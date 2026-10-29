@@ -116,6 +116,12 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
         let mut lanes: BTreeMap<String, LaneProjection> = BTreeMap::new();
         // The burn-up: the minutes of estimate merged per hour of the voyage.
         let mut burn_up: Vec<i64> = Vec::new();
+        // A lane's throughput (T-390): its own minutes run from the earliest
+        // `started` of any attempt of its voyage tasks to the latest hand-in of
+        // its done tasks. Review and merge run while the lane is already on its
+        // next task, so the span of a task up to its merge is not the lane's
+        // own time and would count the same minutes twice.
+        let mut throughput: BTreeMap<String, (Option<Ts>, Option<Ts>)> = BTreeMap::new();
         for task in scope {
             let estimate = estimate_of(tx, project, task)?;
             r.scope_min = add(r.scope_min, estimate);
@@ -134,7 +140,7 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
             };
             let name = task.lane.clone().unwrap_or_else(|| "-".to_string());
             let lane = lanes.entry(name.clone()).or_insert_with(|| LaneProjection {
-                lane: name,
+                lane: name.clone(),
                 done_min: 0,
                 done_estimate_min: 0,
                 left_min: 0,
@@ -149,11 +155,21 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
                     r.slowest = Some((task.id.clone(), actual));
                 }
             }
+            // The lane's own window: every attempt of every voyage task opens
+            // it, a done task's hand-in (or its last step when it was never
+            // handed in) closes it.
+            let (lane_started, lane_closed) = throughput.entry(name.clone()).or_default();
+            if let Some(started) = rounds.iter().filter_map(|(_, t)| t.started).min() {
+                *lane_started = Some(lane_started.map_or(started, |first| first.min(started)));
+            }
             if task.state == TaskState::Done {
-                if let (Some(actual), Some(estimate)) = (actual, estimate.filter(|e| *e > 0)) {
-                    r.measured_actual_min += actual;
+                let closed = rounds.iter().filter_map(|(_, t)| t.handed_in).max()
+                    .or_else(|| rounds.iter().filter_map(|(_, t)| t.last()).max());
+                if let Some(closed) = closed {
+                    *lane_closed = Some(lane_closed.map_or(closed, |last| last.max(closed)));
+                }
+                if let (Some(_), Some(estimate)) = (actual, estimate.filter(|e| *e > 0)) {
                     r.measured_estimate_min += estimate;
-                    lane.done_min += actual;
                     lane.done_estimate_min += estimate;
                     lane.done_count += 1;
                 }
@@ -178,7 +194,12 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
         }
         // Every lane's own pace, and what it needs at that pace. A lane that
         // measured nothing has no pace: its projection stays unknown.
-        for lane in lanes.values_mut() {
+        for (name, lane) in lanes.iter_mut() {
+            let (started, closed) = throughput.get(name).copied().unwrap_or_default();
+            lane.done_min = match (started, closed) {
+                (Some(started), Some(closed)) if closed >= started => (closed - started) / 60,
+                _ => 0,
+            };
             lane.pace = (lane.done_estimate_min > 0)
                 .then(|| lane.done_min as f64 / lane.done_estimate_min as f64);
             lane.projected_min = lane
@@ -187,6 +208,9 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
                 .map(|pace| ((lane.left_min as f64) * pace).ceil() as i64);
         }
         r.lanes = lanes.into_values().collect();
+        // The voyage's measured time is the lanes' own time, not the sum of
+        // their tasks' spans: overlapping review and merge is not double work.
+        r.measured_actual_min = r.lanes.iter().map(|lane| lane.done_min).sum();
         // The slowest lane sets the finish and is named (§10.7 row B4). The
         // finish is known only when every lane that has open work has a pace
         // and known estimates: an unmeasured lane is never dropped and never
