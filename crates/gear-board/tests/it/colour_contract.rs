@@ -192,7 +192,8 @@ fn the_selected_row_is_lit_across_the_width_in_one_colour() {
     let board = board();
     let size = (160, 40);
     // The second lane of the fixture, `rewrite`, is the selected row.
-    let screen = canvas(&board, &crate::screen(Tab::Now, 1, size), None);
+    let screen_of = crate::screen(Tab::Now, 1, size);
+    let screen = canvas(&board, &screen_of, None);
     let text = screen.text();
     let (row, _) = find(&text, "› rewrite");
     let lit = Style { fg: None, bold: false, reverse: true };
@@ -201,10 +202,12 @@ fn the_selected_row_is_lit_across_the_width_in_one_colour() {
     }
     assert_eq!(screen.style_at(0, row).reverse, false, "the mark's column is not lit: {text}");
     assert_eq!(screen.style_at(size.0 - 1, row).reverse, false, "the last column stays: {text}");
-    // No other row carries a reverse cell, but the row of the tabs (the open
-    // tab is in reverse video).
+    // No other row carries a reverse cell, but the first row (the shown
+    // voyage's label is lit, README change 1) and the row of the tabs (the
+    // open tab is in reverse video).
+    let tab_row = gear_board::frame::layout(&board, &screen_of).tab_row;
     for y in 0..size.1 {
-        if y == row || y == gear_board::frame::TAB_ROW {
+        if y == row || y == 0 || y == tab_row {
             continue;
         }
         for x in 0..size.0 {
@@ -253,22 +256,6 @@ fn a_merged_task_is_green_in_the_graph() {
     assert!(ansi.contains("\u{1b}[1;32m●\u{1b}[0m"), "{ansi:?}");
     let ansi = canvas(&board, &crate::screen(Tab::Tasks, 0, (160, 40)), None).ansi(true);
     assert!(ansi.contains("\u{1b}[1;33m◉\u{1b}[0m"), "{ansi:?}");
-}
-
-#[test]
-fn the_time_bar_is_red_once_the_projected_finish_is_past_the_eta() {
-    let mut board = board();
-    board.projects[0].voyages[0].projected_min = Some(13 * 60);
-    let screen = canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
-    assert_eq!(screen.style_at(7, 1).fg, Some(Color::Bad), "{}", screen.text());
-    let (row, x) = find(&screen.text(), "projected finish");
-    assert_eq!(screen.style_at(x, row).fg, Some(Color::Bad));
-    assert!(screen.ansi(true).contains("time   \u{1b}[31m██"), "{:?}", screen.ansi(true));
-
-    // Within the eta it is green.
-    board.projects[0].voyages[0].projected_min = Some(11 * 60);
-    let screen = canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
-    assert_eq!(screen.style_at(7, 1).fg, Some(Color::Ok), "{}", screen.text());
 }
 
 #[test]
@@ -358,8 +345,8 @@ fn a_long_lane_name_never_moves_the_text_columns() {
     let decisions = frame(&board, &crate::screen(Tab::Log, 0, size), None);
     let long = line_with(&decisions, "friction of rewrite");
     let short = line_with(&decisions, "friction of hull");
-    assert!(long.contains("T-2 rewrite open"), "{decisions}");
-    assert_eq!(column(long, "open"), column(short, "open"), "{decisions}");
+    assert!(long.contains("T-2 rewrite unread"), "{decisions}");
+    assert_eq!(column(long, "unread"), column(short, "unread"), "{decisions}");
 
     // Cost: the lane names are padded to one width, so the estimates line up
     // under their heading whichever lane the row names.

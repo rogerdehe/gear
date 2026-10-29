@@ -237,6 +237,10 @@ pub struct ProjectBoard {
     /// decisions on its `done`, `bar` and `eta`, oldest first; empty without
     /// a measured voyage. The S4 header draws them red.
     pub goal_changes: Vec<GoalChangeBoard>,
+    /// The goal check of the shown voyage (T-354): each clause of the goal and
+    /// whether it is met. The plan's clauses when the store has them, else the
+    /// clauses of the voyage's done sentence, every one unmet.
+    pub goal_check: Vec<(bool, String)>,
     /// The friction reports the agents left (§6.1), open and closed.
     pub frictions: Vec<FrictionBoard>,
     /// The tasks that overlap the integration branch of their repo (T-188):
@@ -255,6 +259,11 @@ pub struct ProjectBoard {
     /// The voyage the board measures and shows (T-350): the one it was built
     /// for.
     pub shown: Option<VoyageEntry>,
+    /// The tasks that left the shown voyage for another (T-351), as (task, the
+    /// voyage it moved to), in the order the voyage recorded them. A moved task
+    /// carries the new voyage's milestone, so the shown voyage counts it
+    /// nowhere.
+    pub moved_out: Vec<(String, String)>,
 }
 
 /// One voyage of the project, as the board names it (T-350).
@@ -263,6 +272,10 @@ pub struct VoyageEntry {
     /// The milestone id the plan uses (`M1`, `M2`, …).
     pub milestone: String,
     pub title: String,
+    /// The voyage's `done` sentence: the goal the board boxes (T-353).
+    pub done: Option<String>,
+    /// The voyage's quality bar, as the plan wrote it (T-353).
+    pub bar: Option<String>,
     /// Some task of the voyage is not settled: it is still sailing.
     pub sailing: bool,
     /// When the voyage departed; `None` while it has no task.
@@ -980,12 +993,20 @@ pub fn project_for(
         project,
         workload.as_ref().map(|voyage| voyage.milestone.as_str()),
     )?;
+    // The tasks that left the shown voyage (T-351): its `move` decisions.
+    let moved_out = moved_out_of(&decisions);
     // The confirmed goal changes are the measured voyage's own (T-335).
     let goal_changes = goal_changes_of(
         tx,
         project,
         workload.as_ref().map(|voyage| voyage.milestone.as_str()),
     )?;
+    // The goal check of the shown voyage (T-354): the plan's own clauses, else
+    // the clauses of its done sentence, unmet.
+    let goal_check = match shown.as_ref() {
+        Some(entry) => goal_check_of(tx, project, &entry.milestone, entry.done.as_deref())?,
+        None => Vec::new(),
+    };
     // The friction reports are the ones of the measured voyage too (T-263).
     let frictions = frictions_of(
         tx,
@@ -1041,6 +1062,7 @@ pub fn project_for(
         quota: quota_readings(tx, project)?,
         decisions,
         goal_changes,
+        goal_check,
         frictions,
         // The overlaps with the integration branch (T-188): information
         // lines, never items that wait for the captain.
@@ -1053,6 +1075,7 @@ pub fn project_for(
         forecast,
         voyage_list,
         shown,
+        moved_out,
     })
 }
 
@@ -1569,6 +1592,20 @@ fn decisions_of(tx: &Tx<'_>, project: &str, voyage: Option<&str>) -> GearResult<
         .collect())
 }
 
+/// The tasks that left the shown voyage for another (T-351): the voyage's
+/// decisions of kind `move`, whose text is "<id> moved to <milestone>", in the
+/// order they were recorded.
+fn moved_out_of(decisions: &[DecisionBoard]) -> Vec<(String, String)> {
+    decisions
+        .iter()
+        .filter(|decision| decision.kind == "move")
+        .filter_map(|decision| {
+            let (task, to) = decision.what.split_once(" moved to ")?;
+            Some((task.to_string(), to.to_string()))
+        })
+        .collect()
+}
+
 /// The confirmed goal changes of the voyage (T-335): the decisions of kind
 /// `user` with source `gear` (T-410, T-331), oldest first.
 fn goal_changes_of(
@@ -1589,6 +1626,48 @@ fn goal_changes_of(
             why: decision.why,
         })
         .collect())
+}
+
+/// The goal check of a voyage (T-354): the meta `goal-check:<project>:<milestone>`
+/// holds the plan's clauses as a JSON array of `{"met": bool, "text": str}`.
+/// Without it the clauses of the voyage's done sentence stand in, every one
+/// unmet: the store that keeps no check knows of no clause that is met.
+fn goal_check_of(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+    done: Option<&str>,
+) -> GearResult<Vec<(bool, String)>> {
+    if let Some(raw) = tx.get_meta(&format!("goal-check:{project}:{milestone}"))? {
+        if let Some(check) = parse_goal_check(&raw) {
+            return Ok(check);
+        }
+    }
+    Ok(done_clauses(done).into_iter().map(|text| (false, text)).collect())
+}
+
+/// The clauses of a goal check written in the meta: a JSON array of
+/// `{"met": bool, "text": str}`. `None` when the text is not one.
+fn parse_goal_check(raw: &str) -> Option<Vec<(bool, String)>> {
+    let clauses: Vec<serde_json::Value> = serde_json::from_str(raw).ok()?;
+    let mut check = Vec::with_capacity(clauses.len());
+    for clause in clauses {
+        let met = clause.get("met")?.as_bool()?;
+        let text = clause.get("text")?.as_str()?.to_string();
+        check.push((met, text));
+    }
+    Some(check)
+}
+
+/// The clauses of a done sentence: split on `;`, trimmed, empty ones left out.
+pub(crate) fn done_clauses(done: Option<&str>) -> Vec<String> {
+    let Some(done) = done else {
+        return Vec::new();
+    };
+    done.split(';')
+        .map(|clause| clause.trim().to_string())
+        .filter(|clause| !clause.is_empty())
+        .collect()
 }
 
 /// The friction reports of the voyage, as the board shows them (§6.1): the
@@ -1663,6 +1742,8 @@ fn voyage_entries(
         entries.push(VoyageEntry {
             milestone: voyage.milestone,
             title: voyage.title,
+            done: voyage.done,
+            bar: voyage.bar,
             sailing,
             departure: voyage.departure,
             ended,
@@ -2043,10 +2124,17 @@ pub fn run_with(
         // The selection moves over the rows the view paints as picks, and
         // never leaves them (F4): a view that shrank, or a key pressed at its
         // end, does not lose the selection.
+        // The head of the board says where the tabs and the view are (T-353):
+        // the box of the goal and the rows of the header grow and shrink with
+        // the voyage's words.
+        let layout = {
+            let board = kept.as_ref().expect("the board was just built or kept");
+            frame::layout(board, &screen)
+        };
         let mut tall = frame::Canvas::new(screen.size.0, 1000);
         let picks = {
             let board = kept.as_ref().expect("the board was just built or kept");
-            frame::view(board, &screen, &mut tall, frame::VIEW_ROW)
+            frame::view(board, &screen, &mut tall, layout.top)
         };
         screen.selected = screen.selected.min(picks.len().saturating_sub(1));
         let text = {
@@ -2066,7 +2154,7 @@ pub fn run_with(
         // The picks one page holds (T-411): the rows of the view the screen
         // shows, the header and the footer's rows taken out, and never less
         // than one.
-        let page = screen.size.1.saturating_sub(frame::VIEW_ROW + 2).max(1);
+        let page = screen.size.1.saturating_sub(layout.top + 2).max(1);
         loop {
             let now = std::time::Instant::now();
             if now >= deadline {
@@ -2136,6 +2224,13 @@ pub fn run_with(
                     panel = None;
                     break;
                 }
+                // The `d` key unfolds the header and folds it again (T-354):
+                // the tab and the selection stay where they were.
+                Event::Key('d') | Event::Key('D') => {
+                    screen.detail = !screen.detail;
+                    panel = None;
+                    break;
+                }
                 Event::Up | Event::Key('k') => {
                     screen.selected = screen.selected.saturating_sub(1);
                     panel = None;
@@ -2198,9 +2293,18 @@ pub fn run_with(
                     // A click on the tab row picks a view; a click on a row of
                     // the view picks that row. The rows are the ones the
                     // frame draws: the tabs on their own row, the data below
-                    // the heading.
-                    if y == frame::TAB_ROW as u16 + 1 {
-                        if let Some(picked) = frame::tab_at(x) {
+                    // the heading. A click at the terminal's (x, y), counted
+                    // from 1, is the screen's column x - 1 and row y - 1
+                    // (T-353).
+                    let column = x.saturating_sub(1) as usize;
+                    let row = y.saturating_sub(1) as usize;
+                    if row == layout.tab_row {
+                        let picked = layout
+                            .tabs
+                            .iter()
+                            .find(|(first, last, _)| column >= *first && column <= *last)
+                            .map(|(_, _, tab)| *tab);
+                        if let Some(picked) = picked {
                             screen.tab = picked;
                             screen.selected = 0;
                             panel = None;
@@ -2212,15 +2316,14 @@ pub fn run_with(
                         // below the data and the footer's row select nothing.
                         // The view's first row is a row of the view (T-342's
                         // rework): scrolling can put a pick there.
-                        let row = y.saturating_sub(1) as usize;
                         let last = frame::view_bottom(screen.tab, screen.size.1);
-                        if row >= frame::VIEW_ROW && row < last {
+                        if row >= layout.top && row < last {
                             // The rows above the viewport are scrolled away:
                             // the clicked row is the one the frame drew.
                             let offset = frame::offset_of(
                                 &picks,
                                 screen.selected,
-                                frame::VIEW_ROW,
+                                layout.top,
                                 last,
                             );
                             // A click selects the pick drawn on that row; a
