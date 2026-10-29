@@ -10,6 +10,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use gear_forge::{marker, Error, Filter, Forge, GitHub, MergeMethod, PrRef};
@@ -49,13 +50,51 @@ exit "$code"
 "#;
 
 /// The one `gh` file every test's fake links to, made once per test file.
-fn shared_fake() -> &'static Path {
-    static SHARED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    SHARED.get_or_init(|| {
-        let path = std::env::temp_dir().join(format!("gear-forge-{}-gh", std::process::id()));
-        executable(&path, FAKE_GH);
-        path
-    })
+///
+/// The file is removed when the last test holding it is done (T-412): a
+/// passing run leaves nothing behind in the temp directory.
+fn shared_fake() -> Arc<SharedFake> {
+    static SHARED: OnceLock<Mutex<Weak<SharedFake>>> = OnceLock::new();
+    let mut shared = SHARED.get_or_init(|| Mutex::new(Weak::new())).lock().unwrap();
+    if let Some(fake) = shared.upgrade() {
+        return fake;
+    }
+    let path = std::env::temp_dir().join(format!("gear-forge-{}-gh", std::process::id()));
+    executable(&path, FAKE_GH);
+    let fake = Arc::new(SharedFake(path));
+    *shared = Arc::downgrade(&fake);
+    fake
+}
+
+/// The shared fake `gh`, whose file goes away with the last test that holds it.
+struct SharedFake(PathBuf);
+
+impl Drop for SharedFake {
+    fn drop(&mut self) {
+        fs::remove_file(&self.0).ok();
+    }
+}
+
+/// A test's scratch directory, removed when the test is done (T-412).
+struct Scratch {
+    dir: PathBuf,
+    /// The shared fake this test's `gh` links to, kept alive while the test
+    /// runs.
+    _shared: Option<Arc<SharedFake>>,
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.dir
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.dir).ok();
+    }
 }
 
 /// A fake `gh` that never answers: it burns time until it is killed.
@@ -73,18 +112,23 @@ fn executable(path: &Path, text: &str) {
 
 /// A scratch directory with an executable `gh` in it, and the forge that
 /// looks for `gh` only there.
-fn forge_with(tag: &str, script: Option<&str>) -> (PathBuf, GitHub) {
+fn forge_with(tag: &str, script: Option<&str>) -> (Scratch, GitHub) {
     let dir = std::env::temp_dir().join(format!("gear-forge-{}-{tag}", std::process::id()));
     fs::remove_dir_all(&dir).ok();
     fs::create_dir_all(&dir).expect("a scratch directory");
+    let mut shared = None;
     match script {
         // A test's own script (the hanging fake): written where it is used.
         Some(text) => executable(&dir.join("gh"), text),
         // The ordinary fake: a link to the one script of this test file.
-        None => fs::hard_link(shared_fake(), dir.join("gh")).expect("link the fake gh"),
+        None => {
+            let fake = shared_fake();
+            fs::hard_link(&fake.0, dir.join("gh")).expect("link the fake gh");
+            shared = Some(fake);
+        }
     }
-    let forge = GitHub::new().with_path(&dir);
-    (dir, forge)
+    let forge = GitHub::new().with_path(dir.to_path_buf());
+    (Scratch { dir, _shared: shared }, forge)
 }
 
 /// What the fake was called with, last call only.
@@ -404,7 +448,7 @@ fn a_missing_tool_is_a_typed_error() {
     // A directory without a `gh`: the tool cannot be started.
     let (dir, _) = forge_with("missing", None);
     fs::remove_file(dir.join("gh")).expect("remove the fake");
-    let forge = GitHub::new().with_path(&dir);
+    let forge = GitHub::new().with_path(dir.to_path_buf());
     match forge.issues("owner/name", &Filter::default()).unwrap_err() {
         Error::Tool(said) => assert!(said.contains("gh issue list"), "{said}"),
         other => panic!("expected a missing tool, got {other:?}"),

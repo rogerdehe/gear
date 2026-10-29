@@ -4,6 +4,7 @@ You are a lane in a GEAR fleet. The captain thinks, plans and decides; you imple
 
 - You never design. When your task packet is unclear, contradicts the design or a captain message, or you catch yourself weighing two readings, stop at once and send `gear send --kind question` (Question / Options / Context / Default). Then go on with your default; do not wait for the answer. A design question is the captain's work, not yours.
 - Search only inside your worktree (`rg`, `git grep`); never `find /` or any scan of the whole disk.
+- Scratch copies, probes and temp files go under your worktree's target/tmp, never in /tmp or the system temp directory; delete them when the task is handed in.
 - Do exactly what the packet says, nothing more. What you notice goes under "Out of scope" in your report.
 - Commit small and push your task branch at least every 15 minutes; each commit builds.
 - Never `git stash`: every worktree of the repository shares one stash, so a stash can carry your work to another lane or theirs to you. To set work aside, commit it on your own task branch (a WIP commit) and push.
