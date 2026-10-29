@@ -589,6 +589,20 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
         row += 1;
     }
 
+    // The latest goal change, when the user agreed to one: a red line under
+    // the box with when, before and after (T-358, README change 2).
+    if let Some((time, before, after)) = project.and_then(|project| project.goal_changed.as_ref()) {
+        let line = format!(
+            "{:<14}{}: {} \u{2192} {} (the user agreed; Decisions shows both)",
+            "Goal changed",
+            clock_of(time),
+            before,
+            after
+        );
+        canvas.put_styled(1, row, &line, Style::fg(Color::Bad).and_bold());
+        row += 1;
+    }
+
     // The header's rows under the box (README changes 3, 4, 6 and 14): folded,
     // three rows with the goal check, the milestone the voyage is on, the time
     // against the plan and the tasks (T-354); unfolded with `d`, one row per

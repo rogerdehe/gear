@@ -237,6 +237,10 @@ pub struct ProjectBoard {
     /// decisions on its `done`, `bar` and `eta`, oldest first; empty without
     /// a measured voyage. The S4 header draws them red.
     pub goal_changes: Vec<GoalChangeBoard>,
+    /// The latest confirmed goal change of the shown voyage (T-358), as
+    /// (time, before, after): the S4 header draws it red under the goal box.
+    /// `None` while the voyage's goal never changed.
+    pub goal_changed: Option<(String, String, String)>,
     /// The goal check of the shown voyage (T-354): each clause of the goal and
     /// whether it is met. The plan's clauses when the store has them, else the
     /// clauses of the voyage's done sentence, every one unmet.
@@ -1001,6 +1005,8 @@ pub fn project_for(
         project,
         workload.as_ref().map(|voyage| voyage.milestone.as_str()),
     )?;
+    // The latest of them is the line under the goal box (T-358).
+    let goal_changed = goal_changed_of(&goal_changes);
     // The goal check of the shown voyage (T-354): the plan's own clauses, else
     // the clauses of its done sentence, unmet.
     let goal_check = match shown.as_ref() {
@@ -1062,6 +1068,7 @@ pub fn project_for(
         quota: quota_readings(tx, project)?,
         decisions,
         goal_changes,
+        goal_changed,
         goal_check,
         frictions,
         // The overlaps with the integration branch (T-188): information
@@ -1626,6 +1633,18 @@ fn goal_changes_of(
             why: decision.why,
         })
         .collect())
+}
+
+/// The latest confirmed goal change of the voyage (T-358), as (time, before,
+/// after): its words come from the decision T-410 (C6) records,
+/// `<field> of <M> changed from "<old>" to "<new>"`. `None` without a goal
+/// change, or when its words are not that record's.
+fn goal_changed_of(changes: &[GoalChangeBoard]) -> Option<(String, String, String)> {
+    let change = changes.last()?;
+    let (_, rest) = change.what.split_once(" changed from \"")?;
+    let (before, rest) = rest.split_once("\" to \"")?;
+    let (after, _) = rest.split_once('"')?;
+    Some((change.at.clone(), before.to_string(), after.to_string()))
 }
 
 /// The goal check of a voyage (T-354): the meta `goal-check:<project>:<milestone>`
