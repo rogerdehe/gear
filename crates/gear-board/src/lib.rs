@@ -40,6 +40,72 @@ pub use screen::{Event, Keys, Terminal};
 /// How long a frame stays on the screen before the board redraws it.
 pub const REFRESH: Duration = Duration::from_secs(2);
 
+/// How old a kept board may get before it is built again (T-384). The board
+/// shows a clock in its header, and some of its texts are an age or a
+/// deadline: those must stay true, so a kept board is rebuilt once a minute
+/// rather than once a refresh.
+pub const REBUILD_AFTER: Duration = Duration::from_secs(60);
+
+/// How often the board asks Herdr for its agents (T-384). The agent list is
+/// kept between asks: a board that waited on it every refresh paid a Herdr
+/// call every two seconds for a list that rarely moves.
+pub const AGENTS_EVERY: Duration = Duration::from_secs(10);
+
+/// The knobs the tests of T-384 turn: the board builds nothing while nothing
+/// changes, and a test proves it by counting the builds and shortening the two
+/// intervals it waits on. The values are per thread — a test runs on its own
+/// thread, so one test cannot shorten another's minute — and production never
+/// sets them.
+pub mod hook {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    thread_local! {
+        static BUILDS: Cell<usize> = Cell::new(0);
+        static STALE_AFTER: Cell<Duration> = Cell::new(super::REBUILD_AFTER);
+        static AGENTS_EVERY: Cell<Duration> = Cell::new(super::AGENTS_EVERY);
+    }
+
+    /// One more board was built; [`run_with`](crate::run_with) counts them.
+    pub(crate) fn built() {
+        BUILDS.with(|count| count.set(count.get() + 1));
+    }
+
+    /// The boards [`run_with`](crate::run_with) built on this thread since the
+    /// last [`reset`].
+    pub fn builds() -> usize {
+        BUILDS.with(Cell::get)
+    }
+
+    /// Count the builds from zero and put both intervals back to their
+    /// defaults.
+    pub fn reset() {
+        BUILDS.with(|count| count.set(0));
+        STALE_AFTER.with(|value| value.set(super::REBUILD_AFTER));
+        AGENTS_EVERY.with(|value| value.set(super::AGENTS_EVERY));
+    }
+
+    /// The age at which a kept board is built again.
+    pub fn stale_after() -> Duration {
+        STALE_AFTER.with(Cell::get)
+    }
+
+    /// How often the board asks Herdr for its agents.
+    pub fn agents_every() -> Duration {
+        AGENTS_EVERY.with(Cell::get)
+    }
+
+    /// Shorten the age for a test.
+    pub fn set_stale_after(after: Duration) {
+        STALE_AFTER.with(|value| value.set(after));
+    }
+
+    /// Shorten the agent-list interval for a test.
+    pub fn set_agents_every(every: Duration) {
+        AGENTS_EVERY.with(|value| value.set(every));
+    }
+}
+
 /// The lane name of a task that belongs to no lane.
 const UNASSIGNED: &str = "unassigned";
 
@@ -1435,6 +1501,12 @@ pub fn run(store: &mut Store, opts: &Options, out: &mut dyn Write, mut herdr: Op
 /// [`Options::refresh`], `q` leaves it, the arrows and the tab key change the
 /// view, the numbers pick a view, the up and down keys move the selection and
 /// `Enter` opens the panel of the selected row.
+///
+/// A frame is built only when something it shows can have changed (T-384): the
+/// store's `data_version` moved, Herdr's agent list moved, or the kept board's
+/// clock got old ([`REBUILD_AFTER`]). Every other frame redraws the board that
+/// was built last, and Herdr is asked for its agents at most every
+/// [`AGENTS_EVERY`].
 pub fn run_with(
     store: &mut Store,
     opts: &Options,
@@ -1454,41 +1526,87 @@ pub fn run_with(
     // walks through them.
     let mut shown = 0usize;
     let mut first = true;
+    // The board that was built last, and what it was built from (T-384). The
+    // whole board is kept: a refresh that finds nothing changed redraws it
+    // instead of building it again, and a key that only moves the selection,
+    // the tab or the scrolling costs a redraw and nothing else.
+    let mut kept: Option<Board> = None;
+    // The store's `data_version` the kept board was built on. It moves when
+    // another connection commits, and nothing else of the store can change
+    // what the board shows without moving it.
+    let mut kept_version: Option<i64> = None;
+    let mut built_at = std::time::Instant::now();
+    // Herdr's agents, asked for at most every [`AGENTS_EVERY`] and kept in
+    // between.
+    let mut agents: Option<Vec<AgentInfo>> = None;
+    let mut agents_at: Option<std::time::Instant> = None;
     loop {
-        let agents = herdr.as_mut().and_then(|herdr| herdr.agents().ok());
-        let mut board = match build_with_agents(store, opts, now_ts(), agents.as_deref()) {
-            Ok(board) => board,
-            Err(e) => {
-                // The first frame decides whether the board can start at all.
-                if first {
-                    return Err(e);
-                }
-                // A frame that cannot be read is shown as the failure it is:
-                // an observation failure is not an all-clear (17 §5).
-                let text = format!(
-                    "GEAR board\n\n! the plan could not be read: {}: {}",
-                    e.code, e.detail
-                );
-                screen::draw(out, &text).map_err(write_error)?;
-                let deadline = std::time::Instant::now() + opts.refresh;
-                let _ = keys.next_event(deadline.saturating_duration_since(std::time::Instant::now()));
-                continue;
+        let at = std::time::Instant::now();
+        let mut agents_changed = false;
+        if let Some(herdr) = herdr.as_mut() {
+            if agents_at.is_none_or(|asked| at.duration_since(asked) >= hook::agents_every()) {
+                let asked = herdr.agents().ok();
+                agents_at = Some(at);
+                agents_changed = asked != agents;
+                agents = asked;
             }
-        };
-        // The frame draws the shown project: the project the board was opened
-        // with is the only one then, and every other project is one `p` away.
-        if opts.project.is_none() && board.projects.len() > 1 {
-            shown %= board.projects.len();
-            board.projects.rotate_left(shown);
+        }
+        // One cheap query decides whether anything the board shows can have
+        // changed: the store moved, the agent list moved, or the kept board's
+        // clock and its age/deadline texts are too old to be trusted.
+        let version = store.read(|tx| tx.data_version()).ok();
+        let stale = kept.is_none()
+            || agents_changed
+            || version != kept_version
+            || at.duration_since(built_at) >= hook::stale_after();
+        if stale {
+            match build_with_agents(store, opts, now_ts(), agents.as_deref()) {
+                Ok(mut board) => {
+                    // The frame draws the shown project: the project the board
+                    // was opened with is the only one then, and every other
+                    // project is one `p` away.
+                    if opts.project.is_none() && board.projects.len() > 1 {
+                        let count = board.projects.len();
+                        board.projects.rotate_left(shown % count);
+                    }
+                    kept = Some(board);
+                    kept_version = version;
+                    built_at = std::time::Instant::now();
+                    hook::built();
+                }
+                Err(e) => {
+                    // The first frame decides whether the board can start at all.
+                    kept = None;
+                    if first {
+                        return Err(e);
+                    }
+                    // A frame that cannot be read is shown as the failure it is:
+                    // an observation failure is not an all-clear (17 §5).
+                    let text = format!(
+                        "GEAR board\n\n! the plan could not be read: {}: {}",
+                        e.code, e.detail
+                    );
+                    screen::draw(out, &text).map_err(write_error)?;
+                    let deadline = std::time::Instant::now() + opts.refresh;
+                    let _ = keys.next_event(deadline.saturating_duration_since(std::time::Instant::now()));
+                    continue;
+                }
+            }
         }
         // The selection moves over the rows the view paints as picks, and
         // never leaves them (F4): a view that shrank, or a key pressed at its
         // end, does not lose the selection.
         screen.size = keys.size();
         let mut tall = frame::Canvas::new(screen.size.0, 1000);
-        let picks = frame::view(&board, &screen, &mut tall, frame::VIEW_ROW);
+        let picks = {
+            let board = kept.as_ref().expect("the board was just built or kept");
+            frame::view(board, &screen, &mut tall, frame::VIEW_ROW)
+        };
         screen.selected = screen.selected.min(picks.len().saturating_sub(1));
-        let text = frame::canvas(&board, &screen, panel.as_deref()).ansi(opts.color);
+        let text = {
+            let board = kept.as_ref().expect("the board was just built or kept");
+            frame::canvas(board, &screen, panel.as_deref()).ansi(opts.color)
+        };
         first = false;
         screen::draw(out, &text).map_err(write_error)?;
         let deadline = std::time::Instant::now() + opts.refresh;
@@ -1540,8 +1658,15 @@ pub fn run_with(
                 }
                 Event::Key('p') | Event::Key('P') => {
                     // The next project of the session (T-317): the selection
-                    // and the panel belong to the project that was shown.
+                    // and the panel belong to the project that was shown. The
+                    // kept board is walked on, so the next project is shown
+                    // without building the board again.
                     shown += 1;
+                    if let Some(board) = kept.as_mut() {
+                        if board.projects.len() > 1 {
+                            board.projects.rotate_left(1);
+                        }
+                    }
                     screen.selected = 0;
                     panel = None;
                     break;
@@ -1557,7 +1682,8 @@ pub fn run_with(
                     break;
                 }
                 Event::Key('\r') | Event::Key('\n') => {
-                    panel = open_panel(&board, store, screen.tab, screen.selected)?;
+                    let board = kept.as_ref().expect("the board was just built or kept");
+                    panel = open_panel(board, store, screen.tab, screen.selected)?;
                     break;
                 }
                 Event::Mouse { button: 0, x, y } => {
