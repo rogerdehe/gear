@@ -9,7 +9,9 @@ use gear_board::frame::{self, Canvas, Screen, Tab};
 use gear_board::style::{Color, Style};
 use gear_board::{build, run_with, Event, Keys, Options};
 use gear_model::{AttemptState, SeatRole, TaskState};
-use gear_store::{testing, AttemptRow, AttemptStep, Store, TaskRow, VoyageRow, VoyageStation};
+use gear_store::{
+    testing, AttemptRow, AttemptStep, NewDecision, Store, TaskRow, VoyageRow, VoyageStation,
+};
 
 const NOW: i64 = 1_800_000_000;
 
@@ -309,22 +311,30 @@ fn the_time_of_a_landed_voyage_is_how_long_it_took() {
 }
 
 #[test]
-fn the_d_key_keeps_the_selection_and_draws_the_same_rows() {
-    // The open header is T-355's: `d` flips the flag and this task draws the
-    // same three rows, so the frame does not change and the selection stays on
-    // the row the user picked.
+fn the_d_key_unfolds_the_header_and_keeps_the_selection() {
+    // T-355: `d` unfolds the header, one row per clause and per station, the
+    // time and the tasks with their legends and the key that folds them again;
+    // the selection stays on the row the user picked.
     let mut store = world();
     let folded = run_events(&mut store, vec![Event::Key('2'), Event::Key('j')]);
     let unfolded = run_events(
         &mut store,
         vec![Event::Key('2'), Event::Key('j'), Event::Key('d')],
     );
-    assert_eq!(
+    assert_ne!(
         last_frame(&unfolded),
         last_frame(&folded),
-        "d draws the folded rows until T-355 unfolds them"
+        "d unfolds the header under the box"
     );
     let frame_text = last_frame(&unfolded);
+    assert!(
+        frame_text.contains("d: fold"),
+        "the unfolded header names the key that folds it: {frame_text}"
+    );
+    assert!(
+        frame_text.contains("Milestones"),
+        "the stations are drawn one row each: {frame_text}"
+    );
     let rows: Vec<&str> = frame_text.lines().collect();
     // Row 0 is the shown voyage's label in reverse video and the tab row the
     // open tab's; the selection is the one lit row besides them.
@@ -337,6 +347,58 @@ fn the_d_key_keeps_the_selection_and_draws_the_same_rows() {
         .map(|(y, _)| y)
         .collect();
     assert_eq!(lit.len(), 1, "one lit row, the selection: {frame_text}");
+}
+
+#[test]
+fn an_unfolded_tasks_row_names_the_tasks_that_moved_out() {
+    // The voyage's log holds a `move` decision (T-351): T-1 left for M6, so the
+    // unfolded header's Tasks row names it apart and counts it nowhere.
+    let mut store = world();
+    store
+        .write(|tx| {
+            tx.insert_decision_if_new(&NewDecision {
+                project: "p".into(),
+                key: "golden-move-T-1".into(),
+                voyage: "M5".into(),
+                at: "2026-10-28 12:00".into(),
+                kind: "move".into(),
+                what: "T-1 moved to M6".into(),
+                why: None,
+                alt: None,
+                changes: None,
+                star: false,
+                source: "gear".into(),
+                line: None,
+                plan_version: None,
+            })
+        })
+        .unwrap();
+    let board = build(
+        &mut store,
+        &Options { project: Some("p".into()), ..Options::default() },
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        board.projects[0].moved_out,
+        vec![("T-1".to_string(), "M6".to_string())],
+        "the board reads the voyage's move decision"
+    );
+
+    let screen =
+        Screen { tab: Tab::Now, selected: 0, detail: true, opened: Vec::new(), size: (160, 40) };
+    let canvas = frame::canvas(&board, &screen, None);
+    let rows: Vec<String> = canvas.text().lines().map(str::to_string).collect();
+    let tasks: Vec<&String> = rows
+        .iter()
+        .filter(|row| row.trim_start().starts_with("Tasks"))
+        .collect();
+    assert_eq!(tasks.len(), 1, "one Tasks row: {rows:?}");
+    let row = tasks[0];
+    assert!(
+        row.trim_end().ends_with("· moved out: T-1"),
+        "the Tasks row names the task that moved out: {row:?}"
+    );
 }
 
 struct Events {
@@ -376,4 +438,220 @@ fn last_frame(out: &str) -> String {
         .next()
         .unwrap_or_default()
         .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// T-355 v3: where the milestone rows' minutes come from.
+// ---------------------------------------------------------------------------
+
+/// A voyage `used_min` minutes into its flight, on one lane, with the stations
+/// given: each station is `(id, needs, tasks)`, and each task is
+/// `(id, state, estimate_min, hand_in_min)`. A task with a hand-in has an
+/// accepted attempt that started at the departure, was handed in at
+/// `hand_in_min` and merged five minutes later.
+fn milestones_world(
+    used_min: i64,
+    stations: &[(&str, &str, &[(&str, TaskState, i64, Option<i64>)])],
+) -> Store {
+    let departure = NOW - used_min * 60;
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", NOW)?;
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p1", "pi", NOW)?;
+            let tasks: Vec<&(&str, TaskState, i64, Option<i64>)> =
+                stations.iter().flat_map(|(_, _, tasks)| tasks.iter()).collect();
+            tx.upsert_voyage(&VoyageRow {
+                project: "p".into(),
+                milestone: "M5".into(),
+                title: "the board".into(),
+                done: Some("the goal box holds".into()),
+                bar: Some("DELIVERABLE".into()),
+                eta: Some("8h".into()),
+                departure: Some(departure),
+                departure_tasks: Some(tasks.len() as i64),
+                departure_estimate_min: Some(tasks.iter().map(|task| task.2).sum()),
+                updated: NOW,
+            })?;
+            tx.set_voyage_stations(
+                "p",
+                "M5",
+                &stations
+                    .iter()
+                    .map(|(id, needs, _)| VoyageStation {
+                        id: (*id).into(),
+                        needs: (*needs).into(),
+                    })
+                    .collect::<Vec<_>>(),
+            )?;
+            let mut rank = 0;
+            for (id, _, tasks) in stations {
+                for (task, state, estimate_min, hand_in_min) in tasks.iter() {
+                    rank += 1;
+                    tx.insert_task(&TaskRow {
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
+                        project: "p".into(),
+                        id: (*task).into(),
+                        rank,
+                        state: *state,
+                        priority: "must".into(),
+                        lane: Some("hull".into()),
+                        milestone: Some("M5".into()),
+                        required: false,
+                        contract_version: 1,
+                        deps: vec![],
+                        followup_of: None,
+                        wait_on: None,
+                        wait_cond: None,
+                        rework_note: None,
+                        estimate_min: Some(*estimate_min),
+                        issue: None,
+                        updated: NOW,
+                    })?;
+                    tx.set_task_station("p", task, Some(id))?;
+                    let Some(hand_in_min) = hand_in_min else {
+                        continue;
+                    };
+                    tx.insert_attempt(&attempt(task, AttemptState::Accepted))?;
+                    tx.set_attempt_time("p", task, 1, AttemptStep::Started, departure)?;
+                    tx.set_attempt_time(
+                        "p",
+                        task,
+                        1,
+                        AttemptStep::HandedIn,
+                        departure + hand_in_min * 60,
+                    )?;
+                    tx.set_attempt_time(
+                        "p",
+                        task,
+                        1,
+                        AttemptStep::Merged,
+                        departure + (hand_in_min + 5) * 60,
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// The unfolded header's rows of a store, from a 160 column screen.
+fn unfolded(store: &mut Store) -> (gear_board::Board, Canvas, Vec<String>) {
+    let board = build(
+        store,
+        &Options { project: Some("p".into()), ..Options::default() },
+        NOW,
+    )
+    .unwrap();
+    let screen =
+        Screen { tab: Tab::Now, selected: 0, detail: true, opened: Vec::new(), size: (160, 40) };
+    let canvas = frame::canvas(&board, &screen, None);
+    let rows: Vec<String> = canvas.text().lines().map(str::to_string).collect();
+    (board, canvas, rows)
+}
+
+/// The unfolded header's row for a station: the one that names it at column 15.
+fn station_row<'a>(rows: &'a [String], id: &str) -> &'a String {
+    rows.iter()
+        .find(|row| at(row, 15, 6).contains(&format!("{id} ")))
+        .unwrap_or_else(|| panic!("no row for station {id}: {rows:?}"))
+}
+
+/// The text of a milestone row, from column 15, without its trailing spaces.
+fn milestone_text(row: &str) -> String {
+    at(row, 15, 160).trim_end().to_string()
+}
+
+#[test]
+fn a_reached_station_says_the_merge_that_reached_it() {
+    // S1's tasks merged 90 and 95 minutes after the departure: the station was
+    // reached by the later one.
+    let mut store = milestones_world(
+        120,
+        &[
+            (
+                "S1",
+                "the box",
+                &[
+                    ("T-1", TaskState::Done, 30, Some(85)),
+                    ("T-2", TaskState::Done, 30, Some(90)),
+                ],
+            ),
+            ("S2", "the views", &[("T-3", TaskState::Ready, 45, None)]),
+        ],
+    );
+    let (_, _, rows) = unfolded(&mut store);
+    assert_eq!(
+        milestone_text(station_row(&rows, "S1")),
+        "✔ S1 the box — reached at 1h35m"
+    );
+}
+
+#[test]
+fn a_station_ahead_is_placed_between_the_time_used_and_the_projected_finish() {
+    // 60 minutes used, a projection of 260 (a lane of pace 1 with 200 minutes
+    // left), and 50 and 150 minutes left in the two stations ahead: the Now
+    // station is planned by 60 + 200 × 50/200 = 1h50m, the Next one by 4h20m.
+    let mut store = milestones_world(
+        60,
+        &[
+            (
+                "S1",
+                "the box",
+                &[("T-1", TaskState::Done, 30, Some(30))],
+            ),
+            ("S2", "the views", &[("T-2", TaskState::Ready, 50, None)]),
+            ("S3", "the goal lock", &[("T-3", TaskState::Ready, 150, None)]),
+        ],
+    );
+    let (board, _, rows) = unfolded(&mut store);
+    let voyage = board.projects[0].workload.as_ref().expect("the measured voyage");
+    assert_eq!(
+        (voyage.elapsed_min, voyage.projected_min),
+        (Some(60), Some(260)),
+        "the board's own numbers"
+    );
+    assert_eq!(
+        milestone_text(station_row(&rows, "S1")),
+        "✔ S1 the box — reached at 0h35m"
+    );
+    assert_eq!(
+        milestone_text(station_row(&rows, "S2")),
+        "▶ S2 the views — now, planned by 1h50m"
+    );
+    assert_eq!(
+        milestone_text(station_row(&rows, "S3")),
+        "· S3 the goal lock — planned by 4h20m"
+    );
+}
+
+#[test]
+fn a_station_ahead_without_a_projection_is_planned_by_nothing() {
+    // No task has merged, so the lane has no pace and the voyage no projected
+    // finish: the Now station says so and the Next one carries no minute.
+    let mut store = milestones_world(
+        60,
+        &[
+            ("S1", "the box", &[("T-1", TaskState::Ready, 20, None)]),
+            ("S2", "the views", &[("T-2", TaskState::Ready, 30, None)]),
+        ],
+    );
+    let (board, _, rows) = unfolded(&mut store);
+    assert_eq!(
+        board.projects[0].workload.as_ref().and_then(|voyage| voyage.projected_min),
+        None,
+        "no projection"
+    );
+    assert_eq!(
+        milestone_text(station_row(&rows, "S1")),
+        "▶ S1 the box — now"
+    );
+    assert_eq!(
+        milestone_text(station_row(&rows, "S2")),
+        "· S2 the views"
+    );
 }
