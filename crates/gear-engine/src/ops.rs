@@ -448,10 +448,14 @@ pub fn execute_intended(
             )?;
             tx.set_op_state(project, item.id(), state, result.as_deref(), now)?;
             // T-407: a delivery that was typed is a finished step in the
-            // engine log. The text and its Enter are one Herdr call, so the
-            // step runs from the op's intent to now.
+            // engine log, and so is the Enter that follows it. `herdr prompt`
+            // types the text and sends the Enter in one call, so the typed
+            // step runs from the op's intent to now and the Enter's own step
+            // is the same instant (0 ms) — its boundary is logged all the same.
             if let (Prepared::Run { probe: Some((task, created)), .. }, OpState::Submitted) = (item, state) {
-                probe("deliver", task, "typed", ms(now.saturating_sub(*created)), ms(now.saturating_sub(*created)));
+                let typed = ms(now.saturating_sub(*created));
+                probe("deliver", task, "typed", typed, typed);
+                probe("deliver", task, "enter", 0, typed);
             }
             results.push((item.id().to_string(), state.as_str().to_string()));
         }
@@ -882,13 +886,15 @@ pub fn confirm_pending_with(
                     // is still the row read before this update, so `updated`
                     // is when the text was typed) and from its intent.
                     if op.kind == OpKind::Deliver {
+                        let total = ms(now.saturating_sub(op.created));
                         probe(
                             "deliver",
                             op.task.as_deref().unwrap_or("-"),
                             "confirmed",
                             ms(now.saturating_sub(op.updated)),
-                            ms(now.saturating_sub(op.created)),
+                            total,
                         );
+                        probe("deliver", op.task.as_deref().unwrap_or("-"), "done", total, total);
                     }
                     if review_delivery {
                         supersede_older_review_deliveries(tx, project, &op, now)?;
@@ -973,14 +979,17 @@ pub fn confirm_pending_with(
                         now,
                     )?;
                     // T-407: the delivery's last step, as for a confirmed
-                    // one: from its typing (`op.updated`) and its intent.
+                    // one: from its typing (`op.updated`) and its intent, and
+                    // the operation's own completion line after it.
+                    let total = ms(now.saturating_sub(op.created));
                     probe(
                         "deliver",
                         op.task.as_deref().unwrap_or("-"),
                         "failed",
                         ms(now.saturating_sub(op.updated)),
-                        ms(now.saturating_sub(op.created)),
+                        total,
                     );
+                    probe("deliver", op.task.as_deref().unwrap_or("-"), "done", total, total);
                     tx.set_meta(&crate::delivery::sent_key(&op.id), "")?;
                     crate::delivery::record(
                         tx,

@@ -244,6 +244,13 @@ impl Probe {
         self.save();
     }
 
+    /// The merge's own completion line (T-407), as a session action's `done`:
+    /// the whole operation, from the op's durable intent.
+    fn done(&mut self) {
+        let total = now_ms().saturating_sub(self.started_ms);
+        crate::ops::probe("merge", &self.task, "done", total, total);
+    }
+
     /// The step that ends here, with the operation's time so far: its own time
     /// runs from its durable beginning.
     fn step(&mut self, name: &str) {
@@ -819,10 +826,19 @@ fn merge_with_retries(
         // keeps their boundaries in the op's meta.
         let mut probe = Probe::new(op.task.as_deref().unwrap_or("-"), op.created, db_path, &op.id);
         match merge_one_locked(worktree, repo, op, lock, others, remote, pr, review_fallback, commit, &mut probe) {
-            Step::Merged(lines) => return Step::Merged(lines),
-            Step::Pr { pr, head } => return Step::Pr { pr, head },
+            Step::Merged(lines) => {
+                probe.done();
+                return Step::Merged(lines);
+            }
+            Step::Pr { pr, head } => {
+                probe.done();
+                return Step::Pr { pr, head };
+            }
             Step::Waiting(tasks) => return Step::Waiting(tasks),
-            Step::Raced(reason) => return Step::Raced(reason),
+            Step::Raced(reason) => {
+                probe.done();
+                return Step::Raced(reason);
+            }
             Step::Failed(mut failed) => {
                 if failed.blocker != Blocker::Clear || attempt >= MERGE_RETRIES {
                     if attempt > 0 {
@@ -837,8 +853,10 @@ fn merge_with_retries(
                     // failure is not that — it can be a stale local lock —
                     // and PR mode keeps its Failed end (T-280 §3).
                     if pr.is_none() && lost_the_race(&failed.reason) {
+                        probe.done();
                         return Step::Raced(failed.reason);
                     }
+                    probe.done();
                     return Step::Failed(failed);
                 }
                 attempt += 1;
@@ -1772,7 +1790,7 @@ fn merge_one_with_db(
         &[("task", op.task.as_deref().unwrap_or_default())],
     );
     let mut probe = Probe::new(op.task.as_deref().unwrap_or("-"), op.created, db_path, &op.id);
-    step_result(merge_one_locked(
+    let step = merge_one_locked(
         worktree,
         repo,
         op,
@@ -1784,7 +1802,12 @@ fn merge_one_with_db(
         &review,
         &commit,
         &mut probe,
-    ))
+    );
+    // T-407: the operation's own completion line, as the retry loop writes it.
+    if !matches!(step, Step::Waiting(_)) {
+        probe.done();
+    }
+    step_result(step)
 }
 
 #[cfg(test)]
@@ -6710,7 +6733,7 @@ gate = "{project_gate}"
             .filter(|line| line.starts_with("probe merge T-9071 "))
             .collect();
         let steps: Vec<&str> = log.iter().map(|line| line.split_whitespace().nth(3).unwrap()).collect();
-        assert_eq!(steps, ["fetch", "merge", "gate", "push", "close"], "{log:?}");
+        assert_eq!(steps, ["fetch", "merge", "gate", "push", "close", "done"], "{log:?}");
         // Every line carries the step's time and the whole attempt's so far.
         for line in &log {
             let fields: Vec<&str> = line.split_whitespace().collect();
@@ -6728,7 +6751,8 @@ gate = "{project_gate}"
         let scratch = Scratch::new("merge-probe-restart");
         let worktree = scratch.merge_worktree();
         let mut op = op(&scratch.head_of("heat/t5"));
-        op.task = Some("T-9071".into());
+        // A task of its own, so the other probe test's lines never mix in.
+        op.task = Some("T-9072".into());
         // The engine died in the fetch a minute ago: the op's meta says so.
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("gear.db").to_string_lossy().into_owned();
@@ -6746,10 +6770,10 @@ gate = "{project_gate}"
 
         let line = merge_one_with_db(&worktree, &repo("true"), &op, &db).unwrap();
 
-        assert!(line.contains("merged T-9071 into dev"), "{line}");
+        assert!(line.contains("merged T-9072 into dev"), "{line}");
         let fetch = crate::ops::probe_log()
             .into_iter()
-            .find(|line| line.starts_with("probe merge T-9071 fetch "))
+            .find(|line| line.starts_with("probe merge T-9072 fetch "))
             .expect("the fetch is logged");
         let ms: i64 = fetch.split_whitespace().nth(4).unwrap().parse().unwrap();
         assert!(ms >= 60_000, "the fetch runs from its durable beginning: {fetch}");

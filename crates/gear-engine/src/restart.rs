@@ -296,13 +296,17 @@ pub(crate) fn advance(
                 // T-407: the last phase's own line, with the whole restart's
                 // time in it — once it is done, not while it waits.
                 if finished.is_some() {
+                    let total = now.saturating_sub(plan.started).saturating_mul(1000);
                     crate::ops::probe(
                         "restart",
                         &seat.id,
                         Phase::Finish.as_str(),
                         now.saturating_sub(plan.at).saturating_mul(1000),
-                        now.saturating_sub(plan.started).saturating_mul(1000),
+                        total,
                     );
+                    // The restart's own completion line, as a session action's
+                    // `done` (T-407).
+                    crate::ops::probe("restart", &seat.id, "done", total, total);
                 }
                 return Ok(finished);
             }
@@ -1447,12 +1451,12 @@ lanes = [{{model="{model}", cli="{kind}"}}]
             .filter(|line| line.starts_with("probe restart p:probe "))
             .collect();
         let steps: Vec<&str> = log.iter().map(|line| line.split_whitespace().nth(3).unwrap()).collect();
-        assert_eq!(steps, ["stop", "exit", "start", "finish"], "{log:?}");
+        assert_eq!(steps, ["stop", "exit", "start", "finish", "done"], "{log:?}");
         // The phase that waited a tick shows it (the exit waits for the agent
         // to go); the last line's total is the whole restart's duration, from
         // the tick it began in to the tick it finished in.
         assert_eq!(log[1], "probe restart p:probe exit 1000 total=1000", "{log:?}");
-        assert_eq!(log.last().unwrap().split_whitespace().last().unwrap(), "total=1000", "{log:?}");
+        assert_eq!(log.last().unwrap(), "probe restart p:probe done 1000 total=1000", "{log:?}");
     }
 
     #[test]
