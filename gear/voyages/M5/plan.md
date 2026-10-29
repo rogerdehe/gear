@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=840 -->
+<!-- gear-plan project=gear base=841 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -184,6 +184,7 @@ eta: 21h
 - 2026-10-29 11:20 scope: T-426 (shipped in this morning's rebuild) made the agent-gone sweep wait for a reviewer's conversation switch with no time limit, and nothing drives that switch for a Standby seat, so three of the other project's four reviewer seats sat reserved with no agent and no review started: my regression in normal use, so a new mast task, first, bounds the wait at 120 s; the other captain releases the three seats meanwhile; rebuild when it and T-431 merge
 - station M-6139: keep course 1431 min in, 162 done, 12 left; hull 91 min, mast 93 min, balanced; projected 1524 min; T-425 rework round 3 near hand-in, T-429 in review, mast takes T-432 and T-431 next; nothing is cut (done clause 1)
 - station M-6150: keep course 1440 min in, 162 done, 12 left; hull 91 min, mast 93 min, balanced; review-11 hit the T-432 stall (Standby, reserved for T-425, stuck in a conversation switch with no agent), so it is released and T-425's review starts on a fresh seat; nothing is cut (done clause 1)
+- station M-6168: keep course 1450 min in, 165 done, 9 left; hull 82 min, mast 65 min; T-425 and T-431 merged, T-432 in review, then the shared engine is rebuilt; nothing is cut (done clause 1)
 - 2026-10-29 08:00 release: v0.5.1 (station S2) published: T-367's merge 6d8d3a0a merged into main as 0974d950, tagged v0.5.1, GitHub release from docs/releases/v0.5.1.md | why: done clause (5)
 
 
