@@ -1332,17 +1332,17 @@ mod tests {
         // tasks name, and a block the store wrote back sits with the goal and
         // the voyages, before the rest of the plan.
         let text = format!(
-            "{HEADER}# Goal
-the goal
-\n# Milestone M1: one\ndone: m1\nbar: b1\neta: 1h\n\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\ndeps: -\n\n# Decisions\n- a note\n"
+            "{HEADER}# Goal\nthe goal\n\n# Milestone M1: one\ndone: m1\nbar: b1\neta: 1h\n\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\ndeps: -\n\n# Decisions\n- a note\n"
         );
         let block = "# Milestone M2: two\ndone: m2\nbar: b2\neta: 2h\nstation S1: the first step needs it\n";
         let rewritten = rewrite_applied(&text, 3, &["T-1".to_string()], &[], &[block.to_string()]);
         let os = rewritten.find("# Milestone M2: two").expect("the block is there");
+        let first = rewritten.find("# Milestone M1: one").expect("the M1 block is there");
         let queue = rewritten.find("# Queue").expect("the queue is there");
         let decisions = rewritten.find("# Decisions").expect("the decisions are there");
-        assert!(queue < os, "the block goes before the first later section: {rewritten}");
-        assert!(os < decisions, "{rewritten}");
+        assert!(first < os, "the block joins the goal and the voyages: {rewritten}");
+        assert!(os < queue, "the block goes before the first later section: {rewritten}");
+        assert!(queue < decisions, "{rewritten}");
         assert!(
             rewritten.contains("station S1: the first step needs it\n\n# Queue"),
             "the block keeps its station lines and an empty line after it: {rewritten}"
@@ -1356,15 +1356,15 @@ the goal
     fn a_written_back_block_closes_a_file_with_no_later_section() {
         // T-333: with no section after the goal and the milestones, the block
         // is appended at the end, after an empty line.
-        let text = format!("{HEADER}# Goal
-the goal\n\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\ndeps: -\n");
+        let text = format!("{HEADER}# Goal\nthe goal\n\n# Milestone M1: one\ndone: m1\nbar: b1\neta: 1h\n");
         let block = "# Milestone M2: two\ndone: m2\nbar: b2\neta: 2h\n";
-        let rewritten = rewrite_applied(&text, 2, &["T-1".to_string()], &[], &[block.to_string()]);
+        let rewritten = rewrite_applied(&text, 2, &[], &[], &[block.to_string()]);
         assert!(
-            rewritten.ends_with("deps: -\n\n# Milestone M2: two\ndone: m2\nbar: b2\neta: 2h\n"),
+            rewritten.ends_with("eta: 1h\n\n# Milestone M2: two\ndone: m2\nbar: b2\neta: 2h\n"),
             "{rewritten:?}"
         );
-        parse(&rewritten).unwrap();
+        let again = parse(&rewritten).unwrap();
+        assert_eq!(again.milestones.len(), 2, "{rewritten}");
     }
 
     #[test]

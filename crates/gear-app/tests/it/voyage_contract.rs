@@ -347,21 +347,30 @@ fn a_voyage_that_has_not_departed_changes_without_confirmation() {
 #[test]
 fn an_untouched_old_milestone_keeps_applying() {
     let mut s = world();
-    // A plan with tasks on M1 but no milestone block: no voyage is created and
-    // nothing is rejected — old plans keep applying (grandfathered).
-    let text = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    // A first plan with the block and one task on M1: the words are stored and
+    // the voyage departs.
+    let text = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, text, "r1", NOW).unwrap();
     let tasks = s.read(|tx| tx.tasks_of_project("p")).unwrap();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].milestone.as_deref(), Some("M1"));
     assert_eq!(tasks[0].state, TaskState::Ready);
-    // The departure is recorded (the tasks exist); the words wait for a block.
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(1)));
-    assert_eq!((voyage.done, voyage.bar, voyage.eta), (None, None, None));
+    assert_eq!(voyage.done.as_deref(), Some("users install it"));
     let packet = s.read(|tx| render_task_packet(tx, "p", "T-1")).unwrap();
     assert!(packet.contains("Voyage M1"), "{packet}");
-    assert!(packet.contains("not described yet"), "{packet}");
+
+    // A later plan that adds a task to M1 and does not repeat the block keeps
+    // applying (grandfathered): the words are the store's, and the file gets
+    // the block back (T-333).
+    let more = "<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
+    let result = run(&mut s, more, "r2", NOW + 10).unwrap();
+    assert_eq!(result.created, vec!["T-2".to_string()]);
+    assert_eq!(result.milestone_blocks.len(), 1, "{:?}", result.milestone_blocks);
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(1)));
+    assert_eq!(voyage.done.as_deref(), Some("users install it"));
 }
 
 /// R1 (review): a milestone whose block was applied earlier departs when its
@@ -448,7 +457,7 @@ fn a_cancelled_task_of_a_milestone_without_words_needs_no_block() {
     // a cancellation needs no voyage words (T-333).
     let with_block = "<!-- gear-plan project=p base=0 -->\n# Milestone M0: base\ndone: it stands\nbar: it holds\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M0\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, with_block, "r1-with", NOW).unwrap();
-    let cancel = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-1 [must] lane=heat milestone=M0 state=cancelled\ngoal: A\naccept: a\ndeps: -\n";
+    let cancel = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-1 [must] lane=heat milestone=M0\ngoal: A\naccept: a\ndeps: -\nstate: cancelled\n";
     let result = run(&mut s, cancel, "r2", NOW + 10).unwrap();
     assert!(result.milestone_blocks.is_empty(), "{:?}", result.milestone_blocks);
     assert_eq!(result.cancelled, vec!["T-1".to_string()]);
@@ -751,7 +760,7 @@ fn an_emptied_milestone_loses_its_departure_and_a_reused_id_starts_again() {
     );
 
     // The trial is moved to M0: M1 loses every task and with them its departure.
-    let moved = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-1 [must] lane=heat milestone=M0\n## T-2 [should] lane=heat milestone=M0\n";
+    let moved = "<!-- gear-plan project=p base=1 -->\n# Milestone M0: the trial\ndone: the trial runs\nbar: it holds\neta: 4h\n# Queue\n## T-1 [must] lane=heat milestone=M0\n## T-2 [should] lane=heat milestone=M0\n";
     run(&mut s, moved, "r2", NOW + 100).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(

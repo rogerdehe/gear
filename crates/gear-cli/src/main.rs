@@ -3911,6 +3911,83 @@ mod tests {
         assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["T-1"]);
     }
 
+    // T-333: a plan that names a milestone without carrying its block gets the
+    // block back from the store, in the file it was applied from, and a second
+    // apply of the rewritten file changes nothing.
+    #[test]
+    fn plan_apply_writes_a_missing_milestone_block_back_into_the_file() {
+        let (mut store, mut herdr) = world();
+        let path = write_draft(&plan_draft_with_milestone());
+        run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-block-1",
+            T0 + 1,
+            false,
+            false,
+        )
+        .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("# Milestone M2: two\ndone: both ship\nbar: fast\neta: 1h"),
+            "the block the captain wrote stays: {written}"
+        );
+
+        // A draft that names M2 and says nothing about it: the words are the
+        // store's, and they go back into the file.
+        let queue_only = "<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [should] lane=heat milestone=M2\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
+        std::fs::write(&path, queue_only).unwrap();
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-block-2",
+            T0 + 2,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(
+            out.contains("the # Milestone M2 block was written back into the plan file from the store"),
+            "{out}"
+        );
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            rewritten.contains("# Milestone M2: two\ndone: both ship\nbar: fast\neta: 1h\n"),
+            "{rewritten}"
+        );
+        assert_eq!(
+            rewritten.matches("# Milestone M2").count(),
+            1,
+            "one block, not two: {rewritten}"
+        );
+
+        // A second apply of the rewritten file changes nothing (the version
+        // line only moves, as every apply moves it).
+        run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-block-3",
+            T0 + 3,
+            false,
+            false,
+        )
+        .unwrap();
+        let again = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(again, rewritten.replace("base=2", "base=3"), "nothing else moved");
+    }
+
     // T-410: `gear plan apply --confirmed` parses, and the flag reaches the
     // draft the apply reads: without it a departed voyage's eta change is
     // refused, with it the change applies.
