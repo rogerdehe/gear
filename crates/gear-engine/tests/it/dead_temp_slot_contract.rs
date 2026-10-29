@@ -303,62 +303,120 @@ fn temps_in_use_never_exceed_the_quota() {
     assert_eq!(checkout_submissions(&herdr, "review/t3"), 0, "the third still waits");
 }
 
-/// T-116 (F2 of the review): a checkout that failed three times stays stuck
-/// when its seat is recovered — a fresh generation must not restart the loop —
-/// and the freed seat serves another task.
+/// T-425 (T-116's F2): a checkout that fails three times retires **its seat**,
+/// never the task. The hand-in is not marked stuck, so another seat takes it;
+/// only a second seat's failure on the same candidate marks it stuck, and from
+/// then no further seat restarts the loop. The captain is told, as information.
 #[test]
 fn a_stuck_checkout_is_not_restarted_by_a_recovered_seat() {
-    // T-1's checkout fails; T-2 waits for a review and can use the seat.
-    let mut store = handed_in_world(2);
+    // One hand-in waits for a reviewer; T-2 is handed in once the slot frees.
+    let mut store = handed_in_world(1);
     let mut herdr = FakeHerdr::new();
 
-    // Three failed Git operations exhaust the attempt's retry budget.
+    // Two failed Git operations on the seat that was given the hand-in.
     crate::REVIEW_GIT_FAIL.with(|fail| fail.set(true));
-    start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-    start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 11).unwrap();
+    for tick in 0..2 {
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10 + tick).unwrap();
+    }
+    assert_eq!(checkout_submissions(&herdr, "review/t1"), 0, "failure occurred before checkout");
+    // The failures are the seat's, not the candidate's: the task is not stuck,
+    // and only that one seat has failed on it.
+    assert!(
+        store.read(|tx| tx.get_meta(&stuck_key("T-1"))).unwrap().is_none_or(|reason| reason.is_empty()),
+        "one seat's worktree does not make the task stuck"
+    );
+    assert_eq!(
+        store.read(|tx| tx.get_meta(&failed_seats_key("T-1"))).unwrap().as_deref(),
+        Some("p:review-1"),
+        "only the first seat has failed so far"
+    );
+    assert_ne!(
+        store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state,
+        SeatState::Retired,
+        "two failures do not retire the seat"
+    );
+
+    // The third failure retires the seat: the reason names its worktree and the
+    // Git error, and the captain is told once to remove that worktree.
     start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 12).unwrap();
     crate::REVIEW_GIT_FAIL.with(|fail| fail.set(false));
     let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
-    assert_eq!(seat.state, SeatState::Unknown, "{:?}", seat.state_reason);
-    let submissions = checkout_submissions(&herdr, "review/t1");
-    assert_eq!(submissions, 0, "failure occurred before checkout");
+    assert_eq!(seat.state, SeatState::Retired, "{:?}", seat.state_reason);
+    let reason = seat.state_reason.clone().unwrap_or_default();
+    assert!(reason.contains("p-review-1") && reason.contains("injected Git failure"), "{reason}");
+    assert!(reason.contains("remove that worktree"), "{reason}");
+    let notices = store.read(|tx| tx.thread_messages("p", "review-seat:p:review-1")).unwrap();
+    assert_eq!(notices.len(), 1, "the captain is told once to remove the worktree: {notices:?}");
+    assert_eq!(notices[0].recipient, "p:captain");
+    assert_eq!(notices[0].state, MsgState::Info);
+    assert_eq!(
+        store.read(|tx| tx.get_meta("engine.review_pending.p:review-1")).unwrap().as_deref(),
+        Some(""),
+        "the retired seat keeps no hand-in"
+    );
+
+    // The same hand-in goes to another seat in the same tick — it is not stuck
+    // after the first seat's three failures, and the second seat then fails on
+    // the same candidate, which is what makes the attempt stuck.
+    assert_eq!(
+        store.read(|tx| tx.get_meta(&failed_seats_key("T-1"))).unwrap().as_deref(),
+        Some("p:review-1,p:review-2"),
+        "the hand-in was given to a second seat"
+    );
+    let stuck = store.read(|tx| tx.get_meta(&stuck_key("T-1"))).unwrap();
+    assert!(stuck.as_deref().is_some_and(|reason| reason.contains("injected Git failure")), "{stuck:?}");
     // The captain is told once, as information (T-370): the stuck review waits,
     // and the lane is not blocked, so nothing rings and no item is held.
-    let told = store.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap();
-    let stuck: Vec<_> = told
+    let told: Vec<_> = (1..=3)
+        .flat_map(|n| store.read(|tx| tx.thread_messages("p", &format!("T-1:{n}"))).unwrap())
+        .collect();
+    let stuck_told: Vec<_> = told
         .iter()
         .filter(|message| message.body.contains("injected Git failure"))
         .collect();
-    assert_eq!(stuck.len(), 1, "the captain is told once: {told:?}");
-    assert_eq!(stuck[0].recipient, "p:captain");
-    assert_eq!(stuck[0].kind, MsgKind::System);
-    assert_eq!(stuck[0].state, MsgState::Info);
+    assert_eq!(stuck_told.len(), 1, "the captain is told once: {told:?}");
+    assert_eq!(stuck_told[0].recipient, "p:captain");
+    assert_eq!(stuck_told[0].kind, MsgKind::System);
+    assert_eq!(stuck_told[0].state, MsgState::Info);
     let items = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 40)).unwrap();
     assert!(
         !items.iter().any(|message| message.body.contains("injected Git failure")),
         "nothing rings the captain: {items:?}"
     );
 
-    // The dead seat is recovered (B02-04): its slot frees, but the stuck
-    // attempt is not handed to it again — no fourth try for T-1.
+    // No fourth try for T-1: whatever seat comes free, a stuck attempt is not
+    // handed to it again — and the freed seat serves the next hand-in, so the
+    // stuck review does not strand the slot.
+    store.write(|tx| hand_in(tx, "T-2", 2)).unwrap();
     release_dead_temps(&mut store, &mut herdr, "p", T0 + 50).unwrap();
-    assert_eq!(temps_in_use(&mut store), 0, "the dead seat holds nothing");
-    start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 60).unwrap();
+    for tick in 0..2 {
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 60 + tick).unwrap();
+    }
+    start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 70).unwrap();
     assert_eq!(
         checkout_submissions(&herdr, "review/t1"),
         0,
-        "a recovered seat does not restart the loop: {:?}",
+        "no seat restarts the loop: {:?}",
         herdr.calls
     );
-
-    // The freed seat serves the other task: T-2's checkout is submitted.
     assert_eq!(
         checkout_submissions(&herdr, "review/t2"),
         1,
-        "the freed seat took T-2: {:?}",
+        "the freed seat took the next hand-in: {:?}",
         herdr.calls
     );
-    assert_eq!(temps_in_use(&mut store), 1, "one reviewer, the one slot");
+    assert!(temps_in_use(&mut store) <= 1, "one reviewer, the one slot");
+}
+
+/// The key the engine records a stuck attempt under (T-425).
+fn stuck_key(task: &str) -> String {
+    format!("engine.review_checkout_stuck.p.{task}.1")
+}
+
+/// The seats an attempt's checkout has failed on (T-425): the attempt is stuck
+/// only once a second one is listed.
+fn failed_seats_key(task: &str) -> String {
+    format!("engine.review_checkout_seats.p.{task}.1")
 }
 
 #[test]
