@@ -128,6 +128,9 @@ eta: 21h
 - station M-5533: keep course 1012 min in, 123 done, 38 left; same as M-5514: reviews are the wait, a third review seat is with the user
 
 
+# Verdicts
+- T-401 attempt=1 contract=3 candidate=5b9838022eea2359824a3d64729a50952a6c6e31 fail estimate=10 rework="F1 of the review: skills/gear/references/captain.md contradicts itself. Move the confirmation rule (a goal, bar or staffing change only when the user asked and confirmed it in a dialog) from the kickoff paragraph (line 31) into daily-loop step 6, replacing its broader instruction to ask about release, money, scope and destructive acts; qualify line 172 (no dialog tool, talk in chat) with that one exception. Keep the kickoff confirmation as it is. captain.md only; run make check CRATE=gear-cli."
+
 # Queue
 
 ## T-412 [now] lane=hull milestone=M5 required
