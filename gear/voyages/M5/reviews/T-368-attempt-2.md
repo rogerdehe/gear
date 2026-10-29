@@ -1,6 +1,6 @@
 # Review of T-368
 
-Status: running
+Status: done
 Verdict: pass
 Reviewed: review/t368 @ 1b4d6193   Reviewer: gear-review-11 (pi)   Round: 2 · Contract: v6
 
