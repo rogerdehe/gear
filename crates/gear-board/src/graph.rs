@@ -318,14 +318,16 @@ pub fn git_rows(
             .collect()
     };
     let mut rows: Vec<GraphRow> = Vec::new();
-    // The tasks that have not started hang in their lanes, in the plan's order,
-    // so the one to run last sits just above the running ones.
+    // The tasks that have not started hang in their lanes, the last to run
+    // first: the plan's order reversed, so a task at the head of the queue sits
+    // just above the running ones and the graph reads newest on top like git
+    // (T-361 contract v2, the captain's M-5627).
     let waiting: Vec<&GraphTask> = plan
         .iter()
         .copied()
         .filter(|task| task.started.is_none() && task.stage != Stage::Moved)
         .collect();
-    for task in &waiting {
+    for task in waiting.iter().rev() {
         let x = col(&task.lane);
         let style = lane_style(task);
         let mut cells = verticals(&live, None);
@@ -379,9 +381,11 @@ pub fn git_rows(
                 style: Style::PLAIN,
             });
         } else {
-            // The start: the branch leaves dev. An open task stands on its
-            // branch first.
-            if task.stage.is_open() {
+            // The start: the branch leaves dev. A task that started and has
+            // not merged yet stands on its branch first — by its times, as the
+            // open set is (a task moved to another lane keeps its earliest
+            // start while its stage is queued again).
+            if task.started.is_some() && task.finished.is_none() {
                 let mut cells = verticals(&live, skip);
                 cells.push((x, symbol_of(task.stage), Style::fg(task.stage.color()).and_bold()));
                 rows.push(GraphRow {

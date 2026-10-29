@@ -1081,24 +1081,43 @@ fn the_git_graph_has_the_rows_of_the_prototype_m5_voyage() {
     let rows = git_rows(&tasks, &lanes, 0, 160);
     assert_eq!(rows.len(), 24, "{:?}", rows.iter().map(|row| &row.text).collect::<Vec<_>>());
 
-    // The first rows are the tasks that have not started, T-265 above the
-    // others: its branch hangs dashed in its lane (keel) and says what it
-    // waits for.
+    // The first rows are the tasks that have not started, the last to run on
+    // top (reverse rank: T-267, T-266, T-265 — the graph reads newest on top
+    // like git). Each hangs dashed in its lane and says what it waits for.
     let first = &rows[0];
-    assert_eq!(first.task.as_deref(), Some("T-265"));
-    assert_eq!(glyph(first, 21), Some('○'));
+    assert_eq!(first.task.as_deref(), Some("T-267"));
+    assert_eq!(glyph(first, 9), Some('○'));
     assert_eq!(first.style, Style::fg(Color::Dim));
     assert!(
-        first.text.starts_with("T-265  goal-change line with the user's words"),
+        first.text.starts_with("T-267  release v0.5.0"),
         "{:?}",
         first.text
     );
-    assert!(first.text.contains("waits for T-262 to merge"), "{:?}", first.text);
-    assert!(first.text.ends_with("35m"), "{:?}", first.text);
+    assert!(first.text.contains("queued"), "{:?}", first.text);
+    assert!(first.text.ends_with("15m"), "{:?}", first.text);
     let dashed = &rows[1];
-    assert_eq!(dashed.task.as_deref(), Some("T-265"));
-    assert_eq!(glyph(dashed, 21), Some('┆'));
+    assert_eq!(dashed.task.as_deref(), Some("T-267"));
+    assert_eq!(glyph(dashed, 9), Some('┆'));
     assert_eq!(dashed.text, "");
+    assert_eq!(rows[2].task.as_deref(), Some("T-266"));
+    assert_eq!(glyph(&rows[2], 15), Some('○'));
+    assert_eq!(rows[3].task.as_deref(), Some("T-266"));
+    assert_eq!(glyph(&rows[3], 15), Some('┆'));
+    let last_waiting = &rows[4];
+    assert_eq!(last_waiting.task.as_deref(), Some("T-265"));
+    assert_eq!(glyph(last_waiting, 21), Some('○'));
+    assert!(
+        last_waiting.text.starts_with("T-265  goal-change line with the user's words"),
+        "{:?}",
+        last_waiting.text
+    );
+    assert!(
+        last_waiting.text.contains("waits for T-262 to merge"),
+        "{:?}",
+        last_waiting.text
+    );
+    assert_eq!(rows[5].task.as_deref(), Some("T-265"));
+    assert_eq!(glyph(&rows[5], 21), Some('┆'));
 
     // The eighth row: T-264's branch leaves dev at +2h09m, after T-261 merged
     // (mast stands at column 15).
@@ -1163,4 +1182,48 @@ fn the_tasks_carry_their_rank_and_the_moment_their_work_started() {
     assert_eq!(by_id("T-135").finished, Some(moment(11, 2)));
     assert_eq!(by_id("T-148").started, None);
     assert_eq!(by_id("T-148").finished, None);
+}
+
+#[test]
+fn a_waiting_task_hangs_above_the_ones_that_run_before_it() {
+    // The last to run is on top, so the graph reads newest on top like git
+    // (T-361 contract v2): T-2 (rank 2) hangs above T-1 (rank 1), nearest the
+    // running work.
+    let tasks = vec![
+        GraphTask { id: "T-1".into(), rank: 1, ..sample() },
+        GraphTask { id: "T-2".into(), rank: 2, ..sample() },
+    ];
+    let lanes = vec!["hull".to_string()];
+    let rows = git_rows(&tasks, &lanes, 0, 120);
+    let named: Vec<Option<&str>> = rows.iter().map(|row| row.task.as_deref()).collect();
+    assert_eq!(named, vec![Some("T-2"), Some("T-2"), Some("T-1"), Some("T-1")], "{named:?}");
+    // The row that names the task is its ○ row, the ┆ row under it.
+    assert_eq!(glyph(&rows[0], 9), Some('○'));
+    assert_eq!(glyph(&rows[1], 9), Some('┆'));
+    assert_eq!(glyph(&rows[2], 9), Some('○'));
+    assert_eq!(glyph(&rows[3], 9), Some('┆'));
+}
+
+#[test]
+fn a_task_that_started_and_waits_again_keeps_its_row() {
+    // A task moved to another lane has its attempt abandoned and its stage
+    // back to queued, but its earliest start stays: open is the times, not the
+    // stage, so it still stands on its branch (F2 of the T-361 review).
+    let tasks = vec![GraphTask {
+        id: "T-3".into(),
+        rank: 3,
+        stage: Stage::Queued,
+        started: Some(60),
+        finished: None,
+        ..sample()
+    }];
+    let lanes = vec!["hull".to_string()];
+    let rows = git_rows(&tasks, &lanes, 0, 120);
+    assert_eq!(rows.len(), 2, "{:?}", rows.iter().map(|row| &row.text).collect::<Vec<_>>());
+    assert_eq!(rows[0].task.as_deref(), Some("T-3"));
+    assert_eq!(glyph(&rows[0], 9), Some('○'));
+    assert_eq!(rows[0].style, Style::bold());
+    assert_eq!(glyph(&rows[1], 3), Some('├'));
+    assert_eq!(rows[1].task, None);
+    assert_eq!(rows[1].text, "       starts +0h01m");
 }
