@@ -311,35 +311,120 @@ fn the_goal_changes_are_the_gear_user_decisions_of_the_measured_voyage() {
 }
 
 #[test]
-fn the_decisions_view_shows_the_log_the_star_and_the_frictions() {
+fn the_log_shows_what_changed_the_course_then_every_decision_and_the_frictions() {
     let mut store = world();
     let board = board(&mut store);
     let text = frame(&board, &crate::screen(Tab::Log, 0, (120, 40)), None);
 
-    assert!(text.contains("DECISIONS MADE  (★ = worth a look at landing)"), "{text}");
-    // The starred decision is in full: the time, the star, the kind, what was
-    // decided.
-    assert!(text.contains("12:05"), "the time of the decision: {text}");
-    assert!(text.contains("★"), "the star: {text}");
-    assert!(text.contains("light procedure moved to M5"), "{text}");
+    // README change 10: what changed the course comes first, the starred
+    // decisions only — the summary the user reads at a glance.
+    assert!(text.contains("WHAT CHANGED THE COURSE  (★)"), "{text}");
+    assert!(
+        text.contains("12:05 ★ light procedure moved to M5"),
+        "the starred decision in the summary: {text}"
+    );
+    // Then every decision, the starred ones marked, the reason under its own
+    // decision.
+    assert!(text.contains("ALL DECISIONS (2)"), "the whole log: {text}");
+    assert!(
+        text.contains("11:40   scope"),
+        "an unstarred decision is in the log too: {text}"
+    );
+    assert!(text.contains("PR-mode landing added as T-152"), "{text}");
     assert!(
         text.contains("why: needs token data from T-141 first"),
         "the reason of the decision: {text}"
     );
-    // The decision that is not starred is counted, not read in full.
-    assert!(
-        !text.contains("PR-mode landing added as T-152"),
-        "an unstarred decision is not in full: {text}"
-    );
-    assert!(text.contains("by kind: 1 scope"), "the count: {text}");
-    // The friction reports, open and closed.
+    assert!(!text.contains("by kind"), "the count of the kinds is gone: {text}");
+    // The friction reports, open and closed: unread and read.
     assert!(text.contains("FRICTION REPORTS FROM AGENTS"), "{text}");
+    let open = text
+        .lines()
+        .find(|line| line.contains("the two-repo fixture had no gate script"))
+        .unwrap_or_else(|| panic!("an open report: {text}"));
+    assert!(open.contains("unread"), "an open report is unread: {open:?}");
+    let closed = text
+        .lines()
+        .find(|line| line.contains("scripts/test.sh ran 4 min"))
+        .unwrap_or_else(|| panic!("a closed report: {text}"));
     assert!(
-        text.contains("the two-repo fixture had no gate script"),
-        "{text}"
+        closed.contains("read") && !closed.contains("unread"),
+        "a closed report is read: {closed:?}"
     );
-    assert!(text.contains("open"), "an open report: {text}");
-    assert!(text.contains("closed"), "a closed report: {text}");
+}
+
+#[test]
+fn a_log_without_a_starred_decision_reads_nothing() {
+    let mut store = Store::open_in_memory().unwrap();
+    let departure = now_seconds() - 3600;
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", NOW)?;
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "pi", NOW)?;
+            tx.upsert_voyage(&gear_store::VoyageRow {
+                project: "p".into(),
+                milestone: "M4".into(),
+                title: "one seat model".into(),
+                done: Some("a rework resumes its session".into()),
+                bar: None,
+                eta: Some("12h".into()),
+                departure: Some(departure),
+                departure_tasks: Some(1),
+                departure_estimate_min: Some(40),
+                updated: NOW,
+            })?;
+            tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: "T-1".into(),
+                rank: 1,
+                state: TaskState::Ready,
+                priority: "must".into(),
+                lane: Some("hull".into()),
+                milestone: Some("M4".into()),
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: Some(40),
+                issue: None,
+                updated: NOW,
+            })?;
+            // A decision that changed nothing of the course.
+            tx.insert_decision_if_new(&NewDecision {
+                project: "p".into(),
+                key: "d1".into(),
+                voyage: "M4".into(),
+                at: "2026-10-27 11:40".into(),
+                kind: "scope".into(),
+                what: "PR-mode landing added as T-152".into(),
+                why: None,
+                alt: None,
+                changes: None,
+                star: false,
+                source: "plan".into(),
+                line: None,
+                plan_version: None,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    let board = board(&mut store);
+    let text = frame(&board, &crate::screen(Tab::Log, 0, (120, 40)), None);
+
+    let lines: Vec<&str> = text.lines().collect();
+    let summary = lines
+        .iter()
+        .position(|line| line.contains("WHAT CHANGED THE COURSE"))
+        .unwrap_or_else(|| panic!("the summary: {text}"));
+    assert_eq!(lines[summary + 1].trim(), "nothing", "the empty summary: {text}");
+    assert!(text.contains("ALL DECISIONS (1)"), "the log still lists it: {text}");
 }
 
 #[test]
@@ -950,8 +1035,8 @@ fn last_frame(out: &[u8]) -> String {
 }
 
 /// T-342 (README change 13): a decision is picked, its reason is not. `Down`
-/// on the log goes from the first starred decision to the second, over the
-/// why line between them.
+/// on the log goes from one decision to the next, over the why line between
+/// them.
 #[test]
 fn down_moves_over_the_reason_of_a_decision() {
     let mut store = world();
@@ -983,19 +1068,20 @@ fn down_moves_over_the_reason_of_a_decision() {
         ..Options::default()
     };
     let mut out: Vec<u8> = Vec::new();
-    let mut keys = Presses(vec!['4', 'j']);
+    let mut keys = Presses(vec!['4', 'j', 'j']);
 
     run_with(&mut store, &opts, &mut out, &mut keys, None).unwrap();
 
     let frame = last_frame(&out);
-    let marked: Vec<&str> = frame.lines().filter(|line| line.starts_with('›')).collect();
+    // The pick's mark sits in column 1, as the prototype draws it.
+    let marked: Vec<&str> = frame.lines().filter(|line| line.contains('›')).collect();
     assert_eq!(marked.len(), 1, "one row is picked: {frame}");
     assert!(
         marked[0].contains("★ scope") && marked[0].contains("12:20"),
-        "the second decision is picked, not the why line before it: {frame}"
+        "the third decision is picked, not the why line before it: {frame}"
     );
     assert!(
-        !frame.lines().any(|line| line.starts_with('›') && line.contains("why:")),
+        !frame.lines().any(|line| line.contains('›') && line.contains("why:")),
         "a reason is not a pick: {frame}"
     );
     // Both reasons are still drawn, under their decisions.

@@ -164,8 +164,11 @@ const PENDING: &[Pending] = &[
     // rows to the golden frames at the prototype's own origin.
     Pending { frame: "cost-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-363 (T-356 removes it)" },
     Pending { frame: "cost-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-363 (T-356 removes it)" },
-    Pending { frame: "log-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-364" },
-    Pending { frame: "log-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-364" },
+    // T-364 draws the Log view to the prototype's rows too, but it waits for
+    // the same header; `the_log_view_paints_the_prototype_rows` holds those
+    // rows to the golden frames at the prototype's own origin.
+    Pending { frame: "log-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-364 (T-356 removes it)" },
+    Pending { frame: "log-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-364 (T-356 removes it)" },
 
     // (6) The prototype's constants contradict its own formulas, so no store
     // can give both.
@@ -745,5 +748,20 @@ fn the_cost_view_paints_the_prototype_rows() {
     let folded = view_differences(Tab::Cost, "cost-folded", 14, (14, 44));
     assert!(folded.is_empty(), "\n{}", folded.join("\n"));
     let open = view_differences(Tab::Cost, "cost-open", 22, (22, 44));
+    assert!(open.is_empty(), "\n{}", open.join("\n"));
+}
+
+/// T-364: the Log view paints the prototype's rows from the row the prototype's
+/// view starts on, so its columns and colours are held to the golden frames
+/// even while the board's own header is still four rows.
+#[test]
+fn the_log_view_paints_the_prototype_rows() {
+    // The prototype's folded view starts on row 14 and its open view on row 22
+    // (its `TOP[0]`); row 13 is the header's own last row and row 47 the
+    // footer, so the view's rows are compared through row 46. The view is the
+    // same in both frames.
+    let folded = view_differences(Tab::Log, "log-folded", 14, (14, 46));
+    assert!(folded.is_empty(), "\n{}", folded.join("\n"));
+    let open = view_differences(Tab::Log, "log-open", 22, (22, 46));
     assert!(open.is_empty(), "\n{}", open.join("\n"));
 }
