@@ -84,3 +84,6 @@
 
 ## False stall items on a delivery into a busy lane
 - 2026-10-29 M5 (both projects, about ten today: our M-6054, M-6089, M-6121, M-6144; the other project's M-2782, M-2797, M-2809): right after a hand-in the engine delivers the next task while the lane is still ending its turn. The confirmation looks for the agent turning busy, which a busy agent never does, so the window ends unconfirmed, crates/gear-engine/src/ops.rs (about line 947) flags the seat, and the item says "delivery … 0 min, no check-in this generation"; it resolves itself once the lane reads the queued text. A delivery into a working agent should be confirmed by the attempt's first check-in (or the agent's next idle-to-busy turn) within a bounded window before any item opens.
+
+## A notice typed into a busy lane aborts its running check
+- 2026-10-29 M5 (T-407 rework, M-6183): the overrun and quiet-lane notices arrive as prompts while the lane runs a 9-minute `make check`; pi stops the command to read them, twice, so the acceptance never finished. A notice to a lane whose agent is working should wait for its next idle moment, or be marked to queue without interrupting.
