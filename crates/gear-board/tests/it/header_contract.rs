@@ -265,18 +265,24 @@ fn the_folded_header_gives_the_check_the_milestone_the_time_and_the_tasks() {
     assert_eq!(canvas.style_at(127, time), Style::fg(Color::Dim));
     assert_eq!(canvas.style_at(142, time), Style::PLAIN);
 
-    // The key that unfolds the header, and the blank row before the tabs.
+    // The key that unfolds the header, and the tab bar's top rule under it
+    // (T-356).
     assert_eq!(
         at(&rows[key], 1, 52),
         "d: unfold the goal check, milestones, time and tasks"
     );
     assert_eq!(canvas.style_at(1, key), Style::fg(Color::Dim));
     assert!(
-        rows[head.tab_row - 1].trim().is_empty(),
-        "one blank row before the tab row: {:?}",
+        rows[head.tab_row - 1].trim().starts_with('╭'),
+        "the bar's top rule before the tab row: {:?}",
         rows[head.tab_row - 1]
     );
-    assert!(rows[head.tab_row].contains("1 Now"), "the tab row follows the rows");
+    assert!(rows[head.tab_row].contains("1 Now"), "the tab row follows the rules");
+    assert!(
+        rows[head.tab_row + 1].trim().starts_with('╰'),
+        "the bar's bottom rule under the tab row: {:?}",
+        rows[head.tab_row + 1]
+    );
 }
 
 /// T-358: a confirmed goal change (T-410's record, C6) is a red line under
