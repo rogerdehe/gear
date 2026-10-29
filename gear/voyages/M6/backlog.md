@@ -60,3 +60,6 @@
 
 ## The stall item fires on a delivery that is still being sent
 - 2026-10-29 M5: three captain stall items in an hour (M-5520, M-5544, M-5584) named a lane "stuck" on a delivery that was `intended, 0 min` and confirmed within 30 s. The stall check should wait out `[timing] delivery_grace_s` (180) before it counts an unconfirmed delivery.
+
+## macOS scans every new build binary
+- 2026-10-29 M5: syspolicyd (Gatekeeper) ran at about 250 % CPU for hours: every test binary, build script and fresh tool a lane, reviewer or merge gate builds is assessed on its first run, so git calls and test starts slowed many times over on a busy machine, and a reviewer saw compiles stall on signature checks. The fix is the machine's: `sudo spctl developer-mode enable-terminal`, then System Settings → Privacy & Security → Developer Tools on for the terminal app that hosts Herdr, and restart it. Candidate for the skill (`gear admin kickoff` could check it and say so on macOS), since every Rust or Go fleet on a Mac hits it.
