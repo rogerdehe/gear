@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, SeatState, TaskState, Ts};
-use gear_store::{BindingStatus, SeatRow, Store, Tx};
+use gear_store::{BindingStatus, RoundRow, SeatRow, Store, Tx};
 
 use crate::frame::Tab;
 use crate::idle::IdleReason;
@@ -1156,14 +1156,34 @@ fn dep_line(node: &DepNode) -> String {
     line
 }
 
-/// The minutes a task took: from its first attempt to its merge, or until
-/// now when it is not merged yet.
+/// The seconds a lane worked on a task (§5.1): the `active_s` of its dev and
+/// rework rounds. None when the task has no such round, so a task that was
+/// never worked on is not a measured zero (F5).
+fn worked_s_of(rounds: &[RoundRow]) -> Option<i64> {
+    let mut total = 0;
+    let mut worked = false;
+    for round in rounds {
+        if round.role == "dev" || round.role == "rework" {
+            total += round.active_s;
+            worked = true;
+        }
+    }
+    worked.then_some(total)
+}
+
+/// The minutes the lane worked on a task (§5.1): the sum of the `active_s` of
+/// its dev and rework rounds. A task with none of them is measured from its
+/// first attempt to its merge, or until now when it is not merged yet.
 fn actual_min_of(
     tx: &Tx<'_>,
     project: &str,
     task: &str,
     now: Ts,
 ) -> GearResult<Option<i64>> {
+    let rounds = tx.rounds_of_task(project, task)?;
+    if let Some(worked) = worked_s_of(&rounds) {
+        return Ok(Some(worked / 60));
+    }
     let times = tx.attempt_times_of_task(project, task)?;
     let start = times.iter().filter_map(|(_, times)| times.started).min();
     let merged = times.iter().filter_map(|(_, times)| times.merged).max();

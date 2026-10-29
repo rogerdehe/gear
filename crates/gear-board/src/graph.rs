@@ -13,7 +13,7 @@
 use gear_model::{
     AttemptState, GearResult, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState, TaskState, Ts,
 };
-use gear_store::{AttemptRow, AttemptTimes, OpRow, Tx};
+use gear_store::{AttemptRow, AttemptTimes, OpRow, RoundRow, Tx};
 
 use crate::state_word;
 use crate::style::{lane_color, lane_width, Color, Line, Style};
@@ -22,14 +22,17 @@ use crate::style::{lane_color, lane_width, Color, Line, Style};
 struct History {
     attempts: Vec<AttemptRow>,
     times: Vec<(i64, AttemptTimes)>,
+    rounds: Vec<RoundRow>,
 }
 
 impl History {
-    /// The history of a task: its attempts and the time of every step.
+    /// The history of a task: its attempts, the time of every step and its
+    /// rounds.
     fn of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<History> {
         Ok(History {
             attempts: tx.attempts_of_task(project, task)?,
             times: tx.attempt_times_of_task(project, task)?,
+            rounds: tx.rounds_of_task(project, task)?,
         })
     }
 
@@ -399,10 +402,15 @@ fn op_number(id: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/// The time the task took, and when it was merged.
+/// The time the lane worked on the task, and when it was merged.
 fn actual_of(history: &History, now: Ts) -> (Option<i64>, Option<Ts>) {
     let (start, _handed_in, merged) = history.span();
-    // A task that is not merged yet is measured until now.
+    // The work time, not the clock since the first delivery (T-348).
+    if let Some(worked) = crate::worked_s_of(&history.rounds) {
+        return (Some(worked / 60), merged);
+    }
+    // A task that was never worked on is measured until it was merged, or
+    // until now when it is not merged yet.
     let end = merged.or(Some(now));
     let actual = match (start, end) {
         (Some(start), Some(end)) if end >= start => Some((end - start) / 60),
