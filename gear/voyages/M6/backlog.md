@@ -48,3 +48,9 @@
 
 ## A lane that reports blocked keeps its task and gets nothing else
 - 2026-10-29 M5: mast reported T-367 blocked on T-366 (`gear send --kind blocked --on T-366`) and then sat idle about 40 minutes: the attempt stayed Started, so the engine assigned no next task. A blocked report with `--on` should park the attempt and free the lane for its next startable task, and the captain should hear when a lane is idle with queued work.
+
+## A held seat cannot report
+- 2026-10-29 M5 (F-176): while the user's stop held mast, every `gear send` was refused ("only active, standby or retiring may do this"), so a finished task could not be handed in and the lane could not even ask the captain. A held seat should be able to send questions and results; only new work stays held.
+
+## A test flake in gear-cli under one-process cargo test
+- 2026-10-29 M5 (F-153): two gear-cli tests share the scratch tag "stale" and race under plain `cargo test`; nextest's process per test hides it. Give each test its own tag.
