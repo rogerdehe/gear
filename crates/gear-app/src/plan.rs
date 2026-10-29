@@ -98,6 +98,10 @@ pub fn apply(
     // before the write transaction (the store is never held while a subprocess
     // runs) and only for the done tasks this draft cancels.
     let cancellable = cancellable_done_tasks(store, draft)?;
+    // T-92 F1: a remerge of a candidate that is already on the integration
+    // branch has nothing to queue. Also a git question, asked here for the
+    // same reason: the store is never held while a subprocess runs.
+    let already_merged = remerges_already_merged(store, draft)?;
     // The verdicts that name the merge that landed their work are checked
     // before anything is written (git runs outside the store transaction).
     require_integrated_by(store, draft)?;
@@ -138,6 +142,7 @@ pub fn apply(
                 draft,
                 text,
                 &cancellable,
+                &already_merged,
                 agents,
                 now,
             )?;
@@ -177,6 +182,7 @@ fn apply_queue(
     draft: &Draft,
     text: &str,
     cancellable: &BTreeSet<String>,
+    already_merged: &BTreeSet<String>,
     agents: Option<&[gear_herdr::AgentInfo]>,
     now: Ts,
 ) -> GearResult<ApplyResult> {
@@ -554,7 +560,13 @@ fn apply_queue(
                         // the failed merge and the push refusal are history,
                         // and the captain's own decision is the answer. The
                         // failed op itself stays as history; no op is created.
-                        resolved.extend(resolve_merge_items(tx, project, id, now)?);
+                        resolved.extend(resolve_merge_items(
+                            tx,
+                            project,
+                            id,
+                            "cancelled by the captain",
+                            now,
+                        )?);
                     }
                     Some("ready") => task.state = TaskState::Ready,
                     _ => {}
@@ -653,7 +665,19 @@ fn apply_queue(
     for item in &draft.staff {
         if matches!(item, StaffItem::Rebind { .. } | StaffItem::RebindCancel { .. }) { continue; }
         if let StaffItem::Remerge { task, .. } = item {
-            remerge(tx, project, task, staff_line(item), now)?;
+            // T-92 F1: a candidate that is already on the integration branch
+            // needs no new merge op; the remerge only settles its failed-merge
+            // item and says so.
+            if let Some(note) = remerge(
+                tx,
+                project,
+                task,
+                staff_line(item),
+                now,
+                already_merged.contains(task),
+            )? {
+                warnings.push(note);
+            }
             // The decision log (design §7.4): a staff line is a decision.
             record_gear_decision(
                 tx,
@@ -1090,6 +1114,69 @@ fn cancellable_done_tasks(store: &mut Store, draft: &Draft) -> GearResult<BTreeS
     Ok(cancellable)
 }
 
+/// The remerge lines of this draft whose accepted candidate is already on the
+/// integration branch (T-92 F1): a candidate that landed by another way — a
+/// hand merge, another task that carried it — has nothing left to merge, and
+/// its open `merge-failed:<task>` item would otherwise stay open forever.
+///
+/// A git failure does not put a task in the set: the remerge then runs as
+/// before and the engine's merge confirms the already-merged candidate itself.
+fn remerges_already_merged(
+    store: &mut Store,
+    draft: &Draft,
+) -> GearResult<BTreeSet<String>> {
+    let wanted: Vec<&String> = draft
+        .staff
+        .iter()
+        .filter_map(|item| match item {
+            StaffItem::Remerge { task, .. } => Some(task),
+            _ => None,
+        })
+        .collect();
+    if wanted.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let project = draft.project.clone();
+    let (rows, text) = store.read(|tx| {
+        let mut rows: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+        for id in &wanted {
+            let Some(task) = tx.get_task(&project, id)? else {
+                continue; // the remerge names a missing task
+            };
+            let candidate = tx
+                .attempts_of_task(&project, id)?
+                .into_iter()
+                .rev()
+                .find(|attempt| attempt.state == AttemptState::Accepted)
+                .and_then(|attempt| attempt.candidate);
+            rows.push((id.to_string(), task.lane.clone(), candidate));
+        }
+        let text = tx
+            .get_project(&project)?
+            .map(|row| row.config_toml)
+            .unwrap_or_default();
+        Ok((rows, text))
+    })?;
+    // A store written before a config was stored has nothing to ask git with,
+    // and text that does not parse is not a gate here.
+    if text.trim().is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let Ok(config) = crate::config::parse(&text) else {
+        return Ok(BTreeSet::new());
+    };
+    let mut already = BTreeSet::new();
+    for (id, lane, candidate) in rows {
+        let Some(candidate) = candidate else {
+            continue; // the remerge names the missing attempt
+        };
+        if matches!(on_integration(&config, lane.as_deref(), &candidate), Ok(true)) {
+            already.insert(id);
+        }
+    }
+    Ok(already)
+}
+
 /// Whether `candidate` is on the repo's integration branch at the project's
 /// remote (T-112, T-257: `[conventions].remote`). The branch is fetched first:
 /// a local tracking ref may be stale, and the answer must be about the remote
@@ -1157,13 +1244,16 @@ fn on_integration(
     }
 }
 
-/// Close the open merge items of a cancelled task (T-112): its failed merge and
-/// its push refusal are history, resolved "cancelled by the captain". Returns
-/// the message ids that were closed.
+/// Close the open merge items of a task (T-112: a cancelled task; T-92 F1: a
+/// remerge of an already-merged candidate): its failed merge and its push
+/// refusal are history. `result` is the line the captain reads — "cancelled by
+/// the captain" or "the candidate <sha> is already on the integration branch".
+/// Returns the message ids that were closed.
 fn resolve_merge_items(
     tx: &Tx<'_>,
     project: &str,
     task: &str,
+    result: &str,
     now: Ts,
 ) -> GearResult<Vec<String>> {
     let mut resolved = Vec::new();
@@ -1188,7 +1278,7 @@ fn resolve_merge_items(
                 project,
                 &message.id,
                 gear_model::MsgState::Resolved,
-                Some("cancelled by the captain"),
+                Some(result),
                 None,
                 None,
                 now,
@@ -1782,13 +1872,19 @@ fn project_config(
 /// Only a task whose **last merge op failed** can be retried: a merge that is
 /// still in flight is not queued twice, and a task that is merged has nothing
 /// to do. Anything else is refused with the reason, like every plan line.
+///
+/// `already` is the answer of `remerges_already_merged` (T-92 F1): when the
+/// accepted candidate is on the integration branch already, no op is queued —
+/// the task's open `merge-failed:<task>` and `push:<task>` items are resolved
+/// and the line the captain reads is returned, so the apply warns.
 fn remerge(
     tx: &gear_store::Tx<'_>,
     project: &str,
     task_id: &str,
     line: usize,
     now: Ts,
-) -> GearResult<()> {
+    already: bool,
+) -> GearResult<Option<String>> {
     let task = tx.get_task(project, task_id)?.ok_or_else(|| {
         bad(line, format!("no task {task_id} in this project"))
     })?;
@@ -1861,6 +1957,22 @@ fn remerge(
     // The same payload the engine writes when a review passes: the lane's
     // branch (a hint for closing it, named by the project's template — T-252),
     // the accepted candidate and the review branch.
+    if already {
+        // T-92 F1: the work landed by another way. The merge is not queued
+        // again; the failed-merge item is answered with the candidate's sha.
+        resolve_merge_items(
+            tx,
+            project,
+            task_id,
+            &format!(
+                "the candidate {candidate} is already on the integration branch"
+            ),
+            now,
+        )?;
+        return Ok(Some(format!(
+            "remerge {task_id}: {candidate} is already on the integration branch: no merge queued, its failed-merge item resolved"
+        )));
+    }
     let lane = task.lane.clone().unwrap_or_default();
     let conventions = project_config(tx, project)?
         .map(|config| config.conventions)
@@ -1892,7 +2004,7 @@ fn remerge(
         }),
         created: now,
     })?;
-    Ok(())
+    Ok(None)
 }
 
 fn priority_str(priority: Priority) -> &'static str {
