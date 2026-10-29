@@ -14,6 +14,8 @@ pub enum Call {
     OpenCodeApi { args: Vec<String> },
     Prompt { pane: String, target: String, text: String },
     Rename { pane: String, name: String },
+    /// Herdr `tab.rename` (T-278): the board names its own tab.
+    TabRename { tab_id: String, label: String },
     PaneRun { pane: String, command: String },
     AgentStart { name: String, kind: String, pane: String, args: Vec<String> },
     SendKeys { pane: String, keys: Vec<String> },
@@ -85,6 +87,9 @@ pub struct FakeHerdr {
     /// runs `gear` as itself needs; `set_pane_processes` makes a pane claim
     /// someone else.
     processes: BTreeMap<String, PaneProcessInfo>,
+    /// The Herdr socket this fake stands in for, named in an identity refusal
+    /// (T-314). `None` by default: an unnamed Herdr.
+    pub socket: Option<String>,
 }
 
 impl FakeHerdr {
@@ -154,6 +159,17 @@ impl FakeHerdr {
             .iter()
             .filter_map(|c| match c {
                 Call::Rename { pane, name: n } if n == name => Some(pane.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The tabs renamed to `label`, in call order (T-278).
+    pub fn tab_renames_to(&self, label: &str) -> Vec<&str> {
+        self.calls
+            .iter()
+            .filter_map(|c| match c {
+                Call::TabRename { tab_id, label: l } if l == label => Some(tab_id.as_str()),
                 _ => None,
             })
             .collect()
@@ -301,6 +317,10 @@ impl FakeHerdr {
 }
 
 impl HerdrRead for FakeHerdr {
+    fn socket(&self) -> Option<String> {
+        self.socket.clone()
+    }
+
     fn agents(&mut self) -> Result<Vec<AgentInfo>, ObserveError> {
         if self.observe_fails || self.agents_fail {
             return Err(ObserveError("injected".into()));
@@ -444,6 +464,13 @@ impl HerdrAct for FakeHerdr {
                 }
             }
         })
+    }
+
+    /// Herdr `tab.rename` (T-278): the board labels its own tab. A tab Herdr
+    /// does not know is refused; the board goes on drawing either way.
+    fn tab_rename(&mut self, tab_id: &str, label: &str) -> Outcome<()> {
+        let call = Call::TabRename { tab_id: tab_id.into(), label: label.into() };
+        self.act(call, |_| Outcome::Ok(()))
     }
 
     fn pane_run(&mut self, pane_id: &str, command: &str) -> Outcome<()> {
@@ -663,6 +690,20 @@ mod tests {
         assert_eq!(h.worktree_remove(&w.workspace_id), Outcome::Ok(()));
         assert!(h.worktree_branches().is_empty());
         assert!(matches!(h.worktree_open("/repo", "data/t1-store", "x"), Outcome::Refused { .. }));
+    }
+
+    #[test]
+    fn tab_rename_is_recorded_with_its_tab_and_label() {
+        let mut h = FakeHerdr::new();
+        assert_eq!(h.tab_rename("w1:t2", "gear board"), Outcome::Ok(()));
+        assert_eq!(
+            h.calls,
+            vec![Call::TabRename { tab_id: "w1:t2".into(), label: "gear board".into() }]
+        );
+        assert_eq!(h.tab_renames_to("gear board"), vec!["w1:t2"]);
+        // A refused rename is recorded too, and the caller may ignore it.
+        h.inject_next = Some(Inject::Refuse { code: "not_found".into() });
+        assert!(matches!(h.tab_rename("w1:t9", "p board"), Outcome::Refused { .. }));
     }
 
     #[test]

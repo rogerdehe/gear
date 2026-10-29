@@ -81,6 +81,9 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE TABLE IF NOT EXISTS contracts (project TEXT NOT NULL, task TEXT NOT NULL, version INTEGER NOT NULL,
   goal TEXT NOT NULL, accept TEXT NOT NULL, evidence_files TEXT NOT NULL DEFAULT '[]',
   evidence_due_min INTEGER, body TEXT NOT NULL, created INTEGER NOT NULL,
+  -- v7 (T-272): the reason this task is mechanical — the gate alone proves the
+  -- change, so the review is skipped. NULL: reviewed as before.
+  mechanical TEXT,
   PRIMARY KEY (project, task, version));
 
 CREATE TABLE IF NOT EXISTS attempts (

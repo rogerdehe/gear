@@ -8,7 +8,7 @@
 use gear_model::{AttemptState, ErrorCode, MsgKind, MsgState, SeatRole, TaskState};
 use gear_store::{
     testing, AttemptRow, NewDecision, NewFriction, NewMessage, NewRound, RoundKey, RoundTokens, Store,
-    TaskRow, SCHEMA_VERSION,
+    TaskRow, DEFAULT_REVIEW_BUDGET_MIN, SCHEMA_VERSION,
 };
 use rusqlite::Connection;
 
@@ -492,6 +492,50 @@ fn the_budget_of_a_review_round_is_measured_and_falls_back_to_thirty() {
         store
             .write(|tx| {
                 tx.set_round_active(&key, 600)?;
+                tx.close_round(&key, NOW + i * 1000 + 700)
+            })
+            .unwrap();
+    }
+    let budget = store
+        .read(|tx| tx.round_budget_min(PROJECT, "T-1", 1, "review", Some("minimax")))
+        .unwrap();
+    assert_eq!(budget, 15);
+}
+
+#[test]
+fn a_review_round_that_measured_no_activity_does_not_enter_the_median() {
+    let mut store = Store::open_in_memory().unwrap();
+    a_task(&mut store, "T-1", Some(45));
+
+    // Ten finished review rounds that never measured activity: nothing is
+    // known about how long a review takes, so the default stands.
+    for i in 0..10 {
+        let key = a_round(&mut store, "T-1", 10 + i, "review", NOW + i * 1000);
+        store
+            .write(|tx| tx.close_round(&key, NOW + i * 1000 + 700))
+            .unwrap();
+    }
+    let budget = store
+        .read(|tx| tx.round_budget_min(PROJECT, "T-1", 1, "review", Some("minimax")))
+        .unwrap();
+    assert_eq!(budget, DEFAULT_REVIEW_BUDGET_MIN);
+    assert_eq!(budget, 30);
+}
+
+#[test]
+fn only_the_measured_review_rounds_build_the_median() {
+    let mut store = Store::open_in_memory().unwrap();
+    a_task(&mut store, "T-1", Some(45));
+
+    // Three rounds of 10 minutes and seven of 0: the seven say nothing, so
+    // the median is 10 min and the budget 1.5 × 10 = 15 min, not the floor.
+    for i in 0..10 {
+        let key = a_round(&mut store, "T-1", 10 + i, "review", NOW + i * 1000);
+        store
+            .write(|tx| {
+                if i < 3 {
+                    tx.set_round_active(&key, 600)?;
+                }
                 tx.close_round(&key, NOW + i * 1000 + 700)
             })
             .unwrap();

@@ -23,7 +23,7 @@ fn world() -> (Store, SeatRow) {
                 priority: "must".into(), lane: Some("heat".into()), milestone: None, required: false, contract_version: 1,
                 deps: vec![], followup_of: None, wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
             tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 1, goal: "g".into(),
-                accept: "a".into(), evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0 })?;
+                accept: "a".into(), evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0, mechanical: None, })?;
             start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
             let mut a = tx.attempts_of_task("p", "T-7")?.pop().unwrap();
             a.state = AttemptState::Submitted;
@@ -165,6 +165,83 @@ fn progress_from_an_earlier_generation_of_the_same_review_still_counts() {
     assert_eq!((nudged,flagged),(vec![seat.id.clone()],vec![]));
     let op=s.read(|tx|tx.last_op(&seat.id,OpKind::Deliver)).unwrap().unwrap();
     assert_eq!(op.payload["nudge"],1);
+}
+
+// ---------- T-284: an uncertain packet op or an older generation never holds
+// the nudge for good.
+
+/// The at-capacity screen a stopped reviewer shows (measured on review-7 of
+/// T-242): it is no quota and no login, so the screen flags do not stop the
+/// nudge — this test reads the flags the way the engine does.
+fn at_capacity_flags() -> BTreeSet<gear_herdr::profile::ScreenFlag> {
+    gear_herdr::classify_screen(
+        &gear_herdr::builtin("codex").unwrap(),
+        "■ Selected model is at capacity. Please try a different model.",
+    )
+}
+
+/// An idle reviewer whose packet op is `Unknown` and older than the cooldown is
+/// nudged: an uncertain delivery never settles, so it could not block for good.
+#[test]
+fn an_unknown_packet_op_older_than_the_cooldown_does_not_block_the_nudge() {
+    let (mut s, seat) = world();
+    s.write(|tx| {
+        let op = tx.insert_op(&NewOp { project: "p".into(), seat: seat.id.clone(), generation: 1, kind: OpKind::Deliver,
+            task: Some("T-7".into()), attempt: Some(1), ref_msg: None, plan_version: None,
+            payload: serde_json::json!({"text": "Review T-7 (uncertain send)"}), created: T0 })?;
+        tx.set_op_state("p", &op.id, OpState::Executing, None, T0)?;
+        tx.set_op_state("p", &op.id, OpState::Unknown, None, T0)
+    })
+    .unwrap();
+    let flags = at_capacity_flags();
+    let mut seen = idle(&seat);
+    seen[0].flags = flags;
+    let t = T0 + COOLDOWN + 1;
+    assert_eq!(
+        nudge_stopped_reviewers(&mut s, "p", &seen, COOLDOWN, t).unwrap(),
+        (vec![seat.id.clone()], vec![])
+    );
+    let nudge = s.read(|tx| tx.last_op(&seat.id, OpKind::Deliver)).unwrap().unwrap();
+    let text = nudge.payload["text"].as_str().unwrap();
+    assert!(text.contains("Review T-7"), "the packet rides along: {text}");
+}
+
+/// An `Intended` op of a generation that is gone (the agent was replaced) does
+/// not block the nudge of the current generation.
+#[test]
+fn an_intended_op_of_an_older_generation_does_not_block_the_nudge() {
+    let (mut s, seat) = world();
+    s.write(|tx| {
+        tx.insert_op(&NewOp { project: "p".into(), seat: seat.id.clone(), generation: 0, kind: OpKind::Doorbell,
+            task: None, attempt: None, ref_msg: None, plan_version: None,
+            payload: serde_json::json!({"text": "doorbell"}), created: T0 })
+            .map(|_| ())
+    })
+    .unwrap();
+    let t = T0 + COOLDOWN + 1;
+    assert_eq!(
+        nudge_stopped_reviewers(&mut s, "p", &idle(&seat), COOLDOWN, t).unwrap(),
+        (vec![seat.id.clone()], vec![])
+    );
+}
+
+/// An `Intended` op of the current generation still blocks: two deliveries must
+/// never be in flight.
+#[test]
+fn an_intended_op_of_the_current_generation_still_blocks_the_nudge() {
+    let (mut s, seat) = world();
+    s.write(|tx| {
+        tx.insert_op(&NewOp { project: "p".into(), seat: seat.id.clone(), generation: 1, kind: OpKind::Doorbell,
+            task: None, attempt: None, ref_msg: None, plan_version: None,
+            payload: serde_json::json!({"text": "doorbell"}), created: T0 })
+            .map(|_| ())
+    })
+    .unwrap();
+    let t = T0 + COOLDOWN + 1;
+    assert_eq!(
+        nudge_stopped_reviewers(&mut s, "p", &idle(&seat), COOLDOWN, t).unwrap(),
+        (vec![], vec![])
+    );
 }
 
 // ---------- T-245: a direction check that stops is nudged like a review

@@ -35,7 +35,7 @@ Read the task packet (`gear --show T-<n>`): the contract (goal, acceptance, the 
 
 ## 2. Delivering
 
-- **Work on branch `review/t<n>`** — the project gives you a worktree on it, cut at the candidate. The review you write is a repository artifact like any other: put it at the path your project uses for reviews (the packet's command and the project's own conventions name it), set `Status: running` first, commit, push; at the end set `Status: done`, commit and push again. Leave the candidate code untouched: your commits carry only the review.
+- **Work on branch `review/t<n>`** — the project gives you a worktree on it, cut at the candidate. The review you write is a repository artifact like any other: put it at the path your project uses for reviews (the packet's command and the project's own conventions name it), set `Status: running` first, commit it with the message the packet names, push; at the end set `Status: done`, commit and push again. Leave the candidate code untouched: your commits carry only the review. Never run `git stash`: every worktree of the repository shares one stash, so a stash can carry your work to another lane or theirs to you.
 - Hand the verdict in with exactly:
 
   ```bash

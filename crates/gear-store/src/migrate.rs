@@ -24,6 +24,9 @@
 //! decision log. The migration leaves every new column NULL: the store
 //! cannot read the project config, so a reader of `tasks.repo/base/gate`
 //! that finds NULL falls back to the lane's current config.
+//! **v7** adds `contracts.mechanical` (T-272): the reason a task is mechanical —
+//! the merge gate alone proves the change, so the review is skipped. NULL means
+//! reviewed as before, and the migration leaves every existing contract NULL.
 
 use gear_model::{ErrorCode, GearError, GearResult};
 use rusqlite::{params, Transaction};
@@ -31,7 +34,7 @@ use rusqlite::{params, Transaction};
 use crate::{map_sqlite, SCHEMA_SQL};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// The oldest version the steps know. A store without a stamp is this old:
 /// nothing ever wrote a version before v1.
@@ -53,6 +56,7 @@ pub const STEPS: &[Step] = &[
     Step { from: 3, apply: step_3_to_4 },
     Step { from: 4, apply: step_4_to_5 },
     Step { from: 5, apply: step_5_to_6 },
+    Step { from: 6, apply: step_6_to_7 },
 ];
 
 /// The columns of the `voyages` table, in the order of the canonical shape.
@@ -196,6 +200,18 @@ fn step_5_to_6(tx: &Transaction<'_>) -> GearResult<()> {
         if key != ["project", "seat", "kind", "start_at"] {
             rebuild_seat_pauses(tx)?;
         }
+    }
+    Ok(())
+}
+
+/// v6 → v7: `contracts.mechanical` (T-272), the reason a task is mechanical.
+///
+/// One nullable column, added here when it is missing: a v6 store keeps every
+/// row it has, and every existing contract is NULL — reviewed as before.
+fn step_6_to_7(tx: &Transaction<'_>) -> GearResult<()> {
+    if !column_exists(tx, "contracts", "mechanical")? {
+        tx.execute_batch("ALTER TABLE contracts ADD COLUMN mechanical TEXT")
+            .map_err(map_sqlite)?;
     }
     Ok(())
 }

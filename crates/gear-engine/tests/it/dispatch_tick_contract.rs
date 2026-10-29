@@ -20,7 +20,7 @@ fn world() -> (Store, SeatRow, SeatRow) {
             lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
             wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
         tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 1, goal: "g".into(), accept: "a".into(),
-            evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0 })?;
+            evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0, mechanical: None, })?;
         Ok((cap, heat))
     }).unwrap();
     (s, cap, heat)
@@ -46,7 +46,7 @@ fn idle_lane_is_assigned_and_delivered() {
     let ops = s.write(|tx| intend_dispatch(tx, "p", &actions, T0 + 100)).unwrap();
     assert_eq!(ops.len(), 1);
     assert_eq!((ops[0].kind, ops[0].task.as_deref(), ops[0].attempt), (OpKind::Deliver, Some("T-7"), Some(1)));
-    assert_eq!(ops[0].payload["text"], first_attempt_text("T-7", 1, "heat/t7", "dev", "`gear --show T-7`").as_str());
+    assert_eq!(ops[0].payload["text"], first_attempt_text("T-7", 1, "heat/t7", "origin", "dev", "`gear --show T-7`").as_str());
     assert_eq!(s.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap().state, AttemptState::Delivered);
     // the pending delivery now blocks a second decision
     let again = s.read(|tx| plan_dispatch(tx, "p", &obs, &DispatchCfg::default(), T0 + 1000)).unwrap();

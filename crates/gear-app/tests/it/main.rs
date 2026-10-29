@@ -1,4 +1,49 @@
 //! All integration tests of gear-app in one binary: each test binary is scanned by macOS on its first run, so one binary per crate keeps the gate fast.
+/// A fresh scratch directory under the temp directory, unique to this test
+/// and this name, removed when the test is done (T-412): a passing run leaves
+/// nothing behind. The same name in one test is the same directory.
+pub fn temp(name: &str) -> std::path::PathBuf {
+    use std::cell::{Cell, RefCell};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static THREADS: AtomicU64 = AtomicU64::new(0);
+
+    /// The directories one test made, removed when that test is done.
+    struct Made {
+        /// The number of this thread, given at its first scratch directory.
+        thread: Cell<Option<u64>>,
+        /// The directories it made, by name.
+        dirs: RefCell<Vec<(String, std::path::PathBuf)>>,
+    }
+
+    impl Drop for Made {
+        fn drop(&mut self) {
+            for (_, dir) in self.dirs.borrow().iter() {
+                std::fs::remove_dir_all(dir).ok();
+            }
+        }
+    }
+
+    thread_local! {
+        static MADE: Made = const { Made { thread: Cell::new(None), dirs: RefCell::new(Vec::new()) } };
+    }
+
+    MADE.with(|made| {
+        if let Some((_, dir)) = made.dirs.borrow().iter().find(|(named, _)| named == name) {
+            return dir.clone();
+        }
+        let thread = made.thread.get().unwrap_or_else(|| {
+            let thread = THREADS.fetch_add(1, Ordering::Relaxed);
+            made.thread.set(Some(thread));
+            thread
+        });
+        let dir = std::env::temp_dir().join(format!("{name}-{}-{thread}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        made.dirs.borrow_mut().push((name.to_string(), dir.clone()));
+        dir
+    })
+}
+
 mod admin_init_contract;
 mod adopt_contract;
 mod app_home;
@@ -22,14 +67,17 @@ mod kickoff_contract;
 mod packet_contract;
 mod plan_apply_contract;
 mod plan_fields_contract;
+mod plan_size_contract;
 mod plan_staff_contract;
 mod plan_verdicts_contract;
 mod profiles_contract;
 mod result_contract;
+mod remerge_contract;
 mod review_contract;
 mod reviewer_mail_contract;
 mod seats_contract;
 mod settle_review_contract;
+mod staffing_lock_contract;
 mod tasks_contract;
 mod temps_quota_contract;
 mod time_contract;

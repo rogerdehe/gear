@@ -12,9 +12,7 @@ const T0: i64 = 1_800_000_000;
 
 /// A scratch directory and a store holding the projects `a` and `b`.
 fn world(tag: &str) -> (PathBuf, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("gear-board-{}-{tag}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let dir = crate::scratch::temp(&format!("gear-board-{tag}"));
     let db = dir.join("gear.db");
     let mut store = Store::open(&db).expect("the store");
     store

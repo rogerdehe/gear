@@ -103,10 +103,10 @@ fn apply_task_on(
 #[test]
 fn a_changed_models_chain_is_the_next_config_version() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), &config(),Some(crate::skill_home()), T0).unwrap();
+    init_with_home(&mut s, &admin(), &config(),Some(crate::skill_home()), false, T0).unwrap();
 
     let changed = config_with(HEAT, "\"deepseek/deepseek-flash\"");
-    let r = init_with_home(&mut s, &admin(), &changed,Some(crate::skill_home()), T0 + 1).unwrap();
+    let r = init_with_home(&mut s, &admin(), &changed,Some(crate::skill_home()), false, T0 + 1).unwrap();
     assert_eq!(r.config_version, 2);
 
     // The store holds the new config as the current version.
@@ -125,7 +125,7 @@ fn a_changed_models_chain_is_the_next_config_version() {
 #[test]
 fn a_new_lane_becomes_a_queued_seat() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), &config(),Some(crate::skill_home()), T0).unwrap();
+    init_with_home(&mut s, &admin(), &config(),Some(crate::skill_home()), false, T0).unwrap();
     // The lane that is already there is running: a config change must not
     // touch its seat.
     s.write(|tx| {
@@ -135,7 +135,7 @@ fn a_new_lane_becomes_a_queued_seat() {
     .unwrap();
 
     let more = config_with(&format!("{HEAT}{PRICING}"), "\"minimax-cn/MiniMax-M3.1-Flash\"");
-    let r = init_with_home(&mut s, &admin(), &more,Some(crate::skill_home()), T0 + 1).unwrap();
+    let r = init_with_home(&mut s, &admin(), &more,Some(crate::skill_home()), false, T0 + 1).unwrap();
     assert_eq!(r.config_version, 2);
     assert!(r.seats.contains(&"harbor:pricing".to_string()), "{:?}", r.seats);
 
@@ -156,11 +156,11 @@ fn a_new_lane_becomes_a_queued_seat() {
 fn a_dropped_lane_is_refused_and_named() {
     let mut s = Store::open_in_memory().unwrap();
     let registered = config();
-    init_with_home(&mut s, &admin(), &registered,Some(crate::skill_home()), T0).unwrap();
+    init_with_home(&mut s, &admin(), &registered,Some(crate::skill_home()), false, T0).unwrap();
 
     // The lane "heat" is not in the new config any more.
     let fewer = config_with(PRICING, "\"minimax-cn/MiniMax-M3.1-Flash\"");
-    let err = init_with_home(&mut s, &admin(), &fewer,Some(crate::skill_home()), T0 + 1).unwrap_err();
+    let err = init_with_home(&mut s, &admin(), &fewer,Some(crate::skill_home()), false, T0 + 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("heat"), "{}", err.detail);
 
@@ -175,11 +175,11 @@ fn a_dropped_lane_is_refused_and_named() {
 #[test]
 fn a_retired_lane_may_be_dropped() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), &config(),Some(crate::skill_home()), T0).unwrap();
+    init_with_home(&mut s, &admin(), &config(),Some(crate::skill_home()), false, T0).unwrap();
     s.write(|tx| tx.set_seat_state("harbor:heat", SeatState::Retired, Some("reclaimed"), T0 + 1)).unwrap();
 
     let fewer = config_with(PRICING, "\"minimax-cn/MiniMax-M3.1-Flash\"");
-    init_with_home(&mut s, &admin(), &fewer,Some(crate::skill_home()), T0 + 2).unwrap();
+    init_with_home(&mut s, &admin(), &fewer,Some(crate::skill_home()), false, T0 + 2).unwrap();
 
     let row = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
     assert_eq!(row.config_version, 2);
@@ -192,7 +192,7 @@ fn a_retired_lane_may_be_dropped() {
 #[test]
 fn a_retired_lane_stays_retired_until_a_task_names_it() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), &config(), Some(crate::skill_home()), T0).unwrap();
+    init_with_home(&mut s, &admin(), &config(), Some(crate::skill_home()), false, T0).unwrap();
     s.write(|tx| {
         tx.set_seat_generation("harbor:heat", 1)?;
         tx.set_seat_state("harbor:heat", SeatState::Retired, Some("reclaimed"), T0 + 1)
@@ -202,7 +202,7 @@ fn a_retired_lane_stays_retired_until_a_task_names_it() {
     // The lane "heat" is in the new config again: a re-apply alone (here the
     // model chain changed) does not register it again.
     let again = config_with(HEAT, "\"deepseek/deepseek-flash\"");
-    init_with_home(&mut s, &admin(), &again, Some(crate::skill_home()), T0 + 2).unwrap();
+    init_with_home(&mut s, &admin(), &again, Some(crate::skill_home()), false, T0 + 2).unwrap();
     let heat = s.read(|tx| tx.get_seat("harbor:heat")).unwrap().unwrap();
     assert_eq!(heat.state, SeatState::Retired, "a re-apply starts no agent");
     assert_eq!(heat.state_reason.as_deref(), Some("reclaimed"));
@@ -230,7 +230,7 @@ fn a_retired_lane_stays_retired_until_a_task_names_it() {
 #[test]
 fn a_retired_lane_out_of_the_config_stays_retired() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), &config(), Some(crate::skill_home()), T0).unwrap();
+    init_with_home(&mut s, &admin(), &config(), Some(crate::skill_home()), false, T0).unwrap();
     s.write(|tx| {
         tx.set_seat_generation("harbor:heat", 1)?;
         tx.set_seat_state("harbor:heat", SeatState::Retired, Some("reclaimed"), T0 + 1)
@@ -239,7 +239,7 @@ fn a_retired_lane_out_of_the_config_stays_retired() {
 
     // The retired lane leaves the config: a new voyage starts with new lanes.
     let fewer = config_with(PRICING, "\"minimax-cn/MiniMax-M3.1-Flash\"");
-    init_with_home(&mut s, &admin(), &fewer, Some(crate::skill_home()), T0 + 2).unwrap();
+    init_with_home(&mut s, &admin(), &fewer, Some(crate::skill_home()), false, T0 + 2).unwrap();
     assert_eq!(s.read(|tx| tx.get_seat("harbor:heat")).unwrap().unwrap().state, SeatState::Retired);
 
     // A NEW task names it, and it stays retired all the same.
@@ -258,14 +258,14 @@ fn a_retired_lane_out_of_the_config_stays_retired() {
 fn an_invalid_config_is_refused_and_nothing_is_written() {
     let mut s = Store::open_in_memory().unwrap();
     let registered = config();
-    init_with_home(&mut s, &admin(), &registered,Some(crate::skill_home()), T0).unwrap();
+    init_with_home(&mut s, &admin(), &registered,Some(crate::skill_home()), false, T0).unwrap();
 
     // The new lane owns a path the lane "heat" owns: the config is invalid.
     let broken = config_with(
         &format!("{HEAT}{}\n", PRICING.replace("src/pricing/", "src/heat/x.rs")),
         "\"minimax-cn/MiniMax-M3.1-Flash\"",
     );
-    let err = init_with_home(&mut s, &admin(), &broken,Some(crate::skill_home()), T0 + 1).unwrap_err();
+    let err = init_with_home(&mut s, &admin(), &broken,Some(crate::skill_home()), false, T0 + 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("lanes[1].owns"), "{}", err.detail);
 
@@ -277,20 +277,20 @@ fn an_invalid_config_is_refused_and_nothing_is_written() {
 #[test]
 fn the_session_and_the_bound_captain_do_not_change_mid_run() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), &config(),Some(crate::skill_home()), T0).unwrap();
+    init_with_home(&mut s, &admin(), &config(),Some(crate::skill_home()), false, T0).unwrap();
 
     let other_session = config().replace(r#"herdr_session = "marina""#, r#"herdr_session = "other""#);
-    let err = init_with_home(&mut s, &admin(), &other_session,Some(crate::skill_home()), T0 + 1).unwrap_err();
+    let err = init_with_home(&mut s, &admin(), &other_session,Some(crate::skill_home()), false, T0 + 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("session"), "{}", err.detail);
 
     let other_pane = config().replace(r#"pane = "w2:p1""#, r#"pane = "w2:p9""#);
-    let err = init_with_home(&mut s, &admin(), &other_pane,Some(crate::skill_home()), T0 + 1).unwrap_err();
+    let err = init_with_home(&mut s, &admin(), &other_pane,Some(crate::skill_home()), false, T0 + 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("pane"), "{}", err.detail);
 
     let other_kind = config().replace(r#"kind = "codex""#, r#"kind = "claude""#);
-    let err = init_with_home(&mut s, &admin(), &other_kind,Some(crate::skill_home()), T0 + 1).unwrap_err();
+    let err = init_with_home(&mut s, &admin(), &other_kind,Some(crate::skill_home()), false, T0 + 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("kind"), "{}", err.detail);
 
@@ -300,10 +300,10 @@ fn the_session_and_the_bound_captain_do_not_change_mid_run() {
 #[test]
 fn a_lane_profile_follows_the_config() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), &config(),Some(crate::skill_home()), T0).unwrap();
+    init_with_home(&mut s, &admin(), &config(),Some(crate::skill_home()), false, T0).unwrap();
 
     let changed = config().replace(r#"profile = "opencode""#, r#"profile = "codex""#);
-    init_with_home(&mut s, &admin(), &changed,Some(crate::skill_home()), T0 + 1).unwrap();
+    init_with_home(&mut s, &admin(), &changed,Some(crate::skill_home()), false, T0 + 1).unwrap();
     let heat = s.read(|tx| tx.get_seat("harbor:heat")).unwrap().unwrap();
     assert_eq!(heat.profile, "codex");
 }
@@ -311,7 +311,7 @@ fn a_lane_profile_follows_the_config() {
 #[test]
 fn a_lane_may_not_take_the_seat_id_of_another_role() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), &config(),Some(crate::skill_home()), T0).unwrap();
+    init_with_home(&mut s, &admin(), &config(),Some(crate::skill_home()), false, T0).unwrap();
 
     // A new lane named "captain" would take the captain's seat id.
     let captain_lane = r#"
@@ -323,7 +323,7 @@ kind = "opencode"
 profile = "opencode"
 "#;
     let clash = config_with(&format!("{HEAT}{captain_lane}"), "\"minimax-cn/MiniMax-M3.1-Flash\"");
-    let err = init_with_home(&mut s, &admin(), &clash,Some(crate::skill_home()), T0 + 1).unwrap_err();
+    let err = init_with_home(&mut s, &admin(), &clash,Some(crate::skill_home()), false, T0 + 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("captain"), "{}", err.detail);
 
@@ -331,4 +331,139 @@ profile = "opencode"
     let captain = s.read(|tx| tx.get_seat("harbor:captain")).unwrap().unwrap();
     assert_eq!(captain.role, SeatRole::Captain);
     assert_eq!(captain.profile, "codex");
+}
+
+/// T-304: a Ready task on a retired lane brings it back only while the lane
+/// quota has a free slot; the quota counts the lane seats that are not Retired.
+#[test]
+fn a_full_lane_quota_leaves_a_retired_lane_retired() {
+    const SAIL: &str = r#"
+[[lanes]]
+name = "sail"
+duty = "sail trim"
+owns = ["src/sail/"]
+kind = "opencode"
+profile = "opencode"
+"#;
+    let mut s = Store::open_in_memory().unwrap();
+    let three = config_with(
+        &format!("{HEAT}{PRICING}{SAIL}"),
+        "\"minimax-cn/MiniMax-M3.1-Flash\"",
+    );
+    init_with_home(&mut s, &admin(), &three, Some(crate::skill_home()), false, T0).unwrap();
+    // sail is reclaimed, then the captain lowers the quota to two: heat and
+    // pricing fill it, sail is retired and does not count (T-304).
+    s.write(|tx| tx.set_seat_state("harbor:sail", SeatState::Retired, Some("reclaimed"), T0 + 1))
+        .unwrap();
+    let two = three.replace("lanes = 3", "lanes = 2");
+    init_with_home(&mut s, &admin(), &two, Some(crate::skill_home()), false, T0 + 2).unwrap();
+
+    // A NEW task names sail: the quota is full, so it stays retired and the
+    // apply says why.
+    let applied = apply_task_on(&mut s, "sail", 0, "r1");
+    assert!(
+        !applied.staffed.iter().any(|line| line == "start sail"),
+        "{:?}",
+        applied.staffed
+    );
+    assert!(
+        applied.warnings.contains(&"lane sail stays retired: 2 lanes run and the quota allows 2; retire another lane or raise [quota] lanes".to_string()),
+        "{:?}",
+        applied.warnings
+    );
+    let sail = s.read(|tx| tx.get_seat("harbor:sail")).unwrap().unwrap();
+    assert_eq!(sail.state, SeatState::Retired);
+    assert_eq!(sail.state_reason.as_deref(), Some("reclaimed"));
+
+    // Another lane retires, so a slot is free: the Ready task on sail brings
+    // it back.
+    s.write(|tx| {
+        tx.set_seat_state("harbor:pricing", SeatState::Retired, Some("reclaimed"), T0 + 4)
+    })
+    .unwrap();
+    let applied = apply_task_on(&mut s, "heat", 1, "r2");
+    assert!(
+        applied.staffed.contains(&"start sail".to_string()),
+        "{:?}",
+        applied.staffed
+    );
+    let sail = s.read(|tx| tx.get_seat("harbor:sail")).unwrap().unwrap();
+    assert_eq!(sail.state, SeatState::Queued, "the engine onboards it again");
+    assert_eq!(sail.state_reason.as_deref(), Some("a task names it again"));
+}
+
+/// T-304 review F1: two Ready tasks on two retired lanes and one free slot
+/// revive **one** lane, not both — the count advances within the apply.
+#[test]
+fn two_ready_tasks_revive_only_one_lane_when_one_slot_is_free() {
+    const SAIL: &str = r#"
+[[lanes]]
+name = "sail"
+duty = "sail trim"
+owns = ["src/sail/"]
+kind = "opencode"
+profile = "opencode"
+"#;
+    let mut s = Store::open_in_memory().unwrap();
+    let three = config_with(
+        &format!("{HEAT}{PRICING}{SAIL}"),
+        "\"minimax-cn/MiniMax-M3.1-Flash\"",
+    );
+    init_with_home(&mut s, &admin(), &three, Some(crate::skill_home()), false, T0).unwrap();
+    // pricing and sail are reclaimed; the captain lowers the quota to two, so
+    // heat fills one slot and exactly one slot is free.
+    s.write(|tx| {
+        tx.set_seat_state("harbor:pricing", SeatState::Retired, Some("reclaimed"), T0 + 1)?;
+        tx.set_seat_state("harbor:sail", SeatState::Retired, Some("reclaimed"), T0 + 1)
+    })
+    .unwrap();
+    let two = three.replace("lanes = 3", "lanes = 2");
+    init_with_home(&mut s, &admin(), &two, Some(crate::skill_home()), false, T0 + 2).unwrap();
+
+    // One apply names both: one comes back, the other stays retired.
+    let text = "<!-- gear-plan project=harbor base=0 -->\n# Queue\n\
+## NEW [must] lane=pricing\ngoal: G\naccept: a\nestimate: 30\ndeps: -\n\
+## NEW [must] lane=sail\ngoal: G\naccept: a\nestimate: 30\ndeps: -\n";
+    let draft = parse(text).unwrap();
+    let env = Env {
+        ctx: Some(GearCtx {
+            project: "harbor".into(),
+            seat: "captain".into(),
+            generation: 1,
+        }),
+        pane_id: Some(CAP_PANE.into()),
+        admin: false,
+    };
+    let fp = Fingerprint {
+        pane_id: CAP_PANE.into(),
+        kind: Some("codex".into()),
+        session_ref: None,
+    };
+    let applied = apply(&mut s, &env, Some(&fp), None, &draft, text, "r1", T0 + 3).unwrap();
+
+    let started: Vec<&String> = applied
+        .staffed
+        .iter()
+        .filter(|line| line.starts_with("start "))
+        .collect();
+    assert_eq!(started.len(), 1, "{:?}", applied.staffed);
+    let warning = format!(
+        "lane {} stays retired: 2 lanes run and the quota allows 2; retire another lane or raise [quota] lanes",
+        if started[0] == "start pricing" { "sail" } else { "pricing" }
+    );
+    assert!(applied.warnings.contains(&warning), "{:?}", applied.warnings);
+
+    // At most the quota runs, and exactly one of the two is still Retired.
+    let seats = s.read(|tx| tx.seats_of_project("harbor")).unwrap();
+    let running = seats
+        .iter()
+        .filter(|seat| seat.role == SeatRole::Lane && seat.state != SeatState::Retired)
+        .count();
+    assert!(running <= 2, "{running} lanes run under a quota of 2");
+    let retired: Vec<&str> = seats
+        .iter()
+        .filter(|seat| seat.role == SeatRole::Lane && seat.state == SeatState::Retired)
+        .map(|seat| seat.name.as_str())
+        .collect();
+    assert_eq!(retired.len(), 1, "{retired:?}");
 }

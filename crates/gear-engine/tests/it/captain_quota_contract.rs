@@ -74,6 +74,7 @@ quota_reset_h = 1
                 evidence_due_min: None,
                 body: String::new(),
                 created: T0,
+                mechanical: None,
             })?;
             Ok(())
         })

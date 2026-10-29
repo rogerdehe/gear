@@ -363,9 +363,33 @@ pub struct TempsSection {
     pub profile: String,
 }
 
+/// The default cap on a task's planned time (T-279): no task is planned for
+/// longer than this, so none keeps a lane unattended for hours before its
+/// hand-in is reviewed.
+pub const MAX_TASK_MIN: u32 = 60;
+
+/// The default age, in minutes, past which a task's branch on the remote is
+/// named to the captain: a branch of a voyage is meant to be merged (or its
+/// task cancelled) within this time; one that lives longer means its work is
+/// stuck, and the captain decides what to do.
+pub const BRANCH_MAX_AGE_MIN: u32 = 120;
+
+/// The default number of task branches each lane may hold on the remote at
+/// once: two hand-ins out and one sent back. More than lanes × this means
+/// branches rot, and the captain is told to clean up.
+pub const BRANCH_MAX_PER_LANE: u32 = 3;
+
+/// The default no-push clock in minutes: a lane working this long without a
+/// push to its task branch is asked why.
+pub const PUSH_INTERVAL_MIN: u32 = 20;
+
+/// The default minutes a lane has to answer that question to the captain;
+/// no answer in time is reported to the captain as a lane in trouble.
+pub const PUSH_REPLY_MIN: u32 = 10;
+
 /// Defaults: integration "dev", release "main", staging "" (none), review_max_rounds 3,
-/// the branches GEAR itself uses (T-252), gate "" (none: a project names its
-/// own gate, T-255).
+/// max_task_min 60, the branches GEAR itself uses (T-252), gate "" (none: a
+/// project names its own gate, T-255).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Conventions {
@@ -373,6 +397,22 @@ pub struct Conventions {
     pub release: String,
     pub staging: String,
     pub review_max_rounds: u32,
+    /// The cap on a task's planned time in minutes (T-279): a plan whose
+    /// estimate is over it is refused, so the captain cuts the work into
+    /// tasks each with its own test cycle. Default 60.
+    pub max_task_min: u32,
+    /// A task's branch on the remote older than this many minutes is named to
+    /// the captain (the branch sweep in the engine). Default 120.
+    pub branch_max_age_min: u32,
+    /// The open voyages' task branches on the remote may number at most
+    /// lanes × this; more are named to the captain. Default 3.
+    pub branch_max_per_lane: u32,
+    /// A lane working this many minutes without a push is asked to tell the
+    /// captain why. Default 20.
+    pub push_interval_min: u32,
+    /// The minutes the lane has for that answer; without it the captain is
+    /// told the lane is in trouble. Default 10.
+    pub push_reply_min: u32,
     /// What the engine runs in its integration worktree after a merge, before
     /// it pushes (T-12). No default (T-255): GEAR cannot know another stack's
     /// build + test command, so the project names its own — a `[[repos]]`
@@ -388,6 +428,26 @@ pub struct Conventions {
     /// `{seat}` filled in: the merge worktree is seat `merge`, so Herdr names
     /// the worktree `<project>-<seat>`. Default `{project}/{seat}`.
     pub seat_branch: String,
+    /// The git remote a hand-in is checked against (T-257): the branch is
+    /// fetched from it and `<remote>/<branch>` is the ref the check reads.
+    /// Default `origin`.
+    pub remote: String,
+    /// The folder a voyage keeps its plan, reports and reviews in (T-257), a
+    /// template with `{project}` and `{milestone}` filled in. Default
+    /// `gear/voyages/{milestone}` (one folder per voyage).
+    pub voyage_dir: String,
+    /// The message of a task's merge commit (T-299), a template with
+    /// `{project}`, `{task}` and `{source}` filled in. Default
+    /// `merge({task}): {source}`.
+    pub merge_message: String,
+    /// The message of a reviewer's commit (T-299), a template with `{project}`,
+    /// `{task}`, `{attempt}` and `{what}` filled in. Default
+    /// `review({task}): {what}`.
+    pub review_message: String,
+    /// The message of the captain's plan commit (T-299), a template with
+    /// `{project}`, `{milestone}` and `{what}` filled in. Default
+    /// `{milestone}: {what}`.
+    pub plan_message: String,
 }
 
 impl Default for Conventions {
@@ -397,10 +457,20 @@ impl Default for Conventions {
             release: "main".to_string(),
             staging: String::new(),
             review_max_rounds: 3,
+            max_task_min: MAX_TASK_MIN,
+            branch_max_age_min: BRANCH_MAX_AGE_MIN,
+            branch_max_per_lane: BRANCH_MAX_PER_LANE,
+            push_interval_min: PUSH_INTERVAL_MIN,
+            push_reply_min: PUSH_REPLY_MIN,
             gate: String::new(),
             task_branch: gear_model::branch::TASK_BRANCH.to_string(),
             review_branch: gear_model::branch::REVIEW_BRANCH.to_string(),
             seat_branch: gear_model::branch::SEAT_BRANCH.to_string(),
+            remote: gear_model::layout::REMOTE.to_string(),
+            voyage_dir: gear_model::layout::VOYAGE_DIR.to_string(),
+            merge_message: gear_model::commit::MERGE_MESSAGE.to_string(),
+            review_message: gear_model::commit::REVIEW_MESSAGE.to_string(),
+            plan_message: gear_model::commit::PLAN_MESSAGE.to_string(),
         }
     }
 }
@@ -417,6 +487,18 @@ pub enum QuotaPolicy {
     Fallback,
     /// Park until the reset, then wake on the same model.
     Wait,
+}
+
+/// What happens to a lane's agent while it is parked on a long quota wait
+/// (T-325): keep the agent, or release it until the reset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WaitPolicy {
+    /// The agent stays; it waits out the quota in its pane.
+    #[default]
+    Keep,
+    /// The agent exits until the reset; its worktree and session are kept.
+    Release,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
@@ -436,6 +518,8 @@ pub struct Models {
     pub review: Vec<ModelEntry>,
     pub captain: Vec<ModelEntry>,
     pub on_quota: OnQuota,
+    /// What a lane parked on a long quota wait does with its agent (T-325).
+    pub on_wait: WaitPolicy,
     pub quota_reset_h: u32,
     /// How a model is found in its CLI's model picker and recognised on the
     /// status bar, keyed by the model id (T-33): `[models.switch."<id>"]`
@@ -616,6 +700,7 @@ impl Default for Models {
             review: Vec::new(),
             captain: Vec::new(),
             on_quota: OnQuota::default(),
+            on_wait: WaitPolicy::default(),
             quota_reset_h: 5,
             switch: BTreeMap::new(),
         }
@@ -760,7 +845,8 @@ pub fn profile_table(
 ///   path prefix of the other on a `/` boundary (`src/a/` vs `src/a/b.rs` overlap;
 ///   `src/a` vs `src/ab` do not) — only between lanes of the **same** repo
 ///   (T-52): the same paths in two repos are two different files;
-/// - number of lanes ≤ `quota.lanes`;
+/// - the lane quota (`quota.lanes`) is not checked here: only the seats know
+///   which lanes are retired (T-304), so `admin::lane_quota_problem` does it;
 /// - every `[[quota.sources]]`: a provider name and a reader the engine knows
 ///   (`minimax`, `opencode-go`, `codex`);
 /// - every `[[repos]]` name: `[a-z][a-z0-9-]*` and unique;
@@ -777,6 +863,12 @@ pub fn profile_table(
 /// - a lane's `repo` names one of the `[[repos]]` entries;
 /// - `conventions.integration` and `release` non-empty and different; `staging`
 ///   if non-empty differs from both;
+/// - `conventions.remote` non-empty and without whitespace, and
+///   `conventions.voyage_dir` names `{milestone}` (T-257);
+/// - a seat branch that git cannot hold together with a task or review branch
+///   (T-372): a ref and a directory of one name cannot both exist, so the
+///   seat branch of a lane, of the merge seat and of a reviewer must not be a
+///   task or review branch, nor a folder of one;
 /// - `timing.cooldown_s > timing.tick_s`;
 /// - `models.lanes`, `models.review`, `models.captain` and each lane's `models`
 ///   hold no blank and no repeated entry (compared trimmed; an entry is the
@@ -818,6 +910,38 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
 
     if cfg.timing.delivery_grace_s == 0 {
         issues.push(issue("timing.delivery_grace_s", "must be at least one second".to_string()));
+    }
+    // A cap of zero would refuse every task (T-279): the captain plans each
+    // task's time, and no estimate is under it.
+    if cfg.conventions.max_task_min == 0 {
+        issues.push(issue(
+            "conventions.max_task_min",
+            format!("must be at least one minute (the default is {MAX_TASK_MIN})"),
+        ));
+    }
+    if cfg.conventions.branch_max_age_min == 0 {
+        issues.push(issue(
+            "conventions.branch_max_age_min",
+            format!("must be at least one minute (the default is {BRANCH_MAX_AGE_MIN})"),
+        ));
+    }
+    if cfg.conventions.branch_max_per_lane == 0 {
+        issues.push(issue(
+            "conventions.branch_max_per_lane",
+            format!("must be at least one (the default is {BRANCH_MAX_PER_LANE})"),
+        ));
+    }
+    if cfg.conventions.push_interval_min == 0 {
+        issues.push(issue(
+            "conventions.push_interval_min",
+            format!("must be at least one minute (the default is {PUSH_INTERVAL_MIN})"),
+        ));
+    }
+    if cfg.conventions.push_reply_min == 0 {
+        issues.push(issue(
+            "conventions.push_reply_min",
+            format!("must be at least one minute (the default is {PUSH_REPLY_MIN})"),
+        ));
     }
     for (model, price) in &cfg.prices {
         if !model.split_once('/').is_some_and(|(provider, name)| !provider.trim().is_empty() && !name.trim().is_empty()) {
@@ -923,17 +1047,9 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         ));
     }
 
-    // ---- quota
-    if cfg.lanes.len() as u32 > cfg.quota.lanes {
-        issues.push(issue(
-            "quota.lanes",
-            format!(
-                "{} lanes are configured but the quota allows {}",
-                cfg.lanes.len(),
-                cfg.quota.lanes
-            ),
-        ));
-    }
+    // ---- quota: not checked here. The quota counts the lanes that can run,
+    // which means the seats, retired ones excluded (T-304); `validate` sees only
+    // the config, so `admin::lane_quota_problem` makes that finding.
 
     // ---- captain: nothing to check here (pane, kind and profile are checked
     // against Herdr by `gear admin init`).
@@ -1148,7 +1264,53 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         }
     }
 
-    // ---- the branch templates (T-252): the branch names GEAR cuts and
+    // ---- the remote and the voyage folder (T-257): a remote with a blank
+    // or a space in it is no remote git can fetch from, and a voyage folder
+    // without `{milestone}` keeps every voyage in one place.
+    let remote = conventions.remote.trim();
+    if remote.is_empty() || remote.chars().any(char::is_whitespace) {
+        issues.push(issue(
+            "conventions.remote",
+            "the remote must be one git remote name, without spaces (e.g. origin, upstream)"
+                .to_string(),
+        ));
+    }
+    if !conventions.voyage_dir.contains("{milestone}") {
+        issues.push(issue(
+            "conventions.voyage_dir",
+            "the voyage folder must name {milestone} (one folder per voyage, e.g. gear/voyages/{milestone})"
+                .to_string(),
+        ));
+    }
+
+    // The commit-message templates (T-299): a team with commit rules (ticket
+    // keys, Conventional Commits) names its own; GEAR's are only the defaults.
+    // Each is checked here — before a merge or a hand-in writes one — the way a
+    // branch template is: the placeholders it may name are the ones the writer
+    // fills in.
+    message_template_issues(
+        "conventions.merge_message",
+        &conventions.merge_message,
+        Some("task"),
+        &["project", "task", "source"],
+        &mut issues,
+    );
+    message_template_issues(
+        "conventions.review_message",
+        &conventions.review_message,
+        Some("task"),
+        &["project", "task", "attempt", "what"],
+        &mut issues,
+    );
+    message_template_issues(
+        "conventions.plan_message",
+        &conventions.plan_message,
+        None,
+        &["project", "milestone", "what"],
+        &mut issues,
+    );
+
+    // The branch templates (T-252): the branch names GEAR cuts and
     // checks. A template is expanded with its placeholders; anything else stays
     // a literal brace and git refuses the branch, so each is checked here — on
     // a sample — rather than when a lane cannot push.
@@ -1204,6 +1366,42 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                     "the review branch {review:?} is the same name as the task branch: a task needs a branch for its work and another for its review"
                 ),
             ));
+        }
+    }
+
+    // ---- a seat branch is a ref, and a lane's task or review branch lives
+    // below it when one is a folder of the other (T-372): git cannot hold the
+    // ref `prometheus/money` and the branch `prometheus/money/t54` together, so
+    // the lane would have to delete its own seat branch to cut a task branch.
+    // Checked on a sample per lane, for the lane's own seat and for the two
+    // seats every project has: the merge seat and a reviewer's.
+    let project = &cfg.project.id;
+    for lane in &cfg.lanes {
+        let task = gear_model::branch::expand(
+            &conventions.task_branch,
+            project,
+            &lane.name,
+            SAMPLE_TASK,
+        );
+        let review = gear_model::branch::expand(
+            &conventions.review_branch,
+            project,
+            &lane.name,
+            SAMPLE_TASK,
+        );
+        for seat in [lane.name.as_str(), MERGE_SEAT, REVIEW_SEAT] {
+            let seat_branch =
+                gear_model::branch::expand_seat(&conventions.seat_branch, project, seat);
+            for (kind, branch) in [("task", &task), ("review", &review)] {
+                if one_branch_holds_the_other(&seat_branch, branch) {
+                    issues.push(issue(
+                        "conventions.seat_branch",
+                        format!(
+                            "the seat branch {seat_branch} and the {kind} branch {branch} cannot both exist in git (a ref and a directory of the same name): give the seat branches their own folder, e.g. seat_branch = \"{{project}}/home/{{seat}}\""
+                        ),
+                    ));
+                }
+            }
         }
     }
 
@@ -1382,6 +1580,53 @@ fn placeholders(template: &str) -> Vec<&str> {
     names
 }
 
+/// Check one commit-message template (T-299): it must not be empty, it must
+/// name `required` when the message needs it, and it may name only `allowed`.
+/// Returns whether the template is usable.
+fn message_template_issues(
+    field: &str,
+    template: &str,
+    required: Option<&str>,
+    allowed: &[&str],
+    issues: &mut Vec<ConfigIssue>,
+) -> bool {
+    let filled: Vec<String> = allowed.iter().map(|name| format!("{{{name}}}")).collect();
+    if template.trim().is_empty() {
+        issues.push(issue(
+            field,
+            format!(
+                "the commit message template is empty: name one; GEAR fills in {}",
+                filled.join(", ")
+            ),
+        ));
+        return false;
+    }
+    let names = placeholders(template);
+    if let Some(unknown) = names.iter().find(|name| !allowed.contains(name)) {
+        issues.push(issue(
+            field,
+            format!(
+                "the template {template:?} names {{{unknown}}}: GEAR fills in {}",
+                filled.join(", ")
+            ),
+        ));
+        return false;
+    }
+    if let Some(required) = required {
+        if !names.contains(&required) {
+            issues.push(issue(
+                field,
+                format!(
+                    "the template {template:?} has no {{{required}}}, so it does not name the task: GEAR fills in {}",
+                    filled.join(", ")
+                ),
+            ));
+            return false;
+        }
+    }
+    true
+}
+
 /// Check one branch template (T-252): it must name `required`, it may name only
 /// `allowed`, and its sample expansion must be a branch name git takes. Returns
 /// whether the template is usable.
@@ -1422,6 +1667,20 @@ fn branch_template_issues(
         return false;
     }
     true
+}
+
+/// The seat names every project has (T-372): the merge worktree and a
+/// reviewer's.
+const MERGE_SEAT: &str = "merge";
+const REVIEW_SEAT: &str = "review-1";
+
+/// Two branch names git cannot hold side by side (T-372): the same name, or one
+/// as a folder of the other (`p/heat` and `p/heat/t1`), because a ref and a
+/// directory of one name cannot both exist.
+fn one_branch_holds_the_other(a: &str, b: &str) -> bool {
+    a == b
+        || b.strip_prefix(a).is_some_and(|rest| rest.starts_with('/'))
+        || a.strip_prefix(b).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// What is wrong with `name` as a branch name, or `None` when git takes it

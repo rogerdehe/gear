@@ -79,6 +79,7 @@ fn world_with(passed: bool, findings: &str, blocking: &str) -> Store {
             evidence_due_min: None,
             body: String::new(),
             created: T0,
+            mechanical: None,
         })?;
         // T-1 is handed in: Delivered → Started → Submitted, task Verifying.
         start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
@@ -304,6 +305,7 @@ fn a_pass_on_an_older_contract_is_a_rework() {
             evidence_due_min: None,
             body: String::new(),
             created: T0 + 3,
+            mechanical: None,
         })?;
         let mut row = tx.get_task("p", "T-1")?.unwrap();
         row.contract_version = 2;
@@ -438,6 +440,7 @@ fn a_fail_on_an_older_contract_is_never_a_pass() {
             evidence_due_min: None,
             body: String::new(),
             created: T0 + 3,
+            mechanical: None,
         })?;
         let mut row = tx.get_task("p", "T-1")?.unwrap();
         row.contract_version = 2;
@@ -524,4 +527,93 @@ fn a_restart_between_the_review_and_the_settlement_does_not_double_settle() {
     );
     let info = settlement_info(&mut s);
     assert_eq!(info.len(), 1, "one information line: {info:?}");
+}
+
+// ------------------------------------------------- rework budget (T-312)
+
+/// A fail world whose T-1 carries `estimate_min` and whose review names
+/// `count` blocking findings (`F1`, `F2`, …).
+fn fail_world(estimate_min: Option<i64>, count: usize) -> Store {
+    let findings: Vec<String> = (1..=count).map(|n| format!("F{n}: finding {n}")).collect();
+    let blocking: Vec<String> = (1..=count).map(|n| format!("F{n}")).collect();
+    let mut s = world_with(false, &findings.join("\n"), &blocking.join(","));
+    s.write(|tx| {
+        let mut row = tx.get_task("p", "T-1")?.unwrap();
+        row.estimate_min = estimate_min;
+        row.updated = T0 + 2;
+        tx.update_task(&row)
+    })
+    .unwrap();
+    s
+}
+
+/// The budget the next round of T-1 gets (§5.1, attempt 2 is a rework).
+fn rework_budget(s: &mut Store) -> i64 {
+    s.read(|tx| tx.round_budget_min("p", "T-1", 2, "rework", None)).unwrap()
+}
+
+/// T-312: a rework round's budget grows with the blocking findings it carries
+/// — 8 minutes each, never below half the estimate at least 10.
+#[test]
+fn a_rework_budget_grows_with_its_blocking_findings() {
+    let mut s = fail_world(Some(30), 5);
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+    assert_eq!(rework_budget(&mut s), 40, "five blocking findings are 40 min");
+
+    // One finding is below half of 30: the old rule still wins.
+    let mut s = fail_world(Some(30), 1);
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+    assert_eq!(rework_budget(&mut s), 15, "half of 30 is still the floor");
+
+    // A long task keeps its half: two findings are 16, half of 100 is 50.
+    let mut s = fail_world(Some(100), 2);
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+    assert_eq!(rework_budget(&mut s), 50, "half of 100 beats 8 per finding");
+}
+
+/// T-312: a task without an estimate counts from the default round budget.
+#[test]
+fn a_rework_budget_without_an_estimate_starts_from_the_default() {
+    let mut s = fail_world(None, 4);
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+    // Half of the default 30 is 15; four findings are 32.
+    assert_eq!(
+        rework_budget(&mut s), 32,
+        "eight minutes per finding, above half the default budget"
+    );
+}
+
+/// T-312: a captain's fail verdict with `estimate=` still sets its own minutes
+/// (plan.rs writes them after its settle).
+#[test]
+fn a_captains_fail_verdict_keeps_its_own_minutes() {
+    let mut s = fail_world(Some(30), 2);
+    let text = "<!-- gear-plan project=p base=0 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc1234 fail estimate=25 rework=\"handle the edge case\"\n";
+    let env = Env {
+        ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+        pane_id: Some("w1:p1".into()),
+        admin: false,
+    };
+    let fp = Fingerprint {
+        pane_id: "w1:p1".into(),
+        kind: Some("codex".into()),
+        session_ref: None,
+    };
+    gear_app::plan::apply(
+        &mut s,
+        &env,
+        Some(&fp),
+        None,
+        &gear_app::draft::parse(text).unwrap(),
+        text,
+        "t312-captain",
+        T0 + 6,
+    )
+    .unwrap();
+
+    assert_eq!(
+        s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().rework_estimate_min,
+        Some(25)
+    );
+    assert_eq!(rework_budget(&mut s), 25, "the captain's minutes win over 8 per finding");
 }

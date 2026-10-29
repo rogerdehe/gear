@@ -15,7 +15,7 @@
 use crate::observe::SeatObs;
 use gear_herdr::Profile;
 use gear_model::{GearResult, MsgKind, MsgState, Ts};
-use gear_store::{NewMessage, Tx};
+use gear_store::{NewMessage, SeatRow, Tx};
 use std::collections::BTreeMap;
 
 /// The thread a seat's stall item lives in.
@@ -92,6 +92,26 @@ pub fn alert(tx: &Tx<'_>, seat_id: &str, now: Ts) -> GearResult<bool> {
     alert_fact(tx, seat_id, now, "its agent is gone from its pane, a delivery was not confirmed, or continuing it made no progress")
 }
 
+/// What the stuck lane is about (T-293): the work in flight, its last
+/// check-in, and the delivery op it waits on. The captain should not have to
+/// open the pane to know what the alert is about.
+fn about(tx: &Tx<'_>, seat: &SeatRow, now: Ts) -> GearResult<String> {
+    let mut parts = Vec::new();
+    match tx.in_progress_attempts_of_seat(&seat.id)?.into_iter().next() {
+        Some(attempt) => parts.push(format!("{} attempt {} ({})", attempt.task, attempt.n, attempt.state)),
+        None => parts.push("no task".to_string()),
+    }
+    let minutes = |ts: Ts| now.saturating_sub(ts) / 60;
+    match tx.views_since(&seat.id, seat.generation, 0)?.into_iter().max_by_key(|view| view.ts) {
+        Some(view) => parts.push(format!("last check-in {} min ago", minutes(view.ts))),
+        None => parts.push("no check-in this generation".to_string()),
+    }
+    if let Some(op) = tx.slot_ops(&seat.id)?.into_iter().min_by_key(|op| (op.created, op.id.clone())) {
+        parts.push(format!("waits on {} ({}, {}, {} min)", op.id, op.kind, op.state, minutes(op.created)));
+    }
+    Ok(parts.join("; "))
+}
+
 pub fn alert_fact(tx: &Tx<'_>, seat_id: &str, now: Ts, fact: &str) -> GearResult<bool> {
     let Some(seat) = tx.get_seat(seat_id)? else {
         return Ok(false);
@@ -105,7 +125,7 @@ pub fn alert_fact(tx: &Tx<'_>, seat_id: &str, now: Ts, fact: &str) -> GearResult
     if captain.id == seat.id {
         return Ok(false); // the captain itself: its doorbell is the signal
     }
-    let body = format!("lane {} is stuck: {}. Look at its pane (agent exited? context full? a dialog? quota?), get it going (restart or resume it, or give it a fresh session), then resolve this item.", seat.name, fact);
+    let body = format!("lane {} is stuck: {fact}. About: {}. Look at its pane (agent exited? context full? a dialog? quota?), get it going (restart or resume it, or give it a fresh session), then resolve this item.", seat.name, about(tx, &seat, now)?);
     let open = tx.thread_messages(&seat.project, &thread(&seat.id))?.into_iter()
         .find(|m| matches!(m.state, MsgState::Open | MsgState::Waiting));
     if let Some(item) = open {

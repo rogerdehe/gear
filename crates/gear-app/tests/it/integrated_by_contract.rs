@@ -172,6 +172,7 @@ fn world(repos: &Repos, candidate: &str) -> Store {
                 evidence_due_min: None,
                 body: String::new(),
                 created: NOW,
+                mechanical: None,
             })?;
         }
         // T-1's work is handed in.

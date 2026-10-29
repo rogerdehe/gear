@@ -150,7 +150,70 @@ fn a_lane_with_nothing_at_all_is_idle() {
 
     let item = items(&mut w.store, "heat");
     assert_eq!(item.len(), 1, "{item:?}");
-    assert_eq!(item[0].body, "lane heat is IDLE");
+    assert_eq!(item[0].body, "lane heat is IDLE: no next task to dispatch (its agent may still be finishing a turn); plan a task for it or move one to it");
+}
+
+/// An unanswered captain instruction to the lane (`kind = Instruction`); its
+/// message id comes back for the reply.
+fn instruct(w: &mut World, created: i64) -> String {
+    w.store.write(|tx| tx.insert_message(&NewMessage {
+        meta: None, project: "p".into(), thread: "hull:175".into(), task: None, attempt: None,
+        sender: "p:captain".into(), sender_gen: 1, recipient: "p:heat".into(),
+        kind: MsgKind::Instruction, urgent: false,
+        body: "please look at the merge".into(), reply_to: None, needs_ack: false,
+        state: MsgState::Open, created,
+    })).unwrap().id
+}
+
+/// The lane answers that instruction.
+fn reply(w: &mut World, instruction: &str, created: i64) {
+    w.store.write(|tx| tx.insert_message(&NewMessage {
+        meta: None, project: "p".into(), thread: "hull:175".into(), task: None, attempt: None,
+        sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
+        kind: MsgKind::Reply, urgent: false, body: "done".into(),
+        reply_to: Some(instruction.into()), needs_ack: false, state: MsgState::Open, created,
+    })).unwrap();
+}
+
+/// T-324: a lane that helps on an unanswered captain instruction is not idle:
+/// the open IDLE item closes with the fact, no new one opens while the help
+/// lasts, and the lane's reply brings the IDLE item back.
+#[test]
+fn a_lane_helping_on_an_unanswered_instruction_is_not_idle() {
+    let mut w = world(AgentStatus::Idle, 0);
+    // The project has work to start elsewhere: the idle lane is told first.
+    startable_elsewhere(&mut w);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+    assert_eq!(items(&mut w.store, "heat").len(), 1, "the lane is idle first");
+
+    // The captain asks the lane for something and it has not answered yet.
+    let instruction = instruct(&mut w, T0 + 2);
+
+    let changes = feed::keep_lanes_fed(&mut w.store, "p", T0 + 5).unwrap();
+    assert_eq!(changes, vec![feed::FeedChange { lane: "heat".into(), action: "closed" }]);
+    let item = items(&mut w.store, "heat");
+    assert_eq!(item.len(), 1, "{item:?}");
+    assert_eq!(item[0].state, MsgState::Resolved);
+    assert_eq!(
+        item[0].result.as_deref(),
+        Some("the lane is helping the captain: please look at the merge")
+    );
+
+    // The next pass opens nothing while the help lasts.
+    assert!(feed::keep_lanes_fed(&mut w.store, "p", T0 + 6).unwrap().is_empty());
+    assert_eq!(items(&mut w.store, "heat").len(), 1, "no IDLE item while helping");
+
+    // The lane answers: the IDLE item opens again on the next feed pass.
+    reply(&mut w, &instruction, T0 + 7);
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 10).unwrap();
+    let item = items(&mut w.store, "heat");
+    assert_eq!(item.len(), 2, "{item:?}");
+    assert_eq!(item[1].state, MsgState::Open);
+    assert!(
+        item[1].body.starts_with("lane heat is IDLE"),
+        "{}",
+        item[1].body
+    );
 }
 
 #[test]
@@ -372,7 +435,7 @@ fn measured_early_warning_stays_quiet_after_acknowledgment_until_worse() {
     feed::keep_lanes_fed(&mut w.store, "p", T0 + 10).unwrap();
     let all = items(&mut w.store, "heat");
     assert_eq!(all.len(), 2);
-    assert_eq!(all[1].body, "lane heat is IDLE");
+    assert_eq!(all[1].body, "lane heat is IDLE: no next task to dispatch (its agent may still be finishing a turn); plan a task for it or move one to it");
     assert_eq!(all[1].state, MsgState::Open);
     assert!(feed::keep_lanes_fed(&mut w.store, "p", T0 + 12).unwrap().is_empty());
 }
@@ -797,7 +860,7 @@ fn a_lane_that_hands_its_last_task_in_says_it_is_idle() {
     let lane_items = items(&mut w.store, "heat");
     assert_eq!(lane_items.len(), 1, "{lane_items:?}");
     assert_eq!(lane_items[0].state, MsgState::Open, "the idle state updates the existing item");
-    assert_eq!(lane_items[0].body, "lane heat is IDLE");
+    assert_eq!(lane_items[0].body, "lane heat is IDLE: no next task to dispatch (its agent may still be finishing a turn); plan a task for it or move one to it");
 
     // And the next tick is silent: the idle lane is not told again.
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 15).unwrap();
@@ -915,7 +978,7 @@ fn no_item_is_opened_and_the_idle_item_closes_when_no_lane_has_work_left_to_star
                 recipient: "p:captain".into(),
                 kind: MsgKind::System,
                 urgent: false,
-                body: "lane deck is IDLE".into(),
+                body: "lane deck is IDLE: no next task to dispatch (its agent may still be finishing a turn); plan a task for it or move one to it".into(),
                 reply_to: None,
                 needs_ack: false,
                 state: MsgState::Open,
@@ -961,6 +1024,6 @@ fn one_startable_task_keeps_the_lanes_talking() {
     let deck = items(&mut w.store, "deck");
     assert_eq!(deck.len(), 1, "{deck:?}");
     assert_eq!(deck[0].state, MsgState::Open);
-    assert_eq!(deck[0].body, "lane deck is IDLE");
+    assert_eq!(deck[0].body, "lane deck is IDLE: no next task to dispatch (its agent may still be finishing a turn); plan a task for it or move one to it");
     assert_eq!(changes.len(), 2, "{changes:?}");
 }

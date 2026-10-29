@@ -129,6 +129,9 @@ pub struct TickReport {
     /// Attempts confirmed by a **late** check-in (design §10.3): the delivery
     /// op had already failed, and the view that showed the attempt came after.
     pub late_confirmed: Vec<String>,
+    /// Deliver op ids whose text sat unsent in their lane's input box and got
+    /// its Enter this tick (T-371).
+    pub resubmitted: Vec<String>,
     /// Seats flagged for attention (e.g. doorbell evidence budget exhausted).
     pub flagged: Vec<String>,
     /// Seats onboarded this tick (worktree, pane and agent all up).
@@ -329,6 +332,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         })?;
         report.park_ended.extend(ended);
         report.busy_lanes.extend(store.write(|tx| busy::check(tx, &project, &observed, now))?);
+        // T-288: a lane still busy with no task five minutes on is interrupted,
+        // so its next packet can go. A lane that is helping is never touched.
+        for pane in store.write(|tx| busy::due_interrupts(tx, &project, &observed, now))? {
+            let _ = herdr.send_keys(&pane, &["esc".into()]);
+        }
         // A seat blocked by a dialog for minutes reaches the captain (lesson
         // 7b): the agent waits on a dialog nobody sees.
         report
@@ -417,6 +425,13 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.confirmed.extend(confirmed);
         report.flagged.extend(flagged);
 
+        // 2a. a delivery whose text sits unsent in its lane's input box gets
+        //     its Enter back (T-371): the lane is idle, the packet was typed,
+        //     and only the key that submits it was lost.
+        report
+            .resubmitted
+            .extend(ops::resubmit_unsent(store, herdr, &project, now)?);
+
         // 2b. a late check-in (design §10.3): a view that shows the attempt
         //     after its delivery op failed confirms the attempt anyway and
         //     closes the stall item.
@@ -482,6 +497,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         //    lane is not blocked; the reviewer is a seat of its own.
         let reviews = review::start_reviews(store, herdr, cfg, &profiles, &project, now)?;
         report.reviewers.extend(reviews.started);
+        // A mechanical hand-in settles itself (T-273): reported the way a
+        // review's own settlement is, so one failed settlement is visible and
+        // still never stops the tick.
+        report.settled.extend(reviews.settled);
+        report.settle_failed.extend(reviews.settle_failed);
 
         // 7b. a reviewer that stopped before its verdict is told to go on
         //     (L-53); past its nudge budget it is flagged for the captain.
@@ -641,7 +661,33 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         if let Err(e) = store.write(|tx| {
             let missing = missing_seats.contains(&seat);
             tx.set_meta(&format!("stall-missing:{seat}"), if missing { "1" } else { "" })?;
-            let fact = if missing { "its agent is gone from its pane" } else { "a delivery was not confirmed or continuing it made no progress" };
+            let row = tx.get_seat(&seat)?;
+            // T-324: a lane helping on an unanswered captain instruction is
+            // busy on purpose. While its agent is present no stall item is
+            // written; a missing agent ("its agent is gone from its pane") is
+            // still told.
+            if !missing {
+                if let Some(row) = row.as_ref() {
+                    if gear_board::idle::helping(tx, &row.project, row, now)?.is_some() {
+                        return Ok(false);
+                    }
+                }
+            }
+            // T-287: a seat the engine already restarted once on this config
+            // that is missing again ends the same way (M4.2 #17). Its item says
+            // so, and names the pane and the config as the place to look, so
+            // the captain does not spend a second restart on it.
+            let again = match (missing, row) {
+                (true, Some(row)) => restart_spent(tx, &row)?,
+                _ => false,
+            };
+            let fact = if again {
+                "its agent exited again after the engine restarted it once on the current config; the cause is in its pane or its config (a refused model id, a missing CLI, a login): fix that first, since another restart on the same config ends the same way"
+            } else if missing {
+                "its agent is gone from its pane"
+            } else {
+                "a delivery was not confirmed or continuing it made no progress"
+            };
             stall::alert_fact(tx, &seat, now, fact)
         }) {
             // One seat's alert failing never stops the tick.
@@ -649,6 +695,49 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         }
     }
     Ok(report)
+}
+
+/// Did the engine's one restart already come back to the same end for this
+/// seat's **current job** (T-287)?
+///
+/// The restart of a job writes `engine.restart.<seat>.<task>.<attempt>`
+/// (`fn restart_missing_jobs`): `"started"` means the restart was spent on that
+/// job, so a seat missing again after it cannot be helped by another restart on
+/// the same config. The current job is the attempts in progress for a lane, and
+/// the seat's own task with its last attempt for a temp seat.
+fn restart_spent(tx: &gear_store::Tx<'_>, seat: &gear_store::SeatRow) -> GearResult<bool> {
+    use gear_model::{AttemptState, SeatRole};
+    let jobs: Vec<(String, i64)> = match seat.role {
+        SeatRole::Lane => tx
+            .in_progress_attempts_of_seat(&seat.id)?
+            .into_iter()
+            .filter(|a| matches!(a.state, AttemptState::Started | AttemptState::Delivered))
+            .map(|a| (a.task, a.n))
+            .collect(),
+        // A released reviewer has no `task_id` any more: the restart finds its
+        // job through the pending review, so this does the same.
+        SeatRole::Temp => match tx
+            .get_meta(&format!("engine.review_pending.{}", seat.id))?
+            .filter(|s| !s.is_empty())
+            .or_else(|| seat.task_id.clone())
+        {
+            Some(task) => tx
+                .attempts_of_task(&seat.project, &task)?
+                .last()
+                .map(|a| (a.task.clone(), a.n))
+                .into_iter()
+                .collect(),
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    for (task, attempt) in jobs {
+        let marker = format!("engine.restart.{}.{}.{}", seat.id, task, attempt);
+        if tx.get_meta(&marker)?.as_deref() == Some("started") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn restart_missing_jobs(
@@ -983,6 +1072,10 @@ fn doorbell_inputs(
     Ok(inputs)
 }
 
+/// Scratch directories of the unit tests, removed when the test is done (T-412).
+#[cfg(test)]
+pub(crate) mod testtmp;
+
 #[cfg(test)]
 mod t209_tick_tests {
     use super::*;
@@ -1029,7 +1122,7 @@ review=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high
             testing::seed_active_seat(tx,"p","captain",SeatRole::Captain,"w1:p9","claude",NOW)?;
             if role==SeatRole::Temp { tx.set_seat_task(&seat.id,"T-1")?; }
             tx.insert_task(&TaskRow {project:"p".into(),id:"T-1".into(),rank:1,state:task_state,priority:"must".into(),lane:Some("heat".into()),milestone:None,required:false,contract_version:1,deps:vec![],followup_of:None,wait_on:None,wait_cond:None,rework_note:None,estimate_min:Some(30),issue:None,updated:NOW,repo:None,base:None,gate:None,rework_estimate_min:None})?;
-            tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"accept".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:NOW})?;
+            tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"accept".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:NOW, mechanical: None,})?;
             tx.insert_attempt(&AttemptRow {project:"p".into(),task:"T-1".into(),n:1,seat:"p:heat".into(),generation:1,contract_version:1,adopted_version:1,pending_update:None,state:attempt_state,candidate:(role==SeatRole::Temp).then(||"abc1234".into()),report:None,safe_point:None,started:NOW,updated:NOW,session_ref:None,session_cli:Some("codex".into()),session_action:None,sent_at:Some(NOW)})?;
             let round_role=if role==SeatRole::Lane {"dev"} else {"review"};
             tx.insert_round(&NewRound {key:RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:round_role.into()},seat:seat.id.clone(),generation:1,cli:"codex".into(),model:Some("gpt-6.1-sol".into()),start_at:NOW})?;
@@ -1044,7 +1137,7 @@ review=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high
         }).unwrap();
         let _=seat;
         let mut herdr=FakeHerdr::new(); herdr.add_shell(pane); herdr.add_shell("w1:p9");
-        let mut cfg=EngineCfg::default(); cfg.db_path="/tmp/t209.db".into();
+        let mut cfg=EngineCfg::default(); cfg.db_path=crate::testtmp::temp("t209").join("t209.db").to_string_lossy().into_owned();
         for kind in ["codex","claude"] { cfg.profiles.insert(kind.into(),gear_herdr::builtin(kind).unwrap()); }
         (store,herdr,cfg,pane.into())
     }
@@ -1070,6 +1163,26 @@ review=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high
             let lane_stall=store.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap();
             assert_eq!(if role==SeatRole::Lane {lane_stall.len()} else {stall.len()},1);
             assert_eq!(if role==SeatRole::Lane {lane_stall[0].state} else {stall[0].state},MsgState::Open);
+            // T-287: the second exit after the engine's one restart says so.
+            let body=&if role==SeatRole::Lane {&lane_stall[0].body} else {&stall[0].body};
+            assert!(body.contains("exited again after the engine restarted it once"),"{role:?}: {body}");
+        }
+    }
+
+    /// T-287: a missing seat the engine never restarted keeps the plain fact:
+    /// nothing says another restart would end the same way.
+    #[test]
+    fn a_missing_seat_never_restarted_keeps_the_plain_fact() {
+        for role in [SeatRole::Lane,SeatRole::Temp] {
+            let (mut store,mut herdr,cfg,pane)=fixture(role);
+            // The pane itself is gone: there is nowhere to restart the agent.
+            let _ = herdr.pane_close(&pane);
+            tick(&mut store,&mut herdr,&cfg,NOW+1).unwrap();
+            assert_eq!(herdr.calls.iter().filter(|call|matches!(call,Call::AgentStart{..})).count(),0);
+            let items=if role==SeatRole::Lane {store.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap()} else {store.read(|tx|tx.thread_messages("p","stall:p:review-1")).unwrap()};
+            assert_eq!(items.len(),1,"{role:?}: {items:?}");
+            assert!(items[0].body.contains("its agent is gone from its pane"),"{role:?}: {}",items[0].body);
+            assert!(!items[0].body.contains("exited again after the engine restarted it once"),"{role:?}: {}",items[0].body);
         }
     }
 }
@@ -1151,7 +1264,7 @@ review=[{{model="{review_model}",cli="codex",args=["-c","model_reasoning_effort=
                     tx.set_seat_task(&seat.id, "T-1")?;
                 }
                 tx.insert_task(&TaskRow {project:"p".into(),id:"T-1".into(),rank:1,state:task_state,priority:"must".into(),lane:Some("heat".into()),milestone:None,required:false,contract_version:1,deps:vec![],followup_of:None,wait_on:None,wait_cond:None,rework_note:None,estimate_min:Some(30),issue:None,updated:NOW,repo:None,base:None,gate:None,rework_estimate_min:None})?;
-                tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"accept".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:NOW})?;
+                tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"accept".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:NOW, mechanical: None,})?;
                 tx.insert_attempt(&AttemptRow {project:"p".into(),task:"T-1".into(),n:1,seat:"p:heat".into(),generation:1,contract_version:1,adopted_version:1,pending_update:None,state:attempt_state,candidate:(role==SeatRole::Temp).then(||"abc1234".into()),report:None,safe_point:None,started:NOW,updated:NOW,session_ref:None,session_cli:Some(binding_kind.into()),session_action:None,sent_at:Some(NOW)})?;
                 let round_role = if role == SeatRole::Lane { "dev" } else { "review" };
                 tx.insert_round(&NewRound {key:RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:round_role.into()},seat:seat.id.clone(),generation:1,cli:binding_kind.into(),model:Some("gpt-6.1-sol".into()),start_at:NOW})?;
@@ -1171,7 +1284,7 @@ review=[{{model="{review_model}",cli="codex",args=["-c","model_reasoning_effort=
         let mut herdr = FakeHerdr::new();
         herdr.add_shell(pane);
         herdr.add_shell("w1:p9");
-        let mut cfg = EngineCfg { db_path: "/tmp/t226.db".into(), ..EngineCfg::default() };
+        let mut cfg = EngineCfg { db_path: crate::testtmp::temp("t226").join("t226.db").to_string_lossy().into_owned(), ..EngineCfg::default() };
         for kind in ["codex", "claude", "opencode", "pi"] {
             cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
         }

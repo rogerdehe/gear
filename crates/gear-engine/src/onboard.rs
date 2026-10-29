@@ -550,7 +550,20 @@ fn onboard_seat(
             // Design §10.1: the command goes to the agent's name, never to the
             // pane id — an agent that exited leaves a shell behind, and the
             // command would be typed into it.
-            if let Some(name) = crate::names::live_name(herdr, &pane) {
+            // T-285: an agent Herdr left unnamed is named first, in this same
+            // try — a prompt to an unnamed agent is refused, so a leftover
+            // would never be asked and the seat would park after three tries.
+            let name = crate::names::agent_name(&seat.project, &seat.name);
+            let target = match crate::names::live_name(herdr, &pane) {
+                Some(live) => Some(live),
+                None => match crate::names::ensure(herdr, &pane, &name) {
+                    crate::names::Ensure::Renamed | crate::names::Ensure::Named => Some(name),
+                    crate::names::Ensure::Taken { .. }
+                    | crate::names::Ensure::NoAgent
+                    | crate::names::Ensure::Failed(_) => None,
+                },
+            };
+            if let Some(name) = target {
                 let _ = herdr.prompt(&name, command);
             }
         } else if !exit_profile.exit_keys.is_empty() {
@@ -633,7 +646,7 @@ fn onboard_seat(
         Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
             wait_for_shell(store, cfg, &seat.id, pending)
         }
-        other => Err(step_failure("agent_start", &other)),
+        other => Err(start_failure(herdr, &pane, &kind, &other)),
     }
 }
 
@@ -687,7 +700,7 @@ fn resume_busy_start(
         Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
             wait_for_shell(store, cfg, &seat.id, pending)
         }
-        other => Err(step_failure("agent_start", &other)),
+        other => Err(start_failure(herdr, &pending.pane, &pending.kind, &other)),
     }
 }
 
@@ -876,6 +889,23 @@ fn park_queued_lanes(store: &mut Store, project: &str, reason: &str, now: Ts) ->
         park(store, &seat_id, reason, now)?;
     }
     Ok(())
+}
+
+/// Why a Herdr start did not succeed (T-286): the pane's last lines decide
+/// whether the CLI itself is missing. A shell that has no `codex` says so on
+/// its screen, and that is not a reason to walk the model chain: the seat is
+/// flagged for the install instead.
+fn start_failure<T>(
+    herdr: &mut dyn HerdrAct,
+    pane: &str,
+    kind: &str,
+    outcome: &Outcome<T>,
+) -> String {
+    let tail = herdr.read_tail(pane, 16).unwrap_or_default();
+    match crate::start::cli_missing(&tail, kind) {
+        Some(line) => crate::start::cli_missing_text(kind, &line),
+        None => step_failure("agent_start", outcome),
+    }
 }
 
 /// Why a Herdr step did not succeed; the step is named in the reason.
@@ -1080,7 +1110,7 @@ repo = "web"
 
     /// An engine that knows the opencode profile.
     fn cfg() -> crate::EngineCfg {
-        let mut cfg = crate::EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
+        let mut cfg = crate::EngineCfg { db_path: crate::testtmp::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
         cfg.profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
         cfg
     }
@@ -1468,6 +1498,58 @@ repo = "web"
         );
     }
 
+    /// A start refused because the CLI is not installed says so on the pane
+    /// (T-286): the lane parks with the install, not with a generic reason —
+    /// and the model chain is never walked for it.
+    #[test]
+    fn a_lane_whose_cli_is_missing_parks_with_the_install() {
+        let config = CONFIG
+            .replace("kind = \"opencode\"", "kind = \"codex\"")
+            .replace("profile = \"opencode\"", "profile = \"codex\"");
+        let mut store = world(&config);
+        store
+            .write(|tx| tx.set_seat_profile("toy:heat", "codex"))
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        let mut cfg = cfg();
+        cfg.profiles.insert("codex".into(), gear_herdr::builtin("codex").unwrap());
+        herdr.refuse_starts = Some(("agent_start_timeout".into(), 1));
+        // The shell of the fresh worktree could not find the CLI.
+        herdr.screen_after = vec![("GEAR_CTX".into(), "zsh: command not found: codex".into())];
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
+
+        assert!(active.is_empty(), "the lane does not start");
+        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::NeedsCheck);
+        let reason = seat.state_reason.unwrap_or_default();
+        assert!(
+            reason.contains("the codex CLI is not installed or not on PATH"),
+            "{reason}"
+        );
+        assert_eq!(crate::start::pending(&mut store, "toy:heat").unwrap(), None);
+        assert!(herdr.started_agents.is_empty(), "no agent was started");
+    }
+
+    /// A refused start whose screen names no missing CLI keeps today's reason
+    /// (T-286).
+    #[test]
+    fn a_refused_start_without_a_missing_cli_keeps_its_reason() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.refuse_starts = Some(("agent_start_timeout".into(), 1));
+        herdr.screen_after = vec![("GEAR_CTX".into(), "error: provider timeout".into())];
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        assert!(active.is_empty());
+        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::NeedsCheck);
+        let reason = seat.state_reason.unwrap_or_default();
+        assert!(reason.contains("agent_start: refused (agent_start_timeout)"), "{reason}");
+        assert!(!reason.contains("CLI is not installed"), "{reason}");
+    }
+
     /// Busy for three ticks, then free: the seat is Starting while the shell
     /// finishes and Active on the fourth — one attempt per tick, never a park
     /// (the live multi-api case: three lanes on a slow shell).
@@ -1760,16 +1842,7 @@ repo = "web"
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         // A real repo with a linked worktree for the lane.
-        let root = std::env::temp_dir().join(format!(
-            "gear-onboard-hooks-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::testtmp::temp("gear-onboard-hooks");
         sh(&root, "git init -q -b dev work");
         let work = root.join("work");
         std::fs::write(work.join("README.md"), "dev\n").unwrap();

@@ -243,10 +243,7 @@ mod tests {
 
     /// A scratch home under the temp dir (no new dependency).
     fn scratch_home(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("gear-skill-{}-{tag}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::testtmp::temp(&format!("gear-skill-{tag}"))
     }
 
     #[test]

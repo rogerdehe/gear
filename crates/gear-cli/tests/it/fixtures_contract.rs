@@ -15,10 +15,7 @@ use std::process::{Command, Output};
 
 /// A scratch directory, unique per tag and process.
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("gear-fixtures-{}-{tag}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).expect("a scratch directory");
-    dir
+    crate::scratch::temp(&format!("gear-fixtures-{tag}"))
 }
 
 /// Run the fixture script for `dir`, as the acceptance runs it. `which` says

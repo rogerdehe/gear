@@ -19,11 +19,26 @@ pub struct InitResult {
     /// The seats of the project after this call (captain first, then the lanes
     /// in config order).
     pub seats: Vec<String>,
+    /// T-373: one display line per seat whose worktree the **old**
+    /// `conventions.seat_branch` made and the new config no longer uses —
+    /// empty when the `seat_branch` did not change. Nothing is removed: the
+    /// line names the path and the command that takes it away.
+    #[serde(default)]
+    pub stale_worktrees: Vec<String>,
 }
 
 /// The seat that may register a project: the user's own shell (no ctx), or
 /// the project's captain (T-86).
 const CAPTAIN: &str = "captain";
+
+/// The meta key that remembers which file the applied config came from
+/// (T-321): `config.path.<project>`. The store keeps the applied text
+/// (`projects.config_toml`) and its version, not the path; the home page needs
+/// the path to tell a config file that drifted from the config the project
+/// runs on. No schema change: the path is a meta row.
+pub fn config_path_key(project: &str) -> String {
+    format!("config.path.{project}")
+}
 
 /// `gear admin init <config>` — register the project, or apply a changed
 /// config to a project that is registered already (T-6).
@@ -48,9 +63,10 @@ pub fn init(
     store: &mut Store,
     env: &Env,
     config_text: &str,
+    confirmed: bool,
     now: Ts,
 ) -> GearResult<InitResult> {
-    init_with_home(store, env, config_text, None, now)
+    init_with_home(store, env, config_text, None, confirmed, now)
 }
 
 /// `gear admin init` with an explicit home for the skill check (T-83): the CLI
@@ -61,6 +77,7 @@ pub fn init_with_home(
     env: &Env,
     config_text: &str,
     home: Option<&std::path::Path>,
+    confirmed: bool,
     now: Ts,
 ) -> GearResult<InitResult> {
     // 1. `GEAR_ADMIN=1` is the user's consent, and only the user's own shell
@@ -114,7 +131,7 @@ pub fn init_with_home(
     store.write(|tx| {
         match tx.get_project(&project_id)? {
             // The project is registered: the config changes.
-            Some(project) => re_register(tx, &project, &config, config_text, now),
+            Some(project) => re_register(tx, &project, &config, config_text, confirmed, now),
             // The project is new: it is registered.
             None => register(tx, &config, config_text, now),
         }
@@ -265,6 +282,7 @@ pub fn init_checked(
     herdr: Option<&mut dyn gear_herdr::HerdrRead>,
     ancestors: &[u32],
     home: Option<&std::path::Path>,
+    confirmed: bool,
     now: Ts,
 ) -> GearResult<InitResult> {
     if let Some(ctx) = env.ctx.clone() {
@@ -282,7 +300,7 @@ pub fn init_checked(
             prove_captain(store, env, herdr, ancestors, &ctx.project, now)?;
         }
     }
-    init_with_home(store, env, config_text, home, now)
+    init_with_home(store, env, config_text, home, confirmed, now)
 }
 
 /// Prove that the caller is the captain of `project` in its own bound pane
@@ -339,21 +357,69 @@ fn other_projects(tx: &Tx<'_>) -> GearResult<Vec<(String, String)>> {
     Ok(others)
 }
 
-/// The problem of two projects cutting the same branch names on one repository
-/// (T-256), or `None` when they cannot collide.
+/// The problem of a config that would run more lanes than `[quota] lanes`
+/// allows (T-304), or `None` when it fits.
+///
+/// The quota counts the lanes that can run: a lane seat that is Retired does
+/// not take a slot, and a config lane that has no seat yet does (the engine
+/// will onboard it). `retired` are the lane names this project's seats hold as
+/// `SeatState::Retired`; a first registration has none.
+pub fn lane_quota_problem(
+    config: &config::ProjectConfig,
+    retired: &[String],
+) -> Option<String> {
+    let running = config
+        .lanes
+        .iter()
+        .filter(|lane| !retired.iter().any(|name| *name == lane.name))
+        .count();
+    if running as u32 > config.quota.lanes {
+        return Some(format!(
+            "quota.lanes: {running} lanes would run but the quota allows {} (a retired lane does not count)",
+            config.quota.lanes
+        ));
+    }
+    None
+}
+
+/// Every lane name this project's seats hold as `Retired` (T-304).
+fn retired_lane_names(tx: &Tx<'_>, project: &str) -> GearResult<Vec<String>> {
+    let mut names = Vec::new();
+    for seat in tx.seats_of_project(project)? {
+        if seat.role == SeatRole::Lane && seat.state == SeatState::Retired {
+            names.push(seat.name);
+        }
+    }
+    Ok(names)
+}
+
+/// The problem of two projects sharing branches, voyage folders or GitHub
+/// issues (T-256, T-302), or `None` when they cannot collide.
 ///
 /// `others` are the store's projects as `(id, config_toml)`; one that does not
-/// parse is skipped, since it says nothing about the branches it cuts. A
-/// project of `others` that works in one of this config's repositories
-/// (canonicalized, the text when it does not exist) meets this config's
-/// branches, so this config's task, review and seat branch templates must name
-/// `{project}`: two fleets in one Herdr session then keep `hull/t12` and
-/// `review/t12` to themselves.
+/// parse is skipped, since it says nothing about what it cuts. Four checks, in
+/// this order:
+///
+/// - **GitHub issues** (T-302): whatever the local paths, two repos of the two
+///   configs that read and write the same `owner/name` (case-insensitively)
+///   take the same issues unless each project selects them with non-empty,
+///   disjoint `[github.issues] labels` — hence [`github_clash`], first.
+/// - **shared repository**: a project of `others` that works in none of this
+///   config's repositories (canonicalized, the text when it does not exist) is
+///   no partner of this config at all.
+/// - **branches** (T-256): on a shared repository this config's task, review
+///   and seat branch templates must name `{project}`, so two fleets in one
+///   Herdr session keep `hull/t12` and `review/t12` to themselves.
+/// - **voyage folder** (T-302): on a shared repository the two projects must
+///   not expand `conventions.voyage_dir` to the same folder, or their plans,
+///   reports and reviews overwrite each other. The default
+///   `gear/voyages/{milestone}` names no project.
 pub fn branch_clash(
     config: &config::ProjectConfig,
     others: &[(String, String)],
 ) -> Option<String> {
     let ours = repo_paths(config);
+    let our_repos = config.repos();
     for (other_id, other_text) in others {
         if *other_id == config.project.id {
             continue;
@@ -361,6 +427,11 @@ pub fn branch_clash(
         let Ok(other) = config::parse(other_text) else {
             continue;
         };
+        // (a) The GitHub check comes first: two projects need not share a
+        // local path to take the same `owner/name` issues.
+        if let Some(problem) = github_clash(other_id, &our_repos, &other) {
+            return Some(problem);
+        }
         let theirs = repo_paths(&other);
         let Some(path) = ours.iter().find(|path| theirs.contains(path)) else {
             continue;
@@ -373,12 +444,74 @@ pub fn branch_clash(
         ]
         .iter()
         .all(|template| template.contains("{project}"));
-        if templated {
-            continue;
+        if !templated {
+            return Some(format!(
+                "project {other_id} also works in {path}: put {{project}} in conventions.task_branch, review_branch and seat_branch so the two projects' branches cannot collide"
+            ));
         }
-        return Some(format!(
-            "project {other_id} also works in {path}: put {{project}} in conventions.task_branch, review_branch and seat_branch so the two projects' branches cannot collide"
-        ));
+        let our_voyages = gear_model::layout::voyage_dir(
+            &conventions.voyage_dir,
+            &config.project.id,
+            "{milestone}",
+        );
+        let their_voyages = gear_model::layout::voyage_dir(
+            &other.conventions.voyage_dir,
+            &other.project.id,
+            "{milestone}",
+        );
+        if our_voyages == their_voyages {
+            return Some(format!(
+                "project {other_id} also works in {path} and keeps its voyages in the same folder {our_voyages}: put {{project}} in conventions.voyage_dir so the two projects' plans, reports and reviews cannot overwrite each other"
+            ));
+        }
+    }
+    None
+}
+
+/// The GitHub issue clash of this config with `other` (T-302): a repo of each
+/// that reads and writes the same `owner/name` (ASCII case-insensitively) takes
+/// the same issues unless both select them with labels that do not overlap.
+///
+/// Two projects on one GitHub repository may share it only with non-empty,
+/// disjoint `[github.issues] labels`: an empty list takes every open issue, and
+/// one shared label puts an issue in both projects' queues.
+fn github_clash(
+    other_id: &str,
+    our_repos: &[config::Repo],
+    other: &config::ProjectConfig,
+) -> Option<String> {
+    let their_repos = other.repos();
+    for repo in our_repos {
+        let Some(ours) = &repo.github else {
+            continue;
+        };
+        for their_repo in &their_repos {
+            let Some(theirs) = &their_repo.github else {
+                continue;
+            };
+            if !ours.repo.eq_ignore_ascii_case(&theirs.repo) {
+                continue;
+            }
+            if ours.issues_labels.is_empty() || theirs.issues_labels.is_empty() {
+                return Some(format!(
+                    "project {other_id} also takes issues from GitHub {}: each project needs its own non-empty [github.issues] labels",
+                    theirs.repo
+                ));
+            }
+            let mut shared: Vec<&str> = Vec::new();
+            for label in &ours.issues_labels {
+                if theirs.issues_labels.contains(label) && !shared.iter().any(|seen| *seen == label) {
+                    shared.push(label);
+                }
+            }
+            if !shared.is_empty() {
+                return Some(format!(
+                    "project {other_id} also takes issues labelled {} from GitHub {}: give each project labels of its own",
+                    shared.join(", "),
+                    theirs.repo
+                ));
+            }
+        }
     }
     None
 }
@@ -407,6 +540,11 @@ fn register(
 ) -> GearResult<InitResult> {
     let project_id = config.project.id.clone();
     check_other_projects(tx, config)?;
+    // The lane quota counts the lanes that would run (T-304); a first
+    // registration has no retired lane seat yet.
+    if let Some(problem) = lane_quota_problem(config, &[]) {
+        return Err(GearError::new(ErrorCode::BadFormat, problem));
+    }
 
     tx.insert_project(&ProjectRow {
         id: project_id.clone(),
@@ -470,6 +608,8 @@ fn register(
         project: project_id,
         config_version: 1,
         seats,
+        // A first registration changes no `seat_branch`: there is no old one.
+        stale_worktrees: Vec::new(),
     })
 }
 
@@ -493,19 +633,80 @@ fn register(
 ///   only its profile follows the config;
 /// - a **retired** lane stays retired, even when it is in the new config
 ///   (T-247): a re-apply starts no agent; a Ready task that names the lane is
-///   what brings it back, in `plan::apply_queue`.
+///   what brings it back, in `plan::apply_queue`;
+/// - a changed `conventions.seat_branch` says which seat worktrees GEAR no
+///   longer uses (T-373): the result carries one line per seat that has a
+///   worktree path in meta, naming the seat, the path and both branch
+///   expansions. Nothing is removed;
+/// - a **departed voyage's staffing** (T-392): while the voyage is under way
+///   (a voyage with a departure and a task that is not terminal), a change to
+///   `quota`, `lanes`, `temps` or `models` is refused with `StaffLocked` and
+///   the changed fields unless the caller passes `--confirmed` (T-401), and
+///   nothing is written; confirmed, the change applies as today and the
+///   voyage gets one starred `staff` decision.
 ///
 /// The plan, the tasks and the attempts are untouched: a config change is not
 /// a plan change.
+///
+/// The meta key of a seat's worktree path: `engine.worktree_path.<seat id>`.
+/// `gear_engine::onboard::worktree_path_key` builds the same key — the engine
+/// sits above this crate, so the shape is named here as well; the two must
+/// stay the same string.
+const WORKTREE_PATH_KEY: &str = "engine.worktree_path.";
+
+/// The seat worktrees the stored `conventions.seat_branch` made that the new
+/// config no longer uses (T-373): one line per seat of the project that has a
+/// worktree path in meta, empty when the `seat_branch` did not change.
+///
+/// The line is what the CLI prints; it takes nothing away — the seat keeps its
+/// worktree until its own agent runs in the new one, and the user removes the
+/// old tree then.
+fn stale_seat_worktrees(
+    tx: &Tx<'_>,
+    project: &ProjectRow,
+    config: &config::ProjectConfig,
+) -> GearResult<Vec<String>> {
+    // A stored config that does not parse says nothing about the old branch.
+    let Ok(stored) = config::parse(&project.config_toml) else {
+        return Ok(Vec::new());
+    };
+    let old_template = &stored.conventions.seat_branch;
+    let new_template = &config.conventions.seat_branch;
+    if old_template == new_template {
+        return Ok(Vec::new());
+    }
+    let mut lines = Vec::new();
+    for seat in tx.seats_of_project(&project.id)? {
+        let Some(path) = tx.get_meta(&format!("{WORKTREE_PATH_KEY}{}", seat.id))? else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        let old_branch = gear_model::branch::expand_seat(old_template, &project.id, &seat.name);
+        let new_branch = gear_model::branch::expand_seat(new_template, &project.id, &seat.name);
+        lines.push(format!(
+            "seat {}: its worktree {path} was made for branch {old_branch}; new agents of this seat get a worktree on {new_branch}; remove the old one with `herdr worktree remove` once the seat runs in the new one",
+            seat.name
+        ));
+    }
+    Ok(lines)
+}
 fn re_register(
     tx: &Tx<'_>,
     project: &ProjectRow,
     config: &config::ProjectConfig,
     config_text: &str,
+    confirmed: bool,
     now: Ts,
 ) -> GearResult<InitResult> {
     let project_id = project.id.clone();
     check_other_projects(tx, config)?;
+    // The lane quota counts the lanes that would run (T-304): the retired lane
+    // seats keep their seat and do not take a slot.
+    if let Some(problem) = lane_quota_problem(config, &retired_lane_names(tx, &project_id)?) {
+        return Err(GearError::new(ErrorCode::BadFormat, problem));
+    }
 
     // The session the project lives in does not change mid-run.
     if config.project.herdr_session != project.herdr_session {
@@ -560,6 +761,31 @@ fn re_register(
         }
     }
 
+    // T-392: the staffing of a departed voyage is agreed at its kickoff, like
+    // the goal (T-331). A change to it needs the user's confirmation
+    // (`--confirmed`, T-401) — GEAR stores no words of theirs — and the
+    // refusal writes nothing.
+    let (staff_changes, staff_changed) = match config::parse(&project.config_toml) {
+        Ok(stored) => (
+            staffing_changes(&stored, config),
+            staffing_changed(&stored, config),
+        ),
+        Err(_) => (Vec::new(), false),
+    };
+    let locked_voyage = if !staff_changed {
+        None
+    } else {
+        staffing_voyage(tx, &project_id)?
+    };
+    if let Some(voyage) = &locked_voyage {
+        if !confirmed {
+            return Err(GearError::new(
+                ErrorCode::StaffLocked,
+                staffing_refusal(voyage, &staff_changes),
+            ));
+        }
+    }
+
     // The new config is the next config version.
     let version = project.config_version + 1;
     let mut row = project.clone();
@@ -596,6 +822,31 @@ fn re_register(
             line: None,
             plan_version: None,
         })?;
+    }
+
+    // A confirmed staffing change of a departed voyage is a starred decision
+    // (T-392, T-401): the voyage's goal is locked the same way.
+    if confirmed {
+        if let Some(voyage) = &locked_voyage {
+            let what = staff_changes.join("; ");
+            let why = "confirmed by the user".to_string();
+            let text = format!("staff|{what}|{what}|{why}");
+            tx.insert_decision_if_new(&gear_store::NewDecision {
+                project: project_id.to_string(),
+                key: crate::decision::key_of(&text),
+                voyage: voyage.clone(),
+                at: crate::decision::apply_time(now),
+                kind: "staff".to_string(),
+                what,
+                why: Some(why),
+                alt: None,
+                changes: None,
+                star: true,
+                source: "gear".to_string(),
+                line: None,
+                plan_version: None,
+            })?;
+        }
     }
 
     // The roster: the captain first, then the lanes in config order.
@@ -655,7 +906,331 @@ fn re_register(
         project: project_id,
         config_version: version,
         seats,
+        stale_worktrees: stale_seat_worktrees(tx, project, config)?,
     })
+}
+
+/// The voyage whose staffing is locked (T-392): the milestone of the latest
+/// departed voyage, when the project still has a task that is not terminal,
+/// else `None`.
+///
+/// The staffing of a voyage is agreed at its kickoff, like its goal (T-331):
+/// while it is under way, a change to it is the user's decision, not a config
+/// edit. A project whose tasks are all done, failed or cancelled has no
+/// voyage under way, and its next voyage may start with other staff.
+pub fn staffing_voyage(tx: &Tx<'_>, project: &str) -> GearResult<Option<String>> {
+    let under_way = tx
+        .tasks_of_project(project)?
+        .iter()
+        .any(|task| !task.state.is_terminal());
+    if !under_way {
+        return Ok(None);
+    }
+    let milestone = crate::plan::current_voyage(tx, project)?;
+    Ok((!milestone.is_empty()).then_some(milestone))
+}
+
+/// Whether the staffing differs between the stored config and the new one
+/// (T-392): `quota`, `lanes`, `temps` and `models` compared as whole sections,
+/// so anything in them — a reordered `[[lanes]]` included — counts.
+///
+/// [`staffing_changes`] explains a difference field by field; it never decides
+/// whether there is one.
+pub fn staffing_changed(old: &config::ProjectConfig, new: &config::ProjectConfig) -> bool {
+    old.quota != new.quota
+        || old.lanes != new.lanes
+        || old.temps != new.temps
+        || old.models != new.models
+}
+
+/// The staff fields that differ between the stored config and the new one
+/// (T-392), each as `section.key: old → new`, over `quota`, `lanes`, `temps`
+/// and `models`.
+pub fn staffing_changes(old: &config::ProjectConfig, new: &config::ProjectConfig) -> Vec<String> {
+    let mut changes: Vec<String> = Vec::new();
+
+    // [quota]
+    let (a, b) = (&old.quota, &new.quota);
+    if a.lanes != b.lanes {
+        changes.push(changed_field("quota.lanes", &a.lanes.to_string(), &b.lanes.to_string()));
+    }
+    if a.temps != b.temps {
+        changes.push(changed_field("quota.temps", &a.temps.to_string(), &b.temps.to_string()));
+    }
+    if a.includes_captain != b.includes_captain {
+        changes.push(changed_field(
+            "quota.includes_captain",
+            &a.includes_captain.to_string(),
+            &b.includes_captain.to_string(),
+        ));
+    }
+    if a.sources != b.sources {
+        changes.push(changed_field(
+            "quota.sources",
+            &quota_sources_text(&a.sources),
+            &quota_sources_text(&b.sources),
+        ));
+    }
+
+    // [[lanes]] — a lane both configs name is compared field by field; a lane
+    // only one of them names is one change, with its staff as the value.
+    let lanes_before = changes.len();
+    let mut names: Vec<&str> = old.lanes.iter().map(|lane| lane.name.as_str()).collect();
+    for lane in &new.lanes {
+        if !names.contains(&lane.name.as_str()) {
+            names.push(&lane.name);
+        }
+    }
+    for name in names {
+        let before = old.lanes.iter().find(|lane| lane.name == name);
+        let after = new.lanes.iter().find(|lane| lane.name == name);
+        let key = format!("lanes.{name}");
+        match (before, after) {
+            (Some(a), Some(b)) => {
+                if a.duty != b.duty {
+                    changes.push(changed_field(&format!("{key}.duty"), &a.duty, &b.duty));
+                }
+                if a.owns != b.owns {
+                    changes.push(changed_field(
+                        &format!("{key}.owns"),
+                        &a.owns.join(", "),
+                        &b.owns.join(", "),
+                    ));
+                }
+                if a.not != b.not {
+                    changes.push(changed_field(
+                        &format!("{key}.not"),
+                        &a.not.join(", "),
+                        &b.not.join(", "),
+                    ));
+                }
+                if a.kind != b.kind {
+                    changes.push(changed_field(&format!("{key}.kind"), &a.kind, &b.kind));
+                }
+                if a.profile != b.profile {
+                    changes.push(changed_field(&format!("{key}.profile"), &a.profile, &b.profile));
+                }
+                if a.models != b.models {
+                    changes.push(changed_field(
+                        &format!("{key}.models"),
+                        &chain_text(&a.models),
+                        &chain_text(&b.models),
+                    ));
+                }
+                if a.repo != b.repo {
+                    changes.push(changed_field(
+                        &format!("{key}.repo"),
+                        a.repo.as_deref().unwrap_or("none"),
+                        b.repo.as_deref().unwrap_or("none"),
+                    ));
+                }
+            }
+            (Some(a), None) => changes.push(changed_field(&key, &lane_text(a), "none")),
+            (None, Some(b)) => changes.push(changed_field(&key, "none", &lane_text(b))),
+            (None, None) => {}
+        }
+    }
+    // The sections differ but no lane field does: the lanes are in another
+    // order. The order is the staffing too (it is the order the board shows
+    // and the lane list prints), so it is named as the one change.
+    if old.lanes != new.lanes && changes.len() == lanes_before {
+        changes.push(changed_field(
+            "lanes",
+            &lane_order_text(&old.lanes),
+            &lane_order_text(&new.lanes),
+        ));
+    }
+
+    // [temps]
+    match (&old.temps, &new.temps) {
+        (None, None) => {}
+        (Some(a), Some(b)) => {
+            if a.kind != b.kind {
+                changes.push(changed_field("temps.kind", &a.kind, &b.kind));
+            }
+            if a.profile != b.profile {
+                changes.push(changed_field("temps.profile", &a.profile, &b.profile));
+            }
+        }
+        (None, Some(b)) => changes.push(changed_field("temps", "none", &temps_text(b))),
+        (Some(a), None) => changes.push(changed_field("temps", &temps_text(a), "none")),
+    }
+
+    // [models]
+    let (a, b) = (&old.models, &new.models);
+    for (key, before, after) in [
+        ("models.lanes", &a.lanes, &b.lanes),
+        ("models.review", &a.review, &b.review),
+        ("models.captain", &a.captain, &b.captain),
+    ] {
+        if before != after {
+            changes.push(changed_field(key, &chain_text(before), &chain_text(after)));
+        }
+    }
+    if a.on_quota.lanes != b.on_quota.lanes {
+        changes.push(changed_field(
+            "models.on_quota.lanes",
+            quota_policy_text(a.on_quota.lanes),
+            quota_policy_text(b.on_quota.lanes),
+        ));
+    }
+    if a.on_quota.review != b.on_quota.review {
+        changes.push(changed_field(
+            "models.on_quota.review",
+            quota_policy_text(a.on_quota.review),
+            quota_policy_text(b.on_quota.review),
+        ));
+    }
+    if a.on_wait != b.on_wait {
+        changes.push(changed_field(
+            "models.on_wait",
+            wait_policy_text(a.on_wait),
+            wait_policy_text(b.on_wait),
+        ));
+    }
+    if a.quota_reset_h != b.quota_reset_h {
+        changes.push(changed_field(
+            "models.quota_reset_h",
+            &a.quota_reset_h.to_string(),
+            &b.quota_reset_h.to_string(),
+        ));
+    }
+    let ids: std::collections::BTreeSet<&String> = a.switch.keys().chain(b.switch.keys()).collect();
+    for id in ids {
+        let before = a.switch.get(id);
+        let after = b.switch.get(id);
+        if before != after {
+            changes.push(changed_field(
+                &format!("models.switch.{id}"),
+                &switch_text(before),
+                &switch_text(after),
+            ));
+        }
+    }
+
+    changes
+}
+
+/// The refusal a staffing change of a departed voyage gets without the user's
+/// confirmation (T-392, T-401): the voyage, every changed field, and how to
+/// apply it.
+pub fn staffing_refusal(voyage: &str, changes: &[String]) -> String {
+    format!(
+        "the staffing of voyage {voyage} was agreed at its kickoff: {} — change staffing only when the user asks; confirm it with them, then run init again with --confirmed",
+        changes.join("; ")
+    )
+}
+
+/// One changed field as `<key>: <old> → <new>`.
+fn changed_field(key: &str, old: &str, new: &str) -> String {
+    format!("{key}: {old} → {new}")
+}
+
+/// The lanes in config order, as one value: the order is staffing too.
+fn lane_order_text(lanes: &[config::LaneSection]) -> String {
+    if lanes.is_empty() {
+        return "none".to_string();
+    }
+    lanes.iter().map(|lane| lane.name.as_str()).collect::<Vec<_>>().join(", ")
+}
+
+/// A lane as one value, for a lane that only one of the two configs names.
+fn lane_text(lane: &config::LaneSection) -> String {
+    let mut text = format!(
+        "duty {:?}, kind {}, profile {}, owns [{}]",
+        lane.duty,
+        lane.kind,
+        lane.profile,
+        lane.owns.join(", ")
+    );
+    if !lane.not.is_empty() {
+        text.push_str(&format!(", not [{}]", lane.not.join(", ")));
+    }
+    if !lane.models.is_empty() {
+        text.push_str(&format!(", models [{}]", chain_text(&lane.models)));
+    }
+    if let Some(repo) = &lane.repo {
+        text.push_str(&format!(", repo {repo}"));
+    }
+    text
+}
+
+/// A model chain as one value: the entries in order, `none` when empty.
+fn chain_text(chain: &[config::ModelEntry]) -> String {
+    if chain.is_empty() {
+        return "none".to_string();
+    }
+    chain
+        .iter()
+        .map(entry_text)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One model entry as one value, for a changed-field message (T-392 rework
+/// F2): the model and its CLI, then the arguments it starts with and its
+/// context window when the entry names them — so a reasoning effort that
+/// changed reads `medium → high`, not the same entry twice.
+fn entry_text(entry: &config::ModelEntry) -> String {
+    let mut text = entry.describe();
+    let args = entry.args();
+    if !args.is_empty() {
+        text.push_str(&format!(" args [{}]", args.join(" ")));
+    }
+    if let Some(k) = entry.context_window_k() {
+        text.push_str(&format!(" context_window_k {k}"));
+    }
+    text
+}
+
+/// The quota sources as one value.
+fn quota_sources_text(sources: &[config::QuotaSource]) -> String {
+    if sources.is_empty() {
+        return "none".to_string();
+    }
+    sources
+        .iter()
+        .map(|source| {
+            let key = match (source.key_file.is_empty(), source.key_path.is_empty()) {
+                (true, _) | (_, true) => String::new(),
+                (false, false) => format!(" key {}#{}", source.key_file, source.key_path),
+            };
+            format!("{} via {}{key}", source.provider, source.reader)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The `[temps]` section as one value.
+fn temps_text(temps: &config::TempsSection) -> String {
+    format!("{} (profile {})", temps.kind, temps.profile)
+}
+
+/// A `[models] on_quota` policy as the config spells it.
+fn quota_policy_text(policy: config::QuotaPolicy) -> &'static str {
+    match policy {
+        config::QuotaPolicy::Fallback => "fallback",
+        config::QuotaPolicy::Wait => "wait",
+    }
+}
+
+/// A `[models] on_wait` policy as the config spells it.
+fn wait_policy_text(policy: config::WaitPolicy) -> &'static str {
+    match policy {
+        config::WaitPolicy::Keep => "keep",
+        config::WaitPolicy::Release => "release",
+    }
+}
+
+/// One `[models.switch]` entry as one value.
+fn switch_text(entry: Option<&config::ModelSwitch>) -> String {
+    match entry {
+        None => "none".to_string(),
+        Some(entry) => match &entry.variant {
+            Some(variant) => format!("picker {:?}, bar {:?}, variant {variant}", entry.picker, entry.bar),
+            None => format!("picker {:?}, bar {:?}", entry.picker, entry.bar),
+        },
+    }
 }
 
 /// Retire the temp seats a lower `[quota] temps` no longer allows (T-237).

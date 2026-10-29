@@ -362,8 +362,9 @@ pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_ve
 
 /// The project's `[conventions]` as the store holds them (T-252): a project
 /// without a config, or with one that does not parse, keeps GEAR's own
-/// defaults — the branch names here are a hint for the merge, never a gate.
-fn conventions_of(tx: &Tx<'_>, project: &str) -> crate::config::Conventions {
+/// defaults — the branch names and the voyage folder here are a hint for the
+/// captain and the merge, never a gate.
+pub(crate) fn conventions_of(tx: &Tx<'_>, project: &str) -> crate::config::Conventions {
     tx.get_project(project)
         .ok()
         .flatten()
@@ -388,6 +389,10 @@ pub struct VerdictHint {
     /// The task's milestone (`M3`), for the voyage file the line goes in;
     /// `None` when the task has none.
     pub milestone: Option<String>,
+    /// The voyage's plan file the line goes in (T-257): the project's
+    /// `[conventions].voyage_dir` with the milestone filled in, `gear/voyages/M3/plan.md`
+    /// by default and `gear/voyages/<M>/plan.md` for a task without milestone.
+    pub plan: String,
     /// `T-<n> attempt=<a> contract=<c> candidate=<sha> fail rework="…"` with
     /// the real values. The rework is the captain's words.
     pub line: String,
@@ -457,8 +462,14 @@ pub fn verdict_hint(
     if !review_fail && !captain_decision && !merge_failed {
         return Ok(None);
     }
+    let voyage_dir = conventions_of(tx, project).voyage_dir;
     Ok(Some(VerdictHint {
         milestone: task_row.milestone.clone(),
+        plan: gear_model::layout::plan_file(
+            &voyage_dir,
+            project,
+            task_row.milestone.as_deref().unwrap_or("<M>"),
+        ),
         line: format!(
             "{task} attempt={attempt} contract={} candidate={candidate} fail rework=\"…\"",
             attempt_row.adopted_version
@@ -963,6 +974,19 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
             // (T-21 reads the reviewer's file), so the note is that text.
             blocking.join("\n")
         });
+        // A rework round's budget grows with the blocking findings it carries
+        // (T-312): 8 minutes per blocking finding, never below the old rule of
+        // half the estimate, at least 10. A stale pass has no findings to
+        // count and keeps the old rule; a captain's own `estimate=` still
+        // overrides this after its settle (plan.rs).
+        task_row.rework_estimate_min = if stale {
+            None
+        } else {
+            let estimate = task_row
+                .estimate_min
+                .unwrap_or(gear_store::DEFAULT_ROUND_BUDGET_MIN);
+            Some(((estimate + 1) / 2).max(10).max(8 * blocking.len() as i64))
+        };
         // Rework before new work: one place ahead of the lane's other ready
         // tasks (design/06).
         task_row.rank = rework_rank(tx, &task_row)?;

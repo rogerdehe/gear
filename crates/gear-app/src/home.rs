@@ -151,7 +151,16 @@ pub fn build_with_agents(
                 Some(first) => match tx.get_message(&ctx.project, first)? {
                     Some(message) if crate::station::is_station(&message) => {
                         let milestone = message.thread.trim_start_matches("station:");
-                        format!("next: gear plan apply gear/voyages/{milestone}.md (# Decisions: station {first}: keep course|time-box|cut|move)")
+                        // The voyage's plan file, where the project keeps it
+                        // (T-257): `gear/voyages/<M>/plan.md` by default.
+                        let voyage_dir =
+                            crate::tasks::conventions_of(tx, &ctx.project).voyage_dir;
+                        let plan = gear_model::layout::plan_file(
+                            &voyage_dir,
+                            &ctx.project,
+                            milestone,
+                        );
+                        format!("next: gear plan apply {plan} (# Decisions: station {first}: keep course|time-box|cut|move)")
                     }
                     // A review fail (or a failed merge) is settled where it
                     // can be: by a `# Verdicts` line, not by a reply (T-90).
@@ -203,16 +212,15 @@ pub fn record_view(store: &mut Store, view: &ViewRecord) -> GearResult<()> {
 }
 
 /// The command that settles an item with a `# Verdicts` line (T-90): the
-/// voyage file of the task's milestone, then the line with the real values.
+/// voyage's plan file (`hint.plan`, the project's own folder, T-257), then the
+/// line with the real values.
 ///
 /// A failed merge is settled by a `# Staff` line instead (B5): `- remerge
 /// T-<n>` retries the merge, which is what a merge that failed needs — a
 /// rework is the other way round.
 pub fn verdict_command(hint: &crate::tasks::VerdictHint) -> String {
-    let path = match &hint.milestone {
-        Some(milestone) => format!("gear/voyages/{milestone}.md"),
-        None => "gear/voyages/<M>.md".to_string(),
-    };
+    // The voyage's plan file, where the project keeps it (T-257).
+    let path = &hint.plan;
     match &hint.remerge {
         Some(task) => format!("gear plan apply {path} (# Staff: - remerge {task})"),
         None => format!("gear plan apply {path} (# Verdicts: {})", hint.line),
@@ -229,9 +237,38 @@ pub fn verdict_section(hint: &crate::tasks::VerdictHint) -> &'static str {
     }
 }
 
+/// The line the snapshot carries when the config file a project was registered
+/// from no longer matches the config the project runs on (T-321): the drift
+/// line when the text differs, the "cannot be read" line when the file is
+/// gone. `None` when they agree, or when the store never recorded a path (a
+/// project registered before T-321, or one registered without the CLI).
+fn config_drift(tx: &Tx<'_>, project: &str) -> GearResult<Option<String>> {
+    let Some(path) = tx.get_meta(&crate::admin::config_path_key(project))? else {
+        return Ok(None);
+    };
+    let Some(row) = tx.get_project(project)? else {
+        return Ok(None);
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) if text == row.config_toml => Ok(None),
+        Ok(_) => Ok(Some(format!(
+            "! config drift: {path} differs from the applied config v{}: re-apply it with GEAR_ADMIN=1 gear admin init {path}, or restore the file",
+            row.config_version
+        ))),
+        Err(_) => Ok(Some(format!(
+            "! config file {path} cannot be read (config v{} still runs)",
+            row.config_version
+        ))),
+    }
+}
+
 /// The most lanes the snapshot lists; the rest is one line of count, so the
 /// snapshot stays under 15 lines.
 const SNAPSHOT_LANES: usize = 10;
+
+/// The most unconfirmed deliveries the snapshot names; the rest is one line of
+/// count, so the snapshot stays short (T-271).
+const SNAPSHOT_DELIVERIES: usize = 3;
 
 /// The captain's snapshot: the totals, one line per lane (the task it is on
 /// and how much is queued), the deliveries in flight and the temp slots.
@@ -244,8 +281,20 @@ fn snapshot(tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[gear_herdr::Ag
         "SNAPSHOT {} tasks · {} done · {} in progress · {} waiting",
         plan.totals.tasks, plan.totals.done, plan.totals.in_progress, plan.totals.waiting
     )];
+    // T-321: the config file the project was registered from, against the
+    // config the project runs on — the second line, before the lanes.
+    if let Some(drift) = config_drift(tx, project)? {
+        lines.push(drift);
+    }
     for lane in plan.lanes.iter().take(SNAPSHOT_LANES) {
-        lines.push(format!("  {}", gear_board::lane_line(lane)));
+        // The captain's tail turns off a lane's idle and stall warnings; the
+        // snapshot says so, or a silenced lane reads as a quiet one (T-260).
+        let mark = if crate::plan::lane_in_tail_at(tx, project, &lane.lane, now)? {
+            " · tail: warnings off"
+        } else {
+            ""
+        };
+        lines.push(format!("  {}{mark}", gear_board::lane_line(lane)));
     }
     if plan.lanes.len() > SNAPSHOT_LANES {
         lines.push(format!("+{} more lanes", plan.lanes.len() - SNAPSHOT_LANES));
@@ -259,6 +308,20 @@ fn snapshot(tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[gear_herdr::Ag
         plan.temps.in_use,
         plan.temps.quota
     ));
+    // Which deliveries those are (T-271): the count alone made the captain ask
+    // the store. The oldest first, three lines, the rest as a count.
+    for item in plan.unconfirmed.iter().take(SNAPSHOT_DELIVERIES) {
+        lines.push(format!(
+            "    {} {} {} {}m",
+            item.op,
+            item.seat,
+            item.task.as_deref().unwrap_or("-"),
+            item.age_s / 60
+        ));
+    }
+    if plan.unconfirmed.len() > SNAPSHOT_DELIVERIES {
+        lines.push(format!("    +{} more", plan.unconfirmed.len() - SNAPSHOT_DELIVERIES));
+    }
     // The voyages (T-22): the sentence each phase is judged by, its bar and its
     // planned landing, so the captain sees the bar before the inbox. Each
     // voyage is independent: the snapshot lists the ones with open work, and
@@ -282,7 +345,13 @@ fn snapshot(tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[gear_herdr::Ag
             }
         })
         .collect();
-    voyages.sort_by(|left, right| left.milestone.cmp(&right.milestone));
+    // T-301: the earliest departure first, a voyage that has not departed
+    // last; the id breaks the tie. An id is any word, so the id alone is no
+    // order (`M10` would come before `M9`).
+    voyages.sort_by(|left, right| {
+        (left.departure.unwrap_or(i64::MAX), &left.milestone)
+            .cmp(&(right.departure.unwrap_or(i64::MAX), &right.milestone))
+    });
     for voyage in &voyages {
         lines.push(format!("  {}", crate::plan::voyage_line(voyage)));
     }

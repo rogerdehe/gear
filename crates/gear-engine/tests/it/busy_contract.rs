@@ -1,9 +1,9 @@
 //! T-46: a Herdr Working lane has handed everything in but ready work waits.
 use gear_app::{home, identity::Fingerprint, Env};
 use gear_engine::{busy, observe, tick, EngineCfg};
-use gear_herdr::{fake::FakeHerdr, AgentStatus};
+use gear_herdr::{fake::{Call, FakeHerdr}, AgentStatus, HerdrAct};
 use gear_model::{AttemptState, GearCtx, MsgKind, MsgState, SeatRole, TaskState};
-use gear_store::{testing, AttemptRow, Store, TaskRow};
+use gear_store::{testing, AttemptRow, NewMessage, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
 const CAP: &str = "w1:p1";
@@ -75,6 +75,109 @@ fn watch(w: &mut World, seconds: i64) -> Vec<String> {
     let agents = observe::snapshot(&mut w.herdr).unwrap();
     let observed = w.store.read(|tx| observe::reconcile(tx, &mut w.herdr, "p", &agents, &w.cfg.profiles)).unwrap();
     w.store.write(|tx| busy::check(tx, "p", &observed, T0+seconds)).unwrap()
+}
+
+/// Every `esc` the engine sent to the lane's pane (T-288).
+fn interrupts(w: &World) -> usize {
+    w.herdr.calls.iter().filter(|call| matches!(call,
+        Call::SendKeys { pane, keys } if pane == LANE && keys == &["esc".to_string()])).count()
+}
+
+/// Observe, then run only the busy monitor and its interrupt step as the tick
+/// does, so a test that makes the lane idle does not also dispatch the ready
+/// task.
+fn watch_interrupts(w: &mut World, seconds: i64) -> usize {
+    let agents = observe::snapshot(&mut w.herdr).unwrap();
+    let observed = w.store.read(|tx| observe::reconcile(tx, &mut w.herdr, "p", &agents, &w.cfg.profiles)).unwrap();
+    let now = T0 + seconds;
+    w.store.write(|tx| busy::check(tx, "p", &observed, now)).unwrap();
+    let panes = w.store.write(|tx| busy::due_interrupts(tx, "p", &observed, now)).unwrap();
+    for pane in &panes { let _ = w.herdr.send_keys(pane, &["esc".into()]); }
+    panes.len()
+}
+
+/// An unanswered captain instruction to the lane (`kind = Instruction`); its
+/// message id comes back for the reply.
+fn instruct(w: &mut World, created: i64) -> String {
+    w.store.write(|tx| tx.insert_message(&NewMessage {
+        meta: None, project: "p".into(), thread: "hull:175".into(), task: None, attempt: None,
+        sender: "p:captain".into(), sender_gen: 1, recipient: "p:heat".into(),
+        kind: MsgKind::Instruction, urgent: false,
+        body: "please look at the merge".into(), reply_to: None, needs_ack: false,
+        state: MsgState::Open, created,
+    })).unwrap().id
+}
+
+/// The lane answers that instruction.
+fn reply(w: &mut World, instruction: &str, created: i64) {
+    w.store.write(|tx| tx.insert_message(&NewMessage {
+        meta: None, project: "p".into(), thread: "hull:175".into(), task: None, attempt: None,
+        sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
+        kind: MsgKind::Reply, urgent: false, body: "done".into(),
+        reply_to: Some(instruction.into()), needs_ack: false, state: MsgState::Open, created,
+    })).unwrap();
+}
+
+#[test]
+fn working_with_no_task_is_interrupted_once_after_five_minutes() {
+    let mut w = world();
+    assert!(run(&mut w, 0).busy_lanes.is_empty());
+    assert_eq!(interrupts(&w), 0);
+    run(&mut w, 299);
+    assert_eq!(interrupts(&w), 0, "four minutes is short of the interrupt");
+    run(&mut w, 300);
+    assert_eq!(interrupts(&w), 1, "five minutes ends the lane's turn once");
+    for seconds in [301, 400, 601, 1200] { run(&mut w, seconds); }
+    assert_eq!(interrupts(&w), 1, "later ticks of the same condition stay quiet");
+    assert_eq!(items(&mut w).len(), 1, "the captain's alert is unchanged");
+}
+
+#[test]
+fn a_new_condition_after_recovery_is_interrupted_again() {
+    let mut w = world();
+    watch_interrupts(&mut w, 0);
+    assert_eq!(watch_interrupts(&mut w, 300), 1);
+    assert_eq!(watch_interrupts(&mut w, 301), 0, "one esc per condition");
+    w.herdr.set_status(LANE, AgentStatus::Idle);
+    assert_eq!(watch_interrupts(&mut w, 302), 0);
+    w.herdr.set_status(LANE, AgentStatus::Working);
+    assert_eq!(watch_interrupts(&mut w, 303), 0, "a new condition starts a new timer");
+    assert_eq!(watch_interrupts(&mut w, 602), 0);
+    assert_eq!(watch_interrupts(&mut w, 603), 1, "the new condition is interrupted again");
+    assert_eq!(interrupts(&w), 2);
+}
+
+#[test]
+fn a_lane_helping_on_an_unanswered_instruction_is_not_interrupted() {
+    let mut w = world();
+    let instruction = instruct(&mut w, T0);
+    run(&mut w, 0);
+    run(&mut w, 300);
+    run(&mut w, 900);
+    assert_eq!(interrupts(&w), 0, "an unanswered captain instruction is help, not idleness");
+    reply(&mut w, &instruction, T0+900);
+    run(&mut w, 901);
+    // T-324: a helping lane's busy condition is recovered each tick, so the
+    // timer of the condition starts at the reply.
+    assert_eq!(interrupts(&w), 0, "the condition starts a new timer at the reply");
+    run(&mut w, 1201);
+    assert_eq!(interrupts(&w), 1, "the reply ends the help, so the condition interrupts");
+}
+
+#[test]
+fn a_lane_helping_on_an_unanswered_instruction_raises_no_busy_item() {
+    let mut w = world();
+    let instruction = instruct(&mut w, T0);
+    for seconds in [0, 599, 601, 1200, 1799] { run(&mut w, seconds); }
+    assert!(items(&mut w).is_empty(), "a lane that helps is busy on purpose");
+
+    // The reply ends the help: the condition counts as before, from the reply.
+    reply(&mut w, &instruction, T0 + 1799);
+    run(&mut w, 1800);
+    run(&mut w, 2400);
+    assert!(items(&mut w).is_empty(), "strictly more than ten minutes is needed");
+    run(&mut w, 2401);
+    assert_eq!(items(&mut w).len(), 1, "the reply ends the help, so the lane is busy with no task");
 }
 
 #[test]

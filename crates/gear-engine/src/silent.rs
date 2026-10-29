@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use gear_herdr::Profile;
-use gear_model::{GearResult, MsgKind, MsgState, SeatRole, Ts};
+use gear_model::{GearResult, MsgKind, MsgState, SeatRole, SeatState, Ts};
 use gear_store::{NewMessage, RoundRow, SeatRow, Store};
 
 use crate::observe::SeatObs;
@@ -48,6 +48,15 @@ pub fn tick(
         let Some(round) = store.read(|tx| tx.open_round_of_seat(&seat.id))? else {
             continue;
         };
+        // A temp seat answers only for the work it holds now (T-289): the
+        // round of a task it no longer holds, or of a seat that is no longer
+        // Active, is not this seat's silence. A lane is checked as before.
+        if seat.role == SeatRole::Temp
+            && (seat.state != SeatState::Active
+                || seat.task_id.as_deref() != Some(round.task.as_str()))
+        {
+            continue;
+        }
         // The seat holds no live work: its attempt is over (cancelled,
         // settled). A seat that waits for the next task is not silent.
         let attempt = store.read(|tx| tx.get_attempt(project, &round.task, round.attempt))?;
@@ -74,12 +83,16 @@ pub fn tick(
             continue;
         }
         let minutes = now.saturating_sub(round.start_at) / 60;
+        // The alert never asks for a hand exit (T-289): the engine restarts a
+        // seat whose agent exits, and a hand exit can leave the old session
+        // running beside the new one.
         let body = format!(
-            "{} has produced nothing for {minutes} min on {} ({} round, model {}): its pane may show an error such as a refused model id; look at the pane, fix the config, then stop the agent so it restarts on the current config",
+            "{} has produced nothing for {minutes} min on {} ({} round, model {}, generation {}): its pane may show an error such as a refused model id. Look at the pane and fix the config; do not exit the agent by hand — the engine restarts a seat whose agent exits, and a hand exit can leave its old session running beside the new one.",
             seat.name,
             round.task,
             round.role,
             round.model.as_deref().unwrap_or("unknown"),
+            seat.generation,
         );
         let Some(captain) = store.read(|tx| tx.captain_of(project))? else {
             continue;
@@ -358,12 +371,70 @@ mod tests {
         assert_eq!(messages[0].task.as_deref(), Some("T-1"));
         assert_eq!(messages[0].attempt, Some(1));
         assert!(messages[0].body.contains("review-1 has produced nothing for 11 min"));
-        assert!(messages[0].body.contains("(review round, model minimax-m3)"));
+        assert!(messages[0].body.contains("(review round, model minimax-m3, generation 1)"));
+        assert!(messages[0].body.contains("do not exit the agent by hand"));
+        assert!(!messages[0].body.contains("stop the agent"));
 
         // The second tick says nothing new: the round was already reported.
         let flagged = tick(&mut world.store, "p", &[idle()], &world.profiles, NOW).unwrap();
         assert!(flagged.is_empty());
         assert_eq!(alerts(&mut world).len(), 1);
+    }
+
+    #[test]
+    fn a_temp_seat_whose_work_moved_on_is_not_silent() {
+        // The seat holds T-2 now; its open round on T-1 is a round of a task it
+        // no longer holds, and its silence is not this seat's (T-289).
+        let mut world = the_world();
+        let session = usage_log(&world, 0);
+        insert_round(&mut world, 1, NOW - 11 * 60, Some(&session));
+        world
+            .store
+            .write(|tx| tx.set_seat_task(SEAT, "T-2"))
+            .unwrap();
+
+        let flagged = tick(&mut world.store, "p", &[idle()], &world.profiles, NOW).unwrap();
+        assert!(flagged.is_empty(), "{flagged:?}");
+        assert!(alerts(&mut world).is_empty());
+    }
+
+    #[test]
+    fn a_standby_temp_seat_is_not_silent() {
+        let mut world = the_world();
+        let session = usage_log(&world, 0);
+        insert_round(&mut world, 1, NOW - 11 * 60, Some(&session));
+        world
+            .store
+            .write(|tx| {
+                tx.set_seat_state(SEAT, SeatState::Standby, None, NOW)?;
+                Ok(())
+            })
+            .unwrap();
+
+        let flagged = tick(&mut world.store, "p", &[idle()], &world.profiles, NOW).unwrap();
+        assert!(flagged.is_empty(), "{flagged:?}");
+        assert!(alerts(&mut world).is_empty());
+    }
+
+    #[test]
+    fn a_temp_seat_restarted_in_place_still_alerts() {
+        // The round keeps the generation it started with; the seat restarted
+        // (T-209) on its own task is exactly what the alert is for (T-289).
+        let mut world = the_world();
+        let session = usage_log(&world, 0);
+        insert_round(&mut world, 1, NOW - 11 * 60, Some(&session));
+        world
+            .store
+            .write(|tx| tx.set_seat_generation(SEAT, 2))
+            .unwrap();
+
+        let flagged = tick(&mut world.store, "p", &[idle()], &world.profiles, NOW).unwrap();
+        assert_eq!(flagged, vec![SEAT.to_string()]);
+        let messages = alerts(&mut world);
+        assert_eq!(messages.len(), 1);
+        // The generation named is the seat's live one (contract v2), not the
+        // round's older one.
+        assert!(messages[0].body.contains("generation 2"), "{}", messages[0].body);
     }
 
     #[test]

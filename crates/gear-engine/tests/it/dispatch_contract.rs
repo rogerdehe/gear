@@ -42,7 +42,7 @@ fn op() -> OpRow {
 fn view() -> LaneView {
     LaneView { obs: Some(obs(SeatState::Active, true, &[])), attempt: None, pending_op: None,
         last_deliver_at: Some(NOW - 1000), nudges_since_progress: 0, ready_tasks: vec![task("T-2"), task("T-3")],
-        safe_for_next: false, switch_pending: false, failed_delivery: None }
+        safe_for_next: false, switch_pending: false, failed_delivery: None, rework_mid_turn: false }
 }
 
 fn is_none(a: &Action) -> bool {
@@ -119,4 +119,41 @@ fn retiring_and_temp_seats_never_assign() {
     let mut v = view();
     let mut o = obs(SeatState::Active, true, &[]); o.seat.role = SeatRole::Temp; v.obs = Some(o);
     assert!(is_none(&decide(&v, &cfg, NOW)));
+}
+
+/// T-290: a rework packet reaches a lane whose agent queues input while it
+/// works (pi, claude) — the packet waits in the input queue and is read after
+/// the current step. A first packet, and a lane that does not queue, wait for
+/// idle as before; the gates after rule 4 still hold.
+#[test]
+fn a_rework_reaches_a_working_lane_that_queues_input() {
+    let cfg = DispatchCfg::default();
+    let working = || obs(SeatState::Active, false, &[]);
+
+    let mut v = view();
+    v.obs = Some(working());
+    v.rework_mid_turn = true;
+    assert_eq!(
+        decide(&v, &cfg, NOW),
+        Action::Assign { task: "T-2".into() },
+        "the first ready task (the rework) is assigned"
+    );
+
+    // No rework: the working agent is not ready.
+    let mut v = view();
+    v.obs = Some(working());
+    assert!(is_none(&decide(&v, &cfg, NOW)));
+
+    // Rules 5 and 6 still hold for a rework mid-turn.
+    let mut v = view();
+    v.obs = Some(obs(SeatState::Active, false, &[ScreenFlag::RateLimit]));
+    v.rework_mid_turn = true;
+    assert!(is_none(&decide(&v, &cfg, NOW)), "a ratelimit wall still holds");
+    let mut v = view();
+    v.obs = Some(working());
+    v.rework_mid_turn = true;
+    v.last_deliver_at = Some(NOW - 89);
+    assert!(is_none(&decide(&v, &cfg, NOW)), "the cooldown still holds");
+    v.last_deliver_at = Some(NOW - 90);
+    assert_eq!(decide(&v, &cfg, NOW), Action::Assign { task: "T-2".into() });
 }

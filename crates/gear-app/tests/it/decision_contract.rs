@@ -265,14 +265,14 @@ gate = "make test"
 "#;
     let mut s = Store::open_in_memory().unwrap();
     let env = Env { ctx: None, pane_id: None, admin: true };
-    gear_app::admin::init_with_home(&mut s, &env, CONFIG, Some(crate::skill_home()), NOW).unwrap();
+    gear_app::admin::init_with_home(&mut s, &env, CONFIG, Some(crate::skill_home()), false, NOW).unwrap();
 
     // The first init registers the project: nothing was re-applied, so the
     // log has no entry yet.
     assert!(s.read(|tx| tx.decisions_of("harbor", "")).unwrap().is_empty());
 
     // A re-apply is a config change, and GEAR records it.
-    gear_app::admin::init_with_home(&mut s, &env, CONFIG, Some(crate::skill_home()), NOW + 1).unwrap();
+    gear_app::admin::init_with_home(&mut s, &env, CONFIG, Some(crate::skill_home()), false, NOW + 1).unwrap();
     let logged = s.read(|tx| tx.decisions_of("harbor", "")).unwrap();
     assert_eq!(logged.len(), 1, "{logged:?}");
     assert_eq!(logged[0].kind, "config");
@@ -281,7 +281,7 @@ gate = "make test"
     assert!(!logged[0].star);
 
     // And again: the next config version, and its own entry.
-    gear_app::admin::init_with_home(&mut s, &env, CONFIG, Some(crate::skill_home()), NOW + 2).unwrap();
+    gear_app::admin::init_with_home(&mut s, &env, CONFIG, Some(crate::skill_home()), false, NOW + 2).unwrap();
     let logged = s.read(|tx| tx.decisions_of("harbor", "")).unwrap();
     assert_eq!(logged.len(), 2, "{logged:?}");
     assert_eq!(logged[1].what, "config v3");

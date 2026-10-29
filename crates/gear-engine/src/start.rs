@@ -14,6 +14,29 @@
 use gear_model::GearResult;
 use gear_store::Store;
 
+/// The pane line that says the CLI is not there (T-286): the first line of
+/// `screen` that names `kind` and one of the shell's "not found" texts — zsh
+/// `zsh: command not found: codex`, bash `bash: codex: command not found`,
+/// dash `sh: 1: codex: not found`. `None` when the screen says nothing of the
+/// sort; a failed start without this line keeps its own reason.
+pub(crate) fn cli_missing(screen: &str, kind: &str) -> Option<String> {
+    screen
+        .lines()
+        .find(|line| {
+            line.contains(kind)
+                && (line.contains("command not found") || line.contains(": not found"))
+        })
+        .map(|line| line.trim().to_string())
+}
+
+/// The reason a seat whose CLI is not installed carries (T-286): no model move
+/// — the seat waits for the install, not for the next entry of its chain.
+pub(crate) fn cli_missing_text(kind: &str, line: &str) -> String {
+    format!(
+        "the {kind} CLI is not installed or not on PATH (the pane says: {line}); install it or fix PATH, then resolve this item — GEAR does not move this seat to another model for it"
+    )
+}
+
 /// How many ticks a busy refusal may keep a start pending: one tick is one
 /// attempt, so a shell gets twenty of them — 80 s at the default 4 s tick —
 /// before a human is asked. Past that the shell is not coming back on its own.
@@ -121,6 +144,23 @@ mod tests {
             args: vec!["--model".into(), "m".into(), "-C".into(), "/w".into()],
             tries: 3,
         }
+    }
+
+    #[test]
+    fn the_three_shells_that_say_a_cli_is_missing() {
+        for screen in [
+            "zsh: command not found: codex",
+            "bash: codex: command not found",
+            "sh: 1: codex: not found",
+        ] {
+            assert_eq!(
+                cli_missing(screen, "codex").as_deref(),
+                Some(screen),
+                "{screen}"
+            );
+        }
+        // Another CLI missing says nothing about this one.
+        assert_eq!(cli_missing("command not found: pi", "codex"), None);
     }
 
     #[test]

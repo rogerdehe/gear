@@ -98,3 +98,60 @@ fn a_settled_or_non_deliver_op_does_not_count() {
     let board = build(&mut store, &options(), T0).unwrap();
     assert_eq!(board.projects[0].unconfirmed_deliveries, 0);
 }
+
+/// One Deliver op of `seat` at `generation`, left in `state`, created at
+/// `created`.
+fn seed_delivery_at(
+    store: &mut Store,
+    seat: &str,
+    generation: i64,
+    state: OpState,
+    created: i64,
+) -> OpRow {
+    store
+        .write(|tx| {
+            let op = tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: seat.to_string(),
+                generation,
+                kind: OpKind::Deliver,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({}),
+                created,
+            })?;
+            tx.set_op_state("p", &op.id, state, None, created + 1)?;
+            tx.get_op("p", &op.id)?
+                .ok_or_else(|| gear_model::GearError::new(gear_model::ErrorCode::NoTarget, "op"))
+        })
+        .unwrap()
+}
+
+/// T-271: the board names the deliveries it counts — the live ones only, the
+/// oldest first, with their ages and the seat's name.
+#[test]
+fn the_unconfirmed_deliveries_are_named_oldest_first() {
+    let mut store = world();
+    // A retired seat's delivery is history, never named.
+    let retired = seed_delivery_at(&mut store, "p:old", 1, OpState::Submitted, T0 - 900);
+    // Two live deliveries: the older one comes first.
+    let older = seed_delivery_at(&mut store, "p:data", 1, OpState::Submitted, T0 - 300);
+    let newer = seed_delivery_at(&mut store, "p:data", 1, OpState::Submitted, T0 - 120);
+
+    let board = build(&mut store, &options(), T0).unwrap();
+    let project = &board.projects[0];
+    assert_eq!(project.unconfirmed_deliveries, 2, "the count stays as it is");
+    assert_eq!(project.unconfirmed.len(), 2, "only the live deliveries are named");
+    assert_eq!(project.unconfirmed[0].op, older.id);
+    assert_eq!(project.unconfirmed[0].seat, "data", "the seat's name, not its id");
+    assert_eq!(project.unconfirmed[0].task.as_deref(), Some("T-1"));
+    assert_eq!(project.unconfirmed[0].age_s, 300);
+    assert_eq!(project.unconfirmed[1].op, newer.id);
+    assert_eq!(project.unconfirmed[1].age_s, 120);
+    assert!(
+        !project.unconfirmed.iter().any(|item| item.op == retired.id),
+        "a retired seat's delivery is history"
+    );
+}

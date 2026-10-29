@@ -199,7 +199,7 @@ gate="new-gate"
             tx.set_binding_session_ref("p:heat",1,"old-session")?;
             tx.set_meta(&crate::onboard::worktree_path_key("p:heat"),"/old-worktree")?;
             tx.insert_task(&task("T-1",TaskState::Ready,"/repo/old"))?;
-            tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"old".into(),accept:"done".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T})?;
+            tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"old".into(),accept:"done".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T, mechanical: None,})?;
             gear_app::tasks::start_attempt(tx,"p","T-1","p:heat",1,T)?;
             gear_app::tasks::on_delivery_confirmed(tx,"p","T-1",1,T)?;
             Ok(())
@@ -213,7 +213,7 @@ gate="new-gate"
         let env=Env {ctx:Some(GearCtx {project:"p".into(),seat:"captain".into(),generation:1}),pane_id:Some("w1:p1".into()),admin:false};
         let fp=Fingerprint {pane_id:"w1:p1".into(),kind:Some("codex".into()),session_ref:None};
         let result=plan::apply(store,&env,Some(&fp),None,&draft::parse(text).unwrap(),text,"rebind",T+1).unwrap();
-        assert!(result.warnings.contains(&"rebind heat: waits for T-1".into()));
+        assert!(result.warnings.iter().any(|w| w.starts_with("rebind heat: repo old → new, owns [src/] → [src/]: waits for T-1")), "{:?}", result.warnings);
     }
     fn staff(store: &mut Store, command: &str, now: Ts) {
         let version = store.read(|tx| tx.plan_version("p")).unwrap();
@@ -316,7 +316,7 @@ gate="new-gate"
         store.write(|tx| {
             let mut new=task("T-2",TaskState::Ready,"/repo/new"); new.base=Some("new-dev".into());
             new.followup_of=Some("T-1".into()); tx.insert_task(&new)?;
-            tx.insert_contract(&ContractRow {project:"p".into(),task:"T-2".into(),version:1,goal:"new".into(),accept:"done".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T})?;
+            tx.insert_contract(&ContractRow {project:"p".into(),task:"T-2".into(),version:1,goal:"new".into(),accept:"done".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T, mechanical: None,})?;
             tx.insert_task(&task("T-3",TaskState::Ready,"/repo/old"))?;
             Ok(())
         }).unwrap();

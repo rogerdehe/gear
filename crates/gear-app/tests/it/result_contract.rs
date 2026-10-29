@@ -21,7 +21,7 @@ fn world_initial(started: bool) -> Store {
             lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
             wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
         tx.insert_contract(&ContractRow { project: "p".into(), task: "T-1".into(), version: 1, goal: "g".into(), accept: "a".into(),
-            evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0 })?;
+            evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0, mechanical: None, })?;
         start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
         if started { on_delivery_confirmed(tx, "p", "T-1", 1, T0)?; }
         Ok(())
@@ -188,4 +188,76 @@ fn hand_in_clears_a_stale_session_when_current_binding_has_none() {
     mail::send(&mut s,&env,Some(&fp),&result(1,Some("abc1234"),"missing-current-session"),T0+20).unwrap();
     let attempt=s.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap();
     assert_eq!(attempt.session_ref,None); assert_eq!(attempt.session_cli.as_deref(),Some("opencode"));
+}
+
+/// T-266: after a fail verdict the engine opens the rework and delivers its
+/// packet only when the lane is idle. A lane still in its turn hands in the
+/// settled attempt again; the refusal must say that a rework waits for it.
+fn failed_with_rework_open() -> Store {
+    let mut s = world();
+    let (env, fp) = lane();
+    mail::send(&mut s, &env, Some(&fp), &result(1, Some("aaa1111"), "round1"), T0 + 5).unwrap();
+    s.write(|tx| {
+        tx.insert_review_verdict(&ReviewVerdictRow {
+            project: "p".into(),
+            task: "T-1".into(),
+            attempt: 1,
+            passed: false,
+            findings: "F1: the rework is missing".into(),
+            by_seat: "p:r-1".into(),
+            created: T0 + 6,
+        })?;
+        tx.set_review_blocking("p", "T-1", 1, "F1", T0 + 6)?;
+        settle_review(tx, "p", "T-1", 1, T0 + 7)?;
+        // The engine opens attempt 2 on the lane's seat.
+        start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 8)?;
+        Ok(())
+    })
+    .unwrap();
+    s
+}
+
+#[test]
+fn hand_in_after_a_fail_names_the_rework_that_waits() {
+    let mut s = failed_with_rework_open();
+    let (env, fp) = lane();
+    let error = mail::send(&mut s, &env, Some(&fp), &result(1, Some("bbb2222"), "again"), T0 + 9).unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadTransition, "{}", error.detail);
+    assert_eq!(
+        error.detail,
+        "a rework of T-1 (attempt 2) is waiting for you: end your turn now and its packet \
+         arrives; do not hand in attempt 1 again"
+    );
+    // Nothing was written: attempt 1 is still the rejected one, attempt 2 still
+    // waits for the lane's turn.
+    assert_eq!(s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state, AttemptState::Rejected);
+    assert_eq!(s.read(|tx| tx.get_attempt("p", "T-1", 2)).unwrap().unwrap().state, AttemptState::Delivered);
+    assert!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 10)).unwrap().is_empty(), "no message stored");
+}
+
+#[test]
+fn hand_in_of_the_rework_itself_keeps_its_own_error() {
+    let mut s = failed_with_rework_open();
+    let (env, fp) = lane();
+    // Attempt 2 before its packet was read, handed in with the candidate the
+    // first round already failed: the hand-in fails on that, and the refusal
+    // stays that one — there is no newer attempt than the one it names.
+    let args = SendArgs { attempt: Some(2), candidate: Some("aaa1111".into()), request_id: "r2".into(), ..result(1, None, "") };
+    let error = mail::send(&mut s, &env, Some(&fp), &args, T0 + 9).unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat, "{}", error.detail);
+    assert!(error.detail.contains("already failed on attempt 1"), "{}", error.detail);
+    assert!(!error.detail.contains("a rework of"), "{}", error.detail);
+}
+
+#[test]
+fn hand_in_with_no_newer_attempt_keeps_todays_error() {
+    let mut s = world();
+    let (env, fp) = lane();
+    mail::send(&mut s, &env, Some(&fp), &result(1, Some("abc1234"), "first"), T0 + 5).unwrap();
+    // No rework was opened: a second hand-in meets the state error it met
+    // before T-266.
+    let error = mail::send(&mut s, &env, Some(&fp), &result(1, Some("abc1234"), "second"), T0 + 6).unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadTransition, "{}", error.detail);
+    assert_eq!(error.detail, "attempt: submitted -> submitted");
+    assert_eq!(s.read(|tx| tx.attempts_of_task("p", "T-1")).unwrap().len(), 1);
 }

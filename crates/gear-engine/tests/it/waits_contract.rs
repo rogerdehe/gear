@@ -16,7 +16,7 @@ fn world() -> (Store,FakeHerdr,EngineCfg) {
         testing::seed_active_seat(tx,"p","heat",SeatRole::Lane,LANE,"opencode",T)?;
         for (id,rank) in [("T-1",1),("T-2",2)] {
             tx.insert_task(&TaskRow {repo:None,base:None,gate:None,rework_estimate_min:None,project:"p".into(),id:id.into(),rank,state:TaskState::Ready,priority:"must".into(),lane:Some("heat".into()),milestone:None,required:false,contract_version:1,deps:vec![],followup_of:None,wait_on:None,wait_cond:None,rework_note:None,estimate_min:Some(10),issue:None,updated:T})?;
-            tx.insert_contract(&ContractRow {project:"p".into(),task:id.into(),version:1,goal:"goal".into(),accept:"done".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T})?;
+            tx.insert_contract(&ContractRow {project:"p".into(),task:id.into(),version:1,goal:"goal".into(),accept:"done".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T, mechanical: None,})?;
         }
         gear_app::tasks::start_attempt(tx,"p","T-1","p:heat",1,T)?;
         gear_app::tasks::on_delivery_confirmed(tx,"p","T-1",1,T)?;

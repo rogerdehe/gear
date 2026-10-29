@@ -1,8 +1,8 @@
 //! Side-effect operations: intend → execute → confirm (design/08).
 
-use gear_herdr::{HerdrAct, Outcome};
+use gear_herdr::{AgentStatus, HerdrAct, Outcome};
 use gear_model::state::require_transition;
-use gear_model::{AttemptState, ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, Ts};
+use gear_model::{AttemptState, ErrorCode, GearError, GearResult, MsgKind, OpKind, OpState, SeatRole, SeatState, Ts};
 use gear_store::{BindingStatus, NewOp, OpRow, Store, Tx};
 use std::collections::BTreeMap;
 
@@ -480,7 +480,21 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
         return void("the op carries no text".to_string());
     };
     let mut urgent = false;
-    let policy = if op.kind == OpKind::Deliver { PromptPolicy::Delivery } else {
+    let policy = if op.kind == OpKind::Deliver {
+        // T-290: a rework packet (attempt n ≥ 2) that is on its way to a lane
+        // whose agent queues input while it works (pi, claude) may go while
+        // the agent is Working — it waits in the input queue and is read
+        // after the current step.
+        let working = match (op.task.as_deref(), op.attempt) {
+            (Some(task), Some(n)) if n >= 2 && gear_herdr::queues_input(&binding.kind) => tx
+                .get_attempt(&op.project, task, n)?
+                .is_some_and(|attempt| {
+                    attempt.state == AttemptState::Delivered && attempt.sent_at.is_none()
+                }),
+            _ => false,
+        };
+        PromptPolicy::Delivery { working }
+    } else {
         let ids = op.payload.get("covers").and_then(|v| v.as_array());
         let mut working = ids.is_some_and(|v| !v.is_empty());
         let mut unknown = working;
@@ -545,7 +559,12 @@ pub enum Aimed {
 /// The sender has no exception: an unnamed agent is named again and the text
 /// goes on the next tick, like everywhere else.
 #[derive(Clone, Copy)]
-enum PromptPolicy { Delivery, Doorbell { working: bool, unknown: bool } }
+enum PromptPolicy {
+    /// A task packet. `working`: a rework packet for an agent that queues
+    /// input while it works may go mid-turn (T-290).
+    Delivery { working: bool },
+    Doorbell { working: bool, unknown: bool },
+}
 
 fn aim(
     herdr: &mut dyn HerdrAct,
@@ -564,14 +583,17 @@ fn aim(
                 Ok(Some(info)) if info.agent.as_deref() == Some(kind) => {
                     let ready = match info.agent_status {
                         gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done => true,
-                        gear_herdr::AgentStatus::Working => matches!(policy, PromptPolicy::Doorbell { working: true, .. }),
+                        gear_herdr::AgentStatus::Working => {
+                            matches!(policy, PromptPolicy::Doorbell { working: true, .. })
+                                || matches!(policy, PromptPolicy::Delivery { working: true })
+                        }
                         gear_herdr::AgentStatus::Unknown => matches!(policy, PromptPolicy::Doorbell { unknown: true, .. }),
                         gear_herdr::AgentStatus::Blocked => false,
                     };
                     if !ready {
                         let reason = format!("agent in {pane_id} is not ready ({:?})", info.agent_status);
                         return match policy {
-                            PromptPolicy::Delivery => Aimed::Retry(reason),
+                            PromptPolicy::Delivery { .. } => Aimed::Retry(reason),
                             PromptPolicy::Doorbell { .. } => Aimed::Refused(reason),
                         };
                     }
@@ -737,30 +759,37 @@ pub fn confirm_pending_with(
         }
         for state in [OpState::Submitted, OpState::Unknown] {
             for op in tx.ops_in_state(project, state)? {
+                // What proves the op, and whether that proof is a view of the
+                // reviewer's own seat (T-267).
                 let evidence = match op.kind {
                     // A doorbell is proven by a view of the ids it carried
                     // that are still open; ids closed another way need no
                     // showing (else the doorbell never settles, holds the
                     // slot, and no doorbell rings again — L-66).
-                    OpKind::Doorbell => shown_in_a_view(tx, project, &op, now)?,
-                    // A review delivery is proven by the verdict the reviewer
-                    // hands in — the review packet is not on the reviewer's
-                    // home page. A review takes longer than the check budget
-                    // of a doorbell, so it spends none (like a kind without an
+                    OpKind::Doorbell => shown_in_a_view(tx, project, &op, now)?.map(|ts| (ts, false)),
+                    // A review delivery is proven by the reviewer's own first
+                    // `gear` — a view of its seat and generation after the
+                    // delivery — or by the verdict it hands in, whichever came
+                    // first (T-267). A newer delivery of the same seat, task
+                    // and attempt supersedes this one: only it is the packet
+                    // the reviewer got, and its confirmation voids this op.
+                    // A review takes longer than the check budget of a
+                    // doorbell, so it spends none (like a kind without an
                     // evidence rule, R-46).
                     OpKind::Deliver if is_reviewer(tx, &op.seat)? => {
-                        match review_verdict(tx, &op)? {
-                            Some(created) => Some(created),
+                        if superseded(tx, project, &op)? { continue }
+                        match review_delivery_evidence(tx, &op)? {
+                            Some(found) => Some(found),
                             None => continue,
                         }
                     }
                     // A delivery is proven by the task/attempt it announced.
-                    OpKind::Deliver => shown_delivery(tx, &op)?,
+                    OpKind::Deliver => shown_delivery(tx, &op)?.map(|ts| (ts, false)),
                     // Onboard/release/title/notify have no evidence rule yet:
                     // leave them completely alone — no budget, no flag (R-46).
                     _ => continue,
                 };
-                if let Some(view_ts) = evidence {
+                if let Some((view_ts, review_by_view)) = evidence {
                     require_transition(
                         state.can_transition(OpState::Confirmed),
                         "operation",
@@ -768,13 +797,14 @@ pub fn confirm_pending_with(
                         "confirmed",
                     )?;
                     // design/08: confirm(op, evidence) — keep the pointer. A
-                    // review delivery is settled by a verdict row, not by a
-                    // view: say so, so the stored explanation can be traced
-                    // (P3 of the T-5 review).
+                    // review delivery settled by a verdict row says so, as one
+                    // settled by the reviewer's own view says `view` like any
+                    // other: the stored explanation can be traced (P3 of the
+                    // T-5 review).
                     let review_delivery = op.kind == OpKind::Deliver && is_reviewer(tx, &op.seat)?;
                     let hand_in = op.kind == OpKind::Deliver && !review_delivery && !tx.views_since(&op.seat, op.generation, op.created)?.iter().any(|view|
                         view.ts == view_ts && view.shown_task.as_deref() == op.task.as_deref() && view.shown_attempt == op.attempt);
-                    let evidence = if review_delivery {
+                    let evidence = if review_delivery && !review_by_view {
                         format!("verdict {} attempt {} @ {view_ts}", op.task.as_deref().unwrap_or("-"), op.attempt.unwrap_or(0))
                     } else if hand_in {
                         format!("hand-in {} attempt {} @ {view_ts}", op.task.as_deref().unwrap_or("-"), op.attempt.unwrap_or(0))
@@ -782,6 +812,9 @@ pub fn confirm_pending_with(
                         format!("view {}/{} @ {view_ts}", op.seat, op.generation)
                     };
                     tx.set_op_state(project, &op.id, OpState::Confirmed, Some(&evidence), now)?;
+                    if review_delivery {
+                        supersede_older_review_deliveries(tx, project, &op, now)?;
+                    }
                     if op.kind == OpKind::Deliver {
                         // The delivery got through: nothing is left to send
                         // again for this attempt (T-97).
@@ -933,6 +966,141 @@ pub fn confirm_pending_with(
 /// seat can be rung again (L-69).
 pub const DOORBELL_EXPIRY_S: i64 = 300;
 
+/// How long a submitted delivery waits before the engine looks at its pane for
+/// text that was typed but never sent (T-371).
+pub const UNSENT_RESUBMIT_AFTER_S: i64 = 30;
+
+/// How many lines of the pane the typed text is looked for in (T-371).
+const UNSENT_READ_LINES: u32 = 12;
+
+/// How many of the tail's last non-empty lines must show the text (T-371).
+const UNSENT_TAIL_LINES: usize = 6;
+
+/// How much of the text's first line identifies it in the pane (T-371).
+const UNSENT_NEEDLE_CHARS: usize = 40;
+
+/// The meta key that marks an op as already given its Enter (T-371).
+fn resubmit_key(op_id: &str) -> String {
+    format!("engine.resubmit.{op_id}")
+}
+
+/// The meta key that marks an op as already typed again (T-404).
+fn retype_key(op_id: &str) -> String {
+    format!("engine.retype.{op_id}")
+}
+
+/// The needle a pane must show for `text`: its first line, cut to its first
+/// [`UNSENT_NEEDLE_CHARS`] characters. `None` = nothing to look for.
+fn unsent_needle(text: &str) -> Option<String> {
+    let needle: String = text
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(UNSENT_NEEDLE_CHARS)
+        .collect();
+    if needle.trim().is_empty() {
+        return None;
+    }
+    Some(needle)
+}
+
+/// Whether one of the tail's last [`UNSENT_TAIL_LINES`] non-empty lines shows
+/// `needle` (T-371).
+fn tail_shows(tail: &str, needle: &str) -> bool {
+    let lines: Vec<&str> = tail.lines().filter(|line| !line.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(UNSENT_TAIL_LINES);
+    lines[start..].iter().any(|line| line.contains(needle))
+}
+
+/// Give a delivery whose text sits unsent in its lane's input box its Enter
+/// (T-371, M-4569, L-76).
+///
+/// A delivery op stays Submitted until a view or a hand-in confirms it, and
+/// nothing looked at the pane in between: the text was typed, the Enter was
+/// lost, and the lane sat idle with its packet waiting in the input box. For
+/// every lane Deliver op of the project in `Submitted` at least
+/// [`UNSENT_RESUBMIT_AFTER_S`] old, whose seat is Active at the op's
+/// generation, whose agent is Idle or Done and that never had its Enter
+/// (`engine.resubmit.<op id>` not set): the pane's tail is read, and when the
+/// text's first line (its first [`UNSENT_NEEDLE_CHARS`] characters) shows in
+/// one of its last [`UNSENT_TAIL_LINES`] non-empty lines, one `enter` is sent
+/// and the meta key records it — so the op gets that Enter once, never twice.
+/// A failed read or a refused key changes nothing (no meta, no second try at
+/// once). A confirmed op is never touched: the lane read its packet.
+///
+/// When the tail does **not** show the text, the delivery never reached the
+/// input box at all — a codex lane showed its empty input placeholder while
+/// the op stayed Submitted (T-404). The delivery is then typed again once
+/// with `herdr prompt` (text + Enter), unless it was typed again before
+/// (`engine.retype.<op id>` not set), and the meta key records it; a refused
+/// prompt changes nothing. A retyped op is listed in the same `resubmitted`
+/// result.
+pub fn resubmit_unsent(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    // The candidates: one read transaction, the pane calls come after it.
+    let candidates = store.read(|tx| {
+        let mut out = Vec::new();
+        for op in tx.ops_in_state(project, OpState::Submitted)? {
+            if op.kind != OpKind::Deliver || now - op.created < UNSENT_RESUBMIT_AFTER_S {
+                continue;
+            }
+            let Some(seat) = tx.get_seat(&op.seat)? else { continue };
+            if seat.role != SeatRole::Lane
+                || seat.state != SeatState::Active
+                || seat.generation != op.generation
+            {
+                continue;
+            }
+            let Some(binding) = tx.get_binding(&op.seat, op.generation)? else { continue };
+            if binding.status != BindingStatus::Active {
+                continue;
+            }
+            if tx.get_meta(&resubmit_key(&op.id))?.is_some()
+                || tx.get_meta(&retype_key(&op.id))?.is_some()
+            {
+                continue;
+            }
+            let Some(text) = op.payload.get("text").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Some(needle) = unsent_needle(text) else { continue };
+            out.push((op.id.clone(), binding.pane_id.clone(), needle, text.to_string()));
+        }
+        Ok(out)
+    })?;
+    let mut sent = Vec::new();
+    for (op_id, pane, needle, text) in candidates {
+        // Only an agent that has nothing better to do left the text unsent.
+        let Ok(Some(agent)) = herdr.agent_get(&pane) else { continue };
+        if !matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done) {
+            continue;
+        }
+        let Ok(tail) = herdr.read_tail(&pane, UNSENT_READ_LINES) else { continue };
+        if !tail_shows(&tail, &needle) {
+            // The text never reached the input box (T-404): it is typed again
+            // once, and a refused prompt changes nothing, not even the meta.
+            if !matches!(herdr.prompt(&pane, &text), Outcome::Ok(())) {
+                continue;
+            }
+            store.write(|tx| tx.set_meta(&retype_key(&op_id), &now.to_string()))?;
+            sent.push(op_id);
+            continue;
+        }
+        // The Enter itself: a refused key changes nothing, not even the meta.
+        if !matches!(herdr.send_keys(&pane, &["enter".to_string()]), Outcome::Ok(())) {
+            continue;
+        }
+        store.write(|tx| tx.set_meta(&resubmit_key(&op_id), &now.to_string()))?;
+        sent.push(op_id);
+    }
+    Ok(sent)
+}
+
 /// A late check-in confirms a delivery that failed (design §10.3).
 ///
 /// The delivery op of an attempt fails when the lane never showed the
@@ -1035,8 +1203,85 @@ fn shown_in_a_view(tx: &Tx<'_>, project: &str, op: &OpRow, now: Ts) -> GearResul
     Ok(Some(now))
 }
 
+/// What proves a reviewer's delivery (T-267): the first view of the reviewer's
+/// own seat and generation at or after the delivery, or the verdict the
+/// reviewer hands in — whichever came first. The flag is true when the view
+/// came first, so the stored evidence is the view's.
+fn review_delivery_evidence(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<(Ts, bool)>> {
+    let verdict = review_verdict(tx, op)?;
+    let view = tx
+        .views_since(&op.seat, op.generation, op.created)?
+        .first()
+        .map(|view| view.ts);
+    Ok(match (view, verdict) {
+        (Some(view), Some(verdict)) if view > verdict => Some((verdict, false)),
+        (Some(view), _) => Some((view, true)),
+        (None, Some(verdict)) => Some((verdict, false)),
+        (None, None) => None,
+    })
+}
+
+/// A reviewer whose packet was delivered twice has two delivery ops for one
+/// attempt, and only the newer one is the packet the reviewer got: while it
+/// still waits for its evidence, the older op is not confirmed (T-267) —
+/// the newer one's confirmation voids it.
+fn superseded(tx: &Tx<'_>, project: &str, op: &OpRow) -> GearResult<bool> {
+    Ok(tx.ops_in_state(project, OpState::Submitted)?.into_iter().any(|other| {
+        other.id != op.id
+            && other.kind == OpKind::Deliver
+            && other.seat == op.seat
+            && other.task == op.task
+            && other.attempt == op.attempt
+            && (other.created, op_seq(&other.id)) > (op.created, op_seq(&op.id))
+    }))
+}
+
+/// The numeric part of an op id (`O-12` → 12).
+fn op_seq(id: &str) -> i64 {
+    id.rsplit('-').next().and_then(|n| n.parse::<i64>().ok()).unwrap_or(0)
+}
+
+/// A reviewer's delivery op that the reviewer's own first `gear` proves
+/// received is confirmed; every older Submitted delivery of the same seat for
+/// the same task and attempt is then Void (T-267) — otherwise it holds the
+/// seat's delivery slot and is sent again.
+fn supersede_older_review_deliveries(
+    tx: &Tx<'_>,
+    project: &str,
+    op: &OpRow,
+    now: Ts,
+) -> GearResult<()> {
+    let older: Vec<String> = tx
+        .ops_in_state(project, OpState::Submitted)?
+        .into_iter()
+        .filter(|other| {
+            other.id != op.id
+                && other.kind == OpKind::Deliver
+                && other.seat == op.seat
+                && other.task == op.task
+                && other.attempt == op.attempt
+                && (other.created, op_seq(&other.id)) < (op.created, op_seq(&op.id))
+        })
+        .map(|other| other.id)
+        .collect();
+    for id in older {
+        // A Submitted op that reached the pane is voided the raw way, as a
+        // review's start op is (release.rs): the state machine has no
+        // Submitted → Void transition, and this is the one op the newer
+        // delivery replaces.
+        tx.set_op_state(
+            project,
+            &id,
+            OpState::Void,
+            Some(&format!("superseded by {}", op.id)),
+            now,
+        )?;
+    }
+    Ok(())
+}
+
 /// The time the reviewer's verdict on the reviewed attempt was stored, if it
-/// is there: a review delivery is proven by the verdict, not by a view.
+/// is there.
 fn review_verdict(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
     let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
         return Ok(None);
@@ -1061,6 +1306,21 @@ fn shown_delivery(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
     let row = tx.get_attempt(&op.project, task, attempt)?;
     if row.as_ref().is_some_and(|a| a.seat == op.seat && matches!(a.state, gear_model::AttemptState::Submitted | gear_model::AttemptState::Accepted | gear_model::AttemptState::Rejected)) {
         return Ok(tx.attempt_times(&op.project, task, attempt)?.handed_in);
+    }
+    // T-277: the seat's own word about this very attempt is proof as well — a
+    // `gear send` (progress, a question, a result) names the task and attempt
+    // and carries the sender's generation, so a lane that works on the task
+    // without ever running `gear` first has plainly received it. The first
+    // such message's time is the evidence; a message on another task or from
+    // an older generation proves nothing about this delivery.
+    let messages = tx.messages_from_since(&op.project, &op.seat, op.created)?;
+    if let Some(message) = messages.into_iter().find(|message| {
+        message.sender_gen == op.generation
+            && message.task.as_deref() == Some(task)
+            && message.attempt == Some(attempt)
+            && matches!(message.kind, MsgKind::Progress | MsgKind::Question | MsgKind::Result)
+    }) {
+        return Ok(Some(message.created));
     }
     Ok(None)
 }
@@ -1224,6 +1484,301 @@ mod tests {
         assert_eq!(confirmed, vec!["O-1".to_string()]);
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
         assert_eq!(op.state, OpState::Confirmed);
+    }
+
+    /// A reviewer's delivery of `task` attempt 1, Submitted, created `created`.
+    fn review_delivery(tx: &Tx<'_>, task: &str, created: Ts) -> String {
+        let op = tx
+            .insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:r-1".into(),
+                generation: 1,
+                kind: OpKind::Deliver,
+                task: Some(task.into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({ "text": "Review packet" }),
+                created,
+            })
+            .unwrap();
+        tx.set_op_state("p", &op.id, OpState::Executing, None, created).unwrap();
+        tx.set_op_state("p", &op.id, OpState::Submitted, None, created).unwrap();
+        op.id
+    }
+
+    /// A view of the reviewer's own seat and generation at `ts`.
+    fn reviewer_view(tx: &Tx<'_>, ts: Ts) {
+        tx.insert_view(&gear_store::ViewRecord {
+            project: "p".into(),
+            seat: "p:r-1".into(),
+            generation: 1,
+            ts,
+            shown_msgs: vec![],
+            shown_ops: vec![],
+            shown_task: None,
+            shown_attempt: None,
+            shown_contract: None,
+        })
+        .unwrap();
+    }
+
+    fn reviewer_world() -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_temp_seat(tx, "p", "r-1", "T-1", "w1:p3", "codex", T0)
+            })
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn a_review_delivery_is_confirmed_by_the_reviewers_first_view() {
+        // T-267: the reviewer's own `gear` proves the packet arrived, before
+        // any verdict — a lost packet shows at once instead of waiting for a
+        // review that never started.
+        let mut store = reviewer_world();
+        store
+            .write(|tx| {
+                review_delivery(tx, "T-1", T0);
+                reviewer_view(tx, T0 + 10);
+                Ok(())
+            })
+            .unwrap();
+
+        let (confirmed, flagged) = confirm_pending(&mut store, "p", 1, T0 + 20).unwrap();
+
+        assert_eq!(confirmed, vec!["O-1".to_string()]);
+        assert!(flagged.is_empty());
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Confirmed);
+        assert_eq!(op.result, Some(format!("view p:r-1/1 @ {}", T0 + 10)));
+    }
+
+    #[test]
+    fn the_first_evidence_of_a_review_delivery_is_the_one_stored() {
+        // A verdict that came before the view is the earlier proof: the op
+        // keeps saying so (T-267, "whichever came first").
+        let mut store = reviewer_world();
+        store
+            .write(|tx| {
+                review_delivery(tx, "T-1", T0);
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: true,
+                    findings: "ops/reviews/T-1.md".into(),
+                    by_seat: "p:r-1".into(),
+                    created: T0 + 5,
+                })?;
+                reviewer_view(tx, T0 + 10);
+                Ok(())
+            })
+            .unwrap();
+
+        let (confirmed, _) = confirm_pending(&mut store, "p", 1, T0 + 20).unwrap();
+
+        assert_eq!(confirmed, vec!["O-1".to_string()]);
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.result, Some(format!("verdict T-1 attempt 1 @ {}", T0 + 5)));
+    }
+
+    #[test]
+    fn a_review_delivery_with_no_view_and_no_verdict_stays_submitted() {
+        // Neither proof is in: the delivery waits, spends no budget and flags
+        // nothing — the reviewer may still be starting (T-267).
+        let mut store = reviewer_world();
+        store.write(|tx| { review_delivery(tx, "T-1", T0); Ok(()) }).unwrap();
+
+        let (confirmed, flagged) = confirm_pending(&mut store, "p", 1, T0 + 600).unwrap();
+
+        assert!(confirmed.is_empty());
+        assert!(flagged.is_empty());
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Submitted);
+        assert_eq!(op.check_budget, 0);
+    }
+
+    #[test]
+    fn a_newer_review_delivery_supersedes_the_older_one() {
+        // Two deliveries of one attempt (T-267): the newer is the packet the
+        // reviewer got, so confirming it voids the older, which would hold the
+        // seat's delivery slot and be sent again.
+        let mut store = reviewer_world();
+        store
+            .write(|tx| {
+                review_delivery(tx, "T-1", T0);
+                review_delivery(tx, "T-1", T0 + 5);
+                reviewer_view(tx, T0 + 10);
+                Ok(())
+            })
+            .unwrap();
+
+        let (confirmed, _) = confirm_pending(&mut store, "p", 1, T0 + 20).unwrap();
+
+        assert_eq!(confirmed, vec!["O-2".to_string()]);
+        let older = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(older.state, OpState::Void);
+        assert_eq!(older.result.as_deref(), Some("superseded by O-2"));
+        let newer = store.read(|tx| tx.get_op("p", "O-2")).unwrap().unwrap();
+        assert_eq!(newer.state, OpState::Confirmed);
+    }
+
+    #[test]
+    fn a_lane_delivery_still_needs_a_view_of_its_task_and_attempt() {
+        // Unchanged (T-48): any view of a lane's seat is not proof; the view
+        // must show the task and attempt the delivery announced.
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+                let op = tx
+                    .insert_op(&NewOp {
+                        project: "p".into(),
+                        seat: "p:heat".into(),
+                        generation: 1,
+                        kind: OpKind::Deliver,
+                        task: Some("T-1".into()),
+                        attempt: Some(1),
+                        ref_msg: None,
+                        plan_version: None,
+                        payload: serde_json::json!({ "text": "New task T-1" }),
+                        created: T0,
+                    })
+                    .unwrap();
+                tx.set_op_state("p", &op.id, OpState::Executing, None, T0)?;
+                tx.set_op_state("p", &op.id, OpState::Submitted, None, T0)?;
+                tx.insert_view(&gear_store::ViewRecord {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    ts: T0 + 10,
+                    shown_msgs: vec![],
+                    shown_ops: vec![],
+                    shown_task: None,
+                    shown_attempt: None,
+                    shown_contract: None,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let (confirmed, _) = confirm_pending_with(&mut store, "p", 2, 60, &[], T0 + 20).unwrap();
+
+        assert!(confirmed.is_empty(), "a view of the seat alone proves nothing");
+        assert_eq!(store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap().state, OpState::Submitted);
+    }
+
+    /// A lane Deliver op for `task` attempt 1, Submitted, created `created`.
+    fn lane_delivery(tx: &Tx<'_>, task: &str, created: Ts) -> GearResult<()> {
+        let op = tx.insert_op(&NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: OpKind::Deliver,
+            task: Some(task.into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({ "text": format!("New task {task}") }),
+            created,
+        })?;
+        tx.set_op_state("p", &op.id, OpState::Executing, None, created)?;
+        tx.set_op_state("p", &op.id, OpState::Submitted, None, created)?;
+        Ok(())
+    }
+
+    /// A message `sender` sent in `sender_gen` naming `task`/`attempt`.
+    fn seat_message(
+        tx: &Tx<'_>,
+        sender: &str,
+        sender_gen: i64,
+        task: &str,
+        attempt: i64,
+        kind: MsgKind,
+        created: Ts,
+    ) -> GearResult<()> {
+        tx.insert_message(&gear_store::NewMessage {
+            project: "p".into(),
+            thread: format!("{task}:{attempt}"),
+            task: Some(task.into()),
+            attempt: Some(attempt),
+            sender: sender.into(),
+            sender_gen,
+            recipient: "p:captain".into(),
+            kind,
+            urgent: false,
+            body: "work update".into(),
+            reply_to: None,
+            needs_ack: false,
+            state: gear_model::MsgState::Info,
+            created,
+            meta: None,
+        })?;
+        Ok(())
+    }
+
+    fn lane_world() -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)
+            })
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn a_lane_delivery_is_confirmed_by_its_progress_message() {
+        // T-277: a lane that works on the task without ever running `gear`
+        // still received the delivery — its own progress message names the
+        // task and attempt and carries its generation. That message's time is
+        // the evidence, so the engine stops re-delivering the task.
+        let mut store = lane_world();
+        store
+            .write(|tx| {
+                lane_delivery(tx, "T-1", T0)?;
+                seat_message(tx, "p:heat", 1, "T-1", 1, MsgKind::Progress, T0 + 10)
+            })
+            .unwrap();
+
+        let (confirmed, _) = confirm_pending_with(&mut store, "p", 2, 60, &[], T0 + 20).unwrap();
+
+        assert_eq!(confirmed, vec!["O-1".to_string()]);
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Confirmed);
+        assert!(
+            op.result.as_deref().is_some_and(|result| result.contains(&format!("T-1 attempt 1 @ {}", T0 + 10))),
+            "the message's time is the evidence: {:?}",
+            op.result
+        );
+    }
+
+    #[test]
+    fn a_message_for_another_task_or_from_an_older_generation_does_not_confirm() {
+        // T-277: only the seat's word about this very task and attempt, in the
+        // generation the delivery named, proves the delivery arrived.
+        let mut store = lane_world();
+        store
+            .write(|tx| {
+                lane_delivery(tx, "T-1", T0)?;
+                seat_message(tx, "p:heat", 1, "T-2", 1, MsgKind::Progress, T0 + 5)?;
+                seat_message(tx, "p:heat", 1, "T-1", 2, MsgKind::Result, T0 + 6)?;
+                seat_message(tx, "p:heat", 0, "T-1", 1, MsgKind::Question, T0 + 7)?;
+                seat_message(tx, "p:other", 1, "T-1", 1, MsgKind::Progress, T0 + 8)
+            })
+            .unwrap();
+
+        let (confirmed, _) = confirm_pending_with(&mut store, "p", 2, 60, &[], T0 + 20).unwrap();
+
+        assert!(confirmed.is_empty(), "none of these messages is the lane's word on T-1 attempt 1");
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Submitted);
     }
 
     #[test]
@@ -1542,5 +2097,238 @@ mod tests {
 
         assert_eq!(pane.as_deref(), Some(REVIEW_PANE));
         prompt_or_esc(&herdr, REVIEW_PANE, "a working reviewer is cut before its urgent send");
+    }
+
+    // ---- T-371: a delivery that sits unsent in the input box ---------------
+
+    const UNSENT_TEXT: &str = "Continue T-1: run `gear` first";
+
+    /// A lane Deliver op carrying `text`, Submitted, created `created`.
+    fn unsent_delivery(tx: &Tx<'_>, text: &str, created: Ts) -> GearResult<String> {
+        let op = tx.insert_op(&NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: OpKind::Deliver,
+            task: Some("T-1".into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({ "text": text }),
+            created,
+        })?;
+        tx.set_op_state("p", &op.id, OpState::Executing, None, created)?;
+        tx.set_op_state("p", &op.id, OpState::Submitted, None, created)?;
+        Ok(op.id)
+    }
+
+    /// A `pi` agent at [`LANE_PANE`] in `status` whose screen is `tail`.
+    fn unsent_herdr(status: AgentStatus, tail: &str) -> FakeHerdr {
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(LANE_PANE, "pi", status);
+        herdr.set_screen(LANE_PANE, tail);
+        herdr
+    }
+
+    fn enters(herdr: &FakeHerdr, pane: &str) -> usize {
+        herdr
+            .calls
+            .iter()
+            .filter(|call| {
+                matches!(call, Call::SendKeys { pane: p, keys } if p == pane && keys == &["enter".to_string()])
+            })
+            .count()
+    }
+
+    #[test]
+    fn an_unsent_delivery_gets_one_enter_and_never_a_second() {
+        // M-4569: the packet was typed and the Enter was lost; the lane sat
+        // idle with the text in its input box. After 30 s the engine presses
+        // the key once and records it.
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> earlier output\n> Continue T-1: run `gear` first");
+
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap();
+
+        assert_eq!(sent, vec!["O-1".to_string()]);
+        assert_eq!(enters(&herdr, LANE_PANE), 1, "the Enter is pressed once");
+        assert!(
+            herdr.prompts_to(LANE_PANE).is_empty(),
+            "the text is in the input box: it is not typed again"
+        );
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(),
+            Some((T0 + 40).to_string()),
+            "the press is recorded with its time"
+        );
+
+        let again = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 50).unwrap();
+
+        assert!(again.is_empty(), "the op got its Enter already");
+        assert_eq!(enters(&herdr, LANE_PANE), 1, "a second pass sends no key");
+    }
+
+    #[test]
+    fn a_delivery_only_20s_old_gets_no_enter() {
+        // The Enter may still be on its way, or the lane may be about to press
+        // it itself: nothing is pressed in the first 30 s.
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: run `gear` first");
+
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+
+        assert!(sent.is_empty());
+        assert_eq!(enters(&herdr, LANE_PANE), 0);
+        assert_eq!(store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(), None);
+    }
+
+    /// A codex lane whose delivery never reached the input: a named agent
+    /// (a prompt to an unnamed agent is refused) and a screen with the empty
+    /// input placeholder.
+    fn unsent_lost_herdr(status: AgentStatus) -> FakeHerdr {
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(LANE_PANE, "opencode", status, "p-heat");
+        herdr.set_screen(LANE_PANE, "> \n  ? for shortcuts, 0 tokens");
+        herdr
+    }
+
+    #[test]
+    fn a_delivery_that_never_reached_the_input_is_typed_again_once() {
+        // T-404: the op stayed Submitted while the pane showed an empty input
+        // and the agent sat idle — nobody had retyped the lost delivery.
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_lost_herdr(AgentStatus::Idle);
+
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 90).unwrap();
+
+        assert_eq!(sent, vec!["O-1".to_string()]);
+        assert_eq!(
+            herdr.prompts_to(LANE_PANE),
+            vec![UNSENT_TEXT],
+            "the delivery is typed again"
+        );
+        assert_eq!(enters(&herdr, LANE_PANE), 0, "the prompt carries its own Enter");
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.retype.O-1")).unwrap(),
+            Some((T0 + 90).to_string()),
+            "the retype is recorded with its time"
+        );
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(),
+            None,
+            "the Enter path was not the one that ran"
+        );
+
+        let again = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 120).unwrap();
+
+        assert!(again.is_empty(), "the op was typed again already");
+        assert_eq!(herdr.prompts_to(LANE_PANE).len(), 1, "a second pass types nothing");
+    }
+
+    #[test]
+    fn a_delivery_younger_than_the_window_is_not_typed_again() {
+        // The text may still be on its way: nothing is typed in the window.
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_lost_herdr(AgentStatus::Idle);
+
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+
+        assert!(sent.is_empty());
+        assert!(herdr.prompts_to(LANE_PANE).is_empty());
+        assert_eq!(store.read(|tx| tx.get_meta("engine.retype.O-1")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_refused_retype_changes_nothing() {
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_lost_herdr(AgentStatus::Idle);
+
+        herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "injected".into() });
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 90).unwrap();
+
+        assert!(sent.is_empty(), "a refused prompt is no retype");
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.retype.O-1")).unwrap(),
+            None,
+            "and it is not recorded"
+        );
+    }
+
+    #[test]
+    fn a_working_agent_gets_no_enter() {
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_herdr(AgentStatus::Working, "> Continue T-1: run `gear` first");
+
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap();
+
+        assert!(sent.is_empty(), "a working agent is not interrupted");
+        assert_eq!(enters(&herdr, LANE_PANE), 0);
+        assert!(herdr.prompts_to(LANE_PANE).is_empty());
+    }
+
+    #[test]
+    fn a_working_agent_with_an_empty_input_is_not_typed_again() {
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_lost_herdr(AgentStatus::Working);
+
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 90).unwrap();
+
+        assert!(sent.is_empty(), "a working agent is not interrupted");
+        assert!(herdr.prompts_to(LANE_PANE).is_empty(), "nor typed into");
+        assert_eq!(enters(&herdr, LANE_PANE), 0);
+    }
+
+    #[test]
+    fn a_confirmed_delivery_is_never_touched() {
+        let mut store = lane_world();
+        store
+            .write(|tx| {
+                let id = unsent_delivery(tx, UNSENT_TEXT, T0)?;
+                tx.set_op_state("p", &id, OpState::Confirmed, Some("view p:heat/1"), T0 + 5)
+            })
+            .unwrap();
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: run `gear` first");
+
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap();
+
+        assert!(sent.is_empty(), "the lane read its packet");
+        assert_eq!(enters(&herdr, LANE_PANE), 0);
+        assert!(herdr.prompts_to(LANE_PANE).is_empty(), "a confirmed op is not typed again");
+        assert_eq!(store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(), None);
+        assert_eq!(store.read(|tx| tx.get_meta("engine.retype.O-1")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_failed_read_or_a_refused_key_changes_nothing() {
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: run `gear` first");
+
+        herdr.observe_fails = true;
+        assert!(resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap().is_empty());
+        assert_eq!(enters(&herdr, LANE_PANE), 0);
+        assert_eq!(store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(), None);
+        herdr.observe_fails = false;
+
+        herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "injected".into() });
+        assert!(
+            resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap().is_empty(),
+            "a refused key changes nothing"
+        );
+        assert_eq!(store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(), None);
+
+        // The next pass still finds the text and presses the key (the fake
+        // logged the refused attempt, so the successful one is the second).
+        let before = enters(&herdr, LANE_PANE);
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 50).unwrap();
+        assert_eq!(sent, vec!["O-1".to_string()]);
+        assert_eq!(enters(&herdr, LANE_PANE), before + 1, "the retry presses it again");
     }
 }

@@ -1,5 +1,5 @@
 //! The frame of the new board (design §8.1): the title, the time and tasks
-//! bars, the five tabs, the views and the overlay panel.
+//! bars, the four tabs, the views and the overlay panel.
 //!
 //! The prototype of `gear/voyages/M4/board` is the contract for the layout, the
 //! views, the keys and the wording; the data comes from the store.
@@ -9,35 +9,31 @@
 //! drawn over the view (as the prototype draws its window over the board).
 
 use crate::graph;
-use crate::voyage::LaneProjection;
 use crate::idle::IdleReason;
 use crate::style::{lane_color, lane_width, Color, Line, Style};
 use crate::{Board, LaneBoard, ProjectBoard, TaskBoard};
 
-/// The five views of the board: the tabs.
+/// The four views of the board: the tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     /// The lanes, what they do now and what they have left.
     Now,
     /// The work as a graph.
-    Graph,
-    /// The work done and left, per lane.
-    Workload,
-    /// The decisions of the captain.
-    Decisions,
+    Tasks,
     /// The time and the tokens, per task.
-    Tokens,
+    Cost,
+    /// The decisions of the captain.
+    Log,
 }
 
 impl Tab {
-    /// The number of the tab (the keys 1 to 5).
+    /// The number of the tab (the keys 1 to 4).
     pub fn number(self) -> u8 {
         match self {
             Tab::Now => 1,
-            Tab::Graph => 2,
-            Tab::Workload => 3,
-            Tab::Decisions => 4,
-            Tab::Tokens => 5,
+            Tab::Tasks => 2,
+            Tab::Cost => 3,
+            Tab::Log => 4,
         }
     }
 
@@ -45,10 +41,9 @@ impl Tab {
     pub fn title(self) -> &'static str {
         match self {
             Tab::Now => "Now",
-            Tab::Graph => "Graph",
-            Tab::Workload => "Workload",
-            Tab::Decisions => "Decisions",
-            Tab::Tokens => "Time & tokens",
+            Tab::Tasks => "Tasks",
+            Tab::Cost => "Cost",
+            Tab::Log => "Log",
         }
     }
 
@@ -57,14 +52,13 @@ impl Tab {
         format!(" {} {} ", self.number(), self.title())
     }
 
-    /// The tab of a number (the keys 1 to 5).
+    /// The tab of a number (the keys 1 to 4).
     pub fn of_number(number: u8) -> Option<Tab> {
         match number {
             1 => Some(Tab::Now),
-            2 => Some(Tab::Graph),
-            3 => Some(Tab::Workload),
-            4 => Some(Tab::Decisions),
-            5 => Some(Tab::Tokens),
+            2 => Some(Tab::Tasks),
+            3 => Some(Tab::Cost),
+            4 => Some(Tab::Log),
             _ => None,
         }
     }
@@ -72,29 +66,39 @@ impl Tab {
     /// The next tab (the right arrow).
     pub fn next(self) -> Tab {
         match self {
-            Tab::Now => Tab::Graph,
-            Tab::Graph => Tab::Workload,
-            Tab::Workload => Tab::Decisions,
-            Tab::Decisions => Tab::Tokens,
-            Tab::Tokens => Tab::Now,
+            Tab::Now => Tab::Tasks,
+            Tab::Tasks => Tab::Cost,
+            Tab::Cost => Tab::Log,
+            Tab::Log => Tab::Now,
         }
     }
 
     /// The tab before (the left arrow).
     pub fn previous(self) -> Tab {
         match self {
-            Tab::Now => Tab::Tokens,
-            Tab::Graph => Tab::Now,
-            Tab::Workload => Tab::Graph,
-            Tab::Decisions => Tab::Workload,
-            Tab::Tokens => Tab::Decisions,
+            Tab::Now => Tab::Log,
+            Tab::Tasks => Tab::Now,
+            Tab::Cost => Tab::Tasks,
+            Tab::Log => Tab::Cost,
         }
     }
 
     /// Every tab, in the order of the row.
-    pub fn all() -> [Tab; 5] {
-        [Tab::Now, Tab::Graph, Tab::Workload, Tab::Decisions, Tab::Tokens]
+    pub fn all() -> [Tab; 4] {
+        [Tab::Now, Tab::Tasks, Tab::Cost, Tab::Log]
     }
+}
+
+/// What the board shows: the view, the selected row, the folded header and
+/// the size of the terminal.
+///
+/// `detail` is carried for the unfolded header (the `d` key); it is not read
+/// yet.
+pub struct Screen {
+    pub tab: Tab,
+    pub selected: usize,
+    pub detail: bool,
+    pub size: (usize, usize),
 }
 
 /// The row of the tab row (counted from zero).
@@ -109,7 +113,7 @@ pub const FIRST_ROW: usize = VIEW_ROW + 1;
 ///
 /// Short enough for an 80 column terminal: a row that is cut at the edge
 /// hides the end of it, and the end says how to leave.
-pub const FOOTER: &str = "←→ / Tab / 1-5: views · ↑↓ select · Enter: a lane or a task · q quit";
+pub const FOOTER: &str = "←→ / Tab / 1-4 / click: views · click a voyage · [ ] older / newer voyage · d header details · ↑↓ select · Enter: a lane's work / a task's rounds / a lane's tasks · q quit";
 
 /// A screen of characters: the frame, the view and the panel are drawn on it.
 ///
@@ -142,13 +146,17 @@ impl Canvas {
     }
 
     /// Write a text in a style; what was under it loses its own style.
+    ///
+    /// As the prototype's `put` does, the last column is never written: the
+    /// text is cut at `width - x - 1` characters.
     pub fn put_styled(&mut self, x: usize, y: usize, text: &str, style: Style) {
         if y >= self.height {
             return;
         }
+        let last = self.width - 1;
         for (offset, character) in text.chars().enumerate() {
             let column = x + offset;
-            if column >= self.width {
+            if column >= last {
                 break;
             }
             self.cells[y * self.width + column] = character;
@@ -156,18 +164,36 @@ impl Canvas {
         }
     }
 
-    /// Write a line, every character in its own style.
+    /// Write a line, every character in its own style; cut at the last
+    /// column, as [`Canvas::put_styled`] is.
     pub fn put_line(&mut self, x: usize, y: usize, line: &Line) {
         if y >= self.height {
             return;
         }
+        let last = self.width - 1;
         for (offset, (character, style)) in line.cells().enumerate() {
             let column = x + offset;
-            if column >= self.width {
+            if column >= last {
                 break;
             }
             self.cells[y * self.width + column] = character;
             self.styles[y * self.width + column] = style;
+        }
+    }
+
+    /// Copy `count` rows of another canvas: its row `src` to this canvas's
+    /// row `dst`, and so on. Both canvases are cut at their own edge.
+    pub fn copy_rows(&mut self, from: &Canvas, src: usize, dst: usize, count: usize) {
+        let columns = self.width.min(from.width);
+        for index in 0..count {
+            let (source, target) = (src + index, dst + index);
+            if source >= from.height || target >= self.height {
+                break;
+            }
+            for column in 0..columns {
+                self.cells[target * self.width + column] = from.cells[source * from.width + column];
+                self.styles[target * self.width + column] = from.styles[source * from.width + column];
+            }
         }
     }
 
@@ -186,6 +212,36 @@ impl Canvas {
             self.styles[y * self.width + x]
         } else {
             Style::PLAIN
+        }
+    }
+
+    /// The character of a cell; a space outside the canvas.
+    pub fn char_at(&self, x: usize, y: usize) -> char {
+        if x < self.width && y < self.height {
+            self.cells[y * self.width + x]
+        } else {
+            ' '
+        }
+    }
+
+    /// The width of the canvas, in cells.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// The height of the canvas, in cells.
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// Light a whole row in reverse video (the prototype's `hl`): columns 1 to
+    /// `width - 2`, both included; the characters stay.
+    pub fn light_row(&mut self, y: usize) {
+        if y >= self.height {
+            return;
+        }
+        for column in 1..self.width.saturating_sub(1) {
+            self.styles[y * self.width + column] = Style { fg: None, bold: false, reverse: true };
         }
     }
 
@@ -245,57 +301,38 @@ impl Canvas {
 }
 
 /// The whole screen as plain text: the frame, the view and the panel.
-pub fn frame(
-    board: &Board,
-    tab: Tab,
-    selected: usize,
-    panel: Option<&[String]>,
-    size: (usize, usize),
-) -> String {
+pub fn frame(board: &Board, screen: &Screen, panel: Option<&[String]>) -> String {
     let panel: Option<Vec<Line>> =
         panel.map(|rows| rows.iter().map(|row| Line::plain(row.clone())).collect());
-    canvas(board, tab, selected, panel.as_deref(), size).text()
+    canvas(board, screen, panel.as_deref()).text()
 }
 
 /// The whole screen on a canvas, in the prototype's colours.
-pub fn canvas(
-    board: &Board,
-    tab: Tab,
-    selected: usize,
-    panel: Option<&[Line]>,
-    size: (usize, usize),
-) -> Canvas {
-    let (width, height) = size;
+pub fn canvas(board: &Board, screen: &Screen, panel: Option<&[Line]>) -> Canvas {
+    let (width, height) = screen.size;
     let mut canvas = Canvas::new(width, height);
-    header(&mut canvas, board, tab);
+    header(&mut canvas, board, screen.tab);
 
-    let view = view(board, tab, selected);
-    // The view's heading sits on its own row; the rows the user can pick come
-    // after it, and the footer keeps the last row of the screen.
-    canvas.put_line(0, VIEW_ROW, &view.heading);
-    let first = FIRST_ROW;
-    let last = height.saturating_sub(2);
+    // The view paints on a tall canvas, the screen's width: the prototype's
+    // views put their texts at fixed columns, a later one over an earlier one
+    // (README change 13). The screen copies the part the user looks at.
+    let top = VIEW_ROW;
+    let mut tall = Canvas::new(width, 1000);
+    let picks = view(board, screen, &mut tall, top);
     // The selected row stays on the screen: the rows above it scroll away
     // (F8). The offset is the one the mouse hit testing uses.
-    let scroll = scroll_of(view.rows.len(), selected, height);
-    // The rows are drawn from the offset, and the screen row is what is
-    // bounded (F8): bounding the row before the offset dropped the rows the
-    // user scrolled to.
-    for (index, line) in view.rows.iter().enumerate().skip(scroll) {
-        let row = first + (index - scroll);
-        if row >= last {
-            break;
+    let offset = offset_of(&picks, screen.selected, top, height);
+    let last = height.saturating_sub(2);
+    // The footer's row and the row above it stay the frame's.
+    canvas.copy_rows(&tall, top + offset, top, last.saturating_sub(top));
+    // The selected row is lit across the width, in one colour (README change
+    // 13).
+    if let Some(row) = picks.get(screen.selected).map(|row| row.saturating_sub(offset)) {
+        if row >= top && row < last {
+            canvas.light_row(row);
         }
-        canvas.put_line(0, row, line);
     }
-    for (index, line) in view.rest.iter().enumerate() {
-        let row = first + view.rows.len() + index;
-        if row >= last {
-            break;
-        }
-        canvas.put_line(0, row, line);
-    }
-    canvas.put_styled(0, height - 1, FOOTER, Style::fg(Color::Dim));
+    canvas.put_styled(1, height - 1, FOOTER, Style::fg(Color::Dim));
     if let Some(panel) = panel {
         draw_panel(&mut canvas, panel);
     }
@@ -305,14 +342,19 @@ pub fn canvas(
 /// The offset of the first visible row of a view (the viewport, F8).
 ///
 /// The rows above it are scrolled away, so the mouse hit testing adds the
-/// same offset to the row the user clicked.
-pub fn scroll_of(rows: usize, selected: usize, height: usize) -> usize {
-    let first = FIRST_ROW;
+/// same offset to the row the user clicked. The offset is zero while the
+/// selected pick's row is above the footer's spacer, else the smallest offset
+/// that shows it.
+pub fn offset_of(picks: &[usize], selected: usize, top: usize, height: usize) -> usize {
     let last = height.saturating_sub(2);
-    let visible = last.saturating_sub(first);
-    selected
-        .saturating_sub(visible.saturating_sub(1))
-        .min(rows.saturating_sub(visible))
+    let Some(row) = picks.get(selected).copied() else {
+        return 0;
+    };
+    if row < last {
+        0
+    } else {
+        (row - last + 1).min(row.saturating_sub(top))
+    }
 }
 
 /// The head of the board: the title, the time and tasks bars and the tabs.
@@ -324,7 +366,7 @@ fn header(canvas: &mut Canvas, board: &Board, tab: Tab) {
     let voyage = project.and_then(|project| project.voyages.first());
 
     // Row 0: the title and the clock.
-    let title = match (project, voyage) {
+    let mut title = match (project, voyage) {
         (Some(project), Some(voyage)) => format!(
             "GEAR · {} · {}: {}",
             project.project, voyage.milestone, voyage.title
@@ -332,6 +374,14 @@ fn header(canvas: &mut Canvas, board: &Board, tab: Tab) {
         (Some(project), None) => format!("GEAR · {}", project.project),
         _ => "GEAR".to_string(),
     };
+    // A board opened without a project holds the session's projects: the
+    // title says that the others are one key away (T-317).
+    if board.projects.len() > 1 {
+        title.push_str(&format!(
+            " · p: next of {} projects",
+            board.projects.len()
+        ));
+    }
     canvas.put_styled(0, 0, &title, Style::bold());
     if board.engine == crate::EngineState::Down {
         // The engine is down: the next `gear` call starts it. It says so on
@@ -343,9 +393,11 @@ fn header(canvas: &mut Canvas, board: &Board, tab: Tab) {
             Style::fg(Color::Bad),
         );
     }
-    let clock = clock_now();
+    // The clock sits where the prototype puts it, `wd - 8` (T-340 contract v2:
+    // the golden frames are the standard).
+    let clock = crate::idle::clock(board.now);
     canvas.put_styled(
-        canvas.width.saturating_sub(clock.chars().count()),
+        canvas.width.saturating_sub(8),
         0,
         &clock,
         Style::fg(Color::Dim),
@@ -414,7 +466,8 @@ fn header(canvas: &mut Canvas, board: &Board, tab: Tab) {
         );
     }
 
-    // Row 3: the five tabs; the open one is in reverse video, the others dim.
+    // Row 3: the four tabs; the open one is in reverse video, the others
+    // dim.
     let mut x = 1;
     for tab_in_row in Tab::all() {
         let label = tab_in_row.label();
@@ -448,13 +501,6 @@ pub fn tab_at(x: u16) -> Option<Tab> {
         .map(|(_, _, tab)| tab)
 }
 
-/// A view of the board: its heading, the rows the user can pick and the rest.
-pub struct ViewRows {
-    pub heading: Line,
-    pub rows: Vec<Line>,
-    pub rest: Vec<Line>,
-}
-
 /// The selection mark of a row: `›` in the accent colour.
 fn mark(selected: bool) -> Line {
     if selected {
@@ -474,80 +520,116 @@ fn lane_style(project: &ProjectBoard, lane: &str) -> Style {
     Style::fg(lane_color(&lane_order(project), lane))
 }
 
-/// The view of the board.
-pub fn view(board: &Board, tab: Tab, selected: usize) -> ViewRows {
+/// Paint the view of the board on a canvas, at row `top`: the heading on its
+/// own row, the rows of the view from `top + 1`.
+///
+/// The canvas row of every selectable row is returned, in order: the picks.
+/// It is what the selection moves over, and what the selected row is lit on.
+pub fn view(board: &Board, screen: &Screen, canvas: &mut Canvas, top: usize) -> Vec<usize> {
     let Some(project) = board.projects.first() else {
-        return ViewRows {
-            heading: Line::plain("no project in the store"),
-            rows: Vec::new(),
-            rest: Vec::new(),
-        };
+        canvas.put_line(0, top, &Line::plain("no project in the store"));
+        return Vec::new();
     };
-    match tab {
-        Tab::Now => view_now(project, selected),
-        Tab::Graph => {
-            let lines =
-                graph::styled_lines(&project.graph, &project.graph_lanes, Some(selected));
-            let count = project.graph.len();
-            let heading = lines.first().cloned().unwrap_or_default();
-            let rows = lines
-                .get(1..=count)
-                .map(|rows| rows.to_vec())
-                .unwrap_or_default();
-            let rest = lines.get(count + 1..).map(|rest| rest.to_vec()).unwrap_or_default();
-            ViewRows { heading, rows, rest }
-        }
-        Tab::Workload => view_workload(project, selected),
-        Tab::Decisions => view_decisions(project, selected),
-        Tab::Tokens => view_tokens(project, selected),
+    match screen.tab {
+        Tab::Now => view_now(project, board.now, screen, canvas, top),
+        Tab::Tasks => view_tasks(project, screen, canvas, top),
+        Tab::Cost => view_tokens(project, screen, canvas, top),
+        Tab::Log => view_decisions(project, screen, canvas, top),
     }
+}
+
+/// The second view: the work as a graph, painted from the graph's own lines.
+fn view_tasks(
+    project: &ProjectBoard,
+    screen: &Screen,
+    canvas: &mut Canvas,
+    top: usize,
+) -> Vec<usize> {
+    // The graph's own highlighter still knows the selection (its dependency
+    // marks); the reversed cells it draws are the row the canvas lights on its
+    // own, one colour across the width (README change 13).
+    let lines = graph::styled_lines(&project.graph, &project.graph_lanes, Some(screen.selected));
+    let count = project.graph.len();
+    let mut picks = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let row = top + index;
+        canvas.put_line(0, row, line);
+        // The first line is the head of the columns; then one line per task.
+        if (1..=count).contains(&index) {
+            picks.push(row);
+        }
+    }
+    picks
 }
 
 /// The fourth view: the captain's decisions (★ = worth a look at landing) and
 /// the agents' friction reports (the prototype).
-fn view_decisions(project: &ProjectBoard, selected: usize) -> ViewRows {
-    let mut rows = Vec::new();
+fn view_decisions(
+    project: &ProjectBoard,
+    screen: &Screen,
+    canvas: &mut Canvas,
+    top: usize,
+) -> Vec<usize> {
+    canvas.put_line(
+        0,
+        top,
+        &Line::styled("DECISIONS MADE  (★ = worth a look at landing)", Style::bold()),
+    );
+    let mut picks = Vec::new();
+    let mut row = top + 1;
     // The starred decisions are the ones the user reads in full (F1): the
     // others are counted by kind below.
     let starred: Vec<&crate::DecisionBoard> =
         project.decisions.iter().filter(|decision| decision.star).collect();
     for (index, decision) in starred.iter().enumerate() {
-        let picked = index == selected;
-        rows.push(
-            mark(picked)
+        let picked = index == screen.selected;
+        canvas.put_line(
+            0,
+            row,
+            &mark(picked)
                 .push(" ", Style::PLAIN)
                 .push(
                     format!("{} ★ {:<9}", clock_of(&decision.at), decision.kind),
-                    Style::fg(Color::Warn).reversed_if(picked),
+                    Style::fg(Color::Warn),
                 )
                 .push(" ", Style::PLAIN)
-                .push(decision.what.clone(), Style::PLAIN.reversed_if(picked)),
+                .push(decision.what.clone(), Style::PLAIN),
         );
+        // The decision is what the selection moves over; its reason is not.
+        picks.push(row);
+        row += 1;
         // The reason stands on its own line, as the prototype draws it: a
         // decision line with the reason appended loses it on a narrow screen
         // (F2).
         if let Some(why) = &decision.why {
-            rows.push(
-                Line::plain(format!("{:22}", ""))
+            canvas.put_line(
+                0,
+                row,
+                &Line::plain(format!("{:22}", ""))
                     .push(format!("why: {why}"), Style::fg(Color::Dim)),
             );
+            row += 1;
         }
     }
     // The count of the decisions by kind (§7.2): the landing review shows it
     // next to the starred lines.
     if !project.decisions.is_empty() {
-        rows.push(Line::new());
-        rows.push(Line::plain(format!("by kind: {}", counts_of_kind(project))));
+        row += 1;
+        canvas.put_line(0, row, &Line::plain(format!("by kind: {}", counts_of_kind(project))));
+        row += 1;
     }
     // The friction reports the agents left (§6.1): an open one is unread.
-    rows.push(Line::new());
-    rows.push(Line::styled("FRICTION REPORTS FROM AGENTS", Style::bold()));
+    row += 1;
+    canvas.put_line(0, row, &Line::styled("FRICTION REPORTS FROM AGENTS", Style::bold()));
+    row += 1;
     let width = lane_width(project.frictions.iter().map(|friction| friction.lane.as_str()), 6, 1);
     for friction in &project.frictions {
         let (status, color) =
             if friction.closed { ("closed", Color::Dim) } else { ("open", Color::Warn) };
-        rows.push(
-            Line::plain("  ")
+        canvas.put_line(
+            0,
+            row,
+            &Line::plain("  ")
                 .push(
                     format!("{} {:<width$}", friction.task, friction.lane),
                     lane_style(project, &friction.lane),
@@ -555,12 +637,9 @@ fn view_decisions(project: &ProjectBoard, selected: usize) -> ViewRows {
                 .push(format!("{status:<8}"), Style::fg(color))
                 .push(friction.body.clone(), Style::PLAIN),
         );
+        row += 1;
     }
-    ViewRows {
-        heading: Line::styled("DECISIONS MADE  (★ = worth a look at landing)", Style::bold()),
-        rows,
-        rest: Vec::new(),
-    }
+    picks
 }
 
 /// The decisions of the project that are not starred, by kind: `2 scope, 1 cut`.
@@ -593,10 +672,16 @@ fn ratio_color(ratio: f64) -> Color {
     }
 }
 
-/// The fifth view: the time and the tokens of every task that ran (the
+/// The third view: the time and the tokens of every task that ran (the
 /// prototype).
-fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
-    let mut rows = Vec::new();
+fn view_tokens(
+    project: &ProjectBoard,
+    screen: &Screen,
+    canvas: &mut Canvas,
+    top: usize,
+) -> Vec<usize> {
+    let mut picks = Vec::new();
+    let mut row = top + 1;
     let mut tokens_total = 0;
     let mut cache_total = 0;
     let mut cost_total = 0.0;
@@ -608,8 +693,19 @@ fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
     // (the user, 2026-10-28).
     let priced = tasks.iter().any(|(_, task)| task.cost_usd.is_some());
     let width = lane_width(tasks.iter().map(|(lane, _)| *lane), 6, 1);
+    canvas.put_line(
+        0,
+        top,
+        &Line::styled(
+            format!(
+                "  {:<7}{:<width$}{:>5}{:>6}{:>8}{:>8}{:>9}{:>9}{:>9}",
+                "task", "lane", "est", "act", "ratio", "rounds", "tokens", "cache", "cost"
+            ),
+            Style::fg(Color::Dim),
+        ),
+    );
     for (index, (lane, task)) in tasks.into_iter().enumerate() {
-        let picked = index == selected;
+        let picked = index == screen.selected;
         let estimate = task.est_min.unwrap_or(0);
         let actual = task.actual_min.unwrap_or(0);
         let ratio = if estimate > 0 {
@@ -652,9 +748,11 @@ fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
             None if priced => "      ?".to_string(),
             None => String::new(),
         };
-        let row_style = Style::PLAIN.reversed_if(picked);
-        rows.push(
-            mark(picked)
+        let row_style = Style::PLAIN;
+        canvas.put_line(
+            0,
+            row,
+            &mark(picked)
                 .push(" ", Style::PLAIN)
                 .push(format!("{:<7}", task.id), row_style)
                 .push(format!("{lane:<width$}"), lane_style(project, lane))
@@ -668,6 +766,8 @@ fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
                     row_style,
                 ),
         );
+        picks.push(row);
+        row += 1;
     }
     let mut total = format!(
         "so far: {:.1}M tokens, {:.1}M cache reads, {}",
@@ -680,17 +780,11 @@ fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
         total.push_str(&format!(" (known so far; {unknown} unknown)"));
     }
     let rest = vec![Line::styled(total, Style::bold())];
-    ViewRows {
-        heading: Line::styled(
-            format!(
-                "  {:<7}{:<width$}{:>5}{:>6}{:>8}{:>8}{:>9}{:>9}{:>9}",
-                "task", "lane", "est", "act", "ratio", "rounds", "tokens", "cache", "cost"
-            ),
-            Style::fg(Color::Dim),
-        ),
-        rows,
-        rest,
+    for line in &rest {
+        canvas.put_line(0, row, line);
+        row += 1;
     }
+    picks
 }
 
 /// The tasks of the Time & tokens view, in the order of its rows: the tasks
@@ -713,112 +807,6 @@ fn clock_of(at: &str) -> &str {
     at.rsplit(' ').next().unwrap_or(at)
 }
 
-/// The third view: the work done and left, per lane, and the burn-up.
-fn view_workload(project: &ProjectBoard, selected: usize) -> ViewRows {
-    // The voyage the Workload view measures: the active one, else the latest
-    // departed voyage that is finished (the measurements of a landed voyage
-    // are still true, F5).
-    let voyage = project.workload.as_ref();
-    let mut rows = Vec::new();
-    let mut done_total = 0;
-    let mut left_total = 0;
-    let width = lane_width(lane_order(project), 5, 0);
-    for (index, lane) in project.lanes.iter().enumerate() {
-        // The lane's own measurements (the voyage report).
-        let measured = voyage
-            .and_then(|voyage| voyage.lanes.iter().find(|l| l.lane == lane.lane));
-        let empty = LaneProjection {
-            lane: lane.lane.clone(),
-            done_min: 0,
-            done_estimate_min: 0,
-            left_min: 0,
-            left_known: true,
-            done_count: 0,
-            left_count: 0,
-            pace: None,
-            projected_min: None,
-        };
-        let lane = measured.unwrap_or(&empty);
-        let picked = index == selected;
-        // The minutes of estimate (the prototype's view counts the estimates).
-        done_total += lane.done_estimate_min;
-        left_total += lane.left_min;
-        let done_cells = ((lane.done_estimate_min / 8).max(0) as usize).min(14);
-        let left_cells = ((lane.left_min / 8).max(0) as usize).min(14);
-        let bars = done_cells + left_cells;
-        rows.push(
-            mark(picked)
-                .push(" ", Style::PLAIN)
-                .push(
-                    format!("{:<width$}", lane.lane),
-                    lane_style(project, &lane.lane).and_bold().reversed_if(picked),
-                )
-                .push(" ", Style::PLAIN)
-                .push("█".repeat(done_cells), Style::fg(Color::Ok))
-                .push("░".repeat(left_cells), Style::fg(Color::Dim))
-                .push(" ".repeat(14usize.saturating_sub(bars)), Style::PLAIN)
-                .push(
-                    format!(
-                        "done {} ({}m) · left {} ({}m)",
-                        lane.done_count,
-                        lane.done_estimate_min,
-                        lane.left_count,
-                        lane.left_min
-                    ),
-                    Style::PLAIN,
-                ),
-        );
-    }
-    let mut rest = Vec::new();
-    let projected = voyage
-        .and_then(|voyage| voyage.projected_min)
-        .map(hours)
-        .unwrap_or_else(|| "-".into());
-    rest.push(Line::styled(
-        format!(
-            "all lanes: done {done_total}m · left {left_total}m · at the measured pace the last lane ends at {projected}"
-        ),
-        Style::bold(),
-    ));
-    rest.push(Line::new());
-    rest.push(Line::styled(
-        "BURN-UP  (minutes of estimate merged, per voyage hour)",
-        Style::bold(),
-    ));
-    let burn = voyage.map(|voyage| voyage.burn_up.clone()).unwrap_or_default();
-    if !burn.is_empty() {
-        let top = burn.iter().copied().max().unwrap_or(0).max(done_total + left_total);
-        for row in (1..=8).rev() {
-            let level = top as f64 * row as f64 / 8.0;
-            let line: String = burn
-                .iter()
-                .map(|minutes| {
-                    if *minutes as f64 >= level {
-                        " ██ "
-                    } else {
-                        "    "
-                    }
-                })
-                .collect();
-            rest.push(Line::styled(line, Style::fg(Color::Ok)));
-        }
-        rest.push(Line::styled(
-            format!("    ─ total {}m", done_total + left_total),
-            Style::fg(Color::Dim),
-        ));
-        let labels: String = (0..burn.len()).map(|hour| format!(" h{hour:<2}")).collect();
-        rest.push(Line::styled(labels, Style::fg(Color::Dim)));
-    }
-    ViewRows {
-        heading: Line::styled(
-            "WORK DONE AND LEFT, BY LANE  (minutes of estimate)",
-            Style::bold(),
-        ),
-        rows,
-        rest,
-    }
-}
-
 /// The colour of a quota reading: red from 90 %, yellow from 60 %.
 fn quota_color(used_percent: f64) -> Color {
     if used_percent >= 90.0 {
@@ -832,13 +820,31 @@ fn quota_color(used_percent: f64) -> Color {
 
 /// The first view: the lanes, what needs a look, the quota and the done
 /// sentence.
-fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
-    let mut rows = Vec::new();
+fn view_now(
+    project: &ProjectBoard,
+    now: gear_model::Ts,
+    screen: &Screen,
+    canvas: &mut Canvas,
+    top: usize,
+) -> Vec<usize> {
+    canvas.put_line(
+        0,
+        top,
+        &Line::styled("LANES  (Enter: what this lane did and has left)", Style::bold()),
+    );
+    let mut picks = Vec::new();
+    let mut row = top + 1;
     let width = lane_width(lane_order(project), 5, 0);
     for (index, lane) in project.lanes.iter().enumerate() {
-        let picked = index == selected;
+        let picked = index == screen.selected;
         let current = current_task(lane);
         let (middle, middle_style) = match (&lane.idle_text, current) {
+            // A lane that helps on the captain's instruction is shown as
+            // helping, not as idle (T-323).
+            (_, None) if lane.helping.is_some() => (
+                lane.helping.clone().unwrap_or_default(),
+                Style::fg(Color::Acc),
+            ),
             (Some(reason), _) => (format!("idle: {reason}"), Style::fg(Color::Bad)),
             (None, Some(task)) => (
                 format!("{} {}", task.id, task.title.chars().take(32).collect::<String>()),
@@ -858,15 +864,17 @@ fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
             },
             None => (String::new(), Style::PLAIN),
         };
-        rows.push(
-            mark(picked)
+        canvas.put_line(
+            0,
+            row,
+            &mark(picked)
                 .push(" ", Style::PLAIN)
                 .push(
                     format!("{:<width$}", lane.lane),
-                    lane_style(project, &lane.lane).and_bold().reversed_if(picked),
+                    lane_style(project, &lane.lane).and_bold(),
                 )
                 .push(" ", Style::PLAIN)
-                .push(format!("{middle:<44}"), middle_style.reversed_if(picked))
+                .push(format!("{middle:<44}"), middle_style)
                 .push(" ", Style::PLAIN)
                 .push(format!("{measures:>20}"), measures_style)
                 .push(
@@ -877,6 +885,8 @@ fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
                     Style::fg(Color::Dim),
                 ),
         );
+        picks.push(row);
+        row += 1;
     }
     let mut rest = Vec::new();
     // The overlaps with the integration branch (T-188): information lines.
@@ -901,18 +911,29 @@ fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
     rest.push(Line::new());
     rest.push(Line::styled("QUOTA", Style::bold()));
     for reading in &project.quota {
+        // A reading older than half an hour says its age (T-383).
+        let stale = now - reading.read_at;
+        let stale = (stale > 30 * 60).then(|| format!("  (read {} min ago)", stale / 60));
         for window in &reading.windows {
+            // A reset today is a clock time; a later one carries its day.
             let reset = window
                 .resets_at
-                .map(crate::idle::clock)
+                .map(|reset| {
+                    if reset - now <= 24 * 3600 {
+                        crate::idle::clock(reset)
+                    } else {
+                        crate::idle::day_clock(reset)
+                    }
+                })
                 .unwrap_or_else(|| "-".into());
             rest.push(Line::styled(
                 format!(
-                    "  {:<12}{:<6}{} {:>3}% used  resets {reset}",
+                    "  {:<12}{:<6}{} {:>3}% used  resets {reset}{}",
                     reading.provider,
                     window.name,
                     bar(window.used_percent as i64, 100, 14),
-                    window.used_percent.round() as i64
+                    window.used_percent.round() as i64,
+                    stale.as_deref().unwrap_or("")
                 ),
                 Style::fg(quota_color(window.used_percent)),
             ));
@@ -925,11 +946,11 @@ fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
     for clause in done_clauses(project) {
         rest.push(Line::styled(format!("  · {clause}"), Style::fg(Color::Dim)));
     }
-    ViewRows {
-        heading: Line::styled("LANES  (Enter: what this lane did and has left)", Style::bold()),
-        rows,
-        rest,
+    for line in &rest {
+        canvas.put_line(0, row, line);
+        row += 1;
     }
+    picks
 }
 
 /// The task the lane works on now.
@@ -1069,72 +1090,94 @@ fn row_cut(row: &Line, width: usize) -> Line {
 }
 
 /// The lane's panel: what it did, what it does now and what it has left.
-pub fn lane_panel(lane: &LaneBoard) -> Vec<String> {
-    styled_lane_panel(lane, Color::Dim).into_iter().map(|line| line.text).collect()
+///
+/// `tasks` are the graph's records of the project (T-346): the panel shows the
+/// lane's own, each with the stage the store's facts gave it.
+pub fn lane_panel(lane: &LaneBoard, tasks: &[graph::GraphTask]) -> Vec<String> {
+    styled_lane_panel(lane, tasks, Color::Dim).into_iter().map(|line| line.text).collect()
+}
+
+/// Whether the graph task is in the lane's queue: a task a plan left without a
+/// lane shows in the `unassigned` lane.
+fn in_lane(task: &graph::GraphTask, lane: &str) -> bool {
+    if task.lane.is_empty() {
+        lane == "unassigned"
+    } else {
+        task.lane == lane
+    }
 }
 
 /// The lane's panel in the prototype's colours; `color` is the lane's own.
-pub fn styled_lane_panel(lane: &LaneBoard, color: Color) -> Vec<Line> {
+pub fn styled_lane_panel(
+    lane: &LaneBoard,
+    tasks: &[graph::GraphTask],
+    color: Color,
+) -> Vec<Line> {
+    let mine = || tasks.iter().filter(move |task| in_lane(task, &lane.lane));
     let mut rows = vec![
         Line::styled(format!("lane {}", lane.lane), Style::fg(color).and_bold()),
         Line::new(),
         Line::styled("DONE", Style::bold()),
     ];
-    for task in &lane.tasks {
-        if task.state == gear_model::TaskState::Done {
-            rows.push(Line::styled(
-                format!(
-                    "  ● {} {:<30} {}/{}m",
-                    task.id,
-                    task.title.chars().take(30).collect::<String>(),
-                    task.actual_min.unwrap_or(0),
-                    task.est_min.unwrap_or(0)
-                ),
-                Style::fg(Color::Ok),
-            ));
-        }
-    }
-    rows.push(Line::new());
-    rows.push(Line::styled("NOW", Style::bold()));
-    for task in &lane.tasks {
-        let (symbol, stage) = match task.state {
-            gear_model::TaskState::Running => ("◉", graph::GraphStage::Working),
-            gear_model::TaskState::Verifying => ("◎", graph::GraphStage::Review),
-            _ => continue,
+    for task in mine().filter(|task| task.stage == graph::Stage::Merged) {
+        let rounds = if task.rounds > 1 {
+            format!(" {}r", task.rounds)
+        } else {
+            String::new()
         };
         rows.push(Line::styled(
             format!(
-                "  {} {} {:<30} {}",
-                symbol,
+                "  {} {} {:<30} {}/{}m{}",
+                task.stage.symbol(),
                 task.id,
                 task.title.chars().take(30).collect::<String>(),
-                task.state.as_str()
+                task.actual_min.unwrap_or(0),
+                task.est_min.unwrap_or(0),
+                rounds
             ),
-            Style::fg(graph::stage_color(stage)),
+            Style::fg(task.stage.color()),
+        ));
+    }
+    rows.push(Line::new());
+    rows.push(Line::styled("NOW", Style::bold()));
+    for task in mine().filter(|task| task.stage.is_open()) {
+        // The stage says what the task does now, in the prototype's words —
+        // the same words as the lane lines (T-347).
+        rows.push(Line::styled(
+            format!(
+                "  {} {} {:<30} {}",
+                task.stage.symbol(),
+                task.id,
+                task.title.chars().take(30).collect::<String>(),
+                graph::Stage::words_of(
+                    task.stage,
+                    &task.deps,
+                    task.rounds,
+                    task.moved_to.as_deref()
+                )
+            ),
+            Style::fg(task.stage.color()),
         ));
     }
     rows.push(Line::new());
     rows.push(Line::styled("LEFT, in order", Style::bold()));
     let mut left = 0;
     let mut minutes = 0;
-    for task in &lane.tasks {
-        // The tasks that run or wait for their review are in NOW: the panel
-        // shows them once (the prototype's LEFT lists the queued work only).
-        if task.state.is_terminal()
-            || matches!(
-                task.state,
-                gear_model::TaskState::Running | gear_model::TaskState::Verifying
-            )
-        {
-            continue;
-        }
+    for task in mine().filter(|task| matches!(task.stage, graph::Stage::Deps | graph::Stage::Queued))
+    {
         left += 1;
         minutes += task.est_min.unwrap_or(0);
+        let needs = if task.deps.is_empty() {
+            String::new()
+        } else {
+            format!("  needs {}", task.deps.join(","))
+        };
         rows.push(Line::plain(format!(
-            "  ○ {} {:<30} {}m",
+            "  ○ {} {:<30} {}m{}",
             task.id,
             task.title.chars().take(30).collect::<String>(),
-            task.est_min.unwrap_or(0)
+            task.est_min.unwrap_or(0),
+            needs
         )));
     }
     rows.push(Line::styled(
@@ -1181,15 +1224,6 @@ pub fn hours(minutes: i64) -> String {
     } else {
         format!("{}h{:02}m", minutes / 60, (minutes % 60))
     }
-}
-
-/// The clock of the board, as the user's clock sees it.
-fn clock_now() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_secs() as i64)
-        .unwrap_or(0);
-    crate::idle::clock(now)
 }
 
 /// The idle reason of a lane, in words (the board's own).

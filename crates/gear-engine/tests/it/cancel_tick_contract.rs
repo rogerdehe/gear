@@ -65,6 +65,7 @@ fn world() -> (Store, FakeHerdr, EngineCfg) {
                 evidence_due_min: None,
                 body: String::new(),
                 created: T0,
+                mechanical: None,
             })?;
         }
         // The lane is at work on T-1.

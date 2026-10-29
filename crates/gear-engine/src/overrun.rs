@@ -1,6 +1,6 @@
 //! Round clocks and the overrun question (design §5.1–§5.2).
 use gear_herdr::HerdrAct;
-use gear_model::{AttemptState, GearResult, MsgKind, MsgState, SeatState, Ts};
+use gear_model::{AttemptState, GearResult, MsgKind, MsgState, SeatState, TaskState, Ts};
 use gear_store::{NewMessage, RoundKey, RoundRow, Store, Tx};
 use serde_json::{json, Value};
 use crate::EngineCfg;
@@ -57,6 +57,9 @@ fn item(tx: &Tx<'_>, round: &RoundRow, body: &str, urgent: bool, now: Ts) -> Gea
 }
 
 fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool> {
+    // How many rounds a tick looked at (T-406's tests).
+    #[cfg(test)]
+    PROCESSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let Some(attempt) = tx.get_attempt(&round.project, &round.task, round.attempt)? else { return Ok(false) };
     let Some(task) = tx.get_task(&round.project, &round.task)? else { return Ok(false) };
     let times = tx.attempt_times(&round.project, &round.task, round.attempt)?;
@@ -64,14 +67,27 @@ fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool> {
     let start = if review { Some(round.start_at) } else { times.started };
     let Some(start) = start else { return Ok(false) };
     let verdict = if review { tx.get_review_verdict(&round.project, &round.task, round.attempt)?.map(|v| v.created) } else { None };
-    let stop = if review { verdict } else { times.handed_in };
+    // A review round ends when its attempt is settled by anyone (T-381): a
+    // captain's verdict writes neither a review verdict nor an `end_at`, so the
+    // round would stay live for ever, its active time would grow and its
+    // "no answer" item would come back every 15 minutes. A review round is thus
+    // live only while its attempt is still handed in and its task is still with
+    // the reviewer; once it is not, the round stops when it was settled.
+    let settled = review && (attempt.state != AttemptState::Submitted || task.state != TaskState::Verifying);
+    let stop = if review {
+        match verdict {
+            Some(at) => Some(at),
+            None if settled => Some(times.settled.unwrap_or(now)),
+            None => None,
+        }
+    } else { times.handed_in };
     let end = stop.unwrap_or(now).min(round.end_at.unwrap_or(now)).min(now).max(start);
     let pause = paused(tx, round, start, end)?;
     let total_pause = pause.max(round.paused_s);
     if total_pause > round.paused_s { tx.add_round_pause(&round_key(round), total_pause - round.paused_s)?; }
     let active = (end - start - total_pause).max(0);
     tx.set_round_active(&round_key(round), active)?;
-    let live = if review { verdict.is_none() && round.end_at.is_none() } else { matches!(attempt.state, AttemptState::Started | AttemptState::Stopped) && stop.is_none() };
+    let live = if review { verdict.is_none() && round.end_at.is_none() && !settled } else { matches!(attempt.state, AttemptState::Started | AttemptState::Stopped) && stop.is_none() };
     let Some(seat) = tx.get_seat(&round.seat)? else { return Ok(false) };
     let budget = tx.round_budget_min(&round.project, &round.task, round.attempt, &round.role, round.model.as_deref())?;
     let state_key = key(round);
@@ -82,7 +98,7 @@ fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool> {
         state["next_active"] = json!(next);
     }
     state["budget"] = json!(budget);
-    let asked_at = state.get("asked_at").and_then(Value::as_i64);
+    let asked_at = state.get("asked_at").and_then(Value::as_i64).filter(|_| !settled);
     let mut changed = false;
     if let Some(asked) = asked_at {
         let last_id = state["answer_id"].as_str().and_then(|id| id.trim_start_matches("M-").parse::<u64>().ok()).unwrap_or(0);
@@ -109,6 +125,16 @@ fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool> {
         for question in tx.thread_messages(&round.project, &format!("overrun-question:{}:{}:{}", round.task, round.attempt, round.role))? {
             if matches!(question.state, MsgState::Open | MsgState::Waiting) {
                 tx.update_message_state(&round.project, &question.id, MsgState::Resolved, Some("round finished"), None, None, now)?;
+            }
+        }
+        // The round is over because its attempt was settled: its open overrun
+        // item is answered by that settlement and is not asked again (T-381).
+        if settled {
+            for old in tx.thread_messages(&round.project, &format!("overrun:{}:{}", round.task, round.role))? {
+                if old.attempt == Some(round.attempt) && matches!(old.state, MsgState::Open | MsgState::Waiting) {
+                    tx.update_message_state(&round.project, &old.id, MsgState::Resolved, Some("the attempt was settled"), None, None, now)?;
+                    changed = true;
+                }
             }
         }
         tx.set_meta(&state_key, &state.to_string())?;
@@ -152,13 +178,19 @@ fn reconcile_quota_pauses(tx: &Tx<'_>, project: &str) -> GearResult<()> {
     Ok(())
 }
 
+/// The rounds a tick looked at: the counter behind T-406's tests.
+#[cfg(test)]
+static PROCESSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, _cfg: &EngineCfg, now: Ts) -> GearResult<()> {
     let projects = store.read(|tx| tx.project_ids())?;
     for project in projects {
         store.write(|tx| {
             reconcile_quota_pauses(tx, &project)?;
             let mut changed = false;
-            for round in tx.rounds_of_project(&project)? { changed |= process(tx, &round, now)?; }
+            // Only the rounds that can still change (T-406): the open ones and
+            // the ended ones whose overrun item is still owed an answer.
+            for round in tx.rounds_to_process(&project)? { changed |= process(tx, &round, now)?; }
             Ok(changed)
         })?;
         let _ = herdr;
@@ -180,7 +212,7 @@ mod tests {
             testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T)?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "codex", T)?;
             tx.insert_task(&TaskRow { repo:None, base:None, gate:None, rework_estimate_min:None, project:"p".into(), id:"T-1".into(), rank:1, state:TaskState::Ready, priority:"must".into(), lane:Some("heat".into()), milestone:None, required:false, contract_version:1, deps:vec![], followup_of:None, wait_on:None, wait_cond:None, rework_note:None, estimate_min:Some(10), issue:None, updated:T })?;
-            tx.insert_contract(&ContractRow { project:"p".into(), task:"T-1".into(), version:1, goal:"g".into(), accept:"a".into(), evidence_files:vec![], evidence_due_min:None, body:String::new(), created:T })?;
+            tx.insert_contract(&ContractRow { project:"p".into(), task:"T-1".into(), version:1, goal:"g".into(), accept:"a".into(), evidence_files:vec![], evidence_due_min:None, body:String::new(), created:T, mechanical: None, })?;
             gear_app::tasks::start_attempt(tx,"p","T-1","p:heat",1,T)?;
             gear_app::tasks::on_delivery_confirmed(tx,"p","T-1",1,T)?;
             tx.insert_round(&NewRound { key: RoundKey { project:"p".into(), task:"T-1".into(), attempt:1, role:"dev".into() }, seat:"p:heat".into(), generation:1, cli:"codex".into(), model:None, start_at:T })?;
@@ -188,7 +220,17 @@ mod tests {
         }).unwrap(); s
     }
     fn tick_at(s: &mut Store, at:i64) { tick(s, &mut FakeHerdr::new(), &EngineCfg::default(), T+at).unwrap(); }
+
+    /// The world with attempt 1 handed in (Submitted) and its task Verifying:
+    /// what a review round runs on.
+    fn submitted() -> Store {
+        let mut s = world();
+        s.write(|tx| gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, "abc1234", "Report: ops/reports/T-1.md", T+1)).unwrap();
+        s
+    }
     fn messages(s:&mut Store, thread:&str) -> Vec<gear_store::MessageRow> { s.read(|tx| tx.thread_messages("p",thread)).unwrap() }
+    fn processed() -> usize { PROCESSED.load(std::sync::atomic::Ordering::Relaxed) }
+
     fn answer(s:&mut Store, at:i64, left:i64, blocker:&str) {
         s.write(|tx| tx.insert_message(&NewMessage { project:"p".into(), thread:"T-1:1".into(), task:Some("T-1".into()), attempt:Some(1), sender:"p:heat".into(), sender_gen:1, recipient:"p:captain".into(), kind:MsgKind::Progress, urgent:false, body:"work update".into(), reply_to:None, needs_ack:false, state:MsgState::Info, created:T+at, meta:Some(json!({"left":left,"blocker":blocker}).to_string()) }).map(|_| ())).unwrap();
     }
@@ -227,7 +269,7 @@ mod tests {
     }
     #[test]
     fn review_budget_uses_model_history_and_stops_at_verdict() {
-        let mut s = world();
+        let mut s = submitted();
         s.write(|tx| {
             testing::seed_temp_seat(tx, "p", "review-1", "T-1", "w1:p3", "codex", T)?;
             for (n, seconds) in [(2, 1200), (3, 1800), (4, 2400)] {
@@ -286,7 +328,7 @@ mod tests {
     }
     #[test]
     fn progress_before_review_verdict_is_processed_on_the_finished_round() {
-        let mut s=world();
+        let mut s=submitted();
         s.write(|tx| {
             testing::seed_temp_seat(tx,"p","review-1","T-1","w1:p3","codex",T)?;
             tx.insert_round(&NewRound { key:RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:"review".into()},seat:"p:review-1".into(),generation:1,cli:"codex".into(),model:None,start_at:T })
@@ -302,4 +344,130 @@ mod tests {
         assert_eq!(messages(&mut s,"overrun-question:T-1:1:review").len(),1);
     }
 
+    #[test]
+    fn a_settled_attempt_ends_the_review_round_and_resolves_its_item_once() {
+        let mut s=submitted();
+        s.write(|tx| {
+            testing::seed_temp_seat(tx,"p","review-1","T-1","w1:p3","codex",T)?;
+            tx.insert_round(&NewRound { key:RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:"review".into()},seat:"p:review-1".into(),generation:1,cli:"codex".into(),model:None,start_at:T })
+        }).unwrap();
+        // The round asks at its budget (30 min) and, unanswered, writes its item.
+        tick_at(&mut s,1800);
+        assert_eq!(messages(&mut s,"overrun-question:T-1:1:review").len(),1);
+        tick_at(&mut s,2400);
+        let items=messages(&mut s,"overrun:T-1:review");
+        assert_eq!(items.len(),1); assert_eq!(items[0].state,MsgState::Open); assert!(items[0].urgent);
+        // The captain's fail verdict settles the attempt: no review verdict, no end_at.
+        s.write(|tx| gear_app::tasks::settle(tx, &gear_app::tasks::Verdict { project:"p".into(), task:"T-1".into(), attempt:1, contract_version:1, candidate:"abc1234".into(), pass:false, evidence:None, rework:Some("the rows drift right".into()), integrated_by:None, by_seat:"p:captain".into() }, T+2401)).unwrap();
+        tick_at(&mut s,2500);
+        let items=messages(&mut s,"overrun:T-1:review");
+        assert_eq!(items.len(),1);
+        assert_eq!(items[0].state,MsgState::Resolved);
+        assert_eq!(items[0].result.as_deref(),Some("the attempt was settled"));
+        assert_eq!(items[0].resolved,Some(T+2500));
+        let round=s.read(|tx| tx.rounds_of_task("p","T-1")).unwrap().into_iter().find(|r| r.attempt==1 && r.role=="review").unwrap();
+        assert_eq!(round.active_s,2401);
+        // Later ticks ask nothing and write nothing: the item stays resolved once.
+        tick_at(&mut s,6000); tick_at(&mut s,9000);
+        assert_eq!(messages(&mut s,"overrun-question:T-1:1:review").len(),1);
+        let items=messages(&mut s,"overrun:T-1:review");
+        assert_eq!(items.len(),1);
+        assert_eq!(items[0].state,MsgState::Resolved);
+        assert_eq!(items[0].resolved,Some(T+2500));
+    }
+
+    #[test]
+    fn a_queued_answer_after_settlement_writes_no_overrun_item() {
+        let mut s = submitted();
+        s.write(|tx| {
+            testing::seed_temp_seat(tx,"p","review-1","T-1","w1:p3","codex",T)?;
+            tx.insert_round(&NewRound { key:RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:"review".into()},seat:"p:review-1".into(),generation:1,cli:"codex".into(),model:None,start_at:T })
+        }).unwrap();
+        // The round asks at its budget (30 min).
+        tick_at(&mut s,1800);
+        assert_eq!(messages(&mut s,"overrun-question:T-1:1:review").len(),1);
+        // The reviewer's answer is queued at T+1801 and the captain settles the
+        // attempt at T+1802, before the next tick can process the answer.
+        s.write(|tx| {
+            tx.insert_message(&NewMessage {project:"p".into(),thread:"T-1:1".into(),task:Some("T-1".into()),attempt:Some(1),sender:"p:review-1".into(),sender_gen:1,recipient:"p:captain".into(),kind:MsgKind::Progress,urgent:false,body:"review update".into(),reply_to:None,needs_ack:false,state:MsgState::Info,created:T+1801,meta:Some(json!({"left":0,"blocker":"none"}).to_string())})?;
+            gear_app::tasks::settle(tx, &gear_app::tasks::Verdict { project:"p".into(), task:"T-1".into(), attempt:1, contract_version:1, candidate:"abc1234".into(), pass:false, evidence:None, rework:Some("the rows drift right".into()), integrated_by:None, by_seat:"p:captain".into() }, T+1802)
+        }).unwrap();
+        // The settlement already stopped the round: the queued answer writes no
+        // item on this tick or any later one (F1 of the T-381 review).
+        for at in [1803, 1804, 6000, 9000] {
+            tick_at(&mut s, at);
+            assert!(messages(&mut s,"overrun:T-1:review").is_empty(), "no item after the settlement, tick {at}");
+        }
+        // The round's question is closed by the settlement, as before.
+        let questions=messages(&mut s,"overrun-question:T-1:1:review");
+        assert_eq!(questions.len(),1);
+        assert_eq!(questions[0].state,MsgState::Resolved);
+    }
+
+    #[test]
+    fn a_tick_looks_only_at_the_rounds_that_can_still_change() {
+        let mut s = world();
+        s.write(|tx| {
+            // 300 rounds that ended long ago are never looked at again.
+            for n in 0..300 {
+                let key = RoundKey { project:"p".into(), task:format!("T-old-{n}"), attempt:1, role:"dev".into() };
+                tx.insert_round(&NewRound { key:key.clone(), seat:"p:heat".into(), generation:1, cli:"codex".into(), model:None, start_at:T-9000 })?;
+                tx.close_round(&key, T-8000)?;
+            }
+            // A second open round beside the dev round the world starts with.
+            tx.insert_round(&NewRound { key:RoundKey { project:"p".into(), task:"T-1".into(), attempt:2, role:"dev".into() }, seat:"p:heat".into(), generation:1, cli:"codex".into(), model:None, start_at:T })?;
+            Ok(())
+        }).unwrap();
+        PROCESSED.store(0, std::sync::atomic::Ordering::Relaxed);
+        tick_at(&mut s, 600);
+        assert_eq!(processed(), 2, "only the two open rounds");
+    }
+
+    #[test]
+    fn an_ended_round_is_looked_at_while_its_overrun_item_is_open() {
+        let mut s = world();
+        let ended = RoundKey { project:"p".into(), task:"T-1".into(), attempt:1, role:"review".into() };
+        s.write(|tx| {
+            tx.insert_round(&NewRound { key:ended.clone(), seat:"p:heat".into(), generation:1, cli:"codex".into(), model:None, start_at:T-900 })?;
+            tx.close_round(&ended, T-800)?;
+            tx.insert_message(&NewMessage { project:"p".into(), thread:"overrun:T-1:review".into(), task:Some("T-1".into()), attempt:Some(1), sender:"p:heat".into(), sender_gen:1, recipient:"p:captain".into(), kind:MsgKind::System, urgent:true, body:"T-1: budget 10 min; active 10 min; no answer".into(), reply_to:None, needs_ack:false, state:MsgState::Open, created:T-700, meta:None }).map(|_| ())
+        }).unwrap();
+        PROCESSED.store(0, std::sync::atomic::Ordering::Relaxed);
+        tick_at(&mut s, 600);
+        assert_eq!(processed(), 2, "the dev round and the ended review round that still owes an answer");
+        // Its item is answered by that look (T-381): once resolved, the ended
+        // round is no longer looked at.
+        let items = messages(&mut s, "overrun:T-1:review");
+        assert_eq!(items.len(), 1); assert_eq!(items[0].state, MsgState::Resolved);
+        PROCESSED.store(0, std::sync::atomic::Ordering::Relaxed);
+        tick_at(&mut s, 700);
+        assert_eq!(processed(), 1, "only the dev round is left");
+    }
+
+    /// F1 of the T-406 review: the selection must read the project's messages
+    /// once, not once per ended round. Thousands of messages and hundreds of
+    /// ended rounds are a normal project's history; the selection still has to
+    /// be cheap enough for the tick's write.
+    #[test]
+    fn a_long_history_does_not_cost_the_rounds_query() {
+        let mut s = world();
+        s.write(|tx| {
+            for n in 0..300 {
+                let key = RoundKey { project:"p".into(), task:format!("T-old-{n}"), attempt:1, role:"dev".into() };
+                tx.insert_round(&NewRound { key:key.clone(), seat:"p:heat".into(), generation:1, cli:"codex".into(), model:None, start_at:T-9000 })?;
+                tx.close_round(&key, T-8000)?;
+            }
+            for n in 0..10_000 {
+                let task = format!("T-old-{}", n % 300);
+                tx.insert_message(&NewMessage { project:"p".into(), thread:format!("{task}:1"), task:Some(task), attempt:Some(1), sender:"p:heat".into(), sender_gen:1, recipient:"p:captain".into(), kind:MsgKind::Progress, urgent:false, body:"work update".into(), reply_to:None, needs_ack:false, state:MsgState::Info, created:T-9000+n, meta:None })?;
+            }
+            Ok(())
+        }).unwrap();
+        let started = std::time::Instant::now();
+        let rounds = s.read(|tx| tx.rounds_to_process("p")).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(rounds.len(), 1, "only the open round is selected");
+        assert!(elapsed < std::time::Duration::from_millis(500),
+            "the rounds query took {elapsed:?} on 10 000 messages and 300 ended rounds");
+    }
 }

@@ -15,25 +15,57 @@ const TEST_FILE: &str = "tests/lib_test.rs";
 /// A contract file: a test file by another name (T-188).
 const CONTRACT_FILE: &str = "src/thing_contract.rs";
 
+/// The base repo every test starts from: `dev` with the fixture files,
+/// built once per test process and copied per test (conventions "Test time":
+/// a git fixture is built once and a copy costs a copy, not ten git calls).
+fn template() -> &'static Path {
+    static TEMPLATE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    TEMPLATE
+        .get_or_init(|| {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("repo");
+            fs::create_dir(&path).unwrap();
+            git(&path, &["init", "-q", "-b", "dev"]);
+            git(&path, &["config", "user.name", "test"]);
+            git(&path, &["config", "user.email", "a@b"]);
+            git(&path, &["config", "commit.gpgsign", "false"]);
+            git(&path, &["config", "core.hooksPath", "/dev/null"]);
+            for file in [SHARED, "other.rs", "third.rs", SRC, TEST_FILE, CONTRACT_FILE] {
+                let full = path.join(file);
+                if let Some(dir) = full.parent() { fs::create_dir_all(dir).unwrap(); }
+                fs::write(full, "base\n").unwrap();
+            }
+            git(&path, &["add", "."]);
+            git(&path, &["commit", "-qm", "base"]);
+            root
+        })
+        .path()
+        .join("repo")
+        .leak()
+}
+
+/// Copy a tree in this process: a copied fixture costs a copy, not a shell
+/// and a `cp` on the test's budget.
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
 struct Repo { root: tempfile::TempDir, path: PathBuf, base: String }
 impl Repo {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("repo");
-        fs::create_dir(&path).unwrap();
-        git(&path, &["init", "-q", "-b", "dev"]);
-        git(&path, &["config", "user.name", "test"]);
-        git(&path, &["config", "user.email", "a@b"]);
-        git(&path, &["config", "commit.gpgsign", "false"]);
-        git(&path, &["config", "core.hooksPath", "/dev/null"]);
-        for file in [SHARED, "other.rs", "third.rs", SRC, TEST_FILE, CONTRACT_FILE] {
-            let full = path.join(file);
-            if let Some(dir) = full.parent() { fs::create_dir_all(dir).unwrap(); }
-            fs::write(full, "base\n").unwrap();
-        }
-        git(&path, &["add", "."]);
-        git(&path, &["commit", "-qm", "base"]);
-        let base = git(&path, &["rev-parse", "HEAD"]);
+        copy_tree(template(), &path);
+        let base = git(&path, &["rev-parse", "dev"]);
         Self { root, path, base }
     }
     fn branch(&self, name: &str, file: &str) {
@@ -123,18 +155,23 @@ fn scan(store: &mut Store, seconds: i64) -> parallel::Check {
 /// The information line of a task that overlaps the integration branch
 /// (T-188): the board and `gear queue` read it, the captain is not told.
 fn integration_info(store: &mut Store, task: &str) -> Option<String> {
-    store.read(|tx| tx.get_meta(&format!("parallel:p:integration:{task}"))).unwrap()
+    integration_line(store, "p", task)
+}
+/// The information line of one project's task (T-281): a project of the store
+/// may be scanned in the same test.
+fn integration_line(store: &mut Store, project: &str, task: &str) -> Option<String> {
+    store.read(|tx| tx.get_meta(&format!("parallel:{project}:integration:{task}"))).unwrap()
 }
 fn pair_items(store: &mut Store) -> Vec<gear_store::MessageRow> {
     store.read(|tx| tx.thread_messages("p", "parallel:tasks:T-1:T-2")).unwrap()
 }
-fn hand_in(store: &mut Store, task: &str, seat: &str, n: i64, candidate: &str) {
+fn hand_in(store: &mut Store, project: &str, task: &str, seat: &str, n: i64, candidate: &str) {
     store.write(|tx| tx.insert_attempt(&AttemptRow {
         session_ref: None,
         session_cli: None,
         session_action: None,
         sent_at: None,
-        project: "p".into(), task: task.into(), n, seat: seat.into(), generation: 1,
+        project: project.into(), task: task.into(), n, seat: seat.into(), generation: 1,
         contract_version: 1, adopted_version: 1, pending_update: None,
         state: AttemptState::Submitted, candidate: Some(candidate.into()), report: None,
         safe_point: None, started: T0, updated: T0+1,
@@ -253,7 +290,7 @@ fn periodic_scan_and_new_hand_in_trigger_at_their_required_cadence() {
         repo.change("steady/t2", SHARED, "new shared change");
         assert!(scan(&mut store, 599).opened.is_empty(), "not polling on every tick");
         if handoff {
-            hand_in(&mut store, "T-2", "p:steady", 1, &git(&repo.path, &["rev-parse", "steady/t2"]));
+            hand_in(&mut store, "p", "T-2", "p:steady", 1, &git(&repo.path, &["rev-parse", "steady/t2"]));
             assert_eq!(scan(&mut store, 599).opened.len(), 1, "hand-in bypasses interval");
         } else {
             assert_eq!(scan(&mut store, 600).opened.len(), 1, "ten-minute boundary");
@@ -502,7 +539,7 @@ fn a_landed_task_is_not_an_open_change_and_open_tasks_still_pair() {
     // T-1 handed in this commit, and the integration branch merged it.
     let candidate = git(&repo.path, &["rev-parse", "heat/t1"]);
     let mut store = repo.store();
-    hand_in(&mut store, "T-1", "p:heat", 1, &candidate);
+    hand_in(&mut store, "p", "T-1", "p:heat", 1, &candidate);
     git(&repo.path, &["switch", "-q", "dev"]);
     git(&repo.path, &["merge", "-q", "--no-ff", "-m", "merge T-1", "heat/t1"]);
     // Another task landed on the integration branch and touched the same file.
@@ -522,7 +559,7 @@ fn a_landed_task_is_not_an_open_change_and_open_tasks_still_pair() {
     // A newer attempt on T-1 is not merged: T-1 is open again, and two open
     // branches on the same file still pair.
     let rework = git(&repo.path, &["rev-parse", "heat/t1"]);
-    hand_in(&mut store, "T-1", "p:heat", 2, &rework);
+    hand_in(&mut store, "p", "T-1", "p:heat", 2, &rework);
     repo.change("steady/t2", SHARED, "steady shares it");
     assert!(!scan(&mut store, 600).opened.is_empty());
     let pair = pair_items(&mut store);
@@ -607,4 +644,232 @@ fn two_tasks_that_share_a_source_file_make_one_item_once() {
     // The same pair rings once: the next scan opens nothing.
     assert!(scan(&mut store, 600).opened.is_empty());
     assert_eq!(pair_items(&mut store).len(), 1, "one item per pair");
+}
+
+/// T-281: a project of the store on a repo, with the `{project}/{lane}/t{n}`
+/// branch template that T-256 requires of projects sharing a repository: the
+/// branches are p/heat/t1 and q/heat/t1, not heat/t1 twice.
+fn seed_on(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    repo: &Path,
+    panes: &str,
+    lanes: &[&str],
+) -> gear_model::GearResult<()> {
+    testing::seed_project(tx, project, "sess", T0)?;
+    testing::seed_active_seat(tx, project, "captain", SeatRole::Captain, &format!("{panes}:p1"), "codex", T0)?;
+    for (index, lane) in lanes.iter().enumerate() {
+        testing::seed_active_seat(tx, project, lane, SeatRole::Lane, &format!("{panes}:p{}", index + 2), "opencode", T0)?;
+        tx.set_seat_state(&format!("{project}:{lane}"), SeatState::Held, Some("isolated Git scan fixture"), T0)?;
+    }
+    let sections: String = lanes.iter().map(|lane| format!(r#"
+[[lanes]]
+name = "{lane}"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+"#)).collect();
+    let mut row = tx.get_project(project)?.unwrap();
+    row.config_toml = format!(
+        r#"
+[project]
+id = "{project}"
+herdr_session = "sess"
+repo = {repo}
+
+[quota]
+lanes = {count}
+temps = 0
+
+[captain]
+pane = "{panes}:p1"
+kind = "codex"
+profile = "codex"
+{sections}
+[conventions]
+task_branch = "{{project}}/{{lane}}/t{{n}}"
+"#,
+        repo = serde_json::json!(repo.to_string_lossy()).to_string(),
+        count = lanes.len(),
+    );
+    tx.update_project(&row)
+}
+
+fn add_task(tx: &gear_store::Tx<'_>, project: &str, id: &str, rank: i64, lane: &str) -> gear_model::GearResult<()> {
+    tx.insert_task(&TaskRow {
+        repo: None, base: None, gate: None, rework_estimate_min: None,
+        project: project.into(), id: id.into(), rank, state: TaskState::Running,
+        priority: "must".into(), lane: Some(lane.into()), milestone: None, required: false,
+        contract_version: 1, deps: vec![], followup_of: None, wait_on: None,
+        wait_cond: None, rework_note: None, estimate_min: Some(30), issue: None, updated: T0,
+    }).map(|_| ())
+}
+
+/// One store with the given projects, each on the repo it is given (T-281):
+/// two entries with one path are two fleets on one repository, two paths are
+/// two repositories.
+fn shared_store(projects: &[(&str, &Path, &[&str])]) -> Store {
+    let mut store = Store::open_in_memory().unwrap();
+    store.write(|tx| {
+        for (index, (project, repo, lanes)) in projects.iter().enumerate() {
+            seed_on(tx, project, repo, &format!("w{}", index + 1), lanes)?;
+        }
+        Ok(())
+    }).unwrap();
+    store
+}
+
+fn projects_of(store: &mut Store, projects: &[(&str, &str, &str)]) {
+    store.write(|tx| {
+        for (project, id, lane) in projects {
+            add_task(tx, project, id, 1, lane)?;
+        }
+        Ok(())
+    }).unwrap();
+}
+
+/// T-281: two fleets work in one repository. Each project's own pass writes
+/// its own captain the pair, so both captains hear of it before the merge
+/// conflicts, and the item names the other side with its project.
+#[test]
+fn two_projects_on_one_repo_each_hear_of_a_shared_pair() {
+    let repo = Repo::new();
+    repo.branch("p/heat/t1", SRC);
+    repo.branch("q/heat/t1", SRC);
+    let mut store = shared_store(&[
+        ("p", repo.path.as_path(), &["heat"]),
+        ("q", repo.path.as_path(), &["heat"]),
+    ]);
+    projects_of(&mut store, &[("p", "T-1", "heat"), ("q", "T-1", "heat")]);
+
+    let for_p = parallel::check(&mut store, "p", T0).unwrap();
+    assert!(for_p.problems.is_empty(), "{:?}", for_p.problems);
+    assert_eq!(for_p.opened.len(), 1, "{for_p:?}");
+    let item = store.read(|tx| tx.get_message("p", &for_p.opened[0])).unwrap().unwrap();
+    assert_eq!(item.recipient, "p:captain");
+    assert!(
+        item.body.starts_with("parallel changes: T-1 (heat) and T-1 (q/heat) share files:"),
+        "{}",
+        item.body
+    );
+    assert!(item.body.contains(SRC), "{}", item.body);
+
+    let for_q = parallel::check(&mut store, "q", T0).unwrap();
+    assert_eq!(for_q.opened.len(), 1, "{for_q:?}");
+    let item = store.read(|tx| tx.get_message("q", &for_q.opened[0])).unwrap().unwrap();
+    assert_eq!(item.recipient, "q:captain");
+    assert!(item.body.contains("T-1 (heat) and T-1 (p/heat)"), "{}", item.body);
+    assert!(item.body.contains(SRC), "{}", item.body);
+
+    // The pair rings once for each captain: the next pass opens nothing.
+    assert!(parallel::check(&mut store, "p", T0 + 600).unwrap().opened.is_empty());
+    assert!(parallel::check(&mut store, "q", T0 + 600).unwrap().opened.is_empty());
+}
+
+/// T-281: a project on another repository shares no file, even under the same
+/// name: only projects whose lane works in the same directory are compared.
+#[test]
+fn a_project_working_in_another_repository_is_not_paired() {
+    let repo = Repo::new();
+    let elsewhere = Repo::new();
+    repo.branch("p/heat/t1", SRC);
+    elsewhere.branch("r/heat/t1", SRC);
+    let mut store = shared_store(&[
+        ("p", repo.path.as_path(), &["heat"]),
+        ("r", elsewhere.path.as_path(), &["heat"]),
+    ]);
+    projects_of(&mut store, &[("p", "T-1", "heat"), ("r", "T-1", "heat")]);
+
+    let for_p = parallel::check(&mut store, "p", T0).unwrap();
+    assert!(for_p.problems.is_empty(), "{:?}", for_p.problems);
+    assert!(for_p.opened.is_empty(), "one file name in two repositories is not one file: {for_p:?}");
+    assert!(parallel::check(&mut store, "r", T0).unwrap().opened.is_empty());
+}
+
+/// T-281: another project's two tasks are that project's pair. This project's
+/// captain is not told about work it does not share.
+#[test]
+fn two_tasks_of_another_project_alone_raise_no_item_here() {
+    let repo = Repo::new();
+    repo.branch("p/heat/t1", "other.rs");
+    repo.branch("q/heat/t1", SRC);
+    repo.branch("q/steady/t2", SRC);
+    let mut store = shared_store(&[
+        ("p", repo.path.as_path(), &["heat"]),
+        ("q", repo.path.as_path(), &["heat", "steady"]),
+    ]);
+    projects_of(&mut store, &[
+        ("p", "T-1", "heat"),
+        ("q", "T-1", "heat"),
+        ("q", "T-2", "steady"),
+    ]);
+
+    assert!(
+        parallel::check(&mut store, "p", T0).unwrap().opened.is_empty(),
+        "another project's own pair is not this captain's item"
+    );
+    // q hears of its own pair: each project's own pass writes its item.
+    let for_q = parallel::check(&mut store, "q", T0).unwrap();
+    assert_eq!(for_q.opened.len(), 1, "{for_q:?}");
+    let item = store.read(|tx| tx.get_message("q", &for_q.opened[0])).unwrap().unwrap();
+    assert!(item.body.contains("T-1 (heat) and T-2 (steady)"), "{}", item.body);
+}
+
+/// T-281: another project's hand-in restarts this project's scan inside the
+/// back-off period: the work it just handed in may share a file now.
+#[test]
+fn another_projects_hand_in_restarts_this_projects_scan() {
+    let repo = Repo::new();
+    repo.branch("p/heat/t1", SRC);
+    repo.branch("q/heat/t1", "other.rs");
+    let mut store = shared_store(&[
+        ("p", repo.path.as_path(), &["heat"]),
+        ("q", repo.path.as_path(), &["heat"]),
+    ]);
+    projects_of(&mut store, &[("p", "T-1", "heat"), ("q", "T-1", "heat")]);
+    assert!(parallel::check(&mut store, "p", T0).unwrap().opened.is_empty());
+    assert!(
+        parallel::check(&mut store, "p", T0 + 599).unwrap().opened.is_empty(),
+        "unchanged, so the back-off holds"
+    );
+
+    // q hands in work that now changes the same file.
+    repo.change("q/heat/t1", SRC, "q shares it now");
+    let candidate = git(&repo.path, &["rev-parse", "q/heat/t1"]);
+    hand_in(&mut store, "q", "T-1", "q:heat", 1, &candidate);
+    let checked = parallel::check(&mut store, "p", T0 + 599).unwrap();
+    assert_eq!(
+        checked.opened.len(),
+        1,
+        "another project's hand-in bypasses the interval: {checked:?}"
+    );
+    let item = store.read(|tx| tx.get_message("p", &checked.opened[0])).unwrap().unwrap();
+    assert!(item.body.contains("T-1 (heat) and T-1 (q/heat)"), "{}", item.body);
+    assert!(item.body.contains(SRC), "{}", item.body);
+}
+
+/// T-281: an overlap with the integration branch is the task's own project's
+/// information line. This project's scan records none for another project's
+/// task, whose id may even be the same.
+#[test]
+fn another_projects_integration_overlap_is_its_own_information_line() {
+    let repo = Repo::new();
+    repo.branch("p/heat/t1", "other.rs");
+    repo.branch("q/heat/t1", SRC);
+    repo.change("dev", SRC, "integration changed it");
+    let mut store = shared_store(&[
+        ("p", repo.path.as_path(), &["heat"]),
+        ("q", repo.path.as_path(), &["heat"]),
+    ]);
+    projects_of(&mut store, &[("p", "T-1", "heat"), ("q", "T-1", "heat")]);
+
+    assert!(parallel::check(&mut store, "p", T0).unwrap().opened.is_empty());
+    assert!(
+        integration_line(&mut store, "p", "T-1").is_none(),
+        "another project's overlap is not this project's line"
+    );
+    assert!(parallel::check(&mut store, "q", T0).unwrap().opened.is_empty());
+    let line = integration_line(&mut store, "q", "T-1").expect("its own project's information line");
+    assert!(line.contains(SRC), "{line}");
 }

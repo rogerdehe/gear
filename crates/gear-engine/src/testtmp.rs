@@ -1,0 +1,56 @@
+//! Scratch directories of the unit tests, removed when the test is done
+//! (T-412).
+//!
+//! The system temp directory held about 168 000 directories left by test runs
+//! (2026-10-29); a passing run must leave none of its own behind. A test's
+//! directories are registered here and removed when its thread ends — the
+//! test harness gives every test its own thread, and the engine's runs pass
+//! `TMPDIR=target/tmp`, so nothing reaches the system disk in the first place.
+
+use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Which test thread asked first: one number per thread of the test binary.
+static THREADS: AtomicU64 = AtomicU64::new(0);
+
+/// The directories one test made, removed when that test is done.
+struct Made {
+    /// The number of this thread, given at its first scratch directory.
+    thread: Cell<Option<u64>>,
+    /// The directories it made, by name: the same name is the same directory.
+    dirs: RefCell<Vec<(String, PathBuf)>>,
+}
+
+impl Drop for Made {
+    fn drop(&mut self) {
+        for (_, dir) in self.dirs.borrow().iter() {
+            std::fs::remove_dir_all(dir).ok();
+        }
+    }
+}
+
+thread_local! {
+    static MADE: Made = const { Made { thread: Cell::new(None), dirs: RefCell::new(Vec::new()) } };
+}
+
+/// A fresh scratch directory under the temp directory, unique to this test
+/// and this name: the same name in one test is the same directory, as it was
+/// before (T-412).
+pub(crate) fn temp(name: &str) -> PathBuf {
+    MADE.with(|made| {
+        if let Some((_, dir)) = made.dirs.borrow().iter().find(|(named, _)| named == name) {
+            return dir.clone();
+        }
+        let thread = made.thread.get().unwrap_or_else(|| {
+            let thread = THREADS.fetch_add(1, Ordering::Relaxed);
+            made.thread.set(Some(thread));
+            thread
+        });
+        let dir = std::env::temp_dir().join(format!("{name}-{}-{thread}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        made.dirs.borrow_mut().push((name.to_string(), dir.clone()));
+        dir
+    })
+}

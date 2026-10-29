@@ -4,9 +4,13 @@
 //! The fixture is the prototype's fake data: the tasks of the lanes, their
 //! dependencies, the rounds and the merges.
 
-use gear_board::graph::{lines, panel, tasks};
-use gear_model::{AttemptState, SeatRole, TaskState};
-use gear_store::{testing, AttemptRow, NewRound, RoundKey, Store, TaskRow};
+use gear_board::frame::lane_panel;
+use gear_board::graph::{lines, panel, tasks, GraphTask, Stage};
+use gear_board::style::Color;
+use gear_model::{AttemptState, MsgKind, MsgState, OpKind, OpState, SeatRole, TaskState};
+use gear_store::{
+    testing, AttemptRow, NewMessage, NewOp, NewRound, RoundKey, Store, TaskRow,
+};
 
 const T0: i64 = 1_793_016_000; // 2026-10-26T12:00:00Z
 
@@ -189,6 +193,7 @@ fn world() -> Store {
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 if task.id == "T-141" {
                     // The task was accepted: it waits for its merge.
@@ -206,6 +211,15 @@ fn world() -> Store {
                 }
                 for round in 1..=task.rounds {
                     let started = task.merged.unwrap_or(moment(12, 0)) - task.actual * 60;
+                    // The attempt says what the task does: a running one is
+                    // started, a task that waits for its verdict is handed
+                    // in, and an accepted one passed.
+                    let state = match task.state {
+                        TaskState::Running => AttemptState::Started,
+                        TaskState::Verifying if task.id == "T-141" => AttemptState::Accepted,
+                        TaskState::Verifying => AttemptState::Submitted,
+                        _ => AttemptState::Accepted,
+                    };
                     tx.insert_attempt(&AttemptRow {
                         project: "p".into(),
                         task: task.id.into(),
@@ -215,7 +229,7 @@ fn world() -> Store {
                         contract_version: 1,
                         adopted_version: 1,
                         pending_update: None,
-                        state: AttemptState::Accepted,
+                        state,
                         candidate: None,
                         report: None,
                         safe_point: None,
@@ -258,10 +272,10 @@ fn the_graph_has_the_columns_of_the_prototype() {
     assert_eq!(
         ids,
         vec![
-            "T-148", "T-150", "T-151", "T-143", "T-144", "T-141", "T-142", "T-139", "T-136", "T-135"
+            "T-148", "T-150", "T-151", "T-141", "T-142", "T-143", "T-144", "T-139", "T-136", "T-135"
         ]
-        // T-141 is being merged and T-142 waits for its verdict: they stand
-        // next to each other, in the order of the plan (review F2).
+        // T-141 passed and T-142 waits for a reviewer: the open tasks follow
+        // the queued ones, in the order of the plan.
     );
 
     let lines = lines(&tasks, &lanes, None);
@@ -283,7 +297,8 @@ fn the_graph_has_the_columns_of_the_prototype() {
     assert!(row.contains("station projection per lane"), "{row:?}");
     // The legend at the end.
     let legend = lines.last().unwrap();
-    assert!(legend.contains("○ queued"), "{legend:?}");
+    assert!(legend.contains("○ not started"), "{legend:?}");
+    assert!(legend.contains("◌ delivered"), "{legend:?}");
     assert!(legend.contains("↺ reworked"), "{legend:?}");
 }
 
@@ -322,22 +337,22 @@ fn a_task_in_review_draws_the_line_of_the_review() {
         .unwrap();
     let lines = lines(&tasks, &lanes, None);
 
-    // T-142 waits for its verdict: the review column reaches its lane
+    // T-142 waits for its reviewer: the review column reaches its lane
     // (hull, the second column).
     let row = line_of(&lines, "T-142");
     assert_eq!(at(row, 9, 1), "◎", "{row:?}");
     // The deck's lane line crosses the line of the review.
     assert_eq!(at(row, 10, 11), "─────│─────", "{row:?}");
     assert_eq!(at(row, 21, 1), "◎", "{row:?}");
-    assert!(row.contains("in review"), "{row:?}");
+    assert!(row.contains("handed in, waits for a reviewer"), "{row:?}");
 
-    // T-141 was accepted and waits for its merge: the same line, and the info
-    // column says so.
+    // T-141 passed and waits to merge: the same line, and the info column
+    // says so.
     let row = line_of(&lines, "T-141");
-    assert_eq!(at(row, 9, 1), "◎", "{row:?}");
+    assert_eq!(at(row, 9, 1), "◍", "{row:?}");
     assert_eq!(at(row, 10, 5), "─────", "{row:?}");
-    assert_eq!(at(row, 15, 1), "◎", "{row:?}");
-    assert!(row.contains("merging"), "{row:?}");
+    assert_eq!(at(row, 15, 1), "◍", "{row:?}");
+    assert!(row.contains("passed, waits to merge"), "{row:?}");
 }
 
 #[test]
@@ -445,13 +460,18 @@ fn at(row: &str, from: usize, len: usize) -> String {
     row.chars().skip(from).take(len).collect()
 }
 
-/// The line of a task in the graph: the row whose id stands in the text
-/// column (a row may name other tasks in its marks).
+/// The line of a task in the graph: the row whose id stands in the id column
+/// (a row may name other tasks in its info and in its marks).
 fn line_of<'a>(lines: &'a [String], task: &str) -> &'a str {
     let needle = format!(" {task} ");
     lines
         .iter()
-        .find(|line| line.contains(&needle))
+        .find(|line| {
+            // The column of the id, in characters (the box signs are more
+            // than one byte).
+            line.match_indices(&needle)
+                .any(|(byte, _)| line[..byte].chars().count() < 60)
+        })
         .map(String::as_str)
         .unwrap_or_else(|| panic!("no line for {task}"))
 }
@@ -521,4 +541,342 @@ fn review_round(store: &mut Store, task: &str, passed: Option<bool>) {
             Ok(())
         })
         .unwrap();
+}
+
+// ---------------------------------------------------------------- T-346: the
+// sixteen stages of a task, from the facts the store already has.
+
+/// The store of the stage rules: one task per stage, built once.
+///
+/// T-1 is a dependency that is not merged yet; T-20 waits for it. T-21 works,
+/// T-22 asked a question, T-23 was delivered and not started. T-24 was sent
+/// back and T-25 reworks on attempt 2. T-26's merge runs, T-27's merge failed
+/// and T-28 passed. T-29 waits for a reviewer, T-30 is in review and T-31
+/// waits for the captain's verdict. T-32 is merged.
+fn stage_world() -> Store {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p0", "codex", T0)?;
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p1", "pi", T0)?;
+            let tasks: Vec<(&str, TaskState, Vec<&str>)> = vec![
+                ("T-1", TaskState::Ready, vec![]),
+                ("T-20", TaskState::Ready, vec!["T-1"]),
+                ("T-21", TaskState::Running, vec![]),
+                ("T-22", TaskState::Running, vec![]),
+                ("T-23", TaskState::Running, vec![]),
+                ("T-24", TaskState::Running, vec![]),
+                ("T-25", TaskState::Running, vec![]),
+                ("T-26", TaskState::Verifying, vec![]),
+                ("T-27", TaskState::Verifying, vec![]),
+                ("T-28", TaskState::Verifying, vec![]),
+                ("T-29", TaskState::Verifying, vec![]),
+                ("T-30", TaskState::Verifying, vec![]),
+                ("T-31", TaskState::Verifying, vec![]),
+                ("T-32", TaskState::Done, vec![]),
+            ];
+            for (rank, (id, state, deps)) in tasks.iter().enumerate() {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.to_string(),
+                    rank: rank as i64 + 1,
+                    state: *state,
+                    priority: "must".into(),
+                    lane: Some("hull".into()),
+                    milestone: Some("M5".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: deps.iter().map(|dep| dep.to_string()).collect(),
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(20),
+                    issue: None,
+                    updated: T0,
+                })?;
+            }
+            // The attempts of the tasks: the state of the newest one is the
+            // fact the stage rules read.
+            let attempts: Vec<(&str, i64, AttemptState)> = vec![
+                ("T-21", 1, AttemptState::Started),
+                ("T-22", 1, AttemptState::Started),
+                ("T-23", 1, AttemptState::Delivered),
+                ("T-24", 1, AttemptState::Rejected),
+                ("T-25", 1, AttemptState::Rejected),
+                ("T-25", 2, AttemptState::Started),
+                ("T-26", 1, AttemptState::Accepted),
+                ("T-27", 1, AttemptState::Accepted),
+                ("T-28", 1, AttemptState::Accepted),
+                ("T-29", 1, AttemptState::Submitted),
+                ("T-30", 1, AttemptState::Submitted),
+                ("T-31", 1, AttemptState::Submitted),
+            ];
+            for (id, n, state) in &attempts {
+                let started = moment(12, 0);
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: id.to_string(),
+                    n: *n,
+                    seat: "p:hull".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: *state,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started,
+                    updated: started,
+                })?;
+                tx.set_attempt_time("p", id, *n, gear_store::AttemptStep::Started, started)?;
+            }
+            // The passed verdicts of the tasks that wait for their merge.
+            for id in ["T-26", "T-27", "T-28"] {
+                tx.insert_verdict(&gear_store::VerdictRow {
+                    project: "p".into(),
+                    task: id.into(),
+                    attempt: 1,
+                    contract_version: 1,
+                    candidate: "abc1234".into(),
+                    passed: true,
+                    evidence: None,
+                    by_seat: "p:captain".into(),
+                    created: moment(12, 10),
+                })?;
+            }
+            // The merge op of T-26 runs; the merge op of T-27 failed.
+            for (id, state) in [("T-26", OpState::Executing), ("T-27", OpState::Failed)] {
+                let op = tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:captain".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some(id.into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({}),
+                    created: moment(12, 15),
+                })?;
+                tx.set_op_state("p", &op.id, state, None, moment(12, 16))?;
+            }
+            // The reviewer of T-30 holds the task; T-31's reviewer handed its
+            // verdict in.
+            testing::seed_temp_seat(tx, "p", "review-1", "T-30", "w1:p5", "codex", T0)?;
+            tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                project: "p".into(),
+                task: "T-31".into(),
+                attempt: 1,
+                passed: true,
+                findings: String::new(),
+                by_seat: "p:review-2".into(),
+                created: moment(12, 20),
+            })?;
+            // T-22 asked the captain and waits for the answer.
+            tx.insert_message(&NewMessage {
+                project: "p".into(),
+                thread: "T-22:1".into(),
+                task: Some("T-22".into()),
+                attempt: Some(1),
+                sender: "p:hull".into(),
+                sender_gen: 1,
+                recipient: "p:captain".into(),
+                kind: MsgKind::Question,
+                urgent: false,
+                body: "which one?".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: moment(12, 5),
+                meta: None,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// The stage and the words of a task of the stage fixture.
+fn stage_and_words(store: &mut Store, task: &str) -> (Stage, String) {
+    let (found, words) = store
+        .read(|tx| {
+            let tasks = tasks(tx, "p", T0)?;
+            let found = tasks
+                .iter()
+                .find(|found| found.id == task)
+                .map(|found| found.stage);
+            let words = tasks
+                .iter()
+                .find(|found| found.id == task)
+                .map(Stage::words);
+            Ok((found, words))
+        })
+        .unwrap();
+    (found.unwrap_or_else(|| panic!("no task {task}")), words.unwrap_or_default())
+}
+
+#[test]
+fn each_stage_comes_from_a_fact_of_the_store() {
+    let mut store = stage_world();
+    let table: [(&str, Stage, &str); 14] = [
+        ("T-20", Stage::Deps, "waits for T-1 to merge"),
+        ("T-1", Stage::Queued, "queued"),
+        ("T-23", Stage::Delivered, "delivered, not started"),
+        ("T-21", Stage::Working, "working"),
+        ("T-22", Stage::Asking, "waits for the captain's answer"),
+        ("T-29", Stage::Handed, "handed in, waits for a reviewer"),
+        ("T-30", Stage::Review, "in review"),
+        ("T-31", Stage::Verdict, "waits for the captain's verdict"),
+        ("T-24", Stage::SentBack, "sent back, rework queued"),
+        ("T-25", Stage::Rework, "reworking (round 2)"),
+        ("T-28", Stage::Passed, "passed, waits to merge"),
+        ("T-26", Stage::Merging, "merging (gate running)"),
+        ("T-27", Stage::MergeFailed, "merge failed, waits for the captain"),
+        ("T-32", Stage::Merged, "merged"),
+    ];
+    for (task, stage, words) in table {
+        let (found, said) = stage_and_words(&mut store, task);
+        assert_eq!(found, stage, "{task}");
+        assert_eq!(said, words, "{task}");
+    }
+}
+
+/// F2 of the T-346 review: a newest attempt that was abandoned counts as no
+/// attempt — it does not resurrect the older one.
+#[test]
+fn an_abandoned_newest_attempt_counts_as_no_attempt() {
+    let mut store = stage_world();
+    let mut abandoned = store
+        .read(|tx| tx.attempts_of_task("p", "T-21"))
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("T-21 has its attempt");
+    abandoned.n = 2;
+    abandoned.state = AttemptState::Abandoned;
+    store.write(|tx| tx.insert_attempt(&abandoned)).unwrap();
+    let (stage, words) = stage_and_words(&mut store, "T-21");
+    assert_eq!(stage, Stage::Queued, "the abandoned attempt is no attempt");
+    assert_eq!(words, "queued");
+}
+
+/// F1 of the T-346 review: the lane panel shows each task in the stage the
+/// graph gave it, not one of five words repeated (the prototype's
+/// `lane_panel`).
+#[test]
+fn the_lane_panel_shows_each_task_in_its_stage() {
+    let mut store = stage_world();
+    let board = gear_board::build(
+        &mut store,
+        &gear_board::Options { project: Some("p".into()), ..Default::default() },
+        T0,
+    )
+    .unwrap();
+    let lane = board.projects[0]
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "hull")
+        .expect("the hull lane");
+    let text = lane_panel(lane, &board.projects[0].graph).join("\n");
+    let row = |task: &str| -> String {
+        text.lines()
+            .find(|line| line.contains(&format!(" {task} ")))
+            .unwrap_or_else(|| panic!("no row for {task} in\n{text}"))
+            .to_string()
+    };
+    // Handed and Review are told apart: the same `◎` but not the same words.
+    assert!(row("T-29").starts_with("  ◎ T-29 "), "{text}");
+    assert!(row("T-29").ends_with("handed in, waits for a reviewer"), "{text}");
+    assert!(row("T-30").starts_with("  ◎ T-30 "), "{text}");
+    assert!(row("T-30").ends_with("in review"), "{text}");
+    // A failed merge is not a merge that runs.
+    assert!(row("T-27").starts_with("  ✗ T-27 "), "{text}");
+    assert!(row("T-27").ends_with("merge failed, waits for the captain"), "{text}");
+    // The rework says which round it is, and a question is not work.
+    assert!(row("T-25").starts_with("  ↺ T-25 "), "{text}");
+    assert!(row("T-25").ends_with("reworking (round 2)"), "{text}");
+    assert!(row("T-22").starts_with("  ◉ T-22 "), "{text}");
+    assert!(row("T-22").ends_with("waits for the captain's answer"), "{text}");
+    // The queued work lists what it waits for.
+    assert!(row("T-20").contains("needs T-1"), "{text}");
+    assert!(text.contains("left: 2 tasks, 40m of estimates"), "{text}");
+}
+
+#[test]
+fn the_sixteen_stages_have_their_symbols_colours_and_words() {
+    let open = [
+        Stage::Delivered,
+        Stage::Working,
+        Stage::Asking,
+        Stage::Handed,
+        Stage::Review,
+        Stage::Verdict,
+        Stage::SentBack,
+        Stage::Rework,
+        Stage::Passed,
+        Stage::Merging,
+        Stage::MergeFailed,
+    ];
+    let table = [
+        (Stage::Deps, "○", Color::Dim),
+        (Stage::Queued, "○", Color::Dim),
+        (Stage::Delivered, "◌", Color::Dim),
+        (Stage::Working, "◉", Color::Warn),
+        (Stage::Asking, "◉", Color::Warn),
+        (Stage::Handed, "◎", Color::Acc),
+        (Stage::Review, "◎", Color::Acc),
+        (Stage::Verdict, "◎", Color::Warn),
+        (Stage::SentBack, "↺", Color::Bad),
+        (Stage::Rework, "↺", Color::Warn),
+        (Stage::Passed, "◍", Color::Acc),
+        (Stage::Merging, "◍", Color::Acc),
+        (Stage::MergeFailed, "✗", Color::Bad),
+        (Stage::Merged, "●", Color::Ok),
+        (Stage::Failed, "✗", Color::Bad),
+        (Stage::Moved, "→", Color::Dim),
+    ];
+    for (stage, symbol, color) in table {
+        assert_eq!(stage.symbol(), symbol, "{stage:?}");
+        assert_eq!(stage.color(), color, "{stage:?}");
+        assert_eq!(stage.is_open(), open.contains(&stage), "{stage:?}");
+    }
+    // The words of the two stages the store here cannot give: a failed task is
+    // not in the flow and a moved one has another milestone.
+    let failed = GraphTask {
+        stage: Stage::Failed,
+        moved_to: None,
+        deps: Vec::new(),
+        rounds: 3,
+        ..sample()
+    };
+    assert_eq!(Stage::words(&failed), "failed (rounds used up)");
+    let moved = GraphTask { stage: Stage::Moved, moved_to: Some("M6".into()), ..sample() };
+    assert_eq!(Stage::words(&moved), "moved to M6");
+}
+
+/// A task of the fixture, for the words of a stage.
+fn sample() -> GraphTask {
+    GraphTask {
+        id: "T-1".into(),
+        lane: "hull".into(),
+        stage: Stage::Queued,
+        moved_to: None,
+        title: "one step".into(),
+        est_min: Some(20),
+        actual_min: None,
+        rounds: 0,
+        deps: Vec::new(),
+        finished: None,
+    }
 }

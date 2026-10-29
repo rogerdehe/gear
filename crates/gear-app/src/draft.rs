@@ -24,6 +24,9 @@ pub struct QueueItem {
     pub priority: Priority,
     pub lane: Option<String>,
     pub milestone: Option<String>,
+    /// The voyage station the task belongs to (M5 S3): `station=S2`. The
+    /// station must be one the task's milestone block names.
+    pub station: Option<String>,
     pub required: bool,
     pub goal: Option<String>,
     pub accept: Option<String>,
@@ -41,6 +44,9 @@ pub struct QueueItem {
     pub reopen: Option<String>,
     /// The GitHub issue a task came from (T-79): `issue: #12`.
     pub issue: Option<u64>,
+    /// The reason the task is mechanical (T-272): `mechanical: delete three
+    /// dead fns`. The gate alone proves the change, so the review is skipped.
+    pub mechanical: Option<String>,
 }
 
 /// One `# Staff` line.
@@ -63,6 +69,8 @@ pub enum StaffItem {
     Release { line: usize, name: String },
     /// `- rebind heat repo=backend owns=[src/, tests/]`.
     Rebind { line: usize, lane: String, repo: String, owns: Vec<String> },
+    /// `- rebind heat cancel`: withdraw a pending rebind (T-305).
+    RebindCancel { line: usize, lane: String },
     /// `- remerge T-<n>`: retry the task's failed merge (T-92).
     Remerge { line: usize, task: String },
 }
@@ -108,7 +116,7 @@ pub struct Draft {
     pub project: String,
     pub base: i64,
     pub goal: String,
-    /// (title line after `# Milestone `, body)
+    /// (title line after `# Milestone ` or `# Voyage `, body)
     pub milestones: Vec<(String, String)>,
     pub decisions: Vec<String>,
     /// in rank order
@@ -116,10 +124,13 @@ pub struct Draft {
     pub staff: Vec<StaffItem>,
     pub verdicts: Vec<VerdictLine>,
     pub reviews: Vec<ReviewLine>,
+    /// The user asked for this goal, bar or eta change and confirmed it
+    /// (T-410): `gear plan apply --confirmed`. The parser never sets it.
+    pub confirmed: bool,
 }
 
-/// The id and title of a `# Milestone <id>: <title>` block, from the header
-/// text (the part after `# Milestone `). The id is the first word without its
+/// The id and title of a `# Milestone <id>: <title>` (or `# Voyage <id>:
+/// <title>`) block, from the header text (the part after `# Milestone `). The id is the first word without its
 /// trailing colon, as [`parse`] reads it.
 pub fn milestone_parts(header: &str) -> (&str, &str) {
     let id = header
@@ -155,10 +166,42 @@ pub fn milestone_fields(body: &str) -> (Option<String>, Option<String>, Option<S
     (done, bar, eta)
 }
 
+/// The stations a milestone block names (M5 S3), in plan order: every trimmed
+/// line `station <id>: <what reaching it needs>`. The id is non-empty and has
+/// no whitespace, the needs are non-empty; a repeated id, an empty id or empty
+/// needs rejects the block, naming the line.
+pub fn milestone_stations(body: &str) -> Result<Vec<gear_store::VoyageStation>, String> {
+    let mut stations: Vec<gear_store::VoyageStation> = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("station ") else { continue };
+        let (id, needs) = match rest.split_once(':') {
+            Some((id, needs)) => (id.trim(), needs.trim()),
+            None => ("", ""),
+        };
+        let refused = || {
+            format!(
+                "station <id>: <what reaching it needs>, got {line:?}"
+            )
+        };
+        if id.is_empty() || id.split_whitespace().count() != 1 || needs.is_empty() {
+            return Err(refused());
+        }
+        if stations.iter().any(|station| station.id == id) {
+            return Err(refused());
+        }
+        stations.push(gear_store::VoyageStation {
+            id: id.to_string(),
+            needs: needs.to_string(),
+        });
+    }
+    Ok(stations)
+}
+
 /// Parse a draft. Header `<!-- gear-plan project=<id> base=<n> -->` on the
 /// first non-empty line is required. Sections may be absent; known sections
-/// only (`Goal`, `Milestone …`, `Decisions`, `Queue`, `Staff`, `Verdicts`,
-/// `Review`). Queue field lines are `<name>: <value>`; a value runs to the end
+/// only (`Goal`, `Milestone …`/`Voyage …`, `Decisions`, `Queue`, `Staff`,
+/// `Verdicts`, `Review`). Queue field lines are `<name>: <value>`; a value runs to the end
 /// of the line.
 pub fn parse(text: &str) -> GearResult<Draft> {
     let lines: Vec<&str> = text.lines().collect();
@@ -185,6 +228,7 @@ pub fn parse(text: &str) -> GearResult<Draft> {
         staff: Vec::new(),
         verdicts: Vec::new(),
         reviews: Vec::new(),
+        confirmed: false,
     };
 
     let mut index = first + 1;
@@ -213,7 +257,7 @@ pub fn parse(text: &str) -> GearResult<Draft> {
                 index += 1;
                 draft.goal = collect_body(&lines, &mut index);
             }
-            "Milestone" => {
+            "Milestone" | "Voyage" => {
                 let id = rest
                     .split_whitespace()
                     .next()
@@ -221,7 +265,7 @@ pub fn parse(text: &str) -> GearResult<Draft> {
                     .trim_end_matches(':')
                     .to_string();
                 if id.is_empty() {
-                    return Err(bad(line_no, "a milestone header needs an id, e.g. `# Milestone M2: …`"));
+                    return Err(bad(line_no, "a voyage header needs an id, e.g. `# Voyage M2: …`"));
                 }
                 if seen_milestones.contains(&id) {
                     return Err(bad(line_no, format!("milestone {id} appears twice")));
@@ -325,7 +369,7 @@ fn parse_header(line: &str) -> Option<(String, i64)> {
     Some((project?, base?))
 }
 
-/// The lines of a free-text section (Goal, Milestone), joined and trimmed.
+/// The lines of a free-text section (Goal, Milestone/Voyage), joined and trimmed.
 fn collect_body(lines: &[&str], index: &mut usize) -> String {
     let mut body: Vec<&str> = Vec::new();
     while *index < lines.len() && !is_section(lines[*index]) {
@@ -478,6 +522,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
     })?;
     let mut lane = None;
     let mut milestone = None;
+    let mut station = None;
     let mut required = false;
     for token in tokens {
         if token == "required" {
@@ -493,6 +538,13 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
             if milestone.replace(value.to_string()).is_some() {
                 return Err(bad(line, "repeated `milestone=` in one queue block header"));
             }
+        } else if let Some(value) = token.strip_prefix("station=") {
+            if value.is_empty() {
+                return Err(bad(line, "`station=` needs a station id"));
+            }
+            if station.replace(value.to_string()).is_some() {
+                return Err(bad(line, "repeated `station=` in one queue block header"));
+            }
         } else {
             return Err(bad(line, format!("unknown queue block header field {token:?}")));
         }
@@ -503,6 +555,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
         priority,
         lane,
         milestone,
+        station,
         required,
         goal: None,
         accept: None,
@@ -514,6 +567,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
         followup_of: None,
         reopen: None,
         issue: None,
+        mechanical: None,
     })
 }
 
@@ -540,6 +594,7 @@ fn parse_queue_field(
         "followup-of" => "followup-of",
         "reopen" => "reopen",
         "issue" => "issue",
+        "mechanical" => "mechanical",
         other => return Err(bad(line, format!("unknown queue field {other:?}"))),
     };
     if seen.contains(&field) {
@@ -583,6 +638,15 @@ fn parse_queue_field(
             item.issue = Some(parse_issue(value).ok_or_else(|| {
                 bad(line, format!("`issue` is a GitHub issue number as `#<n>`, got {value:?}"))
             })?)
+        }
+        "mechanical" => {
+            if value.is_empty() {
+                return Err(bad(
+                    line,
+                    "`mechanical` needs the reason the gate alone proves this change",
+                ));
+            }
+            item.mechanical = Some(value.to_string());
         }
         _ => unreachable!("the field was matched above"),
     }
@@ -716,6 +780,15 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
         }
         "rebind" => {
             let lane = tokens.next().ok_or_else(|| bad(line, "`rebind` needs a lane"))?;
+            // `- rebind <lane> cancel` withdraws a pending request (T-305).
+            let rest = tokens.clone().collect::<Vec<_>>();
+            if rest.first() == Some(&"cancel") {
+                tokens.next();
+                if tokens.next().is_some() {
+                    return Err(bad(line, "`rebind ... cancel` takes only a lane"));
+                }
+                return Ok(StaffItem::RebindCancel { line, lane: lane.into() });
+            }
             let repo = tokens.next().and_then(|s| s.strip_prefix("repo="))
                 .filter(|s| !s.is_empty()).ok_or_else(|| bad(line, "`rebind` needs `repo=<name>`"))?;
             let remaining = tokens.collect::<Vec<_>>().join(" ");
@@ -1236,5 +1309,27 @@ mod tests {
         let text = format!("{HEADER}# Milestone M2: A\na\n\n# Milestone M2: B\nb\n");
         let detail = detail_of(&text);
         assert!(detail.starts_with("line 5: "), "{detail}");
+    }
+
+    #[test]
+    fn a_voyage_section_is_read_as_a_milestone() {
+        let body = "done: users log in\nbar: block only a broken login\neta: 8h\n";
+        let voyage = format!("{HEADER}# Voyage M2: A\n{body}");
+        let milestone = format!("{HEADER}# Milestone M2: A\n{body}");
+        let from_voyage = parse(&voyage).unwrap();
+        let from_milestone = parse(&milestone).unwrap();
+        assert_eq!(from_voyage.milestones, from_milestone.milestones);
+        assert_eq!(from_voyage.milestones, vec![("M2: A".to_string(), body.trim().to_string())]);
+        let (done, bar, eta) = milestone_fields(&from_voyage.milestones[0].1);
+        assert_eq!(done.as_deref(), Some("users log in"));
+        assert_eq!(bar.as_deref(), Some("block only a broken login"));
+        assert_eq!(eta.as_deref(), Some("8h"));
+    }
+
+    #[test]
+    fn a_voyage_and_a_milestone_with_one_id_are_refused() {
+        let text = format!("{HEADER}# Voyage M2: A\na\n\n# Milestone M2: B\nb\n");
+        let detail = detail_of(&text);
+        assert!(detail.contains("milestone M2 appears twice"), "{detail}");
     }
 }

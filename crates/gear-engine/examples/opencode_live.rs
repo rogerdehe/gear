@@ -281,6 +281,11 @@ impl HerdrAct for NoKeys {
     fn worktree_open(&mut self, repo: &str, branch: &str, label: &str) -> Outcome<Worktree> {
         self.0.worktree_open(repo, branch, label)
     }
+    /// This driver never runs a board, so it never names a tab; the call is
+    /// forwarded like the others.
+    fn tab_rename(&mut self, tab_id: &str, label: &str) -> Outcome<()> {
+        self.0.tab_rename(tab_id, label)
+    }
     fn worktree_open_path(&mut self, repo: &str, path: &str, label: &str) -> Outcome<Worktree> {
         self.0.worktree_open_path(repo, path, label)
     }

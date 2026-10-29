@@ -3,14 +3,31 @@
 # targets, not in machine settings: no global config, no locks, no queues
 # (user, 2026-10-28).
 
-.PHONY: check gate full
+.PHONY: check gate full install
 
-check: ## the light run for lanes and reviewers: one crate, 2 build jobs, 2 test threads
+# A run of tests never writes to the system disk (T-412: the disk filled to
+# 1 GB free, mostly test scratch directories left in the system temp
+# directory). Every target below runs its cargo commands with TMPDIR in the
+# checkout, and first deletes what an earlier run left there more than an hour
+# ago — a lane killed mid-run leaves its scratch behind.
+export TMPDIR := $(CURDIR)/target/tmp
+prune-tmp:
+	mkdir -p $(TMPDIR)
+	find $(TMPDIR) -mindepth 1 -maxdepth 1 -mmin +60 -exec rm -rf {} +
+
+PREFIX ?= $(HOME)/.local
+
+install: ## a source checkout's gear on PATH: release build, then a link in $(PREFIX)/bin
+	cargo build --release -p gear-cli
+	mkdir -p $(PREFIX)/bin
+	ln -sf $(CURDIR)/target/release/gear $(PREFIX)/bin/gear
+
+check: prune-tmp ## the light run for lanes and reviewers: one crate, 2 build jobs, 2 test threads; TESTS=<nextest filter> runs only the tests it matches
 	@test -n "$(CRATE)" || { echo "usage: make check CRATE=<crate>"; exit 1; }
-	CARGO_BUILD_JOBS=2 NEXTEST_TEST_THREADS=2 cargo nextest run -p $(CRATE) --no-fail-fast
+	CARGO_BUILD_JOBS=2 NEXTEST_TEST_THREADS=2 cargo nextest run -p $(CRATE) --no-fail-fast $(if $(strip $(TESTS)),-E '$(TESTS)')
 
-gate: ## the merge gate on the shared machine: workspace build and the whole suite, 4 jobs
+gate: prune-tmp ## the merge gate on the shared machine: workspace build and the whole suite, 4 jobs
 	CARGO_BUILD_JOBS=4 cargo build --workspace --all-targets && CARGO_BUILD_JOBS=4 NEXTEST_TEST_THREADS=4 scripts/test.sh
 
-full: ## full speed for one person alone on the machine: no caps
+full: prune-tmp ## full speed for one person alone on the machine: no caps
 	cargo build --workspace --all-targets && scripts/test.sh

@@ -6,11 +6,13 @@
 //! The rows are written straight into the store: the home page only reads,
 //! and the threads of the batch are easier to build that way.
 
+use gear_app::draft::parse;
 use gear_app::home;
 use gear_app::identity::Fingerprint;
+use gear_app::plan::apply;
 use gear_app::Env;
-use gear_model::{ErrorCode, GearCtx, MsgKind, MsgState, SeatRole, TaskState, Ts};
-use gear_store::{testing, NewMessage, Store, TaskRow};
+use gear_model::{AttemptState, ErrorCode, GearCtx, MsgKind, MsgState, OpKind, OpState, SeatRole, TaskState, Ts};
+use gear_store::{testing, AttemptRow, NewMessage, NewOp, Store, TaskRow};
 
 const NOW: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
@@ -82,6 +84,23 @@ fn ask(s: &mut Store, body: &str, created: Ts) -> String {
 /// The captain answers a lane.
 fn answer(s: &mut Store, body: &str, created: Ts) -> String {
     insert(s, "heat:1", "p:captain", "p:heat", MsgKind::Reply, MsgState::Info, body, created)
+}
+
+/// Apply a plan whose `# Decisions` carries the one given line.
+fn apply_decision(s: &mut Store, decision: &str, rid: &str) {
+    let base = s.read(|tx| tx.plan_version("p")).unwrap();
+    let text = format!("<!-- gear-plan project=p base={base} -->\n# Decisions\n- {decision}\n");
+    apply(
+        s,
+        &seat_env("captain", CAP_PANE),
+        Some(&fp(CAP_PANE, "codex")),
+        None,
+        &parse(&text).unwrap(),
+        &text,
+        rid,
+        NOW,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -333,6 +352,28 @@ fn the_captain_home_starts_with_the_snapshot_before_the_inbox() {
                  issue: None,updated: NOW,
             })?;
         }
+        // The attempt behind T-1's Running state: the snapshot names the
+        // task's stage in the graph's words (T-347).
+        tx.insert_attempt(&AttemptRow {
+            project: "p".into(),
+            task: "T-1".into(),
+            n: 1,
+            seat: "p:heat".into(),
+            generation: 1,
+            contract_version: 1,
+            adopted_version: 1,
+            pending_update: None,
+            state: AttemptState::Started,
+            candidate: None,
+            report: None,
+            safe_point: None,
+            started: NOW,
+            updated: NOW,
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
+        })?;
         Ok(())
     })
     .unwrap();
@@ -358,7 +399,7 @@ fn the_captain_home_starts_with_the_snapshot_before_the_inbox() {
         "{}",
         home.text
     );
-    assert!(home.text.contains("heat · agent working · T-1 in progress · 1 queued"), "{}", home.text);
+    assert!(home.text.contains("heat · agent working · T-1 working · 1 queued"), "{}", home.text);
     assert!(home.text.contains("runtime · agent idle · no current task · 2 queued"), "{}", home.text);
     assert!(
         home.text.contains("deliveries not confirmed: 0 · temps 0 running · 0 starting · 0 blocked (0 of 2)"),
@@ -426,4 +467,216 @@ fn the_snapshot_omits_retired_lanes() {
     s.write(|tx| tx.set_seat_state("p:heat", gear_model::SeatState::Retired, None, NOW)).unwrap();
     let home = home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1).unwrap();
     assert!(!home.text.lines().any(|line| line.trim_start().starts_with("heat ·")), "{}", home.text);
+}
+
+/// The snapshot line of the named lane.
+fn lane_line(text: &str, name: &str) -> String {
+    text.lines()
+        .find(|line| line.trim_start().starts_with(&format!("{name} ·")))
+        .unwrap_or_else(|| panic!("{name} is in the snapshot: {text}"))
+        .to_string()
+}
+
+/// T-260: a lane the captain's `- tail:` silences says so in the snapshot —
+/// a silenced lane must not read as a quiet one.
+#[test]
+fn the_snapshot_marks_a_tailed_lane() {
+    let mut s = world();
+    s.write(|tx| {
+        testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p3", "opencode", NOW)?;
+        testing::seed_active_seat(tx, "p", "mast", SeatRole::Lane, "w1:p4", "opencode", NOW)
+    })
+    .unwrap();
+    apply_decision(&mut s, "tail: hull", "r1");
+
+    let home = home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1).unwrap();
+    assert!(lane_line(&home.text, "hull").ends_with(" · tail: warnings off"), "{}", home.text);
+    // The lane the tail does not name reads as before.
+    assert_eq!(lane_line(&home.text, "mast"), "  mast · agent unknown · no current task · 0 queued");
+
+    // The tail is cleared: the mark goes.
+    apply_decision(&mut s, "tail: -", "r2");
+    let home = home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1).unwrap();
+    assert_eq!(lane_line(&home.text, "hull"), "  hull · agent unknown · no current task · 0 queued", "{}", home.text);
+    assert!(!home.text.contains("tail: warnings off"), "{}", home.text);
+}
+
+/// One unconfirmed delivery of the lane `heat`, created at `created` (T-271).
+fn deliver(s: &mut Store, created: Ts) {
+    s.write(|tx| {
+        let op = tx.insert_op(&NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: OpKind::Deliver,
+            task: Some("T-1".into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({}),
+            created,
+        })?;
+        tx.set_op_state("p", &op.id, OpState::Submitted, None, created + 1)?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// T-271: the snapshot says which deliveries are not confirmed — three lines,
+/// the rest as a count.
+#[test]
+fn the_snapshot_names_the_unconfirmed_deliveries() {
+    let mut s = world();
+    // Four deliveries, the oldest 4 minutes back.
+    for age in [240, 180, 120, 60] {
+        deliver(&mut s, NOW - age);
+    }
+    let home =
+        home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1)
+            .unwrap();
+    let lines: Vec<&str> = home.text.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.starts_with("deliveries not confirmed: 4"))
+        .unwrap_or_else(|| panic!("the deliveries line: {}", home.text));
+    assert_eq!(lines[at + 1], "    O-1 heat T-1 4m", "{}", home.text);
+    assert_eq!(lines[at + 2], "    O-2 heat T-1 3m", "{}", home.text);
+    assert_eq!(lines[at + 3], "    O-3 heat T-1 2m", "{}", home.text);
+    assert_eq!(lines[at + 4], "    +1 more", "{}", home.text);
+}
+
+/// T-271: no delivery, no extra line.
+#[test]
+fn the_snapshot_names_no_delivery_when_there_is_none() {
+    let mut s = world();
+    let home =
+        home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1)
+            .unwrap();
+    assert!(home.text.contains("deliveries not confirmed: 0"), "{}", home.text);
+    assert!(
+        !home.text.lines().any(|line| line.trim_start().starts_with("O-")),
+        "{}",
+        home.text
+    );
+}
+
+// ------------------------------------------------------- config drift (T-321)
+
+/// The canonical form of a path, as the CLI records it in the meta row.
+fn canonical_path(path: &std::path::Path) -> String {
+    std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+}
+
+/// T-321: `p` runs on `applied`, registered from the file at `path` — the
+/// project's config text and its meta path row, as a real `init` leaves them.
+/// Returns the path the page must name (canonical, as the CLI writes it).
+fn applied_from(s: &mut Store, path: &std::path::Path, applied: &str) -> String {
+    let canonical = canonical_path(path);
+    s.write(|tx| {
+        let mut row = tx.get_project("p")?.expect("the project");
+        row.config_toml = applied.to_string();
+        tx.update_project(&row)?;
+        tx.set_meta(&gear_app::admin::config_path_key("p"), &canonical)
+    })
+    .unwrap();
+    canonical
+}
+
+/// The snapshot's lines, for the line-after-the-totals assertions.
+fn snapshot_lines(s: &mut Store) -> Vec<String> {
+    let home = home::build(s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1)
+        .unwrap();
+    home.text.lines().map(str::to_string).collect()
+}
+
+/// The line right after the snapshot's totals line.
+fn second_snapshot_line(s: &mut Store) -> String {
+    let lines = snapshot_lines(s);
+    let at = lines
+        .iter()
+        .position(|line| line.starts_with("SNAPSHOT "))
+        .unwrap_or_else(|| panic!("the snapshot: {lines:?}"));
+    lines[at + 1].clone()
+}
+
+/// T-321: a config file whose text is the applied config shows no drift line.
+#[test]
+fn a_config_file_equal_to_the_applied_config_shows_no_drift() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gear.toml");
+    let text = "[project]\nid = \"p\"\n";
+    std::fs::write(&path, text).unwrap();
+    let mut s = world();
+    applied_from(&mut s, &path, text);
+
+    let lines = snapshot_lines(&mut s);
+    let at = lines.iter().position(|line| line.starts_with("SNAPSHOT ")).expect("the snapshot");
+    // The second line is the first lane, not a warning.
+    assert!(lines[at + 1].starts_with("  heat · "), "{lines:?}");
+    assert!(!lines.iter().any(|line| line.starts_with("! config")), "{lines:?}");
+}
+
+/// T-321: a project whose store records no config path shows no line at all.
+#[test]
+fn a_project_with_no_recorded_config_path_shows_no_line() {
+    let mut s = world();
+    let lines = snapshot_lines(&mut s);
+    assert!(!lines.iter().any(|line| line.starts_with("! config")), "{lines:?}");
+}
+
+/// T-321: an edited config file is a drift line, the snapshot's second line,
+/// naming the file and the applied version.
+#[test]
+fn an_edited_config_file_is_a_drift_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gear.toml");
+    std::fs::write(&path, "[project]\nid = \"p\"\n").unwrap();
+    let mut s = world();
+    let canonical = applied_from(&mut s, &path, "[project]\nid = \"p\"\n");
+    // The user edited the file after the project was registered.
+    std::fs::write(&path, "[project]\nid = \"p\"\n[quota]\nlanes = 2\n").unwrap();
+
+    assert_eq!(
+        second_snapshot_line(&mut s),
+        format!(
+            "! config drift: {canonical} differs from the applied config v1: re-apply it with GEAR_ADMIN=1 gear admin init {canonical}, or restore the file"
+        )
+    );
+}
+
+/// T-321: once the applied config matches the file again, the line is gone.
+#[test]
+fn the_drift_line_goes_when_the_applied_config_matches_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gear.toml");
+    let edited = "[project]\nid = \"p\"\n[quota]\nlanes = 2\n";
+    std::fs::write(&path, "[project]\nid = \"p\"\n").unwrap();
+    let mut s = world();
+    applied_from(&mut s, &path, "[project]\nid = \"p\"\n");
+    std::fs::write(&path, edited).unwrap();
+    assert!(second_snapshot_line(&mut s).starts_with("! config drift: "));
+
+    // The config file's text is applied: nothing differs any more.
+    applied_from(&mut s, &path, edited);
+    let lines = snapshot_lines(&mut s);
+    assert!(!lines.iter().any(|line| line.starts_with("! config")), "{lines:?}");
+}
+
+/// T-321: a config file that is gone cannot be compared, and the page says so
+/// — the applied version still runs.
+#[test]
+fn a_removed_config_file_cannot_be_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gear.toml");
+    std::fs::write(&path, "[project]\nid = \"p\"\n").unwrap();
+    let mut s = world();
+    let canonical = applied_from(&mut s, &path, "[project]\nid = \"p\"\n");
+    std::fs::remove_file(&path).unwrap();
+
+    assert_eq!(
+        second_snapshot_line(&mut s),
+        format!("! config file {canonical} cannot be read (config v1 still runs)")
+    );
 }

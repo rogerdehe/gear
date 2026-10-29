@@ -56,6 +56,7 @@ fn contract(id: &str) -> ContractRow {
         evidence_due_min: None,
         body: String::new(),
         created: T0,
+        mechanical: None,
     }
 }
 

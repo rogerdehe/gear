@@ -1,7 +1,10 @@
 //! T-166: the board's fourth view (Decisions) and fifth view (Time & tokens),
 //! as the prototype of `gear/voyages/M4/board` draws them.
 
+use std::time::Duration;
+
 use gear_board::frame::{frame, Tab};
+use gear_board::{run_with, Event, Keys, Options};
 use gear_model::{AttemptState, SeatRole, TaskState};
 use gear_store::{
     testing, AttemptRow, AttemptStep, NewDecision, NewFriction, NewRound, RoundKey, RoundTokens,
@@ -119,6 +122,9 @@ fn world() -> Store {
                 model: Some("minimax-cn/MiniMax-M3.1-Flash".into()),
                 start_at: departure,
             })?;
+            // The work time of the round (T-348): the board reads the minutes
+            // the lane worked, not the clock since the delivery.
+            tx.set_round_active(&key, 44 * 60)?;
             tx.set_round_tokens(
                 &key,
                 &RoundTokens {
@@ -206,7 +212,7 @@ fn board(store: &mut Store) -> gear_board::Board {
 fn the_decisions_view_shows_the_log_the_star_and_the_frictions() {
     let mut store = world();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Decisions, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Log, 0, (120, 40)), None);
 
     assert!(text.contains("DECISIONS MADE  (★ = worth a look at landing)"), "{text}");
     // The starred decision is in full: the time, the star, the kind, what was
@@ -238,7 +244,7 @@ fn the_decisions_view_shows_the_log_the_star_and_the_frictions() {
 fn the_time_and_tokens_view_shows_the_work_of_every_task() {
     let mut store = world();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
     assert!(text.contains("task"), "the columns: {text}");
     assert!(text.contains("tokens"), "the columns: {text}");
@@ -281,7 +287,7 @@ fn the_time_and_tokens_view_opens_the_task_panel_of_its_row() {
 fn the_reason_of_a_decision_is_readable_on_eighty_columns() {
     let mut store = world();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Decisions, 0, None, (80, 40));
+    let text = frame(&board, &crate::screen(Tab::Log, 0, (80, 40)), None);
 
     assert!(
         text.contains("why: needs token data from T-141 first"),
@@ -317,7 +323,7 @@ fn the_decisions_are_the_ones_of_the_voyage_the_board_measures() {
         })
         .unwrap();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Decisions, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Log, 0, (120, 40)), None);
 
     assert!(
         text.contains("light procedure moved to M5"),
@@ -364,7 +370,7 @@ fn the_rounds_of_a_task_are_the_rows_of_the_rounds_table() {
         })
         .unwrap();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
     // The row of the task: two rounds now.
     assert!(text.contains("T-1"), "{text}");
@@ -459,7 +465,7 @@ fn the_unknown_usage_is_not_shown_as_zero() {
         })
         .unwrap();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
     let row = text
         .lines()
@@ -499,7 +505,7 @@ fn an_unmeasured_round_hides_no_part_of_the_sum() {
         })
         .unwrap();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
     let row = text
         .lines()
@@ -562,7 +568,7 @@ fn an_unpriced_round_hides_no_part_of_the_sum() {
         })
         .unwrap();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
     let row = text
         .lines()
@@ -617,7 +623,7 @@ fn the_cache_reads_are_shown_apart_from_the_fresh_tokens() {
         })
         .unwrap();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
     let row = text
         .lines()
@@ -667,7 +673,7 @@ fn a_view_without_prices_says_so_once_and_shows_no_cost_cell() {
         })
         .unwrap();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
     let row = text
         .lines()
@@ -711,4 +717,179 @@ fn the_json_carries_the_fresh_tokens_and_the_cache_reads_apart() {
         .expect("the task T-1");
     assert_eq!(task["tokens"], 512_000, "the fresh tokens: {task}");
     assert_eq!(task["cache_read"], 300_000, "the cache reads: {task}");
+}
+
+/// T-263: the friction reports, like the decisions beside them on the same
+/// view, are the measured voyage's only — a report of an older voyage is
+/// history, not something the captain reads under this voyage.
+fn two_voyages_with_frictions(old_open: bool) -> Store {
+    let mut store = Store::open_in_memory().unwrap();
+    let departure = now_seconds() - 7200;
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", NOW)?;
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "pi", NOW)?;
+            for (milestone, at) in [("M4", departure), ("M5", departure + 3600)] {
+                tx.upsert_voyage(&gear_store::VoyageRow {
+                    project: "p".into(),
+                    milestone: milestone.into(),
+                    title: format!("voyage {milestone}"),
+                    done: Some("it is delivered".into()),
+                    bar: None,
+                    eta: Some("8h".into()),
+                    departure: Some(at),
+                    departure_tasks: Some(2),
+                    departure_estimate_min: Some(60),
+                    updated: at,
+                })?;
+            }
+            // Each voyage: a task that is done and carries a report, and a
+            // task that leaves the voyage open or finished.
+            let m4_rest = if old_open { TaskState::Ready } else { TaskState::Done };
+            let m5_rest = if old_open { TaskState::Done } else { TaskState::Ready };
+            for (id, rank, milestone, with_friction) in [
+                ("T-1", 1, "M4", true),
+                ("T-2", 2, "M4", false),
+                ("T-3", 3, "M5", true),
+                ("T-4", 4, "M5", false),
+            ] {
+                let state = if with_friction {
+                    TaskState::Done
+                } else if milestone == "M4" {
+                    m4_rest
+                } else {
+                    m5_rest
+                };
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state,
+                    priority: "must".into(),
+                    lane: Some("hull".into()),
+                    milestone: Some(milestone.into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(30),
+                    issue: None,
+                    updated: NOW,
+                })?;
+                if with_friction {
+                    tx.insert_friction(&NewFriction {
+                        project: "p".into(),
+                        task: id.into(),
+                        attempt: 1,
+                        role: "dev".into(),
+                        seat: "p:hull".into(),
+                        body: format!("the friction of {milestone}"),
+                        required: false,
+                    })?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+#[test]
+fn the_frictions_are_the_ones_of_the_voyage_the_board_measures() {
+    // M5 is the voyage with work left: only its report is on the board.
+    let mut store = two_voyages_with_frictions(false);
+    let measured_m5 = board(&mut store);
+    let frictions = &measured_m5.projects[0].frictions;
+    let tasks: Vec<&str> = frictions.iter().map(|f| f.task.as_str()).collect();
+    assert_eq!(tasks, ["T-3"], "M5 measured: the frictions of M5");
+
+    // And with M4 the voyage that has work left, only the M4 report.
+    let mut store = two_voyages_with_frictions(true);
+    let measured_m4 = board(&mut store);
+    let frictions = &measured_m4.projects[0].frictions;
+    let tasks: Vec<&str> = frictions.iter().map(|f| f.task.as_str()).collect();
+    assert_eq!(tasks, ["T-1"], "M4 measured: the frictions of M4");
+}
+
+/// Keys the test presses, one per call; `q` after them.
+struct Presses(Vec<char>);
+
+impl Keys for Presses {
+    fn next_event(&mut self, _timeout: Duration) -> Option<Event> {
+        if self.0.is_empty() {
+            return Some(Event::Key('q'));
+        }
+        Some(Event::Key(self.0.remove(0)))
+    }
+
+    fn size(&self) -> (usize, usize) {
+        (120, 40)
+    }
+}
+
+/// The last frame the board drew: the frames are separated by the clear.
+fn last_frame(out: &[u8]) -> String {
+    let text = String::from_utf8_lossy(out);
+    text.rsplit("\u{1b}[?2026h\u{1b}[H").next().unwrap_or_default().to_string()
+}
+
+/// T-342 (README change 13): a decision is picked, its reason is not. `Down`
+/// on the log goes from the first starred decision to the second, over the
+/// why line between them.
+#[test]
+fn down_moves_over_the_reason_of_a_decision() {
+    let mut store = world();
+    // A second starred decision with a reason of its own: both are picks.
+    store
+        .write(|tx| {
+            tx.insert_decision_if_new(&NewDecision {
+                project: "p".into(),
+                key: "d3".into(),
+                voyage: "M4".into(),
+                at: "2026-10-27 12:20".into(),
+                kind: "scope".into(),
+                what: "PR-mode landing was added as T-152".into(),
+                why: Some("the user asked for it at the kickoff".into()),
+                alt: None,
+                changes: None,
+                star: true,
+                source: "plan".into(),
+                line: None,
+                plan_version: None,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    let opts = Options {
+        project: Some("p".into()),
+        color: false,
+        refresh: Duration::from_millis(1),
+        ..Options::default()
+    };
+    let mut out: Vec<u8> = Vec::new();
+    let mut keys = Presses(vec!['4', 'j']);
+
+    run_with(&mut store, &opts, &mut out, &mut keys, None).unwrap();
+
+    let frame = last_frame(&out);
+    let marked: Vec<&str> = frame.lines().filter(|line| line.starts_with('›')).collect();
+    assert_eq!(marked.len(), 1, "one row is picked: {frame}");
+    assert!(
+        marked[0].contains("★ scope") && marked[0].contains("12:20"),
+        "the second decision is picked, not the why line before it: {frame}"
+    );
+    assert!(
+        !frame.lines().any(|line| line.starts_with('›') && line.contains("why:")),
+        "a reason is not a pick: {frame}"
+    );
+    // Both reasons are still drawn, under their decisions.
+    assert!(frame.contains("why: needs token data from T-141 first"), "{frame}");
+    assert!(frame.contains("why: the user asked for it at the kickoff"), "{frame}");
 }

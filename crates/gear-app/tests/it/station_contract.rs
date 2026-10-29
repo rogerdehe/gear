@@ -112,7 +112,7 @@ fn three_done_uses_exactly_the_shared_pace_projection_and_slowest_lane() {
     assert!(check(&mut store, 3601).is_empty());
     let (env, fp) = captain();
     let page = home::build(&mut store, &env, Some(&fp), T0+3601).unwrap();
-    assert!(page.text.contains("next: gear plan apply gear/voyages/M2.md"));
+    assert!(page.text.contains("next: gear plan apply gear/voyages/M2/plan.md"));
     assert!(page.text.contains(&format!("station {}: keep course|time-box|cut|move", ids[0])));
 }
 
@@ -219,7 +219,14 @@ fn invalid_station_decisions_and_mixed_replies_are_atomic() {
 
 #[test]
 fn unknown_eta_keeps_task_stations_and_unknown_measurements_honest() {
-    let mut store = world("soon", 5);
+    // T-387: `apply` refuses a prose eta, so the seed is a duration and the
+    // prose is written the way a row older than T-387 carries it.
+    let mut store = world("4h", 5);
+    store.write(|tx| {
+        let mut voyage = tx.get_voyage("p", "M2")?.unwrap();
+        voyage.eta = Some("soon".into());
+        tx.upsert_voyage(&voyage)
+    }).unwrap();
     // An unknown eta rings no eta station; the course station (row B10) does
     // not need one: the voyage time is known.
     let ids = check(&mut store, 3600);
@@ -282,4 +289,53 @@ fn a_course_station_is_urgent_when_the_projection_is_past_the_eta() {
     let message = item(&mut store, &ids[0]);
     assert!(message.body.contains("projected finish 240m from departure"), "{}", message.body);
     assert!(message.urgent, "the projected finish (240m) is past the eta (1h)");
+}
+
+/// T-414: the eta markers do not stop at 75%. A voyage still sailing past its
+/// eta keeps getting one station per crossed quarter, each naming the quarter
+/// and how far past the eta the voyage is.
+#[test]
+fn a_voyage_past_its_eta_keeps_getting_quarter_stations() {
+    let mut store = world("8h", 5);
+    let at_eta = check(&mut store, 9 * 3600);
+    assert_eq!(at_eta.len(), 1, "{at_eta:?}");
+    let message = item(&mut store, &at_eta[0]);
+    assert!(message.body.contains("100% eta"), "{}", message.body);
+    assert!(message.urgent, "a crossed 100% quarter is urgent");
+    assert!(check(&mut store, 9 * 3600).is_empty(), "one station per quarter");
+    assert!(check(&mut store, 9 * 3600 + 1).is_empty(), "no second station for the same quarter");
+    let later = check(&mut store, 10 * 3600);
+    assert_eq!(later.len(), 1, "{later:?}");
+    let body = item(&mut store, &later[0]).body;
+    assert!(body.contains("125% eta (past eta by 120 min)"), "{body}");
+    assert!(item(&mut store, &later[0]).urgent, "a crossed 100%+ quarter is urgent");
+    assert!(body.contains("Past the eta: speed up (rebalance lanes, cut waiting, fix rework fast); the eta does not move."), "{body}");
+    assert!(check(&mut store, 10 * 3600).is_empty(), "one station per quarter");
+}
+
+#[test]
+fn a_landed_voyage_gets_no_quarter_station() {
+    let mut store = world("8h", 5);
+    assert!(check(&mut store, 0).is_empty()); // watch it while it is active
+    for n in 1..=5 { finish(&mut store, n); }
+    let ids = check(&mut store, 10 * 3600);
+    assert!(ids.iter().any(|id| item(&mut store, id).body.contains("ready to land")), "{ids:?}");
+    for id in &ids {
+        let body = item(&mut store, id).body;
+        assert!(!body.contains("% eta"), "{body}");
+    }
+    assert!(check(&mut store, 11 * 3600).is_empty());
+}
+
+#[test]
+fn the_first_three_quarters_are_unchanged() {
+    let mut store = world("4h", 5);
+    for (seconds, quarter) in [(3600, "25% eta"), (7200, "50% eta"), (10800, "75% eta")] {
+        let ids = check(&mut store, seconds);
+        assert_eq!(ids.len(), 1, "{ids:?}");
+        let message = item(&mut store, &ids[0]);
+        assert!(message.body.contains(quarter), "{}", message.body);
+        assert!(!message.body.contains("past eta by"), "{}", message.body);
+        assert!(!message.body.contains("Past the eta:"), "{}", message.body);
+    }
 }

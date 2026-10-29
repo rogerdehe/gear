@@ -63,6 +63,7 @@ fn world() -> (Store, String) {
                 evidence_due_min: None,
                 body: String::new(),
                 created: T0,
+                mechanical: None,
             })?;
             start_attempt(tx, "p", "T-7", LANE, 1, T0)?;
             let op = tx.insert_op(&NewOp {

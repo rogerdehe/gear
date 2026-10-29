@@ -116,6 +116,7 @@ fn world(broken_config: &str) -> World {
                 evidence_due_min: None,
                 body: String::new(),
                 created: T0,
+                mechanical: None,
             })?;
             Ok(())
         })

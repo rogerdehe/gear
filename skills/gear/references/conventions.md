@@ -5,7 +5,7 @@ The one default way of working every GEAR project shares. The captain and every 
 ## 1. A project, a voyage, a lane
 
 - A **project** is one piece of work with a goal: a new product, or one requirement inside an existing repo (then the project gets a short name, e.g. `billing-v2`, and its own integration branch cut from the mainline). Its code may be one git repository or a folder of several (§9).
-- A **voyage** is one milestone: a `done:` sentence, a `bar:`, an `eta:` style, and its own plan file `gear/voyages/<milestone>.md`.
+- A **voyage** is one milestone: a `done:` sentence, a `bar:`, an `eta:` style, and its own folder `gear/voyages/<milestone>/` holding its plan (`plan.md`), its `reports/` and its `reviews/`. Its id is any word without spaces (`M1`, `sprint-3`, `2026-q4`); this guide writes `M<n>`. The folder is a convention too (`voyage_dir`, §3).
 - A **lane** is a long-lived agent with a declared **duty** (one sentence) and **owned paths**; lanes never own the same path. A lane whose duty cannot be stated is not opened. A changed duty is a new lane, not a rename.
 - A **temp worker** (today: a reviewer) starts clean for one job and ends with one deliverable. Clean context always comes from a new session, never from clearing an old one.
 
@@ -31,7 +31,21 @@ Names are derived, never invented (`lane-a`, `agent-3`, `bot` are not allowed).
 | `<lane>/t<n>` | a task branch, cut from the latest integration branch of the lane's repo, pushed as you commit, deleted after the merge |
 | `home/<lane>` | the anchor of a lane's long-lived worktree; never committed to |
 
-Lanes create, switch and push their own task branches only. They never merge, rebase shared branches, push `dev`/`main`, force-push or delete branches.
+Lanes create, switch and push their own task branches only. They never merge, rebase shared branches, push `dev`/`main`, force-push or delete branches. They never run `git stash`: every worktree of the repository shares one stash, so a stash can carry their work to another lane or theirs to them — work set aside is committed on the task branch and pushed.
+
+The branch names, the remote and the voyage folder are configuration: a project names its own in `[conventions]`, as templates with the placeholders filled in. These are the defaults (the names GEAR itself uses):
+
+| `[conventions]` | Default | Filled in |
+|---|---|---|
+| `integration` / `release` / `staging` | `dev` / `main` / none | — |
+| `task_branch` | `{lane}/t{n}` | `{project}`, `{lane}`, `{n}` |
+| `review_branch` | `review/t{n}` | `{project}`, `{lane}`, `{n}` |
+| `seat_branch` | `{project}/{seat}` | `{project}`, `{seat}` |
+| `remote` | `origin` | — (the git remote a hand-in is checked against) |
+| `voyage_dir` | `gear/voyages/{milestone}` | `{project}`, `{milestone}`; its `plan.md`, `reports/` and `reviews/` |
+| `merge_message` | `merge({task}): {source}` | `{project}`, `{task}`, `{source}` |
+| `review_message` | `review({task}): {what}` | `{project}`, `{task}`, `{attempt}`, `{what}` |
+| `plan_message` | `{milestone}: {what}` | `{project}`, `{milestone}`, `{what}` |
 
 ## 4. Worktrees — always through Herdr
 
@@ -41,7 +55,7 @@ A lane's worktree holds only its repo (§9).
 
 ## 5. The lane's task loop
 
-0. **Start.** The delivery names the task, its branch and its packet: run `gear` first, then in the lane's repo (§9) `git fetch origin && git switch -c <branch> origin/<integration>` (or switch back to it for a rework).
+0. **Start.** The delivery names the task, its branch and its packet: run `gear` first, then in the lane's repo (§9) `git fetch origin && git switch -c <branch> origin/<integration>` (or switch back to it for a rework). The delivery names `origin`; a project whose remote is called otherwise (`[conventions].remote`) fetches from that name.
 1. **Orient.** Read the packet completely (goal, acceptance, the voyage's `done:`/`bar:`), the files it names, the recent history of the area.
    **You implement; you never design.** When the packet is unclear, contradicts the design or a message, or you catch yourself weighing two readings, stop at once and ask (§6) with your default, then go on with the default. A design question is the captain's work, not yours.
 2. **Reproduce before fixing** a bug. If you cannot observe it, your model is wrong: ask.
@@ -98,7 +112,16 @@ Send it with `gear send --kind question`, then continue with other ready work if
 integration = "dev"     # the integration branch
 release = "main"        # the release branch
 gate = "make test"      # the project's own build + test, run before every merge; no default
+max_task_min = 60       # no task is planned longer than this; a plan that asks for more is refused
+branch_max_age_min = 120  # a task branch older than this is named to the captain
+branch_max_per_lane = 3   # more than lanes × this open-voyage task branches is named to the captain
+push_interval_min = 20    # a lane this long without a push is asked to tell the captain why
+push_reply_min = 10       # its time to answer; no answer is an urgent item to the captain
 ```
+
+`max_task_min` (default 60) caps a task's `estimate:`: a lane works unattended and is reviewed only at its hand-in, so a task of hours is a stretch nobody checks and one wrong turn costs all of it — bigger work is cut into tasks of at most `max_task_min`, each with its own test cycle (`gear --skill decompose` §1 rule 5). A rework estimate (`estimate=` on a fail verdict) is not capped.
+
+The engine sweeps the remote every 10 minutes. A cancelled task's branches are deleted (the captain is told each commit, so one can be restored). A task branch older than `branch_max_age_min` (default 120), or more task branches of the open voyages than lanes × `branch_max_per_lane` (default 3: two hand-ins out and one sent back), is named to the captain in one urgent item: a voyage's branch is meant to merge within that time, so its work is stuck and the captain decides — get it reviewed and merged, finish the rework first, or cancel the task.
 
 `[conventions] task_branch` (default `{lane}/t{n}`) and `review_branch` (default `review/t{n}`) name the branches; `{project}`, `{lane}`, `{n}` are filled in, e.g. `task_branch = "{project}/{lane}/t{n}"`. `seat_branch` (default `{project}/{seat}`) names the branch of each seat's own worktree, and of the merge worktree as seat `merge`, so Herdr names the worktree `<project>-<seat>`.
 

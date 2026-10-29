@@ -174,6 +174,136 @@ fn release_brings_a_standby_reviewer_back() {
     assert_eq!(run_at(&mut s, "- release nobody\n", "release-5").unwrap_err().code, ErrorCode::BadFormat);
 }
 
+/// T-303: `- release <reviewer>` takes a reviewer whose agent is gone even
+/// while it holds a task, and still refuses one whose agent is there.
+///
+/// The task stays Verifying with its attempt handed in: the engine's normal
+/// `start_reviews` pass starts the review again.
+#[test]
+fn release_takes_a_reviewer_whose_agent_is_gone() {
+    use gear_herdr::fake::FakeHerdr;
+    use gear_herdr::{AgentStatus, HerdrRead as _};
+    use gear_store::{AttemptRow, TaskRow};
+
+    /// A world with T-12 handed in (Verifying, attempt 1 Submitted) and the
+    /// reviewer `review-1` holding it.
+    fn review_world() -> Store {
+        let mut s = world();
+        s.write(|tx| {
+            tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: "T-12".into(),
+                rank: 1,
+                state: TaskState::Verifying,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: None,
+                issue: None,
+                updated: T0,
+            })?;
+            tx.insert_attempt(&AttemptRow {
+                project: "p".into(),
+                task: "T-12".into(),
+                n: 1,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: gear_model::AttemptState::Submitted,
+                candidate: Some("abc123".into()),
+                report: Some("Report: gear/voyages/M5/reports/T-12.md".into()),
+                safe_point: None,
+                started: T0,
+                updated: T0 + 1,
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+            })?;
+            testing::seed_temp_seat(tx, "p", "review-1", "T-12", "w1:p5", "codex", T0)?;
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    fn task_state(s: &mut Store) -> TaskState {
+        s.read(|tx| tx.get_task("p", "T-12")).unwrap().unwrap().state
+    }
+
+    fn reviewer(s: &mut Store) -> (SeatState, Option<String>, Option<String>) {
+        let r = s.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        (r.state, r.state_reason, r.task_id)
+    }
+
+    let mut s = review_world();
+
+    // Its agent is there: the captain does not pull a live reviewer out of the
+    // review it is doing.
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent("w1:p5", "codex", AgentStatus::Working);
+    let there = herdr.agents().unwrap();
+    let error = run_with_agent_list(&mut s, Some(&there), "- release review-1\n", "release-1").unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadTransition);
+    assert!(error.detail.contains("review-1 is reviewing T-12"), "{}", error.detail);
+    assert_eq!(reviewer(&mut s), (SeatState::Active, None, Some("T-12".into())), "nothing written");
+
+    // Without the session's agents GEAR cannot tell, so it refuses rather than
+    // guesses.
+    let error = run_with_agent_list(&mut s, None, "- release review-1\n", "release-2").unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadTransition);
+    assert!(error.detail.contains("review-1 is reviewing T-12"), "{}", error.detail);
+    assert!(error.detail.contains("the session's agents were not read"), "{}", error.detail);
+    assert_eq!(reviewer(&mut s), (SeatState::Active, None, Some("T-12".into())), "nothing written");
+
+    // Its agent is gone (the binding stays Active, review F1): the seat is let
+    // go and the task stays Verifying with its attempt handed in, so the
+    // engine starts the review again.
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent("w1:p2", "opencode", AgentStatus::Idle); // heat, not the reviewer
+    let gone = herdr.agents().unwrap();
+    let r = run_with_agent_list(&mut s, Some(&gone), "- release review-1\n", "release-3").unwrap();
+    assert_eq!(r.staffed, vec!["release review-1".to_string()]);
+    assert_eq!(
+        reviewer(&mut s),
+        (
+            SeatState::Releasing,
+            Some("released by the captain: its agent is gone mid-review".into()),
+            None,
+        ),
+    );
+    assert_eq!(task_state(&mut s), TaskState::Verifying, "the review starts again");
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-12", 1)).unwrap().unwrap();
+    assert_eq!(attempt.state, gear_model::AttemptState::Submitted, "its attempt stays handed in");
+}
+
+/// T-303: a staff line whose target is already reached says so, and applies.
+#[test]
+fn a_staff_line_that_does_nothing_says_so() {
+    let mut s = world();
+    run_with_agent_list(&mut s, None, "- hold heat reason=waiting for the user\n", "hold-1").unwrap();
+    let r = run_with_agent_list(&mut s, None, "- hold heat reason=x\n", "hold-2").unwrap();
+    assert!(
+        r.warnings.iter().any(|w| w == "- hold heat: the lane is already held, nothing to do"),
+        "{:?}",
+        r.warnings
+    );
+    assert_eq!(seat(&mut s, "heat").0, SeatState::Held);
+}
+
 /// T-133: a held lane comes back from the plan — `Active` while its agent is
 /// still there, `Queued` (the engine onboards it again) once it is gone — and a
 /// lane that is not held is refused with the reason.
@@ -392,17 +522,45 @@ fn an_until_task_park_ends_when_the_task_is_done() {
     assert_eq!(seat(&mut s, "heat").1, Some("park ended".into()));
 }
 
-/// T-190: a lane parked on quota is the quota path's business.
+/// T-190, T-338: a lane parked on quota is the quota path's business, even
+/// when its reason looks like a timed park: the engine's resume deadline is
+/// written under `engine.resume.<seat>`.
 #[test]
 fn a_quota_park_is_untouched() {
     let mut s = world();
     let mut herdr = session();
     parked(&mut s, "heat", "quota: minimax-cn 5h; resume at 1800003600");
     // The engine's quota park carries the resume deadline.
-    s.write(|tx| tx.set_meta("resume:p:heat", "1800003600"))
+    s.write(|tx| tx.set_meta("engine.resume.p:heat", "1800003600"))
         .unwrap();
     run_with_agents(&mut s, &mut herdr, "- hold wire reason=x\n", "r1").unwrap();
     assert_eq!(seat(&mut s, "heat").0, SeatState::Parked);
+}
+
+/// T-338: the quota check reads the key the quota path writes, so a seat
+/// whose `engine.resume.<seat>` is set keeps a timed park that has expired.
+#[test]
+fn a_quota_park_with_an_expired_until_stays() {
+    let mut s = world();
+    let mut herdr = session();
+    parked(&mut s, "heat", &format!("until={}", at(-1)));
+    s.write(|tx| tx.set_meta("engine.resume.p:heat", "T-1"))
+        .unwrap();
+    run_with_agents(&mut s, &mut herdr, "- hold wire reason=x\n", "r1").unwrap();
+    assert_eq!(seat(&mut s, "heat").0, SeatState::Parked);
+}
+
+/// T-338: an empty resume deadline is no quota park: the timed park ends.
+#[test]
+fn an_empty_resume_deadline_does_not_hold_the_park() {
+    let mut s = world();
+    let mut herdr = session();
+    parked(&mut s, "heat", &format!("until={}", at(-1)));
+    s.write(|tx| tx.set_meta("engine.resume.p:heat", ""))
+        .unwrap();
+    run_with_agents(&mut s, &mut herdr, "- hold wire reason=x\n", "r1").unwrap();
+    assert_eq!(seat(&mut s, "heat").0, SeatState::Active);
+    assert_eq!(seat(&mut s, "heat").1, Some("park ended".into()));
 }
 
 /// T-190: a parked lane whose agent is gone is released: it is queued again

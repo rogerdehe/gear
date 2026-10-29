@@ -1,7 +1,6 @@
-//! T-158: the board's third view (Workload) and the projection per lane
-//! (design §10.7 row B4).
+//! T-158: the projection per lane (design §10.7 row B4).
 
-use gear_board::frame::{frame, lane_panel, Tab};
+use gear_board::frame::lane_panel;
 use gear_model::{AttemptState, SeatRole, TaskState};
 use gear_store::{testing, AttemptRow, Store, TaskRow};
 
@@ -16,8 +15,8 @@ fn now_seconds() -> i64 {
 }
 
 /// A voyage with two lanes of very different size and pace: `hull` has little
-/// work left and works at its estimate, `deck` has much more work left and
-/// works twice as slow.
+/// work left, `deck` has much more. Both hand their task in after 30 minutes;
+/// deck's merge lands at 60, which is not lane time any more (T-390).
 fn world() -> Store {
     let mut store = Store::open_in_memory().unwrap();
     let departure = now_seconds() - 3600;
@@ -48,7 +47,8 @@ fn world() -> Store {
         })
         .unwrap();
     // The work: hull measured 30 minutes on 30 of estimate (pace 1.0), deck
-    // measured 60 minutes on 30 of estimate (pace 2.0).
+    // measured the same 30 minutes of lane time on 30 of estimate (pace 1.0):
+    // its minute 30 to 60 was review and merge, run while the lane was free.
     let departure = now_seconds() - 3600;
     store
         .write(|tx| {
@@ -129,6 +129,38 @@ fn attempt(
     Ok(())
 }
 
+/// An open attempt of the fixture, on the step it is: the state the stage
+/// rules read (T-346).
+fn open_attempt(
+    tx: &gear_store::Tx<'_>,
+    task: &str,
+    state: AttemptState,
+    started: i64,
+) -> gear_model::GearResult<()> {
+    tx.insert_attempt(&AttemptRow {
+        project: "p".into(),
+        task: task.into(),
+        n: 1,
+        seat: "p:deck".into(),
+        generation: 1,
+        contract_version: 1,
+        adopted_version: 1,
+        pending_update: None,
+        state,
+        candidate: None,
+        report: None,
+        safe_point: None,
+        started,
+        updated: started,
+        session_ref: None,
+        session_cli: None,
+        session_action: None,
+        sent_at: None,
+    })?;
+    tx.set_attempt_time("p", task, 1, gear_store::AttemptStep::Started, started)?;
+    Ok(())
+}
+
 #[test]
 fn the_slower_lane_sets_the_finish_and_is_named() {
     let mut store = world();
@@ -136,26 +168,83 @@ fn the_slower_lane_sets_the_finish_and_is_named() {
     let voyage = &board.projects[0].voyages[0];
 
     // Each lane at its own pace: hull needs 20 minutes (pace 1.0), deck needs
-    // 120 (pace 2.0 on 60 minutes of estimate).
+    // 60 (pace 1.0 on 60 minutes of open estimate). Deck still sets the finish
+    // because it has far more work left.
     let hull = voyage.lanes.iter().find(|lane| lane.lane == "hull").unwrap();
     let deck = voyage.lanes.iter().find(|lane| lane.lane == "deck").unwrap();
     assert_eq!(hull.done_min, 30);
     assert_eq!(hull.left_min, 20);
     assert_eq!(hull.pace, Some(1.0));
     assert_eq!(hull.projected_min, Some(20));
-    assert_eq!(deck.done_min, 60);
+    assert_eq!(deck.done_min, 30, "the merge tail is not the lane's own time");
     assert_eq!(deck.left_min, 60);
-    assert_eq!(deck.pace, Some(2.0));
-    assert_eq!(deck.projected_min, Some(120));
+    assert_eq!(deck.pace, Some(1.0));
+    assert_eq!(deck.projected_min, Some(60));
 
     // The slowest lane sets the finish and is named.
     assert_eq!(
         voyage.slowest_lane.as_ref().map(|(lane, _)| lane.clone()),
         Some("deck".to_string())
     );
-    assert_eq!(voyage.slowest_lane.as_ref().map(|(_, min)| *min), Some(120));
+    assert_eq!(voyage.slowest_lane.as_ref().map(|(_, min)| *min), Some(60));
     let elapsed = voyage.elapsed_min.unwrap();
-    assert_eq!(voyage.projected_min, Some(elapsed + 120));
+    assert_eq!(voyage.projected_min, Some(elapsed + 60));
+}
+
+/// T-390: a lane is measured by its throughput, not by the sum of its tasks'
+/// spans. Task 1 is merged at 40 while task 2 is already running from 20, so
+/// the two spans overlap and the sum would count those minutes twice.
+#[test]
+fn a_lane_is_measured_by_its_throughput_not_the_sum_of_its_spans() {
+    let mut store = Store::open_in_memory().unwrap();
+    let departure = now_seconds() - 120 * 60;
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", NOW)?;
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "pi", NOW)?;
+            testing::seed_active_seat(tx, "p", "mast", SeatRole::Lane, "w1:p3", "pi", NOW)?;
+            tx.upsert_voyage(&gear_store::VoyageRow {
+                project: "p".into(),
+                milestone: "M4".into(),
+                title: "one seat model".into(),
+                done: Some("a rework resumes its session".into()),
+                bar: None,
+                eta: Some("12h".into()),
+                departure: Some(departure),
+                departure_tasks: Some(3),
+                departure_estimate_min: Some(90),
+                updated: NOW,
+            })?;
+            task(tx, "T-1", "hull", 1, TaskState::Done, Some(30))?;
+            task(tx, "T-2", "hull", 2, TaskState::Done, Some(30))?;
+            // mast has open work and no measured history at all.
+            task(tx, "T-3", "mast", 3, TaskState::Ready, Some(100))
+        })
+        .unwrap();
+    store
+        .write(|tx| {
+            attempt(tx, "T-1", departure, departure + 20 * 60, departure + 40 * 60)?;
+            attempt(tx, "T-2", departure + 20 * 60, departure + 40 * 60, departure + 60 * 60)
+        })
+        .unwrap();
+    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
+    let voyage = &board.projects[0].voyages[0];
+    let hull = voyage.lanes.iter().find(|lane| lane.lane == "hull").unwrap();
+    // From the earliest start (0) to the last hand-in (40): 40 minutes of lane
+    // time, where the sum of the spans would be 40 + 40.
+    assert_eq!(hull.done_min, 40);
+    assert_eq!(hull.done_estimate_min, 60);
+    assert_eq!(hull.pace, Some(40.0 / 60.0));
+    assert_eq!(voyage.measured_actual_min, 40);
+    assert_eq!(voyage.pace(), Some(40.0 / 60.0));
+    // A lane with no done task keeps no pace, and the finish stays unknown.
+    let mast = voyage.lanes.iter().find(|lane| lane.lane == "mast").unwrap();
+    assert_eq!(mast.done_min, 0);
+    assert_eq!(mast.pace, None);
+    assert_eq!(voyage.slowest_lane, None);
+    assert_eq!(voyage.projected_min, None);
+    // Each task's own span still sets the slowest task.
+    assert_eq!(voyage.slowest, Some(("T-1".into(), 40)));
 }
 
 #[test]
@@ -186,29 +275,11 @@ fn the_burn_up_keeps_the_hours_without_progress() {
 }
 
 #[test]
-fn the_workload_view_shows_the_lanes_and_the_burn_up() {
-    let mut store = world();
-    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
-    let text = frame(&board, Tab::Workload, 0, None, (120, 40));
-    assert!(text.contains("WORK DONE AND LEFT, BY LANE"), "{text}");
-    assert!(text.contains("hull"), "{text}");
-    assert!(text.contains("deck"), "{text}");
-    // The bars of the lanes: the done minutes and the minutes left.
-    assert!(text.contains("done 1 (30m) · left 1 (20m)"), "{text}");
-    assert!(text.contains("done 1 (30m) · left 1 (60m)"), "{text}");
-    // The burn-up and its hours.
-    assert!(text.contains("BURN-UP  (minutes of estimate merged, per voyage hour)"), "{text}");
-    assert!(text.contains("h0"), "{text}");
-    // The bars of the burn-up: the estimate merged in the hour.
-    assert!(text.contains("██"), "{text}");
-}
-
-#[test]
 fn the_lane_panel_shows_what_it_did_and_what_is_left() {
     let mut store = world();
     let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
     let lane = board.projects[0].lanes.iter().find(|lane| lane.lane == "deck").unwrap();
-    let panel = lane_panel(lane);
+    let panel = lane_panel(lane, &board.projects[0].graph);
     let text = panel.join("\n");
     assert!(text.contains("lane deck"), "{text}");
     assert!(text.contains("DONE"), "{text}");
@@ -268,72 +339,19 @@ fn the_lane_panel_shows_the_running_and_the_queued_work_once() {
             let mut running = tx.get_task("p", "T-4")?.unwrap();
             running.state = TaskState::Running;
             tx.update_task(&running)?;
+            open_attempt(tx, "T-4", AttemptState::Started, now_seconds())?;
             task(tx, "T-5", "deck", 5, TaskState::Verifying, Some(20))?;
+            open_attempt(tx, "T-5", AttemptState::Submitted, now_seconds())?;
             task(tx, "T-6", "deck", 6, TaskState::Ready, Some(15))
         })
         .unwrap();
     let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
     let lane = board.projects[0].lanes.iter().find(|lane| lane.lane == "deck").unwrap();
-    let text = lane_panel(lane).join("\n");
+    let text = lane_panel(lane, &board.projects[0].graph).join("\n");
     // The running and the reviewing task are in NOW, once each.
     assert_eq!(text.matches("T-4").count(), 1, "{text}");
     assert_eq!(text.matches("T-5").count(), 1, "{text}");
     // LEFT holds the queued task only.
     assert!(text.contains("○ T-6"), "{text}");
     assert!(text.contains("left: 1 tasks, 15m of estimates"), "{text}");
-}
-
-/// A voyage whose tasks are all done: the Workload view keeps its
-/// measurements (F5).
-#[test]
-fn the_workload_view_keeps_the_measurements_of_a_finished_voyage() {
-    let mut store = finished_world();
-    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
-    // The voyage is over: no active voyage is measured any more.
-    assert!(board.projects[0].voyages.is_empty());
-    let text = frame(&board, Tab::Workload, 0, None, (120, 40));
-    // The lanes keep their completed scope: hull 30 + 20, deck 30 + 60.
-    assert!(text.contains("done 2 (50m)"), "{text}");
-    assert!(text.contains("done 2 (90m)"), "{text}");
-    assert!(text.contains("done 140m"), "{text}");
-    // The burn-up of the finished voyage is kept.
-    assert!(text.contains("BURN-UP"), "{text}");
-}
-
-/// A voyage whose every task is done, with the times of the work.
-fn finished_world() -> Store {
-    let mut store = Store::open_in_memory().unwrap();
-    let departure = now_seconds() - 3600;
-    store
-        .write(|tx| {
-            testing::seed_project(tx, "p", "sess", NOW)?;
-            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "pi", NOW)?;
-            testing::seed_active_seat(tx, "p", "deck", SeatRole::Lane, "w1:p3", "pi", NOW)?;
-            tx.upsert_voyage(&gear_store::VoyageRow {
-                project: "p".into(),
-                milestone: "M4".into(),
-                title: "one seat model".into(),
-                done: Some("a rework resumes its session".into()),
-                bar: None,
-                eta: Some("12h".into()),
-                departure: Some(departure),
-                departure_tasks: Some(4),
-                departure_estimate_min: Some(140),
-                updated: NOW,
-            })?;
-            task(tx, "T-1", "hull", 1, TaskState::Done, Some(30))?;
-            task(tx, "T-2", "hull", 2, TaskState::Done, Some(20))?;
-            task(tx, "T-3", "deck", 3, TaskState::Done, Some(30))?;
-            task(tx, "T-4", "deck", 4, TaskState::Done, Some(60))
-        })
-        .unwrap();
-    store
-        .write(|tx| {
-            attempt(tx, "T-1", departure, departure + 30 * 60, departure + 30 * 60)?;
-            attempt(tx, "T-2", departure, departure + 20 * 60, departure + 30 * 60)?;
-            attempt(tx, "T-3", departure, departure + 30 * 60, departure + 60 * 60)?;
-            attempt(tx, "T-4", departure, departure + 60 * 60, departure + 60 * 60)
-        })
-        .unwrap();
-    store
 }

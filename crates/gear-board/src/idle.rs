@@ -16,10 +16,40 @@
 //!
 //! A lane that works has no reason (`None`).
 
-use gear_model::{GearResult, SeatState, TaskState, Ts};
-use gear_store::{SeatRow, TaskRow, Tx};
+use gear_model::{GearResult, MsgKind, SeatRole, SeatState, TaskState, Ts};
+use gear_store::{MessageRow, SeatRow, TaskRow, Tx};
 
 use crate::state_word;
+
+/// How long an unanswered instruction of the captain keeps a lane busy (T-323):
+/// half an hour. A lane that never answers comes back to the idle and stall
+/// rules after it.
+pub const HELP_LIMIT_S: i64 = 1800;
+
+/// A lane that helps on an unanswered instruction of the captain (T-323, S2
+/// "work that is not a task"): the lane holds no attempt, but the captain
+/// asked it for something and it has not answered yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Helping {
+    /// The id of the instruction (`M-<n>`).
+    pub message: String,
+    /// The lane the instruction is about, when it is another lane's.
+    pub lane: Option<String>,
+    /// The first words of the instruction.
+    pub words: String,
+    /// When the instruction was sent.
+    pub since: Ts,
+}
+
+impl Helping {
+    /// The text of the help: `helping <lane>: <words>`.
+    pub fn text(&self) -> String {
+        match &self.lane {
+            Some(lane) => format!("helping {lane}: {}", self.words),
+            None => format!("helping the captain: {}", self.words),
+        }
+    }
+}
 
 /// Why a lane is idle (§8.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +150,14 @@ pub fn idle_reason(
         return Ok(None);
     }
 
+    // The lane helps on an unanswered instruction of the captain (T-323): it
+    // has no attempt, but it is not idle either.
+    if let Some(seat) = seat.as_ref() {
+        if helping(tx, project, seat, now)?.is_some() {
+            return Ok(None);
+        }
+    }
+
     // The next task of the queue: the first one that is queued. A task that
     // was handed in waits for its review in the background and does not hide
     // the work that is left (the engine gives the lane its next task while
@@ -144,6 +182,75 @@ pub fn idle_reason(
 
     // The task is queued and nobody gave it to the lane.
     Ok(Some(IdleReason::Undelivered { task: next.id.clone() }))
+}
+
+/// The instruction of the captain the lane still has to answer, if any
+/// (T-323).
+///
+/// None unless the seat is a lane, holds no attempt in flight and the project
+/// has a captain; then the newest unanswered captain instruction to the seat
+/// within [`HELP_LIMIT_S`] is the help. A reply of the lane — any message of
+/// it with `reply_to` the instruction — ends it.
+pub fn helping(
+    tx: &Tx<'_>,
+    project: &str,
+    seat: &SeatRow,
+    now: Ts,
+) -> GearResult<Option<Helping>> {
+    if seat.role != SeatRole::Lane || !tx.in_progress_attempts_of_seat(&seat.id)?.is_empty() {
+        return Ok(None);
+    }
+    let Some(captain) = tx.captain_of(project)? else {
+        return Ok(None);
+    };
+    let mut instructions: Vec<MessageRow> = tx
+        .messages_to_since(project, &seat.id, now - HELP_LIMIT_S)?
+        .into_iter()
+        .filter(|message| message.kind == MsgKind::Instruction)
+        .filter(|message| message.sender == captain.id)
+        .collect();
+    instructions.sort_by(|a, b| (b.created, &b.id).cmp(&(a.created, &a.id)));
+    for instruction in instructions {
+        if has_reply(tx, project, &seat.id, &instruction)? {
+            continue;
+        }
+        let lane = match instruction.task.as_deref() {
+            Some(task) => tx.get_task(project, task)?.and_then(|task| task.lane),
+            None => None,
+        };
+        let lane = lane.filter(|lane| *lane != seat.name);
+        return Ok(Some(Helping {
+            message: instruction.id.clone(),
+            lane,
+            words: words_of(&instruction.body),
+            since: instruction.created,
+        }));
+    }
+    Ok(None)
+}
+
+/// Did the lane answer the instruction?
+fn has_reply(
+    tx: &Tx<'_>,
+    project: &str,
+    seat_id: &str,
+    instruction: &MessageRow,
+) -> GearResult<bool> {
+    Ok(tx
+        .messages_from_since(project, seat_id, instruction.created)?
+        .into_iter()
+        .any(|message| message.reply_to.as_deref() == Some(instruction.id.as_str())))
+}
+
+/// The first six words of the body, and "…" when there are more.
+fn words_of(body: &str) -> String {
+    let words: Vec<&str> = body.split_whitespace().collect();
+    let head: Vec<&str> = words.iter().take(6).copied().collect();
+    let mut text = head.join(" ");
+    if words.len() > head.len() {
+        text.push_str(" …");
+    }
+    text
 }
 
 /// The text of the reason (§8.2).
@@ -307,6 +414,46 @@ pub fn clock(until: Ts) -> String {
         (parts.tm_hour as i64, parts.tm_min as i64)
     };
     format!("{hour:02}:{minute:02}")
+}
+
+/// The day and the time of day, as the user's clock sees it (`Oct 30 00:35`).
+pub fn day_clock(until: Ts) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let seconds = until as libc::time_t;
+    let mut parts: libc::tm = unsafe { std::mem::zeroed() };
+    let local = unsafe { libc::localtime_r(&seconds, &mut parts) };
+    let (month, day, hour, minute) = if local.is_null() {
+        // No local time: the clock of the machine is not readable.
+        let (month, day) = civil_from_days(until.div_euclid(86_400));
+        (month, day, (until / 3600) % 24, (until % 3600) / 60)
+    } else {
+        (
+            parts.tm_mon as i64 + 1,
+            parts.tm_mday as i64,
+            parts.tm_hour as i64,
+            parts.tm_min as i64,
+        )
+    };
+    let month = MONTHS[(month.clamp(1, 12) - 1) as usize];
+    format!("{month} {day} {hour:02}:{minute:02}")
+}
+
+/// The month and the day of a count of days since 1970-01-01, in UTC.
+///
+/// The fallback of [`day_clock`], when the machine's local time is not
+/// readable.
+fn civil_from_days(days: i64) -> (i64, i64) {
+    let days = days + 719_468;
+    let day_of_era = days.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 };
+    (month, day)
 }
 
 /// An RFC 3339 time (`2026-10-27T10:00:00Z`) in epoch seconds.

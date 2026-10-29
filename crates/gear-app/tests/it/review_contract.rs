@@ -29,7 +29,7 @@ fn world() -> Store {
             lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
             wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
         tx.insert_contract(&ContractRow { project: "p".into(), task: "T-1".into(), version: 1, goal: "g".into(), accept: "a".into(),
-            evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0 })?;
+            evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0, mechanical: None, })?;
         start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
         on_delivery_confirmed(tx, "p", "T-1", 1, T0)
     }).unwrap();
@@ -168,10 +168,7 @@ fn a_second_different_verdict_for_the_same_attempt_is_refused() {
 
 /// A temp findings file, as a reviewer's worktree would hold.
 fn findings_file(text: &str, tag: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "gear-findings-{}-{tag}.md",
-        std::process::id()
-    ));
+    let path = crate::temp("gear-findings").join(format!("{tag}.md"));
     std::fs::write(&path, text).unwrap();
     path
 }
@@ -295,7 +292,7 @@ fn a_missing_path_is_refused_whatever_it_looks_like() {
 #[test]
 fn an_existing_file_with_a_space_in_its_name_is_stored_as_its_text() {
     let mut s = world();
-    let path = std::env::temp_dir().join(format!("gear-findings-{} draft.md", std::process::id()));
+    let path = crate::temp("gear-findings").join("draft.md");
     std::fs::write(&path, "# Findings\n\nP1: the header count is stale.\n").unwrap();
 
     mail::send(
@@ -357,7 +354,7 @@ fn a_repeated_request_id_replays_even_when_the_file_is_gone() {
 #[test]
 fn a_huge_findings_file_is_cut_with_a_note() {
     let mut s = world();
-    let path = std::env::temp_dir().join(format!("gear-findings-{}-huge.md", std::process::id()));
+    let path = crate::temp("gear-findings").join("huge.md");
     let big = "x".repeat(gear_app::review::FINDINGS_MAX + 4096);
     std::fs::write(&path, &big).unwrap();
 

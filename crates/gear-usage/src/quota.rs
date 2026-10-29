@@ -129,6 +129,148 @@ pub fn read_quota_in(
     }
 }
 
+/// The reset a provider's own limit text states (§9.1, M4 #20).
+///
+/// Some providers GEAR has no reader for say when they are available again
+/// only in the text the agent shows. The lines are read from the last to the
+/// first, and only a line that speaks of a reset counts: one that holds
+/// `reset`, `try again`, `retry` or `available again` (ASCII
+/// case-insensitively). Such a line gives, in this order:
+///
+/// 1. an RFC 3339 timestamp among its words (`quota resets at
+///    2026-10-29T05:00:00Z`) — that time;
+/// 2. `retry-after: <n>` — `now` plus `n` seconds;
+/// 3. `in <duration>` or `after <duration>` — `now` plus the duration, which
+///    is one or more `<number><unit>` groups (`2h 13m`, `45 minutes`,
+///    `3 hours 5 min`, `90s`).
+///
+/// None when no line states a reset, or when the time it states is not after
+/// `now` or more than eight days after it: a clock time such as `resets 3pm`
+/// has no time zone GEAR could read, and a window longer than eight days is
+/// none of the windows GEAR knows. A time out of that window is None for the
+/// **whole call**: the last line that states a reset is the provider's latest
+/// word, and an earlier line may be stale.
+pub fn reset_from_text(text: &str, now: Ts) -> Option<Ts> {
+    // The longest window a stated reset can be of: eight days, in seconds.
+    const LONGEST: Ts = 8 * 86_400;
+    for line in text.lines().rev() {
+        if !speaks_of_a_reset(line) {
+            continue;
+        }
+        let Some(time) = reset_of_line(line, now) else { continue };
+        if time > now && time - now <= LONGEST {
+            return Some(time);
+        }
+        // The provider's latest word names a time GEAR cannot use: an earlier
+        // line would only be staler (contract v3).
+        return None;
+    }
+    None
+}
+
+/// Does the line speak of a reset? These four words are the ones the limit
+/// texts of the providers use.
+fn speaks_of_a_reset(line: &str) -> bool {
+    let line = line.to_ascii_lowercase();
+    ["reset", "try again", "retry", "available again"]
+        .iter()
+        .any(|word| line.contains(word))
+}
+
+/// The reset the one line states, in epoch seconds.
+fn reset_of_line(line: &str, now: Ts) -> Option<Ts> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    // 1. An RFC 3339 time among the words, without the punctuation the
+    // sentence puts after it.
+    for word in &words {
+        if let Some(time) = rfc3339(trim_punctuation(word)) {
+            return Some(time);
+        }
+    }
+    // 2. `retry-after: <n>` — the seconds HTTP names.
+    for (index, word) in words.iter().enumerate() {
+        let lower = trim_punctuation(word).to_ascii_lowercase();
+        let Some(rest) = lower.strip_prefix("retry-after") else { continue };
+        let rest = rest.trim_start_matches(':').trim();
+        let seconds = if rest.is_empty() {
+            // `Retry-After: 120` — the number is the next word.
+            words
+                .get(index + 1)
+                .map(|next| trim_punctuation(next))
+                .and_then(|next| next.parse::<Ts>().ok())
+        } else {
+            // `Retry-After:120` — the number is in the same word.
+            rest.parse::<Ts>().ok()
+        };
+        if let Some(seconds) = seconds.filter(|seconds| *seconds >= 0) {
+            return Some(now + seconds);
+        }
+    }
+    // 3. `in <duration>` or `after <duration>`.
+    for (index, word) in words.iter().enumerate() {
+        let lower = trim_punctuation(word).to_ascii_lowercase();
+        if lower != "in" && lower != "after" {
+            continue;
+        }
+        if let Some(seconds) = duration_seconds(&words[index + 1..]) {
+            return Some(now + seconds);
+        }
+    }
+    None
+}
+
+/// A word with the punctuation a sentence puts after it trimmed.
+fn trim_punctuation(word: &str) -> &str {
+    word.trim_end_matches(['.', ',', ';', ':', ')'])
+}
+
+/// The seconds of the duration at the words: one or more `<number><unit>`
+/// groups, with or without a space between the number and its unit.
+fn duration_seconds(words: &[&str]) -> Option<Ts> {
+    let mut total: Ts = 0;
+    let mut groups = 0;
+    let mut index = 0;
+    while index < words.len() {
+        let token = trim_punctuation(words[index]);
+        let digits = token
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .count();
+        if digits == 0 {
+            // The duration ends at the first word that is not a number.
+            break;
+        }
+        let number: f64 = token.get(..digits)?.parse().ok()?;
+        let rest = token.get(digits..)?;
+        let unit = if rest.is_empty() {
+            // `45 minutes` — the unit is the next word.
+            index += 1;
+            trim_punctuation(words.get(index)?)
+        } else {
+            // `2h` — the unit is in the same word.
+            rest
+        };
+        total += (number * unit_seconds(unit)? as f64).round() as Ts;
+        groups += 1;
+        index += 1;
+    }
+    if groups == 0 {
+        return None;
+    }
+    Some(total)
+}
+
+/// The seconds of one unit of a duration.
+fn unit_seconds(unit: &str) -> Option<Ts> {
+    match unit.to_ascii_lowercase().as_str() {
+        "d" | "day" | "days" => Some(86_400),
+        "h" | "hr" | "hrs" | "hour" | "hours" => Some(3_600),
+        "m" | "min" | "mins" | "minute" | "minutes" => Some(60),
+        "s" | "sec" | "secs" | "second" | "seconds" => Some(1),
+        _ => None,
+    }
+}
+
 /// The call of §9.1: `curl -sS --max-time 15` with the key in a header that
 /// goes in through standard input, never on the command line.
 fn http_get(reader: &str, url: &str, key: &str) -> Result<String, String> {
@@ -294,7 +436,7 @@ fn codex(session: &str, now: Ts, home: &Path) -> Result<Reading, String> {
             let Some(entry) = limits.get(name) else { continue };
             let Some(used) = entry.get("used_percent").and_then(Value::as_f64) else { continue };
             windows.push(Window {
-                name: name.to_string(),
+                name: window_name(name, entry),
                 used_percent: used,
                 resets_at: entry.get("resets_at").and_then(time_of),
             });
@@ -312,6 +454,24 @@ fn codex(session: &str, now: Ts, home: &Path) -> Result<Reading, String> {
         windows,
         read_at: now,
     })
+}
+
+/// The name of a Codex window: its length when the rollout says one (T-383).
+///
+/// `5h` for 300 minutes, `weekly` for 10080, else `<minutes / 60>h` when the
+/// minutes divide by 60, else `<minutes>m`. The API's own key
+/// (`primary`/`secondary`) is the name only when there is no `window_minutes`.
+fn window_name(key: &str, entry: &Value) -> String {
+    let Some(minutes) = entry.get("window_minutes").and_then(Value::as_f64) else {
+        return key.to_string();
+    };
+    let minutes = minutes.round() as i64;
+    match minutes {
+        300 => "5h".to_string(),
+        10_080 => "weekly".to_string(),
+        minutes if minutes % 60 == 0 => format!("{}h", minutes / 60),
+        minutes => format!("{minutes}m"),
+    }
 }
 
 /// A time of a provider's answer: a number (seconds or milliseconds) or a

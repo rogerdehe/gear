@@ -72,7 +72,7 @@ confirm_rounds = 2
 
 /// The engine's configuration: the built-ins plus the project's own profiles.
 fn cfg(config_text: &str) -> (EngineCfg, BTreeMap<String, Profile>) {
-    let mut c = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
+    let mut c = EngineCfg { db_path: crate::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
     for (name, profile) in gear_herdr::builtins() {
         c.profiles.insert(name, profile);
     }
@@ -167,6 +167,7 @@ fn active_world(config_text: &str) -> Store {
                 evidence_due_min: None,
                 body: String::new(),
                 created: T0,
+                mechanical: None,
             })?;
             gear_app::tasks::start_attempt(tx, "toy", "T-1", "toy:heat", 1, T0)?;
             gear_app::tasks::on_delivery_confirmed(tx, "toy", "T-1", 1, T0)?;

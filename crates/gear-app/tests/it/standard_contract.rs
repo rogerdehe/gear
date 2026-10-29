@@ -52,6 +52,7 @@ fn world() -> (tempfile::TempDir, Store) {
         &Env { ctx: None, pane_id: None, admin: true },
         &TEMPLATE.replace("{root}", &root.path().display().to_string()),
         Some(crate::skill_home()),
+        false,
         T0,
     )
     .unwrap();
@@ -89,6 +90,7 @@ fn world() -> (tempfile::TempDir, Store) {
             evidence_due_min: None,
             body: String::new(),
             created: T0,
+            mechanical: None,
         })
     })
     .unwrap();

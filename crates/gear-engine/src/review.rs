@@ -34,6 +34,13 @@ pub struct ReviewReport {
     /// The tasks whose review still waits: no free temp slot, or a reviewer
     /// that is not up yet.
     pub waiting: Vec<String>,
+    /// `project:task/attempt` of the mechanical hand-ins settled this tick
+    /// (T-273) — settled without a reviewer.
+    pub settled: Vec<String>,
+    /// `project:task/attempt: CODE: detail` of the mechanical hand-ins whose
+    /// settlement failed this tick: reported, never fatal; the hand-in is
+    /// reviewed as today (contract v2 of T-273).
+    pub settle_failed: Vec<String>,
 }
 
 /// Start the reviewers the project needs.
@@ -66,6 +73,13 @@ pub fn start_reviews(
     // Submitted with nothing telling the captain (another project's M0), so
     // the captain is told to settle it (v0.4.8).
     if config.temps.is_none() {
+        // T-273 (F1 of its review): a mechanical hand-in merges on its gate
+        // alone, and that settlement needs no reviewer at all. It is settled
+        // here, before a missing `[temps]` turns into a manual-settlement
+        // request; the ordinary and stale-contract hand-ins keep today's
+        // notice.
+        let hand_ins = tasks_to_review(store, project)?;
+        start_hand_in_reviews(store, herdr, cfg, &config, profiles, project, &hand_ins, &mut report, now)?;
         tell_captain_of_hand_ins_without_reviewers(store, project, now)?;
         return Ok(report);
     }
@@ -81,7 +95,7 @@ pub fn start_reviews(
 
     let hand_ins = tasks_to_review(store, project)?;
     start_hand_in_reviews(store, herdr, cfg, &config, profiles, project, &hand_ins, &mut report, now)?;
-    finish_direction_results(store, project, now)?;
+    finish_direction_results(store, cfg, &config, project, now)?;
     // A direction result can free the seat of a hand-in that waited behind its
     // own direction check: the hand-in is eligible now (F1 of the T-199
     // review, round 2). The hand-in comes first (design §14): it takes the
@@ -132,8 +146,34 @@ fn start_hand_in_reviews(
     report: &mut ReviewReport,
     now: Ts,
 ) -> GearResult<()> {
-    let Some(temps) = config.temps.as_ref() else { return Ok(()) };
     for task in tasks {
+        // T-273: a mechanical task is not reviewed. The attempt is settled as
+        // a pass in this tick, and the merge gate decides; a task without
+        // `mechanical` is reviewed as before.
+        if let Some(reason) = mechanical_reason(store, project, &task.task, task.attempt)? {
+            match settle_mechanical(store, project, task, &reason, now) {
+                Ok(()) => {
+                    report.settled.push(format!("{project}:{}/{}", task.task, task.attempt));
+                    continue;
+                }
+                // Contract v2 (hull's question M-4507): no error of this step
+                // stops the tick. The failure is reported like a review's own
+                // settle failure (R-67), and the hand-in is then reviewed as
+                // today.
+                Err(err) => report.settle_failed.push(format!(
+                    "{project}:{}/{}: {}: {}",
+                    task.task,
+                    task.attempt,
+                    err.code,
+                    err.detail
+                )),
+            }
+        }
+        // Without `[temps]` there is no reviewer to start (T-273, F1 of its
+        // review): this guard comes **after** the mechanical branch, so a
+        // mechanical hand-in is settled in a project without reviewers too.
+        // The remaining hand-ins keep `tell_captain_of_hand_ins_without_reviewers`.
+        let Some(temps) = config.temps.as_ref() else { continue };
         // T-69 / B02-04: an attempt whose checkout already failed three times
         // is not tried again. A recovered seat (the park's slot freed) must
         // not restart the loop with a fresh generation and a fresh budget; a
@@ -237,6 +277,90 @@ fn start_hand_in_reviews(
     Ok(())
 }
 
+/// T-273: the reason the attempt's **adopted** contract is mechanical, if it
+/// is. A mechanical task is not reviewed at all: it merges on its gate alone.
+///
+/// Contract v2 (hull's question M-4507): only a hand-in that works to the
+/// contract the task carries **now** is mechanical. A task whose contract
+/// changed during the attempt is reviewed as today — its pass could not be
+/// written anyway (a pass needs the task's current contract), and the reviewer
+/// judges what the change asks for.
+fn mechanical_reason(
+    store: &mut Store,
+    project: &str,
+    task: &str,
+    attempt: i64,
+) -> GearResult<Option<String>> {
+    store.read(|tx| {
+        let Some(attempt) = tx.get_attempt(project, task, attempt)? else { return Ok(None) };
+        let Some(row) = tx.get_task(project, task)? else { return Ok(None) };
+        if attempt.adopted_version != row.contract_version {
+            return Ok(None);
+        }
+        Ok(tx
+            .get_contract(project, task, row.contract_version)?
+            .and_then(|contract| contract.mechanical))
+    })
+}
+
+/// T-273: settle a mechanical hand-in as a pass without a reviewer. The
+/// verdict is the same one a captain's pass writes, so the merge follows
+/// exactly as for a captain's pass (the merge step queues the op from it), and
+/// the captain is told once, on the thread `mechanical:<task>`.
+fn settle_mechanical(
+    store: &mut Store,
+    project: &str,
+    task: &ReviewTask,
+    reason: &str,
+    now: Ts,
+) -> GearResult<()> {
+    store.write(|tx| {
+        let Some(attempt) = tx.get_attempt(project, &task.task, task.attempt)? else { return Ok(()) };
+        let verdict = gear_app::tasks::Verdict {
+            project: project.to_string(),
+            task: task.task.clone(),
+            attempt: task.attempt,
+            contract_version: attempt.adopted_version,
+            candidate: task.candidate.clone(),
+            pass: true,
+            evidence: Some(format!("mechanical: {reason}")),
+            rework: None,
+            integrated_by: None,
+            by_seat: "engine".into(),
+        };
+        gear_app::tasks::settle(tx, &verdict, now)?;
+        // One message, not one per tick.
+        let told_key = format!("engine.mechanical_told.{project}.{}", task.task);
+        if tx.get_meta(&told_key)?.is_some() {
+            return Ok(());
+        }
+        if let Some(captain) = tx.captain_of(project)? {
+            tx.insert_message(&NewMessage {
+                meta: None,
+                project: project.to_string(),
+                thread: format!("mechanical:{}", task.task),
+                task: Some(task.task.clone()),
+                attempt: Some(task.attempt),
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: captain.id.clone(),
+                kind: MsgKind::System,
+                urgent: false,
+                body: format!(
+                    "{} settled without review: mechanical ({reason}); the merge gate decides",
+                    task.task
+                ),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Info,
+                created: now,
+            })?;
+            tx.set_meta(&told_key, "1")?;
+        }
+        Ok(())
+    })
+}
+
 fn yield_starting_direction_jobs(store: &mut Store, project: &str) -> GearResult<()> {
     store.write(|tx| {
         for task in tx.tasks_of_project(project)? {
@@ -271,7 +395,22 @@ fn job_packet(store: &mut Store, config: &ProjectConfig, task: &ReviewTask, dire
     let saved = store.read(|tx| tx.get_task(&config.project.id, &task.task))?;
     let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&task.lane));
     let branch = gear_model::branch::expand(&config.conventions.task_branch, &config.project.id, &task.lane, &task.task);
-    Ok(format!("Direction check of {} attempt {} at {} (branch {}). Read the contract (gear --show {}) and the diff from origin/{}. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task {} --attempt {} --direction \"ok\" when nothing is misread, else --direction \"<up to three problems: the contract sentence misread and what to do instead>\".", task.task, task.attempt, task.candidate, branch, task.task, repo.integration, task.task, task.attempt))
+    // The contract the lane works to (T-282): the task's current version, read
+    // here so the direction reviewer judges this text and never has to guess
+    // which version `gear --show` names for its own view.
+    let (version, goal, accept) = match saved.as_ref() {
+        Some(row) => {
+            let version = row.contract_version;
+            match store.read(|tx| tx.get_contract(&config.project.id, &task.task, version))? {
+                Some(contract) => (version, contract.goal, contract.accept),
+                None => (version, String::new(), String::new()),
+            }
+        }
+        None => (1, String::new(), String::new()),
+    };
+    // T-267: the reviewer's first `gear` is what confirms the delivery, so the
+    // direction packet asks for it as the review packet does.
+    Ok(format!("Run `gear` first (it records that you got this). Direction check of {} attempt {} at {} (branch {}). Read the contract below and the diff from {}/{}. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task {} --attempt {} --direction \"ok\" when nothing is misread, else --direction \"<up to three problems: the contract sentence misread and what to do instead>\".\n\nContract v{version} (the task's current contract; the lane works to it — judge against this text, not an older version `gear --show` may name):\nGoal: {goal}\nAccept: {accept}", task.task, task.attempt, task.candidate, branch, config.conventions.remote, repo.integration, task.task, task.attempt))
 }
 
 /// A direction check passed when the first word of its body is `ok`, in any
@@ -283,7 +422,29 @@ fn direction_passed(body: &str) -> bool {
     first.trim_end_matches(['.', ',', ';', ':', '!']).to_lowercase() == "ok"
 }
 
-fn finish_direction_results(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
+fn finish_direction_results(store: &mut Store, cfg: &EngineCfg, config: &ProjectConfig, project: &str, now: Ts) -> GearResult<()> {
+    // T-283: the tip of every live check's branch, read before the write
+    // transaction as `start_direction_checks` reads it. A failing result on a
+    // candidate the lane has already moved past is what the reviewer saw then,
+    // not an instruction: it reaches the captain as information (M4.2 T-237,
+    // M-4110/M-4119 — the `misread` was already fixed on the newer push). A
+    // read that fails leaves the job out of the map: it behaves as today.
+    let mut tips: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for task in store.read(|tx| tx.tasks_of_project(project))? {
+        for attempt in store.read(|tx| tx.attempts_of_task(project, &task.id))? {
+            if attempt.state != AttemptState::Started { continue }
+            let key = direction_key(project, &task.id, attempt.n);
+            let Some(job) = store.read(|tx| tx.get_meta(&key))?.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok()) else { continue };
+            if job["state"] != "running" { continue }
+            let Some(lane) = task.lane.clone() else { continue };
+            let repo = config.repo_of_task(&task);
+            let branch = gear_model::branch::expand(&config.conventions.task_branch, project, &lane, &task.id);
+            let Ok(tip) = review_git(cfg.review_git.as_ref(), &repo.path, &["rev-parse", "--verify", &format!("refs/remotes/{}/{branch}", config.conventions.remote)]) else { continue };
+            let tip = tip.trim().to_string();
+            if tip.is_empty() { continue }
+            tips.insert(key, tip);
+        }
+    }
     store.write(|tx| {
         for task in tx.tasks_of_project(project)? {
             for attempt in tx.attempts_of_task(project, &task.id)? {
@@ -291,15 +452,41 @@ fn finish_direction_results(store: &mut Store, project: &str, now: Ts) -> GearRe
                 let Some(job) = tx.get_meta(&key)?.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok()) else { continue };
                 if job["state"] != "running" { continue }
                 let (Some(seat_id), Some(sha), Some(generation)) = (job["seat"].as_str(), job["sha"].as_str(), job["generation"].as_i64()) else { continue };
+                // A check never outlives the attempt it was started for: once
+                // that attempt is no longer `Started` (the lane handed in, or
+                // the attempt ended any other way) the job is closed, whether
+                // or not a result came (T-258).
+                let live = attempt.state == AttemptState::Started;
                 let result = tx.direction_results_of_attempt(project, &task.id, attempt.n)?.into_iter().find(|m| {
                     m.sender == seat_id && m.sender_gen == generation && m.meta.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()).is_some_and(|v| v["direction"] == true && v["sha"] == sha)
                 });
-                let Some(result) = result else { continue };
-                if !direction_passed(&result.body) {
-                    let captain = tx.captain_of(project)?;
-                    for (recipient, kind, urgent, state) in [(Some(attempt.seat.clone()), MsgKind::Instruction, true, MsgState::Open), (captain.map(|s| s.id), MsgKind::System, false, MsgState::Info)] {
-                        if let Some(recipient) = recipient {
-                            tx.insert_message(&NewMessage { meta: None, project: project.into(), thread: format!("direction:{}:{}:{sha}", task.id, attempt.n), task: Some(task.id.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0, recipient, kind, urgent, body: format!("Direction check of {} attempt {}: {}", task.id, attempt.n, result.body), reply_to: None, needs_ack: false, state, created: now })?;
+                // A live check waits for its result; a dead one does not.
+                if live && result.is_none() { continue }
+                if let Some(result) = &result {
+                    if !direction_passed(&result.body) {
+                        let captain = tx.captain_of(project)?;
+                        // T-283: a live check whose sha is no longer the branch
+                        // tip judged a candidate the lane has already left. Its
+                        // failing result is the captain's information, not the
+                        // lane's instruction: the lane is not told.
+                        let superseded = live && tips.get(&key).is_some_and(|tip| tip.as_str() != sha);
+                        let body = if superseded {
+                            format!("Direction check of {} attempt {} on {:.8} (superseded: the branch is at {:.8} now, so the lane is not told): {}", task.id, attempt.n, sha, tips[&key], result.body)
+                        } else {
+                            format!("Direction check of {} attempt {}: {}", task.id, attempt.n, result.body)
+                        };
+                        // A late or superseded verdict reaches nobody but the
+                        // captain: the lane is not told about the attempt it
+                        // handed in, nor about a candidate it moved past.
+                        let recipients = if live && !superseded {
+                            vec![(Some(attempt.seat.clone()), MsgKind::Instruction, true, MsgState::Open), (captain.map(|s| s.id), MsgKind::System, false, MsgState::Info)]
+                        } else {
+                            vec![(captain.map(|s| s.id), MsgKind::System, false, MsgState::Info)]
+                        };
+                        for (recipient, kind, urgent, state) in recipients {
+                            if let Some(recipient) = recipient {
+                                tx.insert_message(&NewMessage { meta: None, project: project.into(), thread: format!("direction:{}:{}:{sha}", task.id, attempt.n), task: Some(task.id.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0, recipient, kind, urgent, body: body.clone(), reply_to: None, needs_ack: false, state, created: now })?;
+                            }
                         }
                     }
                 }
@@ -319,6 +506,10 @@ fn start_direction_checks(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &Eng
     for row in store.read(|tx| tx.tasks_of_project(project))? {
         let Some(attempt) = store.read(|tx| tx.attempts_of_task(project, &row.id))?.into_iter().last() else { continue };
         if attempt.state != AttemptState::Started { continue }
+        // T-273: a mechanical task's push starts no direction check — no
+        // reviewer judges it, the merge gate alone decides.
+        let mechanical = store.read(|tx| tx.get_contract(project, &row.id, row.contract_version))?;
+        if mechanical.is_some_and(|contract| contract.mechanical.is_some()) { continue }
         let Some(lane) = row.lane.clone() else { continue };
         let key = direction_key(project, &row.id, attempt.n);
         let existing = store.read(|tx| tx.get_meta(&key))?.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok());
@@ -326,12 +517,23 @@ fn start_direction_checks(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &Eng
         let repo = config.repo_of_task(&row);
         let branch = gear_model::branch::expand(&config.conventions.task_branch, project, &lane, &row.id);
         let sha = if let Some(sha) = existing.as_ref().filter(|v| v["state"] == "starting").and_then(|v| v["sha"].as_str()) { sha.to_string() } else {
-            let Ok(sha) = review_git(cfg.review_git.as_ref(), &repo.path, &["rev-parse", "--verify", &format!("refs/remotes/origin/{branch}")]) else { continue };
+            // The project's own remote (T-262): the branch is read from the
+            // ref its `[conventions].remote` names.
+            let remote = &config.conventions.remote;
+            let Ok(sha) = review_git(cfg.review_git.as_ref(), &repo.path, &["rev-parse", "--verify", &format!("refs/remotes/{remote}/{branch}")]) else { continue };
             let sha = sha.trim().to_string();
             if sha.is_empty() || existing.as_ref().and_then(|v| v["checked_sha"].as_str()) == Some(sha.as_str()) { continue }
-            let Ok(base) = review_git(cfg.review_git.as_ref(), &repo.path, &["merge-base", &format!("origin/{}", repo.integration), &sha]) else { continue };
+            let Ok(base) = review_git(cfg.review_git.as_ref(), &repo.path, &["merge-base", &format!("{remote}/{}", repo.integration), &sha]) else { continue };
             let Ok(diff) = review_git(cfg.review_git.as_ref(), &repo.path, &["diff", "--name-only", base.trim(), &sha]) else { continue };
-            if !diff.lines().any(|p| !p.is_empty() && !p.starts_with("ops/")) { continue }
+            // A push that only writes the voyage's reports or reviews starts no
+            // direction check (T-262): reporting is not the work the contract
+            // asks about. The folders are the project's own templates; a task
+            // with no milestone has neither, so only an empty diff is skipped.
+            let dirs: Vec<String> = row.milestone.as_deref().map(|milestone| vec![
+                format!("{}/", gear_model::layout::reports_dir(&config.conventions.voyage_dir, project, milestone)),
+                format!("{}/", gear_model::layout::reviews_dir(&config.conventions.voyage_dir, project, milestone)),
+            ]).unwrap_or_default();
+            if diff.lines().filter(|p| !p.is_empty()).all(|p| dirs.iter().any(|dir| p.starts_with(dir.as_str()))) { continue }
             sha
         };
         let writer = writer_current_model(store, config, &attempt.seat)?;
@@ -411,24 +613,37 @@ pub fn standby_after_verdict(store: &mut Store, project: &str, now: Ts) -> GearR
 /// attempt of the same task, and it is judged by its own verdict (F1 of the
 /// T-143 review).
 ///
+/// The round the seat works on now names the job first (T-375): a seat that
+/// judges a rework has its session resumed before the round's packet exists,
+/// and the last packet is still the one of the round that ended — using it
+/// would let the earlier verdict park the seat in the middle of the new
+/// review.
+///
 /// A seat with no packet (a legacy seat, a seat of an older engine) has no
 /// job to name: the latest attempt of the task is its job then.
 fn handed_a_verdict(store: &mut Store, project: &str, seat: &SeatRow, task: &str) -> GearResult<bool> {
     store.read(|tx| {
-        let attempt = match tx.last_op(&seat.id, OpKind::Deliver)? {
-            // The packet of the job: it must be about this seat's task.
-            Some(op) => {
-                if op.task.as_deref() != Some(task) {
-                    return Ok(false);
+        let round = tx
+            .open_round_of_seat(&seat.id)?
+            .filter(|round| round.role == "review" && round.task == task);
+        let attempt = match round {
+            // The open review round of this seat: the job it works on now.
+            Some(round) => Some(round.attempt),
+            None => match tx.last_op(&seat.id, OpKind::Deliver)? {
+                // The packet of the job: it must be about this seat's task.
+                Some(op) => {
+                    if op.task.as_deref() != Some(task) {
+                        return Ok(false);
+                    }
+                    op.attempt
                 }
-                op.attempt
-            }
-            // A seat with no packet: the latest attempt of the task is its job.
-            None => tx
-                .attempts_of_task(project, task)?
-                .into_iter()
-                .last()
-                .map(|attempt| attempt.n),
+                // A seat with no packet: the latest attempt of the task is its job.
+                None => tx
+                    .attempts_of_task(project, task)?
+                    .into_iter()
+                    .last()
+                    .map(|attempt| attempt.n),
+            },
         };
         let Some(attempt) = attempt else { return Ok(false) };
         Ok(tx
@@ -628,7 +843,7 @@ fn stash_review_tree(git: &dyn ReviewGit, store: &mut Store, project: &str, path
 }
 
 /// Prepare a checkout; a live reviewer on an unfinished job keeps its branch.
-fn prepare_review_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn HerdrAct, project: &str, repo: &str, path: &str, branch: &str, task: &ReviewTask, now: Ts) -> GearResult<bool> {
+fn prepare_review_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn HerdrAct, project: &str, repo: &str, path: &str, remote: &str, branch: &str, task: &ReviewTask, now: Ts) -> GearResult<bool> {
     let git_error = |e| GearError::new(ErrorCode::BadFormat, format!("review checkout {path}: {e}"));
     let same_path = |a: &str, b: &str| a == b || std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a, b)| a == b);
     stash_review_tree(git, store, project, path, &task.task, task.attempt, now)?;
@@ -666,16 +881,16 @@ fn prepare_review_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn H
         stash_review_tree(git, store, project, holder, &task.task, task.attempt, now)?;
         review_git(git, holder, &["checkout", "--detach"]).map_err(git_error)?;
     }
-    review_git(git, path, &["fetch", "origin"]).map_err(git_error)?;
+    review_git(git, path, &["fetch", remote]).map_err(git_error)?;
     review_git(git, path, &["checkout", "-f", "-B", branch, &task.candidate]).map_err(git_error)?;
     Ok(true)
 }
 
-fn prepare_seat_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn HerdrAct, seat: &SeatRow, repo: &str, path: &str, branch: &str, task: &ReviewTask, now: Ts) -> GearResult<bool> {
+fn prepare_seat_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn HerdrAct, seat: &SeatRow, repo: &str, path: &str, remote: &str, branch: &str, task: &ReviewTask, now: Ts) -> GearResult<bool> {
     let key = format!("engine.review_tree.{}", seat.id);
     let job = format!("{}:{}:{}:{}:{}", task.task, task.attempt, task.candidate, repo, branch);
     if store.read(|tx| tx.get_meta(&key))?.as_deref() == Some(job.as_str()) { return Ok(true) }
-    match prepare_review_tree(git, store, herdr, &seat.project, repo, path, branch, task, now) {
+    match prepare_review_tree(git, store, herdr, &seat.project, repo, path, remote, branch, task, now) {
         Ok(true) => {},
         Ok(false) => return Ok(false),
         Err(error) => {
@@ -688,7 +903,7 @@ fn prepare_seat_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn Her
             if used >= 3 {
                 let reason = format!("review checkout failed {used} times: {}", error.detail);
                 if seat.state == SeatState::Standby {
-                    crate::release::release_one(store, herdr, &seat.project, seat, None, now)
+                    crate::release::release_one(store, herdr, &seat.project, seat, None, now, "checkout")
                         .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
                 } else {
                     park(store, &seat.id, &reason, now)?;
@@ -992,7 +1207,7 @@ fn start_reviewer(
         if !ready { return Ok(Started::NotYet) }
         let current_repo = store.read(|tx| tx.get_meta(&repo_key(&seat.id)))?.unwrap_or_else(|| config.root_repo().path);
         if current_repo != repo.path {
-            crate::release::release_one(store, herdr, &seat.project, seat, None, now)
+            crate::release::release_one(store, herdr, &seat.project, seat, None, now, "repo")
                 .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
             return Ok(Started::NotYet);
         }
@@ -1000,12 +1215,12 @@ fn start_reviewer(
         let (recorded, current_model) = store.read(|tx| Ok((tx.get_meta(&review_model_key(&seat.id))?, tx.get_meta(&crate::model::model_meta_key(&seat.id))?)))?;
         let model_matches = entry.is_none_or(|entry| current_model.as_deref() == Some(entry.model()));
         if recorded.as_deref() != Some(selected.as_str()) || !model_matches {
-            crate::release::release_one(store, herdr, &seat.project, seat, None, now)
+            crate::release::release_one(store, herdr, &seat.project, seat, None, now, "model")
                 .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
             return Ok(Started::NotYet);
         }
         let Some(path) = worktree_path(store, &seat.id)? else { return Ok(Started::NotYet) };
-        if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &branch, task, now)? { return Ok(Started::NotYet) }
+        if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &config.conventions.remote, &branch, task, now)? { return Ok(Started::NotYet) }
         if prepare_job_session(store, herdr, cfg, seat, task, direction, now)? != crate::session::Prep::Ready {
             return Ok(Started::NotYet);
         }
@@ -1080,7 +1295,7 @@ fn start_reviewer(
         park(store, &seat.id, "the seat's worktree path is unknown", now)?;
         return Ok(Started::NotYet);
     };
-    if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &branch, task, now)? { return Ok(Started::NotYet) }
+    if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &config.conventions.remote, &branch, task, now)? { return Ok(Started::NotYet) }
 
     if occupant.is_none() {
         let mut env_command = format!("export GEAR_CTX={}:{}:{}; export GEAR_DB={}", config.project.id, seat.name, generation, cfg.db_path);
@@ -1158,7 +1373,14 @@ fn start_reviewer(
                     return Ok(Started::NotYet);
                 }
                 other => {
-                    park(store, &seat.id, &step_failure("agent_start", &other), now)?;
+                    // A CLI that is not installed says so on the pane (T-286):
+                    // the seat is parked for the install, not for a model move.
+                    let tail = herdr.read_tail(&pane, 16).unwrap_or_default();
+                    let reason = match crate::start::cli_missing(&tail, kind) {
+                        Some(line) => crate::start::cli_missing_text(kind, &line),
+                        None => step_failure("agent_start", &other),
+                    };
+                    park(store, &seat.id, &reason, now)?;
                     return Ok(Started::NotYet);
                 }
             }
@@ -1543,10 +1765,22 @@ fn review_packet_for(
     // (T-53): a child repo has its own branch.
     let saved = store.read(|tx| tx.get_task(&config.project.id, task))?;
     let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&lane));
+    // The task's current contract (T-282): when it moved past the version this
+    // hand-in was made against, the reviewer is told so and judges the hand-in
+    // against its own version.
+    let current = saved.as_ref().map(|row| row.contract_version).unwrap_or(version);
+    // The commit message the project asks of a reviewer (T-300): its
+    // `[conventions].review_message`, filled with what is known here. `{what}`
+    // stays in the text — what the commit does is the reviewer's to write.
+    let commit = gear_model::commit::fill(
+        &config.conventions.review_message,
+        &[("project", &config.project.id), ("task", task), ("attempt", &attempt.to_string())],
+    );
     let packet = review_packet(
         task,
         attempt,
         version,
+        current,
         &goal,
         &accept,
         &done,
@@ -1554,6 +1788,7 @@ fn review_packet_for(
         candidate,
         &repo.integration,
         &review_branch(&config.conventions.review_branch, &config.project.id, &lane, task),
+        &commit,
     );
     // The review's own budget (design §5.1) and what a verdict past it must
     // carry (design §6.2): the reviewer is charged from its own start, and a
@@ -1722,6 +1957,7 @@ fn review_packet(
     task: &str,
     attempt: i64,
     version: i64,
+    current: i64,
     goal: &str,
     accept: &str,
     done: &str,
@@ -1729,12 +1965,20 @@ fn review_packet(
     candidate: &str,
     integration: &str,
     branch: &str,
+    commit: &str,
 ) -> String {
+    // T-282: the task's contract moved past the one this hand-in was made
+    // against — the reviewer is told, and still judges the hand-in by its own.
+    let newer = if current > version {
+        format!("Newer contract: v{current} was written after this hand-in; judge against v{version} and log what v{current} changes.\n")
+    } else {
+        String::new()
+    };
     format!(
         "Review {task} attempt {attempt}. Run `gear` first (it records that you got this).\n\
          \n\
          Contract: v{version} (the version this hand-in was made against)\n\
-         Goal: {goal}\n\
+         {newer}Goal: {goal}\n\
          Accept: {accept}\n\
          Done (the milestone's sentence): {done}\n\
          Bar (the quality this phase needs): {bar}\n\
@@ -1746,7 +1990,8 @@ fn review_packet(
          the findings with their severity, the review template and the verdict rule.\n\
          \n\
          Write the review in your worktree at the path your project uses for reviews, commit it \
-         on `{branch}` and push it (the candidate stays untouched).\n\
+         on `{branch}` with the message `{commit}` (replace `{{what}}` with what the commit does) \
+         and push it (the candidate stays untouched).\n\
          \n\
          Every finding is either blocking or logged: a blocking finding names the part of the \
          done-sentence or the bar it breaks. Fail only for a failed mechanical fact, a P0, or a \
@@ -1773,15 +2018,16 @@ fn review_wait_told_key(project: &str, task: &str, attempt: i64) -> String {
     format!("engine.review_wait_told.{project}.{task}.{attempt}")
 }
 
-/// Tell the captain that a review waits: one open item per task, so the tick
-/// does not fill the inbox with the same news.
+/// Tell the captain that a review waits: one message per task, so the tick
+/// does not fill the inbox with the same news. The news is information, not an
+/// item that asks the captain for an action (T-370): the lane is not blocked.
 fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &str, now: Ts) -> GearResult<()> {
     store.write(|tx| {
         let captain = tx.captain_of(project)?.ok_or_else(|| {
             GearError::new(ErrorCode::NoTarget, format!("project {project} has no captain"))
         })?;
         let told_key = review_wait_told_key(project, &task.task, task.attempt);
-        // One open item per task: the captain is told once, not every tick.
+        // One message per task: the captain is told once, not every tick.
         // And once per attempt: a resolved item does not bring the same news
         // back on the next tick (T-214).
         let already = tx.get_meta(&told_key)?.is_some()
@@ -1806,7 +2052,7 @@ fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &st
             sender: task.writer.clone(),
             sender_gen,
             recipient: captain.id.clone(),
-            kind: MsgKind::Question,
+            kind: MsgKind::System,
             urgent: false,
             body: format!(
                 "The review of {} (attempt {}) waits: {reason}, so the \
@@ -1815,7 +2061,7 @@ fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &st
             ),
             reply_to: None,
             needs_ack: false,
-            state: MsgState::Open,
+            state: MsgState::Info,
             created: now,
         };
         tx.insert_message(&message)?;
@@ -2046,6 +2292,38 @@ lanes = ["minimax-cn/MiniMax-M3.1-Flash"]
 review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] }]
 "#;
 
+    /// The same project with room for two temp seats: both can be busy.
+    const CONFIG_TWO_SLOTS: &str = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 2
+
+[captain]
+pane = "w1:p9"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[temps]
+kind = "codex"
+profile = "codex"
+
+[models]
+lanes = ["minimax-cn/MiniMax-M3.1-Flash"]
+review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] }]
+"#;
+
     /// The same project with no `[temps]` at all: no reviewer can start.
     const CONFIG_NO_REVIEWERS: &str = r#"
 [project]
@@ -2076,7 +2354,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 
     /// An engine that knows the codex profile.
     fn cfg() -> EngineCfg {
-        let mut cfg = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
+        let mut cfg = EngineCfg { db_path: crate::testtmp::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
         for kind in ["codex", "opencode", "claude"] {
             cfg.profiles
                 .insert(kind.to_string(), gear_herdr::builtin(kind).unwrap());
@@ -2087,6 +2365,12 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
     /// A project with one lane whose task T-1 was handed in (the attempt is
     /// Submitted with a candidate, the task is Verifying).
     fn world(config_toml: &str) -> Store {
+        world_mechanical(config_toml, None)
+    }
+
+    /// The same world with the contract carrying `mechanical` (T-273): the
+    /// reason the task is judged by its merge gate alone.
+    fn world_mechanical(config_toml: &str, mechanical: Option<&str>) -> Store {
         REVIEW_GIT_FAKE.with(|fake| fake.set(true));
         REVIEW_GIT_CALLS.with(|calls| calls.borrow_mut().clear());
         REVIEW_GIT_FAIL.with(|fail| fail.set(false));
@@ -2138,6 +2422,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: mechanical.map(str::to_string),
                 })?;
                 // The lane hands the result in.
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
@@ -2261,6 +2546,243 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(store.read(|tx| tx.get_meta("engine.verdict_wait.T-1.1")).unwrap().is_none());
     }
 
+    /// T-273: a mechanical hand-in gets no reviewer. It is settled as a pass
+    /// in the same tick — accepted with the engine's evidence, the merge op
+    /// queued exactly as for a captain's pass — and the captain gets one Info
+    /// line on `mechanical:<task>`.
+    #[test]
+    fn a_mechanical_hand_in_is_settled_without_review() {
+        let mut store = world_mechanical(CONFIG, Some("delete three dead fns"));
+        let mut herdr = FakeHerdr::new();
+
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        // The tick report says a task settled without a reviewer.
+        assert_eq!(report.settled, vec!["p:T-1/1".to_string()], "{report:?}");
+        assert!(report.settle_failed.is_empty(), "{report:?}");
+        assert!(report.started.is_empty(), "{report:?}");
+
+        // No reviewer: no seat, no worktree, no agent.
+        assert!(starts(&herdr).is_empty(), "{:?}", starts(&herdr));
+        assert!(worktrees(&herdr).is_empty());
+        let temps = store
+            .read(|tx| tx.seats_of_project("p"))
+            .unwrap()
+            .into_iter()
+            .filter(|seat| seat.role == SeatRole::Temp)
+            .count();
+        assert_eq!(temps, 0, "no review seat starts");
+
+        // The attempt is accepted and the task done.
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+        assert_eq!(attempt.state, AttemptState::Accepted);
+        assert_eq!(
+            store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().state,
+            TaskState::Done
+        );
+        let verdict = store
+            .read(|tx| tx.verdicts_of_task("p", "T-1"))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(verdict.passed);
+        assert_eq!(verdict.evidence.as_deref(), Some("mechanical: delete three dead fns"));
+        assert_eq!(verdict.by_seat, "engine");
+        assert_eq!(verdict.candidate, "abc1234");
+        assert_eq!(verdict.attempt, 1);
+        assert_eq!(verdict.contract_version, 1);
+
+        // The merge follows as for a captain's pass: the merge step queues the
+        // op for the accepted attempt (the same path a captain's pass takes).
+        crate::merge::merge_passed(&mut store, &mut herdr, &cfg(), "p", T0 + 11).unwrap();
+        let mut merges: Vec<_> = Vec::new();
+        for state in [OpState::Intended, OpState::Executing] {
+            merges.extend(
+                store
+                    .read(|tx| tx.ops_in_state("p", state))
+                    .unwrap()
+                    .into_iter()
+                    .filter(|op| op.kind == OpKind::Merge),
+            );
+        }
+        assert_eq!(merges.len(), 1, "{merges:?}");
+        assert_eq!(merges[0].task.as_deref(), Some("T-1"));
+        assert_eq!(merges[0].attempt, Some(1));
+
+        // One Info line for the captain.
+        let told = thread(&mut store, "mechanical:T-1");
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].recipient, "p:captain");
+        assert_eq!(told[0].kind, MsgKind::System);
+        assert_eq!(told[0].state, MsgState::Info);
+        assert!(!told[0].urgent);
+        assert_eq!(
+            told[0].body,
+            "T-1 settled without review: mechanical (delete three dead fns); the merge gate decides"
+        );
+
+        // A second tick adds nothing.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        assert_eq!(thread(&mut store, "mechanical:T-1").len(), 1);
+        assert_eq!(store.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().len(), 1);
+        assert!(starts(&herdr).is_empty());
+    }
+
+    /// T-273 (F1 of its review): a mechanical hand-in merges on its gate
+    /// alone, so it is settled in a project without `[temps]` too — no
+    /// reviewer configuration is needed for that, and the captain gets no
+    /// manual-settlement request for it.
+    #[test]
+    fn a_mechanical_hand_in_settles_without_reviewers() {
+        let mut store = world_mechanical(CONFIG_NO_REVIEWERS, Some("delete three dead fns"));
+        let mut herdr = FakeHerdr::new();
+
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        assert_eq!(report.settled, vec!["p:T-1/1".to_string()], "{report:?}");
+        assert!(report.settle_failed.is_empty(), "{report:?}");
+        assert!(report.started.is_empty(), "{report:?}");
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+        assert_eq!(attempt.state, AttemptState::Accepted, "no reviewer is needed: {report:?}");
+        let verdict = store
+            .read(|tx| tx.verdicts_of_task("p", "T-1"))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(verdict.passed);
+        assert_eq!(verdict.evidence.as_deref(), Some("mechanical: delete three dead fns"));
+        assert_eq!(verdict.by_seat, "engine");
+        // The merge follows as for a captain's pass.
+        crate::merge::merge_passed(&mut store, &mut herdr, &cfg(), "p", T0 + 11).unwrap();
+        let mut merges: Vec<_> = Vec::new();
+        for state in [OpState::Intended, OpState::Executing] {
+            merges.extend(
+                store
+                    .read(|tx| tx.ops_in_state("p", state))
+                    .unwrap()
+                    .into_iter()
+                    .filter(|op| op.kind == OpKind::Merge),
+            );
+        }
+        assert_eq!(merges.len(), 1, "the merge is queued: {merges:?}");
+        assert_eq!(merges[0].task.as_deref(), Some("T-1"));
+        // One Info line, and no manual-settlement request for it.
+        assert_eq!(thread(&mut store, "mechanical:T-1").len(), 1);
+        assert!(thread(&mut store, "verdict:T-1:1").is_empty(), "no manual-settlement request");
+    }
+
+    /// T-273 contract v2 (hull's question M-4507): a mechanical task whose
+    /// attempt works to an older contract than the task carries now is
+    /// reviewed as today — its pass could not be written, and the reviewer
+    /// judges what the change asks for.
+    #[test]
+    fn a_mechanical_hand_in_on_an_older_contract_is_reviewed() {
+        let mut store = world(CONFIG);
+        store
+            .write(|tx| {
+                // The task moved to v2, which is where the reason lives; the
+                // hand-in still works to v1.
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 2,
+                    goal: "the goal".into(),
+                    accept: "the accept criteria".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0 + 1,
+                    mechanical: Some("delete three dead fns".into()),
+                })?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.contract_version = 2;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("wt1:p1", "codex", gear_herdr::AgentStatus::Idle);
+
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+        assert_eq!(attempt.adopted_version, 1);
+        assert_eq!(attempt.state, AttemptState::Submitted, "nothing settles it");
+        assert!(store.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().is_empty());
+        assert!(thread(&mut store, "mechanical:T-1").is_empty(), "no mechanical line");
+        assert!(report.settled.is_empty(), "{report:?}");
+        let temps = store
+            .read(|tx| tx.seats_of_project("p"))
+            .unwrap()
+            .into_iter()
+            .filter(|seat| seat.role == SeatRole::Temp)
+            .count();
+        assert_eq!(temps, 1, "the reviewer judges the change");
+    }
+
+    /// T-273: a task without `mechanical` is reviewed as today.
+    #[test]
+    fn a_hand_in_without_mechanical_still_starts_a_review() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("wt1:p1", "codex", gear_herdr::AgentStatus::Idle);
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+        assert_eq!(attempt.state, AttemptState::Submitted, "nothing settles it");
+        assert!(store.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().is_empty());
+        assert!(thread(&mut store, "mechanical:T-1").is_empty(), "no mechanical line");
+        let temps = store
+            .read(|tx| tx.seats_of_project("p"))
+            .unwrap()
+            .into_iter()
+            .filter(|seat| seat.role == SeatRole::Temp)
+            .count();
+        assert_eq!(temps, 1, "the reviewer starts as before");
+    }
+
+    /// T-273: a push of a mechanical task starts no direction check.
+    #[test]
+    fn a_push_of_a_mechanical_task_starts_no_direction_check() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm one && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        publish(&work, "heat/t1");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world_mechanical(&text, Some("delete three dead fns"));
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Running;
+                task.milestone = Some("M5".into());
+                tx.update_task(&task)?;
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.state = AttemptState::Started;
+                attempt.candidate = None;
+                tx.update_attempt(&attempt)
+            })
+            .unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg();
+        config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let mut herdr = FakeHerdr::new();
+
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+
+        assert_eq!(
+            store.read(|tx| tx.get_meta(&direction_key("p", "T-1", 1))).unwrap(),
+            None,
+            "a mechanical task's push starts no direction check"
+        );
+        let rounds = store.read(|tx| tx.rounds_of_task("p", "T-1")).unwrap();
+        assert_eq!(rounds.iter().filter(|round| round.role == "direction").count(), 0);
+        assert!(starts(&herdr).is_empty(), "{:?}", starts(&herdr));
+    }
+
     /// T-63: the reviewer is sent the contract the hand-in was made against —
     /// the newest version at hand-in time, not the attempt's first one (M2.1:
     /// T-58's reviewer got v1 after the lane reworked to v2 and asked the
@@ -2316,6 +2838,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)
@@ -2334,6 +2857,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0 + 5,
+                    mechanical: None,
                 })?;
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.contract_version = 2;
@@ -2372,6 +2896,105 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(packet.contains("Goal: the revised goal"), "{packet}");
         assert!(packet.contains("Accept: the revised criteria"), "{packet}");
         assert!(!packet.contains("the first goal"), "not the old contract: {packet}");
+    }
+
+    /// T-282 (M-3956): a direction reviewer judges the task's current contract,
+    /// which travels in its packet; it is never sent to `gear --show` for a
+    /// version that follows the reviewer's own view instead of the task.
+    #[test]
+    fn the_direction_packet_carries_the_tasks_current_contract() {
+        let mut store = world(CONFIG);
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.contract_version = 3;
+                tx.update_task(&task)?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 3,
+                    goal: "the third goal".into(),
+                    accept: "the third criteria".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0 + 30,
+                    mechanical: None,
+                })
+            })
+            .unwrap();
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let task = ReviewTask {
+            task: "T-1".into(),
+            attempt: 1,
+            writer: "p:heat".into(),
+            lane: "heat".into(),
+            candidate: "abc1234".into(),
+        };
+        let packet = job_packet(&mut store, &config, &task, true).unwrap();
+
+        assert!(
+            packet.contains("Contract v3 (the task's current contract"),
+            "{packet}"
+        );
+        assert!(packet.contains("Goal: the third goal"), "{packet}");
+        assert!(packet.contains("Accept: the third criteria"), "{packet}");
+        assert!(
+            !packet.contains("Read the contract (gear --show"),
+            "the reviewer is not sent to a version that follows its own view: {packet}"
+        );
+    }
+
+    /// T-282: a hand-in whose task's contract moved past the version it was
+    /// made against says so; the reviewer still judges the hand-in by its own
+    /// version (T-63) and logs what the newer one changes.
+    #[test]
+    fn the_review_packet_says_when_the_task_moved_to_a_newer_contract() {
+        let mut store = world(CONFIG);
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.contract_version = 3;
+                tx.update_task(&task)?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 3,
+                    goal: "the third goal".into(),
+                    accept: "the third criteria".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0 + 30,
+                    mechanical: None,
+                })?;
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.adopted_version = 2;
+                tx.update_attempt(&attempt)
+            })
+            .unwrap();
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+
+        assert!(
+            packet.contains("Contract: v2 (the version this hand-in was made against)"),
+            "{packet}"
+        );
+        assert!(
+            packet.contains("Newer contract: v3 was written after this hand-in; judge against v2 and log what v3 changes."),
+            "{packet}"
+        );
+
+        // At v2 on a task at v2 there is no newer contract to name.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.contract_version = 2;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        assert!(!packet.contains("Newer contract:"), "{packet}");
     }
 
     /// T-168 (design §6.2): the reviewer's packet says the review's own
@@ -2454,12 +3077,15 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let first = sh(&work, "git rev-parse HEAD");
         let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
         let mut store = world(&text);
+        // The task is of a voyage (T-262): its reports live in
+        // `gear/voyages/M5/reports`.
         store.write(|tx| {
-            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Running; tx.update_task(&task)?;
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Running; task.milestone = Some("M5".into()); tx.update_task(&task)?;
             let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap(); attempt.state = AttemptState::Started; attempt.candidate = None; tx.update_attempt(&attempt)
         }).unwrap();
         REVIEW_GIT_FAKE.with(|fake| fake.set(false));
         let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let pc = gear_app::config::parse(&text).unwrap();
         let mut herdr = FakeHerdr::new();
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
         let key = direction_key("p", "T-1", 1);
@@ -2469,6 +3095,10 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert_eq!(initial["sha"], first);
         assert_eq!(store.read(|tx| tx.rounds_of_task("p", "T-1")).unwrap().iter().filter(|r| r.role == "direction").count(), 1);
         let packet = store.read(|tx| tx.last_op("p:review-1", OpKind::Deliver)).unwrap().unwrap().payload["text"].as_str().unwrap().to_string();
+        // T-267: the reviewer's first `gear` is what confirms the delivery,
+        // so the direction packet asks for it first, as the review packet
+        // does.
+        assert!(packet.starts_with("Run `gear` first"), "the direction packet asks for `gear` first: {packet}");
         assert!(packet.contains("Direction check of T-1 attempt 1"));
         let failed = store.read(|tx| tx.last_op("p:review-1", OpKind::Deliver)).unwrap().unwrap();
         store.write(|tx| tx.set_op_state("p", &failed.id, gear_model::OpState::Failed, Some("agent_not_ready"), T0 + 10)).unwrap();
@@ -2477,16 +3107,11 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert_ne!(replayed.id, failed.id);
         assert!(replayed.payload["text"].as_str().unwrap().contains("Direction check of T-1 attempt 1"));
         store.write(|tx| tx.set_op_state("p", &replayed.id, gear_model::OpState::Failed, Some("agent_not_ready"), T0 + 10)).unwrap();
-        store.write(|tx| gear_app::tasks::submit_result(tx,"p","T-1",1,1,&first,"ops/reports/T-1.md",T0+10)).unwrap();
-        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
-        let after_handin = store.read(|tx| tx.last_op("p:review-1", OpKind::Deliver)).unwrap().unwrap();
-        assert_ne!(after_handin.id, replayed.id);
-        assert!(after_handin.payload["text"].as_str().unwrap().contains("Direction check of T-1 attempt 1"));
-        store.write(|tx| {
-            let mut task=tx.get_task("p","T-1")?.unwrap(); task.state=TaskState::Running; tx.update_task(&task)?;
-            let mut attempt=tx.get_attempt("p","T-1",1)?.unwrap(); attempt.state=AttemptState::Started; attempt.candidate=None; tx.update_attempt(&attempt)?;
-            tx.set_op_state("p",&after_handin.id,gear_model::OpState::Submitted,None,T0+10)
-        }).unwrap();
+        // T-258: a hand-in now closes this running check (and its seat goes to
+        // the hand-in's review), so this test keeps the attempt `Started`: it is
+        // about pushes and results, and the hand-in is covered by
+        // `a_hand_in_takes_the_seat_a_direction_result_frees` and
+        // `a_hand_in_closes_a_direction_check_that_never_answers`.
         std::fs::write(work.join("src/base"), "two").unwrap();
         sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm two");
         publish(&work, "heat/t1");
@@ -2495,21 +3120,68 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["sha"], first);
         let result = |tx: &Tx<'_>, sha: &str, body: &str, time| tx.insert_message(&NewMessage { meta: Some(serde_json::json!({"direction":true,"sha":sha}).to_string()), project:"p".into(), thread:format!("result:{time}"), task:Some("T-1".into()), attempt:Some(1), sender:"p:review-1".into(), sender_gen:1, recipient:"p:captain".into(), kind:MsgKind::Result, urgent:false, body:body.into(), reply_to:None, needs_ack:false, state:MsgState::Info, created:time }).map(|_| ());
         store.write(|tx| result(tx, &first, "ok. Candidate follows contract v4; src/base is the right place", T0 + 12)).unwrap();
-        finish_direction_results(&mut store, "p", T0 + 13).unwrap();
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 13).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["checked_sha"], first);
         let inbox = store.read(|tx| tx.actionable_for("p", "p:heat", T0 + 13)).unwrap();
         assert_eq!(inbox.iter().filter(|m| m.kind == MsgKind::Instruction && m.urgent).count(), 0, "a passing direction check sends the lane nothing");
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 14).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["sha"], second);
         store.write(|tx| result(tx, &second, "use the required approach", T0 + 15)).unwrap();
-        finish_direction_results(&mut store, "p", T0 + 16).unwrap();
-        finish_direction_results(&mut store, "p", T0 + 17).unwrap();
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 16).unwrap();
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 17).unwrap();
         let inbox = store.read(|tx| tx.actionable_for("p", "p:heat", T0 + 17)).unwrap();
         assert_eq!(inbox.iter().filter(|m| m.kind == MsgKind::Instruction && m.urgent).count(), 1);
-        sh(&work, "git checkout -q -B ops-only origin/dev && mkdir -p ops && echo report > ops/report && git add -A && git -c user.name=a -c user.email=a@b commit -qm ops");
+        // T-262: a push that only writes the voyage's reports starts no
+        // direction check (it used to be `ops/`, which this repo left on
+        // 2026-10-28).
+        sh(&work, "git checkout -q -B reports-only origin/dev && mkdir -p gear/voyages/M5/reports && echo report > gear/voyages/M5/reports/T-1.md && git add -A && git -c user.name=a -c user.email=a@b commit -qm report");
         publish(&work, "heat/t1");
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 18).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["checked_sha"], second);
+    }
+
+    /// T-262: a report alone starts no direction check, a report together with
+    /// a source file does — the report is a document, the source is the work.
+    #[test]
+    fn a_report_alone_starts_no_direction_check_but_a_report_and_a_source_file_do() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        // The lane's first push: its report only.
+        sh(&work, "git checkout -q -B heat/t1 dev && mkdir -p gear/voyages/M5/reports && echo 'T-1 report' > gear/voyages/M5/reports/T-1.md && git add -A && git -c user.name=a -c user.email=a@b commit -qm report");
+        publish(&work, "heat/t1");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world(&text);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.state = TaskState::Running;
+            task.milestone = Some("M5".into());
+            tx.update_task(&task)?;
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+            attempt.state = AttemptState::Started;
+            attempt.candidate = None;
+            tx.update_attempt(&attempt)
+        }).unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let mut herdr = FakeHerdr::new();
+        let key = direction_key("p", "T-1", 1);
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        assert_eq!(store.read(|tx| tx.get_meta(&key)).unwrap(), None, "a report alone starts no direction check");
+        // The same push with one source file beside the report: the work the
+        // contract asks about is there, and the check starts.
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm work");
+        publish(&work, "heat/t1");
+        let work_sha = sh(&work, "git rev-parse HEAD");
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 11).unwrap();
+        let job: serde_json::Value = serde_json::from_str(&store.read(|tx| tx.get_meta(&key)).unwrap().expect("a direction check starts")).unwrap();
+        assert_eq!(job["state"], "running");
+        assert_eq!(job["sha"], work_sha);
     }
 
     /// F1 of the T-199 review (round 2): a hand-in waits behind its own
@@ -2580,6 +3252,245 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().task_id.as_deref(), Some("T-1"));
         let job: serde_json::Value = serde_json::from_str(&store.read(|tx| tx.get_meta(&direction_key("p", "T-1", 1))).unwrap().unwrap()).unwrap();
         assert_eq!(job["checked_sha"], first);
+    }
+
+    /// T-258: a direction check never outlives its attempt's hand-in. The job
+    /// that never answers is closed anyway, its seat comes free, and the
+    /// hand-in behind it takes the seat on the next `start_reviews` pass.
+    #[test]
+    fn a_hand_in_closes_a_direction_check_that_never_answers() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm one");
+        publish(&work, "heat/t1");
+        let first = sh(&work, "git rev-parse HEAD");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world(&text);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Running; tx.update_task(&task)?;
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap(); attempt.state = AttemptState::Started; attempt.candidate = None; tx.update_attempt(&attempt)
+        }).unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let pc = gear_app::config::parse(&text).unwrap();
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        let key = direction_key("p", "T-1", 1);
+        fn job(store: &mut Store, key: &str) -> serde_json::Value {
+            serde_json::from_str(&store.read(|tx| tx.get_meta(key)).unwrap().unwrap()).unwrap()
+        }
+        assert_eq!(job(&mut store, &key)["state"], "running");
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().task_id.as_deref(), Some("T-1"));
+        // The lane hands T-1 in while its direction check still runs, and the
+        // check never answers.
+        store.write(|tx| gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, &first, "ops/reports/T-1.md", T0 + 11)).unwrap();
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 12).unwrap();
+        assert_eq!(job(&mut store, &key)["checked_sha"], first, "the job is closed with its own sha");
+        assert_eq!(job(&mut store, &key).get("state"), None, "the job is no longer running");
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Standby, "the check's seat comes free");
+        assert_eq!(seat.task_id, None, "and holds no task");
+        // The hand-in's review starts on the next pass and takes that seat.
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 13).unwrap();
+        assert_eq!(
+            store.read(|tx| tx.get_meta(&pending_review_key("p:review-1"))).unwrap().as_deref(),
+            Some("T-1"),
+            "the hand-in's review took the seat the direction check held"
+        );
+    }
+
+    /// T-258: a failing direction result that arrives after the hand-in is the
+    /// captain's to read; the lane, which already handed in, is not told.
+    #[test]
+    fn a_late_failing_direction_result_reaches_only_the_captain() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm one");
+        publish(&work, "heat/t1");
+        let first = sh(&work, "git rev-parse HEAD");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world(&text);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Running; tx.update_task(&task)?;
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap(); attempt.state = AttemptState::Started; attempt.candidate = None; tx.update_attempt(&attempt)
+        }).unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let pc = gear_app::config::parse(&text).unwrap();
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        let key = direction_key("p", "T-1", 1);
+        store.write(|tx| gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, &first, "ops/reports/T-1.md", T0 + 11)).unwrap();
+        // The direction check answers `F1` after the hand-in, replayed with its
+        // own sha.
+        store.write(|tx| tx.insert_message(&NewMessage {
+            meta: Some(serde_json::json!({"direction":true,"sha":first}).to_string()), project: "p".into(),
+            thread: format!("direction:T-1:1:{first}"), task: Some("T-1".into()), attempt: Some(1), sender: "p:review-1".into(),
+            sender_gen: 1, recipient: "p:captain".into(), kind: MsgKind::Result, urgent: false, body: "F1: misread the contract sentence".into(),
+            reply_to: None, needs_ack: false, state: MsgState::Info, created: T0 + 12,
+        }).map(|_| ())).unwrap();
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 13).unwrap();
+        let job: serde_json::Value = serde_json::from_str(&store.read(|tx| tx.get_meta(&key)).unwrap().unwrap()).unwrap();
+        assert_eq!(job["checked_sha"], first, "the late result closes the job too");
+        assert!(
+            store.read(|tx| tx.actionable_for("p", "p:heat", T0 + 13)).unwrap().is_empty(),
+            "the lane that handed in is sent nothing at all"
+        );
+        let written: Vec<_> = store.read(|tx| tx.thread_messages("p", &format!("direction:T-1:1:{first}"))).unwrap().into_iter().filter(|m| m.sender == "engine").collect();
+        assert_eq!(written.len(), 1, "one message only: {written:?}");
+        assert_eq!(written[0].recipient, "p:captain");
+        assert_eq!(written[0].kind, MsgKind::System);
+        assert_eq!(written[0].state, MsgState::Info);
+        assert!(written[0].body.contains("F1: misread the contract sentence"), "{}", written[0].body);
+    }
+
+    /// T-258: a check on an attempt that is still `Started` keeps waiting for
+    /// its result, exactly as before.
+    #[test]
+    fn a_running_direction_check_on_a_started_attempt_keeps_waiting() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm one");
+        publish(&work, "heat/t1");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world(&text);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Running; tx.update_task(&task)?;
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap(); attempt.state = AttemptState::Started; attempt.candidate = None; tx.update_attempt(&attempt)
+        }).unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let pc = gear_app::config::parse(&text).unwrap();
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        let key = direction_key("p", "T-1", 1);
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 11).unwrap();
+        let job: serde_json::Value = serde_json::from_str(&store.read(|tx| tx.get_meta(&key)).unwrap().unwrap()).unwrap();
+        assert_eq!(job["state"], "running", "the check keeps waiting for its result");
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Active);
+    }
+
+    /// T-283: a failing direction result on a candidate the lane has already
+    /// moved past (the branch reads B, the job checked A) is the captain's
+    /// information, not the lane's instruction — the lane pushed the fix
+    /// already (M4.2 T-237, M-4110/M-4119). The job still closes with its own
+    /// sha, so the next pass checks the tip by itself.
+    #[test]
+    fn a_failing_direction_result_on_a_candidate_the_lane_moved_past_reaches_only_the_captain() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm one");
+        publish(&work, "heat/t1");
+        let first = sh(&work, "git rev-parse HEAD");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world(&text);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Running; tx.update_task(&task)?;
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap(); attempt.state = AttemptState::Started; attempt.candidate = None; tx.update_attempt(&attempt)
+        }).unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let pc = gear_app::config::parse(&text).unwrap();
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        let key = direction_key("p", "T-1", 1);
+        let job = |store: &mut Store| serde_json::from_str::<serde_json::Value>(&store.read(|tx| tx.get_meta(&key)).unwrap().unwrap()).unwrap();
+        assert_eq!(job(&mut store)["sha"], first);
+        // The lane pushes the fix while the check on A still runs.
+        std::fs::write(work.join("src/base"), "two").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm two");
+        publish(&work, "heat/t1");
+        let second = sh(&work, "git rev-parse HEAD");
+        assert_ne!(first, second);
+        // The check answers `F1` on the candidate it had, A.
+        store.write(|tx| tx.insert_message(&NewMessage {
+            meta: Some(serde_json::json!({"direction":true,"sha":first}).to_string()), project: "p".into(),
+            thread: format!("direction:T-1:1:{first}"), task: Some("T-1".into()), attempt: Some(1), sender: "p:review-1".into(),
+            sender_gen: 1, recipient: "p:captain".into(), kind: MsgKind::Result, urgent: false, body: "F1: misread the contract sentence".into(),
+            reply_to: None, needs_ack: false, state: MsgState::Info, created: T0 + 12,
+        }).map(|_| ())).unwrap();
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 13).unwrap();
+        assert_eq!(job(&mut store)["checked_sha"], first, "the job closes with its own sha");
+        assert_eq!(job(&mut store).get("state"), None, "the job is no longer running");
+        assert!(
+            store.read(|tx| tx.actionable_for("p", "p:heat", T0 + 13)).unwrap().is_empty(),
+            "a superseded failure is not an instruction for the lane"
+        );
+        let written: Vec<_> = store.read(|tx| tx.thread_messages("p", &format!("direction:T-1:1:{first}"))).unwrap().into_iter().filter(|m| m.sender == "engine").collect();
+        assert_eq!(written.len(), 1, "one message only: {written:?}");
+        assert_eq!(written[0].recipient, "p:captain");
+        assert_eq!(written[0].kind, MsgKind::System);
+        assert_eq!(written[0].state, MsgState::Info);
+        assert!(written[0].body.contains("superseded"), "{}", written[0].body);
+        assert!(written[0].body.contains("F1: misread the contract sentence"), "{}", written[0].body);
+        // The seat came free, and the next pass checks the tip itself.
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 14).unwrap();
+        assert_eq!(job(&mut store)["sha"], second, "the next check is on the branch tip");
+    }
+
+    /// T-283: a branch tip that cannot be read decides nothing: the failing
+    /// result reaches the lane exactly as before.
+    #[test]
+    fn a_failing_direction_result_whose_branch_cannot_be_read_reaches_the_lane() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm one");
+        publish(&work, "heat/t1");
+        let first = sh(&work, "git rev-parse HEAD");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world(&text);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Running; tx.update_task(&task)?;
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap(); attempt.state = AttemptState::Started; attempt.candidate = None; tx.update_attempt(&attempt)
+        }).unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let pc = gear_app::config::parse(&text).unwrap();
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        // The branch ref is gone: the tip cannot be read.
+        sh(&work, "git update-ref -d refs/remotes/origin/heat/t1");
+        store.write(|tx| tx.insert_message(&NewMessage {
+            meta: Some(serde_json::json!({"direction":true,"sha":first}).to_string()), project: "p".into(),
+            thread: format!("direction:T-1:1:{first}"), task: Some("T-1".into()), attempt: Some(1), sender: "p:review-1".into(),
+            sender_gen: 1, recipient: "p:captain".into(), kind: MsgKind::Result, urgent: false, body: "F1: misread the contract sentence".into(),
+            reply_to: None, needs_ack: false, state: MsgState::Info, created: T0 + 12,
+        }).map(|_| ())).unwrap();
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 13).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:heat", T0 + 13)).unwrap();
+        assert_eq!(inbox.iter().filter(|m| m.kind == MsgKind::Instruction && m.urgent).count(), 1, "an unreadable tip decides nothing");
+        let written: Vec<_> = store.read(|tx| tx.thread_messages("p", &format!("direction:T-1:1:{first}"))).unwrap().into_iter().filter(|m| m.sender == "engine").collect();
+        assert!(!written.iter().any(|m| m.body.contains("superseded")), "{written:?}");
     }
 
     #[test]
@@ -2658,8 +3569,8 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         }).unwrap();
         let mut herdr=FakeHerdr::new();
         let task=ReviewTask {task:"T-1".into(),attempt:1,writer:"p:heat".into(),lane:"heat".into(),candidate:"abc1234".into()};
-        prepare_seat_tree(&FakeReviewGit,&mut store,&mut herdr,&seat,"/repo","/fake-review-worktree","direction/t-1",&task,T0).unwrap();
-        prepare_seat_tree(&FakeReviewGit,&mut store,&mut herdr,&seat,"/repo","/fake-review-worktree","review/t1",&task,T0+1).unwrap();
+        prepare_seat_tree(&FakeReviewGit,&mut store,&mut herdr,&seat,"/repo","/fake-review-worktree","origin","direction/t-1",&task,T0).unwrap();
+        prepare_seat_tree(&FakeReviewGit,&mut store,&mut herdr,&seat,"/repo","/fake-review-worktree","origin","review/t1",&task,T0+1).unwrap();
         let branches=REVIEW_GIT_CALLS.with(|calls|calls.borrow().iter().filter_map(|(_,args)| {
             (args.first().map(String::as_str)==Some("checkout") && args.get(2).map(String::as_str)==Some("-B")).then(||args.get(3).cloned()).flatten()
         }).collect::<Vec<_>>());
@@ -2668,9 +3579,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 
     #[test]
     fn direct_checkout_stashes_dirty_worktrees_and_reports_them() {
-        let root = std::env::temp_dir().join(format!("gear-review-direct-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::testtmp::temp("gear-review-direct");
         sh(&root, "git init -q --bare origin.git && git init -q -b dev work");
         let work = root.join("work");
         std::fs::write(work.join("readme"), "base").unwrap();
@@ -2693,10 +3602,10 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             tx.set_meta(&repo_path_key("p:review-9", work.to_str().unwrap()), old.to_str().unwrap())
         }).unwrap();
         herdr.add_agent("w9:p9", "codex", gear_herdr::AgentStatus::Working);
-        assert!(!prepare_review_tree(&RealReviewGit, &mut store, &mut herdr, "p", work.to_str().unwrap(), new.to_str().unwrap(), "review/t1", &task, T0).unwrap());
+        assert!(!prepare_review_tree(&RealReviewGit, &mut store, &mut herdr, "p", work.to_str().unwrap(), new.to_str().unwrap(), "origin", "review/t1", &task, T0).unwrap());
         assert_eq!(sh(&old, "git rev-parse --abbrev-ref HEAD"), "review/t1");
         herdr = FakeHerdr::new();
-        assert!(prepare_review_tree(&RealReviewGit, &mut store, &mut herdr, "p", work.to_str().unwrap(), new.to_str().unwrap(), "review/t1", &task, T0).unwrap());
+        assert!(prepare_review_tree(&RealReviewGit, &mut store, &mut herdr, "p", work.to_str().unwrap(), new.to_str().unwrap(), "origin", "review/t1", &task, T0).unwrap());
         assert_eq!(sh(&old, "git rev-parse --abbrev-ref HEAD"), "HEAD");
         assert_eq!(sh(&new, "git rev-parse --abbrev-ref HEAD"), "review/t1");
         assert!(!old.join("old-evidence").exists());
@@ -2709,9 +3618,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 
     #[test]
     fn real_git_checkout_uses_the_submitted_commit() {
-        let root = std::env::temp_dir().join(format!("gear-review-clean-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::testtmp::temp("gear-review-clean");
         sh(&root, "git init -q --bare origin.git && git init -q -b dev work");
         let work = root.join("work");
         std::fs::write(work.join("readme"), "base").unwrap();
@@ -2723,7 +3630,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let mut herdr = FakeHerdr::new();
         let task = ReviewTask { task: "T-1".into(), attempt: 1, writer: "p:heat".into(), lane: "heat".into(), candidate: candidate.clone() };
         let path = work.to_str().unwrap();
-        assert!(prepare_review_tree(&RealReviewGit, &mut store, &mut herdr, "p", path, path, "review/t1", &task, T0).unwrap());
+        assert!(prepare_review_tree(&RealReviewGit, &mut store, &mut herdr, "p", path, path, "origin", "review/t1", &task, T0).unwrap());
         assert_eq!(sh(&work, "git rev-parse HEAD"), candidate);
         assert_eq!(sh(&work, "git rev-parse --abbrev-ref HEAD"), "review/t1");
         std::fs::remove_dir_all(root).unwrap();
@@ -2962,6 +3869,28 @@ review = [
         // The packet itself is unchanged around it.
         assert!(with.contains("Review T-1 attempt 1"), "{with}");
         assert!(with.contains("Diff to review"), "{with}");
+    }
+
+    /// T-300: the review packet names the commit message the project asks for
+    /// — its `[conventions].review_message` — and leaves `{what}` in it, since
+    /// what the commit does is the reviewer's to write.
+    #[test]
+    fn the_review_packet_names_the_projects_review_message() {
+        // The default: `review({task}): {what}`.
+        let mut store = world(CONFIG);
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 2, "abc1234").unwrap();
+        assert!(
+            packet.contains("with the message `review(T-1): {what}`"),
+            "{packet}"
+        );
+
+        // A team with its own form gets its own message, `{what}` still open.
+        let text = format!("{CONFIG}\n[conventions]\nreview_message = \"{{task}}#{{attempt}} review: {{what}}\"\n");
+        let config = gear_app::config::parse(&text).unwrap();
+        let mut store = world(&text);
+        let packet = review_packet_for(&mut store, &config, "T-1", 2, "abc1234").unwrap();
+        assert!(packet.contains("`T-1#2 review: {what}`"), "{packet}");
     }
 
     #[test]
@@ -3232,14 +4161,59 @@ review = [
             store.read(|tx| tx.get_seat("p:review-1")).unwrap().is_none(),
             "no seat is created while the quota is full"
         );
-        // The captain is told once.
+        // The captain is told once: the news is information, not a captain
+        // action item (T-370).
+        let told = thread(&mut store, "T-1:1");
+        assert_eq!(told.len(), 1, "the captain is told: {told:?}");
+        assert_eq!(told[0].recipient, "p:captain");
+        assert_eq!(told[0].kind, MsgKind::System);
+        assert_eq!(told[0].state, MsgState::Info);
+        assert!(told[0].body.contains("T-1"), "{}", told[0].body);
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 11)).unwrap();
-        assert_eq!(inbox.len(), 1, "the captain is told: {inbox:?}");
-        assert!(inbox[0].body.contains("T-1"), "{}", inbox[0].body);
+        assert!(inbox.is_empty(), "nothing rings the captain: {inbox:?}");
         // The next tick does not tell the captain again.
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
-        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 21)).unwrap();
-        assert_eq!(inbox.len(), 1, "one open item per task: {inbox:?}");
+        assert_eq!(thread(&mut store, "T-1:1").len(), 1, "one message per task");
+    }
+
+    /// T-370: the "the review waits: every temp seat is in use" notice is
+    /// information, not a captain item: it holds no INBOX slot and rings
+    /// nothing, and it stays told once per attempt.
+    #[test]
+    fn the_review_waits_notice_is_information_while_both_temp_seats_are_busy() {
+        let mut store = world(CONFIG_TWO_SLOTS);
+        let mut herdr = FakeHerdr::new();
+        store
+            .write(|tx| {
+                testing::seed_temp_seat(tx, "p", "review-1", "T-9", "wt9:p1", "codex", T0)?;
+                testing::seed_temp_seat(tx, "p", "review-2", "T-8", "wt8:p1", "codex", T0)?;
+                Ok(())
+            })
+            .unwrap();
+
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        assert_eq!(report.waiting, vec!["T-1".to_string()]);
+
+        // One message, told as information: the captain's information list,
+        // not his action items.
+        let told = thread(&mut store, "T-1:1");
+        assert_eq!(told.len(), 1, "the captain is told once: {told:?}");
+        assert_eq!(told[0].recipient, "p:captain");
+        assert_eq!(told[0].kind, MsgKind::System);
+        assert_eq!(told[0].state, MsgState::Info);
+        assert!(
+            told[0].body.contains("waits: every temp seat is in use"),
+            "{}",
+            told[0].body
+        );
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 11)).unwrap();
+        assert!(inbox.is_empty(), "nothing rings the captain: {inbox:?}");
+
+        // A second tick writes none.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        assert_eq!(thread(&mut store, "T-1:1").len(), 1, "a second message was added");
+        let empty = store.read(|tx| tx.thread_messages("p", "T-1:2")).unwrap();
+        assert!(empty.is_empty(), "a second message was added: {empty:?}");
     }
 
     /// T-214: the "the review waits" notice is told once per attempt. A
@@ -3252,12 +4226,16 @@ review = [
 
         // The first tick: the review waits, the captain is told once.
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        let told = thread(&mut store, "T-1:1");
+        assert_eq!(told.len(), 1, "the captain is told: {told:?}");
+        assert_eq!(told[0].kind, MsgKind::System);
+        assert_eq!(told[0].state, MsgState::Info);
+        assert!(told[0].body.contains("T-1"), "{}", told[0].body);
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 11)).unwrap();
-        assert_eq!(inbox.len(), 1, "the captain is told: {inbox:?}");
-        assert!(inbox[0].body.contains("T-1"), "{}", inbox[0].body);
+        assert!(inbox.is_empty(), "nothing rings the captain: {inbox:?}");
 
         // The captain resolves the item.
-        let id = inbox[0].id.clone();
+        let id = told[0].id.clone();
         store
             .write(|tx| {
                 tx.update_message_state("p", &id, MsgState::Resolved, Some("ok"), None, None, T0 + 12)
@@ -3270,6 +4248,7 @@ review = [
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 31)).unwrap();
         assert!(inbox.is_empty(), "the notice comes back: {inbox:?}");
+        assert_eq!(thread(&mut store, "T-1:1").len(), 1, "a second message was added");
         let again = store.read(|tx| tx.thread_messages("p", "T-1:2")).unwrap();
         assert!(again.is_empty(), "a second item was added: {again:?}");
 
@@ -3296,8 +4275,12 @@ review = [
             .unwrap();
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 50).unwrap();
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 51)).unwrap();
-        assert_eq!(inbox.len(), 1, "the next attempt is told again: {inbox:?}");
-        assert!(inbox[0].body.contains("attempt 2"), "{}", inbox[0].body);
+        assert!(inbox.is_empty(), "the next attempt rings nothing: {inbox:?}");
+        let told = thread(&mut store, "T-1:2");
+        assert_eq!(told.len(), 1, "the next attempt is told again: {told:?}");
+        assert_eq!(told[0].kind, MsgKind::System);
+        assert_eq!(told[0].state, MsgState::Info);
+        assert!(told[0].body.contains("attempt 2"), "{}", told[0].body);
     }
 
     #[test]
@@ -3357,6 +4340,61 @@ review = [
         assert!(worktrees(&herdr).is_empty(), "no second worktree");
         let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Active);
+    }
+
+    /// A reviewer whose CLI is not installed says so on the pane (T-286): the
+    /// seat is parked with the install, not left to try again.
+    #[test]
+    fn a_reviewer_whose_cli_is_missing_parks_with_the_install() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        let pane = "wt1:p1";
+        herdr.add_shell(pane);
+        store
+            .write(|tx| {
+                tx.insert_seat(&SeatRow {
+                    id: "p:review-1".into(),
+                    project: "p".into(),
+                    role: SeatRole::Temp,
+                    name: "review-1".into(),
+                    profile: "codex".into(),
+                    generation: 1,
+                    state: SeatState::Starting,
+                    state_since: T0,
+                    state_reason: Some("onboarding".into()),
+                    task_id: Some("T-1".into()),
+                })?;
+                tx.insert_binding(&BindingRow {
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    session: "sess".into(),
+                    pane_id: pane.into(),
+                    kind: "codex".into(),
+                    session_ref: None,
+                    status: BindingStatus::Pending,
+                    handover_id: None,
+                    created: T0,
+                })?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
+                Ok(())
+            })
+            .unwrap();
+        // The shell could not find the CLI when the start came.
+        herdr.set_screen(pane, "zsh: command not found: codex");
+        herdr.refuse_starts = Some(("agent_start_timeout".into(), 1));
+
+        let report =
+            start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+
+        assert!(report.started.is_empty(), "the reviewer is not up");
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Unknown, "parked for a human");
+        let reason = seat.state_reason.unwrap_or_default();
+        assert!(
+            reason.contains("the codex CLI is not installed or not on PATH"),
+            "{reason}"
+        );
+        assert!(herdr.started_agents.is_empty(), "no agent was started");
     }
 
     #[test]
@@ -3579,6 +4617,7 @@ review = [
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-2", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-2", 1, T0)?;
@@ -4096,6 +5135,7 @@ profile = "opencode"
                 project: "p".into(), task: task.id.clone(), version: 1,
                 goal: "next job".into(), accept: "review it".into(),
                 evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0,
+                mechanical: None,
             })?;
             gear_app::tasks::start_attempt(tx, "p", &task.id, "p:heat", 1, T0)?;
             gear_app::tasks::on_delivery_confirmed(tx, "p", &task.id, 1, T0)?;
@@ -4232,6 +5272,209 @@ profile = "opencode"
         assert!(report.started.is_empty(), "{report:?}");
         assert_eq!(report.waiting, vec!["T-2".to_string()], "{report:?}");
     }
+
+    /// T-375: a seat that gave the verdict of attempt 1 and now holds the
+    /// rework is not parked by that earlier verdict while round 2 runs. The
+    /// open review round names the job; the last packet is still attempt 1's
+    /// (the round of attempt 2 is resumed before its packet exists).
+    #[test]
+    fn the_earlier_verdict_does_not_park_the_seat_of_the_open_round() {
+        let mut store = world(CONFIG);
+        let round = |attempt: i64| gear_store::RoundKey {
+            project: "p".into(),
+            task: "T-1".into(),
+            attempt,
+            role: "review".into(),
+        };
+        store
+            .write(|tx| {
+                testing::seed_temp_seat(tx, "p", "review-1", "T-1", "w9:p1", "codex", T0)?;
+                // Round 1 ran on this seat: its packet names attempt 1, and the
+                // verdict of attempt 1 is this seat's.
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    kind: OpKind::Deliver,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "text": "the packet of attempt 1" }),
+                    created: T0,
+                })?;
+                tx.insert_round(&gear_store::NewRound {
+                    key: round(1),
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    cli: "codex".into(),
+                    model: None,
+                    start_at: T0,
+                })?;
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: false,
+                    findings: "rework".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0 + 10,
+                })?;
+                // The lane reworked and attempt 2 is handed in. The seat holds
+                // T-1 again, and the round it opened for attempt 2 is open with
+                // no attempt-2 packet yet: its session is being resumed.
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 2,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Submitted,
+                    candidate: Some("def5678".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0 + 20,
+                    updated: T0 + 20,
+                })?;
+                tx.close_round(&round(1), T0 + 20)?;
+                tx.insert_round(&gear_store::NewRound {
+                    key: round(2),
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    cli: "codex".into(),
+                    model: None,
+                    start_at: T0 + 20,
+                })
+            })
+            .unwrap();
+
+        // The job that runs now is attempt 2: the verdict of attempt 1 is not
+        // its verdict, so the seat stays Active on it.
+        assert!(
+            standby_after_verdict(&mut store, "p", T0 + 30).unwrap().is_empty(),
+            "the review of attempt 2 keeps the seat"
+        );
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active, "the seat keeps working");
+        assert_eq!(seat.task_id.as_deref(), Some("T-1"), "it keeps the job");
+
+        // The verdict of attempt 2 is the job's: the seat waits for the next.
+        store
+            .write(|tx| {
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 2,
+                    passed: true,
+                    findings: "ok".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0 + 40,
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            standby_after_verdict(&mut store, "p", T0 + 50).unwrap(),
+            vec!["p:review-1".to_string()],
+            "the verdict of the job parks the seat"
+        );
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Standby, "the reviewer waits for the next review");
+        assert_eq!(seat.task_id, None, "its job binding ended");
+    }
+
+    /// T-375 (engine, two ticks): the rework hand-in is reviewed by the seat
+    /// that judged round 1. Its activation stands while the round's session is
+    /// brought up (no attempt-2 packet yet), and the earlier verdict must not
+    /// park it between the ticks.
+    #[test]
+    fn a_rework_hand_in_keeps_the_seat_that_judged_round_one_working() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        // Tick 1: the reviewer of attempt 1 starts, Active on the job.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active, "the reviewer of attempt 1 runs");
+        assert_eq!(seat.task_id.as_deref(), Some("T-1"));
+        // The packet of attempt 1 is refused by the pane (`agent_not_ready`
+        // right after a start): the seat keeps its activation, and
+        // `recover_missing_packets` sends the packet again.
+        let packet = store.read(|tx| tx.last_op("p:review-1", OpKind::Deliver)).unwrap().unwrap();
+        store
+            .write(|tx| {
+                tx.set_op_state("p", &packet.id, gear_model::OpState::Failed, Some("agent_not_ready"), T0 + 11)?;
+                // The verdict of attempt 1 (its packet is the seat's last
+                // packet), and the lane's rework handed in as attempt 2.
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: false,
+                    findings: "rework".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0 + 12,
+                })?;
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.state = AttemptState::Rejected;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Ready;
+                tx.update_task(&task)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 13)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 13)?;
+                gear_app::tasks::submit_result(tx, "p", "T-1", 2, 1, "def5678", "report", T0 + 13)
+            })
+            .unwrap();
+        // Tick 2: the same seat takes the rework (round 2 opens, no attempt-2
+        // packet is sent yet: the session is brought up first).
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        let open = store.read(|tx| tx.open_round_of_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!((open.attempt, open.role.as_str()), (2, "review"), "the seat works on the rework");
+        assert!(
+            !store.read(|tx| tx.ops_of_seat_kind("p:review-1", OpKind::Deliver)).unwrap().iter().any(|op| op.attempt == Some(2)),
+            "no attempt-2 packet is sent while the session is brought up"
+        );
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active, "the job's activation stands");
+        assert_eq!(seat.task_id.as_deref(), Some("T-1"), "the seat holds the rework");
+
+        // Between the ticks the earlier verdict is not the verdict of the job:
+        // the seat stays Active on the rework.
+        assert!(
+            standby_after_verdict(&mut store, "p", T0 + 21).unwrap().is_empty(),
+            "the earlier verdict does not park the seat of the rework"
+        );
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active, "the seat keeps working on the rework");
+        assert_eq!(seat.task_id.as_deref(), Some("T-1"), "it keeps the job");
+
+        // The verdict of attempt 2 by that seat ends the job.
+        store
+            .write(|tx| {
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 2,
+                    passed: true,
+                    findings: "ok".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0 + 30,
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            standby_after_verdict(&mut store, "p", T0 + 31).unwrap(),
+            vec!["p:review-1".to_string()],
+            "the verdict of the rework parks the seat"
+        );
+    }
+
 }
 
 /// How many "continue" nudges a reviewer gets before the captain is told.
@@ -4365,10 +5608,19 @@ pub fn nudge_stopped_reviewers(
             // the cooldown on an idle reviewer does not block: it is exactly
             // the case the nudge is for (the packet or its Enter was lost,
             // L-76). Anything not yet submitted still waits.
-            let blocking = tx
-                .slot_ops(&seat.id)?
-                .into_iter()
-                .any(|op| !(op.state == gear_model::OpState::Submitted && now - op.created >= cooldown_s));
+            //
+            // T-284: an op in `Unknown` (an uncertain send, or an `Executing`
+            // op recovered on engine start) never settles either — a reviewer
+            // delivery is settled only by its verdict — so it must not hold the
+            // nudge for good once it is older than the cooldown. Nor does an op
+            // of an older generation: that agent is gone.
+            let blocking = tx.slot_ops(&seat.id)?.into_iter().any(|op| {
+                op.generation == seat.generation
+                    && !(matches!(
+                        op.state,
+                        gear_model::OpState::Submitted | gear_model::OpState::Unknown
+                    ) && now - op.created >= cooldown_s)
+            });
             if blocking {
                 return Ok(None);
             }

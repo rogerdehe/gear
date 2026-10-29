@@ -186,6 +186,11 @@ pub trait HerdrRead {
     /// client does not carry the name, so this reads `agent.list` itself.
     /// `None` = Herdr shows the agent with no name.
     fn agent_names(&mut self) -> Result<BTreeMap<String, Option<String>>, ObserveError>;
+    /// The Herdr socket this door asked, for an error a reader can trace
+    /// (T-314). `None` = a fake or a door that does not know its socket.
+    fn socket(&self) -> Option<String> {
+        None
+    }
 }
 
 pub trait HerdrAct: HerdrRead {
@@ -206,6 +211,10 @@ pub trait HerdrAct: HerdrRead {
     /// Herdr `agent.rename`: give the agent in `pane_id` the name `name`
     /// (T-134). A name another pane holds is refused, never stolen.
     fn agent_rename(&mut self, pane_id: &str, name: &str) -> Outcome<()>;
+    /// Herdr `tab.rename`: give the tab `tab_id` the label `label` (T-278).
+    /// `gear board` names its own tab, so the tab bar shows the board's name
+    /// instead of a number.
+    fn tab_rename(&mut self, tab_id: &str, label: &str) -> Outcome<()>;
     fn send_keys(&mut self, pane_id: &str, keys: &[String]) -> Outcome<()>;
     /// Type `text` into the pane as keystrokes (`pane.send_text`), without
     /// Enter. Unlike `pane_run`/`prompt` (a paste), typed text triggers an
@@ -240,9 +249,13 @@ pub trait HerdrAct: HerdrRead {
 /// it: an agent's TUI has to draw and accept the keystrokes (L-71).
 pub const TYPE_SETTLE_MS: u64 = 300;
 
-/// Real Herdr over its unix socket. Holds one blocking client connection.
+/// Real Herdr over its unix socket. Each call opens its own connection to the
+/// socket path (board-herdr `HerdrClient::call_inner`), so a Herdr server
+/// restarted on the same path is reached on the next call; nothing reconnects.
 pub struct SocketHerdr {
     client: board_herdr::HerdrClient,
+    /// The path `connect` was given (T-314): an error names the Herdr it asked.
+    socket: std::path::PathBuf,
 }
 
 impl SocketHerdr {
@@ -254,11 +267,15 @@ impl SocketHerdr {
         client
             .require_supported_protocol()
             .map_err(|e| ObserveError(format!("herdr protocol check failed: {e}")))?;
-        Ok(SocketHerdr { client })
+        Ok(SocketHerdr { client, socket: socket_path.to_path_buf() })
     }
 }
 
 impl HerdrRead for SocketHerdr {
+    fn socket(&self) -> Option<String> {
+        Some(self.socket.to_string_lossy().into_owned())
+    }
+
     fn agents(&mut self) -> Result<Vec<AgentInfo>, ObserveError> {
         let snapshot = self
             .client
@@ -424,6 +441,14 @@ impl HerdrAct for SocketHerdr {
     fn agent_rename(&mut self, pane_id: &str, name: &str) -> Outcome<()> {
         let params = json!({ "target": pane_id, "name": name });
         match self.client.call("agent.rename", params) {
+            Ok(_) => Outcome::Ok(()),
+            Err(e) => outcome_from_error(&e),
+        }
+    }
+
+    fn tab_rename(&mut self, tab_id: &str, label: &str) -> Outcome<()> {
+        let params = json!({ "tab_id": tab_id, "label": label });
+        match self.client.call("tab.rename", params) {
             Ok(_) => Outcome::Ok(()),
             Err(e) => outcome_from_error(&e),
         }

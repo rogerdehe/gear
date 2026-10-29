@@ -151,13 +151,19 @@ struct Template {
     lane: PathBuf,
     /// The commit before the current `origin/dev` tip.
     older: String,
-    /// The trees above live here, for as long as the process does.
+    /// The trees above live here for as long as the tests use them: the
+    /// directory goes with the last test holding it (T-412).
     _root: Scratch,
 }
 
-fn template() -> &'static Template {
-    static TEMPLATE: std::sync::OnceLock<Template> = std::sync::OnceLock::new();
-    TEMPLATE.get_or_init(|| {
+fn template() -> std::sync::Arc<Template> {
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
+    static TEMPLATE: OnceLock<Mutex<Weak<Template>>> = OnceLock::new();
+    let mut slot = TEMPLATE.get_or_init(|| Mutex::new(Weak::new())).lock().unwrap();
+    if let Some(template) = slot.upgrade() {
+        return template;
+    }
+    let template = Arc::new({
         let root = Scratch::new("gate-template");
         let origin = root.path.join("origin.git");
         std::fs::create_dir(&origin).unwrap();
@@ -172,7 +178,9 @@ fn template() -> &'static Template {
         git(&root.path, &["clone", "-q", &url, lane.to_str().unwrap()]);
         let older = git(&lane, &["rev-parse", "origin/dev~1"]);
         Template { origin, seed, lane, older, _root: root }
-    })
+    });
+    *slot = Arc::downgrade(&template);
+    template
 }
 
 fn repos() -> Repos {
@@ -258,7 +266,7 @@ fn dev_with_ages(r: &Repos, ages: &[i64]) -> Vec<String> {
 fn a_candidate_that_contains_the_integration_branch_is_accepted() {
     let r = repos();
     let candidate = r.candidate("heat/t1", "origin/dev", "my work");
-    require_current_base(&r.lane, "dev", &candidate, 30).unwrap();
+    require_current_base(&r.lane, "origin", "dev", &candidate, 30).unwrap();
 }
 
 /// T-221: a base that moved during the lane's own suite is not a stale base.
@@ -278,7 +286,7 @@ fn a_candidate_behind_a_recent_base_that_merges_clean_is_accepted() {
         !is_ancestor(&r.lane, "origin/dev", &candidate),
         "the tip is not in the candidate"
     );
-    require_current_base(&r.lane, "dev", &candidate, 30).unwrap();
+    require_current_base(&r.lane, "origin", "dev", &candidate, 30).unwrap();
 }
 
 /// T-221: a base that is old is a stale base: a candidate that is only based
@@ -291,7 +299,7 @@ fn a_candidate_behind_the_integration_branch_is_refused() {
     // The lane worked on the forty-minute-old commit.
     let stale = r.candidate("data/stale", &shas[1], "old work");
 
-    let err = require_current_base(&r.lane, "dev", &stale, 30).unwrap_err();
+    let err = require_current_base(&r.lane, "origin", "dev", &stale, 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
         err.detail.contains("merge origin/dev into your branch, build, then hand in again"),
@@ -327,7 +335,7 @@ fn a_recent_base_with_a_conflicting_change_is_refused() {
     // conflict, not an old base.
     assert!(is_ancestor(&r.lane, &shas[1], &candidate));
 
-    let err = require_current_base(&r.lane, "dev", &candidate, 30).unwrap_err();
+    let err = require_current_base(&r.lane, "origin", "dev", &candidate, 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
         err.detail.contains("merge origin/dev into your branch, build, then hand in again"),
@@ -344,7 +352,7 @@ fn a_candidate_behind_the_integration_branch_is_refused_without_a_window() {
     // The candidate is based on the commit before the current origin/dev tip.
     let candidate = r.candidate("data/stale", &r.older, "old work");
 
-    let err = require_current_base(&r.lane, "dev", &candidate, 0).unwrap_err();
+    let err = require_current_base(&r.lane, "origin", "dev", &candidate, 0).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
         err.detail.contains("merge origin/dev into your branch, build, then hand in again"),
@@ -358,7 +366,7 @@ fn a_failing_fetch_is_refused_not_ignored() {
     let r = repos();
     let candidate = r.candidate("heat/t1", "origin/dev", "my work");
     git(&r.lane, &["remote", "set-url", "origin", "/nonexistent/nowhere.git"]);
-    let err = require_current_base(&r.lane, "dev", &candidate, 30).unwrap_err();
+    let err = require_current_base(&r.lane, "origin", "dev", &candidate, 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("cannot fetch origin/dev"), "{}", err.detail);
     // The reason, not only git's boilerplate last line (review F4).
@@ -372,9 +380,33 @@ fn a_failing_fetch_is_refused_not_ignored() {
 #[test]
 fn a_candidate_git_cannot_place_is_refused() {
     let r = repos();
-    let err = require_current_base(&r.lane, "dev", "no-such-commit", 30).unwrap_err();
+    let err = require_current_base(&r.lane, "origin", "dev", "no-such-commit", 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("cannot check"), "{}", err.detail);
+}
+
+/// T-257: the remote is the project's, not always `origin`. The gate fetches
+/// the integration branch from the remote it is given and reads that remote's
+/// tracking ref; a remote that is not there is a refusal, never a pass.
+#[test]
+fn the_integration_branch_is_fetched_through_the_projects_remote() {
+    let r = repos();
+    let candidate = r.candidate("heat/t1", "origin/dev", "my work");
+    // The lane knows its remote as `upstream`, as a project naming
+    // `remote = "upstream"` would have it.
+    git(&r.lane, &["remote", "rename", "origin", "upstream"]);
+
+    require_current_base(&r.lane, "upstream", "dev", &candidate, 30).unwrap();
+    assert!(
+        r.lane.join(".git/refs/remotes/upstream/dev").exists(),
+        "the fetch wrote the given remote's tracking ref"
+    );
+
+    // A remote that is not there names no remote branch: the hand-in is
+    // refused, never accepted unchecked.
+    let err = require_current_base(&r.lane, "origin", "dev", &candidate, 30).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(err.detail.contains("cannot fetch origin/dev"), "{}", err.detail);
 }
 
 // ---------------------------------------------------------------- the hand-in
@@ -418,6 +450,7 @@ fn world() -> Store {
             evidence_due_min: None,
             body: String::new(),
             created: T0,
+            mechanical: None,
         })?;
         start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
         on_delivery_confirmed(tx, "p", "T-1", 1, T0)
@@ -639,7 +672,7 @@ fn a_restricted_fetch_refspec_cannot_hide_a_stale_candidate() {
     // The strict rule (no window): the candidate does not contain the tip the
     // remote has, so it is refused (T-221: with a window a base that moved
     // only just is accepted).
-    let err = require_current_base(&r.lane, "dev", &stale, 0).unwrap_err();
+    let err = require_current_base(&r.lane, "origin", "dev", &stale, 0).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("merge origin/dev into your branch"), "{}", err.detail);
 }
@@ -652,7 +685,7 @@ fn a_deleted_remote_integration_branch_is_refused() {
     let candidate = r.candidate("heat/t1", "origin/dev", "my work");
     unpublish(&r.origin, "dev");
 
-    let err = require_current_base(&r.lane, "dev", &candidate, 30).unwrap_err();
+    let err = require_current_base(&r.lane, "origin", "dev", &candidate, 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("cannot fetch origin/dev"), "{}", err.detail);
 }
@@ -702,7 +735,7 @@ fn a_long_multibyte_fetch_failure_is_a_bad_format_not_a_panic() {
     );
     git(&r.lane, &["remote", "set-url", "origin", &remote]);
 
-    let err = require_current_base(&r.lane, "dev", &candidate, 30).unwrap_err();
+    let err = require_current_base(&r.lane, "origin", "dev", &candidate, 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("cannot fetch origin/dev"), "{}", err.detail);
     assert!(

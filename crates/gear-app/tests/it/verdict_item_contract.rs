@@ -134,7 +134,7 @@ fn the_home_page_names_the_verdicts_line_not_a_reply() {
     let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 10).unwrap();
 
     let expected = format!(
-        "next: gear plan apply gear/voyages/M3.md (# Verdicts: {VERDICTS_LINE})"
+        "next: gear plan apply gear/voyages/M3/plan.md (# Verdicts: {VERDICTS_LINE})"
     );
     assert!(page.text.contains(&expected), "{}\n---\nexpected: {expected}", page.text);
     // The review fail is not something a reply settles.

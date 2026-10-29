@@ -38,6 +38,26 @@ pub enum Caller {
 /// against the seat's binding.
 const TOOLS_OUTSIDE_PANE: [&str; 2] = ["opencode", "codex"];
 
+/// The sessions the shared daemons give their tool shells (T-328): `opencode
+/// serve` exports `OPENCODE_SESSION_ID` (the session id of the tool call, the
+/// id GEAR records when it starts the seat through the API), `codex app-server`
+/// exports `CODEX_THREAD_ID`. A tool shell in no pane carries the session it
+/// works for, so a daemon claim can be checked against the seat's own sessions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DaemonSessions {
+    pub opencode: Option<String>,
+    pub codex: Option<String>,
+}
+
+impl DaemonSessions {
+    /// Read the daemon sessions from the caller's variables (an empty value is
+    /// no value).
+    pub fn from_vars(vars: impl Fn(&str) -> Option<String>) -> DaemonSessions {
+        let read = |name: &str| vars(name).filter(|value| !value.is_empty());
+        DaemonSessions { opencode: read("OPENCODE_SESSION_ID"), codex: read("CODEX_THREAD_ID") }
+    }
+}
+
 /// Phase 1 (no transaction). Returns None when there is no GEAR_CTX or no pane.
 /// Herdr failure is returned as an error: identity cannot be confirmed.
 pub fn observe(
@@ -45,6 +65,17 @@ pub fn observe(
     herdr: &mut dyn HerdrRead,
     ancestors: &[u32],
 ) -> GearResult<Option<Fingerprint>> {
+    observe_via(env, herdr, ancestors).map(|found| found.map(|(fp, _)| fp))
+}
+
+/// [`observe`], also telling whether the caller's tools run in a shared daemon
+/// (T-328): the bool is true exactly when the daemon branch returned, so the
+/// claim can be checked against the seat's own session.
+pub fn observe_via(
+    env: &Env,
+    herdr: &mut dyn HerdrRead,
+    ancestors: &[u32],
+) -> GearResult<Option<(Fingerprint, bool)>> {
     if env.ctx.is_none() {
         return Ok(None);
     }
@@ -82,21 +113,25 @@ pub fn observe(
             .and_then(|info| info.agent.as_deref())
             .is_some_and(is_daemon_kind);
         if real.is_none() && tools_outside_pane {
-            return Ok(occupant.as_ref().map(fingerprint_of));
+            return Ok(occupant.as_ref().map(|info| (fingerprint_of(info), true)));
         }
         let where_ = match real {
             Some(real) if real.as_str() != pane.as_str() => format!("this process runs in pane {real}"),
             Some(_) => "the pane does not list this process".to_string(),
             None => "no pane of this session runs this process (its tools run outside every pane, and the pane's agent is not one GEAR knows to do that)".to_string(),
         };
+        // T-314: a refusal has to be traceable afterwards — which Herdr door
+        // was asked, and the ancestry that was matched against its panes.
+        let asked = herdr.socket().unwrap_or_else(|| "an unnamed Herdr".to_string());
+        let ancestry = ancestors.iter().map(|pid| pid.to_string()).collect::<Vec<_>>().join(" < ");
         return Err(GearError::new(
             ErrorCode::NotRegistered,
             format!(
-                "pane {pane} is claimed as a seat, but {where_}: GEAR_CTX and HERDR_PANE_ID can be set by any shell; the caller's ancestry and the pane's processes cannot"
+                "pane {pane} is claimed as a seat, but {where_}: GEAR_CTX and HERDR_PANE_ID can be set by any shell; the caller's ancestry and the pane's processes cannot (asked Herdr at {asked}; this process's ancestry: {ancestry})"
             ),
         ));
     }
-    Ok(occupant.as_ref().map(fingerprint_of))
+    Ok(occupant.as_ref().map(|info| (fingerprint_of(info), false)))
 }
 
 /// Phase 2 (inside tx). Errors:
@@ -508,10 +543,12 @@ pub fn prove_seat(
     env: &Env,
     herdr: &mut dyn HerdrRead,
     ancestors: &[u32],
+    daemon: &DaemonSessions,
     now: Ts,
 ) -> GearResult<Option<Fingerprint>> {
-    let fp = match observe(env, herdr, ancestors) {
-        Ok(fp) => fp,
+    let (fp, from_daemon) = match observe_via(env, herdr, ancestors) {
+        Ok(Some((fp, from_daemon))) => (Some(fp), from_daemon),
+        Ok(None) => (None, false),
         Err(error) => {
             if error.code == ErrorCode::NotRegistered {
                 let _ = report_claim(store, env, herdr, &error, ancestors, now);
@@ -527,9 +564,135 @@ pub fn prove_seat(
                 }
                 return Err(error);
             }
+            // T-328: a caller whose tools run in a shared daemon has no pane to
+            // prove it by — it proves it by the session its tool shell carries.
+            if from_daemon {
+                let notice = match store.read(|tx| prove_daemon_session(tx, env, fp, daemon)) {
+                    Ok(notice) => notice,
+                    Err(error) => {
+                        if error.code == ErrorCode::NotRegistered {
+                            let _ = report_claim(store, env, herdr, &error, ancestors, now);
+                        }
+                        return Err(error);
+                    }
+                };
+                if let Some((thread, known)) = notice {
+                    if let Some(ctx) = env.ctx.as_ref() {
+                        let _ = report_codex_thread(store, ctx, &thread, &known, now);
+                    }
+                }
+            }
         }
     }
     Ok(fp)
+}
+
+/// The daemon half of the claim (T-328): a caller whose tools run in a shared
+/// daemon proves it is the seat's **own** session, not just any tool shell of
+/// the same daemon. The seat's known sessions are its binding's `session_ref`,
+/// the fingerprint's `session_ref` and the sessions of its open round, empty
+/// values dropped; a seat with none has nothing to prove against, as before.
+/// An OpenCode tool shell always carries `OPENCODE_SESSION_ID`, so its absence
+/// or a foreign id is a refusal. A Codex thread that is not a known session
+/// passes — that the thread id equals the session GEAR records is not yet seen
+/// live — and owes one notice: `Ok(Some((thread, known)))`.
+fn prove_daemon_session(
+    tx: &Tx<'_>,
+    env: &Env,
+    fp: &Fingerprint,
+    daemon: &DaemonSessions,
+) -> GearResult<Option<(String, String)>> {
+    let ctx = env.ctx.as_ref().expect("a claim: no context, no daemon proof");
+    let seat = ctx.seat_id();
+    let binding = tx.get_binding(&seat, ctx.generation)?;
+    let kind = binding
+        .as_ref()
+        .map(|binding| binding.kind.clone())
+        .or_else(|| fp.kind.clone())
+        .unwrap_or_default();
+    let round = tx.open_round_of_seat(&seat)?;
+    let mut known: Vec<String> = Vec::new();
+    let sessions = binding
+        .as_ref()
+        .and_then(|binding| binding.session_ref.as_deref())
+        .into_iter()
+        .chain(fp.session_ref.as_deref())
+        .chain(round.iter().flat_map(|round| round.sessions.iter().map(String::as_str)));
+    for session in sessions {
+        let session = session.trim();
+        if !session.is_empty() && !known.iter().any(|known| known.as_str() == session) {
+            known.push(session.to_string());
+        }
+    }
+    if known.is_empty() {
+        return Ok(None);
+    }
+    let listed = known.join(", ");
+    let mine = |session: &str| known.iter().any(|known| known.as_str() == session);
+    match kind.as_str() {
+        "opencode" => match daemon.opencode.as_deref() {
+            None => Err(GearError::new(
+                ErrorCode::NotRegistered,
+                format!(
+                    "seat {seat} is claimed from outside every pane without OPENCODE_SESSION_ID: an OpenCode tool shell always carries it, so this caller is not the seat's OpenCode session"
+                ),
+            )),
+            Some(session) if mine(session) => Ok(None),
+            Some(session) => Err(GearError::new(
+                ErrorCode::NotRegistered,
+                format!(
+                    "seat {seat} is claimed by OpenCode session {session}, but the seat's sessions are {listed}: a caller may act only as the seat of its own session"
+                ),
+            )),
+        },
+        "codex" => match daemon.codex.as_deref() {
+            Some(thread) if !mine(thread) => Ok(Some((thread.to_string(), listed))),
+            _ => Ok(None),
+        },
+        _ => Ok(None),
+    }
+}
+
+/// Tell the captain that a Codex thread which is not one of the seat's sessions
+/// used the seat (T-328): one item per seat and generation, so a repeat does not
+/// pile up. Best effort — the claim still passes.
+fn report_codex_thread(
+    store: &mut Store,
+    ctx: &GearCtx,
+    thread_id: &str,
+    known: &str,
+    now: Ts,
+) -> GearResult<bool> {
+    let seat = ctx.seat_id();
+    store.write(|tx| {
+        let Some(captain) = tx.captain_of(&ctx.project)? else {
+            return Ok(false);
+        };
+        let thread = format!("identity-codex:{seat}:{}", ctx.generation);
+        if !tx.thread_messages(&ctx.project, &thread)?.is_empty() {
+            return Ok(false);
+        }
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: ctx.project.clone(),
+            thread,
+            task: None,
+            attempt: None,
+            sender: "engine".to_string(),
+            sender_gen: 0,
+            recipient: captain.id,
+            kind: MsgKind::System,
+            urgent: false,
+            body: format!(
+                "seat {seat} was used by Codex thread {thread_id}, while the seat's sessions are {known}: if this repeats, a Codex agent may be acting as another seat"
+            ),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Info,
+            created: now,
+        })?;
+        Ok(true)
+    })
 }
 
 /// What `gear whoami` reports (design §10.7, row B9): the real pane, the seat

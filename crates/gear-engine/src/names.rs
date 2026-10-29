@@ -173,7 +173,20 @@ pub fn restore(
 ) -> GearResult<Restored> {
     let mut restored = Restored::default();
     let seats = store.read(|tx| tx.seats_of_project(project))?;
-    for seat in seats {
+    // T-270: two passes, the seats that **give a name back** before the seats
+    // that ask for one. A finished reviewer goes Standby but its agent keeps
+    // the task name until this very tick's restore renames it to its seat name
+    // (`review-9` → `<project>-review-9`); another seat asking for that task
+    // name in the same pass would see it held and the captain got an item the
+    // next tick resolved by itself. Within a pass the order stays as it was (the
+    // store's own `ORDER BY id`).
+    let (own, task_named): (Vec<SeatRow>, Vec<SeatRow>) = seats
+        .into_iter()
+        .partition(|seat| desired(seat) == agent_name(&seat.project, &seat.name));
+    // The names Herdr reported, carried forward through the pass: a rename below
+    // frees the name a later seat asks for.
+    let mut names = names.clone();
+    for seat in own.into_iter().chain(task_named) {
         let Some(binding) = store.read(|tx| tx.get_binding(&seat.id, seat.generation))? else {
             continue;
         };
@@ -185,7 +198,7 @@ pub fn restore(
             continue;
         }
         let name = desired(&seat);
-        match ensure_snapshot(herdr, names, &binding.pane_id, &name) {
+        match ensure_snapshot(herdr, &names, &binding.pane_id, &name) {
             Ensure::Named => {
                 if let Some(open) = open_taken(store, project, &seat.id)? {
                     store.write(|tx| resolve_taken(tx, project, &open, now))?;
@@ -193,6 +206,9 @@ pub fn restore(
             }
             Ensure::Renamed => {
                 restored.renamed.push(seat.id.clone());
+                // The pane carries its new name from now on: the name it freed
+                // is free for the rest of this pass.
+                names.insert(binding.pane_id.clone(), Some(name.clone()));
                 if let Some(open) = open_taken(store, project, &seat.id)? {
                     store.write(|tx| resolve_taken(tx, project, &open, now))?;
                 }
@@ -225,11 +241,10 @@ fn report_taken(
     holder: Option<&str>,
     now: Ts,
 ) -> GearResult<()> {
-    // The captain's own name cannot be reported to the captain: its doorbell
-    // is the only signal there is, and the next tick looks again.
-    if seat.role == SeatRole::Captain {
-        return Ok(());
-    }
+    // T-285: the captain seat gets its item like any seat. Its agent is the
+    // one that types for the captain, so an unnamed captain pane is exactly
+    // what an item has to unblock — leaving it without one left it unnamed for
+    // ever.
     let Some(captain) = tx.captain_of(project)? else {
         return Ok(()); // no captain: nobody to tell
     };

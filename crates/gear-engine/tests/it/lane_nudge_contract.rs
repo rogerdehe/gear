@@ -47,6 +47,7 @@ fn world() -> (Store, FakeHerdr, EngineCfg) {
             evidence_due_min: None,
             body: String::new(),
             created: T,
+            mechanical: None,
         })?;
         gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T)?;
         gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T)?;

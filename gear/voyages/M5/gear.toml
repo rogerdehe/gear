@@ -1,0 +1,69 @@
+# GEAR's own project config for voyage M5 (kickoff confirmed by the user 2026-10-28),
+# copied from gear/voyages/M4.2/gear.toml and adapted.
+# Registered with: GEAR_ADMIN=1 gear admin init gear/voyages/M5/gear.toml
+
+[project]
+id = "gear"
+herdr_session = "orch"
+repo = "/Volumes/Data/myai/gear"
+
+[quota]
+lanes = 2
+temps = 2
+
+[[quota.sources]]
+provider = "codex"
+reader = "codex"
+
+[captain]
+pane = "w2:p2"
+kind = "claude"
+profile = "claude"
+
+# M5 (user, 2026-10-28): two lanes on DeepSeek V4.1 Flash via TokenRhythm, 600K context, no fallback model.
+[[lanes]]
+name = "hull"
+duty = "M5 engine, app, store, model and usage: crates/gear-engine, gear-app, gear-store, gear-model, gear-usage (re-split 2026-10-29 for balance)"
+owns = ["crates/gear-engine/", "crates/gear-app/", "crates/gear-store/", "crates/gear-model/", "crates/gear-usage/"]
+kind = "pi"
+profile = "pi"
+models = [
+  { model = "tokenrhythm/deepseek-v4.1-flash-1017", cli = "pi", context_window_k = 600 },
+]
+
+[[lanes]]
+name = "mast"
+duty = "M5 board, CLI, herdr, forge, skills, docs, scripts and the board prototype: everything outside hull's crates (re-split 2026-10-29)"
+owns = ["crates/gear-cli/", "crates/gear-herdr/", "crates/gear-board/", "crates/gear-forge/", "skills/", "gear/voyages/M5/board/", "Makefile", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml", "Cargo.lock"]
+kind = "pi"
+profile = "pi"
+models = [
+  { model = "tokenrhythm/deepseek-v4.1-flash-1017", cli = "pi", context_window_k = 600 },
+]
+
+# GEAR lanes run pi without pi-lens (uninstalled 2026-10-28).
+[profiles.pi]
+unattended_args = ["--approve"]
+
+[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning medium, no fallback (user, M5 kickoff)
+kind = "codex"
+profile = "codex"
+
+[models]
+lanes = [
+  { model = "tokenrhythm/deepseek-v4.1-flash-1017", cli = "pi", context_window_k = 600 },
+]
+# The reviewer never runs the model it reviews.
+review = [
+  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"], context_window_k = 500 },
+]
+on_quota = { lanes = "wait", review = "wait" }   # M5 (user): no fallback; spent means wait for the user
+quota_reset_h = 5
+
+[conventions]
+integration = "dev"
+release = "main"
+gate = "make gate"   # T-238 (M4.2): 4 build jobs and 4 test threads on the shared machine
+
+[timing]
+handin_base_window_min = 120   # M5: tasks run past 30 min, so every hand-in re-merged dev and re-ran its suite (friction F-141, F-144, F-153, F-164); the merge gate runs the full suite on the real tip

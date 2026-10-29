@@ -99,10 +99,10 @@ impl Style {
 }
 
 /// The colour of a lane: by its order, cycling through the prototype's lane
-/// colours (cyan, magenta, blue, green, yellow). A lane that is not in the
-/// order is grey.
+/// colours in its lane order (hull cyan, deck magenta, keel yellow, mast
+/// blue). A lane that is not in the order is grey.
 pub fn lane_color<S: AsRef<str>>(lanes: &[S], lane: &str) -> Color {
-    const CYCLE: [Color; 5] = [Color::Acc, Color::Mag, Color::Blu, Color::Ok, Color::Warn];
+    const CYCLE: [Color; 4] = [Color::Acc, Color::Mag, Color::Warn, Color::Blu];
     match lanes.iter().position(|name| name.as_ref() == lane) {
         Some(index) => CYCLE[index % CYCLE.len()],
         None => Color::Dim,

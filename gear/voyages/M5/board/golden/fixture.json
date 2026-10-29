@@ -1,0 +1,644 @@
+{
+ "now": "14:32",
+ "quota": [
+  {
+   "provider": "tokenrhythm",
+   "resets": "22:00",
+   "used": 41,
+   "window": "5h"
+  },
+  {
+   "provider": "codex",
+   "resets": "Oct 30",
+   "used": 63,
+   "window": "week"
+  }
+ ],
+ "review_merge_m": 15,
+ "voyages": [
+  {
+   "BURN": [
+    0,
+    45,
+    160,
+    250
+   ],
+   "DECISIONS": [
+    [
+     "11:05",
+     "scope",
+     "light procedure: a task marked small skips review",
+     "user at kickoff",
+     true
+    ],
+    [
+     "12:40",
+     "rework",
+     "T-260 round 2: accept proof missing",
+     "bug in normal use",
+     false
+    ],
+    [
+     "14:05",
+     "contract",
+     "T-262 v2: GOAL_LOCKED also covers milestone lines",
+     "user agreed 13:58",
+     true
+    ]
+   ],
+   "DONE": [
+    [
+     false,
+     "small task under 10 min: now 14 min (T-262)"
+    ],
+    [
+     true,
+     "the board shows every voyage"
+    ],
+    [
+     false,
+     "goal lock: not started"
+    ]
+   ],
+   "EXC": [
+    [
+     "hull",
+     "T-263",
+     "rework",
+     "round 2, 49/25m: the captain scopes what is left"
+    ]
+   ],
+   "FRICTION": [
+    [
+     "T-260",
+     "hull",
+     "unread",
+     "accept proof needed a real plan file; wrote one by hand (8m)"
+    ]
+   ],
+   "LANES": [
+    "hull",
+    "mast",
+    "keel"
+   ],
+   "STATIONS": [
+    [
+     "S1",
+     "small-task procedure merged",
+     "done",
+     180
+    ],
+    [
+     "S2",
+     "board views to the prototype",
+     "now",
+     330
+    ],
+    [
+     "S3",
+     "goal lock + v0.5.0",
+     "next",
+     480
+    ]
+   ],
+   "T": [
+    [
+     "T-257",
+     "hull",
+     "done",
+     "small task: the plan marks it",
+     20,
+     18,
+     1,
+     530,
+     0.25,
+     [],
+     "11:20",
+     ""
+    ],
+    [
+     "T-258",
+     "mast",
+     "done",
+     "board: voyages and the [ ] keys",
+     40,
+     44,
+     1,
+     1080,
+     0.5,
+     [],
+     "11:47",
+     ""
+    ],
+    [
+     "T-259",
+     "keel",
+     "done",
+     "goal box, check and milestones",
+     30,
+     27,
+     1,
+     670,
+     0.31,
+     [],
+     "11:35",
+     ""
+    ],
+    [
+     "T-260",
+     "hull",
+     "done",
+     "small task: no review, accept proof",
+     30,
+     41,
+     2,
+     1400,
+     0.67,
+     [
+      "T-257"
+     ],
+     "12:31",
+     ""
+    ],
+    [
+     "T-261",
+     "mast",
+     "done",
+     "board: the full width",
+     45,
+     52,
+     1,
+     1310,
+     0.6,
+     [
+      "T-258"
+     ],
+     "12:57",
+     ""
+    ],
+    [
+     "T-262",
+     "keel",
+     "review",
+     "goal lock: GOAL_LOCKED at apply",
+     40,
+     35,
+     1,
+     730,
+     0.31,
+     [],
+     "",
+     ""
+    ],
+    [
+     "T-263",
+     "hull",
+     "rework",
+     "small task: the captain settles it",
+     25,
+     49,
+     2,
+     960,
+     0.44,
+     [
+      "T-260"
+     ],
+     "",
+     "past its budget"
+    ],
+    [
+     "T-264",
+     "mast",
+     "working",
+     "board: Time & tokens by lane",
+     40,
+     22,
+     1,
+     380,
+     0.14,
+     [
+      "T-261"
+     ],
+     "",
+     ""
+    ],
+    [
+     "T-268",
+     "keel",
+     "passed",
+     "doorbell names the station",
+     15,
+     12,
+     1,
+     300,
+     0.12,
+     [],
+     "",
+     ""
+    ],
+    [
+     "T-265",
+     "keel",
+     "deps",
+     "goal-change line with the user's words",
+     35,
+     0,
+     0,
+     0,
+     0,
+     [
+      "T-262"
+     ],
+     "",
+     ""
+    ],
+    [
+     "T-266",
+     "mast",
+     "queued",
+     "board: graph draws dependencies",
+     60,
+     0,
+     0,
+     0,
+     0,
+     [
+      "T-261"
+     ],
+     "",
+     ""
+    ],
+    [
+     "T-267",
+     "hull",
+     "queued",
+     "release v0.5.0",
+     15,
+     0,
+     0,
+     0,
+     0,
+     [
+      "T-263",
+      "T-266"
+     ],
+     "",
+     ""
+    ]
+   ],
+   "V": {
+    "bar": "DELIVERABLE",
+    "eta_m": 480,
+    "goal": "A small task lands without review in under 10 min; the board shows every voyage and uses the full width; a departed goal changes only with the user's yes.",
+    "goal_changed": null,
+    "milestone": "M5",
+    "project": "gear",
+    "projected_m": 455,
+    "slow_lane": "mast",
+    "state": "sailing",
+    "title": "small tasks, the board, the goal rule",
+    "used_m": 212
+   },
+   "WAITING": [
+    "T-262 in review by review-3, 12 min in"
+   ]
+  },
+  {
+   "BURN": [
+    0,
+    60,
+    150,
+    230,
+    256
+   ],
+   "DECISIONS": [
+    [
+     "18:15",
+     "scope",
+     "one folder per voyage under gear/voyages (user)",
+     "",
+     true
+    ],
+    [
+     "19:00",
+     "note",
+     "voyage report: done (1) not met, 3 hand fixes",
+     "",
+     true
+    ]
+   ],
+   "DONE": [
+    [
+     false,
+     "no hand fix: NOT met (3 hand fixes)"
+    ],
+    [
+     true,
+     "init --check changes nothing (T-228)"
+    ],
+    [
+     true,
+     "no run-dry item (T-232, in code)"
+    ],
+    [
+     true,
+     "released as v0.4.8"
+    ]
+   ],
+   "EXC": [],
+   "FRICTION": [
+    [
+     "T-248",
+     "hull",
+     "read",
+     "cargo fmt missing for the pinned toolchain"
+    ]
+   ],
+   "LANES": [
+    "hull",
+    "mast"
+   ],
+   "STATIONS": [
+    [
+     "S1",
+     "29 tasks merged",
+     "done",
+     256
+    ],
+    [
+     "S2",
+     "v0.4.8 released",
+     "done",
+     360
+    ]
+   ],
+   "T": [
+    [
+     "T-228",
+     "mast",
+     "done",
+     "init --check validates, starts nothing",
+     30,
+     41,
+     2,
+     1580,
+     0.73,
+     [],
+     "01:52",
+     ""
+    ],
+    [
+     "T-241",
+     "hull",
+     "done",
+     "an urgent message mid tool call",
+     25,
+     110,
+     2,
+     3100,
+     1.42,
+     [],
+     "04:31",
+     ""
+    ],
+    [
+     "T-248",
+     "hull",
+     "done",
+     "the doorbell says what to run",
+     10,
+     112,
+     3,
+     2540,
+     1.18,
+     [],
+     "05:32",
+     ""
+    ],
+    [
+     "T-252",
+     "mast",
+     "done",
+     "branch templates in gear-model",
+     35,
+     48,
+     1,
+     910,
+     0.42,
+     [],
+     "04:36",
+     ""
+    ],
+    [
+     "T-253",
+     "hull",
+     "done",
+     "the engine uses the templates",
+     30,
+     20,
+     2,
+     1920,
+     0.87,
+     [
+      "T-252"
+     ],
+     "05:27",
+     ""
+    ],
+    [
+     "T-256",
+     "mast",
+     "done",
+     "two projects need {project}",
+     25,
+     33,
+     2,
+     1480,
+     0.69,
+     [
+      "T-252"
+     ],
+     "05:30",
+     ""
+    ],
+    [
+     "T-182",
+     "mast",
+     "moved",
+     "push race re-merge",
+     20,
+     0,
+     0,
+     0,
+     0,
+     [],
+     "",
+     "M5"
+    ]
+   ],
+   "V": {
+    "bar": "DELIVERABLE",
+    "eta_m": 360,
+    "goal": "Every M4.2 task merged with no hand fix; init --check changes nothing; no run-dry item while no lane can start work; released as v0.4.8.",
+    "goal_changed": null,
+    "milestone": "M4.2",
+    "project": "gear",
+    "projected_m": 256,
+    "slow_lane": "hull",
+    "state": "landed",
+    "title": "fixes from real use",
+    "used_m": 256
+   },
+   "WAITING": []
+  },
+  {
+   "BURN": [
+    0,
+    40
+   ],
+   "DECISIONS": [
+    [
+     "14:05",
+     "note",
+     "voyage report: 75m against a 1h eta",
+     "",
+     false
+    ]
+   ],
+   "DONE": [
+    [
+     true,
+     "both merged, v0.4.7 released"
+    ]
+   ],
+   "EXC": [],
+   "FRICTION": [],
+   "LANES": [
+    "hull",
+    "keel"
+   ],
+   "STATIONS": [
+    [
+     "S1",
+     "v0.4.7 released",
+     "done",
+     75
+    ]
+   ],
+   "T": [
+    [
+     "T-226",
+     "hull",
+     "done",
+     "a restart takes the current config",
+     30,
+     18,
+     1,
+     520,
+     0.24,
+     [],
+     "00:22",
+     ""
+    ],
+    [
+     "T-227",
+     "keel",
+     "done",
+     "silent seats are reported",
+     30,
+     73,
+     2,
+     1600,
+     0.71,
+     [],
+     "01:04",
+     ""
+    ]
+   ],
+   "V": {
+    "bar": "FASTEST",
+    "eta_m": 60,
+    "goal": "T-226 and T-227 merged and released as v0.4.7.",
+    "goal_changed": null,
+    "milestone": "M4.1",
+    "project": "gear",
+    "projected_m": 75,
+    "slow_lane": "keel",
+    "state": "landed",
+    "title": "two fixes another captain needed",
+    "used_m": 75
+   },
+   "WAITING": []
+  }
+ ],
+ "when": {
+  "T-226": [
+   0,
+   22
+  ],
+  "T-227": [
+   0,
+   75
+  ],
+  "T-228": [
+   0,
+   52
+  ],
+  "T-241": [
+   30,
+   158
+  ],
+  "T-248": [
+   160,
+   254
+  ],
+  "T-252": [
+   60,
+   96
+  ],
+  "T-253": [
+   100,
+   215
+  ],
+  "T-256": [
+   150,
+   250
+  ],
+  "T-257": [
+   5,
+   31
+  ],
+  "T-258": [
+   5,
+   58
+  ],
+  "T-259": [
+   8,
+   46
+  ],
+  "T-260": [
+   32,
+   102
+  ],
+  "T-261": [
+   59,
+   128
+  ],
+  "T-262": [
+   47,
+   null
+  ],
+  "T-263": [
+   103,
+   null
+  ],
+  "T-264": [
+   129,
+   null
+  ],
+  "T-268": [
+   70,
+   null
+  ]
+ }
+}

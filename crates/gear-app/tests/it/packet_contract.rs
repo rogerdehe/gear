@@ -22,7 +22,7 @@ fn world(attempt: bool) -> Store {
             lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
             wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
         tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 1, goal: "Fix the login crash".into(),
-            accept: "repro passes".into(), evidence_files: vec!["notes/T-7.md".into()], evidence_due_min: Some(60), body: String::new(), created: T0 })?;
+            accept: "repro passes".into(), evidence_files: vec!["notes/T-7.md".into()], evidence_due_min: Some(60), body: String::new(), created: T0, mechanical: None, })?;
         if attempt { start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?; }
         Ok(())
     }).unwrap();
@@ -60,12 +60,43 @@ fn the_packet_says_the_budget_and_the_friction_flag() {
     assert!(text.contains("a permission you lacked"), "{text}");
 }
 
+/// T-257: the report goes to the voyage's reports folder, one folder per
+/// voyage; a task without a milestone keeps the free `<path>`.
+#[test]
+fn the_report_path_is_the_voyages_reports_folder() {
+    let mut s = world(true);
+    s.write(|tx| {
+        let mut task = tx.get_task("p", "T-7")?.unwrap();
+        task.milestone = Some("M3".into());
+        tx.update_task(&task)
+    })
+    .unwrap();
+    let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(
+        text.contains("--candidate <commit> \"Report: gear/voyages/M3/reports/T-<n>.md\""),
+        "{text}"
+    );
+
+    // Without a milestone the lane may report where it likes.
+    let mut s = world(true);
+    let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(text.contains("--candidate <commit> \"Report: <path>\""), "{text}");
+}
+
+#[test]
+fn a_task_that_adopted_its_current_version_has_no_pending_section() {
+    let mut s = world(true);
+    let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(!text.contains("## Pending update"), "{text}");
+    assert!(!text.contains("Run `gear` (no arguments) to adopt it"), "{text}");
+}
+
 #[test]
 fn pending_update_and_missing_task() {
     let mut s = world(true);
     s.write(|tx| {
         tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 2, goal: "Fix it better".into(),
-            accept: "a2".into(), evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0 + 1 })?;
+            accept: "a2".into(), evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0 + 1, mechanical: None, })?;
         let mut t = tx.get_task("p", "T-7")?.unwrap();
         t.contract_version = 2;
         tx.update_task(&t)
@@ -73,9 +104,60 @@ fn pending_update_and_missing_task() {
     let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
     assert!(text.contains("# T-7 — Fix the login crash"), "rendered from the adopted v1:\n{text}");
     assert!(text.contains("## Pending update: v2"), "{text}");
+    // T-378: the pending version's own wording, not only its number.
+    assert!(text.contains("Goal (v2):\nFix it better\n"), "{text}");
+    assert!(text.contains("Acceptance (v2):\na2\n"), "{text}");
+    assert!(
+        text.contains("Run `gear` (no arguments) to adopt it, then work and hand in to v2.\n"),
+        "{text}"
+    );
     assert_eq!(s.read(|tx| render_task_packet(tx, "p", "T-9")).unwrap_err().code, ErrorCode::NoTarget);
     let mut s = world(false);
     assert!(s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap().contains("--attempt <n>"));
+}
+
+/// T-272: a mechanical task's packet says the review is skipped and that the
+/// merge gate is the only check; another task's packet says nothing of it.
+#[test]
+fn a_mechanical_task_says_the_gate_is_the_only_check() {
+    let mut s = world(true);
+    let plain = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(!plain.contains("Review: none"), "{plain}");
+
+    // The task's contract v2 carries the reason; the lane works to it.
+    s.write(|tx| {
+        tx.insert_contract(&ContractRow {
+            project: "p".into(),
+            task: "T-7".into(),
+            version: 2,
+            goal: "Fix the login crash".into(),
+            accept: "repro passes".into(),
+            evidence_files: vec![],
+            evidence_due_min: None,
+            body: String::new(),
+            created: T0 + 1,
+            mechanical: Some("delete three dead fns".into()),
+        })?;
+        let mut t = tx.get_task("p", "T-7")?.unwrap();
+        t.contract_version = 2;
+        tx.update_task(&t)?;
+        // The open attempt works to the new version: the packet renders from
+        // the version it adopted.
+        let mut attempt = tx.get_attempt("p", "T-7", 1)?.unwrap();
+        attempt.contract_version = 2;
+        attempt.adopted_version = 2;
+        tx.update_attempt(&attempt)
+    })
+    .unwrap();
+
+    let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(
+        text.contains(
+            "Review: none — mechanical (delete three dead fns): the merge gate is the only check, \
+             so run its command before you hand in."
+        ),
+        "{text}"
+    );
 }
 
 /// The world of a rework round (T-118): T-7 was handed in as `CANDIDATE`, the

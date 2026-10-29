@@ -9,7 +9,7 @@
 use gear_app::draft::parse;
 use gear_app::identity::Fingerprint;
 use gear_app::plan::apply;
-use gear_app::tasks::{on_delivery_confirmed, start_attempt, submit_result};
+use gear_app::tasks::{on_delivery_confirmed, settle, start_attempt, submit_result, Verdict};
 use gear_app::Env;
 use gear_model::{AttemptState, ErrorCode, GearCtx, MsgKind, MsgState, SeatRole, TaskState};
 use gear_store::{testing, Store};
@@ -321,6 +321,7 @@ fn done_world(repo: &Path, candidate: &str) -> Store {
             evidence_due_min: None,
             body: String::new(),
             created: T0,
+            mechanical: None,
         })?;
         tx.insert_attempt(&AttemptRow {
             session_ref: None,
@@ -430,4 +431,168 @@ fn a_done_task_whose_work_is_merged_cannot_be_cancelled() {
     assert_eq!(state(&mut s, "T-1"), TaskState::Done);
     let items = s.read(|tx| tx.thread_messages("p", "merge-failed:T-1")).unwrap();
     assert_eq!(items[0].state, MsgState::Open, "nothing was resolved");
+}
+
+// ---- T-311: moving a running task to another lane moves its work ----------
+
+/// The world of the move tests: the cancel world, plus the lane the plan sends
+/// the tasks to.
+fn move_world() -> Store {
+    let mut s = world();
+    s.write(|tx| {
+        testing::seed_active_seat(tx, "p", "cold", SeatRole::Lane, "w1:p3", "opencode", T0)
+    })
+    .unwrap();
+    s
+}
+
+fn moved_messages(s: &mut Store, task: &str) -> Vec<gear_store::MessageRow> {
+    s.read(|tx| tx.thread_messages("p", &format!("{task}:moved"))).unwrap()
+}
+
+fn lane(s: &mut Store, task: &str) -> Option<String> {
+    s.read(|tx| tx.get_task("p", task)).unwrap().unwrap().lane
+}
+
+const MOVE_T1_TO_COLD: &str = "## T-1 [must] lane=cold\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+
+/// A started task moves: its attempt is abandoned — the seat is free — it is
+/// Ready on the new lane, and the old lane gets one line telling it to stop.
+#[test]
+fn moving_a_started_task_abandons_its_attempt_and_tells_the_old_lane() {
+    let mut s = move_world();
+    s.write(|tx| {
+        start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+        on_delivery_confirmed(tx, "p", "T-1", 1, T0)
+    })
+    .unwrap();
+    assert_eq!(attempt(&mut s, "T-1", 1), AttemptState::Started);
+
+    run(&mut s, MOVE_T1_TO_COLD, 1, "v2").unwrap();
+
+    assert_eq!(lane(&mut s, "T-1").as_deref(), Some("cold"));
+    assert_eq!(state(&mut s, "T-1"), TaskState::Ready);
+    assert_eq!(attempt(&mut s, "T-1", 1), AttemptState::Abandoned, "the seat is free");
+    assert_eq!(
+        s.read(|tx| tx.in_progress_attempts_of_seat("p:heat")).unwrap().len(),
+        0,
+        "no attempt holds the old lane"
+    );
+    let messages = moved_messages(&mut s, "T-1");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert_eq!(messages[0].recipient, "p:heat");
+    assert_eq!(messages[0].kind, MsgKind::Instruction);
+    assert_eq!(messages[0].state, MsgState::Open);
+    assert_eq!(
+        messages[0].body,
+        "T-1 moved to lane cold; stop work on it, nothing to hand in"
+    );
+    // The decision log records the move (design §7.4).
+    let logged = s.read(|tx| tx.decisions_of("p", "")).unwrap();
+    let moved = logged.iter().find(|d| d.what == "T-1 moved heat → cold");
+    let moved = moved.unwrap_or_else(|| panic!("no move in the log: {logged:?}"));
+    assert_eq!(moved.kind, "staff");
+}
+
+/// A delivered attempt — the prompt reached the lane, it never started — is
+/// abandoned too, and the lane is told.
+#[test]
+fn moving_a_delivered_task_abandons_its_attempt_too() {
+    let mut s = move_world();
+    s.write(|tx| start_attempt(tx, "p", "T-1", "p:heat", 1, T0).map(|_| ())).unwrap();
+    assert_eq!(attempt(&mut s, "T-1", 1), AttemptState::Delivered);
+
+    run(&mut s, MOVE_T1_TO_COLD, 1, "v2").unwrap();
+
+    assert_eq!(lane(&mut s, "T-1").as_deref(), Some("cold"));
+    assert_eq!(state(&mut s, "T-1"), TaskState::Ready);
+    assert_eq!(attempt(&mut s, "T-1", 1), AttemptState::Abandoned);
+    assert_eq!(moved_messages(&mut s, "T-1").len(), 1);
+}
+
+/// The rule is keyed on the attempts, not on the state: after a fail verdict
+/// the task is Ready and the rework attempt is open — a move abandons it and
+/// the new lane gets the task.
+#[test]
+fn a_rework_attempt_opened_after_a_fail_verdict_is_abandoned_and_the_new_lane_gets_the_task() {
+    let mut s = move_world();
+    s.write(|tx| {
+        start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+        on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
+        submit_result(tx, "p", "T-1", 1, 1, "c1", "ops/reports/T-1.md", T0)?;
+        settle(
+            tx,
+            &Verdict {
+                project: "p".into(),
+                task: "T-1".into(),
+                attempt: 1,
+                contract_version: 1,
+                candidate: "c1".into(),
+                pass: false,
+                evidence: None,
+                rework: Some("edge cases".into()),
+                integrated_by: None,
+                by_seat: "p:captain".into(),
+            },
+            T0 + 1,
+        )
+    })
+    .unwrap();
+    assert_eq!(state(&mut s, "T-1"), TaskState::Ready, "a fail sends the task back");
+    s.write(|tx| start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 2).map(|_| ())).unwrap();
+    assert_eq!(state(&mut s, "T-1"), TaskState::Ready, "the rework attempt opens on a Ready task");
+    assert_eq!(attempt(&mut s, "T-1", 2), AttemptState::Delivered);
+
+    run(&mut s, MOVE_T1_TO_COLD, 1, "v2").unwrap();
+
+    assert_eq!(attempt(&mut s, "T-1", 1), AttemptState::Rejected, "the settled attempt keeps its verdict");
+    assert_eq!(attempt(&mut s, "T-1", 2), AttemptState::Abandoned, "the open rework closes");
+    assert_eq!(lane(&mut s, "T-1").as_deref(), Some("cold"));
+    assert_eq!(state(&mut s, "T-1"), TaskState::Ready);
+    assert_eq!(moved_messages(&mut s, "T-1").len(), 1);
+}
+
+/// A handed-in attempt is under review: its verdict belongs to the lane that
+/// did the work, so the move is refused and nothing is written.
+#[test]
+fn moving_a_handed_in_task_is_refused_and_nothing_is_written() {
+    let mut s = move_world();
+    s.write(|tx| {
+        start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+        on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
+        submit_result(tx, "p", "T-1", 1, 1, "c1", "ops/reports/T-1.md", T0)
+    })
+    .unwrap();
+    assert_eq!(attempt(&mut s, "T-1", 1), AttemptState::Submitted);
+
+    let error = run(&mut s, MOVE_T1_TO_COLD, 1, "v2").unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::BadFormat);
+    assert!(
+        error.detail.contains(
+            "T-1 is handed in (attempt 1) and under review: change its lane after the verdict"
+        ),
+        "{}",
+        error.detail
+    );
+    assert_eq!(lane(&mut s, "T-1").as_deref(), Some("heat"));
+    assert_eq!(state(&mut s, "T-1"), TaskState::Verifying);
+    assert_eq!(attempt(&mut s, "T-1", 1), AttemptState::Submitted);
+    assert!(moved_messages(&mut s, "T-1").is_empty(), "nothing was written");
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 1, "the plan did not apply");
+}
+
+/// A task with no attempt in progress only changes its lane: no state change,
+/// no line to any lane.
+#[test]
+fn moving_a_task_with_no_attempt_changes_only_its_lane() {
+    let mut s = move_world();
+    assert_eq!(state(&mut s, "T-1"), TaskState::Ready);
+
+    run(&mut s, MOVE_T1_TO_COLD, 1, "v2").unwrap();
+
+    assert_eq!(lane(&mut s, "T-1").as_deref(), Some("cold"));
+    assert_eq!(state(&mut s, "T-1"), TaskState::Ready);
+    assert!(moved_messages(&mut s, "T-1").is_empty(), "nothing was running");
+    assert_eq!(lane(&mut s, "T-2").as_deref(), Some("heat"), "the other task keeps its lane");
 }

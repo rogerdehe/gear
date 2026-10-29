@@ -12,7 +12,7 @@ use gear_engine::ops::execute_intended;
 use gear_engine::{names, tick, EngineCfg};
 use gear_herdr::fake::{Call, FakeHerdr};
 use gear_herdr::AgentStatus;
-use gear_model::{MsgState, OpKind, SeatRole, TaskState};
+use gear_model::{MsgState, OpKind, SeatRole, SeatState, TaskState};
 use gear_store::{testing, NewOp, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
@@ -320,6 +320,46 @@ fn a_name_held_by_another_pane_is_reported_once_and_never_stolen() {
 }
 
 #[test]
+fn a_captain_whose_name_another_pane_holds_gets_one_item_and_its_name_back() {
+    let mut w = world();
+    // The captain's agent lost its name, and another pane carries `p-captain`.
+    w.herdr
+        .add_agent_named(OTHER_PANE, "codex", AgentStatus::Idle, "p-captain");
+
+    for now in [T0 + 10, T0 + 20] {
+        let names = names::read(&mut w.herdr).unwrap();
+        let restored = names::restore(&mut w.store, &mut w.herdr, "p", &names, now).unwrap();
+        assert!(restored.taken.contains(&"p:captain".to_string()), "{restored:?}");
+    }
+
+    assert_eq!(w.name(CAP_PANE), None, "the seat's agent is not named");
+    assert_eq!(w.name(OTHER_PANE), Some("p-captain"), "the holder keeps its name");
+    assert!(w.herdr.renames_to("p-captain").is_empty(), "nothing was stolen");
+
+    // One item for the captain, in the captain's own thread — not none.
+    let items = w
+        .store
+        .read(|tx| tx.thread_messages("p", "name:p:captain"))
+        .unwrap();
+    assert_eq!(items.len(), 1, "one item over two passes, not every tick: {items:?}");
+    assert_eq!(items[0].recipient, "p:captain");
+    assert_eq!(items[0].state, MsgState::Open);
+    assert!(items[0].body.contains("p-captain"), "{}", items[0].body);
+    assert!(items[0].body.contains(OTHER_PANE), "{}", items[0].body);
+
+    // The holder lets the name go: the captain carries it and its item is
+    // resolved.
+    w.herdr.set_agent_name(OTHER_PANE, None);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 30).unwrap();
+    assert_eq!(w.name(CAP_PANE), Some("p-captain"));
+    let items = w
+        .store
+        .read(|tx| tx.thread_messages("p", "name:p:captain"))
+        .unwrap();
+    assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
+}
+
+#[test]
 fn a_delivery_to_a_pane_whose_agent_lost_its_name_names_it_and_delivers_in_the_same_tick() {
     let mut w = world();
     let task = w.ready_task();
@@ -355,4 +395,108 @@ fn a_delivery_to_a_pane_whose_agent_lost_its_name_names_it_and_delivers_in_the_s
         report.executed.iter().any(|(_, state)| state == "submitted"),
         "{report:?}"
     );
+}
+
+/// A finished reviewer that went Standby still carries the task's name until
+/// restore gives it its seat name back, while another seat takes that task's
+/// review in the same tick (T-270). One pass must give the name back before the
+/// other seat asks for it, so the captain gets no item the next tick resolves
+/// by itself.
+#[test]
+fn a_name_freed_in_the_same_pass_is_named_to_the_seat_that_asks_for_it() {
+    const REV9_PANE: &str = "w1:p8";
+    const REV11_PANE: &str = "w1:p7";
+    let mut w = world();
+    w.ready_task();
+    // review-9's verdict is in: the seat is Standby with no task, its agent
+    // still named after the task it reviewed.
+    let review9 = w
+        .store
+        .write(|tx| {
+            let seat =
+                testing::seed_active_seat(tx, "p", "review-9", SeatRole::Temp, REV9_PANE, "codex", T0)?;
+            tx.set_seat_state(&seat.id, SeatState::Standby, Some("verdict in"), T0)?;
+            Ok(seat)
+        })
+        .unwrap();
+    // review-11 starts the review of T-1: its agent's name is p-review-t1.
+    w.store
+        .write(|tx| testing::seed_temp_seat(tx, "p", "review-11", "T-1", REV11_PANE, "codex", T0))
+        .unwrap();
+    // The ids order review-11 before review-9, so one pass in id order would
+    // see the name held.
+    w.herdr
+        .add_agent_named(REV9_PANE, "codex", AgentStatus::Idle, "p-review-t1");
+    w.herdr.add_agent(REV11_PANE, "codex", AgentStatus::Idle);
+
+    let names = names::read(&mut w.herdr).unwrap();
+    let restored = names::restore(&mut w.store, &mut w.herdr, "p", &names, T0 + 10).unwrap();
+
+    assert!(restored.renamed.contains(&review9.id), "{restored:?}");
+    assert!(restored.renamed.contains(&"p:review-11".to_string()), "{restored:?}");
+    assert!(restored.taken.is_empty(), "no name was taken: {restored:?}");
+    assert_eq!(
+        w.name(REV9_PANE),
+        Some("p-review-9"),
+        "the finished reviewer's seat name is back"
+    );
+    assert_eq!(
+        w.name(REV11_PANE),
+        Some("p-review-t1"),
+        "the new reviewer got the name it asks for"
+    );
+    let freed_at = w
+        .herdr
+        .calls
+        .iter()
+        .position(|call| matches!(call, Call::Rename { pane, .. } if pane == REV9_PANE))
+        .unwrap_or_else(|| panic!("no rename of the finished reviewer: {:?}", w.herdr.calls));
+    let asked_at = w
+        .herdr
+        .calls
+        .iter()
+        .position(|call| matches!(call, Call::Rename { pane, .. } if pane == REV11_PANE))
+        .unwrap_or_else(|| panic!("no rename of the new reviewer: {:?}", w.herdr.calls));
+    assert!(
+        freed_at < asked_at,
+        "the name is given back before the other seat asks for it: {:?}",
+        w.herdr.calls
+    );
+    // No item for the captain: there is nothing the next tick would resolve.
+    let items = w
+        .store
+        .read(|tx| tx.thread_messages("p", "name:p:review-11"))
+        .unwrap();
+    assert!(items.is_empty(), "{items:?}");
+}
+
+/// The two passes never hide a real holder: a name a pane of no seat holds is
+/// still reported to the captain, once.
+#[test]
+fn a_name_held_by_a_pane_of_no_seat_is_still_reported_once() {
+    const REV11_PANE: &str = "w1:p7";
+    let mut w = world();
+    w.ready_task();
+    w.store
+        .write(|tx| testing::seed_temp_seat(tx, "p", "review-11", "T-1", REV11_PANE, "codex", T0))
+        .unwrap();
+    w.herdr.add_agent(REV11_PANE, "codex", AgentStatus::Idle);
+    // The name is held by a pane that is nobody's seat.
+    w.herdr
+        .add_agent_named(OTHER_PANE, "opencode", AgentStatus::Idle, "p-review-t1");
+
+    for now in [T0 + 10, T0 + 20] {
+        let names = names::read(&mut w.herdr).unwrap();
+        let restored = names::restore(&mut w.store, &mut w.herdr, "p", &names, now).unwrap();
+        assert!(restored.taken.contains(&"p:review-11".to_string()), "{restored:?}");
+    }
+
+    assert_eq!(w.name(REV11_PANE), None, "nothing was stolen");
+    assert_eq!(w.name(OTHER_PANE), Some("p-review-t1"));
+    let items = w
+        .store
+        .read(|tx| tx.thread_messages("p", "name:p:review-11"))
+        .unwrap();
+    assert_eq!(items.len(), 1, "reported once, not every tick: {items:?}");
+    assert_eq!(items[0].state, MsgState::Open);
 }

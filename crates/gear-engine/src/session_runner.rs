@@ -133,15 +133,25 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
     let action_name = str_field(&state, "action").to_string();
     let phase = str_field(&state, "step").to_string();
     let is_ready = occupant.as_ref().is_some_and(|a| ready(a.agent_status));
+    // T-290: `keep` and `fresh` do no pane work, so an agent that queues input
+    // typed while it works (pi, claude) is ready mid-turn — the packet waits in
+    // its input queue and is read after the current step. Every other action
+    // types into the pane and still waits for idle, as does every other kind.
+    let mid_turn_ready = occupant.as_ref().is_some_and(|a| {
+        a.agent_status == AgentStatus::Working && gear_herdr::queues_input(&binding.kind)
+    });
     if phase == "done" {
-        return Ok(if is_ready || (occupant.is_none() && str_field(&state, "result") == "fresh") { Prep::Ready } else { Prep::Wait });
+        let done = is_ready
+            || (occupant.is_none() && str_field(&state, "result") == "fresh")
+            || (mid_turn_ready && matches!(action_name.as_str(), "keep" | "fresh"));
+        return Ok(if done { Prep::Ready } else { Prep::Wait });
     }
     if phase == "failed" { return Ok(Prep::Wait) }
     if occupant.as_ref().is_some_and(|a| a.agent_status == AgentStatus::Working) && action_name == "compact" && !state["saw_working"].as_bool().unwrap_or(false) {
         state["saw_working"] = json!(true); save(store, seat, &state)?;
     }
     if action_name == "keep" || action_name == "fresh" {
-        return if occupant.is_none() || is_ready { record(store, seat, task, attempt, role, &action_name, &mut state, now) } else { Ok(Prep::Wait) };
+        return if occupant.is_none() || is_ready || mid_turn_ready { record(store, seat, task, attempt, role, &action_name, &mut state, now) } else { Ok(Prep::Wait) };
     }
     if phase == "initial" {
         if action_name == "resume" && occupant.is_none() { step(&mut state, "start_resume", now); save(store, seat, &state)?; return Ok(Prep::Wait) }

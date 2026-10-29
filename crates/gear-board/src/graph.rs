@@ -10,8 +10,10 @@
 //! The task panel (what `Enter` opens on a row) shows the rounds of the task,
 //! what it depends on and what needs it.
 
-use gear_model::{GearResult, TaskState, Ts};
-use gear_store::{AttemptRow, AttemptTimes, Tx};
+use gear_model::{
+    AttemptState, GearResult, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState, TaskState, Ts,
+};
+use gear_store::{AttemptRow, AttemptTimes, OpRow, RoundRow, Tx};
 
 use crate::state_word;
 use crate::style::{lane_color, lane_width, Color, Line, Style};
@@ -20,14 +22,17 @@ use crate::style::{lane_color, lane_width, Color, Line, Style};
 struct History {
     attempts: Vec<AttemptRow>,
     times: Vec<(i64, AttemptTimes)>,
+    rounds: Vec<RoundRow>,
 }
 
 impl History {
-    /// The history of a task: its attempts and the time of every step.
+    /// The history of a task: its attempts, the time of every step and its
+    /// rounds.
     fn of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<History> {
         Ok(History {
             attempts: tx.attempts_of_task(project, task)?,
             times: tx.attempt_times_of_task(project, task)?,
+            rounds: tx.rounds_of_task(project, task)?,
         })
     }
 
@@ -49,40 +54,119 @@ impl History {
     }
 }
 
-/// The stage of a task in the graph.
+/// The stage of a task in the graph: one of the sixteen steps of a task, in
+/// time order (the prototype's STAGE, SYM, STAGE_COL and OPEN).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GraphStage {
-    /// The task is queued: the lane has not started it.
+pub enum Stage {
+    /// It waits for a task it depends on.
+    Deps,
+    /// It is queued: the lane has not started it.
     Queued,
+    /// It was delivered to its lane and nothing has started yet.
+    Delivered,
     /// The lane works on it.
     Working,
-    /// The task is in review.
+    /// It waits for the captain's answer to a question.
+    Asking,
+    /// It is handed in and waits for a reviewer.
+    Handed,
+    /// A reviewer works on it.
     Review,
-    /// The task is accepted and the merge is on its way.
+    /// It waits for the captain's verdict.
+    Verdict,
+    /// It was sent back and its rework is queued.
+    SentBack,
+    /// The lane reworks it.
+    Rework,
+    /// It passed and waits to merge.
+    Passed,
+    /// The merge is running.
     Merging,
-    /// The task is merged into `dev`.
-    Done,
+    /// The merge failed and it waits for the captain.
+    MergeFailed,
+    /// It is merged into `dev`.
+    Merged,
+    /// It failed: its rounds are used up.
+    Failed,
+    /// It was moved to another milestone.
+    Moved,
 }
 
-impl GraphStage {
-    /// The symbol of the stage in the lane's column.
+impl Stage {
+    /// The symbol of the stage in the lane's column (the prototype's SYM).
     pub fn symbol(self) -> &'static str {
         match self {
-            GraphStage::Queued => "○",
-            GraphStage::Working => "◉",
-            GraphStage::Review | GraphStage::Merging => "◎",
-            GraphStage::Done => "●",
+            Stage::Deps | Stage::Queued => "○",
+            Stage::Delivered => "◌",
+            Stage::Working | Stage::Asking => "◉",
+            Stage::Handed | Stage::Review | Stage::Verdict => "◎",
+            Stage::SentBack | Stage::Rework => "↺",
+            Stage::Passed | Stage::Merging => "◍",
+            Stage::MergeFailed | Stage::Failed => "✗",
+            Stage::Merged => "●",
+            Stage::Moved => "→",
         }
     }
 
-    /// The word of the stage (the panel).
-    pub fn word(self) -> &'static str {
+    /// The colour of the stage (the prototype's STAGE_COL).
+    pub fn color(self) -> Color {
         match self {
-            GraphStage::Queued => "queued",
-            GraphStage::Working => "working",
-            GraphStage::Review => "review",
-            GraphStage::Merging => "merging",
-            GraphStage::Done => "done",
+            Stage::Deps | Stage::Queued | Stage::Delivered | Stage::Moved => Color::Dim,
+            Stage::Working | Stage::Asking | Stage::Verdict | Stage::Rework => Color::Warn,
+            Stage::Handed | Stage::Review | Stage::Passed | Stage::Merging => Color::Acc,
+            Stage::SentBack | Stage::MergeFailed | Stage::Failed => Color::Bad,
+            Stage::Merged => Color::Ok,
+        }
+    }
+
+    /// Whether the stage is open (the prototype's OPEN): the task is on its
+    /// way between its delivery and its merge.
+    pub fn is_open(self) -> bool {
+        matches!(
+            self,
+            Stage::Delivered
+                | Stage::Working
+                | Stage::Asking
+                | Stage::Handed
+                | Stage::Review
+                | Stage::Verdict
+                | Stage::SentBack
+                | Stage::Rework
+                | Stage::Passed
+                | Stage::Merging
+                | Stage::MergeFailed
+        )
+    }
+
+    /// What the stage says of the task, in words (the prototype's STAGE).
+    pub fn words(task: &GraphTask) -> String {
+        Stage::words_of(task.stage, &task.deps, task.rounds, task.moved_to.as_deref())
+    }
+
+    /// The words of a stage from the facts it needs, without a [`GraphTask`]:
+    /// the board's lanes and the captain's home page say the same words as the
+    /// graph (T-347).
+    pub fn words_of(stage: Stage, deps: &[String], rounds: usize, moved_to: Option<&str>) -> String {
+        match stage {
+            Stage::Deps => format!(
+                "waits for {} to merge",
+                if deps.is_empty() { "-".to_string() } else { deps.join(", ") }
+            ),
+            Stage::Queued => "queued".to_string(),
+            Stage::Delivered => "delivered, not started".to_string(),
+            Stage::Working => "working".to_string(),
+            Stage::Asking => "waits for the captain's answer".to_string(),
+            Stage::Handed => "handed in, waits for a reviewer".to_string(),
+            Stage::Review => "in review".to_string(),
+            Stage::Verdict => "waits for the captain's verdict".to_string(),
+            Stage::SentBack => "sent back, rework queued".to_string(),
+            Stage::Rework => format!("reworking (round {rounds})"),
+            Stage::Passed => "passed, waits to merge".to_string(),
+            Stage::Merging => "merging (gate running)".to_string(),
+            Stage::MergeFailed => "merge failed, waits for the captain".to_string(),
+            Stage::Merged => "merged".to_string(),
+            Stage::Failed => "failed (rounds used up)".to_string(),
+            Stage::Moved => format!("moved to {}", moved_to.unwrap_or("-")),
         }
     }
 }
@@ -93,7 +177,9 @@ pub struct GraphTask {
     pub id: String,
     /// The lane that owns the task.
     pub lane: String,
-    pub stage: GraphStage,
+    pub stage: Stage,
+    /// The milestone the task was moved to (None here).
+    pub moved_to: Option<String>,
     /// The goal of the task (the contract's goal), as the title.
     pub title: String,
     /// The estimate of the task in minutes.
@@ -133,6 +219,7 @@ pub fn tasks(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<GraphTask>> 
             id: row.id.clone(),
             lane: row.lane.clone().unwrap_or_default(),
             stage: stage_of(tx, project, row)?,
+            moved_to: None,
             title,
             est_min: row.estimate_min,
             actual_min: actual,
@@ -144,15 +231,14 @@ pub fn tasks(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<GraphTask>> 
     Ok(order(tasks))
 }
 
-/// The order of the prototype: queued, working, the work that is in review
-/// (one group, in the order of the plan), then the merged ones with the
-/// newest first.
+/// The order of the prototype (its `order_of`): the tasks that wait for a
+/// dependency and the queued ones first, then the open ones (one group, in the
+/// order of the plan), then the merged ones with the newest first.
 fn order(mut tasks: Vec<GraphTask>) -> Vec<GraphTask> {
-    let stage = |task: &GraphTask| task.stage;
     let mut done: Vec<GraphTask> = Vec::new();
     let mut rest: Vec<GraphTask> = Vec::new();
     for task in tasks.drain(..) {
-        if task.stage == GraphStage::Done {
+        if task.stage == Stage::Merged {
             done.push(task);
         } else {
             rest.push(task);
@@ -161,17 +247,12 @@ fn order(mut tasks: Vec<GraphTask>) -> Vec<GraphTask> {
     done.sort_by_key(|task| task.finished.unwrap_or(0));
     done.reverse();
     let mut ordered: Vec<GraphTask> = Vec::new();
-    for wanted in [GraphStage::Queued, GraphStage::Working] {
-        ordered.extend(rest.iter().filter(|task| stage(task) == wanted).cloned());
-    }
-    // The work that waits for a verdict is one group: a task that is being
-    // merged and a task that is in review stand next to each other, in the
-    // order of the plan.
     ordered.extend(
         rest.iter()
-            .filter(|task| matches!(stage(task), GraphStage::Review | GraphStage::Merging))
+            .filter(|task| matches!(task.stage, Stage::Deps | Stage::Queued))
             .cloned(),
     );
+    ordered.extend(rest.iter().filter(|task| task.stage.is_open()).cloned());
     ordered.extend(done);
     ordered
 }
@@ -186,32 +267,150 @@ pub fn lanes(tx: &Tx<'_>, project: &str) -> GearResult<Vec<String>> {
         .collect())
 }
 
-/// The stage of a task: its state, and whether it is already accepted.
-fn stage_of(
-    tx: &Tx<'_>,
-    project: &str,
-    task: &gear_store::TaskRow,
-) -> GearResult<GraphStage> {
-    Ok(match task.state {
-        TaskState::Done => GraphStage::Done,
-        TaskState::Running => GraphStage::Working,
-        TaskState::Verifying => {
-            // An accepted task waits for its merge.
-            let accepted = tx.verdicts_of_task(project, &task.id)?.iter().any(|verdict| verdict.passed);
-            if accepted {
-                GraphStage::Merging
-            } else {
-                GraphStage::Review
+/// The stage of a task, from the facts the store already has: the first rule
+/// that holds decides. The board's lane lines read the same stage (T-347).
+pub(crate) fn stage_of(
+    tx: &Tx<'_>, project: &str, task: &gear_store::TaskRow,
+) -> GearResult<Stage> {
+    // Done and failed are endings of the task itself.
+    match task.state {
+        TaskState::Done => return Ok(Stage::Merged),
+        TaskState::Failed => return Ok(Stage::Failed),
+        _ => {}
+    }
+    // The attempt the task is on: the one with the highest n; an abandoned
+    // one counts as none.
+    let attempts = tx.attempts_of_task(project, &task.id)?;
+    let current = attempts
+        .iter()
+        .max_by_key(|attempt| attempt.n)
+        .filter(|attempt| attempt.state != AttemptState::Abandoned);
+    if let Some(a) = current {
+        // The newest attempt came back rejected: the rework waits for the lane.
+        let newer = attempts.iter().any(|other| other.n > a.n);
+        if a.state == AttemptState::Rejected && !newer {
+            return Ok(Stage::SentBack);
+        }
+        if task.state == TaskState::Verifying {
+            let passed = tx
+                .verdicts_of_task(project, &task.id)?
+                .iter()
+                .any(|verdict| verdict.attempt == a.n && verdict.passed);
+            if passed {
+                // An accepted task waits for its merge: the merge op says
+                // where it is.
+                return Ok(match newest_merge_op(tx, project, &task.id)?.map(|op| op.state) {
+                    Some(OpState::Failed) => Stage::MergeFailed,
+                    Some(OpState::Executing | OpState::Submitted | OpState::Unknown) => {
+                        Stage::Merging
+                    }
+                    _ => Stage::Passed,
+                });
+            }
+            if tx.get_review_verdict(project, &task.id, a.n)?.is_some() {
+                // The reviewer handed its verdict in: the captain decides.
+                return Ok(Stage::Verdict);
+            }
+            let held = tx.seats_of_project(project)?.iter().any(|seat| {
+                seat.role == SeatRole::Temp
+                    && seat.state == SeatState::Active
+                    && seat.task_id.as_deref() == Some(task.id.as_str())
+            });
+            if held {
+                // A reviewer holds the task.
+                return Ok(Stage::Review);
+            }
+            let quota_temps = tx.get_project(project)?.map(|row| row.quota_temps).unwrap_or(0);
+            if quota_temps == 0 {
+                // No reviewer can come: the captain decides.
+                return Ok(Stage::Verdict);
+            }
+            return Ok(Stage::Handed);
+        }
+        if matches!(a.state, AttemptState::Started | AttemptState::Stopped | AttemptState::Unknown)
+        {
+            let asked = tx.messages_from_since(project, &a.seat, a.started)?.iter().any(|msg| {
+                msg.kind == MsgKind::Question
+                    && msg.state == MsgState::Open
+                    && msg.task.as_deref() == Some(task.id.as_str())
+            });
+            if asked {
+                return Ok(Stage::Asking);
             }
         }
-        _ => GraphStage::Queued,
-    })
+        if a.n > 1 && a.state == AttemptState::Delivered {
+            // The rework was delivered and nothing has started yet.
+            return Ok(Stage::SentBack);
+        }
+        if a.n > 1
+            && matches!(a.state, AttemptState::Started | AttemptState::Stopped | AttemptState::Unknown)
+        {
+            return Ok(Stage::Rework);
+        }
+        match a.state {
+            AttemptState::Delivered => return Ok(Stage::Delivered),
+            AttemptState::Started | AttemptState::Stopped | AttemptState::Unknown => {
+                return Ok(Stage::Working);
+            }
+            AttemptState::Submitted => return Ok(Stage::Handed),
+            AttemptState::Accepted => return Ok(Stage::Passed),
+            _ => {}
+        }
+    }
+    // No attempt yet: the task waits for a task it depends on.
+    if current.is_none() {
+        for dep in &task.deps {
+            let merged = tx
+                .get_task(project, dep)?
+                .map(|row| row.state == TaskState::Done)
+                .unwrap_or(false);
+            if !merged {
+                return Ok(Stage::Deps);
+            }
+        }
+    }
+    Ok(Stage::Queued)
 }
 
-/// The time the task took, and when it was merged.
+/// The newest merge op of a task, over every state of the ops: by its time,
+/// then by the number after `O-`.
+fn newest_merge_op(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<OpRow>> {
+    let mut newest: Option<OpRow> = None;
+    for state in OpState::ALL {
+        for op in tx.ops_in_state(project, *state)? {
+            if op.kind != OpKind::Merge || op.task.as_deref() != Some(task) {
+                continue;
+            }
+            let newer = match &newest {
+                None => true,
+                Some(current) => {
+                    (op.created, op_number(&op.id)) > (current.created, op_number(&current.id))
+                }
+            };
+            if newer {
+                newest = Some(op);
+            }
+        }
+    }
+    Ok(newest)
+}
+
+/// The number of an id (`O-12` is 12).
+fn op_number(id: &str) -> i64 {
+    id.split_once('-')
+        .and_then(|(_, number)| number.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The time the lane worked on the task, and when it was merged.
 fn actual_of(history: &History, now: Ts) -> (Option<i64>, Option<Ts>) {
     let (start, _handed_in, merged) = history.span();
-    // A task that is not merged yet is measured until now.
+    // The work time, not the clock since the first delivery (T-348).
+    if let Some(worked) = crate::worked_s_of(&history.rounds) {
+        return (Some(worked / 60), merged);
+    }
+    // A task that was never worked on is measured until it was merged, or
+    // until now when it is not merged yet.
     let end = merged.or(Some(now));
     let actual = match (start, end) {
         (Some(start), Some(end)) if end >= start => Some((end - start) / 60),
@@ -229,13 +428,8 @@ pub fn lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usize>) -> 
 }
 
 /// The colour of a stage (the prototype's STAGE_COL).
-pub fn stage_color(stage: GraphStage) -> Color {
-    match stage {
-        GraphStage::Done => Color::Ok,
-        GraphStage::Merging | GraphStage::Review => Color::Acc,
-        GraphStage::Working => Color::Warn,
-        GraphStage::Queued => Color::Dim,
-    }
+pub fn stage_color(stage: Stage) -> Color {
+    stage.color()
 }
 
 /// The columns of the graph: where the lanes and the text stand.
@@ -303,10 +497,20 @@ pub fn styled_lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usiz
         // The line of dev runs down the whole graph.
         row.put(3, "│", Style::fg(Color::Ok));
         let x = columns.lane(lane_index(lanes, &task.lane)) + 1;
-        if matches!(task.stage, GraphStage::Review | GraphStage::Merging) {
-            // The task is in review: the line from the review column to it.
-            row.put(9, "◎", Style::fg(Color::Acc).and_bold());
-            row.put(10, &"─".repeat(x.saturating_sub(10)), Style::fg(Color::Acc));
+        // The review column: the task stands with a reviewer or with the
+        // merge, and the line reaches its lane.
+        let in_review = matches!(
+            task.stage,
+            Stage::Handed
+                | Stage::Review
+                | Stage::Verdict
+                | Stage::Passed
+                | Stage::Merging
+                | Stage::MergeFailed
+        );
+        if in_review {
+            row.put(9, task.stage.symbol(), Style::fg(task.stage.color()).and_bold());
+            row.put(10, &"─".repeat(x.saturating_sub(10)), Style::fg(task.stage.color()));
         }
         // A lane's line runs while the lane still has tasks below this row.
         for (lane_index, lane) in lanes.iter().enumerate() {
@@ -314,8 +518,8 @@ pub fn styled_lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usiz
                 row.put(columns.lane(lane_index) + 1, "│", lane_style(lane));
             }
         }
-        row.put(x, task.stage.symbol(), Style::fg(stage_color(task.stage)).and_bold());
-        if task.stage == GraphStage::Done {
+        row.put(x, task.stage.symbol(), Style::fg(task.stage.color()).and_bold());
+        if task.stage == Stage::Merged {
             // The task was merged into dev: the line of the merge.
             row.put(3, "●", Style::fg(Color::Ok).and_bold());
             row.put(4, &"─".repeat(x.saturating_sub(4)), Style::fg(Color::Ok));
@@ -334,11 +538,11 @@ pub fn styled_lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usiz
             Style::PLAIN.reversed_if(picked),
         );
         let info_style = match task.stage {
-            GraphStage::Done => Style::fg(Color::Dim),
-            stage => Style::fg(stage_color(stage)),
+            Stage::Merged => Style::fg(Color::Dim),
+            stage => Style::fg(stage.color()),
         };
         row.put(columns.info_x, &info(task), info_style);
-        if task.stage == GraphStage::Done {
+        if task.stage == Stage::Merged {
             row.put(9, "✓", Style::fg(Color::Ok).and_bold());
         }
         if task.rounds > 1 {
@@ -369,7 +573,7 @@ pub fn styled_lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usiz
     }
     out.push(Line::new());
     out.push(Line::styled(
-        "○ queued  ◉ working  ◎ in review (rev column)  ↺ reworked  ✓● reviewed and merged into dev   select a row: its deps light up",
+        "○ not started  ◌ delivered  ◉ working  ◎ in review (rev column)  ◍ passed / merging  ↺ reworked  ✗ failed  ✓● merged into dev   select a row: its deps light up",
         Style::fg(Color::Dim),
     ));
     out
@@ -385,22 +589,31 @@ fn lane_index(lanes: &[String], lane: &str) -> usize {
 fn info(task: &GraphTask) -> String {
     let estimate = task.est_min.unwrap_or(0);
     let actual = task.actual_min.unwrap_or(0);
+    let time = if actual > 0 { format!("{actual}/{estimate}m") } else { format!("{estimate}m") };
+    let rounds = if task.rounds > 1 { format!(" · {} rounds", task.rounds) } else { String::new() };
     match task.stage {
-        GraphStage::Done => {
-            let mut info = match task.finished {
+        Stage::Merged => {
+            let merged = match task.finished {
                 Some(finished) => format!("merged {} · ", clock(finished)),
                 None => String::new(),
             };
-            info.push_str(&format!("{actual}/{estimate}m"));
-            if task.rounds > 1 {
-                info.push_str(&format!(" · {} rounds", task.rounds));
-            }
-            info
+            format!("{merged}{time}{rounds}")
         }
-        GraphStage::Working => format!("working {actual}/{estimate}m"),
-        GraphStage::Review => "in review".to_string(),
-        GraphStage::Merging => "merging".to_string(),
-        GraphStage::Queued => format!("queued · {estimate}m"),
+        Stage::Deps
+        | Stage::Queued
+        | Stage::Delivered
+        | Stage::Working
+        | Stage::Asking
+        | Stage::Handed
+        | Stage::Review
+        | Stage::Verdict
+        | Stage::SentBack
+        | Stage::Rework
+        | Stage::Passed
+        | Stage::Merging
+        | Stage::MergeFailed
+        | Stage::Failed
+        | Stage::Moved => format!("{} · {time}", Stage::words(task)),
     }
 }
 

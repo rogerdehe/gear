@@ -11,6 +11,12 @@
 //! and a branch may still point past it — at a commit the merge never took.
 //! Such a task is not an open change: it is skipped, so a merged task raises
 //! no item and an open task is not paired with work that already landed.
+//!
+//! T-281: several fleets may work in one repository. A project's open tasks
+//! are compared with the open tasks of every other project of the store whose
+//! lane works in the same directory, so two fleets that edit one file hear of
+//! it before the merge conflicts. Each project's own pass writes its own
+//! captain's item; a store's other projects only, never another store's.
 
 use std::{collections::{BTreeMap, BTreeSet}, path::{Path, PathBuf}, process::Command};
 use gear_app::config::Repo;
@@ -33,8 +39,14 @@ pub struct Check {
 /// One task of the scan: its branch is the open change, unless the work it
 /// handed in has already landed.
 struct TaskIn {
+    /// The project the task belongs to: a task of the scanned project or of
+    /// another project whose lane works in the same repo (T-281).
+    project: String,
     task: String,
     lane: String,
+    /// The task's own project's `[conventions].task_branch` template (T-253):
+    /// a task of another project is read from its own project's names.
+    task_branch: String,
     /// The candidate of the task's latest attempt: the commit the engine
     /// merges when the review passes (T-61), and the one that tells a landed
     /// task from an open one (T-64).
@@ -49,14 +61,17 @@ struct Input {
     project: String,
     repo: PathBuf,
     integration: String,
-    /// The project's `[conventions].task_branch` template (T-253): the scan
-    /// reads the branch a task's work is on from its names.
-    task_branch: String,
+    /// The project's `[conventions].remote` (T-262): the remote the scan reads
+    /// the branches from.
+    remote: String,
     tasks: Vec<TaskIn>,
     handins: String,
 }
 
 struct Branch {
+    /// The project the task belongs to: two tasks are on different lanes when
+    /// their `(project, lane)` differs (T-281).
+    project: String,
     task: String,
     lane: String,
     files: BTreeSet<String>,
@@ -268,20 +283,61 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
                 .1
                 .push(task.clone());
         }
+        // The other projects of the store (T-281): a fleet that works in the
+        // same repo edits the same files, so its open tasks are compared with
+        // this project's. A project whose config does not parse has no lane
+        // repo to compare and is not seen. Another store (another Herdr
+        // session) is not in this list either: that is a later view.
+        let others: Vec<(String, gear_app::config::ProjectConfig)> = tx.project_ids()?
+            .into_iter()
+            .filter(|other| other != project)
+            .filter_map(|other| {
+                let row = tx.get_project(&other).ok().flatten()?;
+                let config = gear_app::config::parse(&row.config_toml).ok()?;
+                Some((other, config))
+            })
+            .collect();
         let mut inputs = Vec::new();
         for (key, (repo, tasks)) in groups {
             // The hand-ins of this repo: a new one starts the scan early. The
             // latest candidate of every task is the one a merge would take
-            // (T-64), so the scan can tell a landed task from an open one.
+            // (T-64), so the scan can tell a landed task from an open one. A
+            // hand-in of another project in this repo is in here too (T-281):
+            // its work restarts this project's scan as well.
             let mut handins = Vec::new();
-            let mut candidates: BTreeMap<String, String> = BTreeMap::new();
+            let mut candidates: BTreeMap<(String, String), String> = BTreeMap::new();
+            let mut entries = Vec::new();
             for task in &tasks {
                 // Oldest first: the last candidate is the latest attempt's.
-                for attempt in tx.attempts_of_task(project, &task.id)? {
-                    if let Some(candidate) = attempt.candidate {
-                        candidates.insert(task.id.clone(), candidate.clone());
-                        handins.push((task.id.clone(), attempt.n, candidate));
+                for (n, candidate) in attempted(tx, project, &task.id)? {
+                    candidates.insert((project.to_string(), task.id.clone()), candidate.clone());
+                    handins.push((project.to_string(), task.id.clone(), n, candidate));
+                }
+                let Some(lane) = task.lane.clone() else { continue };
+                if !open(&task.state) { continue; }
+                let candidate = candidates.get(&(project.to_string(), task.id.clone())).cloned();
+                entries.push(TaskIn {
+                    project: project.to_string(), task: task.id.clone(), lane,
+                    task_branch: config.conventions.task_branch.clone(), candidate,
+                });
+            }
+            // The open tasks of every other project whose lane works in this
+            // repo: the same directory, after canonicalizing where both paths
+            // canonicalize, as written where either does not.
+            for (other, other_config) in &others {
+                for task in tx.tasks_of_project(other)? {
+                    if !open(&task.state) { continue; }
+                    let Some(lane) = task.lane.clone() else { continue };
+                    if !same_dir(&other_config.repo_of_lane(&lane).path, &repo.path) { continue; }
+                    for (n, candidate) in attempted(tx, other, &task.id)? {
+                        candidates.insert((other.clone(), task.id.clone()), candidate.clone());
+                        handins.push((other.clone(), task.id.clone(), n, candidate));
                     }
+                    let candidate = candidates.get(&(other.clone(), task.id.clone())).cloned();
+                    entries.push(TaskIn {
+                        project: other.clone(), task: task.id.clone(), lane,
+                        task_branch: other_config.conventions.task_branch.clone(), candidate,
+                    });
                 }
             }
             handins.sort();
@@ -294,26 +350,46 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
             if unchanged && last.is_some_and(|last| now >= last && now - last < PERIOD) {
                 continue;
             }
-            let tasks = tasks.into_iter()
-                .filter(|t| !matches!(t.state, TaskState::Draft | TaskState::Cancelled | TaskState::Failed))
-                .filter_map(|t| {
-                    let lane = t.lane?;
-                    let candidate = candidates.get(&t.id).cloned();
-                    Some(TaskIn { task: t.id, lane, candidate })
-                })
-                .collect();
             inputs.push(Input {
                 key,
                 project: project.to_string(),
                 repo: repo.path.into(),
                 integration: repo.integration,
-                task_branch: config.conventions.task_branch.clone(),
-                tasks,
+                remote: config.conventions.remote.clone(),
+                tasks: entries,
                 handins,
             });
         }
         Ok(inputs)
     })
+}
+
+/// Is the task an open change? A draft, cancelled or failed task is not one:
+/// it is not compared with anything.
+fn open(state: &TaskState) -> bool {
+    !matches!(state, TaskState::Draft | TaskState::Cancelled | TaskState::Failed)
+}
+
+/// The candidates of a task, oldest first: the last one is the latest
+/// attempt's (T-64), and every one is a hand-in that starts the scan early.
+fn attempted(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Vec<(i64, String)>> {
+    let mut attempted = Vec::new();
+    for attempt in tx.attempts_of_task(project, task)? {
+        if let Some(candidate) = attempt.candidate {
+            attempted.push((attempt.n, candidate));
+        }
+    }
+    Ok(attempted)
+}
+
+/// Do two configs name one directory (T-281)? Equal after canonicalizing, or
+/// equal as written when either path does not canonicalize (it may not exist
+/// yet).
+fn same_dir(left: &str, right: &str) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 /// The key of a repo in the meta: its name, or "-" for the project root (a
@@ -336,9 +412,9 @@ fn close(tx: &Tx<'_>, project: &str, key: &str, reason: &str, now: Ts) -> GearRe
 fn scan(input: &Input) -> Result<Findings, String> {
     git(&input.repo, &["rev-parse", "--git-dir"])?;
     let local = revision(&input.repo, &format!("refs/heads/{}", input.integration))?;
-    let remote = revision(&input.repo, &format!("refs/remotes/origin/{}", input.integration))?;
-    // Use the containing tip when one is ahead; origin is authoritative when
-    // the local integration ref diverged. No network operation is needed.
+    let remote = revision(&input.repo, &format!("refs/remotes/{}/{}", input.remote, input.integration))?;
+    // Use the containing tip when one is ahead; the remote is authoritative
+    // when the local integration ref diverged. No network operation is needed.
     let integration = match (local, remote) {
         (Some(local), Some(remote)) if ancestor(&input.repo, &remote, &local)? => local,
         (_, Some(remote)) => remote,
@@ -358,34 +434,57 @@ fn scan(input: &Input) -> Result<Findings, String> {
                 continue;
             }
         }
-        let name = crate::dispatch::task_branch(&input.task_branch, &input.project, &task.lane, &task.task);
+        let name = crate::dispatch::task_branch(&task.task_branch, &task.project, &task.lane, &task.task);
         let local = revision(&input.repo, &format!("refs/heads/{name}"))?;
         let head = match local {
             Some(head) => Some(head),
-            None => revision(&input.repo, &format!("refs/remotes/origin/{name}"))?,
+            None => revision(&input.repo, &format!("refs/remotes/{}/{name}", input.remote))?,
         };
         let Some(head) = head else { continue; };
         let files = changed(&input.repo, &integration, &head)?;
         if files.is_empty() { continue; } // includes already integrated Done branches
-        let integration_files = changed(&input.repo, &head, &integration)?;
-        let shared: Vec<_> = files.intersection(&integration_files).cloned().collect();
-        let shared = real_files(&shared);
-        if !shared.is_empty() {
-            findings.integration.insert(format!("integration:{}", task.task), Conflict {
-                left: format!("{} ({})", task.task, task.lane), right: format!("integration {}", input.integration), files: shared,
-            });
+        // An overlap with the integration branch is this project's business:
+        // another project's task that changed the same file is not reported
+        // by this project's scan, its own project reports it (T-281).
+        if task.project == input.project {
+            let integration_files = changed(&input.repo, &head, &integration)?;
+            let shared: Vec<_> = files.intersection(&integration_files).cloned().collect();
+            let shared = real_files(&shared);
+            if !shared.is_empty() {
+                findings.integration.insert(format!("integration:{}", task.task), Conflict {
+                    left: format!("{} ({})", task.task, task.lane), right: format!("integration {}", input.integration), files: shared,
+                });
+            }
         }
-        branches.push(Branch { task: task.task.clone(), lane: task.lane.clone(), files });
+        branches.push(Branch { project: task.project.clone(), task: task.task.clone(), lane: task.lane.clone(), files });
     }
-    branches.sort_by(|a, b| a.task.cmp(&b.task));
+    // Deterministic, and the scanned project's own pairs keep the order they
+    // always had: by task id.
+    branches.sort_by(|a, b| (&a.task, &a.project, &a.lane).cmp(&(&b.task, &b.project, &b.lane)));
     for (index, left) in branches.iter().enumerate() {
-        for right in branches.iter().skip(index + 1).filter(|b| b.lane != left.lane) {
+        for right in branches.iter().skip(index + 1) {
+            // Two tasks are on different lanes when `(project, lane)` differs.
+            if (left.project.as_str(), left.lane.as_str()) == (right.project.as_str(), right.lane.as_str()) {
+                continue;
+            }
+            // A pair with two other projects' tasks is their captains' item,
+            // not this one's: at least one side is this project's (T-281).
+            if left.project != input.project && right.project != input.project { continue; }
             let files: Vec<_> = left.files.intersection(&right.files).cloned().collect();
             let files = real_files(&files);
             if !files.is_empty() {
-                findings.pairs.insert(format!("tasks:{}:{}", left.task, right.task), Conflict {
-                    left: format!("{} ({})", left.task, left.lane),
-                    right: format!("{} ({})", right.task, right.lane), files,
+                // This project's task names the pair, the other side carries
+                // its project: each project's own pass writes its own item.
+                let (main, sibling) = if left.project != input.project { (right, left) } else { (left, right) };
+                let (key, right) = match sibling.project == input.project {
+                    true => (format!("tasks:{}:{}", main.task, sibling.task), format!("{} ({})", sibling.task, sibling.lane)),
+                    false => (
+                        format!("tasks:{}:{}/{}", main.task, sibling.project, sibling.task),
+                        format!("{} ({}/{})", sibling.task, sibling.project, sibling.lane),
+                    ),
+                };
+                findings.pairs.insert(key, Conflict {
+                    left: format!("{} ({})", main.task, main.lane), right, files,
                 });
             }
         }

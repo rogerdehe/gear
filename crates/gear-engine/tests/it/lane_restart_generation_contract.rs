@@ -73,6 +73,7 @@ fn world() -> Store {
                 evidence_due_min: None,
                 body: String::new(),
                 created: T,
+                mechanical: None,
             })?;
         }
         gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 5, T)?;

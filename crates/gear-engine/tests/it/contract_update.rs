@@ -57,6 +57,7 @@ fn world() -> Store {
             evidence_due_min: None,
             body: String::new(),
             created: T0,
+            mechanical: None,
         })?;
         start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
         on_delivery_confirmed(tx, "p", "T-1", 1, T0)
@@ -66,7 +67,7 @@ fn world() -> Store {
 }
 
 fn cfg() -> EngineCfg {
-    let mut c = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
+    let mut c = EngineCfg { db_path: crate::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
     c.profiles.insert("opencode".into(), builtin("opencode").unwrap());
     c
 }

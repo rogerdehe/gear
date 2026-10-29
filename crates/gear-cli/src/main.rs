@@ -142,6 +142,10 @@ struct SendCmd {
     /// could fix.
     #[arg(long, value_name = "TEXT")]
     friction: Option<String>,
+    /// Captain only: the instruction is confirmed by an ack, and the item
+    /// comes back if it is not (design §10.7, row B7).
+    #[arg(long)]
+    ack: bool,
     #[arg(long)]
     preempted: Option<String>,
     #[arg(long)]
@@ -193,6 +197,9 @@ enum PlanOp {
         next: Option<String>,
         #[arg(long = "request-id")]
         request_id: Option<String>,
+        /// The user asked for this goal, bar or eta change and confirmed it.
+        #[arg(long)]
+        confirmed: bool,
     },
     /// Print one task's block as it would stand in the plan file (design §8.3).
     Show {
@@ -273,6 +280,17 @@ enum AdminOp {
         /// engine (T-228).
         #[arg(long)]
         check: bool,
+        /// With `--check`: ask each CLI for its models and warn about a
+        /// configured model id its CLI does not list (T-315). Asking runs the
+        /// CLIs, so it never happens unless asked for.
+        #[arg(long, requires = "check")]
+        models: bool,
+        /// The user asked for this staffing change and confirmed it
+        /// (T-401): a mid-voyage change to the staffing of a departed voyage
+        /// applies only on their confirmation, and GEAR stores no words of
+        /// theirs.
+        #[arg(long)]
+        confirmed: bool,
     },
     /// Print what this machine offers, for the captain's kickoff proposal.
     Kickoff,
@@ -283,7 +301,17 @@ enum AdminOp {
         agent: String,
     },
     /// Stop the background engine (it starts again on the next `gear` call).
-    Stop,
+    Stop {
+        /// Keep it stopped: while `engine.hold` exists no `gear` call starts
+        /// the engine until `gear admin start` (T-394).
+        #[arg(long)]
+        hold: bool,
+    },
+    /// Lift a hold (`admin stop --hold`) and start the background engine.
+    Start,
+    /// Every store on this machine and the projects in it (T-322): the shared
+    /// store, one per Herdr session, and the registered ones. Read-only.
+    Projects,
 }
 
 fn main() {
@@ -293,7 +321,7 @@ fn main() {
     let cli = Cli::parse();
     // T-228 (review F1): `admin init --check` validates a config and changes
     // nothing, and that includes the directories of the default store.
-    if !checks_a_config(&cli.cmd) {
+    if !writes_nothing(&cli.cmd) {
         default_store_path();
     }
     let code = match run(cli) {
@@ -306,9 +334,16 @@ fn main() {
     std::process::exit(code);
 }
 
-/// True for the read-only validation `gear admin init --check`.
-fn checks_a_config(cmd: &Option<Cmd>) -> bool {
-    matches!(cmd, Some(Cmd::Admin { op: AdminOp::Init { check: true, .. } }))
+/// True for the commands that write nothing at all, not even the directory of
+/// the default store: the read-only validation `gear admin init --check` and
+/// `gear admin projects`, which only reads the stores already on this machine
+/// (T-322).
+fn writes_nothing(cmd: &Option<Cmd>) -> bool {
+    matches!(
+        cmd,
+        Some(Cmd::Admin { op: AdminOp::Init { check: true, .. } })
+            | Some(Cmd::Admin { op: AdminOp::Projects })
+    )
 }
 
 /// Where GEAR keeps its store when `GEAR_DB` is not set: one store per Herdr
@@ -368,8 +403,8 @@ fn run(cli: Cli) -> GearResult<()> {
         Some(Cmd::Send(c)) => cmd_send(c, cli.json),
         Some(Cmd::Reply(c)) => cmd_reply(c, cli.json),
         Some(Cmd::Plan { op }) => match op {
-            PlanOp::Apply { path, keep, next, request_id } => {
-                cmd_plan(path, keep, next, request_id, cli.json)
+            PlanOp::Apply { path, keep, next, request_id, confirmed } => {
+                cmd_plan(path, keep, next, request_id, confirmed, cli.json)
             }
             PlanOp::Show { task } => cmd_plan_show(&task),
             PlanOp::Check {} => cmd_plan_check(cli.json),
@@ -385,14 +420,16 @@ fn run(cli: Cli) -> GearResult<()> {
         },
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Friction(c)) => cmd_friction(c, cli.json),
-        Some(Cmd::Admin { op: AdminOp::Init { config, check } }) => {
-            cmd_admin_init(&config, check, cli.json)
+        Some(Cmd::Admin { op: AdminOp::Init { config, check, models, confirmed } }) => {
+            cmd_admin_init(&config, check, models, confirmed, cli.json)
         }
         Some(Cmd::Admin { op: AdminOp::Kickoff }) => cmd_admin_kickoff(cli.json),
         Some(Cmd::Admin { op: AdminOp::InstallSkill { agent } }) => {
             cmd_admin_install_skill(&agent, cli.json)
         }
-        Some(Cmd::Admin { op: AdminOp::Stop }) => cmd_admin_stop(),
+        Some(Cmd::Admin { op: AdminOp::Stop { hold } }) => cmd_admin_stop(hold),
+        Some(Cmd::Admin { op: AdminOp::Start }) => cmd_admin_start(),
+        Some(Cmd::Admin { op: AdminOp::Projects }) => cmd_admin_projects(cli.json),
         Some(Cmd::Captain { op: CaptainOp::Handover { pane } }) => {
             cmd_captain_handover(&pane, cli.json)
         }
@@ -404,7 +441,8 @@ fn run(cli: Cli) -> GearResult<()> {
 /// Does this command start the engine when its lock is free (PRD §16)?
 ///
 /// Most commands do: the project must keep moving. These do not:
-/// - `run` *is* the engine, and `admin stop` stops it;
+/// - `run` *is* the engine, and `admin stop` stops it, `admin start` starts
+///   it (T-394);
 /// - `board` only observes — starting the engine would hide the "engine down"
 ///   warning it exists to show (PRD §15, the review of T-3);
 /// - `report time` only observes (the time accounting of what the store
@@ -416,14 +454,18 @@ fn run(cli: Cli) -> GearResult<()> {
 ///   (T-104);
 /// - `admin init --check` only validates a config: it reads the store's other
 ///   projects for the branch check but writes nothing, so there is nothing to
-///   keep moving (T-228, T-256).
+///   keep moving (T-228, T-256);
+/// - `admin projects` only reads the stores on this machine (T-322): an engine
+///   would open one of them and write it.
 fn starts_engine(cmd: &Option<Cmd>) -> bool {
     match cmd {
         None => true,
         Some(Cmd::Admin { op: AdminOp::Init { check, .. } }) => !check,
         Some(Cmd::Run)
-        | Some(Cmd::Admin { op: AdminOp::Stop })
+        | Some(Cmd::Admin { op: AdminOp::Stop { .. } })
+        | Some(Cmd::Admin { op: AdminOp::Start })
         | Some(Cmd::Admin { op: AdminOp::Kickoff })
+        | Some(Cmd::Admin { op: AdminOp::Projects })
         | Some(Cmd::Admin { op: AdminOp::InstallSkill { .. } })
         | Some(Cmd::Board { .. })
         | Some(Cmd::Report { .. })
@@ -471,6 +513,171 @@ fn cmd_admin_kickoff(json: bool) -> GearResult<()> {
     Ok(())
 }
 
+/// `gear admin projects`: every store on this machine and the projects in it
+/// (T-322).
+///
+/// Since v0.4.5 each Herdr session has its own store ([`default_store_in`]),
+/// and nothing listed them together. This does, and nothing else: the stores
+/// are the shared one, every `~/.local/state/gear/<session>/gear.db` and every
+/// store the registry names, existing files only, each once (by canonical
+/// path), in path order. Each is opened read-only, so nothing is written and
+/// no engine starts.
+fn cmd_admin_projects(json: bool) -> GearResult<()> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let stores: Vec<StoreProjects> = stores_in(home.as_deref())
+        .into_iter()
+        .map(|path| {
+            let store = path.to_string_lossy().into_owned();
+            match projects_in_store(&path) {
+                Ok(projects) => StoreProjects { store, projects, error: None },
+                Err(detail) => StoreProjects { store, projects: Vec::new(), error: Some(detail) },
+            }
+        })
+        .collect();
+    if json {
+        println!("{}", stores_json(&stores)?);
+    } else {
+        let out = render_stores(&stores);
+        if !out.is_empty() {
+            println!("{out}");
+        }
+    }
+    Ok(())
+}
+
+/// One store as `gear admin projects` reports it: what it holds, or why it
+/// could not be read.
+struct StoreProjects {
+    store: String,
+    projects: Vec<ProjectSummary>,
+    error: Option<String>,
+}
+
+/// What `gear admin projects` says about one project.
+struct ProjectSummary {
+    id: String,
+    session: String,
+    config_version: i64,
+    /// The voyage the project is in; empty when it has none.
+    voyage: String,
+}
+
+impl ProjectSummary {
+    /// The voyage as printed: the id, or `-` when the project is in none.
+    fn voyage_or_dash(&self) -> &str {
+        if self.voyage.is_empty() { "-" } else { &self.voyage }
+    }
+}
+
+/// The stores of this machine, in path order: the shared store, every
+/// `~/.local/state/gear/<session>/gear.db` and every store the registry names
+/// ([`targets_path_in`]). Existing files only, each once: deduplicated by
+/// canonical path, which is also what is printed.
+fn stores_in(home: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    let Some(home) = home else { return Vec::new() };
+    let state = home.join(".local/state/gear");
+    let mut named = vec![state.join("gear.db")];
+    if let Ok(entries) = std::fs::read_dir(&state) {
+        for entry in entries.flatten() {
+            named.push(entry.path().join("gear.db"));
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(targets_path_in(home)) {
+        for line in text.lines() {
+            if let Some((_, db)) = line.split_once('\t') {
+                named.push(std::path::PathBuf::from(db));
+            }
+        }
+    }
+    let mut paths: std::collections::BTreeSet<std::path::PathBuf> = std::collections::BTreeSet::new();
+    for path in named {
+        // Canonicalize already tells whether the file exists, and dedups a
+        // store reached twice (a session directory and a registry line).
+        if let Ok(real) = std::fs::canonicalize(&path) {
+            if real.is_file() {
+                paths.insert(real);
+            }
+        }
+    }
+    paths.into_iter().collect()
+}
+
+/// The projects of the store at `path`, read-only; `Err` is why it was not
+/// readable (`gear admin projects` prints it and goes on).
+fn projects_in_store(path: &std::path::Path) -> Result<Vec<ProjectSummary>, String> {
+    let mut store = gear_store::Store::open_read_only(path).map_err(|e| e.detail)?;
+    store
+        .read(|tx| {
+            let mut projects = Vec::new();
+            for id in tx.project_ids()? {
+                let Some(row) = tx.get_project(&id)? else { continue };
+                projects.push(ProjectSummary {
+                    session: row.herdr_session,
+                    config_version: row.config_version,
+                    voyage: gear_app::plan::current_voyage(tx, &id)?,
+                    id: row.id,
+                });
+            }
+            Ok(projects)
+        })
+        .map_err(|e| e.detail)
+}
+
+/// [`StoreProjects`] as lines: the store's path, then one line per project, or
+/// `(no projects)`, or `cannot read: <detail>`.
+fn render_stores(stores: &[StoreProjects]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for store in stores {
+        lines.push(store.store.clone());
+        if let Some(detail) = &store.error {
+            lines.push(format!("  cannot read: {detail}"));
+            continue;
+        }
+        if store.projects.is_empty() {
+            lines.push("  (no projects)".to_string());
+            continue;
+        }
+        for project in &store.projects {
+            lines.push(format!(
+                "  {} · session {} · config v{} · voyage {}",
+                project.id,
+                project.session,
+                project.config_version,
+                project.voyage_or_dash()
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+/// [`StoreProjects`] as JSON: `[{"store", "projects": [{"id", "session",
+/// "config_version", "voyage"}], "error"}]`.
+fn stores_json(stores: &[StoreProjects]) -> GearResult<String> {
+    let doc: Vec<serde_json::Value> = stores
+        .iter()
+        .map(|store| {
+            let projects: Vec<serde_json::Value> = store
+                .projects
+                .iter()
+                .map(|project| {
+                    serde_json::json!({
+                        "id": project.id,
+                        "session": project.session,
+                        "config_version": project.config_version,
+                        "voyage": project.voyage_or_dash(),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "store": store.store,
+                "projects": projects,
+                "error": store.error,
+            })
+        })
+        .collect();
+    serde_json::to_string(&doc).map_err(json_error)
+}
+
 /// Refuse a **first** registration from another project's seat (T-100).
 ///
 /// The captain registers its project (user, M4 landing: the whole flow is the
@@ -501,26 +708,220 @@ fn refuse_first_registration_by_an_agent(env: &gear_app::Env) -> GearResult<()> 
 /// read (`config ok: project <id>, <n> lanes, <m> reviewers`). Its
 /// cross-project branch check (T-256) reads an existing store, never creates
 /// one, and says so when there is none.
-fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> GearResult<()> {
+///
+/// Both forms go on to name the seats the config starts and the model each
+/// one runs (T-261), so a captain sees a wrong model here rather than once the
+/// fleet runs.
+///
+/// With `--models` (T-315) it also asks each seat's CLI for the models it
+/// lists and warns, on stderr, about a configured model id that is not among
+/// them — a warning, not a refusal, and never without `--models`, since asking
+/// runs the CLIs.
+///
+/// With `--confirmed` (T-401) the user's confirmation of a staffing change to
+/// a departed voyage is carried; without it such a change is refused
+/// (T-392), in the check as well, and GEAR stores no words of theirs.
+fn cmd_admin_init(
+    config: &std::path::Path,
+    check_only: bool,
+    with_models: bool,
+    confirmed: bool,
+    json: bool,
+) -> GearResult<()> {
+    // T-261: the lane list — `(name, kind, model)` — with the model being the
+    // lane's first `models` entry, else the role chain's first, else "-".
+    let lane_list = |parsed: &gear_app::config::ProjectConfig| -> Vec<(String, String, String)> {
+        parsed
+            .lanes
+            .iter()
+            .map(|lane| {
+                let model = lane
+                    .models
+                    .first()
+                    .or_else(|| parsed.models.lanes.first())
+                    .map(|entry| entry.model().to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                (lane.name.clone(), lane.kind.clone(), model)
+            })
+            .collect()
+    };
+    // The model a reviewer runs: the first `[models] review` entry, else "-".
+    let review_model = |parsed: &gear_app::config::ProjectConfig| -> String {
+        parsed
+            .models
+            .review
+            .first()
+            .map(|entry| entry.model().to_string())
+            .unwrap_or_else(|| "-".to_string())
+    };
+    let lane_json = |lanes: &[(String, String, String)]| -> Vec<serde_json::Value> {
+        lanes
+            .iter()
+            .map(|(name, kind, model)| {
+                serde_json::json!({ "name": name, "kind": kind, "model": model })
+            })
+            .collect()
+    };
+    // The same facts as lines: one per lane, then the reviewers.
+    let seat_lines = |parsed: &gear_app::config::ProjectConfig| -> Vec<String> {
+        let mut lines: Vec<String> = parsed
+            .lanes
+            .iter()
+            .zip(lane_list(parsed))
+            .map(|(lane, (name, kind, model))| {
+                format!("  lane {name}: {kind} {model} · owns {}", lane.owns.join(", "))
+            })
+            .collect();
+        lines.push(match &parsed.temps {
+            Some(temps) => format!(
+                "  reviewers: {} × {} {}",
+                parsed.quota.temps,
+                temps.kind,
+                review_model(parsed)
+            ),
+            None => "  reviewers: none".to_string(),
+        });
+        lines
+    };
+    // T-269: one store per Herdr session (v0.4.5). A config that names
+    // another session would register into this session's store, where its
+    // engine never reaches the panes — so it is refused before `--check`
+    // prints "config ok" and before a real init writes anything. Nothing is
+    // checked without a socket, for the default session, or when the caller
+    // names a store of its own with `GEAR_DB`.
+    let refuse_a_foreign_session =
+        |parsed: &gear_app::config::ProjectConfig| -> GearResult<()> {
+            let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+                return Ok(());
+            };
+            let Ok(socket) = std::env::var("HERDR_SOCKET_PATH") else {
+                return Ok(());
+            };
+            let Some(name) = session_name_of(&home, &socket) else {
+                return Ok(());
+            };
+            // `default_store_path` fills `GEAR_DB` in with this session's own
+            // default store: a caller that named another store itself is
+            // checked by nothing, since that store need not be a session's.
+            if let Some(db) = std::env::var_os(gear_model::ctx::ENV_DB) {
+                if std::path::PathBuf::from(db) != default_store_in(&home, Some(&socket)) {
+                    return Ok(());
+                }
+            }
+            let configured = &parsed.project.herdr_session;
+            if *configured == name {
+                return Ok(());
+            }
+            Err(GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!(
+                    "project {} names herdr_session {configured}, but this shell runs in session {name}: its store and engine are this session's; run init from a pane of session {configured}, or fix herdr_session",
+                    parsed.project.id
+                ),
+            ))
+        };
+    // T-316: a repository under the system temp directory is a fixture (M4.2
+    // #35: a leftover fixture project with empty tokens appeared in the
+    // user's board, its captain seat bound to the real captain's pane). A
+    // fixture registers only into a store the caller names itself with
+    // `GEAR_DB`, never into this session's store, where the user would see
+    // it. Like T-269, nothing is refused when the caller names its own store.
+    let refuse_a_fixture_into_this_store =
+        |parsed: &gear_app::config::ProjectConfig| -> GearResult<()> {
+            let temp = std::env::temp_dir().to_string_lossy().into_owned();
+            let temp = canonical(&temp);
+            let repo = canonical(&parsed.project.repo);
+            if !std::path::Path::new(&repo).starts_with(&temp) {
+                return Ok(());
+            }
+            let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+                return Ok(());
+            };
+            let socket = std::env::var("HERDR_SOCKET_PATH").ok();
+            // `default_store_path` fills `GEAR_DB` in with this session's own
+            // default store: a `GEAR_DB` that differs was named by the caller.
+            let db = match std::env::var_os(gear_model::ctx::ENV_DB) {
+                Some(db) => {
+                    let db = std::path::PathBuf::from(db);
+                    if db != default_store_in(&home, socket.as_deref()) {
+                        return Ok(());
+                    }
+                    db
+                }
+                None => default_store_in(&home, socket.as_deref()),
+            };
+            Err(GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!(
+                    "project {} lives under the temp directory ({repo}): a fixture registers only into a store named with GEAR_DB, never into this session's store {}",
+                    parsed.project.id,
+                    db.display()
+                ),
+            ))
+        };
     // T-228: `--check` validates the config and changes nothing — no
     // GEAR_ADMIN, no store, no Herdr, no engine.
     if check_only {
         let text = read_config(config)?;
         let parsed = gear_app::admin::check(&text, None)?;
+        refuse_a_foreign_session(&parsed)?;
         // T-256: another project of this store on the same repository is a
         // branch clash, reported before anything is registered. The store is
         // only read, and only when it exists already: a check creates nothing.
-        match other_projects()? {
+        // T-388: the same read gives the config this store holds for this very
+        // project, which is what a re-init would change. A store with no
+        // project of this id is a first registration: nothing to compare.
+        let changes: Option<(i64, Vec<String>)> = match other_projects()? {
             Some(others) => {
-                if let Some(problem) = gear_app::admin::branch_clash(&parsed, &others) {
+                let pairs: Vec<(String, String)> = others
+                    .iter()
+                    .map(|(id, text, _)| (id.clone(), text.clone()))
+                    .collect();
+                if let Some(problem) = gear_app::admin::branch_clash(&parsed, &pairs) {
                     return Err(GearError::new(gear_model::ErrorCode::BadFormat, problem));
                 }
+                others
+                    .iter()
+                    .find(|(id, _, _)| *id == parsed.project.id)
+                    .map(|(_, registered, version)| (*version, config_changes(registered, &text)))
             }
-            None => eprintln!("cross-project check skipped: no store"),
+            None => {
+                eprintln!("cross-project check skipped: no store");
+                None
+            }
+        };
+        // T-304: the lane quota counts the lanes that can run — the seats,
+        // retired ones excluded — so it is checked after the branch check,
+        // against the retired lanes of this project's seats.
+        if let Some(problem) =
+            gear_app::admin::lane_quota_problem(&parsed, &retired_lanes_of(&parsed.project.id)?)
+        {
+            return Err(GearError::new(gear_model::ErrorCode::BadFormat, problem));
+        }
+        // T-392: a departed voyage's staffing changes only on the user's
+        // confirmation (T-401). The check reports the same refusal a real
+        // init would write, and writes nothing itself.
+        if !confirmed {
+            if let Some(problem) = staffing_refusal_of(&parsed)? {
+                return Err(problem);
+            }
         }
         let lanes = parsed.lanes.len();
         let reviewers = parsed.quota.temps;
+        // T-315: only when asked for — this runs the CLIs.
+        let model_warnings: Vec<String> = if with_models {
+            gear_app::kickoff::model_warnings(&parsed, &mut |cli: &str| {
+                gear_app::kickoff::models_of(cli)
+            })
+        } else {
+            Vec::new()
+        };
         if json {
+            let lane_list = lane_list(&parsed);
+            let changes = changes
+                .as_ref()
+                .map(|(_, lines)| lines.clone())
+                .unwrap_or_default();
             println!(
                 "{}",
                 serde_json::json!({
@@ -528,6 +929,10 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
                     "project": parsed.project.id,
                     "lanes": lanes,
                     "reviewers": reviewers,
+                    "lane_list": lane_json(&lane_list),
+                    "review_model": review_model(&parsed),
+                    "model_warnings": model_warnings,
+                    "changes": changes,
                 })
             );
         } else {
@@ -535,6 +940,24 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
                 "config ok: project {}, {lanes} lanes, {reviewers} reviewers",
                 parsed.project.id
             );
+            // T-388: right after it, what the re-init would change (or that
+            // it changes nothing), so a captain sees the store it writes.
+            if let Some((version, lines)) = &changes {
+                if lines.is_empty() {
+                    println!("no change against the registered config v{version}");
+                } else {
+                    println!("changes against the registered config v{version}:");
+                    for line in lines {
+                        println!("{line}");
+                    }
+                }
+            }
+            for line in seat_lines(&parsed) {
+                println!("{line}");
+            }
+            for line in &model_warnings {
+                eprintln!("warning: {line}");
+            }
         }
         return Ok(());
     }
@@ -546,6 +969,12 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
         ));
     }
     let text = read_config(config)?;
+    // T-269: a config for another session never lands in this one's store.
+    if let Ok(parsed) = gear_app::config::parse(&text) {
+        refuse_a_foreign_session(&parsed)?;
+        // T-316: nor does a fixture, unless the caller named its store.
+        refuse_a_fixture_into_this_store(&parsed)?;
+    }
     let mut store = open_store()?;
     // A project that is not registered yet is created by its captain, never by
     // another project's seat (T-100); a seat may re-apply its own project's
@@ -576,8 +1005,14 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
         herdr_ref,
         &ancestors,
         home.as_deref(),
+        confirmed,
         now_ts(),
     )?;
+    // T-321: remember which file this config was applied from, so the home
+    // page can tell a config file that drifted from the config the project
+    // runs on. Canonical, so the meta names the same file every run.
+    let path = canonical(&config.to_string_lossy());
+    store.write(|tx| tx.set_meta(&gear_app::admin::config_path_key(&r.project), &path))?;
     // This store becomes the Herdr session's GEAR target (design/14, L-54).
     if let (Ok(socket), Ok(db), Some(home)) = (
         std::env::var("HERDR_SOCKET_PATH"),
@@ -589,17 +1024,77 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
             eprintln!("gear: could not register the store in {}: {e}", registry.display());
         }
     }
+    // The config parsed already (init validated it): say which seats it
+    // starts, and on which model (T-261).
+    let parsed = gear_app::config::parse(&text)?;
+    let lanes = lane_list(&parsed);
     if json {
-        println!("{}", serde_json::to_string(&r).unwrap_or_default());
+        let mut value = serde_json::to_value(&r).unwrap_or_default();
+        if let Some(object) = value.as_object_mut() {
+            object.insert("lane_list".to_string(), serde_json::json!(lane_json(&lanes)));
+            object.insert("review_model".to_string(), serde_json::json!(review_model(&parsed)));
+        }
+        println!("{value}");
     } else {
         // The project is registered with this config version; a re-init
         // stores the next one (T-6).
         println!("project {} (config v{})", r.project, r.config_version);
+        // T-373: a changed `conventions.seat_branch` leaves worktrees behind;
+        // name them and the command that takes each one away.
+        for line in &r.stale_worktrees {
+            println!("{line}");
+        }
         for seat in &r.seats {
             println!("seat {seat}");
         }
+        for line in seat_lines(&parsed) {
+            println!("{line}");
+        }
     }
     Ok(())
+}
+
+/// The lines of a `--check` change list (T-388): the registered config text
+/// against the config file's own text, as a line diff — `- ` for a line only
+/// in the registered one, `+ ` for a line only in the file, in file order.
+/// The LCS is a plain table, small next to a config file, so no dependency.
+fn config_changes(registered: &str, file: &str) -> Vec<String> {
+    let old: Vec<&str> = registered.lines().collect();
+    let new: Vec<&str> = file.lines().collect();
+    // `same[i][j]`: the length of the longest common subsequence of the tails
+    // `old[i..]` and `new[j..]`.
+    let mut same = vec![vec![0usize; new.len() + 1]; old.len() + 1];
+    for i in (0..old.len()).rev() {
+        for j in (0..new.len()).rev() {
+            same[i][j] = if old[i] == new[j] {
+                same[i + 1][j + 1] + 1
+            } else {
+                same[i + 1][j].max(same[i][j + 1])
+            };
+        }
+    }
+    let mut lines = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < old.len() && j < new.len() {
+        if old[i] == new[j] {
+            i += 1;
+            j += 1;
+        } else if same[i + 1][j] >= same[i][j + 1] {
+            // A tie takes the registered line away first, as a diff does.
+            lines.push(format!("- {}", old[i]));
+            i += 1;
+        } else {
+            lines.push(format!("+ {}", new[j]));
+            j += 1;
+        }
+    }
+    for line in &old[i..] {
+        lines.push(format!("- {line}"));
+    }
+    for line in &new[j..] {
+        lines.push(format!("+ {line}"));
+    }
+    lines
 }
 
 /// Read the config a command was given, as `BadFormat` when it cannot be read.
@@ -613,14 +1108,15 @@ fn read_config(config: &std::path::Path) -> GearResult<String> {
 }
 
 /// The other projects of the store this `gear` call would use — `(id,
-/// config_toml)` — for the branch check of `admin init --check` (T-256), or
-/// `None` when there is no store to read: none at the path, or no `HOME` to
-/// find the default one under. The path is `GEAR_DB` when the caller names
+/// config_toml, config_version)` — for the branch check of `admin init
+/// --check` (T-256) and its change list (T-388), or `None` when there is no
+/// store to read: none at the path, or no `HOME` to find the default one
+/// under. The path is `GEAR_DB` when the caller names
 /// one, else the default store of this session — resolved with
 /// [`default_store_in`], never with [`default_store_path`], which creates the
 /// directory. Only an existing store is opened, and read-only: a check creates
 /// no file, applies no schema and migrates nothing (T-228).
-fn other_projects() -> GearResult<Option<Vec<(String, String)>>> {
+fn other_projects() -> GearResult<Option<Vec<(String, String, i64)>>> {
     let path = match std::env::var_os(gear_model::ctx::ENV_DB) {
         Some(path) => std::path::PathBuf::from(path),
         None => {
@@ -640,12 +1136,85 @@ fn other_projects() -> GearResult<Option<Vec<(String, String)>>> {
             let mut others = Vec::new();
             for id in tx.project_ids()? {
                 if let Some(row) = tx.get_project(&id)? {
-                    others.push((row.id, row.config_toml));
+                    others.push((row.id, row.config_toml, row.config_version));
                 }
             }
             Ok(others)
         })
         .map(Some)
+}
+
+/// The staffing refusal `admin init --check` reports for a registered project
+/// whose departed voyage is under way and whose config changes `quota`,
+/// `lanes`, `temps` or `models` (T-392), or `None` when nothing is locked. It
+/// reads the same store `other_projects` does, with the same path rule,
+/// read-only.
+fn staffing_refusal_of(parsed: &gear_app::config::ProjectConfig) -> GearResult<Option<GearError>> {
+    let path = match std::env::var_os(gear_model::ctx::ENV_DB) {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            let Some(home) = std::env::var_os("HOME") else {
+                return Ok(None);
+            };
+            let socket = std::env::var("HERDR_SOCKET_PATH").ok();
+            default_store_in(&std::path::PathBuf::from(home), socket.as_deref())
+        }
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut store = gear_store::Store::open_read_only(&path)?;
+    store.read(|tx| {
+        let Some(row) = tx.get_project(&parsed.project.id)? else {
+            return Ok(None);
+        };
+        let Ok(stored) = gear_app::config::parse(&row.config_toml) else {
+            return Ok(None);
+        };
+        let changes = gear_app::admin::staffing_changes(&stored, parsed);
+        if !gear_app::admin::staffing_changed(&stored, parsed) {
+            return Ok(None);
+        }
+        let Some(voyage) = gear_app::admin::staffing_voyage(tx, &parsed.project.id)? else {
+            return Ok(None);
+        };
+        Ok(Some(GearError::new(
+            gear_model::ErrorCode::StaffLocked,
+            gear_app::admin::staffing_refusal(&voyage, &changes),
+        )))
+    })
+}
+
+/// The lane names this project's seats hold as `Retired` (T-304), for the lane
+/// quota check of `admin init --check`. It reads the same store `other_projects`
+/// does, with the same path rule, read-only, and is empty when there is no
+/// store to read (a check creates nothing).
+fn retired_lanes_of(project: &str) -> GearResult<Vec<String>> {
+    let path = match std::env::var_os(gear_model::ctx::ENV_DB) {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            let Some(home) = std::env::var_os("HOME") else {
+                return Ok(Vec::new());
+            };
+            let socket = std::env::var("HERDR_SOCKET_PATH").ok();
+            default_store_in(&std::path::PathBuf::from(home), socket.as_deref())
+        }
+    };
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut store = gear_store::Store::open_read_only(&path)?;
+    store.read(|tx| {
+        let mut names = Vec::new();
+        for seat in tx.seats_of_project(project)? {
+            if seat.role == gear_model::SeatRole::Lane
+                && seat.state == gear_model::SeatState::Retired
+            {
+                names.push(seat.name);
+            }
+        }
+        Ok(names)
+    })
 }
 
 /// Open the store at GEAR_DB (agents) or the admin target (design/14).
@@ -656,14 +1225,16 @@ fn open_store() -> GearResult<gear_store::Store> {
 /// [`open_store`] over an injected variable lookup (testable).
 /// The caller's identity (T-104): the library proves the whole claim — the
 /// pane the caller really runs in is the claimed one, and the seat is bound to
-/// it — and reports a refusal once to the captain.
+/// it — and reports a refusal once to the captain. A caller whose tools run in
+/// a daemon (T-328) also proves it is the seat's own session.
 fn observe_identity(
     store: &mut gear_store::Store,
     env: &gear_app::Env,
     herdr: &mut dyn gear_herdr::HerdrRead,
 ) -> GearResult<Option<gear_app::identity::Fingerprint>> {
     let ancestors = gear_app::identity::process_ancestors();
-    gear_app::identity::prove_seat(store, env, herdr, &ancestors, now_ts())
+    let daemon = gear_app::identity::DaemonSessions::from_vars(|name| std::env::var(name).ok());
+    gear_app::identity::prove_seat(store, env, herdr, &ancestors, &daemon, now_ts())
 }
 
 /// The caller's identity (T-126): `GEAR_CTX` when the seat's shell exports it,
@@ -966,8 +1537,43 @@ fn cmd_board(deps: bool, project: Option<&str>, json: bool) -> GearResult<()> {
         ..Default::default()
     };
     let mut out = std::io::stdout();
-    gear_board::run(&mut store, &opts, &mut out,
-        herdr.as_mut().map(|herdr| herdr as &mut dyn gear_herdr::HerdrRead))
+    draw_board(&mut store, &opts, herdr.as_mut(), herdr_tab_id(), &mut out)
+}
+
+/// The Herdr tab this call runs in (`HERDR_TAB_ID`), when Herdr set one. The
+/// user's shell, a terminal outside Herdr, has none.
+fn herdr_tab_id() -> Option<String> {
+    std::env::var("HERDR_TAB_ID").ok().filter(|id| !id.is_empty())
+}
+
+/// The label the board gives its Herdr tab (T-278): `<project> board`, or
+/// `GEAR board` when the board shows every project.
+fn board_tab_label(project: Option<&str>) -> String {
+    match project {
+        Some(project) => format!("{project} board"),
+        None => "GEAR board".into(),
+    }
+}
+
+/// Name the caller's Herdr tab after the board, then draw the board (T-278):
+/// a captain opens the board in a new tab, and an unnamed tab shows a number in
+/// the tab bar. A refused or uncertain rename is ignored — the board still
+/// starts. `--json` is machine output and renames nothing.
+fn draw_board<H: gear_herdr::HerdrAct>(
+    store: &mut gear_store::Store,
+    opts: &gear_board::Options,
+    herdr: Option<&mut H>,
+    tab_id: Option<String>,
+    out: &mut dyn std::io::Write,
+) -> GearResult<()> {
+    let mut herdr = herdr;
+    if !opts.json {
+        if let (Some(herdr), Some(tab_id)) = (herdr.as_mut(), tab_id.as_deref()) {
+            let label = board_tab_label(opts.project.as_deref());
+            let _ = herdr.tab_rename(tab_id, &label);
+        }
+    }
+    gear_board::run(store, opts, out, herdr.map(|h| h as &mut dyn gear_herdr::HerdrRead))
 }
 
 /// `gear whoami`: who this call is (design §10.7, row B9) — the pane it
@@ -1387,6 +1993,7 @@ fn cmd_plan(
     keep: Option<String>,
     next: Option<String>,
     request_id: Option<String>,
+    confirmed: bool,
     json: bool,
 ) -> GearResult<()> {
     let env = env_from_process()?;
@@ -1404,6 +2011,7 @@ fn cmd_plan(
         &request_id,
         now_ts(),
         json,
+        confirmed,
     )?;
     println!("{out}");
     Ok(())
@@ -1602,6 +2210,9 @@ fn planned_issues(
 
 /// `gear plan apply` body, over injected state: read the draft, parse it and
 /// apply it as the captain (design/05).
+///
+/// T-410: `--confirmed` marks the draft as a change to a departed voyage's
+/// goal, bar or eta that the user asked for and confirmed.
 fn run_plan(
     store: &mut gear_store::Store,
     env: &gear_app::Env,
@@ -1612,6 +2223,7 @@ fn run_plan(
     request_id: &str,
     now: i64,
     json: bool,
+    confirmed: bool,
 ) -> GearResult<String> {
     if keep.is_some() || next.is_some() {
         return Err(GearError::new(
@@ -1622,7 +2234,7 @@ fn run_plan(
     let Some(path) = path else {
         return Err(GearError::new(
             gear_model::ErrorCode::BadFormat,
-            "give the voyage file, e.g. gear plan apply gear/voyages/M1.md".to_string(),
+            "give the voyage file, e.g. gear plan apply gear/voyages/M1/plan.md".to_string(),
         ));
     };
     let text = std::fs::read_to_string(path).map_err(|e| {
@@ -1631,7 +2243,8 @@ fn run_plan(
             format!("cannot read {}: {e}", path.display()),
         )
     })?;
-    let draft = gear_app::draft::parse(&text)?;
+    let mut draft = gear_app::draft::parse(&text)?;
+    draft.confirmed = confirmed;
     let fp = observe_identity(store, env, herdr)?;
     // T-133 (review F1): a `- release` of a **lane** must know whether the
     // lane's agent is really in its pane, and only the session can say so. The
@@ -1725,10 +2338,31 @@ fn run_plan(
         let until = gear_app::plan::tail_until(tx, &draft.project)?;
         Ok((lanes, until))
     })?;
+    // T-299: the captain's plan commit follows the project's own form. The
+    // message is the project's `plan_message`, filled with the draft's project
+    // and the id of its last milestone block; `{what}` is left for the captain
+    // to say. A draft without a milestone block has no plan commit named.
+    let plan_commit = match draft.milestones.last() {
+        Some((header, _)) => {
+            let (milestone, _) = gear_app::draft::milestone_parts(header);
+            let conventions =
+                gear_app::config::conventions_or_default(store, &draft.project)?;
+            Some(gear_model::commit::fill(
+                &conventions.plan_message,
+                &[("project", draft.project.as_str()), ("milestone", milestone)],
+            ))
+        }
+        None => None,
+    };
     if json {
         let mut value = serde_json::to_value(&result).map_err(json_error)?;
         value["warnings"] = serde_json::json!(warnings);
         value["tailed"] = serde_json::json!(tailed);
+        // The JSON carries the message itself (a script uses it as the commit
+        // message); the text output wraps it in a sentence.
+        if let Some(plan_commit) = &plan_commit {
+            value["commit"] = serde_json::json!(plan_commit);
+        }
         return serde_json::to_string(&value).map_err(json_error);
     }
     let mut lines = render_apply(&result);
@@ -1746,6 +2380,11 @@ fn run_plan(
         lines.push_str(&format!(
             "tail: lane {lane} is silenced{until} (it may stand idle)"
         ));
+    }
+    // The plan commit comes last: it is the captain's next step after an apply.
+    if let Some(plan_commit) = &plan_commit {
+        lines.push('\n');
+        lines.push_str(&format!("commit the plan as: {plan_commit}"));
     }
     Ok(lines)
 }
@@ -1844,7 +2483,9 @@ fn run_send(
         request_id: require_request_id(&c.request_id)?,
     };
     let fp = observe_identity(store, env, herdr)?;
-    let result = if c.direction.is_some() {
+    let result = if c.ack {
+        gear_app::mail::send_with_ack(store, env, fp.as_ref(), &args, now)?
+    } else if c.direction.is_some() {
         gear_app::mail::send_direction(store, env, fp.as_ref(), &args, now)?
     } else { gear_app::mail::send(store, env, fp.as_ref(), &args, now)? };
     // T-130: an urgent message, and every captain instruction to a lane whose
@@ -2030,11 +2671,12 @@ fn parse_kind(text: &str) -> GearResult<gear_model::MsgKind> {
         | gear_model::MsgKind::Result
         | gear_model::MsgKind::Instruction
         | gear_model::MsgKind::Review
-        | gear_model::MsgKind::Blocked => Ok(kind),
+        | gear_model::MsgKind::Blocked
+        | gear_model::MsgKind::Ack => Ok(kind),
         _ => Err(GearError::new(
             gear_model::ErrorCode::BadFormat,
             format!(
-                "--kind {text} is not a `gear send` kind: progress, question, result, instruction, review or blocked"
+                "--kind {text} is not a `gear send` kind: progress, question, result, instruction, review, blocked or ack"
             ),
         )),
     }
@@ -2196,10 +2838,47 @@ fn cmd_run() -> GearResult<()> {
     let mut herdr = open_herdr()?;
     // The agents get the same database as `GEAR_DB` (design/03).
     let cfg = engine_cfg(&db.to_string_lossy());
+    install_stop_handler();
     let mut clock = now_ts;
     let mut out = Stamped { inner: std::io::stdout(), at_line_start: true };
-    let _ = std::io::Write::write_fmt(&mut out, format_args!("engine start pid={} db={}\n", std::process::id(), db.to_string_lossy()));
+    let line = engine_start_line(
+        std::process::id(),
+        std::path::Path::new(&db),
+        env!("CARGO_PKG_VERSION"),
+        env!("GEAR_BUILD_SHA"),
+    );
+    let _ = std::io::Write::write_fmt(&mut out, format_args!("{line}"));
     run_engine(&mut store, &mut herdr, &cfg, &mut clock, None, &mut out)
+}
+
+/// The engine's start line, with the build it runs, so the log says when a
+/// replaced binary is being run by an old engine (T-398). `build` is the git
+/// sha `build.rs` read at build time ("unknown" without git).
+fn engine_start_line(pid: u32, db: &std::path::Path, version: &str, build: &str) -> String {
+    format!("engine start pid={pid} db={} version={version} build={build}\n", db.display())
+}
+
+/// Set by the SIGTERM handler: `gear admin stop` asks the loop to leave
+/// between ticks, never in the middle of one (T-265).
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The SIGTERM handler itself: async-signal-safe, it only stores the flag.
+/// The loop then finishes the tick it is in — a merge gate may be running —
+/// and leaves, so `gear admin stop` never cuts a merge in half.
+extern "C" fn on_sigterm(_signal: libc::c_int) {
+    STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Let SIGTERM ask the engine loop to stop between ticks.
+fn install_stop_handler() {
+    // SAFETY: `on_sigterm` only stores into an atomic, which is
+    // async-signal-safe; `libc::signal` only installs it.
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            on_sigterm as extern "C" fn(libc::c_int) as *const () as libc::sighandler_t,
+        );
+    }
 }
 
 /// Prefixes every engine log line with a UTC time, so `engine.log` can be
@@ -2305,11 +2984,17 @@ fn engine_target_ok() -> Result<(), String> {
 }
 
 fn ensure_engine() {
+    let Some(dir) = engine_dir() else { return };
+    // A stop the user asked for stays stopped (T-394): no gear call starts a
+    // held engine, and each call says why it is not running.
+    if hold_path(&dir).exists() {
+        eprintln!("{HELD_NOTICE}");
+        return;
+    }
     // Only the registered store gets an engine (L-54); others are silent.
     if engine_target_ok().is_err() {
         return;
     }
-    let Some(dir) = engine_dir() else { return };
     match take_engine_lock(&dir) {
         Ok(lock) => drop(lock), // free: release it for the engine we start
         Err(_) => return,       // already running (or unusable: `gear run` reports it)
@@ -2342,8 +3027,35 @@ fn spawn_engine(dir: &std::path::Path) -> std::io::Result<u32> {
     Ok(cmd.spawn()?.id())
 }
 
-/// `gear admin stop`: signal the engine named in its lock file.
-fn cmd_admin_stop() -> GearResult<()> {
+/// `engine.hold`: the stop the user asked for (T-394). While it exists no
+/// `gear` call starts the engine; `gear admin start` removes it.
+fn hold_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("engine.hold")
+}
+
+/// What every `gear` call says while the engine is held (T-394).
+const HELD_NOTICE: &str = "gear: the engine is held (gear admin stop --hold); `gear admin start` resumes it";
+
+/// What `gear admin stop --hold` says once the hold is written (T-394).
+const HELD_WRITTEN: &str = "engine held: no gear call starts it until `gear admin start`";
+
+/// Hold the engine: write `engine.hold` with the time and who held it.
+fn write_hold(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::write(hold_path(dir), format!("{} held by gear admin stop --hold\n", utc(now_ts())))
+}
+
+/// The stop's last step with `--hold`: write the hold and say so (T-394).
+fn hold_engine(dir: &std::path::Path) -> GearResult<()> {
+    write_hold(dir).map_err(|e| {
+        GearError::new(gear_model::ErrorCode::BadFormat, format!("cannot write {}: {e}", hold_path(dir).display()))
+    })?;
+    println!("{HELD_WRITTEN}");
+    Ok(())
+}
+
+/// `gear admin stop`: signal the engine named in its lock file. With `hold`
+/// it writes `engine.hold` as well, so the stop stays (T-394).
+fn cmd_admin_stop(hold: bool) -> GearResult<()> {
     let env = env_from_process()?;
     if env.ctx.is_some() {
         return Err(GearError::new(gear_model::ErrorCode::Forbidden, "agents do not stop the engine"));
@@ -2352,7 +3064,20 @@ fn cmd_admin_stop() -> GearResult<()> {
     if let Ok(lock) = take_engine_lock(&dir) {
         drop(lock);
         println!("engine not running");
+        if hold {
+            hold_engine(&dir)?;
+        }
         return Ok(());
+    }
+    // One engine and one store serve every project of a Herdr session, and each
+    // project cannot restart at its own point while it does: a captain that
+    // stops the engine says which projects that pauses (T-298). Read-only — the
+    // stop writes nothing to the store — and a store that cannot be read prints
+    // nothing more; the stop goes on either way.
+    if let Some(db) = std::env::var_os(gear_model::ctx::ENV_DB) {
+        if let Some(projects) = projects_in(std::path::Path::new(&db)) {
+            println!("{}", stop_notice(&projects));
+        }
     }
     let text = std::fs::read_to_string(dir.join("engine.lock")).unwrap_or_default();
     let pid: i32 = text.trim().parse().map_err(|_| {
@@ -2362,8 +3087,111 @@ fn cmd_admin_stop() -> GearResult<()> {
     if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
         return Err(GearError::new(gear_model::ErrorCode::NoTarget, format!("cannot stop pid {pid}")));
     }
-    println!("engine stopped (pid {pid})");
+    // The engine leaves its loop only between ticks (see `install_stop_handler`),
+    // so wait for the lock it holds: a merge gate may still be running, and the
+    // merge must not be left Executing (T-265).
+    let mut held: Option<std::fs::File> = None;
+    let mut announced = false;
+    let mut try_lock = || match take_engine_lock(&dir) {
+        Ok(lock) => {
+            held = Some(lock);
+            true
+        }
+        Err(_) => {
+            if !announced {
+                println!("waiting for the engine to finish its tick (a merge gate may be running)");
+                announced = true;
+            }
+            false
+        }
+    };
+    let mut sleep = || std::thread::sleep(std::time::Duration::from_secs(1));
+    if wait_for_lock(&mut try_lock, &mut sleep, STOP_TRIES) {
+        // Released here: the engine is gone, and this process must not keep
+        // the next `gear` call from starting one.
+        drop(held);
+        println!("engine stopped (pid {pid})");
+        if hold {
+            hold_engine(&dir)?;
+        }
+        return Ok(());
+    }
+    Err(GearError::new(
+        gear_model::ErrorCode::Forbidden,
+        format!("the engine (pid {pid}) is still running after 20 min"),
+    ))
+}
+
+/// `gear admin start`: lift the hold `gear admin stop --hold` wrote and start
+/// the engine as `ensure_engine` does, printing its pid (T-394).
+fn cmd_admin_start() -> GearResult<()> {
+    let env = env_from_process()?;
+    if env.ctx.is_some() {
+        return Err(GearError::new(gear_model::ErrorCode::Forbidden, "agents do not start the engine"));
+    }
+    let dir = engine_dir().ok_or_else(|| GearError::new(gear_model::ErrorCode::NoTarget, "GEAR_DB is not set"))?;
+    // The hold goes whichever way the start goes: the user asked for it gone.
+    let hold = hold_path(&dir);
+    if let Err(e) = std::fs::remove_file(&hold) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(GearError::new(gear_model::ErrorCode::BadFormat, format!("cannot remove {}: {e}", hold.display())));
+        }
+    }
+    // Only the registered store gets an engine (L-54), as in `ensure_engine`.
+    if engine_target_ok().is_err() {
+        return Ok(());
+    }
+    match take_engine_lock(&dir) {
+        Ok(lock) => {
+            drop(lock); // free: release it for the engine we start
+            match spawn_engine(&dir) {
+                Ok(pid) => println!("engine started (pid {pid})"),
+                Err(e) => {
+                    return Err(GearError::new(gear_model::ErrorCode::NoTarget, format!("could not start the engine: {e}")))
+                }
+            }
+        }
+        Err(_) => println!("engine already running"),
+    }
     Ok(())
+}
+
+/// What `gear admin stop` says before it signals the engine (T-298): the
+/// projects this store holds, because they all pause until it starts again.
+fn stop_notice(projects: &[String]) -> String {
+    format!(
+        "this engine runs {} project(s) of this store: {}; each pauses until the engine starts \
+         again (the next gear call starts it)",
+        projects.len(),
+        projects.join(", ")
+    )
+}
+
+/// Ids of the projects in the store at `db`, read-only; `None` when the store
+/// cannot be read (T-298: the stop then says nothing more and goes on).
+fn projects_in(db: &std::path::Path) -> Option<Vec<String>> {
+    let mut store = gear_store::Store::open_read_only(db).ok()?;
+    store.read(|tx| tx.project_ids()).ok()
+}
+
+/// How often `gear admin stop` looks at the engine lock: once a second for 20
+/// minutes, the longest a merge gate may take before the user is told.
+const STOP_TRIES: u32 = 20 * 60;
+
+/// Try `try_lock` up to `tries` times, calling `sleep` between tries; true as
+/// soon as it succeeds. Both are injected so a test never sleeps on the wall
+/// clock.
+fn wait_for_lock(try_lock: &mut dyn FnMut() -> bool, sleep: &mut dyn FnMut(), tries: u32) -> bool {
+    for try_index in 0..tries {
+        if try_lock() {
+            return true;
+        }
+        // No sleep after the last try: the wait is over.
+        if try_index + 1 < tries {
+            sleep();
+        }
+    }
+    false
 }
 
 /// The engine's configuration: the defaults, every built-in agent profile and
@@ -2444,11 +3272,62 @@ fn run_engine(
     ticks: Option<u64>,
     out: &mut dyn std::io::Write,
 ) -> GearResult<()> {
-    run_engine_with(store, herdr, cfg, clock, ticks, out, &mut gear_engine::tick)
+    run_engine_with(store, herdr, cfg, clock, ticks, out, &|| STOP.load(std::sync::atomic::Ordering::SeqCst), &mut gear_engine::tick, &mut BinaryWatch::current())
+}
+
+/// The message the engine logs and puts in the captains' inbox when the binary
+/// on disk is no longer the one it runs (T-398).
+const BINARY_CHANGED: &str =
+    "engine: the binary on disk changed since this engine started; restart it to run the new build";
+
+/// The engine's own binary on disk: a rebuild replaces it and the running
+/// engine keeps the old one, silently, for as long as it lives (T-398;
+/// 2026-10-29: an hour on a replaced pre-fix binary).
+struct BinaryWatch {
+    path: std::path::PathBuf,
+    /// The modification time read when the engine started.
+    mtime_at_start: Option<std::time::SystemTime>,
+    /// Set once the change is told: once per engine run.
+    announced: bool,
+}
+
+impl BinaryWatch {
+    /// Watch `path` as it is now.
+    fn at_start(path: std::path::PathBuf) -> Self {
+        Self { mtime_at_start: modified(&path), path, announced: false }
+    }
+
+    /// The engine's own binary, `std::env::current_exe()`.
+    fn current() -> Self {
+        Self::at_start(std::env::current_exe().unwrap_or_default())
+    }
+
+    /// Whether the file on disk is a different build than the one this engine
+    /// started from — true once per engine run.
+    fn changed_once(&mut self) -> bool {
+        if self.announced {
+            return false;
+        }
+        let Some(now) = modified(&self.path) else {
+            return false; // the binary is gone or unreadable: no evidence
+        };
+        if Some(now) == self.mtime_at_start {
+            return false;
+        }
+        self.announced = true;
+        true
+    }
+}
+
+/// The modification time of `path`, when it can be read.
+fn modified(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|meta| meta.modified()).ok()
 }
 
 /// [`run_engine`] with the tick call injectable, so a test can drive the
-/// "a failing tick does not stop the loop" path.
+/// "a failing tick does not stop the loop" path — and `stop`, which the loop
+/// asks before each tick and once per second of the sleep between ticks — and
+/// `watch`, which says when the binary on disk is a newer build (T-398).
 fn run_engine_with(
     store: &mut gear_store::Store,
     herdr: &mut dyn gear_herdr::HerdrAct,
@@ -2456,12 +3335,14 @@ fn run_engine_with(
     clock: &mut dyn FnMut() -> i64,
     ticks: Option<u64>,
     out: &mut dyn std::io::Write,
+    stop: &dyn Fn() -> bool,
     tick: &mut dyn FnMut(
         &mut gear_store::Store,
         &mut dyn gear_herdr::HerdrAct,
         &gear_engine::EngineCfg,
         i64,
     ) -> GearResult<gear_engine::TickReport>,
+    watch: &mut BinaryWatch,
 ) -> GearResult<()> {
     // Startup step 3: an op the previous process left Executing becomes
     // Unknown — nothing is re-sent.
@@ -2473,7 +3354,22 @@ fn run_engine_with(
         if ticks.is_some_and(|limit| done >= limit) {
             break;
         }
-        match tick(store, herdr, cfg, clock()) {
+        // `gear admin stop` only asks the loop to leave between ticks, so the
+        // tick that is running — and a merge gate in it — always finishes
+        // (T-265).
+        if stop() {
+            break;
+        }
+        let now = clock();
+        // T-398: a binary replaced on disk is told once, before the tick — a
+        // failing announcement never stops the loop.
+        if watch.changed_once() {
+            if let Err(error) = announce_binary_changed(store, out, now) {
+                writeln!(out, "binary watch failed: {}: {}", error.code, error.detail)
+                    .map_err(write_error)?;
+            }
+        }
+        match tick(store, herdr, cfg, now) {
             Ok(report) if report != gear_engine::TickReport::default() => {
                 // Verbose while GEAR is in development (PRD §15): every id.
                 writeln!(out, "tick: {report:?}").map_err(write_error)?;
@@ -2484,11 +3380,22 @@ fn run_engine_with(
                 writeln!(out, "tick failed: {}: {}", e.code, e.detail).map_err(write_error)?;
             }
         }
+        // The release lines the tick recorded (T-398): the engine log is
+        // written here, where its writer is.
+        for line in gear_engine::release::take_release_log() {
+            writeln!(out, "{line}").map_err(write_error)?;
+        }
         out.flush().map_err(write_error)?;
         done += 1;
         if ticks.is_none() {
+            // One second at a time, so a stop that arrives during the sleep is
+            // noticed within a second instead of after the whole tick.
             let seconds = u64::try_from(cfg.tick_s).unwrap_or(0);
-            std::thread::sleep(std::time::Duration::from_secs(seconds));
+            let mut slept = 0;
+            while slept < seconds && !stop() {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                slept += 1;
+            }
         }
     }
     Ok(())
@@ -2500,6 +3407,44 @@ fn write_error(e: std::io::Error) -> GearError {
         gear_model::ErrorCode::BadFormat,
         format!("cannot write the engine output: {e}"),
     )
+}
+
+/// The binary on disk is not the one this engine runs: say it in the engine
+/// log and put one item in every project's captain inbox (T-398). Once per
+/// engine run — the caller's watch remembers.
+fn announce_binary_changed(
+    store: &mut gear_store::Store,
+    out: &mut dyn std::io::Write,
+    now: i64,
+) -> GearResult<()> {
+    writeln!(out, "{BINARY_CHANGED}").map_err(write_error)?;
+    for project in store.read(|tx| tx.project_ids())? {
+        store.write(|tx| {
+            // A project without a captain has nobody to tell.
+            let Some(captain) = tx.captain_of(&project)? else {
+                return Ok(());
+            };
+            tx.insert_message(&gear_store::NewMessage {
+                meta: None,
+                project: project.clone(),
+                thread: "engine:binary-changed".to_string(),
+                task: None,
+                attempt: None,
+                sender: "engine".to_string(),
+                sender_gen: 0,
+                recipient: captain.id.clone(),
+                kind: gear_model::MsgKind::System,
+                urgent: false,
+                body: BINARY_CHANGED.to_string(),
+                reply_to: None,
+                needs_ack: false,
+                state: gear_model::MsgState::Open,
+                created: now,
+            })?;
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 /// Skill topics and their embedded text live in `gear_app::skill` (T-30): the
@@ -2528,6 +3473,50 @@ fn print_skill(topic: &str) -> GearResult<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A fresh scratch directory under the temp directory, unique to this test
+    /// and this name, removed when the test is done (T-412): a passing run
+    /// leaves nothing behind. The same name in one test is the same directory.
+    pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
+        use std::cell::{Cell, RefCell};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static THREADS: AtomicU64 = AtomicU64::new(0);
+
+        /// The directories one test made, removed when that test is done.
+        struct Made {
+            /// The number of this thread, given at its first scratch directory.
+            thread: Cell<Option<u64>>,
+            /// The directories it made, by name.
+            dirs: RefCell<Vec<(String, std::path::PathBuf)>>,
+        }
+
+        impl Drop for Made {
+            fn drop(&mut self) {
+                for (_, dir) in self.dirs.borrow().iter() {
+                    std::fs::remove_dir_all(dir).ok();
+                }
+            }
+        }
+
+        thread_local! {
+            static MADE: Made = const { Made { thread: Cell::new(None), dirs: RefCell::new(Vec::new()) } };
+        }
+
+        MADE.with(|made| {
+            if let Some((_, dir)) = made.dirs.borrow().iter().find(|(named, _)| named == name) {
+                return dir.clone();
+            }
+            let thread = made.thread.get().unwrap_or_else(|| {
+                let thread = THREADS.fetch_add(1, Ordering::Relaxed);
+                made.thread.set(Some(thread));
+                thread
+            });
+            let dir = std::env::temp_dir().join(format!("{name}-{}-{thread}", std::process::id()));
+            std::fs::remove_dir_all(&dir).ok();
+            std::fs::create_dir_all(&dir).expect("a scratch directory");
+            made.dirs.borrow_mut().push((name.to_string(), dir.clone()));
+            dir
+        })
+    }
     #[test]
     fn help_lists_every_skill_topic() {
         use clap::CommandFactory;
@@ -2572,6 +3561,63 @@ mod tests {
             pane_id: Some(pane.into()),
             admin: false,
         }
+    }
+
+    /// A stdout that refuses the first write: the board never draws (T-278).
+    struct NoDraw;
+
+    impl std::io::Write for NoDraw {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("the board does not draw here"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// T-278: a board opened in a Herdr tab names that tab (`HERDR_TAB_ID`)
+    /// before it draws, `--json` renames nothing, and a draw that fails still
+    /// leaves the tab named — the rename comes first.
+    #[test]
+    fn the_board_names_its_herdr_tab_before_it_draws() {
+        std::env::set_var("HERDR_TAB_ID", "w1:t2");
+        let tab = herdr_tab_id();
+
+        // The board of project `p` labels its tab `p board`.
+        let (mut store, mut herdr) = world();
+        let opts = gear_board::Options { project: Some("p".into()), ..Default::default() };
+        let mut out = Vec::new();
+        draw_board(&mut store, &opts, Some(&mut herdr), tab.clone(), &mut out).unwrap();
+        assert!(!out.is_empty(), "the board drew nothing");
+        assert_eq!(herdr.tab_renames_to("p board"), vec!["w1:t2"]);
+
+        // A stdout that refuses the draw proves the rename came before it.
+        let (mut store, mut herdr) = world();
+        let drawn = draw_board(&mut store, &opts, Some(&mut herdr), tab.clone(), &mut NoDraw);
+        assert!(drawn.is_err(), "the draw was expected to fail");
+        assert_eq!(herdr.tab_renames_to("p board"), vec!["w1:t2"]);
+
+        // A board that shows every project says so.
+        let (mut store, mut herdr) = world();
+        let mut out = Vec::new();
+        draw_board(
+            &mut store,
+            &gear_board::Options::default(),
+            Some(&mut herdr),
+            tab.clone(),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(herdr.tab_renames_to("GEAR board"), vec!["w1:t2"]);
+
+        // `--json` is machine output: it renames nothing.
+        let (mut store, mut herdr) = world();
+        let json = gear_board::Options { project: Some("p".into()), json: true, ..Default::default() };
+        let mut out = Vec::new();
+        draw_board(&mut store, &json, Some(&mut herdr), tab, &mut out).unwrap();
+        assert!(herdr.calls.is_empty(), "the JSON board renamed a tab: {:?}", herdr.calls);
+
+        std::env::remove_var("HERDR_TAB_ID");
     }
 
     /// The project with one more task: another lane is working on T-8, so a
@@ -2655,6 +3701,7 @@ mod tests {
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)
@@ -2682,6 +3729,7 @@ mod tests {
             direction: None,
             verdict: None,
             blocking: None,
+            ack: false,
             preempted: None,
             saved: None,
             request_id: Some("r-1".into()),
@@ -2744,6 +3792,42 @@ mod tests {
     }
 
     #[test]
+    fn ack_flag_sends_the_instruction_with_the_ack_line() {
+        // `--ack` wires to `send_with_ack` (T-320): the lane gets the line to
+        // acknowledge with, and the captain gets the item that waits.
+        let (mut store, mut herdr) = world();
+        let mut c = send_cmd("instruction");
+        c.to = Some("heat".into());
+        c.ack = true;
+        let out = run_send(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &c,
+            "check the queue".into(),
+            None,
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+        assert!(out.contains("Delivered to p:heat"), "{out}");
+
+        let sent = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+        assert!(sent.needs_ack);
+        assert!(
+            sent.body.ends_with(
+                "Acknowledge it: gear send --kind ack --reply-to M-1 \"<what you will do>\""
+            ),
+            "{}",
+            sent.body
+        );
+        let item = store.read(|tx| tx.get_message("p", "M-2")).unwrap().unwrap();
+        assert_eq!(item.thread, "ack:M-1");
+        assert_eq!(item.state, gear_model::MsgState::Waiting);
+        assert_eq!(item.wait_until, Some(T0 + 1 + 600));
+    }
+
+    #[test]
     fn unsupported_flag_is_bad_format() {
         // Every flag whose behaviour is slice 2+ is rejected by name, never
         // silently dropped.
@@ -2766,12 +3850,7 @@ mod tests {
 
     /// Write `text` to a unique temp file and return its path.
     fn write_draft(text: &str) -> std::path::PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let path = std::env::temp_dir()
-            .join(format!("gear-draft-{}-{nanos}.md", std::process::id()));
+        let path = scratch("gear-draft").join("draft.md");
         std::fs::write(&path, text).unwrap();
         path
     }
@@ -2779,6 +3858,25 @@ mod tests {
     fn plan_draft() -> String {
         "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"
             .to_string()
+    }
+
+    /// A draft with a milestone block: the plan commit is named for it (T-299).
+    fn plan_draft_with_milestone() -> String {
+        "<!-- gear-plan project=p base=0 -->\n# Milestone M2: two\ndone: both ship\nbar: fast\neta: 1h\n\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"
+            .to_string()
+    }
+
+    /// Give the project `p` a `[conventions]` in its stored config.
+    fn set_conventions(store: &mut Store, lines: &str) {
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.expect("the project");
+                project.config_toml = format!(
+                    "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/repo\"\n\n[quota]\nlanes = 1\ntemps = 0\n\n[captain]\npane = \"{CAP_PANE}\"\nkind = \"codex\"\nprofile = \"codex\"\n\n[conventions]\n{lines}\n"
+                );
+                tx.update_project(&project)
+            })
+            .unwrap();
     }
 
     #[test]
@@ -2796,6 +3894,7 @@ mod tests {
             "r-plan",
             T0 + 1,
             false,
+            false,
         )
         .unwrap();
 
@@ -2805,6 +3904,179 @@ mod tests {
         assert!(!out.contains("warning:"), "{out}");
         let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
         assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["T-1"]);
+    }
+
+    // T-410: `gear plan apply --confirmed` parses, and the flag reaches the
+    // draft the apply reads: without it a departed voyage's eta change is
+    // refused, with it the change applies.
+    #[test]
+    fn plan_apply_takes_the_confirmed_flag() {
+        let cli =
+            Cli::try_parse_from(["gear", "plan", "apply", "--confirmed", "plan.md"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Plan { op: PlanOp::Apply { path, confirmed, .. } }) => {
+                assert!(confirmed);
+                assert_eq!(path.as_deref(), Some(std::path::Path::new("plan.md")));
+            }
+            other => panic!("not a plan apply: {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["gear", "plan", "apply", "plan.md"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Plan { op: PlanOp::Apply { confirmed, .. } }) => assert!(!confirmed),
+            other => panic!("not a plan apply: {other:?}"),
+        }
+
+        // The flag is set on the draft before the apply: M2 departs with the
+        // first block, so its eta moves only with the confirmation.
+        let (mut store, mut herdr) = world();
+        let path = write_draft(&plan_draft_with_milestone());
+        run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 1,
+            false,
+            false,
+        )
+        .unwrap();
+        let changed = plan_draft_with_milestone().replace("eta: 1h", "eta: 2h").replace(
+            "base=0",
+            "base=1",
+        );
+        let path = write_draft(&changed);
+        let err = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-changed",
+            T0 + 2,
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
+        assert!(err.detail.contains("milestone M2: eta changed after departure"), "{}", err.detail);
+        run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-confirmed",
+            T0 + 3,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            store.read(|tx| tx.get_voyage("p", "M2")).unwrap().unwrap().eta.as_deref(),
+            Some("2h")
+        );
+    }
+
+    // T-299: after an apply the captain is told how to commit the plan, in the
+    // project's own form: the `plan_message` template, filled with the project
+    // and the id of the draft's last milestone block; `{what}` is his to say.
+    #[test]
+    fn plan_apply_names_the_plan_commit() {
+        let (mut store, mut herdr) = world();
+        let path = write_draft(&plan_draft_with_milestone());
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "plan-commit",
+            T0 + 1,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(out.ends_with("commit the plan as: M2: {what}"), "{out}");
+
+        // A project with its own form (ticket key) gets that one.
+        let (mut store, mut herdr) = world();
+        set_conventions(&mut store, "plan_message = \"PROJ-1 {milestone} {what}\"");
+        let path = write_draft(&plan_draft_with_milestone());
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "plan-commit",
+            T0 + 1,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(out.ends_with("commit the plan as: PROJ-1 M2 {what}"), "{out}");
+
+        // The JSON carries the message itself, not the sentence.
+        let (mut store, mut herdr) = world();
+        let path = write_draft(&plan_draft_with_milestone());
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "plan-commit",
+            T0 + 1,
+            true,
+            false,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["commit"], serde_json::json!("M2: {what}"));
+
+        // A staff-only plan has no milestone block: no commit line.
+        let (mut store, mut herdr) = world();
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- hold heat reason=test\n");
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "plan-commit",
+            T0 + 1,
+            true,
+            false,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(value.get("commit").is_none(), "{out}");
+        let (mut store, mut herdr) = world();
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- hold heat reason=test\n");
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "plan-commit-2",
+            T0 + 2,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(!out.contains("commit the plan as:"), "{out}");
     }
 
     /// A task that passed and whose merge failed: the captain retries it with
@@ -2846,6 +4118,7 @@ mod tests {
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
@@ -2899,6 +4172,7 @@ mod tests {
             "r-plan",
             T0 + 10,
             false,
+            false,
         )
         .unwrap();
 
@@ -2924,6 +4198,7 @@ mod tests {
             None,
             "r-plan",
             T0 + 10,
+            false,
             false,
         )
         .unwrap();
@@ -2956,6 +4231,7 @@ mod tests {
             None,
             "r-plan",
             T0 + 2,
+            false,
             false,
         )
         .unwrap();
@@ -3099,6 +4375,7 @@ mod tests {
             "r-plan",
             T0 + 1,
             false,
+            false,
         )
         .unwrap();
 
@@ -3130,6 +4407,7 @@ mod tests {
             None,
             "r-plan",
             T0 + 1,
+            false,
             false,
         )
         .unwrap();
@@ -3175,8 +4453,9 @@ path="api"
             tx.update_project(&project)
         }).unwrap();
         let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind heat repo=api owns=[src/, tests/]\n");
-        let out = run_plan(&mut store, &env("captain", CAP_PANE), &mut herdr, Some(&path), None, None, "rebind", T0+1, false).unwrap();
-        assert!(out.contains("rebind heat: waits for T-1"), "{out}");
+        let out = run_plan(&mut store, &env("captain", CAP_PANE), &mut herdr, Some(&path), None, None, "rebind", T0+1, false, false,
+        ).unwrap();
+        assert!(out.contains("rebind heat: repo root → api, owns [src/] → [src/, tests/]: waits for T-1"), "{out}");
     }
 
     /// The JSON output carries the same warnings as the text: the lanes that
@@ -3198,6 +4477,7 @@ path="api"
             "r-plan",
             T0 + 1,
             true,
+            false,
         )
         .unwrap();
 
@@ -3248,6 +4528,7 @@ path="api"
             None,
             "r-plan",
             T0 + 1,
+            false,
             false,
         )
         .unwrap();
@@ -3488,6 +4769,7 @@ path="api"
                     evidence_due_min: Some(90),
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 Ok(())
             })
@@ -3533,11 +4815,12 @@ path="api"
             "r-plan",
             T0 + 1,
             false,
+            false,
         )
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
         assert!(
-            err.detail.contains("gear/voyages/M1.md"),
+            err.detail.contains("gear/voyages/M1/plan.md"),
             "the error names the voyage file: {}",
             err.detail
         );
@@ -3560,6 +4843,7 @@ path="api"
             None,
             "r-plan",
             T0 + 1,
+            false,
             false,
         )
         .unwrap();
@@ -3593,6 +4877,7 @@ path="api"
             "r-plan",
             T0 + 1,
             false,
+            false,
         )
         .unwrap();
 
@@ -3605,6 +4890,7 @@ path="api"
             None,
             "r-plan-2",
             T0 + 2,
+            false,
             false,
         )
         .unwrap();
@@ -3638,6 +4924,7 @@ path="api"
             "r-plan",
             T0 + 1,
             false,
+            false,
         )
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
@@ -3658,6 +4945,7 @@ path="api"
             Some("+10m".into()),
             "r-plan",
             T0 + 1,
+            false,
             false,
         )
         .unwrap_err();
@@ -4072,6 +5360,7 @@ path="api"
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })
                 .unwrap();
                 gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0).unwrap();
@@ -4138,10 +5427,7 @@ path="api"
     /// A pi session log with one assistant record: the usage a report counts
     /// (T-207).
     fn pi_log(name: &str, at: i64) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "gear-t207-{name}-{}.jsonl",
-            std::process::id()
-        ));
+        let path = scratch("gear-t207").join(format!("{name}.jsonl"));
         let record = serde_json::json!({
             "type": "message",
             "timestamp": at,
@@ -4173,6 +5459,7 @@ path="api"
             evidence_due_min: None,
             body: String::new(),
             created: T0,
+            mechanical: None,
         }
     }
 
@@ -4995,6 +6282,7 @@ path="api"
                         evidence_due_min: None,
                         body: String::new(),
                         created: T0,
+                        mechanical: None,
                     })?;
                 }
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
@@ -5715,11 +7003,7 @@ path="api"
 
     /// A unique directory for a lock file.
     fn lock_dir(tag: &str) -> std::path::PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        std::env::temp_dir().join(format!("gear-lock-{}-{tag}-{nanos}", std::process::id()))
+        scratch(&format!("gear-lock-{tag}"))
     }
 
     #[test]
@@ -5843,6 +7127,83 @@ path="api"
         assert_eq!(op.state, OpState::Unknown, "recovered before the first tick");
     }
 
+    /// T-398: the start line says which build the engine runs, so a log shows
+    /// a replaced binary being run by an old engine.
+    #[test]
+    fn the_engine_start_line_names_the_build_it_runs() {
+        let line = engine_start_line(42, std::path::Path::new("/state/gear.db"), "0.5.0", "abc1234");
+        assert_eq!(line, "engine start pid=42 db=/state/gear.db version=0.5.0 build=abc1234\n");
+        // This binary's own line: the crate version and the sha build.rs read.
+        let line = engine_start_line(std::process::id(), std::path::Path::new("/x/gear.db"), env!("CARGO_PKG_VERSION"), env!("GEAR_BUILD_SHA"));
+        assert!(line.contains("version="), "{line}");
+        assert!(line.contains("build=") && !line.contains("build=\n"), "{line}");
+    }
+
+    /// T-398 (rework F1): the embedded sha is the commit this binary was built
+    /// from. build.rs reruns when the branch's ref moves, so a rebuild after a
+    /// commit on the same branch cannot keep the preceding commit's sha.
+    #[test]
+    fn the_build_sha_is_the_commit_this_binary_was_built_from() {
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .output();
+        // No git, or no repository: the binary says it was built without one.
+        let head = head.ok().filter(|out| out.status.success()).map(|out| {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        });
+        match head {
+            Some(head) => assert_eq!(env!("GEAR_BUILD_SHA"), head),
+            None => assert_eq!(env!("GEAR_BUILD_SHA"), "unknown"),
+        }
+    }
+
+    /// T-398: a binary replaced on disk under a running engine is told once —
+    /// one engine-log line and one captain item per project, not one a tick.
+    #[test]
+    fn a_changed_binary_on_disk_is_told_once_over_two_ticks() {
+        let (mut store, mut herdr) = world();
+        let dir = scratch("gear-binary");
+        let binary = dir.join("gear");
+        std::fs::write(&binary, b"the old build").unwrap();
+        let mut watch = BinaryWatch::at_start(binary.clone());
+        // A rebuild replaces the file: new content, new modification time (a
+        // coarse file system may keep the second, so the time is set by hand).
+        std::fs::write(&binary, b"the new build").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&binary)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+
+        let mut clock = || T0;
+        let mut tick = |_: &mut Store,
+                        _: &mut dyn gear_herdr::HerdrAct,
+                        _: &gear_engine::EngineCfg,
+                        _: i64| Ok(gear_engine::TickReport::default());
+        let mut out: Vec<u8> = Vec::new();
+        run_engine_with(
+            &mut store,
+            &mut herdr,
+            &gear_engine::EngineCfg::default(),
+            &mut clock,
+            Some(2),
+            &mut out,
+            &|| false,
+            &mut tick,
+            &mut watch,
+        )
+        .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.matches(BINARY_CHANGED).count(), 1, "one log line over two ticks: {text}");
+        let items = store.read(|tx| tx.thread_messages("p", "engine:binary-changed")).unwrap();
+        assert_eq!(items.len(), 1, "one captain item: {items:?}");
+        assert_eq!(items[0].recipient, "p:captain");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn tick_error_does_not_stop_the_loop() {
         let (mut store, mut herdr) = world();
@@ -5870,12 +7231,150 @@ path="api"
             &mut clock,
             Some(3),
             &mut out,
+            &|| false,
             &mut failing,
+            &mut BinaryWatch::at_start(std::path::PathBuf::from("/nonexistent/gear")),
         )
         .unwrap();
 
         assert_eq!(tick_calls.get(), 3, "a failing tick does not stop the loop");
         assert!(String::from_utf8(out).unwrap().contains("boom"));
+    }
+
+    #[test]
+    fn stop_during_a_tick_leaves_the_loop_after_it() {
+        let (mut store, mut herdr) = world();
+        let mut clock = || T0;
+        // `gear admin stop` arrives while this tick (and the merge in it) runs.
+        let stop = std::cell::Cell::new(false);
+        let tick_calls = std::cell::Cell::new(0);
+        let mut tick = |_: &mut Store,
+                        _: &mut dyn gear_herdr::HerdrAct,
+                        _: &gear_engine::EngineCfg,
+                        _: i64| {
+            tick_calls.set(tick_calls.get() + 1);
+            stop.set(true);
+            Ok(gear_engine::TickReport {
+                settled: vec!["p:T-1/1".to_string()],
+                ..gear_engine::TickReport::default()
+            })
+        };
+        let mut out: Vec<u8> = Vec::new();
+        // No tick limit: only the stop ends the loop, and the tick's report is
+        // written before it leaves. (The sleep checks the flag first, so no
+        // test waits on the wall clock.)
+        run_engine_with(
+            &mut store,
+            &mut herdr,
+            &gear_engine::EngineCfg::default(),
+            &mut clock,
+            None,
+            &mut out,
+            &|| stop.get(),
+            &mut tick,
+            &mut BinaryWatch::at_start(std::path::PathBuf::from("/nonexistent/gear")),
+        )
+        .unwrap();
+
+        assert_eq!(tick_calls.get(), 1, "the tick that saw the stop finishes, then the loop leaves");
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("p:T-1/1"), "the running tick's report is written: {text}");
+    }
+
+    #[test]
+    fn stop_already_set_runs_no_tick() {
+        let (mut store, mut herdr) = world();
+        let mut clock = || T0;
+        let tick_calls = std::cell::Cell::new(0);
+        let mut tick = |_: &mut Store,
+                        _: &mut dyn gear_herdr::HerdrAct,
+                        _: &gear_engine::EngineCfg,
+                        _: i64| {
+            tick_calls.set(tick_calls.get() + 1);
+            Ok(gear_engine::TickReport::default())
+        };
+        let mut out: Vec<u8> = Vec::new();
+        run_engine_with(
+            &mut store,
+            &mut herdr,
+            &gear_engine::EngineCfg::default(),
+            &mut clock,
+            None,
+            &mut out,
+            &|| true,
+            &mut tick,
+            &mut BinaryWatch::at_start(std::path::PathBuf::from("/nonexistent/gear")),
+        )
+        .unwrap();
+
+        assert_eq!(tick_calls.get(), 0, "a stop before the first tick runs none");
+    }
+
+    #[test]
+    fn stop_notice_names_every_project_the_engine_pauses() {
+        let notice = stop_notice(&["harbor".to_string(), "mast".to_string()]);
+        assert_eq!(
+            notice,
+            "this engine runs 2 project(s) of this store: harbor, mast; each pauses until the \
+             engine starts again (the next gear call starts it)"
+        );
+    }
+
+    #[test]
+    fn stop_notice_counts_a_single_project() {
+        let notice = stop_notice(&["harbor".to_string()]);
+        assert!(notice.starts_with("this engine runs 1 project(s) of this store: harbor;"), "{notice}");
+    }
+
+    #[test]
+    fn projects_in_reads_the_store_read_only() {
+        let dir = scratch("gear-stop");
+        let db = dir.join("gear.db");
+        let mut store = Store::open(&db).unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "harbor", "sess", T0)?;
+                testing::seed_project(tx, "mast", "sess", T0)
+            })
+            .unwrap();
+        let before = std::fs::metadata(&db).unwrap().len();
+        assert_eq!(projects_in(&db), Some(vec!["harbor".to_string(), "mast".to_string()]));
+        assert_eq!(std::fs::metadata(&db).unwrap().len(), before, "a stop writes nothing");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn projects_in_says_nothing_for_an_unreadable_store() {
+        let missing = scratch("gear-stop-missing").join("gear.db");
+        assert_eq!(projects_in(&missing), None, "the stop goes on without a notice");
+    }
+
+    #[test]
+    fn wait_for_lock_retries_until_the_engine_lets_go() {
+        let mut tries = 0;
+        let mut try_lock = || {
+            tries += 1;
+            tries == 3
+        };
+        let mut sleeps = 0;
+        let mut sleep = || sleeps += 1;
+        assert!(wait_for_lock(&mut try_lock, &mut sleep, 1200));
+        assert_eq!(tries, 3, "it keeps trying until the lock is free");
+        assert_eq!(sleeps, 2, "one second between tries, none after the last");
+    }
+
+    #[test]
+    fn wait_for_lock_gives_up_after_tries() {
+        let mut tries = 0;
+        let mut try_lock = || {
+            tries += 1;
+            false
+        };
+        let mut sleeps = 0;
+        let mut sleep = || sleeps += 1;
+        assert!(!wait_for_lock(&mut try_lock, &mut sleep, 1200));
+        assert_eq!(tries, 1200, "20 minutes, once a second");
+        assert_eq!(sleeps, 1199, "the last try is not followed by a sleep");
     }
 
     #[test]
@@ -6056,6 +7555,7 @@ path="api"
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 Ok(())
             })
@@ -6082,7 +7582,7 @@ path="api"
     fn show_carries_the_projects_standard() {
         let (mut store, mut herdr) = world();
         seed_task(&mut store, "T-1", Some("heat"));
-        let dir = std::env::temp_dir().join(format!("gear-standard-{}", std::process::id()));
+        let dir = scratch("gear-standard");
         std::fs::create_dir_all(dir.join("gear")).expect("the checkout");
         std::fs::write(
             dir.join("gear/standard.md"),
@@ -6184,6 +7684,7 @@ path="api"
             "hold-1",
             T0 + 1,
             false,
+            false,
         )
         .unwrap();
         assert_eq!(lane_state(&mut store), gear_model::SeatState::Held);
@@ -6206,6 +7707,7 @@ path="api"
             "release-1",
             T0 + 2,
             false,
+            false,
         )
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
@@ -6225,6 +7727,7 @@ path="api"
             "release-2",
             T0 + 3,
             false,
+            false,
         )
         .unwrap();
         assert_eq!(lane_state(&mut store), gear_model::SeatState::Queued);
@@ -6239,8 +7742,7 @@ mod default_store_tests {
 
     #[test]
     fn each_herdr_session_gets_its_own_store_unless_one_is_registered() {
-        let home = std::env::temp_dir().join(format!("gear-default-store-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
+        let home = crate::tests::scratch("gear-default-store");
         let sock = |name: &str| home.join(".config/herdr/sessions").join(name).join("herdr.sock").to_string_lossy().to_string();
         let shared = home.join(".local/state/gear/gear.db");
         assert_eq!(default_store_in(&home, None), shared, "no Herdr: the shared store");

@@ -280,3 +280,275 @@ fn the_task_after_the_one_in_review_may_wait_for_a_dependency() {
     );
     assert_eq!(text, "next T-3 waits for T-9 (heat, queued)");
 }
+
+// ---------------------------------------------------------------- T-323
+//
+// A lane that helps on an unanswered instruction of the captain counts as
+// busy: it has no attempt in flight, but the captain asked it for something.
+
+use gear_board::{build, lane_line, Options};
+use gear_model::{MsgKind, MsgState};
+use gear_store::NewMessage;
+
+const CAPTAIN: &str = "captain";
+
+/// The world with a captain, so an instruction can be sent.
+fn world_with_captain() -> Store {
+    let mut store = world();
+    store
+        .write(|tx| {
+            testing::seed_active_seat(tx, "p", CAPTAIN, SeatRole::Captain, "w1:p1", "claude", T0)?;
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// A task in the lane the test names.
+fn task_on(store: &mut Store, id: &str, lane: &str, rank: i64, state: TaskState) {
+    store
+        .write(|tx| {
+            tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: id.into(),
+                rank,
+                state,
+                priority: "must".into(),
+                lane: Some(lane.into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: None,
+                issue: None,
+                updated: T0,
+            })
+        })
+        .unwrap();
+}
+
+/// A message to the lane; returns its id.
+fn message(
+    store: &mut Store,
+    kind: MsgKind,
+    sender: &str,
+    task: Option<&str>,
+    body: &str,
+    reply_to: Option<&str>,
+    created: i64,
+) -> String {
+    store
+        .write(|tx| {
+            Ok(tx
+                .insert_message(&NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: "T-2:1".into(),
+                    task: task.map(str::to_string),
+                    attempt: None,
+                    sender: sender.into(),
+                    sender_gen: 1,
+                    recipient: "p:heat".into(),
+                    kind,
+                    urgent: false,
+                    body: body.into(),
+                    reply_to: reply_to.map(str::to_string),
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created,
+                })?
+                .id)
+        })
+        .unwrap()
+}
+
+/// The help the lane gives, if any.
+fn help_of(store: &mut Store, now: i64) -> Option<gear_board::idle::Helping> {
+    store
+        .read(|tx| {
+            let seat = tx.get_seat("p:heat")?.expect("the lane's seat");
+            gear_board::idle::helping(tx, "p", &seat, now)
+        })
+        .unwrap()
+}
+
+/// The board of the project `p`.
+fn options() -> Options {
+    Options { project: Some("p".into()), ..Options::default() }
+}
+
+#[test]
+fn a_lane_that_helps_says_which_lane_and_what_it_does() {
+    let mut store = world_with_captain();
+    task_on(&mut store, "T-2", "mast", 1, TaskState::Running);
+    message(
+        &mut store,
+        MsgKind::Instruction,
+        "p:captain",
+        Some("T-2"),
+        "Read the log of T-2 and send mast the failing line please",
+        None,
+        T0 + 60,
+    );
+
+    let help = help_of(&mut store, T0 + 120).expect("the lane helps");
+    assert_eq!(help.text(), "helping mast: Read the log of T-2 and …");
+    assert_eq!(help.since, T0 + 60);
+
+    // The lane is not idle: the help comes before the queue's reasons.
+    let (reason, text) = reason_of(&mut store, T0 + 120);
+    assert_eq!(reason, None, "{reason:?}");
+    assert!(text.is_empty(), "{text}");
+
+    let board = build(&mut store, &options(), T0 + 120).unwrap();
+    let lane = board.projects[0]
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == LANE)
+        .expect("the lane");
+    assert_eq!(lane.helping.as_deref(), Some("helping mast: Read the log of T-2 and …"));
+    assert!(lane_line(lane).contains("helping mast: Read the log"), "{}", lane_line(lane));
+}
+
+#[test]
+fn an_instruction_without_a_task_is_help_for_the_captain() {
+    let mut store = world_with_captain();
+    message(
+        &mut store,
+        MsgKind::Instruction,
+        "p:captain",
+        None,
+        "Check the quota line",
+        None,
+        T0 + 60,
+    );
+
+    let help = help_of(&mut store, T0 + 120).expect("the lane helps");
+    assert_eq!(help.text(), "helping the captain: Check the quota line");
+    assert_eq!(help.lane, None);
+    let (reason, _) = reason_of(&mut store, T0 + 120);
+    assert_eq!(reason, None, "{reason:?}");
+}
+
+#[test]
+fn an_instruction_about_the_lanes_own_task_is_help_for_the_captain() {
+    let mut store = world_with_captain();
+    task_on(&mut store, "T-2", LANE, 1, TaskState::Running);
+    message(
+        &mut store,
+        MsgKind::Instruction,
+        "p:captain",
+        Some("T-2"),
+        "Send me the failing line",
+        None,
+        T0 + 60,
+    );
+
+    let help = help_of(&mut store, T0 + 120).expect("the lane helps");
+    assert_eq!(help.text(), "helping the captain: Send me the failing line");
+}
+
+#[test]
+fn a_reply_ends_the_help_and_the_lane_is_idle_again() {
+    let mut store = world_with_captain();
+    let instruction = message(
+        &mut store,
+        MsgKind::Instruction,
+        "p:captain",
+        None,
+        "Look at the quota line of the provider",
+        None,
+        T0 + 60,
+    );
+    // The lane answers it.
+    message(
+        &mut store,
+        MsgKind::Reply,
+        "p:heat",
+        None,
+        "The quota line says 80% used",
+        Some(&instruction),
+        T0 + 90,
+    );
+
+    assert_eq!(help_of(&mut store, T0 + 120), None);
+    let (reason, text) = reason_of(&mut store, T0 + 120);
+    assert_eq!(reason, Some(IdleReason::NoWork), "{reason:?}");
+    assert_eq!(text, "nothing left planned");
+}
+
+#[test]
+fn an_instruction_older_than_the_limit_does_not_count() {
+    let mut store = world_with_captain();
+    message(
+        &mut store,
+        MsgKind::Instruction,
+        "p:captain",
+        None,
+        "Look at the quota line of the provider",
+        None,
+        T0,
+    );
+
+    assert_eq!(help_of(&mut store, T0 + 1801), None);
+    let (reason, _) = reason_of(&mut store, T0 + 1801);
+    assert_eq!(reason, Some(IdleReason::NoWork), "{reason:?}");
+}
+
+#[test]
+fn an_instruction_of_the_engine_is_not_the_captain() {
+    let mut store = world_with_captain();
+    message(
+        &mut store,
+        MsgKind::Instruction,
+        "engine",
+        None,
+        "Look at the quota line of the provider",
+        None,
+        T0 + 60,
+    );
+
+    assert_eq!(help_of(&mut store, T0 + 120), None);
+}
+
+#[test]
+fn a_lane_with_an_attempt_in_flight_does_not_help() {
+    let mut store = world_with_captain();
+    task_on(&mut store, "T-2", LANE, 1, TaskState::Running);
+    attempt(&mut store, "T-2", 1, AttemptState::Started);
+    message(
+        &mut store,
+        MsgKind::Instruction,
+        "p:captain",
+        None,
+        "Look at the quota line of the provider",
+        None,
+        T0 + 60,
+    );
+
+    assert_eq!(help_of(&mut store, T0 + 120), None);
+}
+
+#[test]
+fn a_project_without_a_captain_has_no_help() {
+    let mut store = world();
+    message(
+        &mut store,
+        MsgKind::Instruction,
+        "p:captain",
+        None,
+        "Look at the quota line of the provider",
+        None,
+        T0 + 60,
+    );
+
+    assert_eq!(help_of(&mut store, T0 + 120), None);
+}

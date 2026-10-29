@@ -6,7 +6,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
 **Use it for** big, long-running work with several agents and a plan that changes as you go. For anything smaller, talk to an agent directly.
 
-> **Status:** v0.4.10, an early release for trial use — what changed: [docs/releases/v0.4.10.md](docs/releases/v0.4.10.md). Feedback is welcome — see [Feedback](#feedback).
+> **Status:** v0.5.0, an early release for trial use — what changed: [docs/releases/v0.5.0.md](docs/releases/v0.5.0.md). Feedback is welcome — see [Feedback](#feedback).
 
 ## Requirements
 
@@ -19,7 +19,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 1. **The plugin** (downloads a prebuilt `gear` and checks its SHA-256; no Rust needed):
 
    ```bash
-   herdr plugin install rogerdehe/gear --ref v0.4.10
+   herdr plugin install rogerdehe/gear --ref v0.5.0
    ```
 
    Add `--yes` in a non-interactive shell.
@@ -30,7 +30,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
    export PATH="$(herdr plugin list --json | sed -n 's/.*"plugin_id":"herdr-gear","plugin_root":"\([^"]*\)".*/\1/p')/bin:$PATH"
    ```
 
-   Check: `gear --version` prints `gear 0.4.10`. If the line above prints nothing, take `plugin_root` from `herdr plugin list --json` and add its `bin` to PATH.
+   Check: `gear --version` prints `gear 0.5.0`. If the line above prints nothing, take `plugin_root` from `herdr plugin list --json` and add its `bin` to PATH.
 
 3. **A key for the plan board**, in `~/.config/herdr/config.toml`, then `herdr server reload-config`:
 
@@ -51,6 +51,8 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
 **Upgrading from 0.2.x or 0.3.0?** The [v0.3.0 upgrade guide](docs/releases/v0.3.0.md#upgrading) has the three cases — a fresh install, an upgrade with no voyage running, an upgrade during a voyage — with the commands to copy.
 
+**From a source checkout?** A checkout has no `gear` on PATH. Run `make install`: it builds `gear-cli` in release mode and links `$PREFIX/bin/gear` to `target/release/gear`. It is a link, not a copy, so every later `cargo build --release` is the binary the agents run. `PREFIX` defaults to `~/.local`, and `$PREFIX/bin` must be on PATH.
+
 ## Start a project
 
 1. **Pick a short project name** (`[a-z][a-z0-9-]*`, e.g. `acme`). In a Herdr pane, in your project's repository, start the agent that will be your captain with GEAR's context and your consent:
@@ -65,7 +67,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
    > Use the GEAR skill (`gear --skill captain`) to kick off a project named acme for: <your goal>.
 
-   The captain runs `gear admin kickoff` (which agent CLIs and models this machine has), proposes lanes, models and a plan, and asks you twice: first the quality bar (fastest / deliverable / strict), then the whole kickoff sheet — answer "confirm", or type what to change. It writes `gear/gear.toml` and the first plan `gear/voyages/M1.md`.
+   The captain runs `gear admin kickoff` (which agent CLIs and models this machine has), proposes lanes, models and a plan, and asks you twice: first the quality bar (fastest / deliverable / strict), then the whole kickoff sheet — answer "confirm", or type what to change. It writes `gear/gear.toml` and the first plan `gear/voyages/M1/plan.md`.
 
 3. **The captain registers the project** from the repository, with `GEAR_ADMIN=1 gear admin init gear/gear.toml`: your confirmed kickoff sheet is the consent, and you type nothing. It checks the config first with `gear admin init --check gear/gear.toml`, which starts nothing; `init` lists every problem at once (for example a missing `gate`: your own build + test command, run before every merge). A lane or reviewer never registers a project.
 
