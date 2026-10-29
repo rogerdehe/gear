@@ -39,3 +39,6 @@
 
 ## A new codex seat opens another seat's conversation
 - 2026-10-29 M5: review-11 (generation 325, no session id recorded) started inside review-9's Codex conversation; Codex refused it ("this conversation is open in another app", r retry / f fork), so its review deliveries stayed unconfirmed for 14 minutes. The captain forked by hand and retyped the delivery. Find how a fresh codex seat chooses its session (a resume of the latest conversation in a shared directory is the likely path), make every new seat start its own, and treat that dialog as blocked so the stall item names it.
+
+## Lost-merge cleanup behind the old filters
+- 2026-10-29 M5 (T-408 review F1): the scan drops a task with a merge in flight or an open merge-failed item before the finished-voyage / gone-candidate check, so its open merge-lost item stays open in that case. Check the skip rule first for tasks with an open merge-lost item, then apply the old filters for new items.
