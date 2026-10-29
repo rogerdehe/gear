@@ -3429,6 +3429,12 @@ fn run_engine_with(
         for line in gear_engine::release::take_release_log() {
             writeln!(out, "{line}").map_err(write_error)?;
         }
+        // The probe lines the tick's operations recorded (T-407): how long
+        // each step of a session action, a delivery, a restart and a merge
+        // took, through the same writer and stamp.
+        for line in gear_engine::ops::take_probe_log() {
+            writeln!(out, "{line}").map_err(write_error)?;
+        }
         out.flush().map_err(write_error)?;
         done += 1;
         if ticks.is_none() {
