@@ -38,7 +38,7 @@ Which task built each change above and each element of the Four views, as the pl
 | --- | --- |
 | 1 every voyage | T-350, T-353, T-357 |
 | 2 the goal boxed | T-353, T-358 |
-| 3 every header row says what it is | T-334, T-354, T-355 |
+| 3 every header row says what it is | T-334, T-352, T-354, T-355 |
 | 4 time against the plan | T-349, T-354, T-355 |
 | 5 the full width | T-354, T-355, T-359, T-361 |
 | 6 tasks of this voyage only | T-350, T-351, T-354, T-355, T-359 |
