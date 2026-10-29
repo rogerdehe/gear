@@ -78,3 +78,6 @@
 
 ## Hand-in and review checks against the packet
 - 2026-10-29 M5 (another project's rework audit: 58 of 135 reviewed tasks passed first time): a plan apply that warns when two Ready packets name one file; a pre-hand-in check that the diff stays in the task's allowed files and the report matches the adopted contract; a reviewer start that verifies its worktree, branch, task, attempt and adopted contract before it reads anything; a captain's direction-check answer carried into the review packet.
+
+## A delivery marked submitted never reaches the composer
+- 2026-10-29 M5 (both projects): our hull showed "Continue T-425" typed with no Enter; the other project's review-2 and review-3 sat at empty Codex composers with their direction-check deliveries recorded as submitted, until the captain nudged them to run `gear`. The engine should confirm a delivery by the agent turning busy and resubmit within a bounded time, not wait for the stall item.
