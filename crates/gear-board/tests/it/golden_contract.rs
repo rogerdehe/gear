@@ -133,8 +133,7 @@ const PENDING: &[Pending] = &[
     // T-356 drew the tab bar (rows 10 to 12, and 18 to 20 unfolded), so the
     // view starts on the prototype's own first row (14, and 22 unfolded) and
     // the views compare from there with no exclusion.
-    Pending { frame: "now-folded", rows: (13, 18), cols: (0, 159), swap: None, by: "T-359" },
-    Pending { frame: "now-open", rows: (21, 26), cols: (0, 159), swap: None, by: "T-359" },
+
     Pending { frame: "now-folded", rows: (19, 46), cols: (0, 159), swap: None, by: "T-360" },
     Pending { frame: "now-open", rows: (27, 46), cols: (0, 159), swap: None, by: "T-360" },
 
@@ -713,6 +712,18 @@ fn view_differences(tab: Tab, frame: Frame, top: usize, rows: Range) -> Vec<Stri
 }
 
 #[test]
+fn the_now_view_paints_the_prototype_rows() {
+    // The prototype's folded header ends on row 13 and its view starts on row
+    // 14; the open header ends on row 21 and its view on row 22 (its
+    // `TOP[0]`). T-359 draws the lane table there; the rows below it belong to
+    // T-360. The view is the same in both frames.
+    let folded = view_differences(Tab::Now, "now-folded", 14, (14, 18));
+    assert!(folded.is_empty(), "\n{}", folded.join("\n"));
+    let open = view_differences(Tab::Now, "now-open", 22, (22, 26));
+    assert!(open.is_empty(), "\n{}", open.join("\n"));
+}
+
+#[test]
 fn the_tasks_view_paints_the_prototype_rows() {
     // The prototype's folded header ends on row 13 and its view starts on row
     // 14; the open header ends on row 21 and its view on row 22 (its
@@ -751,3 +762,4 @@ fn the_log_view_paints_the_prototype_rows() {
     let open = view_differences(Tab::Log, "log-open", 22, (22, 46));
     assert!(open.is_empty(), "\n{}", open.join("\n"));
 }
+
