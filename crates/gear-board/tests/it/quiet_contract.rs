@@ -397,14 +397,16 @@ fn a_project_registered_later_does_not_move_the_shown_one() {
 
     assert_eq!(hook::builds(), 2, "the first frame, and one rebuild for the new project");
     let drawn = frames(&out);
-    // The title row of a frame, up to the clock at its end.
-    let names = |frame: &str, project: &str, count: usize| {
+    // The title row of a frame, up to the clock at its end. T-353's head names
+    // the shown project only: the number of the session's projects is no
+    // longer on the row.
+    let names = |frame: &str, project: &str| {
         let title = frame.lines().next().unwrap_or_default();
-        title.contains(&format!("GEAR · {project} · p: next of {count} projects"))
+        title.contains(&format!("GEAR · {project} "))
     };
     // a, b, and a again — two presses over two projects complete the cycle.
-    assert!(names(&drawn[1], "b", 2), "the second project: {drawn:?}");
-    assert!(names(&drawn[2], "a", 2), "the cycle is back at the first: {drawn:?}");
+    assert!(names(&drawn[1], "b"), "the second project: {drawn:?}");
+    assert!(names(&drawn[2], "a"), "the cycle is back at the first: {drawn:?}");
     // The registration rebuilds once, and the board still shows `a`.
-    assert!(names(drawn.last().unwrap(), "a", 3), "still the first project: {drawn:?}");
+    assert!(names(drawn.last().unwrap(), "a"), "still the first project: {drawn:?}");
 }

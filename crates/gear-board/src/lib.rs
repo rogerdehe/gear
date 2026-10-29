@@ -264,6 +264,10 @@ pub struct VoyageEntry {
     /// The milestone id the plan uses (`M1`, `M2`, …).
     pub milestone: String,
     pub title: String,
+    /// The voyage's `done` sentence: the goal the board boxes (T-353).
+    pub done: Option<String>,
+    /// The voyage's quality bar, as the plan wrote it (T-353).
+    pub bar: Option<String>,
     /// Some task of the voyage is not settled: it is still sailing.
     pub sailing: bool,
     /// When the voyage departed; `None` while it has no task.
@@ -1554,6 +1558,8 @@ fn voyage_entries(
         entries.push(VoyageEntry {
             milestone: voyage.milestone,
             title: voyage.title,
+            done: voyage.done,
+            bar: voyage.bar,
             sailing,
             departure: voyage.departure,
             ended,
@@ -1933,10 +1939,17 @@ pub fn run_with(
         // The selection moves over the rows the view paints as picks, and
         // never leaves them (F4): a view that shrank, or a key pressed at its
         // end, does not lose the selection.
+        // The head of the board says where the tabs and the view are (T-353):
+        // the box of the goal and the rows of the header grow and shrink with
+        // the voyage's words.
+        let layout = {
+            let board = kept.as_ref().expect("the board was just built or kept");
+            frame::layout(board, &screen)
+        };
         let mut tall = frame::Canvas::new(screen.size.0, 1000);
         let picks = {
             let board = kept.as_ref().expect("the board was just built or kept");
-            frame::view(board, &screen, &mut tall, frame::VIEW_ROW)
+            frame::view(board, &screen, &mut tall, layout.top)
         };
         screen.selected = screen.selected.min(picks.len().saturating_sub(1));
         let text = {
@@ -1956,7 +1969,7 @@ pub fn run_with(
         // The picks one page holds (T-411): the rows of the view the screen
         // shows, the header and the footer's rows taken out, and never less
         // than one.
-        let page = screen.size.1.saturating_sub(frame::VIEW_ROW + 2).max(1);
+        let page = screen.size.1.saturating_sub(layout.top + 2).max(1);
         loop {
             let now = std::time::Instant::now();
             if now >= deadline {
@@ -2071,9 +2084,18 @@ pub fn run_with(
                     // A click on the tab row picks a view; a click on a row of
                     // the view picks that row. The rows are the ones the
                     // frame draws: the tabs on their own row, the data below
-                    // the heading.
-                    if y == frame::TAB_ROW as u16 + 1 {
-                        if let Some(picked) = frame::tab_at(x) {
+                    // the heading. A click at the terminal's (x, y), counted
+                    // from 1, is the screen's column x - 1 and row y - 1
+                    // (T-353).
+                    let column = x.saturating_sub(1) as usize;
+                    let row = y.saturating_sub(1) as usize;
+                    if row == layout.tab_row {
+                        let picked = layout
+                            .tabs
+                            .iter()
+                            .find(|(first, last, _)| column >= *first && column <= *last)
+                            .map(|(_, _, tab)| *tab);
+                        if let Some(picked) = picked {
                             screen.tab = picked;
                             screen.selected = 0;
                             panel = None;
@@ -2085,15 +2107,14 @@ pub fn run_with(
                         // below the data and the footer's row select nothing.
                         // The view's first row is a row of the view (T-342's
                         // rework): scrolling can put a pick there.
-                        let row = y.saturating_sub(1) as usize;
                         let last = screen.size.1.saturating_sub(2);
-                        if row >= frame::VIEW_ROW && row < last {
+                        if row >= layout.top && row < last {
                             // The rows above the viewport are scrolled away:
                             // the clicked row is the one the frame drew.
                             let offset = frame::offset_of(
                                 &picks,
                                 screen.selected,
-                                frame::VIEW_ROW,
+                                layout.top,
                                 screen.size.1,
                             );
                             // A click selects the pick drawn on that row; a
