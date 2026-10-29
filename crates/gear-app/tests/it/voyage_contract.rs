@@ -400,9 +400,18 @@ fn editing_a_grandfathered_milestone_keeps_its_historical_departure() {
     // T-1 is created on M1 with no block at all.
     let first = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, first, "r1", NOW).unwrap();
-    // Much later the block arrives together with T-2.
+    // Much later the block arrives together with T-2: the words of a voyage
+    // that departed without them come with the user's confirmation (T-410),
+    // since no stored field is exempt from the guard.
     let block = "<!-- gear-plan project=p base=1 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
-    run(&mut s, block, "r2", NOW + 100).unwrap();
+    let err = run(&mut s, block, "r2-bare", NOW + 100).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        err.detail.contains("milestone M1: done changed after departure (stored \"\", got \"users install it\")"),
+        "{}",
+        err.detail
+    );
+    run_confirmed(&mut s, block, "r2", NOW + 100).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
         (voyage.departure, voyage.departure_tasks),

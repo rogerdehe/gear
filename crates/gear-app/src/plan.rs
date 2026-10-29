@@ -149,8 +149,11 @@ pub fn apply(
             // The milestone blocks of the draft become voyages (T-22), after the
             // queue so the task count at departure is the plan's.
             record_tail_decisions(tx, &ctx.project, draft)?;
-            let departed_now = fix_departures(tx, &ctx.project, now)?;
-            record_voyages(tx, &ctx.project, draft, &departed_now, now)?;
+            // T-410: which voyages had departed before this apply, read before
+            // fix_departures moves a departure.
+            let departed = departed_voyages(tx, &ctx.project)?;
+            fix_departures(tx, &ctx.project, now)?;
+            record_voyages(tx, &ctx.project, draft, &departed, now)?;
             record_task_stations(tx, &ctx.project, draft, &result.created)?;
             crate::station::apply_decisions(tx, &ctx.project, draft, now)?;
             serde_json::to_value(&result).map_err(|e| {
@@ -2969,14 +2972,7 @@ fn floor_div(a: i64, b: i64) -> i64 {
 /// milestone id starts its clock when its new tasks come: the reset is recorded
 /// in `meta`, and `departure_from_history` searches only the drafts applied
 /// after it. A milestone that still has tasks never changes.
-/// The milestones whose departure it fixed are returned, so `record_voyages`
-/// knows which words a voyage states as it departs (T-410).
-fn fix_departures(
-    tx: &Tx<'_>,
-    project: &str,
-    now: Ts,
-) -> GearResult<std::collections::BTreeSet<String>> {
-    let mut departed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+fn fix_departures(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
     let mut counts: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
     for task in tx.tasks_of_project(project)? {
         if let Some(milestone) = task.milestone {
@@ -3018,9 +3014,24 @@ fn fix_departures(
         if let Some(estimate) = estimate {
             tx.set_voyage_departure_estimate(project, &milestone, estimate)?;
         }
-        departed.insert(milestone);
     }
-    Ok(departed)
+    Ok(())
+}
+
+/// The milestones whose voyage had departed before this apply (T-410): their
+/// `done:`, `bar:` and `eta:` change only with the user's confirmation. Read
+/// before `fix_departures`, so a departure this apply fixes (a reused id,
+/// T-239) is not one of them.
+fn departed_voyages(
+    tx: &Tx<'_>,
+    project: &str,
+) -> GearResult<std::collections::BTreeSet<String>> {
+    Ok(tx
+        .voyages_of_project(project)?
+        .into_iter()
+        .filter(|voyage| voyage.departure.is_some())
+        .map(|voyage| voyage.milestone)
+        .collect())
 }
 
 /// The meta key that remembers the plan version at which a milestone lost its
@@ -3319,12 +3330,13 @@ fn why_naming(decisions: &[crate::decision::Decision], task: &str) -> Option<Str
 /// A departed voyage's `done:`, `bar:` and `eta:` change only when the user
 /// asked for it and confirmed it (T-410): without `--confirmed` the whole
 /// apply is refused with nothing written, and with it the change applies and
-/// a starred decision of kind `user` records it.
+/// a starred decision of kind `user` records it. A voyage that had not
+/// departed before this apply states its words freely.
 fn record_voyages(
     tx: &Tx<'_>,
     project: &str,
     draft: &crate::draft::Draft,
-    departed_now: &std::collections::BTreeSet<String>,
+    departed: &std::collections::BTreeSet<String>,
     now: Ts,
 ) -> GearResult<()> {
     for (header, body) in &draft.milestones {
@@ -3352,24 +3364,17 @@ fn record_voyages(
             }
         }
         // T-410: a departed voyage's goal, bar and eta change only when the
-        // user asked for it and confirmed it. A stored value that is None is
-        // a voyage not described yet: the first block states its words and
-        // moves nothing the user agreed on.
-        // A milestone whose departure this apply fixes (a reused id, T-239)
-        // has not departed before this apply: its words are its first.
-        let stored = tx.get_voyage(project, id)?;
-        let departed = stored
-            .as_ref()
-            .filter(|voyage| voyage.departure.is_some())
-            .filter(|_| !departed_now.contains(id));
-        if let Some(stored) = departed {
+        // user asked for it and confirmed it. No field is exempt: a voyage
+        // that departed with no words gets them only with the confirmation.
+        if departed.contains(id) {
+            let stored = tx.get_voyage(project, id)?;
+            let stored = stored.as_ref();
             for (field, old, new) in [
-                ("done", &stored.done, &done),
-                ("bar", &stored.bar, &bar),
-                ("eta", &stored.eta, &eta),
+                ("done", stored.and_then(|v| v.done.as_deref()), &done),
+                ("bar", stored.and_then(|v| v.bar.as_deref()), &bar),
+                ("eta", stored.and_then(|v| v.eta.as_deref()), &eta),
             ] {
-                let Some(old) = old.as_deref() else { continue };
-                let old = old.trim();
+                let old = old.unwrap_or("").trim();
                 let new = new.as_deref().unwrap_or("").trim();
                 if old == new {
                     continue;
