@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=803 -->
+<!-- gear-plan project=gear base=804 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -168,9 +168,6 @@ eta: 21h
 - station M-5916: keep course 1266 min in, 147 done, 17 left; hull 220 min and mast 225 min by the queue, balanced; T-351 passed and merges next, so mast's header chain goes on from it
 - 2026-10-29 08:00 release: v0.5.1 (station S2) published: T-367's merge 6d8d3a0a merged into main as 0974d950, tagged v0.5.1, GitHub release from docs/releases/v0.5.1.md | why: done clause (5)
 
-
-# Verdicts
-- T-351 attempt=1 1 7b4b5274 contract= candidate= fail estimate=10 rework="The review passed; the merge conflicts in crates/gear-board/src/lib.rs with T-335 (merged: ProjectBoard.goal_changes). Merge origin/dev into mast/t351, keep both sides (T-335's goal_changes and your moved_out on ProjectBoard), run make check CRATE=gear-board, push and hand in. Then merge the fixed mast/t351 into mast/t353 before you hand T-353 in, so T-353 does not carry the same conflict."
 
 # Queue
 
