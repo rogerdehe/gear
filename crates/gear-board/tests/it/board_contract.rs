@@ -9,6 +9,7 @@ use gear_board::{build, render, run_with, to_json, EngineState, Event, Keys, Opt
 use gear_model::{AttemptState, MsgKind, MsgState, SeatRole, TaskState};
 use gear_store::{
     testing, AttemptRow, AttemptStep, ContractRow, NewMessage, NewRound, RoundKey, Store, TaskRow,
+    VoyageRow,
 };
 
 const T0: i64 = 1_800_000_000;
@@ -2020,7 +2021,7 @@ fn the_page_keys_parse_and_the_wheel_is_still_a_mouse() {
             }
         }
     });
-    is_ready.recv_timeout(Duration::from_secs(5)).expect("the terminal is in raw mode");
+    is_ready.recv_timeout(std::time::Duration::from_secs(5)).expect("the terminal is in raw mode");
     press(pty.master, b"\x1b[5~");
     press(pty.master, b"\x1b[6~");
     press(pty.master, b"\x1b[<64;10;20M");
@@ -2028,7 +2029,7 @@ fn the_page_keys_parse_and_the_wheel_is_still_a_mouse() {
     press(pty.master, b"\x1b[<0;1;7M");
 
     let read = |events: &std::sync::mpsc::Receiver<Option<Event>>| {
-        events.recv_timeout(Duration::from_secs(5)).unwrap_or(None)
+        events.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or(None)
     };
     assert_eq!(read(&events), Some(Event::PageUp), "`[5~` is the page up");
     assert_eq!(read(&events), Some(Event::PageDown), "`[6~` is the page down");
@@ -2050,4 +2051,79 @@ fn the_page_keys_parse_and_the_wheel_is_still_a_mouse() {
     reader.join().ok();
 }
 
+/// T-415: the totals count the live work only. A cancelled task stays in the
+/// plan's views, but it is not part of what the voyage still delivers: four
+/// cancelled tasks out of nine must not read as half the voyage undone.
+#[test]
+fn cancelled_tasks_are_not_counted_in_the_totals() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            tx.upsert_voyage(&VoyageRow {
+                project: "p".into(),
+                milestone: "M5".into(),
+                title: "voyage M5".into(),
+                done: Some("it is delivered".into()),
+                bar: None,
+                eta: Some("8h".into()),
+                departure: Some(T0 - 3600),
+                departure_tasks: Some(9),
+                departure_estimate_min: Some(270),
+                updated: T0 - 3600,
+            })?;
+            for (id, rank, state) in [
+                ("T-1", 1, TaskState::Done),
+                ("T-2", 2, TaskState::Done),
+                ("T-3", 3, TaskState::Done),
+                ("T-4", 4, TaskState::Ready),
+                ("T-5", 5, TaskState::Ready),
+                ("T-6", 6, TaskState::Cancelled),
+                ("T-7", 7, TaskState::Cancelled),
+                ("T-8", 8, TaskState::Cancelled),
+                ("T-9", 9, TaskState::Cancelled),
+            ] {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state,
+                    priority: "must".into(),
+                    lane: Some("data".into()),
+                    milestone: Some("M5".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(30),
+                    issue: None,
+                    updated: T0,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
 
+    let board = build(&mut store, &options(), T0 + 60).unwrap();
+    let plan = board.projects.first().expect("the project");
+    // 3 done of the 5 live tasks, not of all nine.
+    assert_eq!(plan.totals.tasks, 5, "{:?}", plan.totals);
+    assert_eq!(plan.totals.done, 3, "{:?}", plan.totals);
+    let text = render(&board, View::Lanes);
+    assert!(text.contains("Totals: 5 tasks · 3 done"), "{text}");
+    // The cancelled tasks stay in the lane's queue, as they did before.
+    let lane = plan.lanes.iter().find(|lane| lane.lane == "data").expect("the lane");
+    let ids: Vec<&str> = lane.tasks.iter().map(|task| task.id.as_str()).collect();
+    for id in ["T-6", "T-7", "T-8", "T-9"] {
+        assert!(ids.contains(&id), "{id} stays in the Tasks view: {ids:?}");
+    }
+}
