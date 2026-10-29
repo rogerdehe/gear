@@ -184,6 +184,14 @@ pub fn release_finished_reviews(
 /// has waited longest for a review that is not coming. With W = 0 every
 /// Standby reviewer is released at once: no lane works, so no hand-in can
 /// come (a hand-in that does come starts a reviewer again in seconds).
+///
+/// A Standby seat whose `engine.review_pending.<seat id>` is set has a job:
+/// `fn start` (review.rs) started it for a review that `fn start_reviews`
+/// hands over once its agent is idle, so it is not idle and the sweep leaves
+/// it out — and the excess is counted over the seats that are left in (T-391:
+/// releasing such a seat made the pending review start it again, every 20 s).
+/// A reservation whose review is gone is ended by the `under_review` check of
+/// `release_finished_reviews`, not by this sweep.
 pub fn release_idle_standby(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -192,11 +200,22 @@ pub fn release_idle_standby(
 ) -> GearResult<ReleaseReport> {
     let mut report = ReleaseReport::default();
     let mut standby: Vec<SeatRow> = store.read(|tx| {
-        Ok(tx
-            .seats_of_project(project)?
-            .into_iter()
-            .filter(|seat| seat.role == SeatRole::Temp && seat.state == SeatState::Standby)
-            .collect())
+        let mut idle = Vec::new();
+        for seat in tx.seats_of_project(project)? {
+            if seat.role != SeatRole::Temp || seat.state != SeatState::Standby {
+                continue;
+            }
+            // It was started for a review that is not handed over yet: it
+            // has a job and waits for it, it is not idle.
+            let pending = tx
+                .get_meta(&format!("engine.review_pending.{}", seat.id))?
+                .filter(|task| !task.is_empty());
+            if pending.is_some() {
+                continue;
+            }
+            idle.push(seat);
+        }
+        Ok(idle)
     })?;
     if standby.is_empty() {
         return Ok(report);
@@ -214,7 +233,8 @@ pub fn release_idle_standby(
         .filter(|seat| seat.state_since < now)
         .collect();
     for seat in waiting.into_iter().take(excess) {
-        // A standby reviewer has no job: it is idle, its agent alive.
+        // A standby reviewer without a pending review has no job: it is idle,
+        // its agent alive.
         match release_one(store, herdr, project, &seat, None, now) {
             Ok(true) => report.released.push(seat.id.clone()),
             Ok(false) => {}
@@ -932,6 +952,35 @@ profile = "codex"
                     findings: "ok".into(),
                     by_seat: seat.into(),
                     created: T0 + 5,
+                })
+            })
+            .unwrap();
+    }
+
+    /// Attempt 1 of `task` is handed in and no verdict is in: the task is
+    /// under review.
+    fn handed_in(store: &mut Store, task: &str) {
+        store
+            .write(|tx| {
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: task.into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Submitted,
+                    candidate: Some("abc1234".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
                 })
             })
             .unwrap();
@@ -1849,6 +1898,72 @@ profile = "codex"
             assert_eq!(seat.state, SeatState::Released, "{name} is free");
         }
         assert_eq!(exits(&herdr), 2, "both panes are closed");
+    }
+
+    /// T-391: a reviewer started for a pending review sits in `Standby` until
+    /// its agent is idle and `fn start` (review.rs) hands it the review. It has
+    /// a job, so the idle sweep leaves it alone — released, the pending review
+    /// starts it again, and again (844 starts in one voyage).
+    #[test]
+    fn a_standby_reviewer_with_a_pending_review_is_not_released() {
+        // No lane works (W = 0): every jobless Standby reviewer goes.
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        handed_in(&mut store, "T-1");
+        store
+            .write(|tx| {
+                let second = testing::seed_temp_seat(tx, "p", "r-2", "T-1", "w3:p3", "codex", T0)?;
+                tx.set_seat_state(&second.id, SeatState::Standby, Some("review done"), T0)?;
+                tx.set_seat_state("p:r-1", SeatState::Standby, Some("waiting for its review"), T0)?;
+                // Its review is on its way: the seat has a job.
+                tx.set_meta("engine.review_pending.p:r-1", "T-1")
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w3:p3", "codex", gear_herdr::AgentStatus::Idle);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+
+        let kept = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(kept.state, SeatState::Standby, "it waits for its review");
+        let pending = store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap();
+        assert_eq!(pending.as_deref(), Some("T-1"), "its review is still its job");
+        let idle = store.read(|tx| tx.get_seat("p:r-2")).unwrap().unwrap();
+        assert_eq!(idle.state, SeatState::Released, "the jobless one goes");
+        assert_eq!(exits(&herdr), 1, "only the idle reviewer's pane is closed");
+    }
+
+    /// T-391: the excess is counted over the seats the sweep leaves in. With
+    /// one lane working (W = 1) and two Standby reviewers of which one waits
+    /// for its pending review, nothing is released (1 - 1 = 0) — and the one
+    /// without a pending review stays.
+    #[test]
+    fn a_pending_review_is_not_counted_in_the_idle_excess() {
+        let (mut store, seat) = world_with_a_working_lane();
+        handed_in(&mut store, "T-1");
+        store
+            .write(|tx| {
+                let second = testing::seed_temp_seat(tx, "p", "r-2", "T-1", "w3:p3", "codex", T0)?;
+                tx.set_seat_state(&second.id, SeatState::Standby, Some("review done"), T0)?;
+                tx.set_seat_state(&seat.id, SeatState::Standby, Some("waiting for its review"), T0)?;
+                // Its review is on its way: the seat has a job.
+                tx.set_meta(&format!("engine.review_pending.{}", seat.id), "T-1")
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w3:p3", "codex", gear_herdr::AgentStatus::Idle);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+        assert_eq!(exits(&herdr), 0, "the one left in is not beyond W");
+        let kept = store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap();
+        assert_eq!(kept.state, SeatState::Standby, "it waits for its review");
+        let pending = store.read(|tx| tx.get_meta(&format!("engine.review_pending.{}", seat.id))).unwrap();
+        assert_eq!(pending.as_deref(), Some("T-1"), "its review is still its job");
+        let other = store.read(|tx| tx.get_seat("p:r-2")).unwrap().unwrap();
+        assert_eq!(other.state, SeatState::Standby, "it waits for the next review");
     }
 
     /// T-259: a reviewer parked in NeedsCheck with no task and no agent in its
