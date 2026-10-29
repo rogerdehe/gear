@@ -62,13 +62,19 @@ fn two_builds_with_the_same_now_draw_the_same_frame() {
     let mut store = world();
     let first = gear_board::build(
         &mut store,
-        &gear_board::Options { project: Some("p".into()), ..Default::default() },
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
         now,
     )
     .unwrap();
     let second = gear_board::build(
         &mut store,
-        &gear_board::Options { project: Some("p".into()), ..Default::default() },
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
         now,
     )
     .unwrap();
@@ -77,7 +83,10 @@ fn two_builds_with_the_same_now_draw_the_same_frame() {
     let second_frame = canvas(&second, &crate::screen(Tab::Now, 0, (120, 40)), None).text();
 
     assert_eq!(first.now, now, "the board keeps the now it was built at");
-    assert_eq!(first_frame, second_frame, "the frame depends on the store and now only");
+    assert_eq!(
+        first_frame, second_frame,
+        "the frame depends on the store and now only"
+    );
     let title = first_frame.lines().next().unwrap();
     let clock = idle::clock(now);
     assert!(

@@ -181,7 +181,9 @@ pub fn idle_reason(
     }
 
     // The task is queued and nobody gave it to the lane.
-    Ok(Some(IdleReason::Undelivered { task: next.id.clone() }))
+    Ok(Some(IdleReason::Undelivered {
+        task: next.id.clone(),
+    }))
 }
 
 /// The instruction of the captain the lane still has to answer, if any
@@ -191,12 +193,7 @@ pub fn idle_reason(
 /// has a captain; then the newest unanswered captain instruction to the seat
 /// within [`HELP_LIMIT_S`] is the help. A reply of the lane — any message of
 /// it with `reply_to` the instruction — ends it.
-pub fn helping(
-    tx: &Tx<'_>,
-    project: &str,
-    seat: &SeatRow,
-    now: Ts,
-) -> GearResult<Option<Helping>> {
+pub fn helping(tx: &Tx<'_>, project: &str, seat: &SeatRow, now: Ts) -> GearResult<Option<Helping>> {
     if seat.role != SeatRole::Lane || !tx.in_progress_attempts_of_seat(&seat.id)?.is_empty() {
         return Ok(None);
     }
@@ -267,7 +264,10 @@ pub fn describe(reason: &IdleReason, tx: &Tx<'_>, project: &str) -> String {
             format!("waiting for {on} ({})", lane_and_stage(tx, project, on))
         }
         IdleReason::DepWait { task, on } => {
-            format!("next {task} waits for {on} ({})", lane_and_stage(tx, project, on))
+            format!(
+                "next {task} waits for {on} ({})",
+                lane_and_stage(tx, project, on)
+            )
         }
         IdleReason::Undelivered { task } => format!("next {task} is ready but not delivered"),
         IdleReason::NoWork => "nothing left planned".to_string(),
