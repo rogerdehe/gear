@@ -124,6 +124,9 @@ pub struct Draft {
     pub staff: Vec<StaffItem>,
     pub verdicts: Vec<VerdictLine>,
     pub reviews: Vec<ReviewLine>,
+    /// The user asked for this goal, bar or eta change and confirmed it
+    /// (T-410): `gear plan apply --confirmed`. The parser never sets it.
+    pub confirmed: bool,
 }
 
 /// The id and title of a `# Milestone <id>: <title>` (or `# Voyage <id>:
@@ -225,6 +228,7 @@ pub fn parse(text: &str) -> GearResult<Draft> {
         staff: Vec::new(),
         verdicts: Vec::new(),
         reviews: Vec::new(),
+        confirmed: false,
     };
 
     let mut index = first + 1;
