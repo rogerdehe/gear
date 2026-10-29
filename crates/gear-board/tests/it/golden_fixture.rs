@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use gear_model::{AttemptState, SeatRole, TaskState};
 use gear_store::{
     testing, AttemptRow, AttemptStep, ContractRow, NewDecision, NewFriction, NewRound, RoundKey,
-    RoundTokens, Store, TaskRow, VerdictRow, VoyageRow,
+    RoundTokens, Store, TaskRow, VerdictRow, VoyageRow, VoyageStationPlan,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -63,6 +63,10 @@ struct FixtureVoyage {
     /// `(met, text)`.
     #[serde(rename = "DONE")]
     done: Vec<(bool, String)>,
+    /// `(id, what, state, at_m)`: the stations the header draws (T-352),
+    /// state "done" → Reached, "now" → Now, "next" → Next.
+    #[serde(rename = "STATIONS")]
+    stations: Vec<(String, String, String, i64)>,
     /// `(task, lane, status, body)`.
     #[serde(rename = "FRICTION")]
     friction: Vec<(String, String, String, String)>,
@@ -177,6 +181,18 @@ pub fn load() -> (Store, i64) {
                     &format!("goal-check:gear:{}", words.milestone),
                     &serde_json::to_string(&check).unwrap(),
                 )?;
+                // The stations the header draws (T-352).
+                let plans: Vec<VoyageStationPlan> = voyage
+                    .stations
+                    .iter()
+                    .map(|(id, what, state, at)| VoyageStationPlan {
+                        id: id.clone(),
+                        what: what.clone(),
+                        state: state.clone(),
+                        at_min: Some(*at),
+                    })
+                    .collect();
+                tx.set_voyage_station_plans("gear", &words.milestone, &plans)?;
 
                 for task in &voyage.tasks {
                     rank += 1;
