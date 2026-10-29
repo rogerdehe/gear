@@ -555,13 +555,16 @@ pub fn view(board: &Board, screen: &Screen, canvas: &mut Canvas, top: usize) -> 
     }
 }
 
-/// The departure of the shown voyage: its elapsed minutes back from `now`.
+/// The departure of the shown voyage (T-350's entry): the voyage's own
+/// timestamp, so a landed or older voyage picked with `[` and `]` reads its
+/// tasks' starts from its own departure, not from the active voyage's elapsed
+/// minutes (F1 of the T-362 review). A voyage with no departure has no start to
+/// measure from: the view measures from `now`.
 fn voyage_departure(project: &ProjectBoard, now: gear_model::Ts) -> gear_model::Ts {
     project
-        .voyages
-        .first()
-        .and_then(|voyage| voyage.elapsed_min)
-        .map(|elapsed| now - elapsed * 60)
+        .shown
+        .as_ref()
+        .and_then(|voyage| voyage.departure)
         .unwrap_or(now)
 }
 
