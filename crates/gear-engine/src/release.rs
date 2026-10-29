@@ -400,6 +400,15 @@ pub fn release_finished_reviews(
 /// releasing such a seat made the pending review start it again, every 20 s).
 /// A reservation whose review is gone is ended by the `under_review` check of
 /// `release_finished_reviews`, not by this sweep.
+///
+/// T-424: no Standby reviewer is surplus while a hand-in waits for a reviewer.
+/// A hand-in that waits needs a seat that is up, and a released Standby
+/// reviewer is cold-started again for it — so the sweep releases nothing at
+/// all then (2026-10-29, another project: 22 hand-ins waited while one
+/// reviewer worked, with 4 temps; its lanes were mostly "handed in, waits for
+/// a reviewer", so they did not count for W, and every Standby reviewer was
+/// released as surplus and cold-started for the next review). With no hand-in
+/// waiting the rule above stands.
 pub fn release_idle_standby(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -428,6 +437,11 @@ pub fn release_idle_standby(
     if standby.is_empty() {
         return Ok(report);
     }
+    // T-424: a hand-in that waits for a reviewer keeps every Standby reviewer:
+    // the next review needs a seat that is already up.
+    if hand_ins_waiting(store, project)? > 0 {
+        return Ok(report);
+    }
     // The idle longest goes first: the seat that has been in Standby since
     // the longest.
     standby.sort_by_key(|seat| seat.state_since);
@@ -450,6 +464,59 @@ pub fn release_idle_standby(
         }
     }
     Ok(report)
+}
+
+/// The number of hand-ins that wait for a reviewer (T-424): a task in
+/// `Verifying` whose latest attempt is handed in (`Submitted`), with no verdict
+/// for that attempt yet, and no reviewer on it — no `Active` temp seat bound to
+/// it and no `Standby` seat whose `engine.review_pending` names it (that
+/// review is handed over to the seat on the next tick, so the hand-in does not
+/// wait for one). Nothing reviews such a task now. A lane that is "handed in,
+/// waits for a reviewer" is not counted by [`working_lanes`], so the sweep
+/// reads this count too.
+fn hand_ins_waiting(store: &mut Store, project: &str) -> GearResult<usize> {
+    store.read(|tx| {
+        let seats = tx.seats_of_project(project)?;
+        let mut waiting = 0;
+        for task in tx.tasks_of_project(project)? {
+            if task.state != TaskState::Verifying {
+                continue;
+            }
+            let Some(attempt) = tx.attempts_of_task(project, &task.id)?.into_iter().last() else {
+                continue;
+            };
+            // The lane handed its result in: the attempt is `Submitted` with a
+            // candidate to review.
+            if attempt.state != AttemptState::Submitted || attempt.candidate.is_none() {
+                continue;
+            }
+            // Its verdict is in: the review is done, it waits for its
+            // settlement, not for a reviewer.
+            if tx.get_review_verdict(project, &task.id, attempt.n)?.is_some() {
+                continue;
+            }
+            // A reviewer that works on it now — or one that is handed its review
+            // on the next tick — is not waited for.
+            let mut reviewing = false;
+            for seat in &seats {
+                if seat.role != SeatRole::Temp {
+                    continue;
+                }
+                let bound = seat.task_id.as_deref() == Some(task.id.as_str());
+                let pending = tx
+                    .get_meta(&format!("engine.review_pending.{}", seat.id))?
+                    .is_some_and(|pending| pending == task.id);
+                if (bound && seat.state == SeatState::Active) || (pending && seat.state == SeatState::Standby) {
+                    reviewing = true;
+                    break;
+                }
+            }
+            if !reviewing {
+                waiting += 1;
+            }
+        }
+        Ok(waiting)
+    })
 }
 
 /// The number of lane seats that work on a task now (design §3.6's W): a
@@ -2438,6 +2505,65 @@ profile = "codex"
     #[test]
     fn with_no_lane_working_every_standby_reviewer_is_released() {
         let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        store
+            .write(|tx| {
+                let second = testing::seed_temp_seat(tx, "p", "r-2", "T-1", "w3:p3", "codex", T0)?;
+                tx.set_seat_state(&second.id, SeatState::Standby, Some("review done"), T0)?;
+                tx.set_seat_state("p:r-1", SeatState::Standby, Some("review done"), T0)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w3:p3", "codex", gear_herdr::AgentStatus::Idle);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+
+        for name in ["p:r-1", "p:r-2"] {
+            let seat = store.read(|tx| tx.get_seat(name)).unwrap().unwrap();
+            assert_eq!(seat.state, SeatState::Released, "{name} is free");
+        }
+        assert_eq!(exits(&herdr), 2, "both panes are closed");
+    }
+
+    /// T-424: a hand-in waits for a reviewer (its lane is "handed in, waits for
+    /// a reviewer", so no lane works and W = 0), and no temp seat is `Active`
+    /// on it: the two Standby reviewers are not surplus, neither is released.
+    #[test]
+    fn a_standby_reviewer_is_kept_while_a_hand_in_waits() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        handed_in(&mut store, "T-1");
+        store
+            .write(|tx| {
+                let second = testing::seed_temp_seat(tx, "p", "r-2", "T-1", "w3:p3", "codex", T0)?;
+                tx.set_seat_state(&second.id, SeatState::Standby, Some("review done"), T0)?;
+                tx.set_seat_state("p:r-1", SeatState::Standby, Some("review done"), T0)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w3:p3", "codex", gear_herdr::AgentStatus::Idle);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+
+        for name in ["p:r-1", "p:r-2"] {
+            let seat = store.read(|tx| tx.get_seat(name)).unwrap().unwrap();
+            assert_eq!(seat.state, SeatState::Standby, "{name} waits for the waiting review");
+        }
+        assert_eq!(exits(&herdr), 0, "no pane is closed: the hand-in needs a seat that is up");
+        let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+        assert_eq!(task.state, TaskState::Verifying, "the hand-in still waits for a review");
+    }
+
+    /// T-424: the same two Standby reviewers with no hand-in waiting (the
+    /// verdict of `T-1` is in): both are released as today.
+    #[test]
+    fn a_standby_reviewer_goes_when_no_hand_in_waits() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        judge(&mut store, "p:r-1");
         store
             .write(|tx| {
                 let second = testing::seed_temp_seat(tx, "p", "r-2", "T-1", "w3:p3", "codex", T0)?;
