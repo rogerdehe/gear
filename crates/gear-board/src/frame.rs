@@ -862,14 +862,40 @@ fn unfolded_rows(
         row += 1;
     }
 
-    // The milestones: every station of the voyage and how far it is.
+    // The milestones: every station of the voyage, how far it is and when the
+    // plan has it (T-355 v3). A reached station has the merge that reached it;
+    // a station ahead sits between the time used and the projected finish, by
+    // the minutes it has left.
     canvas.put_styled(1, row, "Milestones", Style::bold());
+    let projected = project
+        .workload
+        .as_ref()
+        .and_then(|voyage| voyage.projected_min);
+    let left_all: i64 = project.stations.iter().map(|station| station.left_min).sum();
+    let mut left_upto = 0i64;
     for station in &project.stations {
+        left_upto += station.left_min;
         let what = format!("{} {}", station.id, station.needs);
-        let (text, style) = match station.state {
-            crate::stations::StationState::Reached => (format!("✔ {what}"), Style::fg(Color::Ok)),
-            crate::stations::StationState::Now => (format!("▶ {what} — now"), Style::bold()),
-            _ => (format!("· {what}"), Style::fg(Color::Dim)),
+        let planned = projected
+            .filter(|_| left_all > 0)
+            .map(|projected| used + ((projected - used) * left_upto).div_euclid(left_all));
+        let (text, style) = match (station.state, station.reached_at_min, planned) {
+            (crate::stations::StationState::Reached, Some(at), _) => {
+                (format!("✔ {what} — reached at {}", hm(at)), Style::fg(Color::Ok))
+            }
+            (crate::stations::StationState::Reached, None, _) => {
+                (format!("✔ {what} — reached"), Style::fg(Color::Ok))
+            }
+            (crate::stations::StationState::Now, _, Some(at)) => {
+                (format!("▶ {what} — now, planned by {}", hm(at)), Style::bold())
+            }
+            (crate::stations::StationState::Now, _, None) => {
+                (format!("▶ {what} — now"), Style::bold())
+            }
+            (_, _, Some(at)) => {
+                (format!("· {what} — planned by {}", hm(at)), Style::fg(Color::Dim))
+            }
+            (_, _, None) => (format!("· {what}"), Style::fg(Color::Dim)),
         };
         canvas.put_styled(15, row, &text, style);
         row += 1;

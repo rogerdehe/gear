@@ -175,14 +175,15 @@ const PENDING: &[Pending] = &[
     Pending { frame: "tasks-open", rows: (13, 13), cols: (51, 136), swap: None, by: "prototype data: expected finish" },
     Pending { frame: "cost-open", rows: (13, 13), cols: (51, 136), swap: None, by: "prototype data: expected finish" },
     Pending { frame: "log-open", rows: (13, 13), cols: (51, 136), swap: None, by: "prototype data: expected finish" },
-    // Its stations carry a minute from the departure that the plan never
-    // keeps: S1 reached at 3h00m, S2 planned by 5h30m, S3 by 8h00m (T-352 v4
-    // dropped the model's station minute: no store has one). T-355 draws the
-    // stations and leaves the minute out until the plan carries it.
-    Pending { frame: "now-open", rows: (10, 12), cols: (38, 71), swap: None, by: "prototype data: station times" },
-    Pending { frame: "tasks-open", rows: (10, 12), cols: (38, 71), swap: None, by: "prototype data: station times" },
-    Pending { frame: "cost-open", rows: (10, 12), cols: (38, 71), swap: None, by: "prototype data: station times" },
-    Pending { frame: "log-open", rows: (10, 12), cols: (38, 71), swap: None, by: "prototype data: station times" },
+    // Its stations carry the prototype's own minutes from the departure: S1
+    // reached at 3h00m, S2 planned by 5h30m, S3 by 8h00m. The board reads them
+    // from its data instead (a reached station's last merge, a station ahead
+    // placed by its minutes left), so only the three `<hm>` cells differ: the
+    // rectangle spans them, the words and the layout match.
+    Pending { frame: "now-open", rows: (10, 12), cols: (52, 71), swap: None, by: "prototype data: station times" },
+    Pending { frame: "tasks-open", rows: (10, 12), cols: (52, 71), swap: None, by: "prototype data: station times" },
+    Pending { frame: "cost-open", rows: (10, 12), cols: (52, 71), swap: None, by: "prototype data: station times" },
+    Pending { frame: "log-open", rows: (10, 12), cols: (52, 71), swap: None, by: "prototype data: station times" },
     // Its `finished` clocks are 11 min before departure + WHEN's merge minute.
     Pending { frame: "tasks-folded", rows: (23, 23), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
     Pending { frame: "tasks-folded", rows: (26, 26), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
@@ -202,11 +203,6 @@ const PENDING: &[Pending] = &[
     // The prototype colours lane `mast` blue by name, the board colours lanes
     // by their order: its blue is the board's magenta, bold for bold.
     Pending { frame: "now-folded", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
-    Pending { frame: "now-open", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
-    Pending { frame: "tasks-folded", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
-    Pending { frame: "tasks-open", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
-    Pending { frame: "cost-folded", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
-    Pending { frame: "cost-open", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
 ];
 
 /// The eight frames the prototype draws: `(name, tab, detail)`.
