@@ -1,5 +1,6 @@
-//! The frame of the new board (design §8.1): the title, the time and tasks
-//! bars, the four tabs, the views and the overlay panel.
+//! The frame of the new board (design §8.1): the head (the voyages, the shown
+//! voyage and the goal box with its quality bar), the four tabs, the views and
+//! the overlay panel.
 //!
 //! The prototype of `gear/voyages/M4/board` is the contract for the layout, the
 //! views, the keys and the wording; the data comes from the store.
@@ -11,7 +12,7 @@
 use crate::graph;
 use crate::idle::IdleReason;
 use crate::style::{lane_color, lane_width, Color, Line, Style};
-use crate::{Board, LaneBoard, ProjectBoard, TaskBoard};
+use crate::{Board, LaneBoard, ProjectBoard, TaskBoard, VoyageEntry};
 
 /// The four views of the board: the tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,13 +103,24 @@ pub struct Screen {
     pub size: (usize, usize),
 }
 
-/// The row of the tab row (counted from zero).
-pub const TAB_ROW: usize = 3;
-/// The row of the view's heading (counted from zero). The first row the user
-/// can pick is the one after it.
-pub const VIEW_ROW: usize = 5;
-/// The first row the user can pick (counted from zero).
-pub const FIRST_ROW: usize = VIEW_ROW + 1;
+/// The head of the board: where the view starts, the tab row and the columns
+/// of the tabs and of the voyages on the first row (T-353).
+///
+/// Every column is counted from zero, and a range's first and last column are
+/// inclusive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Layout {
+    /// The row of the view's heading (counted from zero): the view draws from
+    /// `top`, its first pick on the row after it.
+    pub top: usize,
+    /// The row of the tabs (counted from zero).
+    pub tab_row: usize,
+    /// The columns of every tab on the tab row.
+    pub tabs: Vec<(usize, usize, Tab)>,
+    /// The columns of every voyage's label on the first row, and the voyage's
+    /// milestone (T-353).
+    pub voyages: Vec<(usize, usize, String)>,
+}
 
 /// The footer of the board: the keys.
 ///
@@ -121,11 +133,18 @@ pub const FOOTER: &str = "←→ / Tab / 1-4 / click: views · click a voyage ·
 /// Every cell has a style (the prototype's colours, bold, reverse video);
 /// [`Canvas::text`] is the screen as plain text and [`Canvas::ansi`] the
 /// screen as the terminal shows it.
+///
+/// A wide glyph (the prototype's ⛵, ⚓ and ⏳) takes two cells: the glyph and a
+/// continuation, a space the terminal does not draw again. The continuation is
+/// marked, so the cells keep the prototype's columns and [`Canvas::row_text`]
+/// leaves the mark's cell out of its text: the terminal's columns are the
+/// canvas's (T-353, review F1).
 pub struct Canvas {
     width: usize,
     height: usize,
     cells: Vec<char>,
     styles: Vec<Style>,
+    continuation: Vec<bool>,
 }
 
 impl Canvas {
@@ -138,6 +157,7 @@ impl Canvas {
             height,
             cells: vec![' '; width * height],
             styles: vec![Style::PLAIN; width * height],
+            continuation: vec![false; width * height],
         }
     }
 
@@ -160,8 +180,11 @@ impl Canvas {
             if column >= last {
                 break;
             }
-            self.cells[y * self.width + column] = character;
-            self.styles[y * self.width + column] = style;
+            let cell = y * self.width + column;
+            self.clear_wide_at(cell);
+            self.cells[cell] = character;
+            self.styles[cell] = style;
+            self.continuation[cell] = false;
         }
     }
 
@@ -177,9 +200,78 @@ impl Canvas {
             if column >= last {
                 break;
             }
-            self.cells[y * self.width + column] = character;
-            self.styles[y * self.width + column] = style;
+            let cell = y * self.width + column;
+            self.clear_wide_at(cell);
+            self.cells[cell] = character;
+            self.styles[cell] = style;
+            self.continuation[cell] = false;
         }
+    }
+
+    /// Write a text that may hold a wide glyph (the prototype's ⛵, ⚓ and ⏳).
+    ///
+    /// The glyph takes two cells, the second its continuation: a space with
+    /// the same style, marked so that the text does not print it again. It
+    /// returns the number of cells the text took.
+    pub fn put_wide(&mut self, x: usize, y: usize, text: &str, style: Style) -> usize {
+        if y >= self.height {
+            return 0;
+        }
+        let last = self.width - 1;
+        let mut column = x;
+        for character in text.chars() {
+            if column >= last {
+                break;
+            }
+            let cell = y * self.width + column;
+            self.clear_wide_at(cell);
+            self.cells[cell] = character;
+            self.styles[cell] = style;
+            self.continuation[cell] = false;
+            column += 1;
+            if is_wide(character) && column < last {
+                let cell = y * self.width + column;
+                self.clear_wide_at(cell);
+                self.cells[cell] = ' ';
+                self.styles[cell] = style;
+                self.continuation[cell] = true;
+                column += 1;
+            }
+        }
+        column - x
+    }
+
+    /// A write lands on one cell, but a wide glyph is drawn in two: overwriting
+    /// half of one would leave the other half to the terminal, which draws the
+    /// glyph over the write and shifts every column after it (T-353, review
+    /// F3). So the other half is blanked first, as the prototype's export
+    /// blanks it.
+    ///
+    /// A write onto a glyph's continuation blanks the glyph's leading cell; a
+    /// write onto a leading cell clears its continuation, which stays a space
+    /// in the glyph's style. Either way the glyph is never half overwritten.
+    fn clear_wide_at(&mut self, cell: usize) {
+        let same_row = |cell: usize| cell / self.width;
+        if self.continuation[cell] {
+            // This cell is the second half: blank the leading one.
+            if cell > 0 && same_row(cell - 1) == same_row(cell) {
+                self.cells[cell - 1] = ' ';
+                self.continuation[cell - 1] = false;
+            }
+            self.continuation[cell] = false;
+        } else if is_wide(self.cells[cell]) {
+            // This cell is the first half: its continuation is no longer one.
+            let next = cell + 1;
+            if next < self.cells.len() && same_row(next) == same_row(cell) {
+                self.continuation[next] = false;
+            }
+        }
+    }
+
+    /// Is the cell the continuation of a wide glyph? The terminal draws that
+    /// column as part of the glyph, so the text leaves its cell out.
+    pub fn is_continuation(&self, x: usize, y: usize) -> bool {
+        x < self.width && y < self.height && self.continuation[y * self.width + x]
     }
 
     /// Copy `count` rows of another canvas: its row `src` to this canvas's
@@ -194,6 +286,8 @@ impl Canvas {
             for column in 0..columns {
                 self.cells[target * self.width + column] = from.cells[source * from.width + column];
                 self.styles[target * self.width + column] = from.styles[source * from.width + column];
+                self.continuation[target * self.width + column] =
+                    from.continuation[source * from.width + column];
             }
         }
     }
@@ -287,7 +381,16 @@ impl Canvas {
             while column < end && effective(column) == style {
                 column += 1;
             }
-            let text: String = cells[start..column].iter().collect();
+            // A continuation cell is the second column of a wide glyph, which
+            // the terminal already draws: its space is left out of the text, so
+            // the terminal's columns are the canvas's (T-353, review F1).
+            let text: String = (start..column)
+                .filter(|column| !self.continuation[row * self.width + column])
+                .map(|column| cells[column])
+                .collect();
+            if text.is_empty() {
+                continue;
+            }
             let sgr = style.sgr(codes.unwrap_or(false));
             if sgr.is_empty() {
                 out.push_str(&text);
@@ -312,12 +415,12 @@ pub fn frame(board: &Board, screen: &Screen, panel: Option<&[String]>) -> String
 pub fn canvas(board: &Board, screen: &Screen, panel: Option<&[Line]>) -> Canvas {
     let (width, height) = screen.size;
     let mut canvas = Canvas::new(width, height);
-    header(&mut canvas, board, screen.tab);
+    let layout = header(&mut canvas, board, screen);
 
     // The view paints on a tall canvas, the screen's width: the prototype's
     // views put their texts at fixed columns, a later one over an earlier one
     // (README change 13). The screen copies the part the user looks at.
-    let top = VIEW_ROW;
+    let top = layout.top;
     let mut tall = Canvas::new(width, 1000);
     let picks = view(board, screen, &mut tall, top);
     // The selected row stays on the screen: the rows above it scroll away
@@ -340,7 +443,7 @@ pub fn canvas(board: &Board, screen: &Screen, panel: Option<&[Line]>) -> Canvas 
     }
     canvas.put_styled(1, height - 1, FOOTER, Style::fg(Color::Dim));
     if let Some(panel) = panel {
-        draw_panel(&mut canvas, panel);
+        draw_panel(&mut canvas, panel, top);
     }
     canvas
 }
@@ -375,39 +478,57 @@ pub fn offset_of(picks: &[usize], selected: usize, top: usize, last: usize) -> u
     }
 }
 
-/// The head of the board: the title, the time and tasks bars and the tabs.
+/// The head of the board (README changes 1 and 2): the first row lists every
+/// voyage of the project with the shown one lit, the second row names the
+/// shown voyage, and the third starts the goal box with its quality bar.
 ///
-/// The rows are the prototype's: the title, the time, the tasks, the tabs. A
-/// warning (the engine is down) never moves the tab row.
-fn header(canvas: &mut Canvas, board: &Board, tab: Tab) {
+/// The tabs follow the box directly, and the view's heading comes two rows
+/// after the tab row (its own row and the spacer under the tabs). Every text
+/// is put at the prototype's column and cut at the edge, as
+/// [`Canvas::put_styled`] cuts it.
+///
+/// It returns the layout it drew ([`Layout`]), which is what the clicks and
+/// the view need.
+fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
     let project = board.projects.first();
-    let voyage = project.and_then(|project| project.voyages.first());
+    // The voyage the board shows (T-350): the whole head names it and boxes
+    // its goal, so a landed voyage keeps the data of its landing.
+    let voyage = project.and_then(|project| project.shown.as_ref());
 
-    // Row 0: the title and the clock.
-    let mut title = match (project, voyage) {
-        (Some(project), Some(voyage)) => format!(
-            "GEAR · {} · {}: {}",
-            project.project, voyage.milestone, voyage.title
-        ),
-        (Some(project), None) => format!("GEAR · {}", project.project),
-        _ => "GEAR".to_string(),
+    // Row 0: the title, every voyage's label and the clock.
+    let title = match project {
+        Some(project) => format!("GEAR · {}  ", project.project),
+        None => "GEAR".to_string(),
     };
-    // A board opened without a project holds the session's projects: the
-    // title says that the others are one key away (T-317).
-    if board.projects.len() > 1 {
-        title.push_str(&format!(
-            " · p: next of {} projects",
-            board.projects.len()
-        ));
+    canvas.put_styled(1, 0, &title, Style::bold());
+    let mut voyages = Vec::new();
+    let mut x = match project {
+        Some(project) => project.project.chars().count() + 8,
+        None => 1,
+    };
+    if let Some(project) = project {
+        // One label per voyage, newest first: ` M5 ⛵ ` for a voyage that
+        // sails, ` M4.1 ⚓ ` for a landed one. The shown voyage is in reverse
+        // video and bold, the others dim.
+        for entry in &project.voyage_list {
+            let mark = if entry.sailing { '⛵' } else { '⚓' };
+            let label = format!(" {} {} ", entry.milestone, mark);
+            // The prototype draws a wide mark in two cells; the label's own
+            // length is its characters, as the prototype counts them.
+            let cells = canvas.put_wide(x, 0, &label, voyage_style(voyage, entry));
+            voyages.push((x, x + cells - 1, entry.milestone.clone()));
+            x += label.chars().count() + 1;
+        }
     }
-    canvas.put_styled(0, 0, &title, Style::bold());
+    canvas.put_styled(x + 1, 0, "[ older   ] newer", Style::fg(Color::Dim));
     if board.engine == crate::EngineState::Down {
-        // The engine is down: the next `gear` call starts it. It says so on
-        // the title's row, so that the tab row stays where it is.
+        // The engine is down: the next `gear` call starts it (README). It says
+        // so two columns after "newer", so that the tab row stays where it is.
+        let after = x + 1 + "[ older   ] newer".chars().count() + 1;
         canvas.put_styled(
-            title.chars().count(),
+            after,
             0,
-            "  ! engine down — the next gear call starts it",
+            "! engine down — the next gear call starts it",
             Style::fg(Color::Bad),
         );
     }
@@ -421,102 +542,146 @@ fn header(canvas: &mut Canvas, board: &Board, tab: Tab) {
         Style::fg(Color::Dim),
     );
 
-    // Row 1: the time bar and the projection. Both are green while the
-    // projected finish is within the eta, red once it is past it.
-    let elapsed = voyage.and_then(|voyage| voyage.elapsed_min);
-    let eta_minutes = voyage
-        .and_then(|voyage| voyage.eta.as_deref())
-        .and_then(duration_minutes);
-    let projected_min = voyage.and_then(|voyage| voyage.projected_min);
-    let pace = match (projected_min, eta_minutes) {
-        (Some(projected), Some(eta)) if projected <= eta => Style::fg(Color::Ok),
-        (Some(_), Some(_)) => Style::fg(Color::Bad),
-        _ => Style::PLAIN,
-    };
-    let time = match (elapsed, eta_minutes) {
-        (Some(elapsed), Some(eta)) => Line::plain("time   ")
-            .push(bar(elapsed, eta, 24), pace)
-            .push(format!(" {} of {}", hours(elapsed), hours(eta)), Style::PLAIN),
-        _ => Line::plain("time   the voyage's time is unknown"),
-    };
-    canvas.put_line(0, 1, &time);
+    // Row 1: the shown voyage's milestone and title, and what it does.
     if let Some(voyage) = voyage {
-        let projected = match voyage.projected_min {
-            Some(minutes) => format!(
-                "projected finish {} (slowest lane: {})",
-                hours(minutes),
-                voyage
-                    .slowest_lane
-                    .as_ref()
-                    .map(|(lane, _)| lane.clone())
-                    .unwrap_or_else(|| "-".into())
-            ),
-            None => "projected finish unknown".to_string(),
-        };
-        canvas.put_styled(48, 1, &projected, pace);
+        let state = if voyage.sailing { "⛵ sailing" } else { "⚓ landed" };
+        let line = format!("{}: {} · {}", voyage.milestone, voyage.title, state);
+        canvas.put_wide(1, 1, &line, Style::bold());
     }
 
-    // Row 2: the tasks bar and the done sentence.
-    if let Some(project) = project {
-        let totals = &project.totals;
-        let left = project
-            .voyages
-            .first()
-            .and_then(|voyage| voyage.remaining_estimate_min)
-            .unwrap_or(0);
-        canvas.put(
-            0,
-            2,
-            &format!(
-                "tasks  {} {}/{} done, {} of estimates left",
-                bar(totals.done as i64, totals.tasks as i64, 24),
-                totals.done,
-                totals.tasks,
-                hours(left)
-            ),
-        );
-        let clauses = done_clauses(project).len();
+    // The goal box: the voyage's done sentence, word-wrapped, and the quality
+    // bar under it, in the prototype's yellow box (README change 2).
+    let mut row = 2;
+    let box_width = canvas.width.saturating_sub(3);
+    if let Some(voyage) = voyage {
+        let inside = box_width.saturating_sub(4);
         canvas.put_styled(
-            72,
-            2,
-            &format!("done sentence {clauses} clauses"),
+            1,
+            row,
+            &format!("╔═ GOAL {}╗", "═".repeat(box_width.saturating_sub(9))),
+            Style::fg(Color::Warn).and_bold(),
+        );
+        row += 1;
+        for line in wrap(voyage.done.as_deref().unwrap_or_default(), inside) {
+            canvas.put_styled(
+                1,
+                row,
+                &format!("║ {} ║", pad_to(&line, inside)),
+                Style::fg(Color::Warn).and_bold(),
+            );
+            row += 1;
+        }
+        // The bar is how the goal is judged: it is locked in the box with it,
+        // yellow and not bold.
+        canvas.put_styled(
+            1,
+            row,
+            &format!("║ {} ║", pad_to(&bar_line(voyage.bar.as_deref()), inside)),
             Style::fg(Color::Warn),
         );
+        row += 1;
+        canvas.put_styled(
+            1,
+            row,
+            &format!("╚{}╝", "═".repeat(box_width.saturating_sub(2))),
+            Style::fg(Color::Warn).and_bold(),
+        );
+        row += 1;
     }
 
-    // Row 3: the four tabs; the open one is in reverse video, the others
-    // dim.
+    // The tab row follows the box directly: the four tabs, the open one in
+    // reverse video, the others dim.
+    let tab_row = row;
+    let mut tabs = Vec::new();
     let mut x = 1;
-    for tab_in_row in Tab::all() {
-        let label = tab_in_row.label();
-        if tab_in_row == tab {
-            canvas.put(x, TAB_ROW, &label);
-            canvas.reverse(TAB_ROW, x, label.chars().count());
+    for tab in Tab::all() {
+        let label = tab.label();
+        if tab == screen.tab {
+            canvas.put(x, tab_row, &label);
+            canvas.reverse(tab_row, x, label.chars().count());
         } else {
-            canvas.put_styled(x, TAB_ROW, &label, Style::fg(Color::Dim));
+            canvas.put_styled(x, tab_row, &label, Style::fg(Color::Dim));
         }
+        tabs.push((x, x + label.chars().count() - 1, tab));
         x += label.chars().count() + 1;
     }
+
+    Layout { top: tab_row + 2, tab_row, tabs, voyages }
 }
 
-/// The columns of every tab on the tab row: its first and its last column.
-pub fn tab_ranges() -> Vec<(u16, u16, Tab)> {
-    let mut ranges = Vec::new();
-    let mut x = 1u16;
-    for tab in Tab::all() {
-        let width = tab.label().chars().count() as u16;
-        ranges.push((x, x + width - 1, tab));
-        x += width + 1;
+/// The layout of the head of the board, drawn on a scratch canvas: the rows
+/// and the columns the view and the clicks go by.
+pub fn layout(board: &Board, screen: &Screen) -> Layout {
+    let mut scratch = Canvas::new(screen.size.0, screen.size.1);
+    header(&mut scratch, board, screen)
+}
+
+/// The style of a voyage's label on the first row: the shown voyage is lit,
+/// the others are dim.
+fn voyage_style(shown: Option<&VoyageEntry>, entry: &VoyageEntry) -> Style {
+    let is_shown = shown
+        .map(|shown| shown.milestone == entry.milestone)
+        .unwrap_or(false);
+    if is_shown {
+        Style { fg: None, bold: true, reverse: true }
+    } else {
+        Style::fg(Color::Dim)
     }
-    ranges
 }
 
-/// The tab at a column of the tab row.
-pub fn tab_at(x: u16) -> Option<Tab> {
-    tab_ranges()
-        .into_iter()
-        .find(|(first, last, _)| x >= *first && x <= *last)
-        .map(|(_, _, tab)| tab)
+/// Is the character a wide one (East Asian wide or fullwidth), the way the
+/// prototype's export counts a cell?
+fn is_wide(character: char) -> bool {
+    matches!(character, '⛵' | '⚓' | '⏳')
+}
+
+/// The prototype's `wrap`: the words split on whitespace; a word that would
+/// pass `width` starts a new line.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + word.chars().count() + 1 > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// The text padded with spaces to `width` characters (a longer text is not
+/// cut: the canvas cuts the line at its edge).
+fn pad_to(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if count >= width {
+        text.to_string()
+    } else {
+        format!("{text}{}", " ".repeat(width - count))
+    }
+}
+
+/// The quality bar's line of the goal box: its key and what it blocks.
+///
+/// The key is the leading run of capital letters (A-Z) of the voyage's bar;
+/// a bar with another key is shown as it was written.
+fn bar_line(bar: Option<&str>) -> String {
+    let Some(bar) = bar else {
+        return "Quality bar: not set".to_string();
+    };
+    let key: String = bar.chars().take_while(|c| c.is_ascii_uppercase()).collect();
+    let meaning = match key.as_str() {
+        "FASTEST" => "only what breaks the chain or loses data blocks a task",
+        "DELIVERABLE" => "errors in normal use block a task; edge cases are logged",
+        "STRICT" => "severe issues block a task; medium ones are the captain's call",
+        _ => return format!("Quality bar: {bar}"),
+    };
+    format!("Quality bar: {key} — {meaning}")
 }
 
 /// The selection mark of a row: `›` in the accent colour.
@@ -1186,7 +1351,7 @@ fn done_clauses(project: &ProjectBoard) -> Vec<String> {
 
 /// Draw the panel over the frame: a box at the right of the screen, as the
 /// prototype draws its window over the board.
-fn draw_panel(canvas: &mut Canvas, panel: &[Line]) {
+fn draw_panel(canvas: &mut Canvas, panel: &[Line], top: usize) {
     // One width for the whole box, borders included (F3): the interior rows
     // are padded or cut to it, so the right border is always inside the
     // canvas.
@@ -1206,7 +1371,6 @@ fn draw_panel(canvas: &mut Canvas, panel: &[Line]) {
         return;
     }
     let left = canvas.width.saturating_sub(total + 1);
-    let top = VIEW_ROW;
     // The footer row is reserved: the bottom border stands above it (F3).
     let bottom = (top + panel.len() + 1).min(canvas.height - 2);
     // The box: a top border, the rows, a bottom border.
@@ -1336,19 +1500,6 @@ pub fn lane_color_of(project: &ProjectBoard, lane: &str) -> Color {
     lane_color(&lane_order(project), lane)
 }
 
-/// A duration of the plan (`12h`, `30m`) in minutes.
-fn duration_minutes(text: &str) -> Option<i64> {
-    let text = text.trim();
-    let number: String = text.chars().take_while(|c| c.is_ascii_digit()).collect();
-    let value: i64 = number.parse().ok()?;
-    let unit = text[number.len()..].trim().to_ascii_lowercase();
-    match unit.as_str() {
-        "h" | "hr" | "hrs" | "hour" | "hours" => Some(value * 60),
-        "m" | "min" | "mins" | "minute" | "minutes" => Some(value),
-        _ => None,
-    }
-}
-
 /// A bar of `width` cells: how much of `total` is `part`.
 pub fn bar(part: i64, total: i64, width: usize) -> String {
     if total <= 0 {
@@ -1380,5 +1531,64 @@ pub fn reason_word(reason: &IdleReason) -> &'static str {
         IdleReason::DepWait { .. } => "dep wait",
         IdleReason::Undelivered { .. } => "undelivered",
         IdleReason::NoWork => "no work",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wide_glyph_takes_two_cells_and_its_continuation_is_not_printed() {
+        // T-353 (review F1): the canvas keeps the prototype's columns — the
+        // glyph and its continuation — and the text leaves the continuation
+        // out, so a terminal draws the same columns.
+        let mut canvas = Canvas::new(20, 8);
+        let taken = canvas.put_wide(1, 0, " M5 ⛵ ", Style::fg(Color::Warn));
+
+        // The prototype's label: six characters, and the glyph's second cell.
+        assert_eq!(taken, 7, "the cells the label took");
+        assert_eq!(canvas.char_at(1, 0), ' ');
+        assert_eq!(canvas.char_at(5, 0), '⛵');
+        assert!(canvas.is_continuation(6, 0), "the glyph's second cell");
+        assert_eq!(canvas.char_at(6, 0), ' ', "a space in the cell (the golden planes)");
+        assert_eq!(canvas.style_at(6, 0), Style::fg(Color::Warn), "in the label's style");
+        assert!(!canvas.is_continuation(7, 0), "the label's last space is its own");
+        // An ordinary text after the label keeps the trailing spaces printed.
+        canvas.put(8, 0, "x");
+        let line = canvas.text().lines().next().unwrap_or_default().to_string();
+        assert_eq!(line, "  M5 ⛵ x", "the continuation cell prints nothing");
+        let columns: usize = line
+            .chars()
+            .map(|character| if matches!(character, '⛵' | '⚓') { 2 } else { 1 })
+            .sum();
+        assert_eq!(columns, 9, "nine cells, nine terminal columns: {line:?}");
+    }
+
+    #[test]
+    fn a_write_over_half_of_a_wide_glyph_blanks_the_other_half() {
+        // T-353 (review F3): the terminal draws a glyph in two columns, so a
+        // half-overwritten glyph would shift the columns after it.
+        let mut canvas = Canvas::new(20, 8);
+        canvas.put_wide(1, 0, "M5 ⛵", Style::fg(Color::Warn));
+
+        // A write onto the continuation blanks the glyph's leading cell.
+        assert_eq!(canvas.char_at(4, 0), '⛵');
+        assert!(canvas.is_continuation(5, 0));
+        canvas.put(5, 0, "x");
+        assert_eq!(canvas.char_at(4, 0), ' ', "the glyph's first half is blank");
+        assert!(!canvas.is_continuation(4, 0));
+        assert_eq!(canvas.char_at(5, 0), 'x', "the write is where it landed");
+        assert_eq!(canvas.text().lines().next().unwrap_or_default(), " M5  x");
+
+        // A write onto a leading cell clears its continuation: the second half
+        // stays a space in the glyph's style.
+        let mut canvas = Canvas::new(20, 8);
+        canvas.put_wide(1, 0, "M5 ⛵", Style::fg(Color::Warn));
+        canvas.put(4, 0, "y");
+        assert!(!canvas.is_continuation(5, 0), "the glyph has no second half any more");
+        assert_eq!(canvas.char_at(5, 0), ' ');
+        assert_eq!(canvas.style_at(5, 0), Style::fg(Color::Warn));
+        assert_eq!(canvas.text().lines().next().unwrap_or_default(), " M5 y");
     }
 }
