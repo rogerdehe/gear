@@ -844,14 +844,28 @@ fn cmd_admin_init(
         // T-256: another project of this store on the same repository is a
         // branch clash, reported before anything is registered. The store is
         // only read, and only when it exists already: a check creates nothing.
-        match other_projects()? {
+        // T-388: the same read gives the config this store holds for this very
+        // project, which is what a re-init would change. A store with no
+        // project of this id is a first registration: nothing to compare.
+        let changes: Option<(i64, Vec<String>)> = match other_projects()? {
             Some(others) => {
-                if let Some(problem) = gear_app::admin::branch_clash(&parsed, &others) {
+                let pairs: Vec<(String, String)> = others
+                    .iter()
+                    .map(|(id, text, _)| (id.clone(), text.clone()))
+                    .collect();
+                if let Some(problem) = gear_app::admin::branch_clash(&parsed, &pairs) {
                     return Err(GearError::new(gear_model::ErrorCode::BadFormat, problem));
                 }
+                others
+                    .iter()
+                    .find(|(id, _, _)| *id == parsed.project.id)
+                    .map(|(_, registered, version)| (*version, config_changes(registered, &text)))
             }
-            None => eprintln!("cross-project check skipped: no store"),
-        }
+            None => {
+                eprintln!("cross-project check skipped: no store");
+                None
+            }
+        };
         // T-304: the lane quota counts the lanes that can run — the seats,
         // retired ones excluded — so it is checked after the branch check,
         // against the retired lanes of this project's seats.
@@ -872,6 +886,10 @@ fn cmd_admin_init(
         };
         if json {
             let lane_list = lane_list(&parsed);
+            let changes = changes
+                .as_ref()
+                .map(|(_, lines)| lines.clone())
+                .unwrap_or_default();
             println!(
                 "{}",
                 serde_json::json!({
@@ -882,6 +900,7 @@ fn cmd_admin_init(
                     "lane_list": lane_json(&lane_list),
                     "review_model": review_model(&parsed),
                     "model_warnings": model_warnings,
+                    "changes": changes,
                 })
             );
         } else {
@@ -889,6 +908,18 @@ fn cmd_admin_init(
                 "config ok: project {}, {lanes} lanes, {reviewers} reviewers",
                 parsed.project.id
             );
+            // T-388: right after it, what the re-init would change (or that
+            // it changes nothing), so a captain sees the store it writes.
+            if let Some((version, lines)) = &changes {
+                if lines.is_empty() {
+                    println!("no change against the registered config v{version}");
+                } else {
+                    println!("changes against the registered config v{version}:");
+                    for line in lines {
+                        println!("{line}");
+                    }
+                }
+            }
             for line in seat_lines(&parsed) {
                 println!("{line}");
             }
@@ -990,6 +1021,49 @@ fn cmd_admin_init(
     Ok(())
 }
 
+/// The lines of a `--check` change list (T-388): the registered config text
+/// against the config file's own text, as a line diff — `- ` for a line only
+/// in the registered one, `+ ` for a line only in the file, in file order.
+/// The LCS is a plain table, small next to a config file, so no dependency.
+fn config_changes(registered: &str, file: &str) -> Vec<String> {
+    let old: Vec<&str> = registered.lines().collect();
+    let new: Vec<&str> = file.lines().collect();
+    // `same[i][j]`: the length of the longest common subsequence of the tails
+    // `old[i..]` and `new[j..]`.
+    let mut same = vec![vec![0usize; new.len() + 1]; old.len() + 1];
+    for i in (0..old.len()).rev() {
+        for j in (0..new.len()).rev() {
+            same[i][j] = if old[i] == new[j] {
+                same[i + 1][j + 1] + 1
+            } else {
+                same[i + 1][j].max(same[i][j + 1])
+            };
+        }
+    }
+    let mut lines = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < old.len() && j < new.len() {
+        if old[i] == new[j] {
+            i += 1;
+            j += 1;
+        } else if same[i + 1][j] >= same[i][j + 1] {
+            // A tie takes the registered line away first, as a diff does.
+            lines.push(format!("- {}", old[i]));
+            i += 1;
+        } else {
+            lines.push(format!("+ {}", new[j]));
+            j += 1;
+        }
+    }
+    for line in &old[i..] {
+        lines.push(format!("- {line}"));
+    }
+    for line in &new[j..] {
+        lines.push(format!("+ {line}"));
+    }
+    lines
+}
+
 /// Read the config a command was given, as `BadFormat` when it cannot be read.
 fn read_config(config: &std::path::Path) -> GearResult<String> {
     std::fs::read_to_string(config).map_err(|e| {
@@ -1001,14 +1075,15 @@ fn read_config(config: &std::path::Path) -> GearResult<String> {
 }
 
 /// The other projects of the store this `gear` call would use — `(id,
-/// config_toml)` — for the branch check of `admin init --check` (T-256), or
-/// `None` when there is no store to read: none at the path, or no `HOME` to
-/// find the default one under. The path is `GEAR_DB` when the caller names
+/// config_toml, config_version)` — for the branch check of `admin init
+/// --check` (T-256) and its change list (T-388), or `None` when there is no
+/// store to read: none at the path, or no `HOME` to find the default one
+/// under. The path is `GEAR_DB` when the caller names
 /// one, else the default store of this session — resolved with
 /// [`default_store_in`], never with [`default_store_path`], which creates the
 /// directory. Only an existing store is opened, and read-only: a check creates
 /// no file, applies no schema and migrates nothing (T-228).
-fn other_projects() -> GearResult<Option<Vec<(String, String)>>> {
+fn other_projects() -> GearResult<Option<Vec<(String, String, i64)>>> {
     let path = match std::env::var_os(gear_model::ctx::ENV_DB) {
         Some(path) => std::path::PathBuf::from(path),
         None => {
@@ -1028,7 +1103,7 @@ fn other_projects() -> GearResult<Option<Vec<(String, String)>>> {
             let mut others = Vec::new();
             for id in tx.project_ids()? {
                 if let Some(row) = tx.get_project(&id)? {
-                    others.push((row.id, row.config_toml));
+                    others.push((row.id, row.config_toml, row.config_version));
                 }
             }
             Ok(others)
