@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, SeatState, TaskState, Ts};
-use gear_store::{BindingStatus, RoundRow, SeatRow, Store, Tx};
+use gear_store::{BindingStatus, RoundRow, SeatRow, Store, TaskRow, Tx};
 
 use crate::frame::Tab;
 use crate::idle::IdleReason;
@@ -113,6 +113,15 @@ pub mod hook {
 /// The lane name of a task that belongs to no lane.
 const UNASSIGNED: &str = "unassigned";
 
+/// What a lane of a landed voyage reads (T-350): the voyage keeps its data,
+/// and its lanes are retired at the landing.
+const RETIRED_AT_THE_LANDING: &str = "retired at the landing";
+
+/// The lane a task names, or the placeholder of an unassigned task.
+fn lane_of(task: &TaskRow) -> String {
+    task.lane.clone().unwrap_or_else(|| UNASSIGNED.to_string())
+}
+
 /// The one warning line the board may print.
 const ENGINE_DOWN: &str = "! engine down — the next gear call starts it";
 
@@ -144,6 +153,8 @@ impl View {
 pub struct Options {
     /// The project to show; `None` shows every project in the store.
     pub project: Option<String>,
+    /// The voyage to show; `None` shows the voyage measured today (T-350).
+    pub milestone: Option<String>,
     /// The database path. The engine's lock file sits next to it, so the
     /// board can tell whether the engine is down.
     pub db: Option<PathBuf>,
@@ -163,6 +174,7 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             project: None,
+            milestone: None,
             db: None,
             json: false,
             view: View::Lanes,
@@ -233,6 +245,27 @@ pub struct ProjectBoard {
     /// the lane ends and how long it sits idle. Empty when no measured voyage
     /// has open work.
     pub forecast: Vec<forecast::LaneEnd>,
+    /// Every voyage of the project that departed, newest departure first
+    /// (T-350): the board can be built for any of them.
+    pub voyage_list: Vec<VoyageEntry>,
+    /// The voyage the board measures and shows (T-350): the one it was built
+    /// for.
+    pub shown: Option<VoyageEntry>,
+}
+
+/// One voyage of the project, as the board names it (T-350).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoyageEntry {
+    /// The milestone id the plan uses (`M1`, `M2`, …).
+    pub milestone: String,
+    pub title: String,
+    /// Some task of the voyage is not settled: it is still sailing.
+    pub sailing: bool,
+    /// When the voyage departed; `None` while it has no task.
+    pub departure: Option<Ts>,
+    /// When a landed voyage was merged in: the latest merge of its tasks.
+    /// `None` while it sails, or when no attempt of it was merged.
+    pub ended: Option<Ts>,
 }
 
 /// One delivery the engine has not confirmed yet (T-271).
@@ -495,7 +528,18 @@ pub fn build_with_agents(
             Some(id) => vec![id.clone()],
             None => tx.project_ids()?,
         };
-        ids.iter().map(|id| project_with_agents(tx, id, now, agents)).collect()
+        ids.iter()
+            .map(|id| {
+                // The board shows one voyage only (README change 6): the one
+                // named, else the measured one, so a task of another voyage
+                // never reaches it (T-350).
+                let milestone = match &opts.milestone {
+                    Some(milestone) => Some(milestone.clone()),
+                    None => workload_voyage(tx, id, now)?.map(|voyage| voyage.milestone),
+                };
+                project_for(tx, id, now, agents, milestone.as_deref())
+            })
+            .collect()
     })?;
     Ok(Board { engine, now, projects })
 }
@@ -507,29 +551,75 @@ pub fn project(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> 
 }
 
 /// The shared project model with an optional read-only Herdr snapshot.
+///
+/// `None` keeps the choice the captain home page makes: the voyage measured
+/// today, with its tasks and every open task of the project (T-246). The board
+/// names a voyage instead and shows that voyage only (T-350).
 pub fn project_with_agents(
     tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[AgentInfo]>,
+) -> GearResult<ProjectBoard> {
+    project_for(tx, project, now, agents, None)
+}
+
+/// The plan of one project for one voyage (T-350): `milestone` names the
+/// voyage to show, `None` measures the voyage of today.
+pub fn project_for(
+    tx: &Tx<'_>,
+    project: &str,
+    now: Ts,
+    agents: Option<&[AgentInfo]>,
+    milestone: Option<&str>,
 ) -> GearResult<ProjectBoard> {
     let row = tx.get_project(project)?.ok_or_else(|| {
         GearError::new(ErrorCode::NoTarget, format!("project {project} is not registered"))
     })?;
     let seats = tx.seats_of_project(project)?;
-    let tasks = tx.tasks_of_project(project)?;
-    // The voyage the board measures: the active one, else the latest departed
-    // one (F5 of the T-166 review). The board shows that voyage and nothing
-    // that landed before it (T-246): a task of an older voyage is history —
-    // unless it still waits for work, which is a decision the captain owes.
-    let workload = workload_voyage(tx, project, now)?;
-    let tasks: Vec<_> = match &workload {
-        Some(voyage) => tasks
+    let all_tasks = tx.tasks_of_project(project)?;
+    // The voyage the board measures: the one named, else the active one, else
+    // the latest departed one (F5 of the T-166 review).
+    let workload = match milestone {
+        Some(milestone) => voyage::reports_including_finished(tx, project, now)?
             .into_iter()
-            .filter(|task| {
-                !task.state.is_terminal()
-                    || task.milestone.as_deref() == Some(voyage.milestone.as_str())
-            })
-            .collect(),
-        None => tasks,
+            .find(|report| report.milestone == milestone),
+        None => workload_voyage(tx, project, now)?,
     };
+    // The tasks the board shows. A named voyage shows its own tasks and no
+    // task of another voyage (T-350): a cancelled task was cut, so it is not
+    // work. Without a name, the home page keeps today's rule: the measured
+    // voyage's tasks and every open task of the project (T-246).
+    let tasks: Vec<_> = match milestone {
+        Some(shown) => all_tasks
+            .iter()
+            .filter(|task| task.milestone.as_deref() == Some(shown))
+            .filter(|task| task.state != TaskState::Cancelled)
+            .cloned()
+            .collect(),
+        None => match &workload {
+            Some(voyage) => all_tasks
+                .iter()
+                .filter(|task| {
+                    !task.state.is_terminal()
+                        || task.milestone.as_deref() == Some(voyage.milestone.as_str())
+                })
+                .cloned()
+                .collect(),
+            None => all_tasks.clone(),
+        },
+    };
+    // Every voyage of the project, and the measured one as a row (T-350).
+    let entries = voyage_entries(tx, project, &all_tasks)?;
+    let shown = match &workload {
+        Some(voyage) => entries.iter().find(|entry| entry.milestone == voyage.milestone).cloned(),
+        None => None,
+    };
+    // A landed voyage keeps its data: its lanes are retired at the landing.
+    let landed = shown.as_ref().is_some_and(|entry| !entry.sailing);
+    let mut voyage_list: Vec<VoyageEntry> = entries
+        .into_iter()
+        .filter(|entry| entry.departure.is_some())
+        .collect();
+    // The newest departure is the voyage the captain has just sent out.
+    voyage_list.sort_by(|left, right| right.departure.cmp(&left.departure));
     // The seats whose provider is in a back-off (T-75): the engine recorded
     // the wait, and the board says so instead of "working".
     let backoff = tx.seats_in_backoff(project)?;
@@ -540,20 +630,60 @@ pub fn project_with_agents(
         .filter(|seat| seat.role == SeatRole::Lane && seat.state == SeatState::Retired)
         .map(|seat| seat.name.as_str()).collect();
     let mut lanes = Vec::new();
-    for seat in seats.iter().filter(|seat| seat.role == SeatRole::Lane && seat.state != SeatState::Retired) {
-        lanes.push(LaneBoard {
-            lane: seat.name.clone(),
-            agent_state: observed_agent_state(tx, seat, agents, &backoff)?,
-            tasks: Vec::new(),
-            rework: Rework::default(),
-            down: down_seat(seat),
-            idle: None,
-            idle_text: None,
-            helping: None,
-            done_count: 0,
-            left_count: 0,
-            left_min: 0,
-        });
+    if landed {
+        // A landed voyage keeps its data (T-350): the lanes of its tasks,
+        // retired ones included, in seat order, a lane with no seat after
+        // them. Every one of them retired at the landing.
+        let mut names: Vec<String> = Vec::new();
+        for seat in seats.iter().filter(|seat| seat.role == SeatRole::Lane) {
+            if !names.contains(&seat.name)
+                && tasks.iter().any(|task| lane_of(task) == seat.name)
+            {
+                names.push(seat.name.clone());
+            }
+        }
+        for task in &tasks {
+            let name = lane_of(task);
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        for name in names {
+            let seat = seats.iter().find(|seat| seat.name == name);
+            let agent_state = match seat {
+                Some(seat) => observed_agent_state(tx, seat, agents, &backoff)?,
+                None => "unknown",
+            };
+            lanes.push(LaneBoard {
+                lane: name,
+                agent_state,
+                tasks: Vec::new(),
+                rework: Rework::default(),
+                down: seat.and_then(down_seat),
+                idle: None,
+                idle_text: Some(RETIRED_AT_THE_LANDING.into()),
+                helping: None,
+                done_count: 0,
+                left_count: 0,
+                left_min: 0,
+            });
+        }
+    } else {
+        for seat in seats.iter().filter(|seat| seat.role == SeatRole::Lane && seat.state != SeatState::Retired) {
+            lanes.push(LaneBoard {
+                lane: seat.name.clone(),
+                agent_state: observed_agent_state(tx, seat, agents, &backoff)?,
+                tasks: Vec::new(),
+                rework: Rework::default(),
+                down: down_seat(seat),
+                idle: None,
+                idle_text: None,
+                helping: None,
+                done_count: 0,
+                left_count: 0,
+                left_min: 0,
+            });
+        }
     }
 
     let mut totals = Totals::default();
@@ -569,8 +699,8 @@ pub fn project_with_agents(
             TaskState::Waiting => totals.waiting += 1,
             _ => {}
         }
-        let name = task.lane.clone().unwrap_or_else(|| UNASSIGNED.to_string());
-        if retired.contains(name.as_str()) {
+        let name = lane_of(task);
+        if !landed && retired.contains(name.as_str()) {
             continue;
         }
         let rounds = tx.attempts_of_task(project, &task.id)?.len();
@@ -675,13 +805,17 @@ pub fn project_with_agents(
     // Why each lane is idle (design §8.2), what it helps on (T-323) and what
     // it has left.
     for lane in &mut lanes {
-        let reason = idle::idle_reason(tx, project, &lane.lane, now)?;
-        lane.idle_text = reason.as_ref().map(|reason| idle::describe(reason, tx, project));
-        lane.idle = reason;
-        lane.helping = match tx.get_seat(&format!("{project}:{}", lane.lane))? {
-            Some(seat) => idle::helping(tx, project, &seat, now)?.map(|help| help.text()),
-            None => None,
-        };
+        // A lane of a landed voyage retired at the landing (T-350): the words
+        // stay those of the landing, not an idle reason of today.
+        if !landed {
+            let reason = idle::idle_reason(tx, project, &lane.lane, now)?;
+            lane.idle_text = reason.as_ref().map(|reason| idle::describe(reason, tx, project));
+            lane.idle = reason;
+            lane.helping = match tx.get_seat(&format!("{project}:{}", lane.lane))? {
+                Some(seat) => idle::helping(tx, project, &seat, now)?.map(|help| help.text()),
+                None => None,
+            };
+        }
         lane.done_count = lane
             .tasks
             .iter()
@@ -701,11 +835,11 @@ pub fn project_with_agents(
     }
 
     // The work as a graph (design §8.1), of the tasks the board shows (T-246).
-    let shown: std::collections::BTreeSet<&str> =
+    let graphed: std::collections::BTreeSet<&str> =
         tasks.iter().map(|task| task.id.as_str()).collect();
     let graph: Vec<graph::GraphTask> = graph::tasks(tx, project, now)?
         .into_iter()
-        .filter(|task| shown.contains(task.id.as_str()))
+        .filter(|task| graphed.contains(task.id.as_str()))
         .collect();
     let graph_lanes = graph::lanes(tx, project)?;
 
@@ -861,6 +995,8 @@ pub fn project_with_agents(
         unconfirmed,
         stations,
         forecast,
+        voyage_list,
+        shown,
     })
 }
 
@@ -1356,6 +1492,47 @@ fn frictions_of(
         });
     }
     Ok(frictions)
+}
+
+/// One row per voyage of the project (T-350): its milestone, its title,
+/// whether it still sails, and — once landed — when its last task was merged.
+fn voyage_entries(
+    tx: &Tx<'_>,
+    project: &str,
+    tasks: &[TaskRow],
+) -> GearResult<Vec<VoyageEntry>> {
+    let mut entries = Vec::new();
+    for voyage in tx.voyages_of_project(project)? {
+        let of_voyage = || {
+            tasks
+                .iter()
+                .filter(|task| task.milestone.as_deref() == Some(voyage.milestone.as_str()))
+        };
+        // Sailing while some task of it is not settled: a done, failed or
+        // cancelled task is no work left.
+        let sailing = of_voyage().any(|task| {
+            !matches!(task.state, TaskState::Done | TaskState::Failed | TaskState::Cancelled)
+        });
+        // A landed voyage ended at the last merge of its tasks.
+        let mut ended: Option<Ts> = None;
+        if !sailing {
+            for task in of_voyage() {
+                for (_, times) in tx.attempt_times_of_task(project, &task.id)? {
+                    if let Some(merged) = times.merged {
+                        ended = Some(ended.map_or(merged, |last| last.max(merged)));
+                    }
+                }
+            }
+        }
+        entries.push(VoyageEntry {
+            milestone: voyage.milestone,
+            title: voyage.title,
+            sailing,
+            departure: voyage.departure,
+            ended,
+        });
+    }
+    Ok(entries)
 }
 
 fn workload_voyage(
