@@ -153,111 +153,6 @@ fn board(store: &mut Store) -> gear_board::ProjectBoard {
         .expect("the project")
 }
 
-#[test]
-fn the_board_carries_the_shown_voyages_stations_as_the_header_draws_them() {
-    let mut store = world();
-    store
-        .write(|tx| {
-            tx.set_voyage_station_plans(
-                "p",
-                "M5",
-                &[
-                    plan("S1", STATIONS[0].1, "done", 180),
-                    plan("S2", STATIONS[1].1, "now", 330),
-                    plan("S3", STATIONS[2].1, "next", 480),
-                ],
-            )
-        })
-        .unwrap();
-    assert_eq!(
-        board(&mut store).stations,
-        vec![
-            gear_board::StationBoard {
-                id: "S1".into(),
-                what: STATIONS[0].1.into(),
-                state: gear_board::StationState::Reached,
-                at_min: Some(180),
-            },
-            gear_board::StationBoard {
-                id: "S2".into(),
-                what: STATIONS[1].1.into(),
-                state: gear_board::StationState::Now,
-                at_min: Some(330),
-            },
-            gear_board::StationBoard {
-                id: "S3".into(),
-                what: STATIONS[2].1.into(),
-                state: gear_board::StationState::Next,
-                at_min: Some(480),
-            },
-        ]
-    );
-}
-
-#[test]
-fn a_voyage_without_station_plans_has_no_station_boards() {
-    let mut store = world();
-    assert!(board(&mut store).stations.is_empty());
-}
-
-#[test]
-fn the_golden_fixture_carries_the_prototypes_stations() {
-    let (mut store, now) = crate::golden_fixture::load();
-    let options = gear_board::Options {
-        project: Some("gear".into()),
-        milestone: Some("M5".into()),
-        ..Default::default()
-    };
-    let plan = gear_board::build(&mut store, &options, now)
-        .unwrap()
-        .projects
-        .into_iter()
-        .next()
-        .expect("the project");
-    assert_eq!(
-        plan.stations
-            .iter()
-            .map(|station| {
-                (
-                    station.id.as_str(),
-                    station.what.as_str(),
-                    station.state,
-                    station.at_min,
-                )
-            })
-            .collect::<Vec<_>>(),
-        vec![
-            (
-                "S1",
-                "small-task procedure merged",
-                gear_board::StationState::Reached,
-                Some(180),
-            ),
-            (
-                "S2",
-                "board views to the prototype",
-                gear_board::StationState::Now,
-                Some(330),
-            ),
-            (
-                "S3",
-                "goal lock + v0.5.0",
-                gear_board::StationState::Next,
-                Some(480),
-            ),
-        ]
-    );
-}
-
-fn plan(id: &str, what: &str, state: &str, at_min: i64) -> gear_store::VoyageStationPlan {
-    gear_store::VoyageStationPlan {
-        id: id.into(),
-        what: what.into(),
-        state: state.into(),
-        at_min: Some(at_min),
-    }
-}
-
 fn station(stations: &[StationProgress], id: &str) -> StationProgress {
     stations
         .iter()
@@ -287,7 +182,7 @@ fn the_stations_are_reached_now_and_next() {
 
     // The board carries them: the measured voyage's stations.
     let plan = board(&mut store);
-    assert_eq!(plan.station_progress, stations);
+    assert_eq!(plan.stations, stations);
 }
 
 #[test]

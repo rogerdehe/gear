@@ -242,12 +242,9 @@ pub struct ProjectBoard {
     /// The tasks that overlap the integration branch of their repo (T-188):
     /// information lines, never items that wait for the captain.
     pub overlaps: Vec<Overlap>,
-    /// The stations of the shown voyage, in plan order, as the header draws
-    /// them (T-352): reached, now and next. Empty without a shown voyage.
-    pub stations: Vec<StationBoard>,
-    /// The same stations with their progress (T-334); empty without a shown
-    /// voyage.
-    pub station_progress: Vec<stations::StationProgress>,
+    /// The stations of the measured voyage, in plan order, with their
+    /// progress (T-334); empty without a measured voyage.
+    pub stations: Vec<stations::StationProgress>,
     /// Each lane's queue played forward (T-349), in the order of `lanes`: when
     /// the lane ends and how long it sits idle. Empty when no measured voyage
     /// has open work.
@@ -263,31 +260,6 @@ pub struct ProjectBoard {
     /// carries the new voyage's milestone, so the shown voyage counts it
     /// nowhere.
     pub moved_out: Vec<(String, String)>,
-}
-
-/// Where a station of the shown voyage stands (T-352): what the header draws.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StationState {
-    /// Its work is in the integration branch.
-    Reached,
-    /// The work of the voyage now.
-    Now,
-    /// The one after the one that is now.
-    Next,
-}
-
-/// One station of the shown voyage, as the header draws it (T-352).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StationBoard {
-    /// The station's id, as the plan names it (`S1`, `S2`, …).
-    pub id: String,
-    /// What reaching it needs, in the user's words.
-    pub what: String,
-    /// Where it stands in the course.
-    pub state: StationState,
-    /// Minutes from the voyage's departure: when it was reached for
-    /// [`StationState::Reached`], the planned-by time otherwise.
-    pub at_min: Option<i64>,
 }
 
 /// One voyage of the project, as the board names it (T-350).
@@ -1031,14 +1003,9 @@ pub fn project_for(
         project,
         workload.as_ref().map(|voyage| voyage.milestone.as_str()),
     )?;
-    // The stations of the shown voyage (T-334): reached, now, next.
-    let station_progress = match &workload {
-        Some(voyage) => stations::progress(tx, project, &voyage.milestone)?,
-        None => Vec::new(),
-    };
-    // The stations the header draws (T-352): the shown voyage's plan entries.
+    // The stations of the measured voyage (T-334): reached, now, next.
     let stations = match &workload {
-        Some(voyage) => station_boards(tx, project, &voyage.milestone)?,
+        Some(voyage) => stations::progress(tx, project, &voyage.milestone)?,
         None => Vec::new(),
     };
     // Each lane's queue played forward (T-349): the measured voyage's forecast,
@@ -1094,7 +1061,6 @@ pub fn project_for(
         unconfirmed_deliveries,
         unconfirmed,
         stations,
-        station_progress,
         forecast,
         voyage_list,
         shown,
@@ -1627,32 +1593,6 @@ fn moved_out_of(decisions: &[DecisionBoard]) -> Vec<(String, String)> {
             Some((task.to_string(), to.to_string()))
         })
         .collect()
-}
-
-/// The stations the header draws (T-352): the voyage's plan entries, in plan
-/// order, with the state the plan words mapped to the board's. An entry whose
-/// state is none of `done`, `now` or `next` is not drawn.
-fn station_boards(
-    tx: &Tx<'_>,
-    project: &str,
-    voyage: &str,
-) -> GearResult<Vec<StationBoard>> {
-    let mut boards = Vec::new();
-    for plan in tx.voyage_station_plans(project, voyage)? {
-        let state = match plan.state.as_str() {
-            "done" => StationState::Reached,
-            "now" => StationState::Now,
-            "next" => StationState::Next,
-            _ => continue,
-        };
-        boards.push(StationBoard {
-            id: plan.id,
-            what: plan.what,
-            state,
-            at_min: plan.at_min,
-        });
-    }
-    Ok(boards)
 }
 
 /// The confirmed goal changes of the voyage (T-335): the decisions of kind

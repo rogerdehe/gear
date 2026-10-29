@@ -587,18 +587,6 @@ pub struct VoyageStation {
     pub needs: String,
 }
 
-/// One station of a voyage as the board's header draws it (T-352): its id,
-/// what reaching it needs, where it stands (`done`, `now` or `next`, as the
-/// plan words it) and when, in minutes from the voyage's departure — when it
-/// was reached, or the planned-by time.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct VoyageStationPlan {
-    pub id: String,
-    pub what: String,
-    pub state: String,
-    pub at_min: Option<i64>,
-}
-
 /// One applied plan version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanRow {
@@ -3347,42 +3335,6 @@ impl<'s> Tx<'s> {
             .get_meta(&format!("task-station:{project}:{task}"))?
             .unwrap_or_default();
         Ok((!raw.is_empty()).then_some(raw))
-    }
-
-    /// Write the voyage's station plans, in plan order, as a JSON array under
-    /// `voyage-station-plans:<project>:<milestone>` (T-352). An empty list
-    /// writes "".
-    pub fn set_voyage_station_plans(
-        &self,
-        project: &str,
-        milestone: &str,
-        stations: &[VoyageStationPlan],
-    ) -> GearResult<()> {
-        let raw = if stations.is_empty() {
-            String::new()
-        } else {
-            serde_json::to_string(stations)
-                .map_err(|error| GearError::new(ErrorCode::BadFormat, error.to_string()))?
-        };
-        self.set_meta(&format!("voyage-station-plans:{project}:{milestone}"), &raw)
-    }
-
-    /// The voyage's station plans, in plan order (T-352). A missing or empty
-    /// value is an empty list.
-    pub fn voyage_station_plans(
-        &self,
-        project: &str,
-        milestone: &str,
-    ) -> GearResult<Vec<VoyageStationPlan>> {
-        let raw = self
-            .get_meta(&format!("voyage-station-plans:{project}:{milestone}"))?
-            .unwrap_or_default();
-        if raw.is_empty() {
-            return Ok(Vec::new());
-        }
-        serde_json::from_str(&raw).map_err(|error| {
-            GearError::new(ErrorCode::BadFormat, format!("voyage station plans: {error}"))
-        })
     }
 }
 
