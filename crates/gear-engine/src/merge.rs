@@ -269,6 +269,18 @@ pub fn merge_passed(
                 // captain's items about them close (T-62, T-92).
                 resolve_wait(store, project, &op.task.clone().unwrap_or_default(), finished.at)?;
                 resolve_failed(store, project, &op.task.clone().unwrap_or_default(), finished.at)?;
+                // A branch the merge had to leave behind holds work that is not
+                // on the integration branch: the captain decides, once.
+                if let Some(left) = lines.lines().find(|line| line.starts_with("left on ")) {
+                    let task = op.task.clone().unwrap_or_default();
+                    let _ = tell_captain(
+                        store,
+                        project,
+                        op.attempt.map(|attempt| (task.as_str(), attempt)),
+                        &format!("{task} merged, but a branch stays: {left}. Land what it holds in a task, or delete it."),
+                        finished.at,
+                    );
+                }
             }
             Report::Pr { pr, head } => {
                 // §11.2 step 3: the merge op waits for the land op, which is
@@ -2168,6 +2180,26 @@ fn close_branches(
         }
         if delete_remote(dir, &name, remote) && !closed.contains(&name) {
             closed.push(name);
+        }
+    }
+    // The task's own branch whose tip moved past the candidate (a push after
+    // the hand-in): when every commit of it is on the merged integration
+    // branch it is closed too; otherwise it holds work nobody reviewed or
+    // merged, so it stays and the captain is told (another project,
+    // 2026-10-29: a branch left behind without a word).
+    let task_ref = format!("{}/{task_branch}", remote.name);
+    if !closed.iter().any(|name| name == task_branch) && pushed.refs.iter().any(|name| name == &task_ref) {
+        if git(dir, &["merge-base", "--is-ancestor", &task_ref, "HEAD"]).is_ok() {
+            if delete_remote(dir, task_branch, remote) {
+                closed.push(task_branch.to_string());
+            }
+        } else {
+            let ahead = git(dir, &["log", "--oneline", &format!("HEAD..{task_ref}")]).unwrap_or_default();
+            let commits: Vec<&str> = ahead.lines().filter(|line| !line.trim().is_empty()).collect();
+            left.push(format!(
+                "{task_branch} (commits after the approved candidate, not merged: {})",
+                commits.join("; ")
+            ));
         }
     }
     (closed, left)
