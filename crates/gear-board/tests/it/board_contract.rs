@@ -465,8 +465,12 @@ fn q_leaves_the_board() {
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains("GEAR · p"), "{text}");
     assert!(text.contains("LANES"), "{text}");
-    // The frame is drawn on the screen, so it starts with the clear.
-    assert!(text.contains("\x1b[2J"), "{text:?}");
+    // The frame is drawn in place (T-403): it opens a synchronized update and
+    // never clears the whole screen.
+    assert!(text.contains("\x1b[?2026h\x1b[H"), "{text:?}");
+    assert!(!text.contains("\x1b[2J"), "the screen is never cleared whole: {text:?}");
+    assert!(text.contains("\x1b[K"), "every line erases its rest: {text:?}");
+    assert!(text.contains("\x1b[J"), "the screen below the frame is erased: {text:?}");
 }
 
 #[test]
@@ -917,8 +921,9 @@ struct Frames {
     buffer: String,
 }
 
-/// The clear-screen prefix every frame starts with.
-const CLEAR: &str = "\x1b[H\x1b[2J";
+/// The clear-screen prefix every frame starts with: the synchronized update
+/// and the home position (T-403: the screen is never cleared whole).
+const CLEAR: &str = "\x1b[?2026h\x1b[H";
 
 /// The start of the footer, which an 80 column terminal shows: the whole
 /// footer is longer than the screen.
@@ -933,6 +938,40 @@ impl Frames {
     /// The next frame that does not hold `needle`.
     fn next_without(&mut self, needle: &str, timeout: Duration) -> String {
         self.wait(needle, false, timeout)
+    }
+
+    /// Whether no frame at all was written within `timeout`.
+    ///
+    /// The board writes a frame only when it says something new (T-403): a
+    /// key or a click that changes nothing leaves the screen as it is, so no
+    /// frame arrives.
+    fn quiet(&mut self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if self.take_frame().is_some() {
+                return false;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return true;
+            }
+            let mut fds = libc::pollfd { fd: self.master, events: libc::POLLIN, revents: 0 };
+            let millis = (deadline.saturating_duration_since(now)).as_millis().min(50) as i32;
+            // SAFETY: `fds` is one pollfd we own; the call only waits.
+            let ready = unsafe { libc::poll(&mut fds, 1, millis) };
+            if ready <= 0 {
+                continue;
+            }
+            let mut chunk = [0u8; 4096];
+            // SAFETY: the buffer is one chunk long.
+            let read = unsafe {
+                libc::read(self.master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+            };
+            if read > 0 {
+                self.buffer
+                    .push_str(&String::from_utf8_lossy(&chunk[..read as usize]));
+            }
+        }
     }
 
     /// Wait for a **complete** frame: the text between a clear-screen and the
@@ -1166,21 +1205,29 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     let _frame = frames.next("LANES", Duration::from_secs(5));
 
     // A click on the first row of the first view picks that row, and `Enter`
-    // opens its panel.
+    // opens its panel. The row is the one the board already shows as picked,
+    // and a frame that says what the last one said is not written (T-403):
+    // the selection is moved off it first, so the click is a change.
+    press(pty.master, b"j");
+    let _frame = frames.next("› runtime", Duration::from_secs(5));
     press(pty.master, b"\x1b[<0;1;7M");
     let _frame = frames.next("› data", Duration::from_secs(5));
     press(pty.master, b"\r");
     let frame = frames.next("lane data", Duration::from_secs(5));
     assert!(frame.contains("LEFT, in order"), "{frame}");
 
-    // The selection never walks past the last row: `j` twice on two lanes
-    // keeps the last one, and `Enter` opens it.
+    // The selection never walks past the last row: `j` moves to the last
+    // lane, a second `j` has nowhere to go and writes no frame at all, and
+    // `Enter` opens the last lane.
     press(pty.master, b"x");
     let _frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
     press(pty.master, b"j");
-    let _frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
-    press(pty.master, b"j");
     let _frame = frames.next("› runtime", Duration::from_secs(5));
+    press(pty.master, b"j");
+    assert!(
+        frames.quiet(Duration::from_millis(300)),
+        "a key that moves nothing writes no frame"
+    );
     press(pty.master, b"\r");
     let _frame = frames.next("lane runtime", Duration::from_secs(5));
 
@@ -1330,7 +1377,7 @@ fn a_board_of_one_project_has_no_project_key() {
 fn a_frame_without_the_footer_is_never_accepted() {
     let mut frames = Frames { master: -1, buffer: String::new() };
     // The clear-screen and the body, but no footer yet.
-    frames.buffer.push_str("\x1b[H\x1b[2JGEAR · p\nLANES\n");
+    frames.buffer.push_str("\x1b[?2026h\x1b[HGEAR · p\nLANES\n");
     assert!(
         frames.take_frame().is_none(),
         "a frame without the footer is not a frame"
@@ -1429,9 +1476,14 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     let _frame = frames.next("LANES", Duration::from_secs(5));
 
     // The panel of a lane with seventeen tasks is taller than the terminal: it
-    // keeps both borders and the footer's row (F3).
+    // keeps both borders and the footer's row (F3). The first lane is the one
+    // the board shows as picked, and a click that picks it again writes no
+    // frame (T-403): `Enter` opens it from there.
     press(pty.master, b"\x1b[<0;1;7M");
-    let _frame = frames.next("› data", Duration::from_secs(5));
+    assert!(
+        frames.quiet(Duration::from_millis(300)),
+        "a click on the picked row writes no frame"
+    );
     press(pty.master, b"\r");
     let frame = frames.next("LEFT, in order", Duration::from_secs(5));
     assert!(frame.contains("┐"), "the right border of the panel: {frame}");
@@ -1443,12 +1495,13 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     );
     // Any key closes the panel.
     press(pty.master, b"x");
-    let _frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
+    let frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
 
     // The Graph tab is clicked where it is drawn (F2: the frame is written
     // without a trailing newline, so the row the user sees is the row the hit
-    // testing expects).
-    let frame = frames.next("LANES", Duration::from_secs(5));
+    // testing expects). The frame that closed the panel is the one on the
+    // screen, and a frame that reads like the last one written is not written
+    // again (T-403).
     let tab = column_of(&frame, 3, "2 Tasks") + 2;
     press(pty.master, format!("\x1b[<0;{tab};4M").as_bytes());
     let _frame = frames.next("dev", Duration::from_secs(5));
@@ -1457,19 +1510,24 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     // press is read: the board redraws on its own too, and a pty whose output
     // is not read blocks the board (F9). The heading scrolls away with the
     // rows above the selected one (T-342), so the frames are drained by their
-    // footer.
+    // footer. A frame is written only when the selection moves (T-403), so the
+    // last one drained is the one on the screen.
+    let mut frame = String::new();
     for _ in 0..16 {
         press(pty.master, b"j");
-        let _frame = frames.last_with(FOOTER_START, Duration::from_secs(5));
+        frame = frames.last_with(FOOTER_START, Duration::from_secs(5));
     }
-    let frame = frames.last_with("T-17", Duration::from_secs(5));
     assert!(frame.contains("T-17"), "the last task stays visible: {frame}");
 
     // A click on the footer's row and on the spacer below the data selects
-    // nothing (F8): the selection stays on the last task.
+    // nothing (F8): the selection stays on the last task, and no frame is
+    // written (T-403).
     press(pty.master, b"\x1b[<0;1;24M");
     press(pty.master, b"\x1b[<0;1;23M");
-    let _frame = frames.next(FOOTER_START, Duration::from_secs(5));
+    assert!(
+        frames.quiet(Duration::from_millis(300)),
+        "a click that selects nothing writes no frame"
+    );
 
     // `Enter` opens the panel of the task that is visible.
     press(pty.master, b"\r");
@@ -1527,7 +1585,7 @@ impl Keys for Events {
 /// The last frame the board drew: the frames are separated by the clear.
 fn last_frame(out: &[u8]) -> String {
     let text = String::from_utf8_lossy(out);
-    text.rsplit("\u{1b}[H\u{1b}[2J").next().unwrap_or_default().to_string()
+    text.rsplit("\u{1b}[?2026h\u{1b}[H").next().unwrap_or_default().to_string()
 }
 
 /// T-342: a view with more picks than screen rows scrolls so the selected one

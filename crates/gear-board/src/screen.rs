@@ -1,7 +1,8 @@
 //! The terminal the board draws on: ANSI, raw mode, one key at a time.
 //!
-//! The board owns the screen while it is open: it clears it, redraws the
-//! frame and gives the terminal back when the user quits.
+//! The board owns the screen while it is open: it takes it over, overwrites
+//! the frame in place (T-403: nothing is cleared whole, so the page does not
+//! blink) and gives the terminal back when the user quits.
 
 use std::io::Write;
 use std::os::fd::{AsRawFd, RawFd};
@@ -192,14 +193,32 @@ pub fn leave(out: &mut dyn Write) -> std::io::Result<()> {
     out.flush()
 }
 
-/// Clear the screen and draw `text` at the top.
+/// Draw `text` over the last frame, in place (T-403).
+///
+/// The frame is written inside a synchronized update (`\x1b[?2026h` ...
+/// `\x1b[?2026l`), so the terminal shows all of it or none of it, and every
+/// line erases its rest with `\x1b[K` before the newline: a line that got
+/// shorter leaves nothing of the old one behind. `\x1b[J` erases below the
+/// last line. The screen is never cleared whole (`\x1b[2J`): that clear is
+/// what made the page blink. (`[2026` is ignored by a terminal that does not
+/// know it: the frame is still a full overwrite from the home position.)
 ///
 /// The canvas is written **without** a trailing newline (F2): a newline after
 /// the footer's row scrolls the screen by one line, so the title leaves the
 /// top and every visible row sits one line above where the hit testing
 /// expects it.
 pub fn draw(out: &mut dyn Write, text: &str) -> std::io::Result<()> {
-    write!(out, "\x1b[H\x1b[2J{text}")?;
+    write!(out, "\x1b[?2026h\x1b[H")?;
+    let mut lines = text.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        // Every line erases its rest. The lines are kept apart by the newline
+        // the board has always written; the last line's one is dropped (F2).
+        write!(out, "{line}\x1b[K")?;
+        if lines.peek().is_some() {
+            write!(out, "\n")?;
+        }
+    }
+    write!(out, "\x1b[J\x1b[?2026l")?;
     out.flush()
 }
 
