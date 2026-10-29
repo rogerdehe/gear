@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=681 -->
+<!-- gear-plan project=gear base=682 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -119,7 +119,7 @@ estimate: 25
 
 ## T-395 [now] lane=hull milestone=M5 required
 goal: [v0.5.0 S1] A merge that lost its push race is not starved by newer merges (2026-10-29: T-381 and T-329 sat in `unknown` after a push race while five newer merges ran ahead of them; `- remerge` refuses an unknown op). Cause, crates/gear-engine/src/merge.rs fn ready_merges: it returns every Intended op before any Unknown one, so while new merges keep arriving an Unknown merge never runs. Change fn ready_merges only, no other design: return the Intended and Unknown merge ops together, ordered by their `created` time (oldest first, the op id breaking ties). The code change is in crates/gear-engine/src/merge.rs only; tests go where the crate keeps them.
-accept: A merge.rs test: an Unknown merge op created before two Intended ones comes first from fn ready_merges; ops of other kinds are left out as today; the existing merge tests pass. Run only `make check CRATE=gear-engine TESTS='test(/^merge::/)'`; the merge gate runs `make gate`.
+accept: A merge.rs test: an Unknown merge op created before two Intended ones comes first from fn ready_merges; ops of other kinds are left out as today; the existing merge tests pass. Run only `make check CRATE=gear-engine`; the merge gate runs `make gate`.
 estimate: 10
 
 ## T-381 [must] lane=hull milestone=M5 required
