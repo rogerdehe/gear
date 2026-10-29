@@ -125,6 +125,9 @@ pub struct Facts {
     /// The session of the round that is already open on this seat (S1: the
     /// agent died or was restarted while its round was open).
     pub open_round_session: Option<String>,
+    /// The sessions other panes' live agents run (S3): a conversation one of
+    /// them holds is never resumed here.
+    pub sessions_elsewhere: Vec<String>,
 }
 
 impl Facts {
@@ -155,24 +158,44 @@ impl Facts {
 /// - **V1-V2** — a review round: the earlier review of this task on this
 ///   seat, else a new session.
 ///
+/// **S3** sits on top of all of them: whichever rule picked a `resume` of a
+/// session another pane's live agent runs, the round starts a new
+/// conversation instead.
+///
 /// **L1** is not a rule of its own: it says what happens when the seat has
 /// no live agent — the agent is started plainly (with the resume args when
 /// the rule says `resume`) and the action becomes `fresh`.
 pub fn choose(facts: &Facts) -> Action {
     // S1: the round is open and the agent died or was restarted.
-    if let Some(action) = s1(facts) {
-        return action;
-    }
-    let action = match facts.role {
-        Role::Review | Role::Direction => review_action(facts),
-        Role::Dev | Role::Rework => lane_action(facts),
+    let action = match s1(facts) {
+        Some(action) => action,
+        None => match facts.role {
+            Role::Review | Role::Direction => review_action(facts),
+            Role::Dev | Role::Rework => lane_action(facts),
+        },
     };
+    // S3: a conversation another pane's live agent runs is not resumed — that
+    // agent answers "This conversation is open in another app" and the seat
+    // sits locked. The seat starts a new conversation instead; nothing else is
+    // touched, no pane is closed.
+    let action = without_a_held_resume(facts, action);
     // L1: a seat without a live agent has its agent started plainly, and the
     // session it starts with is a fresh one.
     if !facts.agent_live && !matches!(action, Action::Resume(_)) {
         return Action::Fresh;
     }
     action
+}
+
+/// S3 (design §3.3, T-423): a conversation another pane's live agent holds is
+/// never resumed. Every path that picks an action passes through here — the
+/// rules of `choose`, and the S1 recovery of an open round that calls `s1`
+/// directly (`prepare_lane`, `prepare_review`).
+fn without_a_held_resume(facts: &Facts, action: Action) -> Action {
+    match action {
+        Action::Resume(session) if facts.sessions_elsewhere.contains(&session) => Action::Fresh,
+        action => action,
+    }
 }
 
 /// S1 (design §3.3): the agent died or was restarted while its round was
@@ -301,11 +324,14 @@ pub fn prepare_lane(
         // A new round: the rules of §3.3 decide.
         None => choose(&facts),
         // The round is open: S1 decides, else the round goes on with the
-        // action it has.
-        Some(_) => match s1(&facts) {
-            Some(action) => action,
-            None => recorded_action(store, &project, task, attempt)?.unwrap_or(Action::Keep),
-        },
+        // action it has. S3 holds for S1 too (T-423, F1 of the review).
+        Some(_) => without_a_held_resume(
+            &facts,
+            match s1(&facts) {
+                Some(action) => action,
+                None => recorded_action(store, &project, task, attempt)?.unwrap_or(Action::Keep),
+            },
+        ),
     };
     if rebind_fresh { action = Action::Fresh; }
     if round.is_none() && facts.followup_of.is_some() && attempt == 1 && matches!(action, Action::Keep)
@@ -379,10 +405,15 @@ pub(crate) fn prepare_review_role(
 
     let action = match &round {
         None => choose(&facts),
-        Some(_) => match s1(&facts) {
-            Some(action) => action,
-            None => recorded_review_action(store, &project, task, attempt)?.unwrap_or(Action::Keep),
-        },
+        // The round is open: S1 decides, else the recorded action. S3 holds for
+        // S1 too (T-423, F1 of the review).
+        Some(_) => without_a_held_resume(
+            &facts,
+            match s1(&facts) {
+                Some(action) => action,
+                None => recorded_review_action(store, &project, task, attempt)?.unwrap_or(Action::Keep),
+            },
+        ),
     };
 
     store.write(|tx| {
@@ -454,6 +485,7 @@ fn lane_facts(
         current_cli,
         agent_live,
         open_round_session: None,
+        sessions_elsewhere: sessions_elsewhere(store, herdr, seat),
     })
 }
 
@@ -497,7 +529,33 @@ fn review_facts(
         current_cli,
         agent_live,
         open_round_session: None,
+        sessions_elsewhere: sessions_elsewhere(store, herdr, seat),
     })
+}
+
+/// The sessions the live agents of the **other** panes run (S3).
+///
+/// A conversation another pane's live agent holds is refused on resume
+/// ("This conversation is open in another app") and the seat sits locked, so
+/// the seat starts a new conversation instead. A read that fails is not
+/// evidence of another pane: the facts then carry no such session, and the
+/// rules resume as they did before.
+fn sessions_elsewhere(store: &mut Store, herdr: &mut dyn HerdrAct, seat: &SeatRow) -> Vec<String> {
+    let own = store
+        .read(|tx| tx.get_binding(&seat.id, seat.generation))
+        .ok()
+        .flatten()
+        .map(|binding| binding.pane_id);
+    let Ok(agents) = herdr.agents() else {
+        return Vec::new();
+    };
+    agents
+        .iter()
+        .filter(|agent| Some(agent.pane_id.as_str()) != own.as_deref())
+        .filter_map(|agent| agent.agent_session.as_ref())
+        .map(|session| session.value.clone())
+        .filter(|session| !session.is_empty())
+        .collect()
 }
 
 /// The session the seat runs on now, the CLI it runs on, and whether its
@@ -1022,6 +1080,7 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
             current_cli: Some("codex".into()),
             agent_live: true,
             open_round_session: None,
+            sessions_elsewhere: Vec::new(),
         }
     }
 
@@ -1163,6 +1222,7 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
             current_cli: Some("codex".into()),
             agent_live: true,
             open_round_session: None,
+            sessions_elsewhere: Vec::new(),
         };
         assert_eq!(choose(&facts), Action::Keep);
 
@@ -1189,6 +1249,7 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
             current_cli: Some("codex".into()),
             agent_live: true,
             open_round_session: None,
+            sessions_elsewhere: Vec::new(),
         };
         assert_eq!(choose(&facts), Action::New);
 
@@ -1218,6 +1279,155 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
         let mut facts = lane_facts();
         facts.open_round_session = Some("session-a".into());
         assert_ne!(choose(&facts), Action::Resume(String::new()));
+    }
+
+    /// S3: a review round whose earlier session another pane's live agent
+    /// holds starts a new conversation; the same round without such an agent
+    /// resumes it.
+    #[test]
+    fn s3_a_review_of_a_session_held_elsewhere_starts_fresh() {
+        let mut facts = Facts {
+            seat: "p:review-1".into(),
+            seat_state: SeatState::Standby,
+            role: Role::Review,
+            attempt: 1,
+            followup_of: None,
+            earlier_seat: Some("p:review-1".into()),
+            earlier_cli: Some("codex".into()),
+            earlier_session: Some("session-r".into()),
+            current_session: Some("session-other".into()),
+            current_cli: Some("codex".into()),
+            agent_live: true,
+            open_round_session: None,
+            sessions_elsewhere: Vec::new(),
+        };
+        assert_eq!(choose(&facts), Action::Resume("session-r".into()));
+
+        facts.sessions_elsewhere = vec!["session-r".into()];
+        assert_eq!(choose(&facts), Action::Fresh, "another pane's agent holds it");
+
+        // Another session held elsewhere is not this round's concern.
+        facts.sessions_elsewhere = vec!["session-z".into()];
+        assert_eq!(choose(&facts), Action::Resume("session-r".into()));
+    }
+
+    /// S3: an S1 resume of a session another pane's live agent holds starts a
+    /// new conversation (the original symptom: the seat sat locked).
+    #[test]
+    fn s3_an_s1_resume_of_a_session_held_elsewhere_starts_fresh() {
+        // The agent of the open round died, and another pane's live agent runs
+        // the round's session.
+        let mut facts = lane_facts();
+        facts.open_round_session = Some("session-a".into());
+        facts.agent_live = false;
+        facts.sessions_elsewhere = vec!["session-a".into()];
+        assert_eq!(choose(&facts), Action::Fresh);
+
+        // The agent was restarted on another session, and the round's session
+        // is held elsewhere.
+        let mut facts = lane_facts();
+        facts.open_round_session = Some("session-old".into());
+        facts.current_session = Some("session-new".into());
+        facts.sessions_elsewhere = vec!["session-old".into()];
+        assert_eq!(choose(&facts), Action::Fresh);
+
+        // With no such holder, S1 resumes as it did.
+        facts.sessions_elsewhere = Vec::new();
+        assert_eq!(choose(&facts), Action::Resume("session-old".into()));
+    }
+
+    /// F1 of the T-423 review (S3): the recovery of an open round calls `s1`
+    /// directly, so the guard holds there too — a lane round whose session
+    /// another pane's live agent holds starts a new conversation.
+    #[test]
+    fn s3_an_open_lane_round_held_elsewhere_is_not_resumed() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let key = gear_store::RoundKey { project: "p".into(), task: "T-1".into(), attempt: 1, role: "dev".into() };
+        store
+            .write(|tx| {
+                tx.insert_round(&gear_store::NewRound { key: key.clone(), seat: seat.id.clone(), generation: 1, cli: "codex".into(), model: None, start_at: T0 })?;
+                tx.add_round_session(&key, "round-session")?;
+                // The seat was restarted on another session: S1 would resume
+                // the round's.
+                tx.set_binding_session_ref(&seat.id, 1, "replacement")
+            })
+            .unwrap();
+        herdr.exit_agent("w1:p1");
+        // Another pane's live agent runs the round's session.
+        herdr.add_agent("w9:p1", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.set_agent_session("w9:p1", "round-session");
+
+        assert_eq!(
+            prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 10).unwrap(),
+            Prep::Ready,
+            "the seat starts a new conversation"
+        );
+
+        let state = store.read(|tx| tx.get_meta("engine.session_step.p:heat")).unwrap().unwrap();
+        let state: serde_json::Value = serde_json::from_str(&state).unwrap();
+        assert_eq!(state["action"], "fresh", "S1 does not resume a held session: {state}");
+        assert!(
+            !herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::AgentStart { args, .. } if args.contains(&"round-session".to_string()))),
+            "the held session is not started: {:?}",
+            herdr.calls
+        );
+    }
+
+    /// F1 of the T-423 review (S3): an open **review** round in the same
+    /// recovery starts a new conversation too.
+    #[test]
+    fn s3_an_open_review_round_held_elsewhere_is_not_resumed() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        let key = gear_store::RoundKey { project: "p".into(), task: "T-1".into(), attempt: 1, role: "review".into() };
+        store
+            .write(|tx| {
+                tx.insert_round(&gear_store::NewRound { key: key.clone(), seat: seat.id.clone(), generation: seat.generation, cli: "codex".into(), model: None, start_at: T0 })?;
+                tx.add_round_session(&key, "review-held")?;
+                tx.set_binding_session_ref(&seat.id, seat.generation, "review-other")
+            })
+            .unwrap();
+        herdr.exit_agent("w2:p2");
+        herdr.add_agent("w9:p1", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.set_agent_session("w9:p1", "review-held");
+
+        assert_eq!(
+            prepare_review(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 10).unwrap(),
+            Prep::Ready,
+            "the review starts a new conversation"
+        );
+        let action = store.read(|tx| tx.get_meta(&review_action_key("p", "T-1", 1))).unwrap().unwrap();
+        let action: serde_json::Value = serde_json::from_str(&action).unwrap();
+        assert_eq!(action["action"], "fresh", "a held review session is not resumed: {action}");
+    }
+
+    /// S3: both facts builders read the sessions of the other panes' live
+    /// agents from Herdr, never the seat's own.
+    #[test]
+    fn s3_the_facts_name_the_sessions_the_other_panes_hold() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w3:p3", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w4:p4", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.set_agent_session("w1:p1", "lane-own");
+        herdr.set_agent_session("w2:p2", "review-own");
+        herdr.set_agent_session("w3:p3", "held-a");
+        herdr.set_agent_session("w4:p4", "held-b");
+
+        let lane = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let facts = super::lane_facts(&mut store, &mut herdr, "p", &lane, "T-1", 1).unwrap();
+        assert_eq!(facts.sessions_elsewhere, vec!["review-own".to_string(), "held-a".into(), "held-b".into()]);
+
+        let review = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        let facts = super::review_facts(&mut store, &mut herdr, "p", &review, "T-1", 1).unwrap();
+        assert_eq!(facts.sessions_elsewhere, vec!["lane-own".to_string(), "held-a".into(), "held-b".into()]);
     }
 
     /// The round row is created once: two calls over the same round make one
