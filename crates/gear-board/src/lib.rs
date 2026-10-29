@@ -253,6 +253,11 @@ pub struct ProjectBoard {
     /// the lane ends and how long it sits idle. Empty when no measured voyage
     /// has open work.
     pub forecast: Vec<forecast::LaneEnd>,
+    /// What the shown tasks wait on, in plan order (T-360): a task in review
+    /// names the reviewer and how long it has held it, a task that waits for
+    /// the captain names what he owes. The board's Now view lists them as items
+    /// to handle, each with who acts.
+    pub waiting_on: Vec<String>,
     /// Every voyage of the project that departed, newest departure first
     /// (T-350): the board can be built for any of them.
     pub voyage_list: Vec<VoyageEntry>,
@@ -453,6 +458,9 @@ pub struct DownSeat {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskBoard {
     pub id: String,
+    /// The queue position in the plan, ascending (the store's rank): the Now
+    /// view's items to handle follow the plan, not the lanes' grouping (T-360).
+    pub rank: i64,
     pub state: TaskState,
     /// The task's stage in the graph, and its words (T-347): the lane lines of
     /// the board and of the captain's home page name the stage in the same
@@ -756,6 +764,7 @@ pub fn project_for(
         let stage_words = graph::Stage::words_of(stage, &task.deps, rounds, None);
         let line = TaskBoard {
             id: task.id.clone(),
+            rank: task.rank,
             state: task.state,
             stage,
             stage_words,
@@ -986,6 +995,58 @@ pub fn project_for(
         right.age_s.cmp(&left.age_s).then_with(|| left.op.cmp(&right.op))
     });
 
+    // What the shown tasks wait on, in plan order (T-360): the Now view lists
+    // it under the lanes, each item with who acts. A task in review names the
+    // reviewer holding it and how long it has held it; a task that waits for
+    // the captain names what he owes.
+    let mut ordered: Vec<(&str, &TaskBoard)> = Vec::new();
+    for lane in &lanes {
+        for task in &lane.tasks {
+            ordered.push((lane.lane.as_str(), task));
+        }
+    }
+    ordered.sort_by(|(_, left), (_, right)| {
+        left.rank.cmp(&right.rank).then_with(|| left.id.cmp(&right.id))
+    });
+    let mut waiting_on = Vec::new();
+    for (lane, task) in ordered {
+        match task.stage {
+            graph::Stage::Review => {
+                let holder = temps_seats.iter().find(|seat| {
+                    seat.state == SeatState::Active
+                        && seat.task_id.as_deref() == Some(task.id.as_str())
+                });
+                let name = holder.map(|seat| seat.name.as_str()).unwrap_or("-");
+                // The reviewer's open round is when it took the task up; a
+                // seat without one counts from its state.
+                let since = match holder {
+                    Some(seat) => match tx.open_round_of_seat(&seat.id)? {
+                        Some(round) => round.start_at,
+                        None => seat.state_since,
+                    },
+                    None => now,
+                };
+                waiting_on.push(format!(
+                    "{} in review by {name}, {} min in",
+                    task.id,
+                    (now - since).max(0) / 60
+                ));
+            }
+            graph::Stage::Asking => waiting_on.push(format!(
+                "{} {lane} waits for the captain's answer",
+                task.id
+            )),
+            graph::Stage::Verdict => {
+                waiting_on.push(format!("{} waits for the captain's verdict", task.id))
+            }
+            graph::Stage::MergeFailed => waiting_on.push(format!(
+                "{} merge failed, waits for the captain",
+                task.id
+            )),
+            _ => {}
+        }
+    }
+
     let voyages = voyage::reports(tx, project, now)?;
     // The decisions belong to the voyage the board measures (F3).
     let decisions = decisions_of(
@@ -1073,6 +1134,7 @@ pub fn project_for(
         unconfirmed,
         stations,
         forecast,
+        waiting_on,
         voyage_list,
         shown,
         moved_out,

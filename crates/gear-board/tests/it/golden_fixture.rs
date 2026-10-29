@@ -95,7 +95,16 @@ pub fn load() -> (Store, i64) {
     let mut store = Store::open_in_memory().unwrap();
     store
         .write(|tx| {
-            testing::seed_project(tx, "gear", "s", now)?;
+            let mut project = testing::seed_project(tx, "gear", "s", now)?;
+            // The prototype's project reads the two providers its quota line
+            // draws; the board shows a reading only when the project reads it
+            // now (T-383).
+            project.config_toml = concat!(
+                "[[quota.sources]]\nprovider = \"tokenrhythm\"\n",
+                "[[quota.sources]]\nprovider = \"codex\"\n",
+            )
+            .to_string();
+            tx.update_project(&project)?;
             testing::seed_active_seat(
                 tx,
                 "gear",
