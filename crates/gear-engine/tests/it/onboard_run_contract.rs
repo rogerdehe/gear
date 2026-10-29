@@ -331,6 +331,9 @@ fn a_released_lane_whose_agent_is_gone_is_onboarded_and_given_its_task() {
     )
     .unwrap();
     let mut herdr = FakeHerdr::new();
+    // A delivered prompt starts the lane's turn, as a real agent does (T-404:
+    // an idle agent with no delivery in its tail is a lost delivery).
+    herdr.prompt_starts_turn = true;
     let cfg = cfg();
 
     let cap = Fingerprint { pane_id: "w1:p1".into(), kind: Some("claude".into()), session_ref: None };
