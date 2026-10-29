@@ -1047,6 +1047,11 @@ pub(crate) fn reconcile_config(
     let version = store.read(|tx|tx.get_project(project))?.map(|p|p.config_version).unwrap_or(0);
     let seats = store.read(|tx|tx.seats_of_project(project))?;
     for seat in seats {
+        // A seat that is not Active or Standby (Held, Parked, Queued, …) is out
+        // of reconciliation: its stored `engine.restart_config` stays as it is,
+        // so a change made meanwhile is still stored as a change when the seat
+        // comes back, and the comparison below runs then like for any other
+        // seat (T-400).
         if seat.role != gear_model::SeatRole::Lane || !matches!(seat.state, SeatState::Active | SeatState::Standby) { continue }
         if pending(store, &seat.id)?.is_some() || crate::switch::pending(store, &seat.id)?.is_some() { continue }
         let Some(lane) = config.lanes.iter().find(|lane|lane.name == seat.name) else { continue };
@@ -1062,18 +1067,34 @@ pub(crate) fn reconcile_config(
         let previous = meta_get(store, &key)?.and_then(|s|serde_json::from_str::<serde_json::Value>(&s).ok());
         let changed = previous.as_ref().is_some_and(|old| old != &desired);
         let current_model = meta_get(store, &model_meta_key(&seat.id))?;
-        let quota_fallback = previous.is_none() && chain.iter().skip(1).any(|entry|
+        // A lane the quota policy moved onto a later entry of its own chain is
+        // not a config change: the quota step brings it back at the reset.
+        let on_later_entry = chain.iter().skip(1).any(|entry|
             current_model.as_deref() == Some(entry.model()) && entry.cli().unwrap_or(&lane.kind) == current_cli);
+        let quota_fallback = previous.is_none() && on_later_entry;
         // Version one is the initial configuration, not a re-apply. Seed a
         // baseline for existing lanes without confusing a quota fallback with
         // an explicit configuration change.
         let reapply = previous.is_some() || version > 1;
+        // An explicit config change of CLI restarts the seat even when its
+        // old model/CLI is still a later entry of the new chain; only a seat
+        // the quota policy moved down its chain is left alone (T-400 F1).
         let kind_changed = reapply && current_cli != target_cli && !quota_fallback && (changed || previous.is_none());
         let model_changed = reapply && ((changed && previous.as_ref().is_some_and(|old|
             (old["model"] != desired["model"] && (model.is_empty() || current_model.as_deref() != Some(model)))
                 || old["args"] != desired["args"]))
             || (previous.is_none() && !model.is_empty() && current_model.is_some() && current_model.as_deref() != Some(model) && !quota_fallback));
-        if !kind_changed && !model_changed { meta_set(store, &key, &desired.to_string())?; continue }
+        // T-400: what the seat actually runs is compared with the registered
+        // chain head, not only the stored key. A restart planned while the seat
+        // was Active is lost when the captain holds the lane and releases it
+        // before the plan finishes; the key then says "applied" and the lane
+        // would keep the old model for good.
+        let runs_other = current_cli != target_cli || match current_model.as_deref() {
+            Some(running) => running != model,
+            None => false,
+        };
+        let stale = reapply && !on_later_entry && runs_other;
+        if !kind_changed && !model_changed && !stale { meta_set(store, &key, &desired.to_string())?; continue }
         let target = ModelEntry::Entry(gear_app::config::ModelSpec {model:model.into(),cli:Some(target_cli.into()),args:args.to_vec(),context_window_k:first.and_then(|e|e.context_window_k())});
         // Persist the request before any terminal action. A crash resumes the
         // restart plan; the desired fingerprint prevents another one afterward.
@@ -1087,7 +1108,7 @@ pub(crate) fn reconcile_config(
 mod config_change_tests {
     use super::*;
     use gear_herdr::fake::{Call, FakeHerdr};
-    use gear_model::{SeatRole, TaskState};
+    use gear_model::{AttemptState, SeatRole, TaskState};
     use gear_store::{testing, ContractRow, NewRound, RoundKey, TaskRow};
     const T: i64 = 1_800_000_000;
     const PANE: &str = "w1:p2";
@@ -1252,6 +1273,113 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         assert!(pending(&mut store,"p:heat").unwrap().is_none());
         let ops=store.read(|tx|tx.ops_of_seat_kind("p:heat",OpKind::Deliver)).unwrap();
         assert!(ops.iter().any(|op|op.payload["text"].as_str().is_some_and(|text|text.contains("Continue T-1"))),"{ops:?}");
+    }
+    #[test]
+    fn re_init_to_another_cli_with_an_open_attempt_restarts_on_the_new_model_and_continues() {
+        // T-400: a re-init that changes the lane's model and its CLI while its
+        // attempt is Started restarts the lane on the new model and hands the
+        // attempt back with its Continue line.
+        let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap(),false);
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T).unwrap();
+        assert_eq!(store.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().state,AttemptState::Started);
+        change(&mut store,"codex","new-model");
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+1).unwrap();
+        advance_pending(&mut store,&mut herdr,&cfg,T+2);
+        assert!(herdr.calls.iter().any(|c|matches!(c,Call::Prompt {text,..} if text=="/quit")));
+        herdr.exit_agent(PANE); advance_pending(&mut store,&mut herdr,&cfg,T+3);
+        let (kind,args)=herdr.calls.iter().find_map(|c|if let Call::AgentStart {kind,args,..}=c {Some((kind,args))} else {None}).unwrap();
+        assert_eq!(kind,"codex");
+        assert!(args.windows(2).any(|w|w==["-m","new-model"]),"{args:?}");
+        assert_eq!(store.read(|tx|tx.get_meta(&model_meta_key("p:heat"))).unwrap().as_deref(),Some("new-model"));
+        let ops=store.read(|tx|tx.ops_of_seat_kind("p:heat",OpKind::Deliver)).unwrap();
+        assert!(ops.iter().any(|op|op.payload["text"].as_str().is_some_and(|text|text.contains("Continue T-1"))),"{ops:?}");
+    }
+    #[test]
+    fn a_lane_that_came_back_on_its_old_model_is_restarted_again() {
+        // T-400, the incident: a restart planned while the seat was Active is
+        // lost when the captain holds the lane and releases it before the plan
+        // finishes. The stored key already says the new chain was applied, so
+        // only what the seat actually runs can still trigger the restart.
+        let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap(),false);
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T).unwrap();
+        change(&mut store,"pi","new-model");
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+1).unwrap();
+        assert!(pending(&mut store,"p:heat").unwrap().is_some());
+        assert!(store.read(|tx|tx.get_meta("engine.restart_config.p:heat")).unwrap().unwrap().contains("new-model"));
+        // Held, the plan gone, released with its agent alive: the lane runs the
+        // old model again.
+        store.write(|tx|tx.set_seat_state("p:heat",SeatState::Held,Some("hold: the user asked"),T+2)).unwrap();
+        clear_pending(&mut store,"p:heat").unwrap();
+        store.write(|tx|tx.set_seat_state("p:heat",SeatState::Active,Some("released by the captain: its agent continues"),T+3)).unwrap();
+        assert_eq!(store.read(|tx|tx.get_meta(&model_meta_key("p:heat"))).unwrap().as_deref(),Some("old-model"));
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+3).unwrap();
+        assert!(pending(&mut store,"p:heat").unwrap().is_some(),"the seat still runs the old model, so the change is applied again");
+        advance_pending(&mut store,&mut herdr,&cfg,T+4);
+        herdr.exit_agent(PANE); advance_pending(&mut store,&mut herdr,&cfg,T+5);
+        let args=herdr.calls.iter().find_map(|c|if let Call::AgentStart {args,..}=c {Some(args)} else {None}).unwrap();
+        assert!(args.windows(2).any(|w|w==["--model","new-model"]),"{args:?}");
+        assert_eq!(store.read(|tx|tx.get_meta(&model_meta_key("p:heat"))).unwrap().as_deref(),Some("new-model"));
+    }
+    #[test]
+    fn review_reinit_cli_change_retaining_old_cli_as_fallback() {
+        // F1 of the T-400 review: the old CLI staying a later entry of the new
+        // chain must not swallow an explicit CLI change.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap(), false);
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        // Same model, new preferred CLI; the old CLI remains a fallback.
+        change(&mut store, "codex", "old-model");
+        store.write(|tx| {
+            let mut p = tx.get_project("p")?.unwrap();
+            p.config_toml = p.config_toml.replace(
+                "lanes = [{model=\"old-model\", cli=\"codex\"}]",
+                "lanes = [{model=\"old-model\", cli=\"codex\"}, {model=\"old-model\", cli=\"pi\"}]");
+            tx.update_project(&p)
+        }).unwrap();
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T+1).unwrap();
+        assert!(pending(&mut store, "p:heat").unwrap().is_some(),
+            "explicit pi-to-codex config change must schedule a restart, even when pi remains a fallback");
+    }
+    #[test]
+    fn a_lane_on_a_later_chain_entry_is_left_to_the_quota_step() {
+        // The comparison with what the seat runs must not fight a quota
+        // fallback: a lane on a later entry of its own chain waits for the
+        // quota step, as before (T-400).
+        let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap(),false);
+        store.write(|tx| {let mut p=tx.get_project("p")?.unwrap();
+            p.config_toml=p.config_toml.replace("lanes = [{model=\"old-model\", cli=\"pi\"}]","lanes = [{model=\"old-model\", cli=\"pi\"}, {model=\"new-model\", cli=\"pi\"}]");
+            tx.update_project(&p)}).unwrap();
+        store.write(|tx|tx.set_meta(&model_meta_key("p:heat"),"new-model")).unwrap();
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T).unwrap();
+        store.write(|tx| {let mut p=tx.get_project("p")?.unwrap();p.config_version+=1;tx.update_project(&p)}).unwrap();
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+1).unwrap();
+        assert!(pending(&mut store,"p:heat").unwrap().is_none());
+        assert!(!herdr.calls.iter().any(|c|matches!(c,Call::Prompt {..}|Call::AgentStart {..}|Call::SendKeys {..})));
+    }
+    #[test]
+    fn model_change_made_while_the_lane_was_held_is_applied_on_release() {
+        // T-400: a hold takes the lane out of reconciliation, so the change
+        // waits; the release puts the seat back in and the comparison with the
+        // registered chain runs as for any other seat.
+        let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap(),false);
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T).unwrap();
+        let seeded=store.read(|tx|tx.get_meta("engine.restart_config.p:heat")).unwrap();
+        assert!(seeded.is_some());
+        store.write(|tx|tx.set_seat_state("p:heat",SeatState::Held,Some("hold: the user asked"),T)).unwrap();
+        change(&mut store,"pi","new-model");
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+1).unwrap();
+        assert!(pending(&mut store,"p:heat").unwrap().is_none(),"a held lane is not restarted");
+        assert_eq!(store.read(|tx|tx.get_meta("engine.restart_config.p:heat")).unwrap(),seeded,"the hold keeps the stored configuration untouched");
+        assert!(!herdr.calls.iter().any(|c|matches!(c,Call::Prompt {..}|Call::AgentStart {..}|Call::SendKeys {..})));
+        // Released with its agent still alive: the seat is Active again.
+        store.write(|tx|tx.set_seat_state("p:heat",SeatState::Active,Some("released by the captain: its agent continues"),T+2)).unwrap();
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+2).unwrap();
+        assert!(pending(&mut store,"p:heat").unwrap().is_some(),"the change made while held is applied on release");
+        advance_pending(&mut store,&mut herdr,&cfg,T+3);
+        herdr.exit_agent(PANE); advance_pending(&mut store,&mut herdr,&cfg,T+4);
+        let args=herdr.calls.iter().find_map(|c|if let Call::AgentStart {args,..}=c {Some(args)} else {None}).unwrap();
+        assert!(args.windows(2).any(|w|w==["--model","new-model"]),"{args:?}");
+        assert_eq!(store.read(|tx|tx.get_meta(&model_meta_key("p:heat"))).unwrap().as_deref(),Some("new-model"));
     }
     #[test]
     fn removing_the_model_chain_restarts_without_a_model_flag() {

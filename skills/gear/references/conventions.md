@@ -152,6 +152,26 @@ repo = "api"                 # the [[repos]] entry; without it the project root
 
 A lane without a `repo` works in the project root, exactly as before.
 
+A lane may also run its own model and CLI instead of `[models] lanes`: a `models` list in its `[[lanes]]` block replaces the lane chain for that lane alone, its first entry being the model the engine starts and restarts it on (and the one the quota policy walks). E.g. two lanes on one model, one on another, one on a CLI of its own:
+
+```toml
+[models]
+lanes = ["provider/fast-model"]
+
+[[lanes]]
+name = "api"
+duty = "The API service"
+owns = ["src/"]
+repo = "api"
+models = [{ model = "<model-id>", cli = "pi" }]   # pi | codex | opencode | claude
+
+[[lanes]]
+name = "web"
+duty = "The web client"
+owns = ["app/"]
+models = [{ model = "<other-model-id>", cli = "codex" }]
+```
+
 - A lane's worktree holds only its repo: it is cut from that repo's integration branch, reviewed against it and merged into it with that repo's gate.
 - `owns` paths are relative to the lane's repo, so two lanes may own the same path in two repos.
 - A repo may have several lanes, each owning its own paths. A task changes one repo; a requirement that crosses repos is cut into a contract task first, then one task per repo (`gear --skill decompose`).
