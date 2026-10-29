@@ -18,7 +18,7 @@ use gear_app::config::{ModelEntry, ProjectConfig, Repo};
 use gear_herdr::{HerdrAct, Outcome, Profile};
 use gear_model::state::require_transition;
 use gear_model::{
-    AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, SeatRole, SeatState,
+    AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState,
     TaskState, Ts,
 };
 use gear_store::{BindingStatus, NewMessage, NewOp, SeatRow, Store, Tx};
@@ -120,6 +120,12 @@ pub fn start_reviews(
     } else {
         start_hand_in_reviews(store, herdr, cfg, &config, profiles, project, &late_hand_ins, &mut report, now)?;
     }
+    // T-376: the hand-in pass is done. A hand-in that still waits for a
+    // reviewer 20 minutes after it was handed in rings the captain: the
+    // "every temp seat is in use" notice covers only a full quota, and a
+    // hand-in that reached no reviewer at all said nothing (another project's
+    // T-117: 70 minutes Submitted while seats were free).
+    tell_captain_of_a_review_stall(store, project, now)?;
     Ok(report)
 }
 
@@ -2116,6 +2122,97 @@ fn tell_captain_of_hand_ins_without_reviewers(
                     "{} attempt {} was handed in and this project has no reviewers \
                      ([temps]): settle it in # Verdicts (pass with evidence=, or fail with rework=)",
                     task.task, task.attempt
+                ),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: now,
+            })?;
+            tx.set_meta(&key, &now.to_string())?;
+        }
+        Ok(())
+    })
+}
+
+/// T-376: how long a hand-in may wait for its review packet before the
+/// captain is rung.
+const REVIEW_STALL_S: i64 = 1200;
+
+/// The key that remembers that the captain was told that a hand-in waits
+/// without a reviewer's packet.
+fn review_stall_key(task: &str, attempt: i64) -> String {
+    format!("engine.review_stall.{task}.{attempt}")
+}
+
+/// T-376: ring the captain, once per attempt, for every hand-in that has
+/// waited `REVIEW_STALL_S` without a reviewer's packet: no Confirmed `Deliver`
+/// op of a temp seat exists for that task and attempt, so the packet never
+/// reached a reviewer. The message names the seats (their state and task) so
+/// the captain can look at the reviewer panes, or settle the attempt himself.
+fn tell_captain_of_a_review_stall(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
+    let hand_ins = tasks_to_review(store, project)?;
+    if hand_ins.is_empty() {
+        return Ok(());
+    }
+    store.write(|tx| {
+        // No captain: nobody to tell.
+        let Some(captain) = tx.captain_of(project)? else { return Ok(()) };
+        // The temp seats of the project: the reviewers the captain looks at.
+        let mut seats = Vec::new();
+        for seat in tx.seats_of_project(project)? {
+            if seat.role != SeatRole::Temp || seat.state == SeatState::Retired {
+                continue;
+            }
+            seats.push(format!(
+                "{}: {}, {}",
+                seat.id,
+                seat.state.as_str(),
+                seat.task_id.as_deref().unwrap_or("-")
+            ));
+        }
+        for task in &hand_ins {
+            // One message per attempt: a tick does not bring the same news
+            // back, and a resolved item stays resolved.
+            let key = review_stall_key(&task.task, task.attempt);
+            if tx.get_meta(&key)?.is_some() {
+                continue;
+            }
+            let Some(handed_in) = tx.attempt_times(project, &task.task, task.attempt)?.handed_in else {
+                continue;
+            };
+            if now - handed_in < REVIEW_STALL_S {
+                continue;
+            }
+            // A packet the reviewer confirmed reached a reviewer: the hand-in
+            // is not stalled, whatever the tick's report says.
+            let reached = tx.ops_in_state(project, OpState::Confirmed)?.into_iter().any(|op| {
+                op.kind == OpKind::Deliver
+                    && op.task.as_deref() == Some(task.task.as_str())
+                    && op.attempt == Some(task.attempt)
+                    && tx.get_seat(&op.seat).is_ok_and(|seat| seat.is_some_and(|seat| seat.role == SeatRole::Temp))
+            });
+            if reached {
+                continue;
+            }
+            tx.insert_message(&NewMessage {
+                meta: None,
+                project: project.to_string(),
+                thread: format!("review-stall:{}:{}", task.task, task.attempt),
+                task: Some(task.task.clone()),
+                attempt: Some(task.attempt),
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: captain.id.clone(),
+                kind: MsgKind::System,
+                urgent: true,
+                body: format!(
+                    "{} attempt {} was handed in {} min ago and no reviewer has its packet: \
+                     the seats are {}; look at the reviewer panes, or settle it in # Verdicts \
+                     after reading the candidate yourself",
+                    task.task,
+                    task.attempt,
+                    (now - handed_in) / 60,
+                    seats.join("; ")
                 ),
                 reply_to: None,
                 needs_ack: false,
@@ -4214,6 +4311,85 @@ review = [
         assert_eq!(thread(&mut store, "T-1:1").len(), 1, "a second message was added");
         let empty = store.read(|tx| tx.thread_messages("p", "T-1:2")).unwrap();
         assert!(empty.is_empty(), "a second message was added: {empty:?}");
+    }
+
+    /// T-376: a hand-in that waits 20 minutes without its review packet
+    /// reaching a reviewer rings the captain — once per attempt, on
+    /// `review-stall:<task>:<attempt>`, naming the seats. 19 minutes is not
+    /// yet a stall, 21 is.
+    #[test]
+    fn a_review_stall_rings_the_captain_once_per_attempt() {
+        let mut store = world(CONFIG_TWO_SLOTS);
+        let mut herdr = FakeHerdr::new();
+        store
+            .write(|tx| {
+                testing::seed_temp_seat(tx, "p", "review-1", "T-9", "wt9:p1", "codex", T0)?;
+                testing::seed_temp_seat(tx, "p", "review-2", "T-8", "wt8:p1", "codex", T0)?;
+                Ok(())
+            })
+            .unwrap();
+
+        // 19 minutes: the hand-in waits, and nothing rings yet.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 19 * 60).unwrap();
+        assert!(thread(&mut store, "review-stall:T-1:1").is_empty());
+
+        // 21 minutes: one urgent item, naming the seats and their tasks.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 21 * 60).unwrap();
+        let told = thread(&mut store, "review-stall:T-1:1");
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].recipient, "p:captain");
+        assert_eq!(told[0].kind, MsgKind::System);
+        assert_eq!(told[0].state, MsgState::Open);
+        assert!(told[0].urgent);
+        assert_eq!(told[0].task.as_deref(), Some("T-1"));
+        assert_eq!(told[0].attempt, Some(1));
+        assert_eq!(
+            told[0].body,
+            "T-1 attempt 1 was handed in 21 min ago and no reviewer has its packet: the seats are \
+             p:review-1: active, T-9; p:review-2: active, T-8; look at the reviewer panes, or settle \
+             it in # Verdicts after reading the candidate yourself"
+        );
+        assert!(store.read(|tx| tx.get_meta("engine.review_stall.T-1.1")).unwrap().is_some());
+        // It rings: the item is the captain's.
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 21 * 60)).unwrap();
+        assert_eq!(inbox.len(), 1, "{inbox:?}");
+
+        // A second tick adds none.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 22 * 60).unwrap();
+        assert_eq!(thread(&mut store, "review-stall:T-1:1").len(), 1, "a second message was added");
+    }
+
+    /// T-376: a packet the reviewer confirmed means the hand-in reached a
+    /// reviewer: no stall is reported, however long the task waits.
+    #[test]
+    fn a_confirmed_review_packet_is_no_stall() {
+        let mut store = world(CONFIG_TWO_SLOTS);
+        let mut herdr = FakeHerdr::new();
+        store
+            .write(|tx| {
+                testing::seed_temp_seat(tx, "p", "review-1", "T-9", "wt9:p1", "codex", T0)?;
+                testing::seed_temp_seat(tx, "p", "review-2", "T-8", "wt8:p1", "codex", T0)?;
+                let op = tx.insert_op(&gear_store::NewOp {
+                    project: "p".into(),
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    kind: OpKind::Deliver,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({"text": "the review packet"}),
+                    created: T0 + 60,
+                })?;
+                tx.set_op_state("p", &op.id, OpState::Confirmed, Some("view p:review-1/1 @ 61"), T0 + 61)?;
+                Ok(())
+            })
+            .unwrap();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 21 * 60).unwrap();
+
+        assert!(thread(&mut store, "review-stall:T-1:1").is_empty());
+        assert!(store.read(|tx| tx.get_meta("engine.review_stall.T-1.1")).unwrap().is_none());
     }
 
     /// T-214: the "the review waits" notice is told once per attempt. A

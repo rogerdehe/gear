@@ -5,8 +5,8 @@
 //! dependencies, the rounds and the merges.
 
 use gear_board::frame::lane_panel;
-use gear_board::graph::{lines, panel, tasks, GraphTask, Stage};
-use gear_board::style::Color;
+use gear_board::graph::{git_rows, lines, panel, tasks, GraphRow, GraphTask, Stage};
+use gear_board::style::{lane_color, Color, Style};
 use gear_model::{AttemptState, MsgKind, MsgState, OpKind, OpState, SeatRole, TaskState};
 use gear_store::{
     testing, AttemptRow, NewMessage, NewOp, NewRound, RoundKey, Store, TaskRow,
@@ -869,6 +869,7 @@ fn the_sixteen_stages_have_their_symbols_colours_and_words() {
 fn sample() -> GraphTask {
     GraphTask {
         id: "T-1".into(),
+        rank: 1,
         lane: "hull".into(),
         stage: Stage::Queued,
         moved_to: None,
@@ -878,5 +879,351 @@ fn sample() -> GraphTask {
         rounds: 0,
         deps: Vec::new(),
         finished: None,
+        started: None,
     }
+}
+
+/// One task of the prototype's M5 voyage: the id, the lane, the stage, the
+/// title, the estimate and the time it took, its rounds, what it depends on,
+/// when its work started and when it merged, both in minutes from the
+/// departure (the prototype's `WHEN`).
+struct VoyageTask {
+    id: &'static str,
+    lane: &'static str,
+    stage: Stage,
+    title: &'static str,
+    est: i64,
+    actual: i64,
+    rounds: usize,
+    deps: &'static [&'static str],
+    started: Option<i64>,
+    merged: Option<i64>,
+}
+
+/// The prototype's M5 voyage (`gear/voyages/M5/board/prototype.py`), in its
+/// plan order: the departure is 0, so every time is a minute from it.
+fn m5() -> Vec<GraphTask> {
+    let voyage = [
+        VoyageTask {
+            id: "T-257",
+            lane: "hull",
+            stage: Stage::Merged,
+            title: "small task: the plan marks it",
+            est: 20,
+            actual: 18,
+            rounds: 1,
+            deps: &[],
+            started: Some(5),
+            merged: Some(31),
+        },
+        VoyageTask {
+            id: "T-258",
+            lane: "mast",
+            stage: Stage::Merged,
+            title: "board: voyages and the [ ] keys",
+            est: 40,
+            actual: 44,
+            rounds: 1,
+            deps: &[],
+            started: Some(5),
+            merged: Some(58),
+        },
+        VoyageTask {
+            id: "T-259",
+            lane: "keel",
+            stage: Stage::Merged,
+            title: "goal box, check and milestones",
+            est: 30,
+            actual: 27,
+            rounds: 1,
+            deps: &[],
+            started: Some(8),
+            merged: Some(46),
+        },
+        VoyageTask {
+            id: "T-260",
+            lane: "hull",
+            stage: Stage::Merged,
+            title: "small task: no review, accept proof",
+            est: 30,
+            actual: 41,
+            rounds: 2,
+            deps: &["T-257"],
+            started: Some(32),
+            merged: Some(102),
+        },
+        VoyageTask {
+            id: "T-261",
+            lane: "mast",
+            stage: Stage::Merged,
+            title: "board: the full width",
+            est: 45,
+            actual: 52,
+            rounds: 1,
+            deps: &["T-258"],
+            started: Some(59),
+            merged: Some(128),
+        },
+        VoyageTask {
+            id: "T-262",
+            lane: "keel",
+            stage: Stage::Review,
+            title: "goal lock: GOAL_LOCKED at apply",
+            est: 40,
+            actual: 35,
+            rounds: 1,
+            deps: &[],
+            started: Some(47),
+            merged: None,
+        },
+        VoyageTask {
+            id: "T-263",
+            lane: "hull",
+            stage: Stage::Rework,
+            title: "small task: the captain settles it",
+            est: 25,
+            actual: 49,
+            rounds: 2,
+            deps: &["T-260"],
+            started: Some(103),
+            merged: None,
+        },
+        VoyageTask {
+            id: "T-264",
+            lane: "mast",
+            stage: Stage::Working,
+            title: "board: Time & tokens by lane",
+            est: 40,
+            actual: 22,
+            rounds: 1,
+            deps: &["T-261"],
+            started: Some(129),
+            merged: None,
+        },
+        VoyageTask {
+            id: "T-268",
+            lane: "keel",
+            stage: Stage::Passed,
+            title: "doorbell names the station",
+            est: 15,
+            actual: 12,
+            rounds: 1,
+            deps: &[],
+            started: Some(70),
+            merged: None,
+        },
+        VoyageTask {
+            id: "T-265",
+            lane: "keel",
+            stage: Stage::Deps,
+            title: "goal-change line with the user's words",
+            est: 35,
+            actual: 0,
+            rounds: 0,
+            deps: &["T-262"],
+            started: None,
+            merged: None,
+        },
+        VoyageTask {
+            id: "T-266",
+            lane: "mast",
+            stage: Stage::Queued,
+            title: "board: graph draws dependencies",
+            est: 60,
+            actual: 0,
+            rounds: 0,
+            deps: &["T-261"],
+            started: None,
+            merged: None,
+        },
+        VoyageTask {
+            id: "T-267",
+            lane: "hull",
+            stage: Stage::Queued,
+            title: "release v0.5.0",
+            est: 15,
+            actual: 0,
+            rounds: 0,
+            deps: &["T-263", "T-266"],
+            started: None,
+            merged: None,
+        },
+    ];
+    voyage
+        .iter()
+        .enumerate()
+        .map(|(index, task)| GraphTask {
+            id: task.id.into(),
+            rank: index as i64 + 1,
+            lane: task.lane.into(),
+            stage: task.stage,
+            moved_to: None,
+            title: task.title.into(),
+            est_min: Some(task.est),
+            actual_min: Some(task.actual),
+            rounds: task.rounds,
+            deps: task.deps.iter().map(|dep| dep.to_string()).collect(),
+            finished: task.merged.map(|minute| minute * 60),
+            started: task.started.map(|minute| minute * 60),
+        })
+        .collect()
+}
+
+/// The character a graph row writes at a column: the last cell there wins.
+fn glyph(row: &GraphRow, x: usize) -> Option<char> {
+    row.cells.iter().rev().find(|(column, _, _)| *column == x).map(|(_, glyph, _)| *glyph)
+}
+
+#[test]
+fn the_git_graph_has_the_rows_of_the_prototype_m5_voyage() {
+    let tasks = m5();
+    let lanes: Vec<String> = ["hull", "mast", "keel"].iter().map(|name| name.to_string()).collect();
+    let rows = git_rows(&tasks, &lanes, 0, 160);
+    assert_eq!(rows.len(), 24, "{:?}", rows.iter().map(|row| &row.text).collect::<Vec<_>>());
+
+    // The first rows are the tasks that have not started, the last to run on
+    // top (reverse rank: T-267, T-266, T-265 — the graph reads newest on top
+    // like git). Each hangs dashed in its lane and says what it waits for.
+    let first = &rows[0];
+    assert_eq!(first.task.as_deref(), Some("T-267"));
+    assert_eq!(glyph(first, 9), Some('○'));
+    assert_eq!(first.style, Style::fg(Color::Dim));
+    assert!(
+        first.text.starts_with("T-267  release v0.5.0"),
+        "{:?}",
+        first.text
+    );
+    assert!(first.text.contains("queued"), "{:?}", first.text);
+    assert!(first.text.ends_with("15m"), "{:?}", first.text);
+    let dashed = &rows[1];
+    assert_eq!(dashed.task.as_deref(), Some("T-267"));
+    assert_eq!(glyph(dashed, 9), Some('┆'));
+    assert_eq!(dashed.text, "");
+    assert_eq!(rows[2].task.as_deref(), Some("T-266"));
+    assert_eq!(glyph(&rows[2], 15), Some('○'));
+    assert_eq!(rows[3].task.as_deref(), Some("T-266"));
+    assert_eq!(glyph(&rows[3], 15), Some('┆'));
+    let last_waiting = &rows[4];
+    assert_eq!(last_waiting.task.as_deref(), Some("T-265"));
+    assert_eq!(glyph(last_waiting, 21), Some('○'));
+    assert!(
+        last_waiting.text.starts_with("T-265  goal-change line with the user's words"),
+        "{:?}",
+        last_waiting.text
+    );
+    assert!(
+        last_waiting.text.contains("waits for T-262 to merge"),
+        "{:?}",
+        last_waiting.text
+    );
+    assert_eq!(rows[5].task.as_deref(), Some("T-265"));
+    assert_eq!(glyph(&rows[5], 21), Some('┆'));
+
+    // The eighth row: T-264's branch leaves dev at +2h09m, after T-261 merged
+    // (mast stands at column 15).
+    let fork = &rows[7];
+    assert_eq!(fork.task, None);
+    assert_eq!(glyph(fork, 3), Some('├'));
+    for x in 4..=14 {
+        assert_eq!(glyph(fork, x), Some('─'), "column {x} of {:?}", fork.text);
+    }
+    assert_eq!(glyph(fork, 15), Some('╮'));
+    assert_eq!(glyph(fork, 16), None);
+    assert_eq!(fork.text, "       starts +2h09m after T-261");
+    assert_eq!(fork.style, Style::fg(Color::Dim));
+
+    // The merge of T-261, below its lane's line: dev joins the branch.
+    let merge = &rows[8];
+    assert_eq!(merge.task.as_deref(), Some("T-261"));
+    assert_eq!(glyph(merge, 3), Some('●'));
+    assert_eq!(glyph(merge, 15), Some('╯'));
+    let mast = Style::fg(lane_color(&lanes, "mast"));
+    assert!(
+        merge.cells.iter().any(|(x, glyph, style)| *x == 15 && *glyph == '╯' && *style == mast),
+        "{:?}",
+        merge.cells
+    );
+    assert!(merge.text.starts_with("T-261  board: the full width"), "{:?}", merge.text);
+    assert!(merge.text.contains("52/45m"), "{:?}", merge.text);
+    // The clock of the merge, as the user's clock shows it.
+    let (_, merged_at) = merge.text.rsplit_once("  merged ").expect("the merge clock");
+    assert_eq!(merged_at.len(), 5, "{:?}", merge.text);
+    assert_eq!(&merged_at[2..3], ":", "{:?}", merge.text);
+
+    // An open task stands on its branch: T-264 is the mast's working task.
+    let working = &rows[6];
+    assert_eq!(working.task.as_deref(), Some("T-264"));
+    assert_eq!(glyph(working, 15), Some('◉'));
+    assert_eq!(working.style, Style::bold());
+
+    // The last two rows are the forks of T-257 and T-258: they started at the
+    // same minute, so they keep the plan's order (hull first, then mast).
+    let before = &rows[22];
+    let last = &rows[23];
+    assert_eq!(before.task, None);
+    assert_eq!(last.task, None);
+    assert_eq!(before.text, "       starts +0h05m");
+    assert_eq!(last.text, "       starts +0h05m");
+    assert_eq!(glyph(before, 9), Some('╮'));
+    assert_eq!(glyph(last, 15), Some('╮'));
+}
+
+#[test]
+fn the_tasks_carry_their_rank_and_the_moment_their_work_started() {
+    let mut store = world();
+    let tasks = store.read(|tx| tasks(tx, "p", T0)).unwrap();
+    let by_id = |id: &str| tasks.iter().find(|task| task.id == id).expect("the task");
+    // The plan's queue position: the order of the fixture.
+    assert_eq!(by_id("T-135").rank, 1);
+    assert_eq!(by_id("T-151").rank, 10);
+    // A merged task started when its first attempt started; a task nobody
+    // has started has no start.
+    assert_eq!(by_id("T-135").started, Some(moment(11, 2) - 44 * 60));
+    assert_eq!(by_id("T-135").finished, Some(moment(11, 2)));
+    assert_eq!(by_id("T-148").started, None);
+    assert_eq!(by_id("T-148").finished, None);
+}
+
+#[test]
+fn a_waiting_task_hangs_above_the_ones_that_run_before_it() {
+    // The last to run is on top, so the graph reads newest on top like git
+    // (T-361 contract v2): T-2 (rank 2) hangs above T-1 (rank 1), nearest the
+    // running work.
+    let tasks = vec![
+        GraphTask { id: "T-1".into(), rank: 1, ..sample() },
+        GraphTask { id: "T-2".into(), rank: 2, ..sample() },
+    ];
+    let lanes = vec!["hull".to_string()];
+    let rows = git_rows(&tasks, &lanes, 0, 120);
+    let named: Vec<Option<&str>> = rows.iter().map(|row| row.task.as_deref()).collect();
+    assert_eq!(named, vec![Some("T-2"), Some("T-2"), Some("T-1"), Some("T-1")], "{named:?}");
+    // The row that names the task is its ○ row, the ┆ row under it.
+    assert_eq!(glyph(&rows[0], 9), Some('○'));
+    assert_eq!(glyph(&rows[1], 9), Some('┆'));
+    assert_eq!(glyph(&rows[2], 9), Some('○'));
+    assert_eq!(glyph(&rows[3], 9), Some('┆'));
+}
+
+#[test]
+fn a_task_that_started_and_waits_again_keeps_its_row() {
+    // A task moved to another lane has its attempt abandoned and its stage
+    // back to queued, but its earliest start stays: open is the times, not the
+    // stage, so it still stands on its branch (F2 of the T-361 review).
+    let tasks = vec![GraphTask {
+        id: "T-3".into(),
+        rank: 3,
+        stage: Stage::Queued,
+        started: Some(60),
+        finished: None,
+        ..sample()
+    }];
+    let lanes = vec!["hull".to_string()];
+    let rows = git_rows(&tasks, &lanes, 0, 120);
+    assert_eq!(rows.len(), 2, "{:?}", rows.iter().map(|row| &row.text).collect::<Vec<_>>());
+    assert_eq!(rows[0].task.as_deref(), Some("T-3"));
+    assert_eq!(glyph(&rows[0], 9), Some('○'));
+    assert_eq!(rows[0].style, Style::bold());
+    assert_eq!(glyph(&rows[1], 3), Some('├'));
+    assert_eq!(rows[1].task, None);
+    assert_eq!(rows[1].text, "       starts +0h01m");
 }
