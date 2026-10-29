@@ -541,6 +541,9 @@ fn sessions_elsewhere(store: &mut Store, herdr: &mut dyn HerdrAct, seat: &SeatRo
         .filter(|session| !session.is_empty())
         .collect()
 }
+
+/// The session the seat runs on now, the CLI it runs on, and whether its
+/// agent is alive.
 ///
 /// A pane that cannot be read is not an absence: the agent counts as alive
 /// (design/08).
