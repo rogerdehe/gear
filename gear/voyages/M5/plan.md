@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=775 -->
+<!-- gear-plan project=gear base=776 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -149,8 +149,8 @@ eta: 21h
 - 2026-10-29 05:45 scope: v0.5.1 (T-367, started by hull) is cut, as v0.5.0 was, with what is merged when it hands in; the S1 and S2 tasks still queued go in v0.5.2's notes
 - 2026-10-29 05:48 release: v0.5.0 (station S1) published: T-366's merge a172ab78 merged into main as 0dd26a8b, tagged v0.5.0, GitHub release from docs/releases/v0.5.0.md | why: done clause (5)
 - station M-5681: keep course 1080 min in, 27 left; the board chains now branch from their previous link, T-332 is cancelled, build-slot no longer starves the merge gate
-- 2026-10-29 05:52 config: the engine runs v0.5.0 from dev (build c9f45551, every fix merged since departure: T-399, T-402, T-416, T-417, T-418 among them), restarted between merges, inode checked; M-5675 answered
-- 2026-10-29 05:52 note: T-350's merge gate ran the whole suite on 1 thread for 1015 s (build-slot's load term, fixed at 05:40, pushed after it) and failed for a real conflict with T-415: back to mast as a rework
+- 2026-10-29 05:50 config: the engine runs v0.5.0 from dev (build c9f45551, every fix merged since departure: T-399, T-402, T-416, T-417, T-418 among them), restarted between merges, inode checked; M-5675 answered
+- 2026-10-29 05:51 note: T-350's merge gate ran the whole suite on 1 thread for 1015 s (build-slot's load term, fixed at 05:40, pushed after it) and failed for a real conflict with T-415: back to mast as a rework
 - station M-5708: keep course 1094 min in, 138 done, 24 left; the merge gate gets its share of the cores again
 
 
