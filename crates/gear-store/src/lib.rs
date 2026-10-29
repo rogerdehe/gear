@@ -2874,6 +2874,35 @@ impl<'s> Tx<'s> {
         Ok(rounds)
     }
 
+    /// The rounds a project's overrun step still has to look at (T-406): the
+    /// open ones (no `end_at`) and the ended ones that still owe an answer on
+    /// their `overrun:<task>:<role>` thread (T-381's resolution). A settled
+    /// round's item is resolved on the tick that looks at it, so the round is
+    /// no longer selected after that.
+    ///
+    /// The membership of the answered threads is read once, uncorrelated: a
+    /// correlated subquery scanned the project's whole message history once
+    /// per ended round and held the write for seconds (F1 of the T-406 review).
+    pub fn rounds_to_process(&self, project: &str) -> GearResult<Vec<RoundRow>> {
+        let mut stmt = self
+            .tx
+            .prepare(&round_select(
+                " WHERE project=?1
+                    AND (end_at IS NULL OR ('overrun:'||task||':'||role, attempt) IN (
+                      SELECT m.thread, m.attempt FROM messages m
+                       WHERE m.project=?1 AND m.kind='system'
+                         AND m.state IN ('open', 'waiting')))
+                  ORDER BY start_at, task, role",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt.query_map(params![project], round_from_row).map_err(map_sqlite)?;
+        let mut rounds = Vec::new();
+        for row in rows {
+            rounds.push(row.map_err(map_sqlite)?);
+        }
+        Ok(rounds)
+    }
+
     /// Store a friction report (§6). Returns its id, `F-<n>`.
     ///
     /// The time of the report is the store's own: the input carries the

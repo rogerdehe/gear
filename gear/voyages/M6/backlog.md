@@ -54,3 +54,9 @@
 
 ## A test flake in gear-cli under one-process cargo test
 - 2026-10-29 M5 (F-153): two gear-cli tests share the scratch tag "stale" and race under plain `cargo test`; nextest's process per test hides it. Give each test its own tag.
+
+## The shared compile cache barely hits
+- 2026-10-29 M5: sccache (rustc-wrapper in the machine's cargo config since M4) hit 1.4 % (70 misses, 1 hit, 331 requests not cacheable): every lane, reviewer and merge worktree builds our own crates from a different absolute path and incrementally, which sccache does not cache. Find what makes one worktree's build reusable by another (a path-independent cache key, CARGO_INCREMENTAL=0 for check runs, or one shared target directory per crate set) and measure it before turning it on.
+
+## The stall item fires on a delivery that is still being sent
+- 2026-10-29 M5: three captain stall items in an hour (M-5520, M-5544, M-5584) named a lane "stuck" on a delivery that was `intended, 0 min` and confirmed within 30 s. The stall check should wait out `[timing] delivery_grace_s` (180) before it counts an unconfirmed delivery.

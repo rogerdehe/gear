@@ -2,9 +2,10 @@
 //! `[temps]` and `[models]` are agreed at its kickoff, like the goal (T-331).
 //! While the voyage is under way, a re-init that changes one of them is
 //! refused with `StaffLocked` and the changed fields, and writes nothing;
-//! with the user's own words (`--user`) it applies and leaves one starred
-//! `staff` decision in the voyage. Anything outside those four sections, and
-//! any change of a project with no voyage under way, applies as before.
+//! confirmed by the user (`--confirmed`, T-401) it applies and leaves one
+//! starred `staff` decision in the voyage. Anything outside those four
+//! sections, and any change of a project with no voyage under way, applies as
+//! before.
 
 use gear_app::admin::init_with_home;
 use gear_app::draft::parse;
@@ -92,7 +93,7 @@ fn departed() -> Store {
 /// The same, from `config_text` instead of the helper's own config.
 fn departed_with(config_text: &str) -> Store {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), config_text, Some(crate::skill_home()), None, T0).unwrap();
+    init_with_home(&mut s, &admin(), config_text, Some(crate::skill_home()), false, T0).unwrap();
     depart(&mut s);
     let voyage = s.read(|tx| tx.get_voyage("harbor", "M1")).unwrap().unwrap();
     assert_eq!(voyage.departure, Some(T0 + 1), "the voyage departed");
@@ -136,7 +137,7 @@ fn a_staffing_change_mid_voyage_is_refused_without_the_users_words() {
     let stored = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
 
     let changed = config(3, "merge({task}): {source}");
-    let err = init_with_home(&mut s, &admin(), &changed, Some(crate::skill_home()), None, T0 + 2)
+    let err = init_with_home(&mut s, &admin(), &changed, Some(crate::skill_home()), false, T0 + 2)
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::StaffLocked);
     assert!(
@@ -150,7 +151,9 @@ fn a_staffing_change_mid_voyage_is_refused_without_the_users_words() {
         err.detail
     );
     assert!(
-        err.detail.contains("--user"),
+        err.detail.ends_with(
+            "— change staffing only when the user asks; confirm it with them, then run init again with --confirmed"
+        ),
         "the refusal says how to apply it: {}",
         err.detail
     );
@@ -163,10 +166,10 @@ fn a_staffing_change_mid_voyage_is_refused_without_the_users_words() {
     assert!(staff_decisions(&mut s).is_empty());
 }
 
-/// With the user's own words the change applies, and the voyage keeps one
-/// starred `staff` decision whose why holds them.
+/// Confirmed by the user (T-401) the change applies, and the voyage keeps one
+/// starred `staff` decision whose why says so — no words are stored.
 #[test]
-fn the_users_words_apply_the_change_and_leave_one_starred_decision() {
+fn a_confirmed_change_applies_and_leaves_one_starred_decision() {
     let mut s = departed();
     let before = version(&mut s);
 
@@ -176,7 +179,7 @@ fn the_users_words_apply_the_change_and_leave_one_starred_decision() {
         &admin(),
         &changed,
         Some(crate::skill_home()),
-        Some("lower the reviewers to three, I asked for it"),
+        true,
         T0 + 2,
     )
     .unwrap();
@@ -189,21 +192,18 @@ fn the_users_words_apply_the_change_and_leave_one_starred_decision() {
     assert_eq!(decision.voyage, "M1");
     assert_eq!(decision.what, "quota.temps: 6 → 3");
     let why = decision.why.as_deref().unwrap_or_default();
-    assert!(
-        why.contains("lower the reviewers to three, I asked for it"),
-        "the user's words are kept: {why}"
-    );
+    assert_eq!(why, "confirmed by the user", "no words of the user are kept");
 }
 
-/// A change outside the four staffing sections applies without the user's
-/// words, even mid-voyage.
+/// A change outside the four staffing sections applies without a
+/// confirmation, even mid-voyage.
 #[test]
 fn a_change_outside_the_staffing_sections_applies_without_words() {
     let mut s = departed();
     let before = version(&mut s);
 
     let changed = config(6, "merged({task}): {source}");
-    let r = init_with_home(&mut s, &admin(), &changed, Some(crate::skill_home()), None, T0 + 2)
+    let r = init_with_home(&mut s, &admin(), &changed, Some(crate::skill_home()), false, T0 + 2)
         .unwrap();
     assert_eq!(r.config_version, before + 1);
     assert!(staff_decisions(&mut s).is_empty());
@@ -213,11 +213,11 @@ fn a_change_outside_the_staffing_sections_applies_without_words() {
 #[test]
 fn without_a_departed_voyage_every_change_applies_as_before() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), &config(6, "merge({task}): {source}"), Some(crate::skill_home()), None, T0)
+    init_with_home(&mut s, &admin(), &config(6, "merge({task}): {source}"), Some(crate::skill_home()), false, T0)
         .unwrap();
 
     let changed = config(3, "merge({task}): {source}");
-    let r = init_with_home(&mut s, &admin(), &changed, Some(crate::skill_home()), None, T0 + 1)
+    let r = init_with_home(&mut s, &admin(), &changed, Some(crate::skill_home()), false, T0 + 1)
         .unwrap();
     assert_eq!(r.config_version, 2);
     assert_eq!(
@@ -225,38 +225,6 @@ fn without_a_departed_voyage_every_change_applies_as_before() {
         3
     );
     assert!(staff_decisions(&mut s).is_empty());
-}
-
-/// Rework F1: `--user ""` and `--user "   "` carry no words, so the refusal
-/// stands, nothing is written and no staff decision is recorded.
-#[test]
-fn blank_user_words_are_no_words() {
-    let mut s = departed();
-    let stored = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
-    let changed = config(3, "merge({task}): {source}");
-
-    for blank in ["", "   ", "\t\n "] {
-        let err = init_with_home(
-            &mut s,
-            &admin(),
-            &changed,
-            Some(crate::skill_home()),
-            Some(blank),
-            T0 + 2,
-        )
-        .unwrap_err();
-        assert_eq!(err.code, ErrorCode::StaffLocked, "for {blank:?}: {}", err.detail);
-        assert!(
-            err.detail.contains("quota.temps: 6 → 3"),
-            "for {blank:?}: {}",
-            err.detail
-        );
-    }
-
-    let after = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
-    assert_eq!(after.config_version, stored.config_version);
-    assert_eq!(after.config_toml, stored.config_toml);
-    assert!(staff_decisions(&mut s).is_empty(), "no staff decision");
 }
 
 /// Rework F2: a changed model argument is a changed field — the refusal and
@@ -269,7 +237,7 @@ fn a_changed_model_argument_is_named_in_the_refusal_and_the_decision() {
 
     let changed = config_with_effort("high", Some(300));
     let err =
-        init_with_home(&mut s, &admin(), &changed, Some(crate::skill_home()), None, T0 + 2)
+        init_with_home(&mut s, &admin(), &changed, Some(crate::skill_home()), false, T0 + 2)
             .unwrap_err();
     assert_eq!(err.code, ErrorCode::StaffLocked);
     for expected in [
@@ -292,7 +260,7 @@ fn a_changed_model_argument_is_named_in_the_refusal_and_the_decision() {
         &admin(),
         &changed,
         Some(crate::skill_home()),
-        Some("raise the lane's effort, the user said so"),
+        true,
         T0 + 2,
     )
     .unwrap();
@@ -354,14 +322,14 @@ merge_message = "merge({{task}}): {{source}}"
 
 /// The direction check: the four sections are compared as whole sections, so
 /// putting the same lanes in another order is a staffing change and is refused
-/// without the user's words.
+/// without the user's confirmation.
 #[test]
 fn a_reordered_lanes_section_is_a_staffing_change() {
     let mut s = departed_with(&two_lane_config(&["heat", "keel"]));
     let stored = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
 
     let reordered = two_lane_config(&["keel", "heat"]);
-    let err = init_with_home(&mut s, &admin(), &reordered, Some(crate::skill_home()), None, T0 + 2)
+    let err = init_with_home(&mut s, &admin(), &reordered, Some(crate::skill_home()), false, T0 + 2)
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::StaffLocked, "{}", err.detail);
     assert!(
@@ -374,13 +342,13 @@ fn a_reordered_lanes_section_is_a_staffing_change() {
     assert_eq!(after.config_toml, stored.config_toml);
     assert!(staff_decisions(&mut s).is_empty());
 
-    // With the user's words the order applies, and the decision names it.
+    // Confirmed, the order applies, and the decision names it.
     init_with_home(
         &mut s,
         &admin(),
         &reordered,
         Some(crate::skill_home()),
-        Some("run keel first, the user asked"),
+        true,
         T0 + 2,
     )
     .unwrap();
