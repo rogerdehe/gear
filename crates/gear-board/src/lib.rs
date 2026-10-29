@@ -14,6 +14,7 @@
 //! on a terminal; `gear-cli` calls it from the `gear board` subcommand.
 
 mod deps;
+pub mod forecast;
 pub mod frame;
 pub mod golden;
 pub mod graph;
@@ -50,6 +51,9 @@ pub const REBUILD_AFTER: Duration = Duration::from_secs(60);
 /// kept between asks: a board that waited on it every refresh paid a Herdr
 /// call every two seconds for a list that rarely moves.
 pub const AGENTS_EVERY: Duration = Duration::from_secs(10);
+
+/// The picks one notch of the mouse wheel moves the selection (T-411).
+pub const WHEEL_PICKS: usize = 3;
 
 /// The knobs the tests of T-384 turn: the board builds nothing while nothing
 /// changes, and a test proves it by counting the builds and shortening the two
@@ -225,6 +229,10 @@ pub struct ProjectBoard {
     /// The stations of the measured voyage, in plan order, with their
     /// progress (T-334); empty without a measured voyage.
     pub stations: Vec<stations::StationProgress>,
+    /// Each lane's queue played forward (T-349), in the order of `lanes`: when
+    /// the lane ends and how long it sits idle. Empty when no measured voyage
+    /// has open work.
+    pub forecast: Vec<forecast::LaneEnd>,
 }
 
 /// One delivery the engine has not confirmed yet (T-271).
@@ -406,6 +414,9 @@ pub struct TaskBoard {
     pub cache_read: Option<i64>,
     /// The cost of the task's rounds, when it is known (§4.4).
     pub cost_usd: Option<f64>,
+    /// The tasks it depends on (T-349): the board's forecast waits for them to
+    /// merge before the task can start.
+    pub deps: Vec<String>,
 }
 
 /// The captain's inbox: how many items wait, and how long the oldest has.
@@ -583,6 +594,7 @@ pub fn project_with_agents(
             tokens: tokens_of(tx, project, &task.id)?,
             cache_read: cache_read_of(tx, project, &task.id)?,
             cost_usd: cost_of(tx, project, &task.id)?,
+            deps: task.deps.clone(),
         };
         match lanes.iter_mut().find(|lane| lane.lane == name) {
             Some(lane) => lane.tasks.push(line),
@@ -796,6 +808,34 @@ pub fn project_with_agents(
         Some(voyage) => stations::progress(tx, project, &voyage.milestone)?,
         None => Vec::new(),
     };
+    // Each lane's queue played forward (T-349): the measured voyage's forecast,
+    // while it has open work. The jobs come from the lanes, which are in plan
+    // order; the graph's order is for drawing and is not the queue's.
+    let forecast = match &workload {
+        Some(voyage)
+            if lanes
+                .iter()
+                .any(|lane| lane.tasks.iter().any(|task| !task.state.is_terminal())) =>
+        {
+            let jobs: Vec<forecast::Job> = lanes
+                .iter()
+                .flat_map(|lane| {
+                    lane.tasks.iter().map(|task| forecast::Job {
+                        id: task.id.clone(),
+                        lane: lane.lane.clone(),
+                        stage: task.stage,
+                        est_min: task.est_min.unwrap_or(0),
+                        actual_min: task.actual_min.unwrap_or(0),
+                        deps: task.deps.clone(),
+                    })
+                })
+                .collect();
+            let names: Vec<String> = lanes.iter().map(|lane| lane.lane.clone()).collect();
+            let review_merge = forecast::review_merge_min(tx, project, &voyage.milestone)?;
+            forecast::forecast(&jobs, &names, review_merge)
+        }
+        _ => Vec::new(),
+    };
     Ok(ProjectBoard {
         voyages,
         workload,
@@ -820,6 +860,7 @@ pub fn project_with_agents(
         unconfirmed_deliveries,
         unconfirmed,
         stations,
+        forecast,
     })
 }
 
@@ -1574,7 +1615,9 @@ pub fn run(store: &mut Store, opts: &Options, out: &mut dyn Write, mut herdr: Op
 /// The frames over injected keys: the board is redrawn every
 /// [`Options::refresh`], `q` leaves it, the arrows and the tab key change the
 /// view, the numbers pick a view, the up and down keys move the selection and
-/// `Enter` opens the panel of the selected row.
+/// `Enter` opens the panel of the selected row. The mouse wheel moves the
+/// selection three picks a notch and the page keys a screenful (T-411); the
+/// viewport follows the selection in each case.
 ///
 /// A frame is built only when something it shows can have changed (T-384): the
 /// store's `data_version` moved, Herdr's agent list moved, or the kept board's
@@ -1706,6 +1749,10 @@ pub fn run_with(
             written = Some(text);
         }
         let deadline = std::time::Instant::now() + opts.refresh;
+        // The picks one page holds (T-411): the rows of the view the screen
+        // shows, the header and the footer's rows taken out, and never less
+        // than one.
+        let page = screen.size.1.saturating_sub(frame::VIEW_ROW + 2).max(1);
         loop {
             let now = std::time::Instant::now();
             if now >= deadline {
@@ -1782,6 +1829,32 @@ pub fn run_with(
                 }
                 Event::Down | Event::Key('j') => {
                     screen.selected = (screen.selected + 1).min(picks.len().saturating_sub(1));
+                    panel = None;
+                    break;
+                }
+                // The mouse wheel (T-411): three picks a notch, and never a
+                // click. It closes the panel as an arrow does.
+                Event::Mouse { button: 64, .. } => {
+                    screen.selected = screen.selected.saturating_sub(WHEEL_PICKS);
+                    panel = None;
+                    break;
+                }
+                Event::Mouse { button: 65, .. } => {
+                    screen.selected = (screen.selected + WHEEL_PICKS)
+                        .min(picks.len().saturating_sub(1));
+                    panel = None;
+                    break;
+                }
+                // The page keys move the selection by a screenful (T-411).
+                // The viewport follows it as it follows an arrow's.
+                Event::PageUp => {
+                    screen.selected = screen.selected.saturating_sub(page);
+                    panel = None;
+                    break;
+                }
+                Event::PageDown => {
+                    screen.selected =
+                        (screen.selected + page).min(picks.len().saturating_sub(1));
                     panel = None;
                     break;
                 }

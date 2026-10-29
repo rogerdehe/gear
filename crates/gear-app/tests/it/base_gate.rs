@@ -151,13 +151,19 @@ struct Template {
     lane: PathBuf,
     /// The commit before the current `origin/dev` tip.
     older: String,
-    /// The trees above live here, for as long as the process does.
+    /// The trees above live here for as long as the tests use them: the
+    /// directory goes with the last test holding it (T-412).
     _root: Scratch,
 }
 
-fn template() -> &'static Template {
-    static TEMPLATE: std::sync::OnceLock<Template> = std::sync::OnceLock::new();
-    TEMPLATE.get_or_init(|| {
+fn template() -> std::sync::Arc<Template> {
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
+    static TEMPLATE: OnceLock<Mutex<Weak<Template>>> = OnceLock::new();
+    let mut slot = TEMPLATE.get_or_init(|| Mutex::new(Weak::new())).lock().unwrap();
+    if let Some(template) = slot.upgrade() {
+        return template;
+    }
+    let template = Arc::new({
         let root = Scratch::new("gate-template");
         let origin = root.path.join("origin.git");
         std::fs::create_dir(&origin).unwrap();
@@ -172,7 +178,9 @@ fn template() -> &'static Template {
         git(&root.path, &["clone", "-q", &url, lane.to_str().unwrap()]);
         let older = git(&lane, &["rev-parse", "origin/dev~1"]);
         Template { origin, seed, lane, older, _root: root }
-    })
+    });
+    *slot = Arc::downgrade(&template);
+    template
 }
 
 fn repos() -> Repos {

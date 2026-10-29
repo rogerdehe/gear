@@ -11,10 +11,7 @@ const T0: i64 = 1_800_000_000;
 
 /// A scratch directory for the store and the home of the child.
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("gear-check-{}-{tag}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).expect("a scratch directory");
-    dir
+    crate::scratch::temp(&format!("gear-check-{tag}"))
 }
 
 /// The store of a project whose captain sits in `w1:p1` and whose lane `heat`

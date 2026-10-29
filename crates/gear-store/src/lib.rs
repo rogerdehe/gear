@@ -28,6 +28,11 @@ pub const BUSY_TIMEOUT_MS: u64 = 30_000;
 /// naming the caller that held it (T-379). The engine's stderr is its log.
 pub const SLOW_WRITE_MS: u64 = 1_000;
 
+/// How many prepared statements one connection keeps (T-385). A tick or a
+/// board frame runs the same queries again and again; the cache holds their
+/// statements so SQLite does not parse the text every time.
+pub const STATEMENT_CACHE_CAPACITY: usize = 256;
+
 /// The line [`Store::write`] prints when it held the store over
 /// [`SLOW_WRITE_MS`]: the elapsed time and the caller's location.
 pub fn slow_write_line(ms: u128, caller: &'static std::panic::Location<'static>) -> String {
@@ -685,6 +690,9 @@ impl Store {
         let store = Store { conn };
         store
             .conn
+            .set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
+        store
+            .conn
             .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))
             .map_err(map_sqlite)?;
         Ok(store)
@@ -755,6 +763,11 @@ impl Store {
 
     /// Connection pragmas: WAL journal, busy timeout, foreign keys.
     fn prepare_connection(&self) -> GearResult<()> {
+        // Queries are prepared through the statement cache ([`prepare_cached`]):
+        // a tick or a board frame reuses its statements instead of re-parsing
+        // every query.
+        self.conn
+            .set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         // An in-memory database keeps the "memory" journal mode; the value is
         // informational, only a failure matters.
         let _mode: String = self
@@ -939,7 +952,7 @@ impl<'s> Tx<'s> {
         let stored: Option<(String, String)> = {
             let mut stmt = self
                 .tx
-                .prepare("SELECT args_hash, result FROM requests WHERE id=?1")
+                .prepare_cached("SELECT args_hash, result FROM requests WHERE id=?1")
                 .map_err(map_sqlite)?;
             let mut rows = stmt.query(params![request_id]).map_err(map_sqlite)?;
             match rows.next().map_err(map_sqlite)? {
@@ -1004,7 +1017,7 @@ impl<'s> Tx<'s> {
     pub fn meta_keys_with_prefix(&self, prefix: &str) -> GearResult<Vec<String>> {
         let mut stmt = self
             .tx
-            .prepare("SELECT key FROM meta ORDER BY key")
+            .prepare_cached("SELECT key FROM meta ORDER BY key")
             .map_err(map_sqlite)?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
@@ -1077,7 +1090,7 @@ impl<'s> Tx<'s> {
     pub fn project_ids(&self) -> GearResult<Vec<String>> {
         let mut stmt = self
             .tx
-            .prepare("SELECT id FROM projects ORDER BY id")
+            .prepare_cached("SELECT id FROM projects ORDER BY id")
             .map_err(map_sqlite)?;
         let rows = stmt
             .query_map([], |r| r.get::<_, String>(0))
@@ -1163,7 +1176,7 @@ impl<'s> Tx<'s> {
     pub fn seats_of_project(&self, project: &str) -> GearResult<Vec<SeatRow>> {
         let mut stmt = self
             .tx
-            .prepare(&seat_select(" WHERE project=?1 ORDER BY id"))
+            .prepare_cached(&seat_select(" WHERE project=?1 ORDER BY id"))
             .map_err(map_sqlite)?;
         let rows = stmt.query_map(params![project], seat_from_row).map_err(map_sqlite)?;
         let mut seats = Vec::new();
@@ -1449,7 +1462,7 @@ impl<'s> Tx<'s> {
 
     /// Progress messages for one attempt, in their recorded order.
     pub fn progress_of_attempt(&self, project: &str, task: &str, attempt: i64) -> GearResult<Vec<MessageRow>> {
-        let mut stmt = self.tx.prepare(&message_select(" WHERE project=?1 AND task=?2 AND attempt=?3 AND kind='progress' ORDER BY created, id")).map_err(map_sqlite)?;
+        let mut stmt = self.tx.prepare_cached(&message_select(" WHERE project=?1 AND task=?2 AND attempt=?3 AND kind='progress' ORDER BY created, id")).map_err(map_sqlite)?;
         let rows = stmt.query_map(params![project, task, attempt], message_from_row).map_err(map_sqlite)?;
         let mut result = Vec::new();
         for row in rows { result.push(row.map_err(map_sqlite)?); }
@@ -1466,7 +1479,7 @@ impl<'s> Tx<'s> {
     ) -> GearResult<Vec<MessageRow>> {
         let mut stmt = self
             .tx
-            .prepare(&message_select(
+            .prepare_cached(&message_select(
                 " WHERE project=?1 AND recipient=?2
                    AND (state='open' OR (state='waiting' AND wait_until IS NOT NULL AND wait_until<=?3))
                  ORDER BY created, id",
@@ -1495,7 +1508,7 @@ impl<'s> Tx<'s> {
     ) -> GearResult<Vec<MessageRow>> {
         let mut stmt = self
             .tx
-            .prepare(&message_select(
+            .prepare_cached(&message_select(
                 " WHERE project=?1 AND recipient=?2 AND created>?3
                    AND kind IN ('reply', 'instruction')
                  ORDER BY created, id",
@@ -1522,7 +1535,7 @@ impl<'s> Tx<'s> {
     ) -> GearResult<Vec<MessageRow>> {
         let mut stmt = self
             .tx
-            .prepare(&message_select(
+            .prepare_cached(&message_select(
                 " WHERE project=?1 AND sender=?2 AND created>=?3
                  ORDER BY created, id",
             ))
@@ -1540,7 +1553,7 @@ impl<'s> Tx<'s> {
     pub fn thread_messages(&self, project: &str, thread: &str) -> GearResult<Vec<MessageRow>> {
         let mut stmt = self
             .tx
-            .prepare(&message_select(
+            .prepare_cached(&message_select(
                 " WHERE project=?1 AND thread=?2 ORDER BY created, id",
             ))
             .map_err(map_sqlite)?;
@@ -1556,7 +1569,7 @@ impl<'s> Tx<'s> {
 
     /// Direction results for one task attempt.
     pub fn direction_results_of_attempt(&self, project: &str, task: &str, attempt: i64) -> GearResult<Vec<MessageRow>> {
-        let mut stmt = self.tx.prepare(&message_select(" WHERE project=?1 AND task=?2 AND attempt=?3 AND kind='result' AND CASE WHEN json_valid(meta) THEN json_extract(meta, '$.direction') = 1 ELSE 0 END ORDER BY created, id"))
+        let mut stmt = self.tx.prepare_cached(&message_select(" WHERE project=?1 AND task=?2 AND attempt=?3 AND kind='result' AND CASE WHEN json_valid(meta) THEN json_extract(meta, '$.direction') = 1 ELSE 0 END ORDER BY created, id"))
             .map_err(map_sqlite)?;
         let rows = stmt.query_map(params![project, task, attempt], message_from_row).map_err(map_sqlite)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
@@ -1637,7 +1650,7 @@ impl<'s> Tx<'s> {
     pub fn views_since(&self, seat: &str, generation: i64, since: Ts) -> GearResult<Vec<ViewRecord>> {
         let mut stmt = self
             .tx
-            .prepare(
+            .prepare_cached(
                 "SELECT project, seat, generation, ts, shown_msgs, shown_ops, shown_task,
                         shown_attempt, shown_contract
                  FROM views WHERE seat=?1 AND generation=?2 AND ts>=?3 ORDER BY ts, rowid",
@@ -1760,7 +1773,7 @@ impl<'s> Tx<'s> {
     pub fn slot_ops(&self, seat: &str) -> GearResult<Vec<OpRow>> {
         let mut stmt = self
             .tx
-            .prepare(&op_select(
+            .prepare_cached(&op_select(
                 " WHERE seat=?1
                    AND kind IN ('deliver', 'doorbell')
                    AND state IN ('intended', 'executing', 'submitted', 'unknown')
@@ -1780,7 +1793,7 @@ impl<'s> Tx<'s> {
     pub fn ops_in_state(&self, project: &str, state: OpState) -> GearResult<Vec<OpRow>> {
         let mut stmt = self
             .tx
-            .prepare(&op_select(" WHERE project=?1 AND state=?2 ORDER BY created, id"))
+            .prepare_cached(&op_select(" WHERE project=?1 AND state=?2 ORDER BY created, id"))
             .map_err(map_sqlite)?;
         let rows = stmt
             .query_map(params![project, state.as_str()], op_from_row)
@@ -1797,7 +1810,7 @@ impl<'s> Tx<'s> {
     pub fn ops_of_seat_kind(&self, seat: &str, kind: OpKind) -> GearResult<Vec<OpRow>> {
         let mut stmt = self
             .tx
-            .prepare(&op_select(
+            .prepare_cached(&op_select(
                 " WHERE seat=?1 AND kind=?2
                  ORDER BY created, CAST(SUBSTR(id, INSTR(id, '-')+1) AS INTEGER)",
             ))
@@ -1932,7 +1945,7 @@ impl<'s> Tx<'s> {
     pub fn tasks_of_project(&self, project: &str) -> GearResult<Vec<TaskRow>> {
         let mut stmt = self
             .tx
-            .prepare(&task_select(" WHERE project=?1 ORDER BY rank, id"))
+            .prepare_cached(&task_select(" WHERE project=?1 ORDER BY rank, id"))
             .map_err(map_sqlite)?;
         let rows = stmt
             .query_map(params![project], task_from_row)
@@ -2081,7 +2094,7 @@ impl<'s> Tx<'s> {
     pub fn attempts_of_task(&self, project: &str, task: &str) -> GearResult<Vec<AttemptRow>> {
         let mut stmt = self
             .tx
-            .prepare(&attempt_select(" WHERE project=?1 AND task=?2 ORDER BY n"))
+            .prepare_cached(&attempt_select(" WHERE project=?1 AND task=?2 ORDER BY n"))
             .map_err(map_sqlite)?;
         let rows = stmt
             .query_map(params![project, task], attempt_from_row)
@@ -2098,7 +2111,7 @@ impl<'s> Tx<'s> {
     pub fn in_progress_attempts_of_seat(&self, seat: &str) -> GearResult<Vec<AttemptRow>> {
         let mut stmt = self
             .tx
-            .prepare(&attempt_select(
+            .prepare_cached(&attempt_select(
                 " WHERE seat=?1 AND state IN ('delivered', 'started', 'stopped', 'unknown')
                  ORDER BY task, n",
             ))
@@ -2122,7 +2135,7 @@ impl<'s> Tx<'s> {
     pub fn open_attempts_of_seat(&self, seat: &str) -> GearResult<Vec<AttemptRow>> {
         let mut stmt = self
             .tx
-            .prepare(&attempt_select(
+            .prepare_cached(&attempt_select(
                 " WHERE seat=?1
                    AND state IN ('delivered', 'started', 'stopped', 'unknown', 'submitted')
                  ORDER BY state = 'submitted', task, n",
@@ -2248,7 +2261,7 @@ impl<'s> Tx<'s> {
     ) -> GearResult<Vec<(i64, AttemptTimes)>> {
         let mut stmt = self
             .tx
-            .prepare(
+            .prepare_cached(
                 "SELECT n, delivered_at, started_at, handed_in_at, verdict_at, settled_at, merged_at
                  FROM attempts WHERE project=?1 AND task=?2 ORDER BY n",
             )
@@ -2302,7 +2315,7 @@ impl<'s> Tx<'s> {
     pub fn verdicts_of_task(&self, project: &str, task: &str) -> GearResult<Vec<VerdictRow>> {
         let mut stmt = self
             .tx
-            .prepare(
+            .prepare_cached(
                 "SELECT project, task, attempt, contract_version, candidate, passed, evidence,
                         by_seat, created
                  FROM verdicts WHERE project=?1 AND task=?2 ORDER BY created, attempt",
@@ -2424,7 +2437,7 @@ impl<'s> Tx<'s> {
     pub fn voyages_of_project(&self, project: &str) -> GearResult<Vec<VoyageRow>> {
         let mut stmt = self
             .tx
-            .prepare(
+            .prepare_cached(
                 "SELECT project, milestone, title, done, bar, eta, departure, departure_tasks, updated, departure_estimate_min
                  FROM voyages WHERE project=?1 ORDER BY milestone",
             )
@@ -2532,7 +2545,7 @@ impl<'s> Tx<'s> {
     ) -> GearResult<Vec<ReviewVerdictRow>> {
         let mut stmt = self
             .tx
-            .prepare(
+            .prepare_cached(
                 "SELECT project, task, attempt, passed, findings, by_seat, created
                  FROM review_verdicts WHERE project=?1 AND task=?2 ORDER BY attempt",
             )
@@ -2555,7 +2568,7 @@ impl<'s> Tx<'s> {
     pub fn reviews_to_settle(&self, project: &str) -> GearResult<Vec<ReviewVerdictRow>> {
         let mut stmt = self
             .tx
-            .prepare(
+            .prepare_cached(
                 "SELECT r.project, r.task, r.attempt, r.passed, r.findings, r.by_seat, r.created
                  FROM review_verdicts r
                  JOIN attempts a ON a.project=r.project AND a.task=r.task AND a.n=r.attempt
@@ -2837,7 +2850,7 @@ impl<'s> Tx<'s> {
     pub fn rounds_of_task(&self, project: &str, task: &str) -> GearResult<Vec<RoundRow>> {
         let mut stmt = self
             .tx
-            .prepare(&round_select(" WHERE project=?1 AND task=?2 ORDER BY start_at, role"))
+            .prepare_cached(&round_select(" WHERE project=?1 AND task=?2 ORDER BY start_at, role"))
             .map_err(map_sqlite)?;
         let rows = stmt.query_map(params![project, task], round_from_row).map_err(map_sqlite)?;
         let mut rounds = Vec::new();
@@ -2851,7 +2864,7 @@ impl<'s> Tx<'s> {
     pub fn rounds_of_project(&self, project: &str) -> GearResult<Vec<RoundRow>> {
         let mut stmt = self
             .tx
-            .prepare(&round_select(" WHERE project=?1 ORDER BY start_at, task, role"))
+            .prepare_cached(&round_select(" WHERE project=?1 ORDER BY start_at, task, role"))
             .map_err(map_sqlite)?;
         let rows = stmt.query_map(params![project], round_from_row).map_err(map_sqlite)?;
         let mut rounds = Vec::new();
@@ -2920,7 +2933,7 @@ impl<'s> Tx<'s> {
     pub fn open_frictions(&self, project: &str) -> GearResult<Vec<FrictionRow>> {
         let mut stmt = self
             .tx
-            .prepare(&friction_select(" WHERE project=?1 AND closed_at IS NULL ORDER BY created, id"))
+            .prepare_cached(&friction_select(" WHERE project=?1 AND closed_at IS NULL ORDER BY created, id"))
             .map_err(map_sqlite)?;
         let rows = stmt
             .query_map(params![project], friction_from_row)
@@ -2936,7 +2949,7 @@ impl<'s> Tx<'s> {
     pub fn frictions_of_project(&self, project: &str) -> GearResult<Vec<FrictionRow>> {
         let mut stmt = self
             .tx
-            .prepare(&friction_select(" WHERE project=?1 ORDER BY created, id"))
+            .prepare_cached(&friction_select(" WHERE project=?1 ORDER BY created, id"))
             .map_err(map_sqlite)?;
         let rows = stmt
             .query_map(params![project], friction_from_row)
@@ -3008,7 +3021,7 @@ impl<'s> Tx<'s> {
     pub fn decisions_of(&self, project: &str, voyage: &str) -> GearResult<Vec<DecisionRow>> {
         let mut stmt = self
             .tx
-            .prepare(&decision_select(" WHERE project=?1 AND voyage=?2 ORDER BY seq"))
+            .prepare_cached(&decision_select(" WHERE project=?1 AND voyage=?2 ORDER BY seq"))
             .map_err(map_sqlite)?;
         let rows = stmt
             .query_map(params![project, voyage], decision_from_row)
@@ -3109,7 +3122,7 @@ impl<'s> Tx<'s> {
     pub fn pauses_of_project(&self, project: &str) -> GearResult<Vec<PauseRow>> {
         let mut stmt = self
             .tx
-            .prepare(
+            .prepare_cached(
                 "SELECT project, seat, kind, reason, start_at, end_at
                  FROM seat_pauses WHERE project=?1 ORDER BY start_at, seat",
             )
@@ -3226,7 +3239,7 @@ impl<'s> Tx<'s> {
     fn review_budget_min(&self, project: &str, model: Option<&str>) -> GearResult<i64> {
         let mut stmt = self
             .tx
-            .prepare(
+            .prepare_cached(
                 "SELECT active_s FROM rounds
                  WHERE project=?1 AND role='review' AND end_at IS NOT NULL AND model IS ?2
                    AND active_s > 0

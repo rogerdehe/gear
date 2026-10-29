@@ -149,8 +149,11 @@ pub fn apply(
             // The milestone blocks of the draft become voyages (T-22), after the
             // queue so the task count at departure is the plan's.
             record_tail_decisions(tx, &ctx.project, draft)?;
+            // T-410: which voyages had departed before this apply, read before
+            // fix_departures moves a departure.
+            let departed = departed_voyages(tx, &ctx.project)?;
             fix_departures(tx, &ctx.project, now)?;
-            record_voyages(tx, &ctx.project, draft, now)?;
+            record_voyages(tx, &ctx.project, draft, &departed, now)?;
             record_task_stations(tx, &ctx.project, draft, &result.created)?;
             crate::station::apply_decisions(tx, &ctx.project, draft, now)?;
             serde_json::to_value(&result).map_err(|e| {
@@ -2057,6 +2060,24 @@ fn remerge(
     } else {
         crate::base::task_branch(&conventions, project, &lane, task_id)
     };
+    // T-405: a mechanically settled attempt has no reviewer, so it has no
+    // review branch. Its merge op says so, and the merge does not require
+    // one.
+    let mechanical = settled_mechanically(tx, project, task_id, latest.n)?;
+    let mut payload = serde_json::json!({
+        "branch": branch,
+        "candidate": candidate,
+        "review": gear_model::branch::expand(
+            &conventions.review_branch,
+            project,
+            &lane,
+            task_id
+        ),
+        "remerge": true,
+    });
+    if mechanical {
+        payload["mechanical"] = serde_json::json!(true);
+    }
     tx.insert_op(&gear_store::NewOp {
         project: project.to_string(),
         seat: if lane.is_empty() { format!("{project}:captain") } else { format!("{project}:{lane}") },
@@ -2066,20 +2087,34 @@ fn remerge(
         attempt: Some(latest.n),
         ref_msg: None,
         plan_version: None,
-        payload: serde_json::json!({
-            "branch": branch,
-            "candidate": candidate,
-            "review": gear_model::branch::expand(
-                &conventions.review_branch,
-                project,
-                &lane,
-                task_id
-            ),
-            "remerge": true,
-        }),
+        payload,
         created: now,
     })?;
     Ok(None)
+}
+
+/// T-405: whether the task's accepted attempt was settled by the engine as
+/// mechanical (T-273) — the pass verdict whose note starts `mechanical:`.
+/// Such a task never had a reviewer, so its merge has no review branch to
+/// merge and must not require one.
+fn settled_mechanically(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    task: &str,
+    attempt: i64,
+) -> GearResult<bool> {
+    Ok(tx
+        .verdicts_of_task(project, task)?
+        .into_iter()
+        .any(|verdict| {
+            verdict.passed
+                && verdict.attempt == attempt
+                && verdict.by_seat == "engine"
+                && verdict
+                    .evidence
+                    .as_deref()
+                    .is_some_and(|note| note.starts_with("mechanical:"))
+        }))
 }
 
 fn priority_str(priority: Priority) -> &'static str {
@@ -3015,6 +3050,22 @@ fn fix_departures(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
     Ok(())
 }
 
+/// The milestones whose voyage had departed before this apply (T-410): their
+/// `done:`, `bar:` and `eta:` change only with the user's confirmation. Read
+/// before `fix_departures`, so a departure this apply fixes (a reused id,
+/// T-239) is not one of them.
+fn departed_voyages(
+    tx: &Tx<'_>,
+    project: &str,
+) -> GearResult<std::collections::BTreeSet<String>> {
+    Ok(tx
+        .voyages_of_project(project)?
+        .into_iter()
+        .filter(|voyage| voyage.departure.is_some())
+        .map(|voyage| voyage.milestone)
+        .collect())
+}
+
 /// The meta key that remembers the plan version at which a milestone lost its
 /// last task (T-239): `departure_from_history` starts after it.
 fn departure_reset_key(project: &str, milestone: &str) -> String {
@@ -3307,7 +3358,19 @@ fn why_naming(decisions: &[crate::decision::Decision], task: &str) -> Option<Str
 /// board, the stations and the forecast measure against it, so a block whose
 /// eta reads as prose is refused with nothing written (T-387), for every
 /// block, departed or not — such a voyage cannot depart either.
-fn record_voyages(tx: &Tx<'_>, project: &str, draft: &crate::draft::Draft, now: Ts) -> GearResult<()> {
+///
+/// A departed voyage's `done:`, `bar:` and `eta:` change only when the user
+/// asked for it and confirmed it (T-410): without `--confirmed` the whole
+/// apply is refused with nothing written, and with it the change applies and
+/// a starred decision of kind `user` records it. A voyage that had not
+/// departed before this apply states its words freely.
+fn record_voyages(
+    tx: &Tx<'_>,
+    project: &str,
+    draft: &crate::draft::Draft,
+    departed: &std::collections::BTreeSet<String>,
+    now: Ts,
+) -> GearResult<()> {
     for (header, body) in &draft.milestones {
         let (id, title) = crate::draft::milestone_parts(header);
         let (done, bar, eta) = crate::draft::milestone_fields(body);
@@ -3330,6 +3393,51 @@ fn record_voyages(tx: &Tx<'_>, project: &str, draft: &crate::draft::Draft, now: 
                         "milestone {id}: eta must be a duration GEAR measures the voyage against, e.g. `eta: 8h` or `eta: 1d 4h`; reasons go in # Decisions; got \"{got}\""
                     ),
                 ));
+            }
+        }
+        // T-410: a departed voyage's goal, bar and eta change only when the
+        // user asked for it and confirmed it. No field is exempt: a voyage
+        // that departed with no words gets them only with the confirmation.
+        if departed.contains(id) {
+            let stored = tx.get_voyage(project, id)?;
+            let stored = stored.as_ref();
+            for (field, old, new) in [
+                ("done", stored.and_then(|v| v.done.as_deref()), &done),
+                ("bar", stored.and_then(|v| v.bar.as_deref()), &bar),
+                ("eta", stored.and_then(|v| v.eta.as_deref()), &eta),
+            ] {
+                let old = old.unwrap_or("").trim();
+                let new = new.as_deref().unwrap_or("").trim();
+                if old == new {
+                    continue;
+                }
+                if !draft.confirmed {
+                    return Err(bad(
+                        0,
+                        format!(
+                            "milestone {id}: {field} changed after departure (stored \"{old:.40}\", got \"{new:.40}\"): the goal, the bar and the eta change only when the user asks; confirm it with them, then apply again with --confirmed"
+                        ),
+                    ));
+                }
+                // The user's confirmation is a starred decision (T-410).
+                let what = format!("{field} of {id} changed from \"{old}\" to \"{new}\"");
+                let why = "confirmed by the user".to_string();
+                let key = format!("user|{project}|{id}|{field}|{old}|{new}");
+                tx.insert_decision_if_new(&gear_store::NewDecision {
+                    project: project.to_string(),
+                    key: crate::decision::key_of(&key),
+                    voyage: id.to_string(),
+                    at: crate::decision::apply_time(now),
+                    kind: "user".to_string(),
+                    what: what.clone(),
+                    why: Some(why.clone()),
+                    alt: None,
+                    changes: None,
+                    star: true,
+                    source: "gear".to_string(),
+                    line: Some(format!("{what} | why: {why}")),
+                    plan_version: None,
+                })?;
             }
         }
         // The stations the block names, in plan order (M5 S3), then the words;

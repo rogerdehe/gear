@@ -33,4 +33,24 @@
 
 - Slash commands typed into an agent (`/new`, `/resume`, `/compact`) go in one character at a time and are slow; type them in one go, and handle the dialogs some CLIs open after them (codex asks whether to work in the current worktree or a new one).
 
+- M6 goal: solve every performance problem, both slow operations and high resource use.
+- Machine and fleet health watch (decided 2026-10-29: M6 does it). It watches the CPU and memory of the fleet's own lanes and reviewers, the processes they start included, and the machine's overall health. Internal cause (a lane's or reviewer's processes over the safe line): the engine interrupts that seat and stops it, and tells the captain, who holds the lane and fixes its cause. External cause (the machine is short but our seats are not the reason): an urgent item to the captain to find the cause; when another captain on the machine is behind it, the captain tells that captain to act at once. The watch itself must cost almost nothing: no watch that loads the machine it protects.
 - Performance: GEAR is a scheduler and must run near idle (the engine and each board under a few percent of one core, tens of MB). Measured 2026-10-29: engine 15-78 % CPU in spikes, boards 20-34 %, about 20 MB each; the engine's cost is SQLite reads in the overrun step (fixed in M5 by T-406) and the board's full rebuilds (T-384). M6 reads the M5 probe lines (T-407) and fixes the slow operations they show, starting with every multi-tick step that waits a whole tick between steps.
+
+## A new codex seat opens another seat's conversation
+- 2026-10-29 M5: review-11 (generation 325, no session id recorded) started inside review-9's Codex conversation; Codex refused it ("this conversation is open in another app", r retry / f fork), so its review deliveries stayed unconfirmed for 14 minutes. The captain forked by hand and retyped the delivery. Find how a fresh codex seat chooses its session (a resume of the latest conversation in a shared directory is the likely path), make every new seat start its own, and treat that dialog as blocked so the stall item names it.
+
+## Lost-merge cleanup behind the old filters
+- 2026-10-29 M5 (T-408 review F1): the scan drops a task with a merge in flight or an open merge-failed item before the finished-voyage / gone-candidate check, so its open merge-lost item stays open in that case. Check the skip rule first for tasks with an open merge-lost item, then apply the old filters for new items.
+
+## A repeated confirmed goal/bar/eta change records no second decision
+- 2026-10-29 M5 (T-410 review F1): the decision key in plan.rs record_voyages holds only project, milestone, field and the old and new text, so the same confirmed transition a second time in one voyage is skipped by insert_decision_if_new. Add the plan version to the key and a test with three confirmed transitions.
+
+## A lane that reports blocked keeps its task and gets nothing else
+- 2026-10-29 M5: mast reported T-367 blocked on T-366 (`gear send --kind blocked --on T-366`) and then sat idle about 40 minutes: the attempt stayed Started, so the engine assigned no next task. A blocked report with `--on` should park the attempt and free the lane for its next startable task, and the captain should hear when a lane is idle with queued work.
+
+## A held seat cannot report
+- 2026-10-29 M5 (F-176): while the user's stop held mast, every `gear send` was refused ("only active, standby or retiring may do this"), so a finished task could not be handed in and the lane could not even ask the captain. A held seat should be able to send questions and results; only new work stays held.
+
+## A test flake in gear-cli under one-process cargo test
+- 2026-10-29 M5 (F-153): two gear-cli tests share the scratch tag "stale" and race under plain `cargo test`; nextest's process per test hides it. Give each test its own tag.

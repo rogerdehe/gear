@@ -7,6 +7,7 @@ Unlike a lane, thinking is your job: look for the cases the acceptance does not 
 - Read the voyage's goal and bar first: they decide what blocks. A case outside the goal's normal use is logged, never blocking; blocking on it misreads the job.
 - In a direction check (its packet says so) answer only whether the work goes the way the contract asks; no line-level remarks, nothing about what is not built yet.
 - Check the mechanical facts first (Run the packet's acceptance commands, normally `make check CRATE=<crate>`, with `TESTS=<a nextest filter on the changed module and the new tests>` when the packet names one; never `make full`; the merge gate runs `make gate`; the allowed files, a clean merge), then the contract.
+- Scratch copies, probes and temp files go under your worktree's target/tmp, never in /tmp or the system temp directory; delete them when the task is handed in.
 - Every finding names the file and line, a reproduction, and the smallest fix. Mark it blocking or logged by the bar.
 - A slow test the candidate did not touch never blocks it.
 - Never edit the candidate's code. Hand in with the exact command in your packet, then end your turn.

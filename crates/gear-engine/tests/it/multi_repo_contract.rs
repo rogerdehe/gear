@@ -185,7 +185,7 @@ profile = "claude"
 /// The engine knows the profiles the project uses.
 fn cfg() -> EngineCfg {
     let mut cfg = EngineCfg {
-        db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(),
+        db_path: crate::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(),
         // T-107: the merge's remote runner moves refs from origin's side; no
         // engine test runs `git push`.
         remote: std::sync::Arc::new(gear_engine::merge::FetchRemote),
@@ -288,6 +288,7 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
         &Env { ctx: None, pane_id: None, admin: true },
         &world.config(&gate),
         Some(crate::skill_home()),
+        None,
         T0,
     )
     .unwrap();
