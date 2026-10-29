@@ -37,6 +37,9 @@ pub enum ErrorCode {
     /// A departed voyage's staffing (`quota`, `lanes`, `temps`, `models`) may
     /// not change at a re-init without the user's own words (T-392).
     StaffLocked,
+    /// A departed voyage's goal (`title`, `done`, `bar`, stations) belongs to
+    /// the user and no apply may change it (T-331).
+    GoalLocked,
 }
 
 impl ErrorCode {
@@ -57,6 +60,7 @@ impl ErrorCode {
             ErrorCode::EngineDown => "ENGINE_DOWN",
             ErrorCode::FrictionRequired => "FRICTION_REQUIRED",
             ErrorCode::StaffLocked => "STAFF_LOCKED",
+            ErrorCode::GoalLocked => "GOAL_LOCKED",
         }
     }
 
