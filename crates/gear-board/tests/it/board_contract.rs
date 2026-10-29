@@ -1182,7 +1182,8 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     // quota reading and the done sentence.
     assert!(frame.contains("idle:"), "{frame}");
     assert!(frame.contains("minimax-cn"), "{frame}");
-    assert!(frame.contains("rework resumes its session"), "{frame}");
+    assert!(frame.contains("TO HANDLE ("), "{frame}");
+    assert!(frame.contains("Quota"), "{frame}");
     // The time bar is the voyage's time: 60 minutes of a 12 h voyage is two
     // cells of 24.
     assert!(frame.contains("time   ██░░░░░░░░░░░░░░░░░░░░░░"), "{frame}");
@@ -1777,42 +1778,37 @@ fn a_reset_days_away_prints_the_day_and_a_later_one_the_clock_alone() {
         ],
     );
     let frame = now_frame(&mut store, T0);
-    // A week out: the month and the day, then the time.
+    // The quota is one line, the windows side by side (T-360).
     let line = frame
         .lines()
-        .find(|line| line.contains("codex"))
-        .unwrap_or_else(|| panic!("no codex line: {frame}"));
-    let reset = line.split("resets ").nth(1).unwrap_or_else(|| panic!("no reset: {line}"));
+        .find(|line| line.contains("Quota"))
+        .unwrap_or_else(|| panic!("no quota line: {frame}"));
+    // A week out: the month and the day, and no time of day (T-360).
+    let segment = &line[line
+        .find("codex")
+        .unwrap_or_else(|| panic!("no codex window: {line}"))..];
+    let reset = segment
+        .split("resets ")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no reset: {segment}"))
+        .trim_end();
     let mut words = reset.split(' ');
     let month = words.next().unwrap_or_default();
     let day = words.next().unwrap_or_default();
-    let time = words.next().unwrap_or_default();
-    assert_eq!(month.len(), 3, "the month is a word: {line}");
-    assert!(month.chars().all(|c| c.is_ascii_alphabetic()), "{line}");
-    assert!(day.parse::<u32>().is_ok(), "the day is a number: {line}");
-    assert_eq!(time.len(), 5, "then the time: {line}");
-    assert_eq!(&time[2..3], ":", "{line}");
+    assert_eq!(month.len(), 3, "the month is a word: {segment}");
+    assert!(month.chars().all(|c| c.is_ascii_alphabetic()), "{segment}");
+    assert!(day.parse::<u32>().is_ok(), "the day is a number: {segment}");
+    assert_eq!(words.next(), None, "and nothing else: {segment}");
     // The date is the one the clock of the machine gives.
-    assert!(line.contains(&gear_board::idle::day_clock(week)), "{line}");
+    assert!(segment.contains(&gear_board::idle::month_day(week)), "{segment}");
     // Three hours out: only the clock, as today.
-    let line = frame
-        .lines()
-        .find(|line| line.contains("minimax-cn"))
-        .unwrap_or_else(|| panic!("no minimax-cn line: {frame}"));
     assert!(
-        line.contains(&format!("resets {}", gear_board::idle::clock(hours))),
+        line.contains(&format!(
+            "minimax-cn 5h 63% · resets {}",
+            gear_board::idle::clock(hours)
+        )),
         "{line}"
     );
-}
-
-#[test]
-fn a_reading_half_an_hour_old_says_its_age() {
-    let mut store = world_reading_custom(
-        &["codex"],
-        &[("codex", &reading_json("codex", "weekly", T0 + 6 * 86_400, T0 - 45 * 60))],
-    );
-    let frame = now_frame(&mut store, T0);
-    assert!(frame.contains("(read 45 min ago)"), "{frame}");
 }
 
 // ---- T-411: the wheel and the page keys scroll a long view
@@ -2126,4 +2122,263 @@ fn cancelled_tasks_are_not_counted_in_the_totals() {
     for id in ["T-6", "T-7", "T-8", "T-9"] {
         assert!(ids.contains(&id), "{id} stays in the Tasks view: {ids:?}");
     }
+}
+
+// ---- T-360: under the lanes the Now view lists what to handle, each item
+// with who acts, and the quota on one line.
+
+/// The a task over its estimate gets: the board's one line per item.
+#[test]
+fn a_merged_task_past_its_estimate_is_not_an_item_to_handle() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            // T-1 is done: 40 minutes on an estimate of 20. A merged task is
+            // history — the Time & tokens view keeps it (T-360).
+            let mut row = tx.get_task("p", "T-1")?.unwrap();
+            row.estimate_min = Some(20);
+            tx.update_task(&row)?;
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:data".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Accepted,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T0)?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::HandedIn, T0 + 40 * 60)?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Merged, T0 + 40 * 60)?;
+            Ok(())
+        })
+        .unwrap();
+    let frame = now_frame(&mut store, T0 + 60 * 60);
+    assert!(!frame.contains("T-1 data"), "{frame}");
+    assert!(!frame.contains("past its estimate"), "{frame}");
+    assert!(frame.contains("TO HANDLE (0)"), "{frame}");
+    assert!(frame.contains("nothing"), "{frame}");
+}
+
+/// An open task that took more than one round is an item, and the captain is
+/// told what to do with it.
+#[test]
+fn an_open_reworked_task_is_an_item_to_handle() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            let mut row = tx.get_task("p", "T-2")?.unwrap();
+            row.estimate_min = Some(25);
+            tx.update_task(&row)?;
+            // A second attempt: the task is in rework, on round 2.
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-2".into(),
+                n: 2,
+                seat: "p:runtime".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Started,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            tx.set_attempt_time("p", "T-2", 2, AttemptStep::Started, T0)?;
+            Ok(())
+        })
+        .unwrap();
+    let frame = now_frame(&mut store, T0 + 30 * 60);
+    assert!(
+        frame.contains("⚠ T-2 runtime round 2,"),
+        "the item is listed with its lane and round: {frame}"
+    );
+    assert!(
+        frame.contains("the captain scopes what is left"),
+        "{frame}"
+    );
+}
+
+/// The quota is one line: every window of every reading, the provider's name
+/// first, and a reset two days away names its day.
+#[test]
+fn the_quota_is_one_line_with_a_day_two_days_away() {
+    let in_two_days = T0 + 2 * 86_400;
+    let mut store = world_reading_custom(
+        &["codex", "minimax-cn"],
+        &[
+            ("codex", &reading_json("codex", "weekly", in_two_days, T0)),
+            ("minimax-cn", &reading_json("minimax-cn", "5h", T0 + 3600, T0)),
+        ],
+    );
+    let frame = now_frame(&mut store, T0);
+    let line = frame
+        .lines()
+        .find(|line| line.contains("Quota"))
+        .unwrap_or_else(|| panic!("no quota line: {frame}"));
+    // The hour-out window comes first: the windows are ordered by their reset.
+    let minimax = line
+        .find("minimax-cn 5h 63%")
+        .unwrap_or_else(|| panic!("no minimax-cn window: {line}"));
+    let codex = line
+        .find("codex weekly 63%")
+        .unwrap_or_else(|| panic!("no codex window: {line}"));
+    assert!(minimax < codex, "the window that resets first comes first: {line}");
+    assert!(
+        line.contains(&format!("codex weekly 63% · resets {}", gear_board::idle::month_day(in_two_days))),
+        "a reset two days away is a date: {line}"
+    );
+}
+
+/// The items name who acts: the reviewer that holds the task and how long it
+/// has held it, the captain for an answer, a verdict and a failed merge.
+#[test]
+fn the_items_name_the_one_who_acts() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            for (id, rank) in [("T-5", 5), ("T-6", 6), ("T-7", 7), ("T-8", 8)] {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state: if id == "T-5" { TaskState::Running } else { TaskState::Verifying },
+                    priority: "must".into(),
+                    lane: Some("data".into()),
+                    milestone: Some("M4".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(30),
+                    issue: None,
+                    updated: T0,
+                })?;
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: id.into(),
+                    n: 1,
+                    seat: "p:data".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: if id == "T-5" {
+                        AttemptState::Started
+                    } else {
+                        AttemptState::Submitted
+                    },
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0 - 20 * 60,
+                    updated: T0 - 20 * 60,
+                })?;
+                tx.set_attempt_time("p", id, 1, AttemptStep::Started, T0 - 20 * 60)?;
+            }
+            // T-5 asked the captain a question and waits for the answer.
+            tx.insert_message(&NewMessage {
+                project: "p".into(),
+                thread: "T-5:1".into(),
+                task: Some("T-5".into()),
+                attempt: Some(1),
+                sender: "p:data".into(),
+                sender_gen: 1,
+                recipient: "p:captain".into(),
+                kind: MsgKind::Question,
+                urgent: false,
+                body: "which one?".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: T0 - 10 * 60,
+                meta: None,
+            })?;
+            // T-6 is held by a reviewer whose round started twelve minutes ago.
+            testing::seed_temp_seat(tx, "p", "review-1", "T-6", "w1:p9", "codex", T0)?;
+            tx.insert_round(&NewRound {
+                key: RoundKey {
+                    project: "p".into(),
+                    task: "T-6".into(),
+                    attempt: 1,
+                    role: "review".into(),
+                },
+                seat: "p:review-1".into(),
+                generation: 1,
+                cli: "codex".into(),
+                model: None,
+                start_at: T0 - 12 * 60,
+            })?;
+            // T-7's reviewer handed its verdict in; T-8 passed and its merge
+            // failed.
+            tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                project: "p".into(),
+                task: "T-7".into(),
+                attempt: 1,
+                passed: true,
+                findings: String::new(),
+                by_seat: "p:review-2".into(),
+                created: T0 - 5 * 60,
+            })?;
+            tx.insert_verdict(&gear_store::VerdictRow {
+                project: "p".into(),
+                task: "T-8".into(),
+                attempt: 1,
+                contract_version: 1,
+                candidate: "c".into(),
+                passed: true,
+                evidence: None,
+                by_seat: "p:captain".into(),
+                created: T0 - 5 * 60,
+            })?;
+            let op = tx.insert_op(&gear_store::NewOp {
+                project: "p".into(),
+                seat: "p:captain".into(),
+                generation: 1,
+                kind: gear_model::OpKind::Merge,
+                task: Some("T-8".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({}),
+                created: T0 - 4 * 60,
+            })?;
+            tx.set_op_state("p", &op.id, gear_model::OpState::Failed, None, T0 - 3 * 60)?;
+            Ok(())
+        })
+        .unwrap();
+    let frame = now_frame(&mut store, T0);
+    assert!(frame.contains("⏳  T-6 in review by review-1, 12 min in"), "{frame}");
+    assert!(frame.contains("T-5 data waits for the captain's answer"), "{frame}");
+    assert!(frame.contains("T-7 waits for the captain's verdict"), "{frame}");
+    assert!(frame.contains("T-8 merge failed, waits for the captain"), "{frame}");
 }

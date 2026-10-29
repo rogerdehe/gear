@@ -177,8 +177,12 @@ fn a_task_over_its_estimate_has_a_yellow_bar() {
     let end = ansi.find("██████████ 60/30m\u{1b}[0m").expect("the bar ends its yellow run");
     assert!(ansi[..end].rfind("\u{1b}[") == ansi[..end].rfind("\u{1b}[33m"), "{ansi:?}");
     // The heading of what needs a look is yellow and bold.
-    let (row, x) = find(&text, "NEEDS A LOOK");
+    let (row, x) = find(&text, "TO HANDLE");
     assert_eq!(screen.style_at(x, row), Style::fg(Color::Warn).and_bold());
+    // The item itself is yellow too, its mark two columns before the text.
+    let (row, x) = find(&text, "T-2 rewrite 60/30m, past its estimate");
+    assert_eq!(screen.style_at(x, row).fg, Some(Color::Warn), "{text}");
+    assert_eq!(screen.style_at(x - 2, row).fg, Some(Color::Warn), "{text}");
     // A lane name is bold, in its lane colour (the first lane is cyan).
     let (row, x) = find(&text, "› hull");
     assert_eq!(screen.style_at(x, row).fg, Some(Color::Acc));

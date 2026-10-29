@@ -233,6 +233,11 @@ pub struct ProjectBoard {
     /// the lane ends and how long it sits idle. Empty when no measured voyage
     /// has open work.
     pub forecast: Vec<forecast::LaneEnd>,
+    /// What the shown tasks wait on, in plan order (T-360): a task in review
+    /// names the reviewer and how long it has held it, a task that waits for
+    /// the captain names what he owes. The board's Now view lists them as items
+    /// to handle, each with who acts.
+    pub waiting_on: Vec<String>,
 }
 
 /// One delivery the engine has not confirmed yet (T-271).
@@ -557,6 +562,9 @@ pub fn project_with_agents(
     }
 
     let mut totals = Totals::default();
+    // The stage of every shown task, in plan order: the Now view's items to
+    // handle follow the plan, not the lanes' grouping (T-360).
+    let mut shown_stages: Vec<(String, String, graph::Stage)> = Vec::new();
     for task in &tasks {
         // A draft task is not in the plan yet; the board shows the plan.
         if task.state == TaskState::Draft {
@@ -583,6 +591,7 @@ pub fn project_with_agents(
         // reading for the views and the lane lines.
         let stage = graph::stage_of(tx, project, task)?;
         let stage_words = graph::Stage::words_of(stage, &task.deps, rounds, None);
+        shown_stages.push((task.id.clone(), name.clone(), stage));
         let line = TaskBoard {
             id: task.id.clone(),
             state: task.state,
@@ -795,6 +804,44 @@ pub fn project_with_agents(
         right.age_s.cmp(&left.age_s).then_with(|| left.op.cmp(&right.op))
     });
 
+    // What the shown tasks wait on, in plan order (T-360): the Now view lists
+    // it under the lanes, each item with who acts. A task in review names the
+    // reviewer holding it and how long it has held it; a task that waits for
+    // the captain names what he owes.
+    let mut waiting_on = Vec::new();
+    for (id, lane, stage) in &shown_stages {
+        match stage {
+            graph::Stage::Review => {
+                let holder = temps_seats.iter().find(|seat| {
+                    seat.state == SeatState::Active
+                        && seat.task_id.as_deref() == Some(id.as_str())
+                });
+                let name = holder.map(|seat| seat.name.as_str()).unwrap_or("-");
+                // The reviewer's open round is when it took the task up; a
+                // seat without one counts from its state.
+                let since = holder
+                    .and_then(|seat| match tx.open_round_of_seat(&seat.id) {
+                        Ok(Some(round)) => Some(round.start_at),
+                        _ => Some(seat.state_since),
+                    })
+                    .unwrap_or(now);
+                waiting_on.push(format!(
+                    "{id} in review by {name}, {} min in",
+                    (now - since).max(0) / 60
+                ));
+            }
+            graph::Stage::Asking => waiting_on
+                .push(format!("{id} {lane} waits for the captain's answer")),
+            graph::Stage::Verdict => {
+                waiting_on.push(format!("{id} waits for the captain's verdict"))
+            }
+            graph::Stage::MergeFailed => {
+                waiting_on.push(format!("{id} merge failed, waits for the captain"))
+            }
+            _ => {}
+        }
+    }
+
     let voyages = voyage::reports(tx, project, now)?;
     // The decisions belong to the voyage the board measures (F3).
     let decisions = decisions_of(
@@ -866,6 +913,7 @@ pub fn project_with_agents(
         unconfirmed,
         stations,
         forecast,
+        waiting_on,
     })
 }
 

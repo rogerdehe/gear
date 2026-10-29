@@ -157,8 +157,11 @@ const PENDING: &[Pending] = &[
 
     Pending { frame: "now-folded", rows: (13, 18), cols: (0, 159), swap: None, by: "T-359" },
     Pending { frame: "now-open", rows: (21, 26), cols: (0, 159), swap: None, by: "T-359" },
-    Pending { frame: "now-folded", rows: (19, 46), cols: (0, 159), swap: None, by: "T-360" },
-    Pending { frame: "now-open", rows: (27, 46), cols: (0, 159), swap: None, by: "T-360" },
+    // T-360 draws the block from the row two below the balance line, so its
+    // rows follow the header (T-353, T-354, T-355, T-356) and the lane table
+    // (T-359): they match the golden frames once that chain is in.
+    Pending { frame: "now-folded", rows: (19, 46), cols: (0, 159), swap: None, by: "T-360 (after T-353 to T-359)" },
+    Pending { frame: "now-open", rows: (27, 46), cols: (0, 159), swap: None, by: "T-360 (after T-353 to T-359)" },
 
     Pending { frame: "tasks-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-362" },
     Pending { frame: "tasks-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-362" },
@@ -513,3 +516,4 @@ fn a_lane_colour_swap_keeps_the_case() {
     assert!(!matches(&cell('U'), &cell('m'), swap), "a bold prototype letter needs the bold board letter");
     assert!(!matches(&cell('u'), &cell('M'), swap), "and a plain one the plain");
 }
+
