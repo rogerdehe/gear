@@ -20,12 +20,19 @@ other.
 | reading | from |
 |---|---|
 | cores | `sysctl -n hw.ncpu` / `nproc` |
-| load | the 1-minute load average, rounded up |
+| load | the 1-minute load average, shown in the line only (it counts every busy thread, lags a burst by a minute, and already includes the builds counted in running) |
 | running | the `build-slot.sh` runs alive on the machine, this one included; the larger of two samples 400 ms apart, so runs started in the same second see each other |
 | free memory | `kern.memorystatus_level` / `MemAvailable` over `MemTotal`, in percent |
 
-`N = max(1, min(cores - load, cores / running))`, then at most 2 when free
-memory is under 25 % and 1 when under 15 %.
+`N = max(1, cores / running)`, then at most 2 when free memory is under 25 %
+and 1 when under 15 %. CPU contention only slows every run (and the low
+priority keeps the machine usable); memory is what can take a machine down,
+so the memory readings are the hard limits.
+
+`BUILD_SLOT_MIN` (default 1) is a floor on N before the memory clamps, for
+the one run everybody waits on, such as a merge gate that merges one task at a
+time. `BUILD_SLOT_PRIORITY=normal` runs that one at normal priority instead of
+the lower one.
 
 ## What the command gets
 
@@ -34,7 +41,7 @@ memory is under 25 % and 1 when under 15 %.
 | `BUILD_JOBS` | N | your Makefile: map it to your own knob (`go test -p`, `--maxWorkers`, …) |
 | `CARGO_BUILD_JOBS` | N | cargo |
 | `NEXTEST_TEST_THREADS` | N | cargo-nextest |
-| `GOMAXPROCS` | max(1, cores / N) | Go: `-p` packages times `-parallel` cases (which follows GOMAXPROCS) stays at the core count |
+| `GOMAXPROCS` | max(1, cores / N) alone, at most 2 while other runs are alive | Go: `-p` packages times `-parallel` cases (which follows GOMAXPROCS); a lone run stays at the core count, a crowded machine keeps a little case parallelism without each run taking the whole machine |
 | `BUILD_SLOT` | 1 | `build-slot.sh` itself: a run started under it runs its command at once and changes nothing, so the outermost run owns the slot |
 
 It prints one line to stderr:

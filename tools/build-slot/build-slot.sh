@@ -10,20 +10,27 @@
 #
 # N, the jobs for this run:
 #   cores    hw.ncpu / nproc
-#   load     the 1-minute load average, rounded up
+#   load     the 1-minute load average, shown in the line only: it counts
+#            every busy thread (agents, editors, other work), lags a burst by
+#            a minute, and already includes the builds counted in running, so
+#            dividing by it starved every build on a busy machine to 1 job
 #   running  the build-slot.sh runs alive on the machine, this one included,
 #            the larger of two samples 400 ms apart, so runs that start in the
 #            same second all see each other. Every project on the machine must
 #            run its heavy commands through a file named build-slot.sh for them
 #            to count one another.
 #   free     free memory in percent (kern.memorystatus_level / MemAvailable)
-#   N = max(1, min(cores - load, cores / running)); at most 2 when free memory
+#   N = max(1, cores / running); at most 2 when free memory
 #   is under 25 %, 1 when under 15 %.
 #
 # Exported to the command:
 #   BUILD_JOBS, CARGO_BUILD_JOBS, NEXTEST_TEST_THREADS = N
-#   GOMAXPROCS = max(1, cores / N): Go runs -p packages times -parallel cases,
-#   and -parallel follows GOMAXPROCS, so the product stays at the core count.
+#   GOMAXPROCS = max(1, cores / N) for a run alone, at most 2 while other runs
+#   are alive: Go runs -p packages times -parallel cases, and -parallel
+#   follows GOMAXPROCS, so a lone run's product stays at the core count, and on
+#   a crowded machine each run keeps a little case parallelism (much Go test
+#   time waits on a database, not on a core) without R runs each taking the
+#   whole machine.
 #   BUILD_SLOT = 1: a build-slot.sh started under it runs its command at once,
 #   without counting itself or changing these, so the outermost run owns the
 #   slot.
@@ -34,6 +41,11 @@
 #
 # One line goes to stderr:
 #   build-slot: N (cores C, load L, running R, free memory M %)
+# BUILD_SLOT_PRIORITY=normal runs the command at normal priority instead of
+# the lower one, for the same run.
+# BUILD_SLOT_MIN (default 1) is a floor on N before the memory clamps, for the
+# one run everybody waits on (a merge gate that merges one task at a time):
+# it takes at least that share, and the memory clamps still win.
 # BUILD_SLOT_CORES, BUILD_SLOT_LOAD, BUILD_SLOT_RUNNING and BUILD_SLOT_FREE
 # replace the readings (for tests).
 
@@ -87,11 +99,9 @@ else
     [ "$first" -gt "$running" ] && running=$first
 fi
 
-jobs=$(awk -v c="$cores" -v l="${load:-0}" -v r="$running" -v f="${free:-100}" 'BEGIN {
-    up = int(l); if (up < l) up++
-    n = c - up
-    share = int(c / r)
-    if (share < n) n = share
+jobs=$(awk -v c="$cores" -v l="${load:-0}" -v r="$running" -v f="${free:-100}" -v m="${BUILD_SLOT_MIN:-1}" 'BEGIN {
+    n = int(c / r)
+    if (n < m) n = m
     if (f < 25 && n > 2) n = 2
     if (f < 15) n = 1
     if (n < 1) n = 1
@@ -99,6 +109,7 @@ jobs=$(awk -v c="$cores" -v l="${load:-0}" -v r="$running" -v f="${free:-100}" '
     print n
 }')
 gomax=$((cores / jobs)); [ "$gomax" -ge 1 ] || gomax=1
+[ "$running" -gt 1 ] && [ "$gomax" -gt 2 ] && gomax=2
 
 echo "build-slot: $jobs (cores $cores, load $load, running $running, free memory $free %)" >&2
 
@@ -106,7 +117,11 @@ BUILD_SLOT=1 BUILD_JOBS=$jobs CARGO_BUILD_JOBS=$jobs NEXTEST_TEST_THREADS=$jobs 
 export BUILD_SLOT BUILD_JOBS CARGO_BUILD_JOBS NEXTEST_TEST_THREADS GOMAXPROCS
 
 # A child, not exec: this process stays counted until the command ends.
-if command -v taskpolicy >/dev/null 2>&1; then
+# BUILD_SLOT_PRIORITY=normal skips the lower priority, for the one run
+# everybody waits on (a merge gate); the memory clamps above still hold.
+if [ "${BUILD_SLOT_PRIORITY:-}" = normal ]; then
+    "$@"
+elif command -v taskpolicy >/dev/null 2>&1; then
     taskpolicy -c utility "$@"
 else
     nice -n 10 "$@"

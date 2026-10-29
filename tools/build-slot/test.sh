@@ -13,12 +13,22 @@ expect() {
     else echo "FAIL load $2 running $3 free $4: want $1, got $got"; fail=1; fi
 }
 expect "10 10 10 1" 0 1 60
-expect "6 6 6 1"    3.2 1 60
-expect "1 1 1 10"   0 8 60
-expect "3 3 3 3"    0 3 60
-expect "1 1 1 10"   12 1 60
+expect "10 10 10 1"  3.2 1 60
+expect "1 1 1 2"    0 8 60
+expect "3 3 3 2"    0 3 60
+expect "10 10 10 1"  12 1 60
 expect "2 2 2 5"    0 1 20
 expect "1 1 1 10"   0 1 10
+
+# a floor for the run everybody waits on, the memory clamps still winning
+got=$(env -u BUILD_SLOT BUILD_SLOT_MIN=4 BUILD_SLOT_CORES=10 BUILD_SLOT_LOAD=0 BUILD_SLOT_RUNNING=5 BUILD_SLOT_FREE=60 "$slot" sh -c "$show" 2>/dev/null)
+[ "$got" = "4 4 4 2" ] && echo "ok   floor 4 with five runs -> $got" || { echo "FAIL floor: $got"; fail=1; }
+got=$(env -u BUILD_SLOT BUILD_SLOT_MIN=4 BUILD_SLOT_CORES=10 BUILD_SLOT_LOAD=0 BUILD_SLOT_RUNNING=5 BUILD_SLOT_FREE=20 "$slot" sh -c "$show" 2>/dev/null)
+[ "$got" = "2 2 2 2" ] && echo "ok   floor under the memory clamp -> $got" || { echo "FAIL floor memory: $got"; fail=1; }
+
+# BUILD_SLOT_PRIORITY=normal still runs the command and passes its status
+env -u BUILD_SLOT BUILD_SLOT_PRIORITY=normal BUILD_SLOT_CORES=10 BUILD_SLOT_LOAD=0 BUILD_SLOT_RUNNING=1 BUILD_SLOT_FREE=60 "$slot" false 2>/dev/null
+[ $? -eq 1 ] && echo "ok   normal priority runs the command" || { echo "FAIL normal priority"; fail=1; }
 
 # the command's exit status passes through
 env -u BUILD_SLOT BUILD_SLOT_CORES=10 BUILD_SLOT_LOAD=0 BUILD_SLOT_RUNNING=1 BUILD_SLOT_FREE=60 "$slot" false 2>/dev/null
