@@ -1,6 +1,6 @@
 # Review of T-425
 
-Status: running
+Status: done
 Verdict: pass
 Reviewed: review/t425 @ be577496   Reviewer: gear:review-9   Round: 5 (attempt 5)
 Contract: v1
