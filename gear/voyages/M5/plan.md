@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=782 -->
+<!-- gear-plan project=gear base=783 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -156,6 +156,7 @@ eta: 21h
 - 2026-10-29 05:57 scope: the other captain reported a hand-in refused as an already-failed candidate (T-198 there); checked in both stores: its attempt 1 was handed in with a branch name, which GEAR stores as given, so the same branch at a new commit matched it; a new mast task makes `gear send` resolve a branch to its commit and names the fix in the refusal
 - ★ 2026-10-29 05:59 hand-fix: merges took 13-21 min each with six queued: build-slot gave the merge gate an equal share (2 jobs); the captain added BUILD_SLOT_MIN to its own tool (a floor before the memory clamps), and a mechanical mast task sets it to 4 on the gate
 - 2026-10-29 06:06 scope: hull reached T-360 before T-359 (which waits on mast's T-354), so hull/t359 does not exist to branch from; T-360 branches from origin/dev and anchors its block at top + lanes + 3, and T-359 puts its balance line on top + lanes + 1 so nothing moves
+- 2026-10-29 06:10 config: until T-422 merges (six merges ahead of it), the engine runs with BUILD_SLOT_MIN=4 in its environment, which every merge gate inherits: stopped after T-376's gate, the tool pushed in that gap, restarted from the captain's shell, same build, inode checked; a stopgap row records it
 
 
 # Queue
