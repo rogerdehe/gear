@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=695 -->
+<!-- gear-plan project=gear base=696 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -97,6 +97,7 @@ eta: 16h
 - station M-5159: keep course 627 min in, 99 done; finish 905 of 960
 - 2026-10-29 13:15 staff: mast runs dry (M-5152): its board chain waits on reviews (two temp seats, reviews queued); T-385, T-387 and T-370, startable and in crates with no open mast work, move to mast (their files are allowed edits for mast) | why: never-stop | else: mast idles while hull holds 13 tasks
 - station M-5187: keep course 643 min in, 102 done; finish 937 of 960 (mast 294 min, mostly the board chain, each step waiting for its review on two temp seats); a third temp seat is put to the user
+- station M-5203: keep course 660 min in; finish 938 of 960; mast 278 min (the board chain on two temp seats); the third temp seat waits for the user
 - 2026-10-29 09:45 hand-fix: another project's review seats restarted in a loop (844 temp starts for about fifty reviews): the idle sweep releases a Standby reviewer that still holds its pending review; T-391 fixes it, and that captain lowered `[quota] temps` from 6 to 3 until the fix is in the shared binary | why: each restart costs a login shell and a codex launch on the shared machine | else: the loop runs until the voyage ends
 - ★ 2026-10-29 09:20 estimate: the 24 h eta proposal is withdrawn; the eta stays 16 h and a short clock is answered by working faster, never by moving the eta (user: "如果每次时间不够了，就往后推一个工作，就他妈会无限延期！") | why: the forecast was wrong, not the lanes: crates/gear-board/src/voyage.rs measures a lane by the sum of its tasks' start-to-merge spans, but review and merge run beside the lane's next task, so the same minutes count twice; measured by throughput (estimate done per lane wall minute since departure) hull runs 0.65 (550 min left → about 357) and mast 0.32 (895 left → about 290), a finish near 845 min of 960; T-390 fixes the forecast, T-385 moves to mast to even the lanes | else: the station alarms keep pushing the eta out
 # Queue
