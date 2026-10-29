@@ -1,8 +1,8 @@
 //! T-246: each voyage is independent, so the board shows the current voyage
-//! only. A task of a landed voyage is history — unless it still waits for
-//! work, which is a decision the captain owes.
+//! only. T-350: the board shows one voyage and nothing of another; the captain
+//! home page keeps the older rule — a task of a landed voyage that still waits
+//! for work is a decision the captain owes.
 
-use gear_board::frame::token_tasks;
 use gear_model::{AttemptState, SeatRole, TaskState};
 use gear_store::{testing, AttemptRow, AttemptStep, Store, TaskRow, VoyageRow};
 
@@ -137,8 +137,14 @@ fn the_board_counts_and_works_the_current_voyage_only() {
     // The two M2 tasks; the done task of the landed M1 voyage is history.
     assert_eq!(plan.totals.tasks, 2, "the tasks of M2: {:?}", plan.totals);
     assert_eq!(plan.totals.done, 1);
-    // The Time & tokens view lists no task of M1.
-    let listed: Vec<&str> = token_tasks(&plan).iter().map(|(_, task)| task.id.as_str()).collect();
+    // The Cost view's rows are the lanes' own tasks (T-363): no task of M1.
+    let listed: Vec<&str> = plan
+        .lanes
+        .iter()
+        .flat_map(|lane| lane.tasks.iter())
+        .filter(|task| task.actual_min.unwrap_or(0) > 0)
+        .map(|task| task.id.as_str())
+        .collect();
     assert!(!listed.contains(&"T-1"), "no task of the landed voyage: {listed:?}");
     assert!(listed.contains(&"T-2"), "the measured task of M2: {listed:?}");
     // Nor does the lane line.
@@ -151,12 +157,22 @@ fn the_board_counts_and_works_the_current_voyage_only() {
 }
 
 #[test]
-fn a_task_left_open_on_a_landed_voyage_is_still_shown() {
+fn the_board_shows_one_voyage_but_the_home_page_keeps_every_open_task() {
     let mut store = world(true);
     let plan = board(&mut store);
 
-    // T-1 never finished: it is not history, it is a decision the captain owes.
+    // The board measures M1 (it still has open work) and shows its tasks only:
+    // an open task of another voyage is not on it (README change 6, T-350).
     let lane = plan.lanes.iter().find(|lane| lane.lane == "hull").expect("the lane");
     let ids: Vec<&str> = lane.tasks.iter().map(|task| task.id.as_str()).collect();
-    assert!(ids.contains(&"T-1"), "the open task of M1: {ids:?}");
+    assert_eq!(ids, vec!["T-1"], "the board works the measured voyage only: {ids:?}");
+
+    // The home page, which names no voyage, keeps today's rule: the open task
+    // of M2 is not history, it is a decision the captain owes.
+    let home = store
+        .read(|tx| gear_board::project_with_agents(tx, "p", NOW, None))
+        .unwrap();
+    let lane = home.lanes.iter().find(|lane| lane.lane == "hull").expect("the lane");
+    let ids: Vec<&str> = lane.tasks.iter().map(|task| task.id.as_str()).collect();
+    assert!(ids.contains(&"T-3"), "the open task of M2 on the home page: {ids:?}");
 }

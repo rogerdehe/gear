@@ -85,6 +85,24 @@ const AGENT_GONE_LIMIT: u32 = 3;
 /// Herdr may report its agent a moment late (as `START_GRACE_S` above).
 const STANDBY_AGENT_GONE_S: i64 = 60;
 
+/// T-426: whether the seat is in the middle of a session switch of its own
+/// generation. `session_runner` types the profile's `exit_command` and starts
+/// the agent again with the session (`wait_exit`, `start_resume`,
+/// `fallback_exit`, `fallback_enter`, `fallback_wait_exit`, `start_fallback`),
+/// so the pane holds no agent between the two while the switch is on its way
+/// — not an absence to release the seat for. A step that is `done` or
+/// `failed`, or one of an older generation, says nothing about this one.
+fn a_session_switch_is_in_flight(store: &mut Store, seat: &SeatRow) -> GearResult<bool> {
+    let Some(raw) = store.read(|tx| tx.get_meta(&format!("engine.session_step.{}", seat.id)))? else {
+        return Ok(false);
+    };
+    let Some(state) = serde_json::from_str::<serde_json::Value>(&raw).ok() else { return Ok(false) };
+    if state["generation"].as_i64() != Some(seat.generation) {
+        return Ok(false);
+    }
+    Ok(!matches!(state["step"].as_str(), Some("done") | Some("failed")))
+}
+
 /// How long a `Starting` reviewer whose pane holds no agent keeps its temp
 /// slot before its failed start is released (T-418): a start that takes longer
 /// than this — an agent that is up but not yet reported, a clone, a build —
@@ -310,6 +328,13 @@ pub fn release_finished_reviews(
                         continue;
                     }
                 };
+                // T-426: a seat that quit its agent to resume an earlier
+                // conversation has no agent for a moment by design: its
+                // session step says the switch is still in flight, so the
+                // seat keeps its slot until the step is `done` or `failed`.
+                if a_session_switch_is_in_flight(store, &seat)? {
+                    continue;
+                }
                 // A seat that just got its verdict may be handed the next
                 // review on the next tick: it waits for this one.
                 if now - seat.state_since <= STANDBY_AGENT_GONE_S {
@@ -400,6 +425,15 @@ pub fn release_finished_reviews(
 /// releasing such a seat made the pending review start it again, every 20 s).
 /// A reservation whose review is gone is ended by the `under_review` check of
 /// `release_finished_reviews`, not by this sweep.
+///
+/// T-424: no Standby reviewer is surplus while a hand-in waits for a reviewer.
+/// A hand-in that waits needs a seat that is up, and a released Standby
+/// reviewer is cold-started again for it — so the sweep releases nothing at
+/// all then (2026-10-29, another project: 22 hand-ins waited while one
+/// reviewer worked, with 4 temps; its lanes were mostly "handed in, waits for
+/// a reviewer", so they did not count for W, and every Standby reviewer was
+/// released as surplus and cold-started for the next review). With no hand-in
+/// waiting the rule above stands.
 pub fn release_idle_standby(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -428,6 +462,11 @@ pub fn release_idle_standby(
     if standby.is_empty() {
         return Ok(report);
     }
+    // T-424: a hand-in that waits for a reviewer keeps every Standby reviewer:
+    // the next review needs a seat that is already up.
+    if hand_ins_waiting(store, project)? > 0 {
+        return Ok(report);
+    }
     // The idle longest goes first: the seat that has been in Standby since
     // the longest.
     standby.sort_by_key(|seat| seat.state_since);
@@ -450,6 +489,49 @@ pub fn release_idle_standby(
         }
     }
     Ok(report)
+}
+
+/// The number of hand-ins that wait for a reviewer (T-424): a task in
+/// `Verifying` whose latest attempt is handed in (`Submitted`), with no verdict
+/// for that attempt yet, and no `Active` temp seat on it — nothing reviews it
+/// now. A Standby seat that holds its `engine.review_pending` reservation is
+/// not `Active`: the hand-in still waits for a reviewer until a seat is on it,
+/// so a reviewer that is only reserved keeps the sweep off (the direction check
+/// of T-424). A lane that is "handed in, waits for a reviewer" is not counted
+/// by [`working_lanes`], so the sweep reads this count too.
+fn hand_ins_waiting(store: &mut Store, project: &str) -> GearResult<usize> {
+    store.read(|tx| {
+        let seats = tx.seats_of_project(project)?;
+        let mut waiting = 0;
+        for task in tx.tasks_of_project(project)? {
+            if task.state != TaskState::Verifying {
+                continue;
+            }
+            let Some(attempt) = tx.attempts_of_task(project, &task.id)?.into_iter().last() else {
+                continue;
+            };
+            // The lane handed its result in: the attempt is `Submitted` with a
+            // candidate to review.
+            if attempt.state != AttemptState::Submitted || attempt.candidate.is_none() {
+                continue;
+            }
+            // Its verdict is in: the review is done, it waits for its
+            // settlement, not for a reviewer.
+            if tx.get_review_verdict(project, &task.id, attempt.n)?.is_some() {
+                continue;
+            }
+            // A reviewer that works on it now is not waited for.
+            let reviewing = seats.iter().any(|seat| {
+                seat.role == SeatRole::Temp
+                    && seat.state == SeatState::Active
+                    && seat.task_id.as_deref() == Some(task.id.as_str())
+            });
+            if !reviewing {
+                waiting += 1;
+            }
+        }
+        Ok(waiting)
+    })
 }
 
 /// The number of lane seats that work on a task now (design §3.6's W): a
@@ -770,6 +852,8 @@ fn release_seat(
                 tx.set_seat_state(&seat.id, SeatState::Released, Some(reason), now)
             })
             .map_err(|e| e.detail)?;
+        // T-413: the seat's scratch directory goes with it.
+        remove_scratch(store, project, seat);
         log_release(release_line(seat, seat.state, reason, caller));
         return Ok(true);
     }
@@ -902,8 +986,28 @@ fn release_seat(
     if !matches!(seat.state_reason.as_deref(), Some(REVIEW_DONE) | Some(IDLE_REVIEWER_RELEASED)) {
         log_release(release_line(seat, seat.state, &reason, caller));
     }
-    let _ = project;
+    // T-413: the seat's scratch directory goes with it; the worktree and its
+    // build cache stay.
+    remove_scratch(store, project, seat);
     Ok(true)
+}
+
+/// T-413: a released seat takes its scratch directory with it: the next job on
+/// the seat — or the lane's next start — makes a fresh one. Only temp files go;
+/// the worktree and its build cache stay (17 §8a). A directory that is not
+/// there, or cannot be removed, is left as it is: a scratch directory never
+/// decides whether a seat is free.
+fn remove_scratch(store: &mut Store, project: &str, seat: &SeatRow) {
+    let Ok(conventions) = gear_app::config::conventions_or_default(store, project) else { return };
+    let worktree = store
+        .read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(&seat.id)))
+        .ok()
+        .flatten()
+        .filter(|path| !path.is_empty());
+    let Some(scratch) = crate::onboard::scratch_dir(&conventions, project, &seat.name, worktree.as_deref()) else {
+        return;
+    };
+    let _ = std::fs::remove_dir_all(&scratch);
 }
 
 /// Release the reviewer seats that run **no reviewer** (B02-04).
@@ -1119,6 +1223,9 @@ fn retire_one(
             tx.set_seat_state(&seat.id, SeatState::Retired, Some("retired"), now)
         })
         .map_err(|e| e.detail)?;
+    // T-413: the lane's scratch directory goes with it, like a released
+    // seat's; its worktree and build cache stay.
+    remove_scratch(store, &seat.project, seat);
     Ok(())
 }
 
@@ -1646,6 +1753,38 @@ profile = "codex"
         // A further tick does nothing.
         let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 40).unwrap();
         assert!(report.released.is_empty());
+    }
+
+    /// T-413: a released seat takes its scratch directory with it — only after
+    /// its agent is gone, so nothing writes there any more.
+    #[test]
+    fn a_released_seat_takes_its_scratch_directory_with_it() {
+        let worktree = crate::testtmp::temp("gear-release-scratch").join("wt");
+        let scratch = worktree.join(".gear").join("tmp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join("probe"), "x").unwrap();
+
+        let mut store = world(TaskState::Cancelled, "w1:p1", "codex");
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    &crate::onboard::worktree_path_key("p:r-1"),
+                    &worktree.to_string_lossy(),
+                )
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+
+        // The agent leaves first: the scratch is still there.
+        assert!(!release_one(&mut store, &mut herdr, "p", &seat, None, T0 + 10, "test").unwrap());
+        assert!(scratch.is_dir(), "the scratch goes with the seat, not before it");
+
+        // The seat is free: its scratch directory is gone.
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert!(release_one(&mut store, &mut herdr, "p", &seat, None, T0 + 20, "test").unwrap());
+        assert!(!scratch.exists(), "the released seat's scratch directory is gone");
     }
 
     #[test]
@@ -2403,10 +2542,73 @@ profile = "codex"
         assert_eq!(exits(&herdr), 2, "both panes are closed");
     }
 
+    /// T-424: a hand-in waits for a reviewer (its lane is "handed in, waits for
+    /// a reviewer", so no lane works and W = 0), and no temp seat is `Active`
+    /// on it: the two Standby reviewers are not surplus, neither is released.
+    #[test]
+    fn a_standby_reviewer_is_kept_while_a_hand_in_waits() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        handed_in(&mut store, "T-1");
+        store
+            .write(|tx| {
+                let second = testing::seed_temp_seat(tx, "p", "r-2", "T-1", "w3:p3", "codex", T0)?;
+                tx.set_seat_state(&second.id, SeatState::Standby, Some("review done"), T0)?;
+                tx.set_seat_state("p:r-1", SeatState::Standby, Some("review done"), T0)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w3:p3", "codex", gear_herdr::AgentStatus::Idle);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+
+        for name in ["p:r-1", "p:r-2"] {
+            let seat = store.read(|tx| tx.get_seat(name)).unwrap().unwrap();
+            assert_eq!(seat.state, SeatState::Standby, "{name} waits for the waiting review");
+        }
+        assert_eq!(exits(&herdr), 0, "no pane is closed: the hand-in needs a seat that is up");
+        let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+        assert_eq!(task.state, TaskState::Verifying, "the hand-in still waits for a review");
+    }
+
+    /// T-424: the same two Standby reviewers with no hand-in waiting (the
+    /// verdict of `T-1` is in): both are released as today.
+    #[test]
+    fn a_standby_reviewer_goes_when_no_hand_in_waits() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        judge(&mut store, "p:r-1");
+        store
+            .write(|tx| {
+                let second = testing::seed_temp_seat(tx, "p", "r-2", "T-1", "w3:p3", "codex", T0)?;
+                tx.set_seat_state(&second.id, SeatState::Standby, Some("review done"), T0)?;
+                tx.set_seat_state("p:r-1", SeatState::Standby, Some("review done"), T0)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w3:p3", "codex", gear_herdr::AgentStatus::Idle);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+
+        for name in ["p:r-1", "p:r-2"] {
+            let seat = store.read(|tx| tx.get_seat(name)).unwrap().unwrap();
+            assert_eq!(seat.state, SeatState::Released, "{name} is free");
+        }
+        assert_eq!(exits(&herdr), 2, "both panes are closed");
+    }
+
     /// T-391: a reviewer started for a pending review sits in `Standby` until
     /// its agent is idle and `fn start` (review.rs) hands it the review. It has
     /// a job, so the idle sweep leaves it alone — released, the pending review
     /// starts it again, and again (844 starts in one voyage).
+    ///
+    /// `r-3` works on `T-1` (T-424): the hand-in is not waiting for a reviewer,
+    /// so the sweep runs at all — a hand-in that only waits keeps every
+    /// Standby reviewer (see `a_hand_in_reserved_for_a_standby_reviewer_still_waits`).
     #[test]
     fn a_standby_reviewer_with_a_pending_review_is_not_released() {
         // No lane works (W = 0): every jobless Standby reviewer goes.
@@ -2418,12 +2620,16 @@ profile = "codex"
                 tx.set_seat_state(&second.id, SeatState::Standby, Some("review done"), T0)?;
                 tx.set_seat_state("p:r-1", SeatState::Standby, Some("waiting for its review"), T0)?;
                 // Its review is on its way: the seat has a job.
-                tx.set_meta("engine.review_pending.p:r-1", "T-1")
+                tx.set_meta("engine.review_pending.p:r-1", "T-1")?;
+                // A reviewer is on `T-1`: the hand-in does not wait for one.
+                testing::seed_temp_seat(tx, "p", "r-3", "T-1", "w4:p4", "codex", T0)?;
+                Ok(())
             })
             .unwrap();
         let mut herdr = FakeHerdr::new();
         herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
         herdr.add_agent("w3:p3", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w4:p4", "codex", gear_herdr::AgentStatus::Idle);
 
         release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
         release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
@@ -2435,6 +2641,36 @@ profile = "codex"
         let idle = store.read(|tx| tx.get_seat("p:r-2")).unwrap().unwrap();
         assert_eq!(idle.state, SeatState::Released, "the jobless one goes");
         assert_eq!(exits(&herdr), 1, "only the idle reviewer's pane is closed");
+    }
+
+    /// T-424 (the direction check): a hand-in whose review is reserved for a
+    /// `Standby` seat still waits for a reviewer — the reservation is not an
+    /// `Active` seat on the task — so the sweep releases nothing while it
+    /// waits, the jobless Standby reviewer included.
+    #[test]
+    fn a_hand_in_reserved_for_a_standby_reviewer_still_waits() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        standby_for_a_pending_review(&mut store, T0);
+        store
+            .write(|tx| {
+                let second = testing::seed_temp_seat(tx, "p", "r-2", "T-1", "w3:p3", "codex", T0)?;
+                tx.set_seat_state(&second.id, SeatState::Standby, Some("review done"), T0)
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w3:p3", "codex", gear_herdr::AgentStatus::Idle);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+
+        for name in ["p:r-1", "p:r-2"] {
+            let seat = store.read(|tx| tx.get_seat(name)).unwrap().unwrap();
+            assert_eq!(seat.state, SeatState::Standby, "{name} waits while the hand-in waits");
+        }
+        let pending = store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap();
+        assert_eq!(pending.as_deref(), Some("T-1"), "its review is still its job");
+        assert_eq!(exits(&herdr), 0, "no pane is closed while a hand-in waits");
     }
 
     /// T-391: the excess is counted over the seats the sweep leaves in. With
@@ -2544,6 +2780,85 @@ profile = "codex"
         let pending = store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap();
         assert_eq!(pending.as_deref(), Some("T-1"), "its review is kept");
         assert_eq!(exits(&herdr), 0, "its pane stays open");
+    }
+
+    /// T-426: a `Standby` reviewer that quit its agent to resume an earlier
+    /// conversation has no agent in its pane for a moment by design
+    /// (`session_runner`: `wait_exit`, `start_resume`, the fallback steps).
+    /// Its session step says the switch is still in flight, so the seat keeps
+    /// its slot and its review instead of being released as `agent-gone` and
+    /// started cold again.
+    #[test]
+    fn a_standby_reviewer_switching_its_session_is_not_released() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        standby_for_a_pending_review(&mut store, T0);
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    "engine.session_step.p:r-1",
+                    &serde_json::json!({"round":"p:T-1:1:review", "generation":1, "action":"resume", "step":"wait_exit", "step_at":T0, "target":"wanted"}).to_string(),
+                )
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        // The agent is gone while the switch is under way: the pane is a shell.
+        herdr.add_shell("w2:p2");
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 120).unwrap();
+
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Standby, "the switch is not an absence");
+        let pending = store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap();
+        assert_eq!(pending.as_deref(), Some("T-1"), "its review is kept");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
+    }
+
+    /// T-426: a session step that is `done` says the switch is over: the seat
+    /// with no agent is released as before.
+    #[test]
+    fn a_standby_reviewer_whose_session_step_is_done_is_released() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        standby_for_a_pending_review(&mut store, T0);
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    "engine.session_step.p:r-1",
+                    &serde_json::json!({"round":"p:T-1:1:review", "generation":1, "action":"resume", "step":"done", "step_at":T0, "target":"wanted"}).to_string(),
+                )
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w2:p2");
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 120).unwrap();
+
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Releasing, "the dead seat is on its way out");
+        assert_eq!(exits(&herdr), 1, "its pane is closed");
+    }
+
+    /// T-426: a session step of an older generation says nothing about this
+    /// one: the seat with no agent is released as before.
+    #[test]
+    fn a_standby_reviewer_whose_session_step_is_of_an_older_generation_is_released() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        standby_for_a_pending_review(&mut store, T0);
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    "engine.session_step.p:r-1",
+                    &serde_json::json!({"round":"p:T-1:1:review", "generation":0, "action":"resume", "step":"wait_exit", "step_at":T0, "target":"wanted"}).to_string(),
+                )
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w2:p2");
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 120).unwrap();
+
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Releasing, "a step of another generation is no switch");
+        assert_eq!(exits(&herdr), 1, "its pane is closed");
     }
 
     /// T-399: a reviewer that has been in `Standby` for less than a minute is

@@ -168,20 +168,18 @@ pub fn with_goal(text: String, goal: Option<&str>) -> String {
 
 /// The line that reminds the captain of the voyage it sails (user,
 /// 2026-10-28): the current voyage's done sentence and bar, as the user agreed
-/// them. None when the project has no departed voyage or it is not described.
+/// them, and where the voyage stands (T-337). None when the project has no
+/// departed voyage or it is not described.
+///
+/// The text is the one every captain output uses
+/// ([`gear_board::stations::goal_text`]), so the doorbell, the home page and
+/// the station items never drift apart.
 pub fn goal_line(tx: &gear_store::Tx<'_>, project: &str) -> gear_model::GearResult<Option<String>> {
     let milestone = gear_app::plan::current_voyage(tx, project)?;
     if milestone.is_empty() {
         return Ok(None);
     }
-    let Some(voyage) = tx.get_voyage(project, &milestone)? else { return Ok(None) };
-    let Some(done) = voyage.done.filter(|d| !d.trim().is_empty()) else { return Ok(None) };
-    let bar = voyage.bar.unwrap_or_default();
-    Ok(Some(format!(
-        "Your goal, voyage {milestone}: done: {} · bar: {}. Judge every decision against it.",
-        done.trim(),
-        bar.trim()
-    )))
+    gear_board::stations::goal_text(tx, project, &milestone)
 }
 
 /// Whether this seat may be rung right now.

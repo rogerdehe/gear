@@ -53,6 +53,10 @@ fn apply(s: &mut Store, text: &str, rid: &str) -> gear_model::GearResult<plan::A
 const NEW_TASK: &str =
     "## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\nestimate: 60\ndeps: -\n";
 
+/// The voyage M2 the task sails on (T-333): a plan that names M2 carries its
+/// `# Milestone` block.
+const M2_BLOCK: &str = "# Milestone M2: delivery\ndone: it ships\nbar: it holds\neta: 8h\n\n";
+
 /// T-171: the work and the waiting time of a voyage (§5.4): the lane's work,
 /// its quota wait and its declared wait, the wall clock of the voyage and the
 /// time the fleet was stopped by the quota.
@@ -61,7 +65,7 @@ fn the_report_of_a_voyage_separates_work_from_waiting() {
     let mut s = world();
     apply(
         &mut s,
-        &format!("<!-- gear-plan project=p base=0 -->\n# Queue\n{NEW_TASK}"),
+        &format!("<!-- gear-plan project=p base=0 -->\n{M2_BLOCK}# Queue\n{NEW_TASK}"),
         "r1",
     )
     .unwrap();
@@ -134,7 +138,7 @@ fn the_report_prints_the_durations_and_the_ratio() {
     let mut s = world();
     apply(
         &mut s,
-        &format!("<!-- gear-plan project=p base=0 -->\n# Queue\n{NEW_TASK}"),
+        &format!("<!-- gear-plan project=p base=0 -->\n{M2_BLOCK}# Queue\n{NEW_TASK}"),
         "r1",
     )
     .unwrap();
@@ -190,7 +194,7 @@ fn only_the_captain_may_read_the_report() {
     let mut s = world();
     apply(
         &mut s,
-        &format!("<!-- gear-plan project=p base=0 -->\n# Queue\n{NEW_TASK}"),
+        &format!("<!-- gear-plan project=p base=0 -->\n{M2_BLOCK}# Queue\n{NEW_TASK}"),
         "r1",
     )
     .unwrap();
@@ -212,7 +216,7 @@ fn an_unknown_task_is_no_target() {
     let mut s = world();
     apply(
         &mut s,
-        &format!("<!-- gear-plan project=p base=0 -->\n# Queue\n{NEW_TASK}"),
+        &format!("<!-- gear-plan project=p base=0 -->\n{M2_BLOCK}# Queue\n{NEW_TASK}"),
         "r1",
     )
     .unwrap();
@@ -230,7 +234,7 @@ fn a_successful_rework_reports_its_merge_for_task_and_voyage() {
     let mut s = world();
     apply(
         &mut s,
-        &format!("<!-- gear-plan project=p base=0 -->\n# Queue\n{NEW_TASK}"),
+        &format!("<!-- gear-plan project=p base=0 -->\n{M2_BLOCK}# Queue\n{NEW_TASK}"),
         "r1",
     )
     .unwrap();

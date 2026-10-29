@@ -1,5 +1,6 @@
-//! The frame of the new board (design §8.1): the title, the time and tasks
-//! bars, the four tabs, the views and the overlay panel.
+//! The frame of the new board (design §8.1): the head (the voyages, the shown
+//! voyage and the goal box with its quality bar), the four tabs, the views and
+//! the overlay panel.
 //!
 //! The prototype of `gear/voyages/M4/board` is the contract for the layout, the
 //! views, the keys and the wording; the data comes from the store.
@@ -11,7 +12,7 @@
 use crate::graph;
 use crate::idle::IdleReason;
 use crate::style::{lane_color, lane_width, Color, Line, Style};
-use crate::{Board, LaneBoard, ProjectBoard, TaskBoard};
+use crate::{Board, LaneBoard, ProjectBoard, TaskBoard, VoyageEntry};
 
 /// The four views of the board: the tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,7 +21,7 @@ pub enum Tab {
     Now,
     /// The work as a graph.
     Tasks,
-    /// The time and the tokens, per task.
+    /// The time and the tokens, per lane.
     Cost,
     /// The decisions of the captain.
     Log,
@@ -92,22 +93,34 @@ impl Tab {
 /// What the board shows: the view, the selected row, the folded header and
 /// the size of the terminal.
 ///
-/// `detail` is carried for the unfolded header (the `d` key); it is not read
-/// yet.
+/// `detail` is carried for the unfolded header (the `d` key); `opened` holds
+/// the lanes the Cost view shows the tasks of (T-363).
 pub struct Screen {
     pub tab: Tab,
     pub selected: usize,
     pub detail: bool,
+    pub opened: Vec<String>,
     pub size: (usize, usize),
 }
 
-/// The row of the tab row (counted from zero).
-pub const TAB_ROW: usize = 3;
-/// The row of the view's heading (counted from zero). The first row the user
-/// can pick is the one after it.
-pub const VIEW_ROW: usize = 5;
-/// The first row the user can pick (counted from zero).
-pub const FIRST_ROW: usize = VIEW_ROW + 1;
+/// The head of the board: where the view starts, the tab row and the columns
+/// of the tabs and of the voyages on the first row (T-353).
+///
+/// Every column is counted from zero, and a range's first and last column are
+/// inclusive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Layout {
+    /// The row of the view's heading (counted from zero): the view draws from
+    /// `top`, its first pick on the row after it.
+    pub top: usize,
+    /// The row of the tabs (counted from zero).
+    pub tab_row: usize,
+    /// The columns of every tab on the tab row.
+    pub tabs: Vec<(usize, usize, Tab)>,
+    /// The columns of every voyage's label on the first row, and the voyage's
+    /// milestone (T-353).
+    pub voyages: Vec<(usize, usize, String)>,
+}
 
 /// The footer of the board: the keys.
 ///
@@ -120,11 +133,18 @@ pub const FOOTER: &str = "←→ / Tab / 1-4 / click: views · click a voyage ·
 /// Every cell has a style (the prototype's colours, bold, reverse video);
 /// [`Canvas::text`] is the screen as plain text and [`Canvas::ansi`] the
 /// screen as the terminal shows it.
+///
+/// A wide glyph (the prototype's ⛵, ⚓ and ⏳) takes two cells: the glyph and a
+/// continuation, a space the terminal does not draw again. The continuation is
+/// marked, so the cells keep the prototype's columns and [`Canvas::row_text`]
+/// leaves the mark's cell out of its text: the terminal's columns are the
+/// canvas's (T-353, review F1).
 pub struct Canvas {
     width: usize,
     height: usize,
     cells: Vec<char>,
     styles: Vec<Style>,
+    continuation: Vec<bool>,
 }
 
 impl Canvas {
@@ -137,6 +157,7 @@ impl Canvas {
             height,
             cells: vec![' '; width * height],
             styles: vec![Style::PLAIN; width * height],
+            continuation: vec![false; width * height],
         }
     }
 
@@ -159,8 +180,11 @@ impl Canvas {
             if column >= last {
                 break;
             }
-            self.cells[y * self.width + column] = character;
-            self.styles[y * self.width + column] = style;
+            let cell = y * self.width + column;
+            self.clear_wide_at(cell);
+            self.cells[cell] = character;
+            self.styles[cell] = style;
+            self.continuation[cell] = false;
         }
     }
 
@@ -176,9 +200,78 @@ impl Canvas {
             if column >= last {
                 break;
             }
-            self.cells[y * self.width + column] = character;
-            self.styles[y * self.width + column] = style;
+            let cell = y * self.width + column;
+            self.clear_wide_at(cell);
+            self.cells[cell] = character;
+            self.styles[cell] = style;
+            self.continuation[cell] = false;
         }
+    }
+
+    /// Write a text that may hold a wide glyph (the prototype's ⛵, ⚓ and ⏳).
+    ///
+    /// The glyph takes two cells, the second its continuation: a space with
+    /// the same style, marked so that the text does not print it again. It
+    /// returns the number of cells the text took.
+    pub fn put_wide(&mut self, x: usize, y: usize, text: &str, style: Style) -> usize {
+        if y >= self.height {
+            return 0;
+        }
+        let last = self.width - 1;
+        let mut column = x;
+        for character in text.chars() {
+            if column >= last {
+                break;
+            }
+            let cell = y * self.width + column;
+            self.clear_wide_at(cell);
+            self.cells[cell] = character;
+            self.styles[cell] = style;
+            self.continuation[cell] = false;
+            column += 1;
+            if is_wide(character) && column < last {
+                let cell = y * self.width + column;
+                self.clear_wide_at(cell);
+                self.cells[cell] = ' ';
+                self.styles[cell] = style;
+                self.continuation[cell] = true;
+                column += 1;
+            }
+        }
+        column - x
+    }
+
+    /// A write lands on one cell, but a wide glyph is drawn in two: overwriting
+    /// half of one would leave the other half to the terminal, which draws the
+    /// glyph over the write and shifts every column after it (T-353, review
+    /// F3). So the other half is blanked first, as the prototype's export
+    /// blanks it.
+    ///
+    /// A write onto a glyph's continuation blanks the glyph's leading cell; a
+    /// write onto a leading cell clears its continuation, which stays a space
+    /// in the glyph's style. Either way the glyph is never half overwritten.
+    fn clear_wide_at(&mut self, cell: usize) {
+        let same_row = |cell: usize| cell / self.width;
+        if self.continuation[cell] {
+            // This cell is the second half: blank the leading one.
+            if cell > 0 && same_row(cell - 1) == same_row(cell) {
+                self.cells[cell - 1] = ' ';
+                self.continuation[cell - 1] = false;
+            }
+            self.continuation[cell] = false;
+        } else if is_wide(self.cells[cell]) {
+            // This cell is the first half: its continuation is no longer one.
+            let next = cell + 1;
+            if next < self.cells.len() && same_row(next) == same_row(cell) {
+                self.continuation[next] = false;
+            }
+        }
+    }
+
+    /// Is the cell the continuation of a wide glyph? The terminal draws that
+    /// column as part of the glyph, so the text leaves its cell out.
+    pub fn is_continuation(&self, x: usize, y: usize) -> bool {
+        x < self.width && y < self.height && self.continuation[y * self.width + x]
     }
 
     /// Copy `count` rows of another canvas: its row `src` to this canvas's
@@ -193,6 +286,8 @@ impl Canvas {
             for column in 0..columns {
                 self.cells[target * self.width + column] = from.cells[source * from.width + column];
                 self.styles[target * self.width + column] = from.styles[source * from.width + column];
+                self.continuation[target * self.width + column] =
+                    from.continuation[source * from.width + column];
             }
         }
     }
@@ -286,7 +381,16 @@ impl Canvas {
             while column < end && effective(column) == style {
                 column += 1;
             }
-            let text: String = cells[start..column].iter().collect();
+            // A continuation cell is the second column of a wide glyph, which
+            // the terminal already draws: its space is left out of the text, so
+            // the terminal's columns are the canvas's (T-353, review F1).
+            let text: String = (start..column)
+                .filter(|column| !self.continuation[row * self.width + column])
+                .map(|column| cells[column])
+                .collect();
+            if text.is_empty() {
+                continue;
+            }
             let sgr = style.sgr(codes.unwrap_or(false));
             if sgr.is_empty() {
                 out.push_str(&text);
@@ -311,19 +415,20 @@ pub fn frame(board: &Board, screen: &Screen, panel: Option<&[String]>) -> String
 pub fn canvas(board: &Board, screen: &Screen, panel: Option<&[Line]>) -> Canvas {
     let (width, height) = screen.size;
     let mut canvas = Canvas::new(width, height);
-    header(&mut canvas, board, screen.tab);
+    let layout = header(&mut canvas, board, screen);
 
     // The view paints on a tall canvas, the screen's width: the prototype's
     // views put their texts at fixed columns, a later one over an earlier one
     // (README change 13). The screen copies the part the user looks at.
-    let top = VIEW_ROW;
+    let top = layout.top;
     let mut tall = Canvas::new(width, 1000);
     let picks = view(board, screen, &mut tall, top);
     // The selected row stays on the screen: the rows above it scroll away
     // (F8). The offset is the one the mouse hit testing uses.
-    let offset = offset_of(&picks, screen.selected, top, height);
-    let last = height.saturating_sub(2);
-    // The footer's row and the row above it stay the frame's.
+    let last = view_bottom(screen.tab, height);
+    let offset = offset_of(&picks, screen.selected, top, last);
+    // The footer's row, the legend's row and the row above them stay the
+    // frame's.
     canvas.copy_rows(&tall, top + offset, top, last.saturating_sub(top));
     // The selected row is lit across the width, in one colour (README change
     // 13).
@@ -332,21 +437,37 @@ pub fn canvas(board: &Board, screen: &Screen, panel: Option<&[Line]>) -> Canvas 
             canvas.light_row(row);
         }
     }
+    if screen.tab == Tab::Tasks {
+        // The Tasks view's legend (the prototype's row `h - 2`).
+        canvas.put_styled(1, height.saturating_sub(2), TASKS_LEGEND, Style::fg(Color::Dim));
+    }
     canvas.put_styled(1, height - 1, FOOTER, Style::fg(Color::Dim));
     if let Some(panel) = panel {
-        draw_panel(&mut canvas, panel);
+        draw_panel(&mut canvas, panel, top);
     }
     canvas
 }
+
+/// The row the view's own rows stop at (exclusive): the footer's row is
+/// `height - 1`, and the Tasks view keeps the legend's row `height - 2` (the
+/// prototype stops its graph at `h - 3`).
+pub fn view_bottom(tab: Tab, height: usize) -> usize {
+    match tab {
+        Tab::Tasks => height.saturating_sub(3),
+        _ => height.saturating_sub(2),
+    }
+}
+
+/// The legend under the Tasks view (the prototype's row `h - 2`).
+pub const TASKS_LEGEND: &str = "● merged into dev   ◉ working   ◎ in review   ◍ passed / merging   ↺ reworking   ○┆ not started   a branch leaves dev where its work starts and joins it where it merges · ↑↓ select: its deps light up";
 
 /// The offset of the first visible row of a view (the viewport, F8).
 ///
 /// The rows above it are scrolled away, so the mouse hit testing adds the
 /// same offset to the row the user clicked. The offset is zero while the
-/// selected pick's row is above the footer's spacer, else the smallest offset
-/// that shows it.
-pub fn offset_of(picks: &[usize], selected: usize, top: usize, height: usize) -> usize {
-    let last = height.saturating_sub(2);
+/// selected pick's row is above `last` (the first row below the view), else the
+/// smallest offset that shows it.
+pub fn offset_of(picks: &[usize], selected: usize, top: usize, last: usize) -> usize {
     let Some(row) = picks.get(selected).copied() else {
         return 0;
     };
@@ -357,39 +478,57 @@ pub fn offset_of(picks: &[usize], selected: usize, top: usize, height: usize) ->
     }
 }
 
-/// The head of the board: the title, the time and tasks bars and the tabs.
+/// The head of the board (README changes 1 and 2): the first row lists every
+/// voyage of the project with the shown one lit, the second row names the
+/// shown voyage, and the third starts the goal box with its quality bar.
 ///
-/// The rows are the prototype's: the title, the time, the tasks, the tabs. A
-/// warning (the engine is down) never moves the tab row.
-fn header(canvas: &mut Canvas, board: &Board, tab: Tab) {
+/// The tabs follow the box directly, and the view's heading comes two rows
+/// after the tab row (its own row and the spacer under the tabs). Every text
+/// is put at the prototype's column and cut at the edge, as
+/// [`Canvas::put_styled`] cuts it.
+///
+/// It returns the layout it drew ([`Layout`]), which is what the clicks and
+/// the view need.
+fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
     let project = board.projects.first();
-    let voyage = project.and_then(|project| project.voyages.first());
+    // The voyage the board shows (T-350): the whole head names it and boxes
+    // its goal, so a landed voyage keeps the data of its landing.
+    let voyage = project.and_then(|project| project.shown.as_ref());
 
-    // Row 0: the title and the clock.
-    let mut title = match (project, voyage) {
-        (Some(project), Some(voyage)) => format!(
-            "GEAR · {} · {}: {}",
-            project.project, voyage.milestone, voyage.title
-        ),
-        (Some(project), None) => format!("GEAR · {}", project.project),
-        _ => "GEAR".to_string(),
+    // Row 0: the title, every voyage's label and the clock.
+    let title = match project {
+        Some(project) => format!("GEAR · {}  ", project.project),
+        None => "GEAR".to_string(),
     };
-    // A board opened without a project holds the session's projects: the
-    // title says that the others are one key away (T-317).
-    if board.projects.len() > 1 {
-        title.push_str(&format!(
-            " · p: next of {} projects",
-            board.projects.len()
-        ));
+    canvas.put_styled(1, 0, &title, Style::bold());
+    let mut voyages = Vec::new();
+    let mut x = match project {
+        Some(project) => project.project.chars().count() + 8,
+        None => 1,
+    };
+    if let Some(project) = project {
+        // One label per voyage, newest first: ` M5 ⛵ ` for a voyage that
+        // sails, ` M4.1 ⚓ ` for a landed one. The shown voyage is in reverse
+        // video and bold, the others dim.
+        for entry in &project.voyage_list {
+            let mark = if entry.sailing { '⛵' } else { '⚓' };
+            let label = format!(" {} {} ", entry.milestone, mark);
+            // The prototype draws a wide mark in two cells; the label's own
+            // length is its characters, as the prototype counts them.
+            let cells = canvas.put_wide(x, 0, &label, voyage_style(voyage, entry));
+            voyages.push((x, x + cells - 1, entry.milestone.clone()));
+            x += label.chars().count() + 1;
+        }
     }
-    canvas.put_styled(0, 0, &title, Style::bold());
+    canvas.put_styled(x + 1, 0, "[ older   ] newer", Style::fg(Color::Dim));
     if board.engine == crate::EngineState::Down {
-        // The engine is down: the next `gear` call starts it. It says so on
-        // the title's row, so that the tab row stays where it is.
+        // The engine is down: the next `gear` call starts it (README). It says
+        // so two columns after "newer", so that the tab row stays where it is.
+        let after = x + 1 + "[ older   ] newer".chars().count() + 1;
         canvas.put_styled(
-            title.chars().count(),
+            after,
             0,
-            "  ! engine down — the next gear call starts it",
+            "! engine down — the next gear call starts it",
             Style::fg(Color::Bad),
         );
     }
@@ -403,102 +542,358 @@ fn header(canvas: &mut Canvas, board: &Board, tab: Tab) {
         Style::fg(Color::Dim),
     );
 
-    // Row 1: the time bar and the projection. Both are green while the
-    // projected finish is within the eta, red once it is past it.
-    let elapsed = voyage.and_then(|voyage| voyage.elapsed_min);
-    let eta_minutes = voyage
-        .and_then(|voyage| voyage.eta.as_deref())
-        .and_then(duration_minutes);
-    let projected_min = voyage.and_then(|voyage| voyage.projected_min);
-    let pace = match (projected_min, eta_minutes) {
-        (Some(projected), Some(eta)) if projected <= eta => Style::fg(Color::Ok),
-        (Some(_), Some(_)) => Style::fg(Color::Bad),
-        _ => Style::PLAIN,
-    };
-    let time = match (elapsed, eta_minutes) {
-        (Some(elapsed), Some(eta)) => Line::plain("time   ")
-            .push(bar(elapsed, eta, 24), pace)
-            .push(format!(" {} of {}", hours(elapsed), hours(eta)), Style::PLAIN),
-        _ => Line::plain("time   the voyage's time is unknown"),
-    };
-    canvas.put_line(0, 1, &time);
+    // Row 1: the shown voyage's milestone and title, and what it does.
     if let Some(voyage) = voyage {
-        let projected = match voyage.projected_min {
-            Some(minutes) => format!(
-                "projected finish {} (slowest lane: {})",
-                hours(minutes),
-                voyage
-                    .slowest_lane
-                    .as_ref()
-                    .map(|(lane, _)| lane.clone())
-                    .unwrap_or_else(|| "-".into())
-            ),
-            None => "projected finish unknown".to_string(),
-        };
-        canvas.put_styled(48, 1, &projected, pace);
+        let state = if voyage.sailing { "⛵ sailing" } else { "⚓ landed" };
+        let line = format!("{}: {} · {}", voyage.milestone, voyage.title, state);
+        canvas.put_wide(1, 1, &line, Style::bold());
     }
 
-    // Row 2: the tasks bar and the done sentence.
-    if let Some(project) = project {
-        let totals = &project.totals;
-        let left = project
-            .voyages
-            .first()
-            .and_then(|voyage| voyage.remaining_estimate_min)
-            .unwrap_or(0);
-        canvas.put(
-            0,
-            2,
-            &format!(
-                "tasks  {} {}/{} done, {} of estimates left",
-                bar(totals.done as i64, totals.tasks as i64, 24),
-                totals.done,
-                totals.tasks,
-                hours(left)
-            ),
-        );
-        let clauses = done_clauses(project).len();
+    // The goal box: the voyage's done sentence, word-wrapped, and the quality
+    // bar under it, in the prototype's yellow box (README change 2).
+    let mut row = 2;
+    let box_width = canvas.width.saturating_sub(3);
+    if let Some(voyage) = voyage {
+        let inside = box_width.saturating_sub(4);
         canvas.put_styled(
-            72,
-            2,
-            &format!("done sentence {clauses} clauses"),
+            1,
+            row,
+            &format!("╔═ GOAL {}╗", "═".repeat(box_width.saturating_sub(9))),
+            Style::fg(Color::Warn).and_bold(),
+        );
+        row += 1;
+        for line in wrap(voyage.done.as_deref().unwrap_or_default(), inside) {
+            canvas.put_styled(
+                1,
+                row,
+                &format!("║ {} ║", pad_to(&line, inside)),
+                Style::fg(Color::Warn).and_bold(),
+            );
+            row += 1;
+        }
+        // The bar is how the goal is judged: it is locked in the box with it,
+        // yellow and not bold.
+        canvas.put_styled(
+            1,
+            row,
+            &format!("║ {} ║", pad_to(&bar_line(voyage.bar.as_deref()), inside)),
             Style::fg(Color::Warn),
         );
+        row += 1;
+        canvas.put_styled(
+            1,
+            row,
+            &format!("╚{}╝", "═".repeat(box_width.saturating_sub(2))),
+            Style::fg(Color::Warn).and_bold(),
+        );
+        row += 1;
     }
 
-    // Row 3: the four tabs; the open one is in reverse video, the others
-    // dim.
+    // The folded header's three rows (T-354, README changes 3, 4, 6 and 14):
+    // the goal check, the milestone the voyage is on, the time against the
+    // plan and the tasks, each row with its bold labels. The unfolded header
+    // draws the same three rows; it unfolds elsewhere (T-355).
+    if let Some(project) = project {
+        row = folded_rows(canvas, board, project, row);
+    }
+
+    // The tab row follows after one blank row: the tab bar draws its frame
+    // around it (T-356), so the blank row is where its top rule goes.
+    let tab_row = row + 1;
+    let mut tabs = Vec::new();
     let mut x = 1;
-    for tab_in_row in Tab::all() {
-        let label = tab_in_row.label();
-        if tab_in_row == tab {
-            canvas.put(x, TAB_ROW, &label);
-            canvas.reverse(TAB_ROW, x, label.chars().count());
+    for tab in Tab::all() {
+        let label = tab.label();
+        if tab == screen.tab {
+            canvas.put(x, tab_row, &label);
+            canvas.reverse(tab_row, x, label.chars().count());
         } else {
-            canvas.put_styled(x, TAB_ROW, &label, Style::fg(Color::Dim));
+            canvas.put_styled(x, tab_row, &label, Style::fg(Color::Dim));
         }
+        tabs.push((x, x + label.chars().count() - 1, tab));
         x += label.chars().count() + 1;
     }
+
+    Layout { top: tab_row + 2, tab_row, tabs, voyages }
 }
 
-/// The columns of every tab on the tab row: its first and its last column.
-pub fn tab_ranges() -> Vec<(u16, u16, Tab)> {
-    let mut ranges = Vec::new();
-    let mut x = 1u16;
-    for tab in Tab::all() {
-        let width = tab.label().chars().count() as u16;
-        ranges.push((x, x + width - 1, tab));
-        x += width + 1;
+/// The folded header's three rows, from the row after the goal box: the goal
+/// check and the milestone, the time against the plan and the tasks, and the
+/// key that unfolds them (T-354; README changes 3, 4, 6 and 14).
+///
+/// Every text is put at the prototype's column, a later put over an earlier
+/// one, as the prototype paints: the time's words run into the tasks' column
+/// on a narrow terminal. It returns the row after the three rows.
+fn folded_rows(
+    canvas: &mut Canvas,
+    board: &Board,
+    project: &ProjectBoard,
+    mut row: usize,
+) -> usize {
+    let width = canvas.width;
+    let voyage = project.shown.as_ref();
+
+    // The numbers, all in minutes: the time used, the plan's eta and the end
+    // the lane forecast expects (the slowest lane's end after what is used).
+    let used = match voyage {
+        Some(voyage) => {
+            let departure = voyage.departure.unwrap_or(board.now);
+            // A landed voyage's time is the flight from departure to its
+            // merge; the one with no merge on record is measured against now.
+            let end = if voyage.sailing {
+                board.now
+            } else {
+                voyage.ended.unwrap_or(board.now)
+            };
+            (end - departure).max(0) / 60
+        }
+        None => 0,
+    };
+    let eta = project
+        .workload
+        .as_ref()
+        .and_then(|voyage| voyage.eta.as_deref())
+        .map(duration_minutes)
+        .unwrap_or(0);
+    let expected = project
+        .forecast
+        .iter()
+        .map(|end| end.end_min)
+        .max()
+        .map(|end| used + end)
+        .unwrap_or(used);
+    let sailing = voyage.is_some_and(|voyage| voyage.sailing);
+    let diff = if sailing { eta - expected } else { eta - used };
+
+    // The time bar: the cells used, then the plan's end and, while the voyage
+    // sails, the expected finish.
+    let n = (width.saturating_sub(60) / 2).clamp(20, 40);
+    let span = eta.max(expected).max(used).max(1) as usize;
+    let filled = (((used.max(0) as f64) / span as f64) * n as f64)
+        .round_ties_even()
+        .max(0.0) as usize;
+    let mut cells: Vec<char> = std::iter::repeat('░').take(n).collect();
+    for cell in cells.iter_mut().take(filled.min(n)) {
+        *cell = '█';
     }
-    ranges
+    cells[((eta.max(0) as usize * n) / span).min(n - 1)] = '│';
+    if sailing {
+        cells[((expected.max(0) as usize * n) / span).min(n - 1)] = '◆';
+    }
+    let bar: String = cells.into_iter().collect();
+
+    // The tasks of the shown voyage: the cancelled ones are not work, the
+    // merged ones, the waiting ones and the rest make the three parts.
+    let mut tasks = 0usize;
+    let mut merged = 0usize;
+    let mut waiting = 0usize;
+    for task in project.lanes.iter().flat_map(|lane| lane.tasks.iter()) {
+        if task.state == gear_model::TaskState::Cancelled {
+            continue;
+        }
+        tasks += 1;
+        match task.stage {
+            graph::Stage::Merged => merged += 1,
+            graph::Stage::Deps | graph::Stage::Queued => waiting += 1,
+            _ => {}
+        }
+    }
+    let going = tasks.saturating_sub(merged + waiting);
+    let a = merged * n / tasks.max(1);
+    let b = going * n / tasks.max(1);
+
+    let mx = (width / 2 + 10).max(90);
+    let time_style = if diff >= 0 { Style::fg(Color::Ok) } else { Style::fg(Color::Bad) };
+
+    // Row 1: the goal check and the milestone the voyage is on.
+    canvas.put_styled(1, row, "Goal check", Style::bold());
+    let met = project.goal_check.iter().filter(|(met, _)| *met).count();
+    let all = project.goal_check.len();
+    canvas.put_styled(
+        15,
+        row,
+        &format!("{met} of {all} met"),
+        Style::fg(if met == all { Color::Ok } else { Color::Bad }),
+    );
+    if let Some((_, first)) = project.goal_check.iter().find(|(met, _)| !*met) {
+        canvas.put_styled(30, row, &format!("next: {first}"), Style::fg(Color::Bad));
+    }
+    canvas.put_styled(mx, row, "Milestone", Style::bold());
+    if project.stations.is_empty() {
+        canvas.put_styled(mx + 11, row, "none set", Style::fg(Color::Dim));
+    } else {
+        let reached = project
+            .stations
+            .iter()
+            .filter(|station| station.state == crate::stations::StationState::Reached)
+            .count();
+        let now = match project
+            .stations
+            .iter()
+            .find(|station| station.state == crate::stations::StationState::Now)
+        {
+            Some(station) => format!(
+                "▶ {} {} ({reached} of {} reached)",
+                station.id,
+                station.needs,
+                project.stations.len()
+            ),
+            None => format!("✔ all {} reached", project.stations.len()),
+        };
+        canvas.put_styled(mx + 11, row, &now, Style::bold());
+    }
+    row += 1;
+
+    // Row 2: the time against the plan and the tasks, in their three parts.
+    canvas.put_styled(1, row, "Time", Style::bold());
+    canvas.put_styled(15, row, &bar, time_style);
+    let short = if sailing {
+        if diff >= 0 {
+            format!("expected {} of {}, {} ahead", hm(expected), hm(eta), hm(diff))
+        } else {
+            format!("expected {} of {}, {} behind", hm(expected), hm(eta), hm(-diff))
+        }
+    } else if diff >= 0 {
+        format!("took {} of {}, {} under", hm(used), hm(eta), hm(diff))
+    } else {
+        format!("took {} of {}, {} over", hm(used), hm(eta), hm(-diff))
+    };
+    canvas.put_styled(16 + n, row, &short, time_style);
+    canvas.put_styled(mx, row, "Tasks", Style::bold());
+    canvas.put_styled(mx + 11, row, &"█".repeat(a), Style::fg(Color::Ok));
+    canvas.put_styled(mx + 11 + a, row, &"▓".repeat(b), Style::fg(Color::Warn));
+    canvas.put_styled(mx + 11 + a + b, row, &"░".repeat(n - a - b), Style::fg(Color::Dim));
+    canvas.put_styled(
+        mx + 12 + n,
+        row,
+        &format!("{merged}/{tasks} merged · {going} going · {waiting} waiting"),
+        Style::PLAIN,
+    );
+    row += 1;
+
+    // Row 3: the key that unfolds the header.
+    canvas.put_styled(
+        1,
+        row,
+        "d: unfold the goal check, milestones, time and tasks",
+        Style::fg(Color::Dim),
+    );
+    row + 1
 }
 
-/// The tab at a column of the tab row.
-pub fn tab_at(x: u16) -> Option<Tab> {
-    tab_ranges()
-        .into_iter()
-        .find(|(first, last, _)| x >= *first && x <= *last)
-        .map(|(_, _, tab)| tab)
+/// Minutes as the folded header reads them: always the hours, the minutes in
+/// two digits (`0h25m`; T-354). The board's other texts keep [`hours`].
+fn hm(minutes: i64) -> String {
+    format!("{}h{:02}m", minutes / 60, minutes % 60)
+}
+
+/// The minutes of a voyage's eta, as the plan writes it (`8h`, `1d 4h`,
+/// `90m`): the units of `eta_seconds` in `gear-app`. An eta the board cannot
+/// read is no time at all.
+fn duration_minutes(text: &str) -> i64 {
+    let mut rest = text.trim();
+    let mut seconds = 0.0;
+    while !rest.is_empty() {
+        let end = rest
+            .find(|character: char| !character.is_ascii_digit() && character != '.')
+            .unwrap_or(rest.len());
+        let Ok(number) = rest[..end].parse::<f64>() else {
+            return 0;
+        };
+        rest = rest[end..].trim_start();
+        let end = rest
+            .find(|character: char| !character.is_ascii_alphabetic())
+            .unwrap_or(rest.len());
+        let factor = match rest[..end].to_ascii_lowercase().as_str() {
+            "d" | "day" | "days" => 86_400.0,
+            "h" | "hr" | "hrs" | "hour" | "hours" => 3_600.0,
+            "m" | "min" | "mins" | "minute" | "minutes" => 60.0,
+            "s" | "sec" | "secs" | "second" | "seconds" => 1.0,
+            _ => return 0,
+        };
+        seconds += number * factor;
+        rest = rest[end..].trim_start();
+    }
+    if seconds.is_finite() && seconds > 0.0 {
+        (seconds / 60.0).ceil() as i64
+    } else {
+        0
+    }
+}
+
+/// The layout of the head of the board, drawn on a scratch canvas: the rows
+/// and the columns the view and the clicks go by.
+pub fn layout(board: &Board, screen: &Screen) -> Layout {
+    let mut scratch = Canvas::new(screen.size.0, screen.size.1);
+    header(&mut scratch, board, screen)
+}
+
+/// The style of a voyage's label on the first row: the shown voyage is lit,
+/// the others are dim.
+fn voyage_style(shown: Option<&VoyageEntry>, entry: &VoyageEntry) -> Style {
+    let is_shown = shown
+        .map(|shown| shown.milestone == entry.milestone)
+        .unwrap_or(false);
+    if is_shown {
+        Style { fg: None, bold: true, reverse: true }
+    } else {
+        Style::fg(Color::Dim)
+    }
+}
+
+/// Is the character a wide one (East Asian wide or fullwidth), the way the
+/// prototype's export counts a cell?
+fn is_wide(character: char) -> bool {
+    matches!(character, '⛵' | '⚓' | '⏳')
+}
+
+/// The prototype's `wrap`: the words split on whitespace; a word that would
+/// pass `width` starts a new line.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + word.chars().count() + 1 > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// The text padded with spaces to `width` characters (a longer text is not
+/// cut: the canvas cuts the line at its edge).
+fn pad_to(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if count >= width {
+        text.to_string()
+    } else {
+        format!("{text}{}", " ".repeat(width - count))
+    }
+}
+
+/// The quality bar's line of the goal box: its key and what it blocks.
+///
+/// The key is the leading run of capital letters (A-Z) of the voyage's bar;
+/// a bar with another key is shown as it was written.
+fn bar_line(bar: Option<&str>) -> String {
+    let Some(bar) = bar else {
+        return "Quality bar: not set".to_string();
+    };
+    let key: String = bar.chars().take_while(|c| c.is_ascii_uppercase()).collect();
+    let meaning = match key.as_str() {
+        "FASTEST" => "only what breaks the chain or loses data blocks a task",
+        "DELIVERABLE" => "errors in normal use block a task; edge cases are logged",
+        "STRICT" => "severe issues block a task; medium ones are the captain's call",
+        _ => return format!("Quality bar: {bar}"),
+    };
+    format!("Quality bar: {key} — {meaning}")
 }
 
 /// The selection mark of a row: `›` in the accent colour.
@@ -532,133 +927,231 @@ pub fn view(board: &Board, screen: &Screen, canvas: &mut Canvas, top: usize) -> 
     };
     match screen.tab {
         Tab::Now => view_now(project, board.now, screen, canvas, top),
-        Tab::Tasks => view_tasks(project, screen, canvas, top),
-        Tab::Cost => view_tokens(project, screen, canvas, top),
+        Tab::Tasks => view_tasks(project, board.now, screen, canvas, top),
+        Tab::Cost => view_cost(project, screen, canvas, top),
         Tab::Log => view_decisions(project, screen, canvas, top),
     }
 }
 
-/// The second view: the work as a graph, painted from the graph's own lines.
+/// The departure of the shown voyage (T-350's entry): the voyage's own
+/// timestamp, so a landed or older voyage picked with `[` and `]` reads its
+/// tasks' starts from its own departure, not from the active voyage's elapsed
+/// minutes (F1 of the T-362 review). A voyage with no departure has no start to
+/// measure from: the view measures from `now`.
+fn voyage_departure(project: &ProjectBoard, now: gear_model::Ts) -> gear_model::Ts {
+    project
+        .shown
+        .as_ref()
+        .and_then(|voyage| voyage.departure)
+        .unwrap_or(now)
+}
+
+/// The lanes of the Tasks view, in the prototype's order: the lane of the
+/// first task in plan order, then the next new one, and a lane of
+/// `project.lanes` that no shown task names after them.
+///
+/// The prototype draws its voyage's lanes in the plan's order (`LANES`), while
+/// `project.lanes` is in seat order (a seat id sorts by name), so the two orders
+/// differ once a voyage has three lanes (hull, mast, keel against hull, keel,
+/// mast). The golden frames are the prototype's, so the view takes the plan's
+/// order (T-362, the captain's answer to M-5869 pending).
+fn task_lanes(project: &ProjectBoard) -> Vec<String> {
+    let mut plan: Vec<&graph::GraphTask> = project.graph.iter().collect();
+    plan.sort_by_key(|task| task.rank);
+    let mut lanes: Vec<String> = Vec::new();
+    for task in plan {
+        if !lanes.contains(&task.lane) {
+            lanes.push(task.lane.clone());
+        }
+    }
+    for lane in lane_order(project) {
+        if !lanes.iter().any(|known| known == lane) {
+            lanes.push(lane.to_string());
+        }
+    }
+    lanes
+}
+
+/// The rows the Tasks view draws: the git graph of the project's tasks,
+/// measured from the shown voyage's departure (the prototype's `view_graph`).
+pub fn task_rows(project: &ProjectBoard, now: gear_model::Ts, width: usize) -> Vec<graph::GraphRow> {
+    graph::git_rows(&project.graph, &task_lanes(project), voyage_departure(project, now), width)
+}
+
+/// The tasks of the Tasks view's picks, in order: the rows with a task and a
+/// text — the rows `Enter` opens.
+pub fn task_picks(project: &ProjectBoard, now: gear_model::Ts, width: usize) -> Vec<String> {
+    task_rows(project, now, width)
+        .into_iter()
+        .filter(|row| !row.text.is_empty())
+        .filter_map(|row| row.task)
+        .collect()
+}
+
+/// The second view: the work as a git graph (README change 8): `dev` on the
+/// left, each task a branch of its lane, the newest work on top.
 fn view_tasks(
     project: &ProjectBoard,
+    now: gear_model::Ts,
     screen: &Screen,
     canvas: &mut Canvas,
     top: usize,
 ) -> Vec<usize> {
-    // The graph's own highlighter still knows the selection (its dependency
-    // marks); the reversed cells it draws are the row the canvas lights on its
-    // own, one colour across the width (README change 13).
-    let lines = graph::styled_lines(&project.graph, &project.graph_lanes, Some(screen.selected));
-    let count = project.graph.len();
-    let mut picks = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        let row = top + index;
-        canvas.put_line(0, row, line);
-        // The first line is the head of the columns; then one line per task.
-        if (1..=count).contains(&index) {
-            picks.push(row);
+    let lanes = task_lanes(project);
+    let width = canvas.width();
+    let info_x = 9 + 6 * lanes.len().saturating_sub(1) + 6;
+    let tw = (width as i64 - info_x as i64 - 52).clamp(30, 56) as usize;
+    // The head of the columns: dev, the lanes and the text's columns.
+    canvas.put_styled(2, top, "dev", Style::fg(Color::Ok).and_bold());
+    for (index, lane) in lanes.iter().enumerate() {
+        canvas.put_styled(
+            9 + 6 * index - 1,
+            top,
+            lane,
+            Style::fg(lane_color(&lanes, lane)).and_bold(),
+        );
+    }
+    canvas.put_styled(
+        info_x,
+        top,
+        &format!("{:<7}{:<tw$}  {:<36}time", "task", "what", "stage"),
+        Style::fg(Color::Dim),
+    );
+    // One row per row of the graph: dev's line, the cells of the drawing and
+    // the text after it.
+    let rows = task_rows(project, now, width);
+    let mut picks: Vec<(usize, String)> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let at = top + 1 + index;
+        canvas.put_styled(3, at, "│", Style::fg(Color::Ok));
+        for (x, character, style) in &row.cells {
+            canvas.put_styled(*x, at, &character.to_string(), *style);
+        }
+        if row.text.is_empty() {
+            continue;
+        }
+        canvas.put_styled(info_x, at, &row.text, row.style);
+        if let Some(task) = &row.task {
+            picks.push((at, task.clone()));
         }
     }
-    picks
+    // The selected pick's dependencies light up: what it needs, and what waits
+    // for it.
+    if let Some((_, selected)) = picks.get(screen.selected) {
+        let deps_of = |task: &str| -> Vec<String> {
+            project
+                .graph
+                .iter()
+                .find(|row| row.id == task)
+                .map(|row| row.deps.clone())
+                .unwrap_or_default()
+        };
+        let needed = deps_of(selected);
+        for (at, task) in &picks {
+            let waits = deps_of(task);
+            let mark = if needed.contains(task) {
+                // The row's task is what the selected one waits for.
+                format!("◂ needed by {selected}")
+            } else if waits.contains(selected) {
+                // The row's task waits for the selected one.
+                format!("▸ waits for {selected}")
+            } else {
+                continue;
+            };
+            canvas.put_styled(
+                width.saturating_sub(22),
+                *at,
+                &mark,
+                Style::fg(Color::Warn).and_bold(),
+            );
+        }
+    }
+    picks.into_iter().map(|(at, _)| at).collect()
 }
 
-/// The fourth view: the captain's decisions (★ = worth a look at landing) and
-/// the agents' friction reports (the prototype).
+/// The fourth view: the log (README change 10) — what changed the course, then
+/// every decision and the agents' friction reports (the prototype).
+///
+/// The user found M4's log a wall of text, so the starred decisions — the ones
+/// that changed the course — come first as a summary, and the full list below
+/// it holds every decision, its reason under it; the friction reports close the
+/// view.
 fn view_decisions(
     project: &ProjectBoard,
     screen: &Screen,
     canvas: &mut Canvas,
     top: usize,
 ) -> Vec<usize> {
-    canvas.put_line(
-        0,
-        top,
-        &Line::styled("DECISIONS MADE  (★ = worth a look at landing)", Style::bold()),
-    );
-    let mut picks = Vec::new();
+    canvas.put_styled(1, top, "WHAT CHANGED THE COURSE  (★)", Style::bold());
     let mut row = top + 1;
-    // The starred decisions are the ones the user reads in full (F1): the
-    // others are counted by kind below.
+    // The starred decisions are the ones that changed the course: the summary
+    // the user reads first. A voyage that changed nothing says so.
     let starred: Vec<&crate::DecisionBoard> =
         project.decisions.iter().filter(|decision| decision.star).collect();
-    for (index, decision) in starred.iter().enumerate() {
-        let picked = index == screen.selected;
-        canvas.put_line(
-            0,
-            row,
-            &mark(picked)
-                .push(" ", Style::PLAIN)
-                .push(
-                    format!("{} ★ {:<9}", clock_of(&decision.at), decision.kind),
-                    Style::fg(Color::Warn),
-                )
-                .push(" ", Style::PLAIN)
-                .push(decision.what.clone(), Style::PLAIN),
-        );
-        // The decision is what the selection moves over; its reason is not.
-        picks.push(row);
+    if starred.is_empty() {
+        canvas.put_styled(3, row, "nothing", Style::fg(Color::Dim));
         row += 1;
+    }
+    for decision in &starred {
+        canvas.put_styled(
+            3,
+            row,
+            &format!("{} ★ {}", clock_of(&decision.at), decision.what),
+            Style::fg(Color::Warn),
+        );
+        row += 1;
+    }
+    // The full list: every decision is a pick, its reason is not.
+    row += 1;
+    canvas.put_styled(
+        1,
+        row,
+        &format!("ALL DECISIONS ({})", project.decisions.len()),
+        Style::bold(),
+    );
+    let mut picks = Vec::new();
+    for (index, decision) in project.decisions.iter().enumerate() {
+        row += 1;
+        let picked = index == screen.selected;
+        canvas.put_styled(1, row, if picked { "›" } else { " " }, Style::fg(Color::Acc));
+        canvas.put_styled(
+            3,
+            row,
+            &format!(
+                "{} {} {:<9}",
+                clock_of(&decision.at),
+                if decision.star { '★' } else { ' ' },
+                decision.kind
+            ),
+            if decision.star { Style::fg(Color::Warn) } else { Style::PLAIN },
+        );
+        canvas.put_styled(22, row, &decision.what, Style::PLAIN);
+        picks.push(row);
         // The reason stands on its own line, as the prototype draws it: a
         // decision line with the reason appended loses it on a narrow screen
         // (F2).
         if let Some(why) = &decision.why {
-            canvas.put_line(
-                0,
-                row,
-                &Line::plain(format!("{:22}", ""))
-                    .push(format!("why: {why}"), Style::fg(Color::Dim)),
-            );
             row += 1;
+            canvas.put_styled(22, row, &format!("why: {why}"), Style::fg(Color::Dim));
         }
-    }
-    // The count of the decisions by kind (§7.2): the landing review shows it
-    // next to the starred lines.
-    if !project.decisions.is_empty() {
-        row += 1;
-        canvas.put_line(0, row, &Line::plain(format!("by kind: {}", counts_of_kind(project))));
-        row += 1;
     }
     // The friction reports the agents left (§6.1): an open one is unread.
-    row += 1;
-    canvas.put_line(0, row, &Line::styled("FRICTION REPORTS FROM AGENTS", Style::bold()));
-    row += 1;
-    let width = lane_width(project.frictions.iter().map(|friction| friction.lane.as_str()), 6, 1);
+    row += 2;
+    canvas.put_styled(1, row, "FRICTION REPORTS FROM AGENTS", Style::bold());
     for friction in &project.frictions {
-        let (status, color) =
-            if friction.closed { ("closed", Color::Dim) } else { ("open", Color::Warn) };
-        canvas.put_line(
-            0,
-            row,
-            &Line::plain("  ")
-                .push(
-                    format!("{} {:<width$}", friction.task, friction.lane),
-                    lane_style(project, &friction.lane),
-                )
-                .push(format!("{status:<8}"), Style::fg(color))
-                .push(friction.body.clone(), Style::PLAIN),
-        );
         row += 1;
+        canvas.put_styled(
+            3,
+            row,
+            &format!("{} {:<5}", friction.task, friction.lane),
+            lane_style(project, &friction.lane),
+        );
+        let (status, color) =
+            if friction.closed { ("read", Color::Dim) } else { ("unread", Color::Warn) };
+        canvas.put_styled(15, row, &format!("{status:<7}"), Style::fg(color));
+        canvas.put_styled(23, row, &friction.body, Style::PLAIN);
     }
     picks
-}
-
-/// The decisions of the project that are not starred, by kind: `2 scope, 1 cut`.
-///
-/// The starred ones are read in full above; this is the count of the others
-/// (§7.2).
-fn counts_of_kind(project: &ProjectBoard) -> String {
-    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
-    for decision in &project.decisions {
-        if decision.star {
-            continue;
-        }
-        *counts.entry(decision.kind.as_str()).or_default() += 1;
-    }
-    counts
-        .into_iter()
-        .map(|(kind, count)| format!("{count} {kind}"))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// The colour of a ratio of the actual time to the estimate.
@@ -672,133 +1165,161 @@ fn ratio_color(ratio: f64) -> Color {
     }
 }
 
-/// The third view: the time and the tokens of every task that ran (the
-/// prototype).
-fn view_tokens(
+/// The third view: one row per lane, its time and its tokens with the
+/// development and the review apart, and the tasks of an opened lane under it
+/// (T-363; the prototype's `view_cost`).
+fn view_cost(
     project: &ProjectBoard,
     screen: &Screen,
     canvas: &mut Canvas,
     top: usize,
 ) -> Vec<usize> {
     let mut picks = Vec::new();
-    let mut row = top + 1;
-    let mut tokens_total = 0;
-    let mut cache_total = 0;
-    let mut cost_total = 0.0;
-    let mut unknown = 0;
-    let tasks = token_tasks(project);
-    // A project without `[prices]` priced none of its rounds: the cost column
-    // then says nothing at all, and the total names the missing prices once,
-    // instead of a `?` in every cell and a dollar sum that does not exist
-    // (the user, 2026-10-28).
-    let priced = tasks.iter().any(|(_, task)| task.cost_usd.is_some());
-    let width = lane_width(tasks.iter().map(|(lane, _)| *lane), 6, 1);
     canvas.put_line(
-        0,
+        3,
         top,
         &Line::styled(
             format!(
-                "  {:<7}{:<width$}{:>5}{:>6}{:>8}{:>8}{:>9}{:>9}{:>9}",
-                "task", "lane", "est", "act", "ratio", "rounds", "tokens", "cache", "cost"
+                "{:<22}{:>6}{:>7}{:>7}{:>8}{:>12}{:>8}{:>15}{:>10}{:>9}",
+                "lane / task",
+                "est",
+                "act",
+                "ratio",
+                "rounds",
+                "dev tokens",
+                "dev $",
+                "review tokens",
+                "review $",
+                "total $"
             ),
             Style::fg(Color::Dim),
         ),
     );
-    for (index, (lane, task)) in tasks.into_iter().enumerate() {
+    let mut row = top + 1;
+    let mut dev_k_total = 0;
+    let mut rev_k_total = 0;
+    let mut cost_total = 0.0;
+    // A project without `[prices]` priced none of its rounds: the total then
+    // names the missing prices once, instead of a dollar sum that does not
+    // exist (the user, 2026-10-28).
+    let priced = project
+        .lanes
+        .iter()
+        .flat_map(|lane| lane.tasks.iter())
+        .filter(|task| task.actual_min.unwrap_or(0) > 0)
+        .any(|task| task.dev_cost.is_some() || task.review_cost.is_some());
+    let mut unknown = 0;
+    for (index, lane) in project.lanes.iter().enumerate() {
         let picked = index == screen.selected;
-        let estimate = task.est_min.unwrap_or(0);
-        let actual = task.actual_min.unwrap_or(0);
-        let ratio = if estimate > 0 {
-            actual as f64 / estimate as f64
-        } else {
-            0.0
-        };
-        // The tokens and the cost are unknown when no round counted them
-        // (F5): they are not a measured zero.
-        let tokens = task.tokens;
-        let cache_read = task.cache_read;
-        let cost = task.cost_usd;
-        if tokens.is_none() {
-            unknown += 1;
-        } else {
-            tokens_total += tokens.unwrap_or(0);
-        }
-        if let Some(cache_read) = cache_read {
-            cache_total += cache_read;
-        }
-        // Without prices there is no cost to be unknown: the count of the
-        // unknown parts then counts the tokens only.
-        if priced {
-            if cost.is_none() {
+        // The lane's shown tasks that ran, in plan order.
+        let mine: Vec<&TaskBoard> = lane
+            .tasks
+            .iter()
+            .filter(|task| task.actual_min.unwrap_or(0) > 0)
+            .collect();
+        let mut est = 0;
+        let mut act = 0;
+        let mut rounds = 0;
+        let mut dev_k = 0;
+        let mut rev_k = 0;
+        let mut dev_c = 0.0;
+        let mut rev_c = 0.0;
+        for task in &mine {
+            est += task.est_min.unwrap_or(0);
+            act += task.actual_min.unwrap_or(0);
+            rounds += task.rounds;
+            // A part the rounds never counted is unknown, not a measured zero
+            // (F5): it counts as zero here and is named in the voyage's line.
+            dev_k += task.dev_tokens.unwrap_or(0) / 1000;
+            rev_k += task.review_tokens.unwrap_or(0) / 1000;
+            if let Some(cost) = task.dev_cost {
+                dev_c += cost;
+            }
+            if let Some(cost) = task.review_cost {
+                rev_c += cost;
+            }
+            // Without prices there is no cost to be unknown: the count then
+            // counts the tokens only (the user, 2026-10-28).
+            if task.dev_tokens.is_none()
+                || task.review_tokens.is_none()
+                || (priced && (task.dev_cost.is_none() || task.review_cost.is_none()))
+            {
                 unknown += 1;
-            } else {
-                cost_total += cost.unwrap_or(0.0);
             }
         }
-        let tokens_text = match tokens {
-            Some(tokens) => format!("{}k", tokens / 1000),
-            None => "?".to_string(),
-        };
-        let cache_text = match cache_read {
-            Some(cache_read) => format!("{}k", cache_read / 1000),
-            None => "?".to_string(),
-        };
-        let cost_text = match cost {
-            Some(cost) => format!("${cost:>6.2}"),
-            None if priced => "      ?".to_string(),
-            None => String::new(),
-        };
-        let row_style = Style::PLAIN;
+        dev_k_total += dev_k;
+        rev_k_total += rev_k;
+        cost_total += dev_c + rev_c;
+        let ratio = if est > 0 { act as f64 / est as f64 } else { 0.0 };
+        let expanded = screen.opened.iter().any(|open| *open == lane.lane);
         canvas.put_line(
             0,
             row,
-            &mark(picked)
+            &Line::plain(" ")
+                .push(if picked { "›" } else { " " }, Style::fg(Color::Acc))
                 .push(" ", Style::PLAIN)
-                .push(format!("{:<7}", task.id), row_style)
-                .push(format!("{lane:<width$}"), lane_style(project, lane))
-                .push(format!("{estimate:>4}m{actual:>5}m"), row_style)
-                .push(format!("{ratio:>7.1}x"), Style::fg(ratio_color(ratio)))
+                .push(
+                    format!("{}{:<19}", if expanded { "▾ " } else { "▸ " }, lane.lane),
+                    lane_style(project, &lane.lane).and_bold(),
+                )
+                .push(" ", Style::PLAIN)
+                .push(format!("{est:>5}m{act:>6}m"), Style::PLAIN)
+                .push(format!("{ratio:>6.1}x"), Style::fg(ratio_color(ratio)))
                 .push(
                     format!(
-                        "{:>8}{tokens_text:>9}{cache_text:>9}  {cost_text}",
-                        task.stored_rounds
+                        "{rounds:>8}{dev_k:>11}k{dev_c:>8.2}{rev_k:>14}k{rev_c:>10.2}{:>9.2}",
+                        dev_c + rev_c
                     ),
-                    row_style,
+                    Style::bold(),
                 ),
         );
         picks.push(row);
         row += 1;
-    }
-    let mut total = format!(
-        "so far: {:.1}M tokens, {:.1}M cache reads, {}",
-        tokens_total as f64 / 1_000_000.0,
-        cache_total as f64 / 1_000_000.0,
-        if priced { format!("${cost_total:.2}") } else { "no prices set".to_string() }
-    );
-    if unknown > 0 {
-        // The total is what is known: the unknown parts are named (F5).
-        total.push_str(&format!(" (known so far; {unknown} unknown)"));
-    }
-    let rest = vec![Line::styled(total, Style::bold())];
-    for line in &rest {
-        canvas.put_line(0, row, line);
-        row += 1;
-    }
-    picks
-}
-
-/// The tasks of the Time & tokens view, in the order of its rows: the tasks
-/// that ran, lane by lane.
-pub fn token_tasks(project: &ProjectBoard) -> Vec<(&str, &TaskBoard)> {
-    let mut tasks = Vec::new();
-    for lane in &project.lanes {
-        for task in &lane.tasks {
-            if task.actual_min.is_some() {
-                tasks.push((lane.lane.as_str(), task));
+        // An opened lane shows its tasks, one row each, in the same columns.
+        if expanded {
+            for task in &mine {
+                let est = task.est_min.unwrap_or(0);
+                let act = task.actual_min.unwrap_or(0);
+                let ratio = if est > 0 { act as f64 / est as f64 } else { 0.0 };
+                let dev_k = task.dev_tokens.unwrap_or(0) / 1000;
+                let rev_k = task.review_tokens.unwrap_or(0) / 1000;
+                let dev_c = task.dev_cost.unwrap_or(0.0);
+                let rev_c = task.review_cost.unwrap_or(0.0);
+                canvas.put_line(
+                    0,
+                    row,
+                    &Line::plain("     ")
+                        .push(format!("{:<20}", task.id), Style::fg(Color::Dim))
+                        .push(format!("{est:>5}m{act:>6}m"), Style::fg(Color::Dim))
+                        .push(format!("{ratio:>6.1}x"), Style::fg(ratio_color(ratio)))
+                        .push(
+                            format!(
+                                "{:>8}{dev_k:>11}k{dev_c:>8.2}{rev_k:>14}k{rev_c:>10.2}{:>9.2}",
+                                task.rounds,
+                                dev_c + rev_c
+                            ),
+                            Style::fg(Color::Dim),
+                        ),
+                );
+                row += 1;
             }
         }
     }
-    tasks
+    // One blank row, then the voyage's own sum.
+    row += 1;
+    let mut total = format!(
+        "this voyage: {:.1}M tokens (development {:.1}M, review {:.1}M), {}",
+        (dev_k_total + rev_k_total) as f64 / 1000.0,
+        dev_k_total as f64 / 1000.0,
+        rev_k_total as f64 / 1000.0,
+        if priced { format!("${cost_total:.2}") } else { "no prices set".to_string() }
+    );
+    if unknown > 0 {
+        // The sum is what is known: the unknown parts are named.
+        total.push_str(&format!(" (known so far; {unknown} unknown)"));
+    }
+    canvas.put_line(3, row, &Line::styled(total, Style::bold()));
+    picks
 }
 
 /// The clock of a decision: the time of its line (`2026-10-27 10:05` →
@@ -943,7 +1464,8 @@ fn view_now(
     rest.push(Line::styled("DONE SENTENCE", Style::bold()));
     // The store keeps the clauses of the done sentence, not whether each one
     // is met: every clause is an open one (the prototype's grey `·`).
-    for clause in done_clauses(project) {
+    let done = project.voyages.first().and_then(|voyage| voyage.done.as_deref());
+    for clause in crate::done_clauses(done) {
         rest.push(Line::styled(format!("  · {clause}"), Style::fg(Color::Dim)));
     }
     for line in &rest {
@@ -1026,23 +1548,9 @@ fn needs_a_look(project: &ProjectBoard) -> Vec<(String, String, String, String)>
     looks
 }
 
-/// The clauses of the done sentence of the voyage.
-fn done_clauses(project: &ProjectBoard) -> Vec<String> {
-    let Some(voyage) = project.voyages.first() else {
-        return Vec::new();
-    };
-    let Some(done) = voyage.done.as_deref() else {
-        return Vec::new();
-    };
-    done.split(';')
-        .map(|clause| clause.trim().to_string())
-        .filter(|clause| !clause.is_empty())
-        .collect()
-}
-
 /// Draw the panel over the frame: a box at the right of the screen, as the
 /// prototype draws its window over the board.
-fn draw_panel(canvas: &mut Canvas, panel: &[Line]) {
+fn draw_panel(canvas: &mut Canvas, panel: &[Line], top: usize) {
     // One width for the whole box, borders included (F3): the interior rows
     // are padded or cut to it, so the right border is always inside the
     // canvas.
@@ -1062,7 +1570,6 @@ fn draw_panel(canvas: &mut Canvas, panel: &[Line]) {
         return;
     }
     let left = canvas.width.saturating_sub(total + 1);
-    let top = VIEW_ROW;
     // The footer row is reserved: the bottom border stands above it (F3).
     let bottom = (top + panel.len() + 1).min(canvas.height - 2);
     // The box: a top border, the rows, a bottom border.
@@ -1192,19 +1699,6 @@ pub fn lane_color_of(project: &ProjectBoard, lane: &str) -> Color {
     lane_color(&lane_order(project), lane)
 }
 
-/// A duration of the plan (`12h`, `30m`) in minutes.
-fn duration_minutes(text: &str) -> Option<i64> {
-    let text = text.trim();
-    let number: String = text.chars().take_while(|c| c.is_ascii_digit()).collect();
-    let value: i64 = number.parse().ok()?;
-    let unit = text[number.len()..].trim().to_ascii_lowercase();
-    match unit.as_str() {
-        "h" | "hr" | "hrs" | "hour" | "hours" => Some(value * 60),
-        "m" | "min" | "mins" | "minute" | "minutes" => Some(value),
-        _ => None,
-    }
-}
-
 /// A bar of `width` cells: how much of `total` is `part`.
 pub fn bar(part: i64, total: i64, width: usize) -> String {
     if total <= 0 {
@@ -1238,3 +1732,79 @@ pub fn reason_word(reason: &IdleReason) -> &'static str {
         IdleReason::NoWork => "no work",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wide_glyph_takes_two_cells_and_its_continuation_is_not_printed() {
+        // T-353 (review F1): the canvas keeps the prototype's columns — the
+        // glyph and its continuation — and the text leaves the continuation
+        // out, so a terminal draws the same columns.
+        let mut canvas = Canvas::new(20, 8);
+        let taken = canvas.put_wide(1, 0, " M5 ⛵ ", Style::fg(Color::Warn));
+
+        // The prototype's label: six characters, and the glyph's second cell.
+        assert_eq!(taken, 7, "the cells the label took");
+        assert_eq!(canvas.char_at(1, 0), ' ');
+        assert_eq!(canvas.char_at(5, 0), '⛵');
+        assert!(canvas.is_continuation(6, 0), "the glyph's second cell");
+        assert_eq!(canvas.char_at(6, 0), ' ', "a space in the cell (the golden planes)");
+        assert_eq!(canvas.style_at(6, 0), Style::fg(Color::Warn), "in the label's style");
+        assert!(!canvas.is_continuation(7, 0), "the label's last space is its own");
+        // An ordinary text after the label keeps the trailing spaces printed.
+        canvas.put(8, 0, "x");
+        let line = canvas.text().lines().next().unwrap_or_default().to_string();
+        assert_eq!(line, "  M5 ⛵ x", "the continuation cell prints nothing");
+        let columns: usize = line
+            .chars()
+            .map(|character| if matches!(character, '⛵' | '⚓') { 2 } else { 1 })
+            .sum();
+        assert_eq!(columns, 9, "nine cells, nine terminal columns: {line:?}");
+    }
+
+    #[test]
+    fn a_write_over_half_of_a_wide_glyph_blanks_the_other_half() {
+        // T-353 (review F3): the terminal draws a glyph in two columns, so a
+        // half-overwritten glyph would shift the columns after it.
+        let mut canvas = Canvas::new(20, 8);
+        canvas.put_wide(1, 0, "M5 ⛵", Style::fg(Color::Warn));
+
+        // A write onto the continuation blanks the glyph's leading cell.
+        assert_eq!(canvas.char_at(4, 0), '⛵');
+        assert!(canvas.is_continuation(5, 0));
+        canvas.put(5, 0, "x");
+        assert_eq!(canvas.char_at(4, 0), ' ', "the glyph's first half is blank");
+        assert!(!canvas.is_continuation(4, 0));
+        assert_eq!(canvas.char_at(5, 0), 'x', "the write is where it landed");
+        assert_eq!(canvas.text().lines().next().unwrap_or_default(), " M5  x");
+
+        // A write onto a leading cell clears its continuation: the second half
+        // stays a space in the glyph's style.
+        let mut canvas = Canvas::new(20, 8);
+        canvas.put_wide(1, 0, "M5 ⛵", Style::fg(Color::Warn));
+        canvas.put(4, 0, "y");
+        assert!(!canvas.is_continuation(5, 0), "the glyph has no second half any more");
+        assert_eq!(canvas.char_at(5, 0), ' ');
+        assert_eq!(canvas.style_at(5, 0), Style::fg(Color::Warn));
+        assert_eq!(canvas.text().lines().next().unwrap_or_default(), " M5 y");
+    }
+
+    #[test]
+    fn an_eta_reads_in_minutes_and_the_header_reads_it_back_in_hours() {
+        // T-354: the plan's units, as `eta_seconds` in gear-app reads them.
+        assert_eq!(duration_minutes("8h"), 480);
+        assert_eq!(duration_minutes("1d 4h"), 1_680);
+        assert_eq!(duration_minutes("90m"), 90);
+        assert_eq!(duration_minutes("2.5 hours"), 150);
+        // An eta the board cannot read is no time at all.
+        assert_eq!(duration_minutes(""), 0);
+        assert_eq!(duration_minutes("soon"), 0);
+        // The folded header always reads the hours, the minutes in two digits.
+        assert_eq!(hm(0), "0h00m");
+        assert_eq!(hm(25), "0h25m");
+        assert_eq!(hm(346), "5h46m");
+    }
+}
+

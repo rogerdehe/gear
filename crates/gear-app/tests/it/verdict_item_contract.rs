@@ -36,7 +36,7 @@ fn apply_plan(s: &mut Store, text: &str, rid: &str) -> gear_model::GearResult<ge
     apply(s, &cap_env(), Some(&fp()), None, &parse(text).unwrap(), text, rid, T0 + 50)
 }
 
-const V1: &str = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M3\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+const V1: &str = "<!-- gear-plan project=p base=0 -->\n# Milestone M3: delivery\ndone: it ships\nbar: it holds\neta: 8h\n\n# Queue\n## NEW [must] lane=heat milestone=M3\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
 
 /// The line the plan writes to settle the fail.
 const VERDICTS_LINE: &str = "T-1 attempt=1 contract=1 candidate=abc1234def5678 fail rework=\"…\"";

@@ -2,9 +2,10 @@
 //! (§5.4).
 //!
 //! `gear report voyage [--json] [--all]` is the captain's landing report: the
-//! voyage's own lines, its `done:` sentence clause by clause, its time and
-//! tokens, the ★ decisions in full (the rest counted per kind), the friction
-//! reports with their outcomes, and the tasks that took more than one round.
+//! voyage's own lines, its `done:` sentence clause by clause, its confirmed
+//! goal changes, its time and tokens, the ★ decisions in full (the rest
+//! counted per kind), the friction reports with their outcomes, and the tasks
+//! that took more than one round.
 //!
 //! §5.4 keeps working and waiting apart: a spent quota stops lanes for
 //! hours, so the wall clock of a voyage says how much of it the fleet was
@@ -41,6 +42,9 @@ pub struct Report {
     pub slowest: Vec<TaskRatio>,
     /// The ★ decisions, in full.
     pub starred: Vec<DecisionLine>,
+    /// The confirmed goal changes of the voyage (T-335): the user's decisions
+    /// on its `done`, `bar` and `eta` (T-410, T-331).
+    pub goal_changes: Vec<DecisionLine>,
     /// How many decisions of each kind there are besides the ★ ones.
     pub kind_counts: Vec<(String, usize)>,
     /// Every decision of the voyage (only with `--all`).
@@ -210,6 +214,13 @@ pub fn report_with(
         })
         .collect();
     let starred: Vec<DecisionLine> = decisions.iter().filter(|d| d.star).cloned().collect();
+    // The confirmed goal changes: the decisions of kind `user` with source
+    // `gear`, in the order they appeared (T-335).
+    let goal_changes: Vec<DecisionLine> = decisions
+        .iter()
+        .filter(|d| d.kind == "user" && d.source == "gear")
+        .cloned()
+        .collect();
     let mut kind_counts: BTreeMap<String, usize> = BTreeMap::new();
     for decision in decisions.iter().filter(|d| !d.star) {
         *kind_counts.entry(decision.kind.clone()).or_default() += 1;
@@ -253,6 +264,7 @@ pub fn report_with(
         time: voyage_time,
         slowest,
         starred,
+        goal_changes,
         kind_counts: kind_counts.into_iter().collect(),
         all_decisions: if all { decisions } else { Vec::new() },
         frictions,
@@ -304,7 +316,7 @@ fn clauses_of(done: &str) -> Vec<String> {
 
 // ---------------------------------------------------------------- rendering
 
-/// The report as the captain reads it (design §7.5): the six parts in order.
+/// The report as the captain reads it (design §7.5): the seven parts in order.
 pub fn render(report: &Report) -> String {
     let mut lines: Vec<String> = Vec::new();
     // 1. The voyage's own report lines.
@@ -316,7 +328,16 @@ pub fn render(report: &Report) -> String {
         lines.push(format!("  {clause}"));
     }
     lines.push(String::new());
-    // 3. Time and tokens: the wall clock (§5.4), the work and waiting time
+    // 3. The confirmed goal changes of the voyage (T-335).
+    lines.push(format!("Goal changes ({})", report.milestone));
+    if report.goal_changes.is_empty() {
+        lines.push("  no goal change".to_string());
+    }
+    for change in &report.goal_changes {
+        lines.push(format!("  {}", decision_line(change)));
+    }
+    lines.push(String::new());
+    // 4. Time and tokens: the wall clock (§5.4), the work and waiting time
     // per lane, and the five tasks with the highest actual/estimate.
     lines.push(crate::time::voyage_work_line(&report.work));
     lines.push(format!(
@@ -341,7 +362,7 @@ pub fn render(report: &Report) -> String {
         }
     }
     lines.push(String::new());
-    // 4. The ★ decisions in full; the rest counted per kind.
+    // 5. The ★ decisions in full; the rest counted per kind.
     lines.push(format!("Decisions ({})", report.milestone));
     if report.starred.is_empty() {
         lines.push("  no ★ decision".to_string());
@@ -361,7 +382,7 @@ pub fn render(report: &Report) -> String {
         lines.push(format!("  {}", decision_line(decision)));
     }
     lines.push(String::new());
-    // 5. The friction reports with their outcomes; the open ones are marked.
+    // 6. The friction reports with their outcomes; the open ones are marked.
     lines.push("Friction".to_string());
     if report.frictions.is_empty() {
         lines.push("  no friction report".to_string());
@@ -381,7 +402,7 @@ pub fn render(report: &Report) -> String {
         lines.push(format!("    {}", friction.body));
     }
     lines.push(String::new());
-    // 6. The tasks that took more than one round.
+    // 7. The tasks that took more than one round.
     lines.push("Rework".to_string());
     if report.rework.is_empty() {
         lines.push("  no task took more than one round".to_string());

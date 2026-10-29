@@ -108,6 +108,7 @@ type Range = (usize, usize);
 /// A cell inside a skip entry (`swap: None`) is not compared. A cell inside a
 /// swap entry and inside no skip entry is compared, except that the golden
 /// colour `want` matches the board's `got` (case kept: `u` with `m`).
+#[derive(Clone, Copy)]
 struct Pending {
     /// The frame (`now-folded`, …): the name of its golden files.
     frame: Frame,
@@ -129,19 +130,6 @@ struct Pending {
 const PENDING: &[Pending] = &[
     // (5) The rows the queued tasks build. Row 47 (the footer) is compared
     // from the start: T-341 drew it.
-    Pending { frame: "now-folded", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-    Pending { frame: "now-open", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-    Pending { frame: "tasks-folded", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-    Pending { frame: "tasks-open", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-    Pending { frame: "cost-folded", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-    Pending { frame: "cost-open", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-    Pending { frame: "log-folded", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-    Pending { frame: "log-open", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-
-    Pending { frame: "now-folded", rows: (7, 9), cols: (0, 159), swap: None, by: "T-354" },
-    Pending { frame: "tasks-folded", rows: (7, 9), cols: (0, 159), swap: None, by: "T-354" },
-    Pending { frame: "cost-folded", rows: (7, 9), cols: (0, 159), swap: None, by: "T-354" },
-    Pending { frame: "log-folded", rows: (7, 9), cols: (0, 159), swap: None, by: "T-354" },
     Pending { frame: "now-open", rows: (7, 17), cols: (0, 159), swap: None, by: "T-355" },
     Pending { frame: "tasks-open", rows: (7, 17), cols: (0, 159), swap: None, by: "T-355" },
     Pending { frame: "cost-open", rows: (7, 17), cols: (0, 159), swap: None, by: "T-355" },
@@ -160,12 +148,23 @@ const PENDING: &[Pending] = &[
     Pending { frame: "now-folded", rows: (19, 46), cols: (0, 159), swap: None, by: "T-360" },
     Pending { frame: "now-open", rows: (27, 46), cols: (0, 159), swap: None, by: "T-360" },
 
-    Pending { frame: "tasks-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-362" },
-    Pending { frame: "tasks-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-362" },
-    Pending { frame: "cost-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-363" },
-    Pending { frame: "cost-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-363" },
-    Pending { frame: "log-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-364" },
-    Pending { frame: "log-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-364" },
+    // T-362 draws the Tasks view to the prototype's rows, but the board's own
+    // view starts on row 5: the rows below are the prototype's, which the view
+    // reaches once the header is the prototype's height (T-353..T-356, T-356
+    // puts the view's first row there). The view's own rows are held to the
+    // golden rows by `the_tasks_view_paints_the_prototype_rows`.
+    Pending { frame: "tasks-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-356: the view's first row" },
+    Pending { frame: "tasks-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-356: the view's first row" },
+    // T-363 draws the Cost view to the prototype's rows too, but it waits for
+    // the same header; `the_cost_view_paints_the_prototype_rows` holds those
+    // rows to the golden frames at the prototype's own origin.
+    Pending { frame: "cost-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-363 (T-356 removes it)" },
+    Pending { frame: "cost-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-363 (T-356 removes it)" },
+    // T-364 draws the Log view to the prototype's rows too, but it waits for
+    // the same header; `the_log_view_paints_the_prototype_rows` holds those
+    // rows to the golden frames at the prototype's own origin.
+    Pending { frame: "log-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-364 (T-356 removes it)" },
+    Pending { frame: "log-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-364 (T-356 removes it)" },
 
     // (6) The prototype's constants contradict its own formulas, so no store
     // can give both.
@@ -191,9 +190,11 @@ const PENDING: &[Pending] = &[
     Pending { frame: "tasks-open", rows: (38, 38), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
     Pending { frame: "tasks-open", rows: (41, 41), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
     Pending { frame: "tasks-open", rows: (43, 43), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
-    // T-267 is queued although T-263 and T-266 are not merged.
-    Pending { frame: "tasks-folded", rows: (19, 19), cols: (92, 122), swap: None, by: "prototype data: T-267 stage" },
-    Pending { frame: "tasks-open", rows: (27, 27), cols: (92, 122), swap: None, by: "prototype data: T-267 stage" },
+    // T-267 is queued although T-263 and T-266 are not merged. Its row is the
+    // first of the waiting ones, the newest first (T-362's regeneration of the
+    // Tasks frames).
+    Pending { frame: "tasks-folded", rows: (15, 15), cols: (92, 122), swap: None, by: "prototype data: T-267 stage" },
+    Pending { frame: "tasks-open", rows: (23, 23), cols: (92, 122), swap: None, by: "prototype data: T-267 stage" },
     // The prototype colours lane `mast` blue by name, the board colours lanes
     // by their order: its blue is the board's magenta, bold for bold.
     Pending { frame: "now-folded", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
@@ -239,8 +240,145 @@ fn render(tab: Tab, detail: bool) -> Planes {
     )
     .unwrap();
     board.engine = EngineState::Running;
-    let screen = Screen { tab, selected: 0, detail, size: (160, 48) };
+    let screen = Screen { tab, selected: 0, detail, opened: Vec::new(), size: (160, 48) };
     gold::planes(&canvas(&board, &screen, None))
+}
+
+/// A line without the terminal's escape sequences.
+fn plain_line(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' {
+            // A control sequence (`ESC [`, its parameters, its final letter)
+            // or a two-character escape: neither prints anything.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for character in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&character) {
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+            continue;
+        }
+        out.push(character);
+    }
+    out
+}
+
+/// The terminal columns a text takes: the wide glyphs of the board's head (⛵
+/// and ⚓, one glyph in two columns) take two, everything else one.
+fn terminal_columns(text: &str) -> usize {
+    text.chars()
+        .map(|character| if matches!(character, '⛵' | '⚓') { 2 } else { 1 })
+        .sum()
+}
+
+/// The terminal column a text starts at in a line.
+fn column_of(line: &str, needle: &str) -> usize {
+    let at = line
+        .find(needle)
+        .unwrap_or_else(|| panic!("no {needle:?} in {line:?}"));
+    terminal_columns(&line[..at])
+}
+
+/// The first row of the golden fixture's frame as the terminal shows it.
+fn head_row(board: &gear_board::Board, size: (usize, usize)) -> String {
+    let ansi = canvas(board, &crate::screen(Tab::Now, 0, size), None).ansi(true);
+    plain_line(ansi.lines().next().unwrap_or_default())
+}
+
+/// T-353 (review F1): the terminal's columns are the canvas's. A wide glyph
+/// (⛵, ⚓) fills two columns, and its continuation cell — a space the canvas
+/// keeps so that the golden planes match the prototype — is not printed again.
+/// The clock of row 0 sits at column 152 and the second voyage's label starts
+/// at column 20; with one more voyage the row is still cut at the terminal's
+/// edge.
+#[test]
+fn a_wide_glyph_fills_two_columns_and_its_continuation_is_not_printed() {
+    use gear_board::EngineState;
+
+    let (mut store, now) = crate::golden_fixture::load();
+    let mut board = gear_board::build(
+        &mut store,
+        &gear_board::Options { project: Some("gear".into()), ..Default::default() },
+        now,
+    )
+    .unwrap();
+    board.engine = EngineState::Running;
+    let size = (160, 48);
+
+    let row = head_row(&board, size);
+    assert_eq!(column_of(&row, "14:32"), 152, "the clock's column: {row:?}");
+    assert_eq!(column_of(&row, "M4.2"), 20, "the second voyage's column: {row:?}");
+    assert!(terminal_columns(&row) <= 160, "the row fits the terminal: {row:?}");
+    assert!(row.contains(" M5 ⛵  "), "the first label keeps its spaces: {row:?}");
+
+    // One more voyage, newest first: the row is cut at the terminal's edge, it
+    // never grows past it.
+    let extra = {
+        let project = &mut board.projects[0];
+        let mut extra = project.voyage_list.last().cloned().expect("a voyage of the fixture");
+        extra.milestone = "M3".into();
+        project.voyage_list.push(extra.clone());
+        extra
+    };
+    assert_eq!(extra.milestone, "M3");
+    let row = head_row(&board, size);
+    assert!(row.contains(" M3 ⚓ "), "the fourth label is drawn: {row:?}");
+    assert!(
+        terminal_columns(&row) <= 160,
+        "the row is {} columns wide: {row:?}",
+        terminal_columns(&row)
+    );
+}
+
+/// T-353 (review F3): a write that lands on a wide glyph's continuation
+/// blanks the glyph, so the glyph is never half overwritten. Eight voyages on an
+/// 80-column terminal put the labels under the clock: the clock still starts at
+/// column `W - 8` and the row is still 80 cells wide.
+#[test]
+fn a_write_over_a_wide_glyph_blanks_it_and_keeps_the_clock_its_column() {
+    use gear_board::EngineState;
+
+    let (mut store, now) = crate::golden_fixture::load();
+    let mut board = gear_board::build(
+        &mut store,
+        &gear_board::Options { project: Some("gear".into()), ..Default::default() },
+        now,
+    )
+    .unwrap();
+    board.engine = EngineState::Running;
+    // Five more voyages, as the review reproduces it: their labels run into the
+    // clock's columns.
+    {
+        let project = &mut board.projects[0];
+        let last = project.voyage_list.last().cloned().expect("a voyage of the fixture");
+        for milestone in ["M3.9", "M3.8", "M3.7", "M3.6x", "M3.5"] {
+            let mut extra = last.clone();
+            extra.milestone = milestone.into();
+            project.voyage_list.push(extra);
+        }
+    }
+
+    let row = head_row(&board, (80, 48));
+    assert_eq!(column_of(&row, "14:32"), 72, "the clock's column (W - 8): {row:?}");
+    assert!(
+        terminal_columns(&row) <= 80,
+        "the row is {} columns wide: {row:?}",
+        terminal_columns(&row)
+    );
+    // The glyph the clock landed on is blanked, not half printed: no wide glyph
+    // sits in front of the clock's first digit.
+    let at = row.find("14:32").unwrap_or(0);
+    let before = &row[..at];
+    assert!(
+        !before.ends_with('⛵') && !before.ends_with('⚓'),
+        "no wide glyph in front of the clock: {row:?}"
+    );
 }
 
 /// One plane of golden files: `name.txt`, `name.col` or `name.rev`, split on
@@ -512,4 +650,114 @@ fn a_lane_colour_swap_keeps_the_case() {
     assert!(matches(&cell('U'), &cell('M'), swap), "a bold lane");
     assert!(!matches(&cell('U'), &cell('m'), swap), "a bold prototype letter needs the bold board letter");
     assert!(!matches(&cell('u'), &cell('M'), swap), "and a plain one the plain");
+}
+
+// ---------------------------------------------------------------------------
+// T-362: the Tasks view paints the prototype's git graph, from the row the
+// prototype's view starts on.
+// ---------------------------------------------------------------------------
+
+/// The board of the fixture, as `render` builds it.
+fn fixture_board() -> (Store, gear_board::Board) {
+    let (mut store, now) = crate::golden_fixture::load();
+    let mut board = gear_board::build(
+        &mut store,
+        &gear_board::Options { project: Some("gear".into()), ..Default::default() },
+        now,
+    )
+    .unwrap();
+    board.engine = gear_board::EngineState::Running;
+    (store, board)
+}
+
+/// The cell differences of `frame`'s rows `rows` between the prototype and the
+/// view `tab` painted on top of `top` (the row the prototype's view starts on).
+///
+/// The lane colour swap of the golden gate is allowed: the prototype colours a
+/// lane by its name, the board by its place.
+fn view_differences(tab: Tab, frame: Frame, top: usize, rows: Range) -> Vec<String> {
+    let (_, board) = fixture_board();
+    let mut canvas = gear_board::frame::Canvas::new(160, 48);
+    let screen =
+        gear_board::frame::Screen {
+            tab,
+            selected: 0,
+            detail: false,
+            opened: Vec::new(),
+            size: (160, 48),
+        };
+    let picks = gear_board::frame::view(&board, &screen, &mut canvas, top);
+    // The frame lights the selected row (README change 13).
+    if let Some(row) = picks.first() {
+        canvas.light_row(*row);
+    }
+    let (want, got) = (cells(&golden(frame)), cells(&gold::planes(&canvas)));
+    // The prototype's own data that no store can give (its merge clocks and
+    // T-267's stage) is skipped, as the golden gate skips it.
+    let data: Vec<Pending> = PENDING
+        .iter()
+        .copied()
+        .filter(|entry| entry.frame == frame && entry.by.starts_with("prototype data"))
+        .collect();
+    let mut problems = Vec::new();
+    for row in rows.0..=rows.1 {
+        for col in 0..want[row].len() {
+            if pending_at(&data, frame, row, col).0 {
+                continue;
+            }
+            let (want_cell, got_cell) = (want[row][col], got[row][col]);
+            if !matches(&want_cell, &got_cell, Some(('u', 'm'))) {
+                problems.push(format!(
+                    "row {row} col {col}: want {:?} {} {} got {:?} {} {}",
+                    want_cell.text,
+                    want_cell.colour,
+                    want_cell.reverse,
+                    got_cell.text,
+                    got_cell.colour,
+                    got_cell.reverse,
+                ));
+            }
+        }
+    }
+    problems
+}
+
+#[test]
+fn the_tasks_view_paints_the_prototype_rows() {
+    // The prototype's folded header ends on row 13 and its view starts on row
+    // 14; the open header ends on row 21 and its view on row 22 (its
+    // `TOP[0]`). The view is the same in both frames.
+    let folded = view_differences(Tab::Tasks, "tasks-folded", 14, (14, 44));
+    assert!(folded.is_empty(), "\n{}", folded.join("\n"));
+    let open = view_differences(Tab::Tasks, "tasks-open", 22, (22, 44));
+    assert!(open.is_empty(), "\n{}", open.join("\n"));
+}
+
+/// T-363: the Cost view paints the prototype's rows from the row the
+/// prototype's view starts on, so its columns and colours are held to the
+/// golden frames even while the board's own header is still four rows.
+#[test]
+fn the_cost_view_paints_the_prototype_rows() {
+    // The prototype's folded header ends on row 13 and its view starts on row
+    // 14; the open header ends on row 21 and its view on row 22 (its
+    // `TOP[0]`). The view is the same in both frames.
+    let folded = view_differences(Tab::Cost, "cost-folded", 14, (14, 44));
+    assert!(folded.is_empty(), "\n{}", folded.join("\n"));
+    let open = view_differences(Tab::Cost, "cost-open", 22, (22, 44));
+    assert!(open.is_empty(), "\n{}", open.join("\n"));
+}
+
+/// T-364: the Log view paints the prototype's rows from the row the prototype's
+/// view starts on, so its columns and colours are held to the golden frames
+/// even while the board's own header is still four rows.
+#[test]
+fn the_log_view_paints_the_prototype_rows() {
+    // The prototype's folded view starts on row 14 and its open view on row 22
+    // (its `TOP[0]`); row 13 is the header's own last row and row 47 the
+    // footer, so the view's rows are compared through row 46. The view is the
+    // same in both frames.
+    let folded = view_differences(Tab::Log, "log-folded", 14, (14, 46));
+    assert!(folded.is_empty(), "\n{}", folded.join("\n"));
+    let open = view_differences(Tab::Log, "log-open", 22, (22, 46));
+    assert!(open.is_empty(), "\n{}", open.join("\n"));
 }

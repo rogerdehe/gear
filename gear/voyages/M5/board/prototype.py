@@ -400,7 +400,9 @@ def view_graph(w, sel):
         if s_ is not None: events.append((s_, 0, t))
         if m_ is not None: events.append((m_, 1, t))
     events.sort(key=lambda e: (e[0], e[1]), reverse=True)
-    waiting = [t for t in T if t[0] not in WHEN and t[2] != "moved"]
+    # The last to run first, so the graph reads newest on top like git (the board draws them in reverse rank, T-361
+    # and T-362): the task at the head of the queue sits just above the running work.
+    waiting = [t for t in T if t[0] not in WHEN and t[2] != "moved"][::-1]
     open_ids = {t[0] for t in T if t[0] in WHEN and WHEN[t[0]][1] is None}
     live = set(open_ids)
     rows = []
