@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=658 -->
+<!-- gear-plan project=gear base=659 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -80,6 +80,7 @@ eta: 16h
 - station M-4936: keep course 468 min in, 78 done; forecast 1169 min; the eta waits for the user
 - 2026-10-29 08:30 scope: GEAR's own cost (user: "调度本身应该是一个比较低资源的东西"; another project measured its gear processes at about 143 % CPU on a loaded machine; here two boards took 12-15 % each and the engine 16 %): sampling shows them mostly waiting, the rest SQLite reads and re-parsing (the board rebuilds its whole model from the store every 2 s, with a Herdr call each time; statements are prepared anew each call); T-384 to T-386 cut it, and the target is written in their accepts. Also an eta written as prose made another project's board say its time is unknown and its eta stations never fire: T-387, which refuses such a plan (user: a wrong spec does not depart)
 
+- station M-4947: keep course 480 min (50 % of the 16 h eta), 80 done of 131; forecast 1179 min (19.7 h); the eta waits for the user
 # Queue
 
 ## T-381 [must] lane=hull milestone=M5 required
