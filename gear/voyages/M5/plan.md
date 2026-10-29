@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=812 -->
+<!-- gear-plan project=gear base=813 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -169,7 +169,7 @@ eta: 21h
 - 2026-10-29 08:57 scope: one lane order for every per-lane view: the board model orders its lanes by each lane's first task in plan order (the prototype's order); T-363 does it in lib.rs where the model is built (hull's question M-5935), so Now, Cost and the lane colours follow it, as Tasks already does
 - station M-5952: keep course 1288 min in, 150 done, 14 left; hull 130 min, mast 145 min, balanced; projected 1433 min; T-363 merging, T-351 next, mast reworks T-353 on top of the fixed t351
 - 2026-10-29 09:07 scope: a seat resumed a Codex conversation another pane still held, in both projects today (our review-11 at 05:15, the other's review-4 at 09:01, an orphan pane holding T-216's direction conversation): an error in normal use, so a new hull task (after T-364) makes session::choose start fresh when another live pane holds the session; the other captain was told how to unlock his seat (close the orphan pane, then R)
-- 2026-10-29 09:16 scope: release_idle_standby releases standby reviewers beyond the working lanes and ignores waiting reviews, so the other project ran one reviewer of four for hours with 22 hand-ins waiting: a new hull task, first in its queue after T-364, keeps every standby reviewer while a hand-in waits; the shared engine is rebuilt from dev when it merges
+- 2026-10-29 09:15 scope: release_idle_standby releases standby reviewers beyond the working lanes and ignores waiting reviews, so the other project ran one reviewer of four for hours with 22 hand-ins waiting: a new hull task, first in its queue after T-364, keeps every standby reviewer while a hand-in waits; the shared engine is rebuilt from dev when it merges
 - 2026-10-29 08:00 release: v0.5.1 (station S2) published: T-367's merge 6d8d3a0a merged into main as 0974d950, tagged v0.5.1, GitHub release from docs/releases/v0.5.1.md | why: done clause (5)
 
 
