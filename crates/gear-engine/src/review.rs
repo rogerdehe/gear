@@ -1802,6 +1802,7 @@ fn review_packet_for(
         &done,
         &bar,
         candidate,
+        &config.conventions.remote,
         &repo.integration,
         &review_branch(&config.conventions.review_branch, &config.project.id, &lane, task),
         &commit,
@@ -1979,6 +1980,7 @@ fn review_packet(
     done: &str,
     bar: &str,
     candidate: &str,
+    remote: &str,
     integration: &str,
     branch: &str,
     commit: &str,
@@ -1999,7 +2001,7 @@ fn review_packet(
          Done (the milestone's sentence): {done}\n\
          Bar (the quality this phase needs): {bar}\n\
          Candidate: {candidate}\n\
-         Diff to review: `git diff {integration}...{candidate}` (three dots: the change since the merge base)\n\
+         Diff to review: `git fetch {remote} && git diff {remote}/{integration}...{candidate}` (three dots: the change since the merge base)\n\
          Your worktree: branch `{branch}`, checked out at the candidate.\n\
          \n\
          Rules: `gear --skill review` — the mechanical acceptance you run yourself, \
@@ -4000,6 +4002,30 @@ review = [
         assert!(packet.contains("`T-1#2 review: {what}`"), "{packet}");
     }
 
+    /// T-380: the packet's diff is against the remote integration branch —
+    /// fetched first, so a stale local branch cannot widen the diff.
+    #[test]
+    fn the_review_packet_diffs_against_the_remote_integration_branch() {
+        // The default remote: `origin`.
+        let mut store = world(CONFIG);
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        assert!(
+            packet.contains("Diff to review: `git fetch origin && git diff origin/dev...abc1234`"),
+            "{packet}"
+        );
+
+        // A team whose remote is called `upstream` gets its own name.
+        let text = format!("{CONFIG}\n[conventions]\nremote = \"upstream\"\n");
+        let config = gear_app::config::parse(&text).unwrap();
+        let mut store = world(&text);
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        assert!(
+            packet.contains("Diff to review: `git fetch upstream && git diff upstream/dev...abc1234`"),
+            "{packet}"
+        );
+    }
+
     #[test]
     fn a_result_in_starts_one_reviewer() {
         let mut store = world(CONFIG);
@@ -4066,7 +4092,7 @@ review = [
         assert!(text.contains("the goal"), "{text}");
         assert!(text.contains("the accept criteria"), "{text}");
         assert!(text.contains("abc1234"), "{text}");
-        assert!(text.contains("git diff dev...abc1234"), "{text}");
+        assert!(text.contains("git fetch origin && git diff origin/dev...abc1234"), "{text}");
         // The rules come from the binary, not from a file of the gear repo
         // (T-30): the packet names `gear --skill review` and no `ops/` path.
         assert!(text.contains("gear --skill review"), "{text}");
@@ -5119,7 +5145,7 @@ review = [
         // The packet asks for the diff against that repo's integration branch.
         let packet = store.read(|tx| packet_text(tx, "p:review-1", "T-1", 1)).unwrap();
         assert!(
-            packet.contains("Diff to review: `git diff web-dev...abc1234` (three dots: the change since the merge base)"),
+            packet.contains("Diff to review: `git fetch origin && git diff origin/web-dev...abc1234` (three dots: the change since the merge base)"),
             "{packet}"
         );
     }
@@ -5143,7 +5169,7 @@ review = [
         let packet = store.read(|tx| packet_text(tx, "p:review-1", "T-1", 1)).unwrap();
         assert!(
             packet.contains(
-                "Diff to review: `git diff original-base...abc1234` (three dots: the change since the merge base)"
+                "Diff to review: `git fetch origin && git diff origin/original-base...abc1234` (three dots: the change since the merge base)"
             ),
             "{packet}"
         );
@@ -5187,7 +5213,7 @@ profile = "opencode"
             let packet = store.read(|tx| packet_text(tx, "p:review-1", &format!("T-{n}"), 1)).unwrap();
             assert!(
                 packet.contains(&format!(
-                    "Diff to review: `git diff {base}...abc1234` (three dots: the change since the merge base)"
+                    "Diff to review: `git fetch origin && git diff origin/{base}...abc1234` (three dots: the change since the merge base)"
                 )),
                 "{packet}"
             );
