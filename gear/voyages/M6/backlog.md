@@ -100,6 +100,7 @@
 
 ## Direction-check and review packets quote the goal, not the rework that replaced it
 - 2026-10-29 M5 (the other project: T-254's direction check M-3565 held the lane to the original goal's "all 3 clickable" while the applied rework narrowed it to two Settings cases and a prototype exemption; T-271 similar). A packet for a rework round should show the latest applied rework text first, marked as the instruction that governs where it differs from the goal, and the reviewer should judge against it. Also: T-270 was a second accepted review whose branch never reached the remote (see above).
+- 2026-10-29 (the other project, third case: T-293 attempt 2, direction check M-3872 on 27bcee99e quoted contract v1's goal against the captain's applied rework after issue #339; the lane stopped to ask, M-3875, and the captain corrected review-4, M-3877). Recurring in every rework round with a narrowed goal: the direction-check packet must carry the current attempt's rework text.
 
 ## A review job replaced mid-review learns it only at hand-in
 - 2026-10-29 M5 (the other project, T-283, M-3715): the engine rebound review-4 to a new job on the attempt's current candidate while the previous job was still reviewing an earlier commit; the old job finished, judged the stale commit, and its hand-in failed NO_TARGET ("review-4 not bound"). A replaced job should be told at once (stop, your binding moved), and a review packet should refuse a candidate that is not the attempt's current one.
