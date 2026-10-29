@@ -81,6 +81,8 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             merge_message: "merge({task}): {source}".into(),
             review_message: "review({task}): {what}".into(),
             plan_message: "{milestone}: {what}".into(),
+            // T-413: no scratch directory named; the seat's worktree holds it.
+            scratch_dir: None,
         }
     );
     assert_eq!(Conventions::default().gate, "", "the gate has no default");
@@ -191,6 +193,20 @@ fn whitespace_does_not_hide_overlaps_or_empty_values() {
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.conventions.staging = "  ".into();
     assert_eq!(validate(&cfg), vec![], "blank staging means no staging");
+}
+
+// ---- `[conventions].scratch_dir` (T-413): where a seat's temp files go.
+// Absent, the seat's own worktree holds them.
+
+#[test]
+fn scratch_dir_defaults_to_none_and_parses_a_path() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert_eq!(cfg.conventions.scratch_dir, None, "the default is none");
+    assert_eq!(validate(&cfg), vec![], "no scratch_dir is valid");
+
+    let cfg = parse(&MINIMAL.replace(GATE_LINE, "gate = \"make test\"\nscratch_dir = \"~/gear-scratch\"")).unwrap();
+    assert_eq!(cfg.conventions.scratch_dir.as_deref(), Some("~/gear-scratch"));
+    assert_eq!(validate(&cfg), vec![], "a scratch_dir is valid");
 }
 
 // ---- `[conventions].max_task_min` (T-279): no task is planned longer than
