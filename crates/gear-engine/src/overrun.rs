@@ -57,6 +57,9 @@ fn item(tx: &Tx<'_>, round: &RoundRow, body: &str, urgent: bool, now: Ts) -> Gea
 }
 
 fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool> {
+    // How many rounds a tick looked at (T-406's tests).
+    #[cfg(test)]
+    PROCESSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let Some(attempt) = tx.get_attempt(&round.project, &round.task, round.attempt)? else { return Ok(false) };
     let Some(task) = tx.get_task(&round.project, &round.task)? else { return Ok(false) };
     let times = tx.attempt_times(&round.project, &round.task, round.attempt)?;
@@ -175,13 +178,19 @@ fn reconcile_quota_pauses(tx: &Tx<'_>, project: &str) -> GearResult<()> {
     Ok(())
 }
 
+/// The rounds a tick looked at: the counter behind T-406's tests.
+#[cfg(test)]
+static PROCESSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, _cfg: &EngineCfg, now: Ts) -> GearResult<()> {
     let projects = store.read(|tx| tx.project_ids())?;
     for project in projects {
         store.write(|tx| {
             reconcile_quota_pauses(tx, &project)?;
             let mut changed = false;
-            for round in tx.rounds_of_project(&project)? { changed |= process(tx, &round, now)?; }
+            // Only the rounds that can still change (T-406): the open ones and
+            // the ended ones whose overrun item is still owed an answer.
+            for round in tx.rounds_to_process(&project)? { changed |= process(tx, &round, now)?; }
             Ok(changed)
         })?;
         let _ = herdr;
@@ -220,6 +229,8 @@ mod tests {
         s
     }
     fn messages(s:&mut Store, thread:&str) -> Vec<gear_store::MessageRow> { s.read(|tx| tx.thread_messages("p",thread)).unwrap() }
+    fn processed() -> usize { PROCESSED.load(std::sync::atomic::Ordering::Relaxed) }
+
     fn answer(s:&mut Store, at:i64, left:i64, blocker:&str) {
         s.write(|tx| tx.insert_message(&NewMessage { project:"p".into(), thread:"T-1:1".into(), task:Some("T-1".into()), attempt:Some(1), sender:"p:heat".into(), sender_gen:1, recipient:"p:captain".into(), kind:MsgKind::Progress, urgent:false, body:"work update".into(), reply_to:None, needs_ack:false, state:MsgState::Info, created:T+at, meta:Some(json!({"left":left,"blocker":blocker}).to_string()) }).map(|_| ())).unwrap();
     }
@@ -393,4 +404,70 @@ mod tests {
         assert_eq!(questions[0].state,MsgState::Resolved);
     }
 
+    #[test]
+    fn a_tick_looks_only_at_the_rounds_that_can_still_change() {
+        let mut s = world();
+        s.write(|tx| {
+            // 300 rounds that ended long ago are never looked at again.
+            for n in 0..300 {
+                let key = RoundKey { project:"p".into(), task:format!("T-old-{n}"), attempt:1, role:"dev".into() };
+                tx.insert_round(&NewRound { key:key.clone(), seat:"p:heat".into(), generation:1, cli:"codex".into(), model:None, start_at:T-9000 })?;
+                tx.close_round(&key, T-8000)?;
+            }
+            // A second open round beside the dev round the world starts with.
+            tx.insert_round(&NewRound { key:RoundKey { project:"p".into(), task:"T-1".into(), attempt:2, role:"dev".into() }, seat:"p:heat".into(), generation:1, cli:"codex".into(), model:None, start_at:T })?;
+            Ok(())
+        }).unwrap();
+        PROCESSED.store(0, std::sync::atomic::Ordering::Relaxed);
+        tick_at(&mut s, 600);
+        assert_eq!(processed(), 2, "only the two open rounds");
+    }
+
+    #[test]
+    fn an_ended_round_is_looked_at_while_its_overrun_item_is_open() {
+        let mut s = world();
+        let ended = RoundKey { project:"p".into(), task:"T-1".into(), attempt:1, role:"review".into() };
+        s.write(|tx| {
+            tx.insert_round(&NewRound { key:ended.clone(), seat:"p:heat".into(), generation:1, cli:"codex".into(), model:None, start_at:T-900 })?;
+            tx.close_round(&ended, T-800)?;
+            tx.insert_message(&NewMessage { project:"p".into(), thread:"overrun:T-1:review".into(), task:Some("T-1".into()), attempt:Some(1), sender:"p:heat".into(), sender_gen:1, recipient:"p:captain".into(), kind:MsgKind::System, urgent:true, body:"T-1: budget 10 min; active 10 min; no answer".into(), reply_to:None, needs_ack:false, state:MsgState::Open, created:T-700, meta:None }).map(|_| ())
+        }).unwrap();
+        PROCESSED.store(0, std::sync::atomic::Ordering::Relaxed);
+        tick_at(&mut s, 600);
+        assert_eq!(processed(), 2, "the dev round and the ended review round that still owes an answer");
+        // Its item is answered by that look (T-381): once resolved, the ended
+        // round is no longer looked at.
+        let items = messages(&mut s, "overrun:T-1:review");
+        assert_eq!(items.len(), 1); assert_eq!(items[0].state, MsgState::Resolved);
+        PROCESSED.store(0, std::sync::atomic::Ordering::Relaxed);
+        tick_at(&mut s, 700);
+        assert_eq!(processed(), 1, "only the dev round is left");
+    }
+
+    /// F1 of the T-406 review: the selection must read the project's messages
+    /// once, not once per ended round. Thousands of messages and hundreds of
+    /// ended rounds are a normal project's history; the selection still has to
+    /// be cheap enough for the tick's write.
+    #[test]
+    fn a_long_history_does_not_cost_the_rounds_query() {
+        let mut s = world();
+        s.write(|tx| {
+            for n in 0..300 {
+                let key = RoundKey { project:"p".into(), task:format!("T-old-{n}"), attempt:1, role:"dev".into() };
+                tx.insert_round(&NewRound { key:key.clone(), seat:"p:heat".into(), generation:1, cli:"codex".into(), model:None, start_at:T-9000 })?;
+                tx.close_round(&key, T-8000)?;
+            }
+            for n in 0..10_000 {
+                let task = format!("T-old-{}", n % 300);
+                tx.insert_message(&NewMessage { project:"p".into(), thread:format!("{task}:1"), task:Some(task), attempt:Some(1), sender:"p:heat".into(), sender_gen:1, recipient:"p:captain".into(), kind:MsgKind::Progress, urgent:false, body:"work update".into(), reply_to:None, needs_ack:false, state:MsgState::Info, created:T-9000+n, meta:None })?;
+            }
+            Ok(())
+        }).unwrap();
+        let started = std::time::Instant::now();
+        let rounds = s.read(|tx| tx.rounds_to_process("p")).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(rounds.len(), 1, "only the open round is selected");
+        assert!(elapsed < std::time::Duration::from_millis(500),
+            "the rounds query took {elapsed:?} on 10 000 messages and 300 ended rounds");
+    }
 }
