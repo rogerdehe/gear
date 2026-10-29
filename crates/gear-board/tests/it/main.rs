@@ -27,6 +27,7 @@ pub fn screen(
         tab,
         selected,
         detail: false,
+        opened: Vec::new(),
         size,
     }
 }

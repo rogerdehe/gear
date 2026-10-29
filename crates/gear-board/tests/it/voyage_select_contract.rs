@@ -2,7 +2,7 @@
 //! that voyage only. A landed voyage keeps its data: its lanes read "retired
 //! at the landing", and its end is the last merge of its tasks.
 
-use gear_board::{frame::token_tasks, Options, ProjectBoard};
+use gear_board::{Options, ProjectBoard};
 use gear_model::{AttemptState, SeatRole, SeatState, TaskState};
 use gear_store::{
     testing, AttemptRow, AttemptStep, NewDecision, Store, TaskRow, VoyageRow,
@@ -173,7 +173,13 @@ fn the_board_built_without_a_milestone_shows_the_sailing_voyage_only() {
 
     // The two M2 tasks: no task of the landed M1, and not the one it cut.
     assert_eq!(plan.totals.tasks, 2, "the tasks of M2: {:?}", plan.totals);
-    let listed: Vec<&str> = token_tasks(&plan).iter().map(|(_, task)| task.id.as_str()).collect();
+    let listed: Vec<&str> = plan
+        .lanes
+        .iter()
+        .flat_map(|lane| lane.tasks.iter())
+        .filter(|task| task.actual_min.unwrap_or(0) > 0)
+        .map(|task| task.id.as_str())
+        .collect();
     assert!(!listed.contains(&"T-1"), "no task of the landed voyage: {listed:?}");
     let graphed: Vec<&str> = plan.graph.iter().map(|task| task.id.as_str()).collect();
     assert!(!graphed.contains(&"T-1"), "no task of the landed voyage: {graphed:?}");

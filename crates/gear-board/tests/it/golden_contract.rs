@@ -162,8 +162,11 @@ const PENDING: &[Pending] = &[
 
     Pending { frame: "tasks-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-362" },
     Pending { frame: "tasks-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-362" },
-    Pending { frame: "cost-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-363" },
-    Pending { frame: "cost-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-363" },
+    // The Cost view draws the prototype's rows once the header chain is in
+    // (T-353 to T-356): until then it sits at the rows the old header leaves
+    // it, and its rows stay skipped.
+    Pending { frame: "cost-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-363 (after T-353 to T-356)" },
+    Pending { frame: "cost-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-363 (after T-353 to T-356)" },
     Pending { frame: "log-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-364" },
     Pending { frame: "log-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-364" },
 
@@ -239,7 +242,7 @@ fn render(tab: Tab, detail: bool) -> Planes {
     )
     .unwrap();
     board.engine = EngineState::Running;
-    let screen = Screen { tab, selected: 0, detail, size: (160, 48) };
+    let screen = Screen { tab, selected: 0, detail, opened: Vec::new(), size: (160, 48) };
     gold::planes(&canvas(&board, &screen, None))
 }
 
@@ -513,3 +516,4 @@ fn a_lane_colour_swap_keeps_the_case() {
     assert!(!matches(&cell('U'), &cell('m'), swap), "a bold prototype letter needs the bold board letter");
     assert!(!matches(&cell('u'), &cell('M'), swap), "and a plain one the plain");
 }
+

@@ -20,7 +20,7 @@ pub enum Tab {
     Now,
     /// The work as a graph.
     Tasks,
-    /// The time and the tokens, per task.
+    /// The time and the tokens, per lane.
     Cost,
     /// The decisions of the captain.
     Log,
@@ -92,12 +92,13 @@ impl Tab {
 /// What the board shows: the view, the selected row, the folded header and
 /// the size of the terminal.
 ///
-/// `detail` is carried for the unfolded header (the `d` key); it is not read
-/// yet.
+/// `detail` is carried for the unfolded header (the `d` key); `opened` holds
+/// the lanes the Cost view shows the tasks of (T-363).
 pub struct Screen {
     pub tab: Tab,
     pub selected: usize,
     pub detail: bool,
+    pub opened: Vec<String>,
     pub size: (usize, usize),
 }
 
@@ -533,7 +534,7 @@ pub fn view(board: &Board, screen: &Screen, canvas: &mut Canvas, top: usize) -> 
     match screen.tab {
         Tab::Now => view_now(project, board.now, screen, canvas, top),
         Tab::Tasks => view_tasks(project, screen, canvas, top),
-        Tab::Cost => view_tokens(project, screen, canvas, top),
+        Tab::Cost => view_cost(project, screen, canvas, top),
         Tab::Log => view_decisions(project, screen, canvas, top),
     }
 }
@@ -672,133 +673,161 @@ fn ratio_color(ratio: f64) -> Color {
     }
 }
 
-/// The third view: the time and the tokens of every task that ran (the
-/// prototype).
-fn view_tokens(
+/// The third view: one row per lane, its time and its tokens with the
+/// development and the review apart, and the tasks of an opened lane under it
+/// (T-363; the prototype's `view_cost`).
+fn view_cost(
     project: &ProjectBoard,
     screen: &Screen,
     canvas: &mut Canvas,
     top: usize,
 ) -> Vec<usize> {
     let mut picks = Vec::new();
-    let mut row = top + 1;
-    let mut tokens_total = 0;
-    let mut cache_total = 0;
-    let mut cost_total = 0.0;
-    let mut unknown = 0;
-    let tasks = token_tasks(project);
-    // A project without `[prices]` priced none of its rounds: the cost column
-    // then says nothing at all, and the total names the missing prices once,
-    // instead of a `?` in every cell and a dollar sum that does not exist
-    // (the user, 2026-10-28).
-    let priced = tasks.iter().any(|(_, task)| task.cost_usd.is_some());
-    let width = lane_width(tasks.iter().map(|(lane, _)| *lane), 6, 1);
     canvas.put_line(
-        0,
+        3,
         top,
         &Line::styled(
             format!(
-                "  {:<7}{:<width$}{:>5}{:>6}{:>8}{:>8}{:>9}{:>9}{:>9}",
-                "task", "lane", "est", "act", "ratio", "rounds", "tokens", "cache", "cost"
+                "{:<22}{:>6}{:>7}{:>7}{:>8}{:>12}{:>8}{:>15}{:>10}{:>9}",
+                "lane / task",
+                "est",
+                "act",
+                "ratio",
+                "rounds",
+                "dev tokens",
+                "dev $",
+                "review tokens",
+                "review $",
+                "total $"
             ),
             Style::fg(Color::Dim),
         ),
     );
-    for (index, (lane, task)) in tasks.into_iter().enumerate() {
+    let mut row = top + 1;
+    let mut dev_k_total = 0;
+    let mut rev_k_total = 0;
+    let mut cost_total = 0.0;
+    // A project without `[prices]` priced none of its rounds: the total then
+    // names the missing prices once, instead of a dollar sum that does not
+    // exist (the user, 2026-10-28).
+    let priced = project
+        .lanes
+        .iter()
+        .flat_map(|lane| lane.tasks.iter())
+        .filter(|task| task.actual_min.unwrap_or(0) > 0)
+        .any(|task| task.dev_cost.is_some() || task.review_cost.is_some());
+    let mut unknown = 0;
+    for (index, lane) in project.lanes.iter().enumerate() {
         let picked = index == screen.selected;
-        let estimate = task.est_min.unwrap_or(0);
-        let actual = task.actual_min.unwrap_or(0);
-        let ratio = if estimate > 0 {
-            actual as f64 / estimate as f64
-        } else {
-            0.0
-        };
-        // The tokens and the cost are unknown when no round counted them
-        // (F5): they are not a measured zero.
-        let tokens = task.tokens;
-        let cache_read = task.cache_read;
-        let cost = task.cost_usd;
-        if tokens.is_none() {
-            unknown += 1;
-        } else {
-            tokens_total += tokens.unwrap_or(0);
-        }
-        if let Some(cache_read) = cache_read {
-            cache_total += cache_read;
-        }
-        // Without prices there is no cost to be unknown: the count of the
-        // unknown parts then counts the tokens only.
-        if priced {
-            if cost.is_none() {
+        // The lane's shown tasks that ran, in plan order.
+        let mine: Vec<&TaskBoard> = lane
+            .tasks
+            .iter()
+            .filter(|task| task.actual_min.unwrap_or(0) > 0)
+            .collect();
+        let mut est = 0;
+        let mut act = 0;
+        let mut rounds = 0;
+        let mut dev_k = 0;
+        let mut rev_k = 0;
+        let mut dev_c = 0.0;
+        let mut rev_c = 0.0;
+        for task in &mine {
+            est += task.est_min.unwrap_or(0);
+            act += task.actual_min.unwrap_or(0);
+            rounds += task.rounds;
+            // A part the rounds never counted is unknown, not a measured zero
+            // (F5): it counts as zero here and is named in the voyage's line.
+            dev_k += task.dev_tokens.unwrap_or(0) / 1000;
+            rev_k += task.review_tokens.unwrap_or(0) / 1000;
+            if let Some(cost) = task.dev_cost {
+                dev_c += cost;
+            }
+            if let Some(cost) = task.review_cost {
+                rev_c += cost;
+            }
+            // Without prices there is no cost to be unknown: the count then
+            // counts the tokens only (the user, 2026-10-28).
+            if task.dev_tokens.is_none()
+                || task.review_tokens.is_none()
+                || (priced && (task.dev_cost.is_none() || task.review_cost.is_none()))
+            {
                 unknown += 1;
-            } else {
-                cost_total += cost.unwrap_or(0.0);
             }
         }
-        let tokens_text = match tokens {
-            Some(tokens) => format!("{}k", tokens / 1000),
-            None => "?".to_string(),
-        };
-        let cache_text = match cache_read {
-            Some(cache_read) => format!("{}k", cache_read / 1000),
-            None => "?".to_string(),
-        };
-        let cost_text = match cost {
-            Some(cost) => format!("${cost:>6.2}"),
-            None if priced => "      ?".to_string(),
-            None => String::new(),
-        };
-        let row_style = Style::PLAIN;
+        dev_k_total += dev_k;
+        rev_k_total += rev_k;
+        cost_total += dev_c + rev_c;
+        let ratio = if est > 0 { act as f64 / est as f64 } else { 0.0 };
+        let expanded = screen.opened.iter().any(|open| *open == lane.lane);
         canvas.put_line(
             0,
             row,
-            &mark(picked)
+            &Line::plain(" ")
+                .push(if picked { "›" } else { " " }, Style::fg(Color::Acc))
                 .push(" ", Style::PLAIN)
-                .push(format!("{:<7}", task.id), row_style)
-                .push(format!("{lane:<width$}"), lane_style(project, lane))
-                .push(format!("{estimate:>4}m{actual:>5}m"), row_style)
-                .push(format!("{ratio:>7.1}x"), Style::fg(ratio_color(ratio)))
+                .push(
+                    format!("{}{:<19}", if expanded { "▾ " } else { "▸ " }, lane.lane),
+                    lane_style(project, &lane.lane).and_bold(),
+                )
+                .push(" ", Style::PLAIN)
+                .push(format!("{est:>5}m{act:>6}m"), Style::PLAIN)
+                .push(format!("{ratio:>6.1}x"), Style::fg(ratio_color(ratio)))
                 .push(
                     format!(
-                        "{:>8}{tokens_text:>9}{cache_text:>9}  {cost_text}",
-                        task.stored_rounds
+                        "{rounds:>8}{dev_k:>11}k{dev_c:>8.2}{rev_k:>14}k{rev_c:>10.2}{:>9.2}",
+                        dev_c + rev_c
                     ),
-                    row_style,
+                    Style::bold(),
                 ),
         );
         picks.push(row);
         row += 1;
-    }
-    let mut total = format!(
-        "so far: {:.1}M tokens, {:.1}M cache reads, {}",
-        tokens_total as f64 / 1_000_000.0,
-        cache_total as f64 / 1_000_000.0,
-        if priced { format!("${cost_total:.2}") } else { "no prices set".to_string() }
-    );
-    if unknown > 0 {
-        // The total is what is known: the unknown parts are named (F5).
-        total.push_str(&format!(" (known so far; {unknown} unknown)"));
-    }
-    let rest = vec![Line::styled(total, Style::bold())];
-    for line in &rest {
-        canvas.put_line(0, row, line);
-        row += 1;
-    }
-    picks
-}
-
-/// The tasks of the Time & tokens view, in the order of its rows: the tasks
-/// that ran, lane by lane.
-pub fn token_tasks(project: &ProjectBoard) -> Vec<(&str, &TaskBoard)> {
-    let mut tasks = Vec::new();
-    for lane in &project.lanes {
-        for task in &lane.tasks {
-            if task.actual_min.is_some() {
-                tasks.push((lane.lane.as_str(), task));
+        // An opened lane shows its tasks, one row each, in the same columns.
+        if expanded {
+            for task in &mine {
+                let est = task.est_min.unwrap_or(0);
+                let act = task.actual_min.unwrap_or(0);
+                let ratio = if est > 0 { act as f64 / est as f64 } else { 0.0 };
+                let dev_k = task.dev_tokens.unwrap_or(0) / 1000;
+                let rev_k = task.review_tokens.unwrap_or(0) / 1000;
+                let dev_c = task.dev_cost.unwrap_or(0.0);
+                let rev_c = task.review_cost.unwrap_or(0.0);
+                canvas.put_line(
+                    0,
+                    row,
+                    &Line::plain("     ")
+                        .push(format!("{:<20}", task.id), Style::fg(Color::Dim))
+                        .push(format!("{est:>5}m{act:>6}m"), Style::fg(Color::Dim))
+                        .push(format!("{ratio:>6.1}x"), Style::fg(ratio_color(ratio)))
+                        .push(
+                            format!(
+                                "{:>8}{dev_k:>11}k{dev_c:>8.2}{rev_k:>14}k{rev_c:>10.2}{:>9.2}",
+                                task.rounds,
+                                dev_c + rev_c
+                            ),
+                            Style::fg(Color::Dim),
+                        ),
+                );
+                row += 1;
             }
         }
     }
-    tasks
+    // One blank row, then the voyage's own sum.
+    row += 1;
+    let mut total = format!(
+        "this voyage: {:.1}M tokens (development {:.1}M, review {:.1}M), {}",
+        (dev_k_total + rev_k_total) as f64 / 1000.0,
+        dev_k_total as f64 / 1000.0,
+        rev_k_total as f64 / 1000.0,
+        if priced { format!("${cost_total:.2}") } else { "no prices set".to_string() }
+    );
+    if unknown > 0 {
+        // The sum is what is known: the unknown parts are named.
+        total.push_str(&format!(" (known so far; {unknown} unknown)"));
+    }
+    canvas.put_line(3, row, &Line::styled(total, Style::bold()));
+    picks
 }
 
 /// The clock of a decision: the time of its line (`2026-10-27 10:05` →
