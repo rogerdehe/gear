@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=710 -->
+<!-- gear-plan project=gear base=711 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -112,7 +112,7 @@ accept: ops.rs tests: an idle lane whose tail shows an empty input and whose del
 estimate: 20
 
 ## T-408 [now] lane=hull milestone=M5 required
-goal: [v0.5.0 S1] The lost-merge check (T-397) looks only at tasks of voyages that are still open, and never at a candidate the repository does not hold (2026-10-29: right after T-397 went live it opened 34 merge-lost items for tasks of finished voyages such as M1's T-13, whose candidate 6e555b1 is no longer an object in the repository). Change crates/gear-engine/src/merge.rs (the T-397 scan) only, no other design: a task is considered only when its milestone's voyage still has a task that is not terminal; and a candidate that `git cat-file -e <sha>^{commit}` does not find in the task's repository is skipped. The code change is in crates/gear-engine/src/merge.rs only; tests go where the crate keeps them.
+goal: [v0.5.0 S1] The lost-merge check (T-397) looks only at tasks of voyages that are still open, and never at a candidate the repository does not hold (2026-10-29: right after T-397 went live it opened 34 merge-lost items for tasks of finished voyages such as M1's T-13, whose candidate 6e555b1 is no longer an object in the repository). Change crates/gear-engine/src/merge.rs (the T-397 scan) only, no other design: a task is considered only when its milestone's voyage still has a task that is not terminal; and a candidate that `git cat-file -e <sha>^{commit}` does not find in the task's repository is skipped. An Open merge-lost item whose task the new rule skips is resolved by the scan with "no longer checked: its voyage is finished or its candidate is gone". The code change is in crates/gear-engine/src/merge.rs only; tests go where the crate keeps them.
 accept: merge.rs tests: an accepted, unmerged task of a voyage whose tasks are all terminal gets no item; one whose candidate is not in the repository gets none; T-397's own tests pass. Run only `make check CRATE=gear-engine`; the merge gate runs `make gate`.
 estimate: 15
 
