@@ -29,6 +29,10 @@ and 1 when under 15 %. CPU contention only slows every run (and the low
 priority keeps the machine usable); memory is what can take a machine down,
 so the memory readings are the hard limits.
 
+`BUILD_SLOT_MIN` (default 1) is a floor on N before the memory clamps, for
+the one run everybody waits on, such as a merge gate that merges one task at a
+time.
+
 ## What the command gets
 
 | variable | value | read by |
@@ -36,7 +40,7 @@ so the memory readings are the hard limits.
 | `BUILD_JOBS` | N | your Makefile: map it to your own knob (`go test -p`, `--maxWorkers`, …) |
 | `CARGO_BUILD_JOBS` | N | cargo |
 | `NEXTEST_TEST_THREADS` | N | cargo-nextest |
-| `GOMAXPROCS` | max(1, cores / N) | Go: `-p` packages times `-parallel` cases (which follows GOMAXPROCS) stays at the core count |
+| `GOMAXPROCS` | max(1, cores / N) alone, at most 2 while other runs are alive | Go: `-p` packages times `-parallel` cases (which follows GOMAXPROCS); a lone run stays at the core count, a crowded machine keeps a little case parallelism without each run taking the whole machine |
 | `BUILD_SLOT` | 1 | `build-slot.sh` itself: a run started under it runs its command at once and changes nothing, so the outermost run owns the slot |
 
 It prints one line to stderr:

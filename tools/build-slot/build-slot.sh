@@ -25,8 +25,12 @@
 #
 # Exported to the command:
 #   BUILD_JOBS, CARGO_BUILD_JOBS, NEXTEST_TEST_THREADS = N
-#   GOMAXPROCS = max(1, cores / N): Go runs -p packages times -parallel cases,
-#   and -parallel follows GOMAXPROCS, so the product stays at the core count.
+#   GOMAXPROCS = max(1, cores / N) for a run alone, at most 2 while other runs
+#   are alive: Go runs -p packages times -parallel cases, and -parallel
+#   follows GOMAXPROCS, so a lone run's product stays at the core count, and on
+#   a crowded machine each run keeps a little case parallelism (much Go test
+#   time waits on a database, not on a core) without R runs each taking the
+#   whole machine.
 #   BUILD_SLOT = 1: a build-slot.sh started under it runs its command at once,
 #   without counting itself or changing these, so the outermost run owns the
 #   slot.
@@ -37,6 +41,9 @@
 #
 # One line goes to stderr:
 #   build-slot: N (cores C, load L, running R, free memory M %)
+# BUILD_SLOT_MIN (default 1) is a floor on N before the memory clamps, for the
+# one run everybody waits on (a merge gate that merges one task at a time):
+# it takes at least that share, and the memory clamps still win.
 # BUILD_SLOT_CORES, BUILD_SLOT_LOAD, BUILD_SLOT_RUNNING and BUILD_SLOT_FREE
 # replace the readings (for tests).
 
@@ -90,8 +97,9 @@ else
     [ "$first" -gt "$running" ] && running=$first
 fi
 
-jobs=$(awk -v c="$cores" -v l="${load:-0}" -v r="$running" -v f="${free:-100}" 'BEGIN {
+jobs=$(awk -v c="$cores" -v l="${load:-0}" -v r="$running" -v f="${free:-100}" -v m="${BUILD_SLOT_MIN:-1}" 'BEGIN {
     n = int(c / r)
+    if (n < m) n = m
     if (f < 25 && n > 2) n = 2
     if (f < 15) n = 1
     if (n < 1) n = 1
@@ -99,6 +107,7 @@ jobs=$(awk -v c="$cores" -v l="${load:-0}" -v r="$running" -v f="${free:-100}" '
     print n
 }')
 gomax=$((cores / jobs)); [ "$gomax" -ge 1 ] || gomax=1
+[ "$running" -gt 1 ] && [ "$gomax" -gt 2 ] && gomax=2
 
 echo "build-slot: $jobs (cores $cores, load $load, running $running, free memory $free %)" >&2
 
