@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=793 -->
+<!-- gear-plan project=gear base=794 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -163,9 +163,6 @@ eta: 21h
 - station M-5752: keep course 1140 min in, 139 done, 25 left; hull 224 min and mast 226 min, balanced; the merge queue (six ahead, 10-15 min a gate on a load of 22) is the wait: the gate's floor runs from the engine's environment now and T-422 adds normal priority
 - station M-5781: keep course 1161 min in, 141 done, 23 left; hull 224 min, mast 208 min; eight merges queued on a saturated machine (load about 22, the other project's database runs): T-422 (gate floor 4, normal priority) is in the queue
 
-
-# Verdicts
-- T-331 attempt=1 contract=2 candidate=dba30907 fail estimate=10 rework="The review passed; the merge conflicts with T-336 (merged) in crates/gear-app/tests/it/voyage_contract.rs. Merge origin/dev into your branch, keep both sides' tests (T-336's home-page and station tests and yours), run make check CRATE=gear-app TESTS='binary_id(gear-app::it) & test(/voyage/)', push and hand in."
 
 # Queue
 
