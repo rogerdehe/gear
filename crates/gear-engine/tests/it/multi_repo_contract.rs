@@ -288,7 +288,7 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
         &Env { ctx: None, pane_id: None, admin: true },
         &world.config(&gate),
         Some(crate::skill_home()),
-        None,
+        false,
         T0,
     )
     .unwrap();

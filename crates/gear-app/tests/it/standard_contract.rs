@@ -52,7 +52,7 @@ fn world() -> (tempfile::TempDir, Store) {
         &Env { ctx: None, pane_id: None, admin: true },
         &TEMPLATE.replace("{root}", &root.path().display().to_string()),
         Some(crate::skill_home()),
-        None,
+        false,
         T0,
     )
     .unwrap();

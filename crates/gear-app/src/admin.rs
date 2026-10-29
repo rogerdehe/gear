@@ -63,10 +63,10 @@ pub fn init(
     store: &mut Store,
     env: &Env,
     config_text: &str,
-    user: Option<&str>,
+    confirmed: bool,
     now: Ts,
 ) -> GearResult<InitResult> {
-    init_with_home(store, env, config_text, None, user, now)
+    init_with_home(store, env, config_text, None, confirmed, now)
 }
 
 /// `gear admin init` with an explicit home for the skill check (T-83): the CLI
@@ -77,7 +77,7 @@ pub fn init_with_home(
     env: &Env,
     config_text: &str,
     home: Option<&std::path::Path>,
-    user: Option<&str>,
+    confirmed: bool,
     now: Ts,
 ) -> GearResult<InitResult> {
     // 1. `GEAR_ADMIN=1` is the user's consent, and only the user's own shell
@@ -131,7 +131,7 @@ pub fn init_with_home(
     store.write(|tx| {
         match tx.get_project(&project_id)? {
             // The project is registered: the config changes.
-            Some(project) => re_register(tx, &project, &config, config_text, user, now),
+            Some(project) => re_register(tx, &project, &config, config_text, confirmed, now),
             // The project is new: it is registered.
             None => register(tx, &config, config_text, now),
         }
@@ -282,7 +282,7 @@ pub fn init_checked(
     herdr: Option<&mut dyn gear_herdr::HerdrRead>,
     ancestors: &[u32],
     home: Option<&std::path::Path>,
-    user: Option<&str>,
+    confirmed: bool,
     now: Ts,
 ) -> GearResult<InitResult> {
     if let Some(ctx) = env.ctx.clone() {
@@ -300,7 +300,7 @@ pub fn init_checked(
             prove_captain(store, env, herdr, ancestors, &ctx.project, now)?;
         }
     }
-    init_with_home(store, env, config_text, home, user, now)
+    init_with_home(store, env, config_text, home, confirmed, now)
 }
 
 /// Prove that the caller is the captain of `project` in its own bound pane
@@ -641,8 +641,8 @@ fn register(
 /// - a **departed voyage's staffing** (T-392): while the voyage is under way
 ///   (a voyage with a departure and a task that is not terminal), a change to
 ///   `quota`, `lanes`, `temps` or `models` is refused with `StaffLocked` and
-///   the changed fields when the caller gives no `user` words, and nothing is
-///   written; with the user's words the change applies as today and the
+///   the changed fields unless the caller passes `--confirmed` (T-401), and
+///   nothing is written; confirmed, the change applies as today and the
 ///   voyage gets one starred `staff` decision.
 ///
 /// The plan, the tasks and the attempts are untouched: a config change is not
@@ -697,7 +697,7 @@ fn re_register(
     project: &ProjectRow,
     config: &config::ProjectConfig,
     config_text: &str,
-    user: Option<&str>,
+    confirmed: bool,
     now: Ts,
 ) -> GearResult<InitResult> {
     let project_id = project.id.clone();
@@ -762,10 +762,9 @@ fn re_register(
     }
 
     // T-392: the staffing of a departed voyage is agreed at its kickoff, like
-    // the goal (T-331). A change to it needs the user's own words, and the
-    // refusal writes nothing. Words that are blank once trimmed are no words
-    // (rework F1): `--user ""` never stands for an agreement.
-    let user = user.map(str::trim).filter(|words| !words.is_empty());
+    // the goal (T-331). A change to it needs the user's confirmation
+    // (`--confirmed`, T-401) — GEAR stores no words of theirs — and the
+    // refusal writes nothing.
     let (staff_changes, staff_changed) = match config::parse(&project.config_toml) {
         Ok(stored) => (
             staffing_changes(&stored, config),
@@ -778,11 +777,13 @@ fn re_register(
     } else {
         staffing_voyage(tx, &project_id)?
     };
-    if let (Some(voyage), None) = (&locked_voyage, user) {
-        return Err(GearError::new(
-            ErrorCode::StaffLocked,
-            staffing_refusal(voyage, &staff_changes),
-        ));
+    if let Some(voyage) = &locked_voyage {
+        if !confirmed {
+            return Err(GearError::new(
+                ErrorCode::StaffLocked,
+                staffing_refusal(voyage, &staff_changes),
+            ));
+        }
     }
 
     // The new config is the next config version.
@@ -823,27 +824,29 @@ fn re_register(
         })?;
     }
 
-    // The user's own words for a staffing change of a departed voyage are a
-    // starred decision (T-392): the voyage's goal is locked the same way.
-    if let (Some(voyage), Some(words)) = (&locked_voyage, user) {
-        let what = staff_changes.join("; ");
-        let why = format!("user: «{words}»");
-        let text = format!("staff|{what}|{what}|{why}");
-        tx.insert_decision_if_new(&gear_store::NewDecision {
-            project: project_id.to_string(),
-            key: crate::decision::key_of(&text),
-            voyage: voyage.clone(),
-            at: crate::decision::apply_time(now),
-            kind: "staff".to_string(),
-            what,
-            why: Some(why),
-            alt: None,
-            changes: None,
-            star: true,
-            source: "gear".to_string(),
-            line: None,
-            plan_version: None,
-        })?;
+    // A confirmed staffing change of a departed voyage is a starred decision
+    // (T-392, T-401): the voyage's goal is locked the same way.
+    if confirmed {
+        if let Some(voyage) = &locked_voyage {
+            let what = staff_changes.join("; ");
+            let why = "confirmed by the user".to_string();
+            let text = format!("staff|{what}|{what}|{why}");
+            tx.insert_decision_if_new(&gear_store::NewDecision {
+                project: project_id.to_string(),
+                key: crate::decision::key_of(&text),
+                voyage: voyage.clone(),
+                at: crate::decision::apply_time(now),
+                kind: "staff".to_string(),
+                what,
+                why: Some(why),
+                alt: None,
+                changes: None,
+                star: true,
+                source: "gear".to_string(),
+                line: None,
+                plan_version: None,
+            })?;
+        }
     }
 
     // The roster: the captain first, then the lanes in config order.
@@ -1109,10 +1112,11 @@ pub fn staffing_changes(old: &config::ProjectConfig, new: &config::ProjectConfig
 }
 
 /// The refusal a staffing change of a departed voyage gets without the user's
-/// own words (T-392): the voyage, every changed field, and how to apply it.
+/// confirmation (T-392, T-401): the voyage, every changed field, and how to
+/// apply it.
 pub fn staffing_refusal(voyage: &str, changes: &[String]) -> String {
     format!(
-        "the staffing of voyage {voyage} was agreed at its kickoff: {} — ask the user first, then run init again with --user \"<the user's words>\"",
+        "the staffing of voyage {voyage} was agreed at its kickoff: {} — change staffing only when the user asks; confirm it with them, then run init again with --confirmed",
         changes.join("; ")
     )
 }
