@@ -279,6 +279,95 @@ fn the_folded_header_gives_the_check_the_milestone_the_time_and_the_tasks() {
     assert!(rows[head.tab_row].contains("1 Now"), "the tab row follows the rows");
 }
 
+/// T-358: a confirmed goal change (T-410's record, C6) is a red line under
+/// the goal box with when, before and after, and every row below moves down
+/// one.
+#[test]
+fn a_goal_change_puts_a_red_line_under_the_box_and_moves_the_rows_down() {
+    // Without a goal change the box's bottom is five rows above the tabs.
+    let mut plain = world();
+    let (board, screen, _, rows) = drawn(&mut plain);
+    let head = frame::layout(&board, &screen);
+    assert_eq!(board.projects[0].goal_changed, None);
+    assert!(
+        !rows.iter().any(|row| row.contains("Goal changed")),
+        "no goal change, no red line"
+    );
+    assert!(
+        rows[head.tab_row - 5].contains("╚"),
+        "the box's bottom: {:?}",
+        rows[head.tab_row - 5]
+    );
+
+    // The user agreed to two changes of the voyage's goal: the latest one is
+    // the line, with its own words.
+    let mut store = world();
+    store
+        .write(|tx| {
+            for (key, at, what) in [
+                (
+                    "g1",
+                    "2026-10-27 12:30",
+                    "done of M5 changed from \"the first goal\" to \"the middle goal\"",
+                ),
+                (
+                    "g2",
+                    "2026-10-27 12:40",
+                    "done of M5 changed from \"the middle goal\" to \"the new goal\"",
+                ),
+            ] {
+                tx.insert_decision_if_new(&NewDecision {
+                    project: "p".into(),
+                    key: key.into(),
+                    voyage: "M5".into(),
+                    at: at.into(),
+                    kind: "user".into(),
+                    what: what.into(),
+                    why: Some("confirmed by the user".into()),
+                    alt: None,
+                    changes: None,
+                    star: true,
+                    source: "gear".into(),
+                    line: None,
+                    plan_version: None,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let (board, screen, canvas, rows) = drawn(&mut store);
+    assert_eq!(
+        board.projects[0].goal_changed,
+        Some((
+            "2026-10-27 12:40".to_string(),
+            "the middle goal".to_string(),
+            "the new goal".to_string()
+        )),
+        "the latest confirmed change, with its time and its two texts"
+    );
+
+    // The line sits on the row after the box, the label padded to 14, and
+    // every row below it moves down one.
+    let changed = frame::layout(&board, &screen);
+    assert_eq!(
+        changed.tab_row,
+        head.tab_row + 1,
+        "the tab row is one row lower than without the line"
+    );
+    let line = changed.tab_row - 5;
+    assert_eq!(at(&rows[line], 1, 14), "Goal changed  ");
+    assert_eq!(
+        at(&rows[line], 15, 80),
+        "12:40: the middle goal → the new goal (the user agreed; Decisions shows both)"
+    );
+    assert_eq!(canvas.style_at(1, line), Style::fg(Color::Bad).and_bold());
+    assert_eq!(canvas.style_at(15, line), Style::fg(Color::Bad).and_bold());
+    // The folded header follows the line: the goal check is one row lower than
+    // in the plain board.
+    assert_eq!(at(&rows[line + 1], 1, 10), "Goal check");
+    assert_eq!(changed.tab_row - 4, line + 1);
+}
+
 #[test]
 fn the_time_of_a_landed_voyage_is_how_long_it_took() {
     // Both tasks merged: the voyage landed 75 minutes after departure, against
