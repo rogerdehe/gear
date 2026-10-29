@@ -661,11 +661,23 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         if let Err(e) = store.write(|tx| {
             let missing = missing_seats.contains(&seat);
             tx.set_meta(&format!("stall-missing:{seat}"), if missing { "1" } else { "" })?;
+            let row = tx.get_seat(&seat)?;
+            // T-324: a lane helping on an unanswered captain instruction is
+            // busy on purpose. While its agent is present no stall item is
+            // written; a missing agent ("its agent is gone from its pane") is
+            // still told.
+            if !missing {
+                if let Some(row) = row.as_ref() {
+                    if gear_board::idle::helping(tx, &row.project, row, now)?.is_some() {
+                        return Ok(false);
+                    }
+                }
+            }
             // T-287: a seat the engine already restarted once on this config
             // that is missing again ends the same way (M4.2 #17). Its item says
             // so, and names the pane and the config as the place to look, so
             // the captain does not spend a second restart on it.
-            let again = match (missing, tx.get_seat(&seat)?) {
+            let again = match (missing, row) {
                 (true, Some(row)) => restart_spent(tx, &row)?,
                 _ => false,
             };
@@ -1060,6 +1072,10 @@ fn doorbell_inputs(
     Ok(inputs)
 }
 
+/// Scratch directories of the unit tests, removed when the test is done (T-412).
+#[cfg(test)]
+pub(crate) mod testtmp;
+
 #[cfg(test)]
 mod t209_tick_tests {
     use super::*;
@@ -1121,7 +1137,7 @@ review=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high
         }).unwrap();
         let _=seat;
         let mut herdr=FakeHerdr::new(); herdr.add_shell(pane); herdr.add_shell("w1:p9");
-        let mut cfg=EngineCfg::default(); cfg.db_path="/tmp/t209.db".into();
+        let mut cfg=EngineCfg::default(); cfg.db_path=crate::testtmp::temp("t209").join("t209.db").to_string_lossy().into_owned();
         for kind in ["codex","claude"] { cfg.profiles.insert(kind.into(),gear_herdr::builtin(kind).unwrap()); }
         (store,herdr,cfg,pane.into())
     }
@@ -1268,7 +1284,7 @@ review=[{{model="{review_model}",cli="codex",args=["-c","model_reasoning_effort=
         let mut herdr = FakeHerdr::new();
         herdr.add_shell(pane);
         herdr.add_shell("w1:p9");
-        let mut cfg = EngineCfg { db_path: "/tmp/t226.db".into(), ..EngineCfg::default() };
+        let mut cfg = EngineCfg { db_path: crate::testtmp::temp("t226").join("t226.db").to_string_lossy().into_owned(), ..EngineCfg::default() };
         for kind in ["codex", "claude", "opencode", "pi"] {
             cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
         }

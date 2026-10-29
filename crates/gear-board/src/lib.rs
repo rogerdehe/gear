@@ -14,6 +14,7 @@
 //! on a terminal; `gear-cli` calls it from the `gear board` subcommand.
 
 mod deps;
+pub mod forecast;
 pub mod frame;
 pub mod golden;
 pub mod graph;
@@ -50,6 +51,9 @@ pub const REBUILD_AFTER: Duration = Duration::from_secs(60);
 /// kept between asks: a board that waited on it every refresh paid a Herdr
 /// call every two seconds for a list that rarely moves.
 pub const AGENTS_EVERY: Duration = Duration::from_secs(10);
+
+/// The picks one notch of the mouse wheel moves the selection (T-411).
+pub const WHEEL_PICKS: usize = 3;
 
 /// The knobs the tests of T-384 turn: the board builds nothing while nothing
 /// changes, and a test proves it by counting the builds and shortening the two
@@ -225,6 +229,10 @@ pub struct ProjectBoard {
     /// The stations of the measured voyage, in plan order, with their
     /// progress (T-334); empty without a measured voyage.
     pub stations: Vec<stations::StationProgress>,
+    /// Each lane's queue played forward (T-349), in the order of `lanes`: when
+    /// the lane ends and how long it sits idle. Empty when no measured voyage
+    /// has open work.
+    pub forecast: Vec<forecast::LaneEnd>,
 }
 
 /// One delivery the engine has not confirmed yet (T-271).
@@ -406,6 +414,9 @@ pub struct TaskBoard {
     pub cache_read: Option<i64>,
     /// The cost of the task's rounds, when it is known (§4.4).
     pub cost_usd: Option<f64>,
+    /// The tasks it depends on (T-349): the board's forecast waits for them to
+    /// merge before the task can start.
+    pub deps: Vec<String>,
 }
 
 /// The captain's inbox: how many items wait, and how long the oldest has.
@@ -583,6 +594,7 @@ pub fn project_with_agents(
             tokens: tokens_of(tx, project, &task.id)?,
             cache_read: cache_read_of(tx, project, &task.id)?,
             cost_usd: cost_of(tx, project, &task.id)?,
+            deps: task.deps.clone(),
         };
         match lanes.iter_mut().find(|lane| lane.lane == name) {
             Some(lane) => lane.tasks.push(line),
@@ -796,6 +808,34 @@ pub fn project_with_agents(
         Some(voyage) => stations::progress(tx, project, &voyage.milestone)?,
         None => Vec::new(),
     };
+    // Each lane's queue played forward (T-349): the measured voyage's forecast,
+    // while it has open work. The jobs come from the lanes, which are in plan
+    // order; the graph's order is for drawing and is not the queue's.
+    let forecast = match &workload {
+        Some(voyage)
+            if lanes
+                .iter()
+                .any(|lane| lane.tasks.iter().any(|task| !task.state.is_terminal())) =>
+        {
+            let jobs: Vec<forecast::Job> = lanes
+                .iter()
+                .flat_map(|lane| {
+                    lane.tasks.iter().map(|task| forecast::Job {
+                        id: task.id.clone(),
+                        lane: lane.lane.clone(),
+                        stage: task.stage,
+                        est_min: task.est_min.unwrap_or(0),
+                        actual_min: task.actual_min.unwrap_or(0),
+                        deps: task.deps.clone(),
+                    })
+                })
+                .collect();
+            let names: Vec<String> = lanes.iter().map(|lane| lane.lane.clone()).collect();
+            let review_merge = forecast::review_merge_min(tx, project, &voyage.milestone)?;
+            forecast::forecast(&jobs, &names, review_merge)
+        }
+        _ => Vec::new(),
+    };
     Ok(ProjectBoard {
         voyages,
         workload,
@@ -809,7 +849,7 @@ pub fn project_with_agents(
         deps,
         graph,
         graph_lanes,
-        quota: quota_readings(tx)?,
+        quota: quota_readings(tx, project)?,
         decisions,
         frictions,
         // The overlaps with the integration branch (T-188): information
@@ -820,6 +860,7 @@ pub fn project_with_agents(
         unconfirmed_deliveries,
         unconfirmed,
         stations,
+        forecast,
     })
 }
 
@@ -1194,8 +1235,6 @@ fn actual_min_of(
     })
 }
 
-/// The quota readings of the providers (§9.1): the meta keys
-/// `quota.reading.<provider>`.
 /// The voyage the Workload view measures: the active one, else the latest
 /// departed voyage that is finished (F5).
 ///
@@ -1337,11 +1376,28 @@ fn workload_voyage(
         .min_by_key(|report| report.elapsed_min.unwrap_or(i64::MAX)))
 }
 
-fn quota_readings(tx: &Tx<'_>) -> GearResult<Vec<QuotaReading>> {
+/// The quota readings of the providers (§9.1): the meta keys
+/// `quota.reading.<provider>`.
+///
+/// Only the providers the project reads now are shown (T-383): a reading left
+/// in the meta by an earlier config is not one of them. A config that does
+/// not parse does not filter: the readings are shown rather than hidden.
+fn quota_readings(tx: &Tx<'_>, project: &str) -> GearResult<Vec<QuotaReading>> {
+    let wanted = quota_providers(tx, project)?;
     let mut readings = Vec::new();
     for key in tx.meta_keys_with_prefix("quota.reading.")? {
         let Some(raw) = tx.get_meta(&key)? else { continue };
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+        let provider = value
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| key.trim_start_matches("quota.reading."))
+            .to_string();
+        if let Some(wanted) = &wanted {
+            if !wanted.contains(&provider) {
+                continue;
+            }
+        }
         let mut windows = Vec::new();
         for window in value
             .get("windows")
@@ -1362,11 +1418,7 @@ fn quota_readings(tx: &Tx<'_>) -> GearResult<Vec<QuotaReading>> {
             continue;
         }
         readings.push(QuotaReading {
-            provider: value
-                .get("provider")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_else(|| key.trim_start_matches("quota.reading."))
-                .to_string(),
+            provider,
             windows,
             read_at: value
                 .get("read_at")
@@ -1375,6 +1427,28 @@ fn quota_readings(tx: &Tx<'_>) -> GearResult<Vec<QuotaReading>> {
         });
     }
     Ok(readings)
+}
+
+/// The providers the project's stored config reads (§9.1): the `provider` of
+/// every `[[quota.sources]]`.
+///
+/// None when the config does not parse or the project is not there: the
+/// filter is skipped then, and every reading stays.
+fn quota_providers(tx: &Tx<'_>, project: &str) -> GearResult<Option<Vec<String>>> {
+    let Some(row) = tx.get_project(project)? else { return Ok(None) };
+    let Ok(config) = row.config_toml.parse::<toml::Value>() else { return Ok(None) };
+    let mut providers = Vec::new();
+    for source in config
+        .get("quota")
+        .and_then(|quota| quota.get("sources"))
+        .and_then(toml::Value::as_array)
+        .unwrap_or(&Vec::new())
+    {
+        if let Some(provider) = source.get("provider").and_then(toml::Value::as_str) {
+            providers.push(provider.to_string());
+        }
+    }
+    Ok(Some(providers))
 }
 
 /// The line about the captain's inbox.
@@ -1541,13 +1615,16 @@ pub fn run(store: &mut Store, opts: &Options, out: &mut dyn Write, mut herdr: Op
 /// The frames over injected keys: the board is redrawn every
 /// [`Options::refresh`], `q` leaves it, the arrows and the tab key change the
 /// view, the numbers pick a view, the up and down keys move the selection and
-/// `Enter` opens the panel of the selected row.
+/// `Enter` opens the panel of the selected row. The mouse wheel moves the
+/// selection three picks a notch and the page keys a screenful (T-411); the
+/// viewport follows the selection in each case.
 ///
 /// A frame is built only when something it shows can have changed (T-384): the
 /// store's `data_version` moved, Herdr's agent list moved, or the kept board's
 /// clock got old ([`REBUILD_AFTER`]). Every other frame redraws the board that
 /// was built last, and Herdr is asked for its agents at most every
-/// [`AGENTS_EVERY`].
+/// [`AGENTS_EVERY`]. A frame that reads like the last one written is not
+/// written at all (T-403): the screen keeps it.
 pub fn run_with(
     store: &mut Store,
     opts: &Options,
@@ -1581,6 +1658,10 @@ pub fn run_with(
     // between.
     let mut agents: Option<Vec<AgentInfo>> = None;
     let mut agents_at: Option<std::time::Instant> = None;
+    // The frame that was written last (T-403). A frame that says what that one
+    // said is not written at all: the board redraws in place, and rewriting
+    // the same text only makes the page blink.
+    let mut written: Option<String> = None;
     loop {
         let at = std::time::Instant::now();
         let mut agents_changed = false;
@@ -1632,16 +1713,22 @@ pub fn run_with(
                         e.code, e.detail
                     );
                     screen::draw(out, &text).map_err(write_error)?;
+                    written = Some(text);
                     let deadline = std::time::Instant::now() + opts.refresh;
                     let _ = keys.next_event(deadline.saturating_duration_since(std::time::Instant::now()));
                     continue;
                 }
             }
         }
+        // A resize has thrown away what the screen showed (T-403): the frame
+        // is drawn once, over a full clear, even when it says what the last
+        // one said. Nothing else clears the screen.
+        let size = keys.size();
+        let resized = size != screen.size;
+        screen.size = size;
         // The selection moves over the rows the view paints as picks, and
         // never leaves them (F4): a view that shrank, or a key pressed at its
         // end, does not lose the selection.
-        screen.size = keys.size();
         let mut tall = frame::Canvas::new(screen.size.0, 1000);
         let picks = {
             let board = kept.as_ref().expect("the board was just built or kept");
@@ -1653,8 +1740,19 @@ pub fn run_with(
             frame::canvas(board, &screen, panel.as_deref()).ansi(opts.color)
         };
         first = false;
-        screen::draw(out, &text).map_err(write_error)?;
+        if resized {
+            out.write_all(b"\x1b[2J").map_err(write_error)?;
+            written = None;
+        }
+        if written.as_deref() != Some(text.as_str()) {
+            screen::draw(out, &text).map_err(write_error)?;
+            written = Some(text);
+        }
         let deadline = std::time::Instant::now() + opts.refresh;
+        // The picks one page holds (T-411): the rows of the view the screen
+        // shows, the header and the footer's rows taken out, and never less
+        // than one.
+        let page = screen.size.1.saturating_sub(frame::VIEW_ROW + 2).max(1);
         loop {
             let now = std::time::Instant::now();
             if now >= deadline {
@@ -1731,6 +1829,32 @@ pub fn run_with(
                 }
                 Event::Down | Event::Key('j') => {
                     screen.selected = (screen.selected + 1).min(picks.len().saturating_sub(1));
+                    panel = None;
+                    break;
+                }
+                // The mouse wheel (T-411): three picks a notch, and never a
+                // click. It closes the panel as an arrow does.
+                Event::Mouse { button: 64, .. } => {
+                    screen.selected = screen.selected.saturating_sub(WHEEL_PICKS);
+                    panel = None;
+                    break;
+                }
+                Event::Mouse { button: 65, .. } => {
+                    screen.selected = (screen.selected + WHEEL_PICKS)
+                        .min(picks.len().saturating_sub(1));
+                    panel = None;
+                    break;
+                }
+                // The page keys move the selection by a screenful (T-411).
+                // The viewport follows it as it follows an arrow's.
+                Event::PageUp => {
+                    screen.selected = screen.selected.saturating_sub(page);
+                    panel = None;
+                    break;
+                }
+                Event::PageDown => {
+                    screen.selected =
+                        (screen.selected + page).min(picks.len().saturating_sub(1));
                     panel = None;
                     break;
                 }

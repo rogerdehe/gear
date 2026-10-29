@@ -121,10 +121,7 @@ fn stdout(o: &Output) -> String {
 }
 
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("gear-issues-{}-{tag}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).expect("a scratch directory");
-    dir
+    crate::scratch::temp(&format!("gear-issues-{tag}"))
 }
 
 /// The JSON `gh issue list --json …` answers: #12 is in the plan, #13 and #14

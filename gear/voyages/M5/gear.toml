@@ -64,3 +64,6 @@ quota_reset_h = 5
 integration = "dev"
 release = "main"
 gate = "make gate"   # T-238 (M4.2): 4 build jobs and 4 test threads on the shared machine
+
+[timing]
+handin_base_window_min = 120   # M5: tasks run past 30 min, so every hand-in re-merged dev and re-ran its suite (friction F-141, F-144, F-153, F-164); the merge gate runs the full suite on the real tip

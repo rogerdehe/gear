@@ -1,7 +1,8 @@
 //! The terminal the board draws on: ANSI, raw mode, one key at a time.
 //!
-//! The board owns the screen while it is open: it clears it, redraws the
-//! frame and gives the terminal back when the user quits.
+//! The board owns the screen while it is open: it takes it over, overwrites
+//! the frame in place (T-403: nothing is cleared whole, so the page does not
+//! blink) and gives the terminal back when the user quits.
 
 use std::io::Write;
 use std::os::fd::{AsRawFd, RawFd};
@@ -20,6 +21,10 @@ pub enum Event {
     Left,
     /// The arrow right.
     Right,
+    /// The page up (T-411): the selection moves up a screenful.
+    PageUp,
+    /// The page down (T-411): the selection moves down a screenful.
+    PageDown,
     /// The shift-tab (the tab before).
     BackTab,
     /// A click (the SGR mouse): the button (0 = the left one) and the
@@ -91,14 +96,21 @@ impl Keys for Terminal {
         // An escape: the arrows, the shift-tab and the mouse.
         let rest = self.read_sequence()?;
         match rest.as_bytes().first() {
-            Some(b'[') => match rest.as_bytes().get(1) {
-                Some(b'A') => Some(Event::Up),
-                Some(b'B') => Some(Event::Down),
-                Some(b'C') => Some(Event::Right),
-                Some(b'D') => Some(Event::Left),
-                Some(b'Z') => Some(Event::BackTab),
-                Some(b'<') => mouse_event(&rest),
-                _ => Some(Event::Key('\u{1b}')),
+            // The page keys end with `~` (T-411): `[5~` is the page up and
+            // `[6~` the page down. The mouse keeps its own sequence: the wheel
+            // arrives as the SGR buttons 64 and 65.
+            Some(b'[') => match rest.as_str() {
+                "[5~" => Some(Event::PageUp),
+                "[6~" => Some(Event::PageDown),
+                _ => match rest.as_bytes().get(1) {
+                    Some(b'A') => Some(Event::Up),
+                    Some(b'B') => Some(Event::Down),
+                    Some(b'C') => Some(Event::Right),
+                    Some(b'D') => Some(Event::Left),
+                    Some(b'Z') => Some(Event::BackTab),
+                    Some(b'<') => mouse_event(&rest),
+                    _ => Some(Event::Key('\u{1b}')),
+                },
             },
             _ => Some(Event::Key('\u{1b}')),
         }
@@ -142,8 +154,8 @@ impl Terminal {
                 break;
             }
             out.push(byte[0] as char);
-            // The mouse sequence ends with M or m.
-            if byte[0] == b'M' || byte[0] == b'm' {
+            // The mouse sequence ends with M or m, the page keys with `~`.
+            if byte[0] == b'M' || byte[0] == b'm' || byte[0] == b'~' {
                 break;
             }
             // The arrows and the shift-tab end after their last letter.
@@ -192,14 +204,32 @@ pub fn leave(out: &mut dyn Write) -> std::io::Result<()> {
     out.flush()
 }
 
-/// Clear the screen and draw `text` at the top.
+/// Draw `text` over the last frame, in place (T-403).
+///
+/// The frame is written inside a synchronized update (`\x1b[?2026h` ...
+/// `\x1b[?2026l`), so the terminal shows all of it or none of it, and every
+/// line erases its rest with `\x1b[K` before the newline: a line that got
+/// shorter leaves nothing of the old one behind. `\x1b[J` erases below the
+/// last line. The screen is never cleared whole (`\x1b[2J`): that clear is
+/// what made the page blink. (`[2026` is ignored by a terminal that does not
+/// know it: the frame is still a full overwrite from the home position.)
 ///
 /// The canvas is written **without** a trailing newline (F2): a newline after
 /// the footer's row scrolls the screen by one line, so the title leaves the
 /// top and every visible row sits one line above where the hit testing
 /// expects it.
 pub fn draw(out: &mut dyn Write, text: &str) -> std::io::Result<()> {
-    write!(out, "\x1b[H\x1b[2J{text}")?;
+    write!(out, "\x1b[?2026h\x1b[H")?;
+    let mut lines = text.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        // Every line erases its rest. The lines are kept apart by the newline
+        // the board has always written; the last line's one is dropped (F2).
+        write!(out, "{line}\x1b[K")?;
+        if lines.peek().is_some() {
+            write!(out, "\n")?;
+        }
+    }
+    write!(out, "\x1b[J\x1b[?2026l")?;
     out.flush()
 }
 
@@ -228,4 +258,47 @@ fn raw_mode(fd: RawFd) -> Option<libc::termios> {
         return None;
     }
     Some(saved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T-403: a frame is written over the last one, in place, and the screen
+    /// is never cleared whole — that clear is what made the page blink.
+    #[test]
+    fn draw_overwrites_the_screen_in_place() {
+        let mut out: Vec<u8> = Vec::new();
+        draw(&mut out, "GEAR · p\nLANES\n  T-1 done").unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("\x1b[?2026h\x1b[H"), "{text:?}");
+        assert!(!text.contains("\x1b[2J"), "the whole screen is never cleared: {text:?}");
+        assert!(
+            text.ends_with("\x1b[J\x1b[?2026l"),
+            "the erase below and the end of the synchronized update close the frame: {text:?}"
+        );
+        // Every line erases its rest, the last one included; only the lines
+        // between newlines take a newline (F2: the frame has no trailing one).
+        let body = text
+            .strip_prefix("\x1b[?2026h\x1b[H")
+            .and_then(|rest| rest.strip_suffix("\x1b[J\x1b[?2026l"))
+            .expect("the frame between the update's two ends");
+        let lines: Vec<&str> = body.split('\n').collect();
+        assert_eq!(lines.len(), 3, "{body:?}");
+        for line in &lines {
+            assert!(line.ends_with("\x1b[K"), "every line erases its rest: {line:?}");
+        }
+        assert_eq!(lines[2], "  T-1 done\x1b[K", "{body:?}");
+    }
+
+    /// An empty frame is an update of its own: `\x1b[J` erases what is left.
+    #[test]
+    fn an_empty_frame_is_a_whole_update() {
+        let mut out: Vec<u8> = Vec::new();
+        draw(&mut out, "").unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[?2026h\x1b[H\x1b[K\x1b[J\x1b[?2026l"
+        );
+    }
 }

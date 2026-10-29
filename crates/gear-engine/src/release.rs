@@ -22,6 +22,60 @@ use gear_store::{BindingStatus, SeatRow, Store};
 /// its agent may not be reported by Herdr yet.
 const START_GRACE_S: i64 = 60;
 
+/// The reason a release this module itself decided records: such a seat logs
+/// its release where it is decided, not again when the sweep frees it (T-398).
+const REVIEW_DONE: &str = "review done";
+const IDLE_REVIEWER_RELEASED: &str = "idle reviewer released";
+
+std::thread_local! {
+    /// The release lines this thread has not handed to the engine log yet
+    /// (T-398): the engine (gear-cli) writes them into `engine.log`, a test
+    /// reads them. Thread-local, so tests running side by side never share
+    /// a buffer.
+    static RELEASE_LOG: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// The release lines written since the last call, oldest first: the engine
+/// writes them into `engine.log` (T-398).
+pub fn take_release_log() -> Vec<String> {
+    RELEASE_LOG.with(|lines| std::mem::take(&mut *lines.borrow_mut()))
+}
+
+/// One release in the engine log (T-398): which seat, its generation, the
+/// state it leaves, why it goes, and which step of the tick asked for it.
+fn release_line(seat: &SeatRow, from: SeatState, reason: &str, caller: &str) -> String {
+    format!(
+        "release {} gen={} from={} reason={} caller={}",
+        seat.id,
+        seat.generation,
+        from.as_str(),
+        reason,
+        caller
+    )
+}
+
+fn log_release(line: String) {
+    RELEASE_LOG.with(|lines| {
+        let mut lines = lines.borrow_mut();
+        // A caller that never drains (a library test) does not grow for ever.
+        if lines.len() >= 256 {
+            lines.remove(0);
+        }
+        lines.push(line);
+    });
+}
+
+/// The step that put a `Releasing` seat on its way out, as the reason the seat
+/// records says (T-398): the engine's own agent-gone sweep, or a step that
+/// released it from outside this module — the captain, a lowered quota — which
+/// the log names `captain`.
+fn releasing_step(seat: &SeatRow) -> &'static str {
+    match seat.state_reason.as_deref() {
+        Some("its agent is gone mid-review") => "agent-gone",
+        _ => "captain",
+    }
+}
+
 /// After this many "agent gone" releases of the same task and attempt the
 /// seat is parked and the captain told, instead of starting it again.
 const AGENT_GONE_LIMIT: u32 = 3;
@@ -30,6 +84,12 @@ const AGENT_GONE_LIMIT: u32 = 3;
 /// before it is released: a review can be handed over to it on any tick, and
 /// Herdr may report its agent a moment late (as `START_GRACE_S` above).
 const STANDBY_AGENT_GONE_S: i64 = 60;
+
+/// How long a `Starting` reviewer whose pane holds no agent keeps its temp
+/// slot before its failed start is released (T-418): a start that takes longer
+/// than this — an agent that is up but not yet reported, a clone, a build —
+/// still gets its chance, and no review waits longer for a slot than it must.
+const START_FAILED_S: i64 = 180;
 
 /// What the release step did in one tick.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -202,7 +262,10 @@ pub fn release_finished_reviews(
             // the rule of §3.6 did): the pane goes, the binding ends, the
             // seat is free — with a job or without one.
             SeatState::Releasing => {
-                match release_one(store, herdr, project, &seat, seat.task_id.as_deref(), now) {
+                // T-398: the step that put this seat on its way out, as the
+                // seat's own reason records it.
+                let caller = releasing_step(&seat);
+                match release_one(store, herdr, project, &seat, seat.task_id.as_deref(), now, caller) {
                     Ok(true) => report.released.push(seat.id.clone()),
                     Ok(false) => {}
                     // One failing reviewer does not stop the others.
@@ -218,7 +281,7 @@ pub fn release_finished_reviews(
                 if under_review(store, project, &seat, &task)? {
                     continue;
                 }
-                match release_one(store, herdr, project, &seat, Some(&task), now) {
+                match release_one(store, herdr, project, &seat, Some(&task), now, "job-gone") {
                     Ok(true) => report.released.push(seat.id.clone()),
                     Ok(false) => {}
                     Err(_) => report.failed.push(seat.id.clone()),
@@ -258,7 +321,7 @@ pub fn release_finished_reviews(
                 }
                 // `release_one_ending_its_review` clears the reservation the
                 // seat leaves behind, in the same write as its transition.
-                match release_one_ending_its_review(store, herdr, project, &seat, now) {
+                match release_one_ending_its_review(store, herdr, project, &seat, now, "agent-gone") {
                     Ok(true) => report.released.push(seat.id.clone()),
                     Ok(false) => {}
                     Err(_) => report.failed.push(seat.id.clone()),
@@ -269,6 +332,36 @@ pub fn release_finished_reviews(
             // waits for a slot and a seat a human has to look at is left
             // alone.
             SeatState::Starting => {
+                // T-418: a reviewer whose start failed. Its pane holds no
+                // agent — the CLI died at its start ("No saved session
+                // found") — so no review will ever come from it, while the
+                // seat keeps its temp slot and other reviews wait for one
+                // (2026-10-29: review-11 sat Starting 30 min, two reviews
+                // waited for a slot). It leaves as a cancelled start does
+                // (`release_one`, caller `start-failed`): its review goes back
+                // to `start_reviews`, which starts it again on a free seat.
+                //
+                // A pane that cannot be read is an observation failure, not
+                // an absence (design/08, T-264): such a seat keeps its slot.
+                if let Some((pane, last_line)) = failed_start(store, herdr, &seat, now)? {
+                    match release_one(
+                        store,
+                        herdr,
+                        project,
+                        &seat,
+                        seat.task_id.as_deref(),
+                        now,
+                        "start-failed",
+                    ) {
+                        Ok(true) => {
+                            report.released.push(seat.id.clone());
+                            tell_start_failed(store, project, &seat, &pane, &last_line, now)?;
+                        }
+                        Ok(false) => {}
+                        Err(_) => report.failed.push(seat.id.clone()),
+                    }
+                    continue;
+                }
                 let Some(task) = pending.or_else(|| seat.task_id.clone()) else {
                     continue;
                 };
@@ -350,7 +443,7 @@ pub fn release_idle_standby(
     for seat in waiting.into_iter().take(excess) {
         // A standby reviewer without a pending review has no job: it is idle,
         // its agent alive.
-        match release_one(store, herdr, project, &seat, None, now) {
+        match release_one(store, herdr, project, &seat, None, now, "idle-standby") {
             Ok(true) => report.released.push(seat.id.clone()),
             Ok(false) => {}
             Err(_) => report.failed.push(seat.id.clone()),
@@ -512,10 +605,98 @@ fn under_review(
     })
 }
 
+/// Whether a `Starting` reviewer's start has failed (T-418): its binding is
+/// still `Pending` and older than [`START_FAILED_S`], and its pane holds no
+/// agent — the start never took. `Some((pane, last line))` = it has, and the
+/// release names the pane and its last line to the captain.
+///
+/// A pane that cannot be read is an observation failure, not an absence
+/// (design/08, T-264): `Err` keeps the seat, and so does an agent that is
+/// there (the start is slow, not failed).
+fn failed_start(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &SeatRow,
+    now: Ts,
+) -> GearResult<Option<(String, String)>> {
+    let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
+    let Some(binding) = binding.filter(|binding| binding.status == BindingStatus::Pending) else {
+        return Ok(None);
+    };
+    if now - binding.created <= START_FAILED_S {
+        return Ok(None);
+    }
+    match herdr.agent_get(&binding.pane_id) {
+        Ok(None) => {}
+        Ok(Some(_)) | Err(_) => return Ok(None),
+    }
+    // The pane is read before it is closed: the captain is told what its CLI
+    // said. A tail that cannot be read names nothing rather than keeping the
+    // seat.
+    let tail = herdr.read_tail(&binding.pane_id, 16).unwrap_or_default();
+    let last_line = tail
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    Ok(Some((binding.pane_id, last_line)))
+}
+
+/// Tell the captain that a reviewer was released because its start failed
+/// (T-418): the seat and the last line of its pane say what to look at. One
+/// message per release — the seat is `Released`, so the rule cannot fire again
+/// for it.
+fn tell_start_failed(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    pane: &str,
+    last_line: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let Some(captain) = store.read(|tx| tx.captain_of(project))? else {
+        return Ok(());
+    };
+    let line = if last_line.is_empty() {
+        "(nothing on its screen)"
+    } else {
+        last_line
+    };
+    let task = seat.task_id.clone();
+    store.write(|tx| {
+        tx.insert_message(&gear_store::NewMessage {
+            meta: None,
+            project: project.to_string(),
+            thread: format!("review:start-failed:{}", seat.id),
+            task,
+            attempt: None,
+            sender: "engine".to_string(),
+            sender_gen: 0,
+            recipient: captain.id.clone(),
+            kind: gear_model::MsgKind::System,
+            urgent: false,
+            body: format!(
+                "reviewer {} ({}) was released: its start failed. The last line of its pane {pane}: {line}",
+                seat.name, seat.id
+            ),
+            reply_to: None,
+            needs_ack: false,
+            state: gear_model::MsgState::Info,
+            created: now,
+        })
+    })?;
+    Ok(())
+}
+
 /// Release one reviewer. `Ok(false)` = nothing to do (it is waiting for its
 /// worktree to go), `Err` = the step failed and a human should look.
 ///
 /// `task` is the job the seat held, if any: a standby reviewer has none.
+/// `caller` is the step that asked for the release (`verdict`, `job-gone`,
+/// `agent-gone`, `idle-standby`, `checkout`, `repo`, `model`, `captain`): it
+/// goes into the engine-log line of every release (T-398).
 pub(crate) fn release_one(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -523,8 +704,9 @@ pub(crate) fn release_one(
     seat: &SeatRow,
     task: Option<&str>,
     now: Ts,
+    caller: &str,
 ) -> Result<bool, String> {
-    release_seat(store, herdr, project, seat, task, now, false)
+    release_seat(store, herdr, project, seat, task, now, caller, false)
 }
 
 /// The release of a `Standby` reviewer whose agent is gone (T-399): the review
@@ -536,8 +718,9 @@ fn release_one_ending_its_review(
     project: &str,
     seat: &SeatRow,
     now: Ts,
+    caller: &str,
 ) -> Result<bool, String> {
-    release_seat(store, herdr, project, seat, None, now, true)
+    release_seat(store, herdr, project, seat, None, now, caller, true)
 }
 
 /// The steps of one release, shared by `release_one` and the release that ends
@@ -549,9 +732,47 @@ fn release_seat(
     seat: &SeatRow,
     task: Option<&str>,
     now: Ts,
+    caller: &str,
     ending_its_review: bool,
 ) -> Result<bool, String> {
     let pane = binding_pane(store, seat)?;
+
+    // T-418: a reviewer whose start failed is released as a cancelled start is
+    // (design §3.6, B03-05): its pane holds no agent, so closing it ends the
+    // shell the start left behind, and its binding, its task and the review it
+    // was started for end in one write — a seat left with its reservation
+    // behind would be started again on itself (T-399). `release_finished_reviews`
+    // decides *when* a start has failed; here it pays out.
+    if seat.state == SeatState::Starting {
+        if let Some(pane) = bound_pane(store, seat)?.as_deref() {
+            // A pane that is already gone is fine; a refused close does not
+            // keep the seat (T-264).
+            match herdr.pane_close(pane) {
+                Outcome::Ok(()) | Outcome::Refused { .. } | Outcome::Uncertain { .. } => {}
+            }
+        }
+        let reason = "its start failed";
+        store
+            .write(|tx| {
+                if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
+                    if binding.status != BindingStatus::Void {
+                        tx.set_binding_status(&seat.id, seat.generation, BindingStatus::Void)?;
+                    }
+                }
+                tx.clear_seat_task(&seat.id)?;
+                tx.set_meta(&format!("engine.review_pending.{}", seat.id), "")?;
+                require_transition(
+                    SeatState::can_transition(SeatRole::Temp, seat.state, SeatState::Released),
+                    "seat",
+                    seat.state.as_str(),
+                    SeatState::Released.as_str(),
+                )?;
+                tx.set_seat_state(&seat.id, SeatState::Released, Some(reason), now)
+            })
+            .map_err(|e| e.detail)?;
+        log_release(release_line(seat, seat.state, reason, caller));
+        return Ok(true);
+    }
 
     // 1. the agent leaves, once: its pane is closed. Exit keys differ per
     //    agent and fail quietly (codex needs two ctrl+c, grok only `/exit`,
@@ -576,8 +797,8 @@ fn release_seat(
             }
         }
         let reason = match task {
-            Some(_) => "review done",
-            None => "idle reviewer released",
+            Some(_) => REVIEW_DONE,
+            None => IDLE_REVIEWER_RELEASED,
         };
         // The transition the seat makes on its way out (design §3.6): the
         // model knows it.
@@ -605,6 +826,9 @@ fn release_seat(
                 tx.set_seat_state(&seat.id, SeatState::Releasing, Some(reason), now)
             })
             .map_err(|e| e.detail)?;
+        // T-398: the release is in the engine log with the step that asked for
+        // it and why.
+        log_release(release_line(seat, seat.state, reason, caller));
         return Ok(false);
     }
 
@@ -650,6 +874,16 @@ fn release_seat(
     //    next job on this seat reopens them (conventions 17 §8a), so a review
     //    never builds the workspace from nothing and a release removes nothing.
     //    The closed pane's binding ends here, so the next job opens a new pane.
+    let reason = match task {
+        Some(task) => format!("review of {task} done"),
+        // A seat that arrives Releasing keeps why it was released
+        // (its agent died mid-review, the captain released it…).
+        None if seat.state == SeatState::Releasing => seat
+            .state_reason
+            .clone()
+            .unwrap_or_else(|| IDLE_REVIEWER_RELEASED.to_string()),
+        None => IDLE_REVIEWER_RELEASED.to_string(),
+    };
     store
         .write(|tx| {
             if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
@@ -658,23 +892,16 @@ fn release_seat(
                 }
             }
             tx.clear_seat_task(&seat.id)?;
-            tx.set_seat_state(
-                &seat.id,
-                SeatState::Released,
-                Some(&match task {
-                    Some(task) => format!("review of {task} done"),
-                    // A seat that arrives Releasing keeps why it was released
-                    // (its agent died mid-review, the captain released it…).
-                    None if seat.state == SeatState::Releasing => seat
-                        .state_reason
-                        .clone()
-                        .unwrap_or_else(|| "idle reviewer released".to_string()),
-                    None => "idle reviewer released".to_string(),
-                }),
-                now,
-            )
+            tx.set_seat_state(&seat.id, SeatState::Released, Some(&reason), now)
         })
         .map_err(|e| e.detail)?;
+    // T-398: a seat another step put on its way out (the captain, a lowered
+    // quota, an agent that died mid-review) says so here, in the line of the
+    // step that frees it; a seat this function released logged its release
+    // where it was decided.
+    if !matches!(seat.state_reason.as_deref(), Some(REVIEW_DONE) | Some(IDLE_REVIEWER_RELEASED)) {
+        log_release(release_line(seat, seat.state, &reason, caller));
+    }
     let _ = project;
     Ok(true)
 }
@@ -1659,6 +1886,123 @@ profile = "codex"
         assert_eq!(binding.status, BindingStatus::Void, "its binding ends");
     }
 
+    /// A reviewer that is still starting, whose binding is `Pending` and old
+    /// and whose pane holds no agent (T-418): its start failed.
+    fn failed_start_world(pane: &str) -> (Store, FakeHerdr) {
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell(pane);
+        herdr.set_screen(pane, "$ codex resume\nNo saved session found");
+        let mut store = world(TaskState::Verifying, pane, "codex");
+        store
+            .write(|tx| {
+                tx.insert_seat(&SeatRow {
+                    id: "p:captain".into(),
+                    project: "p".into(),
+                    role: SeatRole::Captain,
+                    name: "captain".into(),
+                    profile: "claude".into(),
+                    generation: 1,
+                    state: SeatState::Active,
+                    state_since: T0,
+                    state_reason: None,
+                    task_id: None,
+                })?;
+                tx.set_seat_state("p:r-1", SeatState::Starting, Some("starting"), T0)?;
+                // The start in flight opened a pending binding on the pane.
+                tx.set_binding_status("p:r-1", 1, BindingStatus::Pending)?;
+                tx.set_meta("engine.review_pending.p:r-1", "T-1")
+            })
+            .unwrap();
+        // The review it was started for is still under review: nothing but
+        // the failed start may release the seat.
+        handed_in(&mut store, "T-1");
+        (store, herdr)
+    }
+
+    /// T-418: a reviewer whose start failed never holds a temp slot: its
+    /// pending binding is 200 s old and its pane holds no agent, so it is
+    /// released — binding void, task cleared, the review it was started for
+    /// cleared in the same write — so the review starts again on a free seat,
+    /// and the captain is told the seat and its pane's last line.
+    #[test]
+    fn a_reviewer_whose_start_failed_is_released() {
+        let (mut store, mut herdr) = failed_start_world("w2:p2");
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 200).unwrap();
+
+        assert_eq!(report.released, vec!["p:r-1".to_string()], "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Released, "the seat is free");
+        assert_eq!(seat.task_id, None, "its task is cleared");
+        assert_eq!(exits(&herdr), 1, "its pane is closed");
+        let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Void, "its binding ends");
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap().as_deref(),
+            Some(""),
+            "the review goes back to start_reviews"
+        );
+        let told = store
+            .read(|tx| tx.thread_messages("p", "review:start-failed:p:r-1"))
+            .unwrap();
+        assert_eq!(told.len(), 1, "one message for the captain");
+        assert_eq!(told[0].state, gear_model::MsgState::Info);
+        assert!(told[0].body.contains("r-1"), "{}", told[0].body);
+        assert!(
+            told[0].body.contains("No saved session found"),
+            "the pane's last line is named: {}",
+            told[0].body
+        );
+    }
+
+    /// The same seat inside the grace is left alone: its start still has its
+    /// chance.
+    #[test]
+    fn a_starting_reviewer_inside_the_grace_is_left_starting() {
+        let (mut store, mut herdr) = failed_start_world("w2:p2");
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 100).unwrap();
+
+        assert!(report.released.is_empty(), "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Starting, "it goes on");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
+        assert!(store
+            .read(|tx| tx.thread_messages("p", "review:start-failed:p:r-1"))
+            .unwrap()
+            .is_empty());
+    }
+
+    /// The same seat with an agent in its pane is left alone: a slow start is
+    /// not a failed one.
+    #[test]
+    fn a_starting_reviewer_with_an_agent_is_left_starting() {
+        let (mut store, mut herdr) = failed_start_world("w2:p2");
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 200).unwrap();
+
+        assert!(report.released.is_empty(), "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Starting, "it goes on");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
+    }
+
+    /// A pane that cannot be read is an observation failure, not an absence
+    /// (design/08, T-264): the seat keeps its slot.
+    #[test]
+    fn a_starting_reviewer_whose_pane_cannot_be_read_is_left_starting() {
+        let (mut store, mut herdr) = failed_start_world("w2:p2");
+        herdr.observe_fails = true;
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 200).unwrap();
+
+        assert!(report.released.is_empty(), "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Starting, "it goes on");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
+    }
+
     #[test]
     fn a_cancelled_pending_review_releases_its_starting_seat() {
         let mut herdr = FakeHerdr::new();
@@ -2578,5 +2922,88 @@ profile = "codex"
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Released);
         assert_eq!(seat.state_reason.as_deref(), Some("its agent is gone mid-review"));
+    }
+
+    /// T-398: every release writes one line in the engine log — which seat,
+    /// which generation, the state it left, why it goes, and which step of the
+    /// tick asked for it.
+    #[test]
+    fn a_release_logs_its_reason_and_its_caller() {
+        // This thread may have logged for an earlier test.
+        let _ = take_release_log();
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        // An idle reviewer: no lane works (W = 0), so §3.6 releases it.
+        store
+            .write(|tx| tx.set_seat_state("p:r-1", SeatState::Standby, Some("review done"), T0))
+            .unwrap();
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+        let log = take_release_log();
+        assert_eq!(
+            log,
+            vec!["release p:r-1 gen=1 from=standby reason=idle reviewer released caller=idle-standby"
+                .to_string()],
+            "{log:?}"
+        );
+
+        // The next tick frees the seat: that release was decided above, so it
+        // is in the log once, not twice.
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+        assert!(take_release_log().is_empty(), "one line per release");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Released);
+    }
+
+    /// T-398: a seat another step released — the captain let it go — says so
+    /// in the log of the sweep that frees it.
+    #[test]
+    fn a_seat_the_captain_released_names_its_caller_in_the_log() {
+        let _ = take_release_log();
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        // `gear admin seat release` (gear-app/plan.rs): the task binding ends
+        // and the seat waits for the engine to close its pane.
+        store
+            .write(|tx| {
+                tx.clear_seat_task("p:r-1")?;
+                tx.set_seat_state("p:r-1", SeatState::Releasing, Some("released by the captain: it was idle"), T0)
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w2:p2");
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+        let log = take_release_log();
+        assert_eq!(
+            log,
+            vec![
+                "release p:r-1 gen=1 from=releasing reason=released by the captain: it was idle caller=captain"
+                    .to_string()
+            ],
+            "{log:?}"
+        );
+    }
+
+    /// T-398: a reviewer that leaves because its job is gone logs the step that
+    /// found it (`job-gone`) and the job it did.
+    #[test]
+    fn a_reviewer_whose_job_is_gone_logs_the_step_and_the_job() {
+        let _ = take_release_log();
+        // The task it works on is cancelled: the review it waited for is gone.
+        let mut store = world(TaskState::Cancelled, "w2:p2", "codex");
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+        let log = take_release_log();
+        assert_eq!(
+            log,
+            vec!["release p:r-1 gen=1 from=active reason=review done caller=job-gone".to_string()],
+            "{log:?}"
+        );
     }
 }

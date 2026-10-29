@@ -903,7 +903,7 @@ fn prepare_seat_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn Her
             if used >= 3 {
                 let reason = format!("review checkout failed {used} times: {}", error.detail);
                 if seat.state == SeatState::Standby {
-                    crate::release::release_one(store, herdr, &seat.project, seat, None, now)
+                    crate::release::release_one(store, herdr, &seat.project, seat, None, now, "checkout")
                         .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
                 } else {
                     park(store, &seat.id, &reason, now)?;
@@ -1207,7 +1207,7 @@ fn start_reviewer(
         if !ready { return Ok(Started::NotYet) }
         let current_repo = store.read(|tx| tx.get_meta(&repo_key(&seat.id)))?.unwrap_or_else(|| config.root_repo().path);
         if current_repo != repo.path {
-            crate::release::release_one(store, herdr, &seat.project, seat, None, now)
+            crate::release::release_one(store, herdr, &seat.project, seat, None, now, "repo")
                 .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
             return Ok(Started::NotYet);
         }
@@ -1215,7 +1215,7 @@ fn start_reviewer(
         let (recorded, current_model) = store.read(|tx| Ok((tx.get_meta(&review_model_key(&seat.id))?, tx.get_meta(&crate::model::model_meta_key(&seat.id))?)))?;
         let model_matches = entry.is_none_or(|entry| current_model.as_deref() == Some(entry.model()));
         if recorded.as_deref() != Some(selected.as_str()) || !model_matches {
-            crate::release::release_one(store, herdr, &seat.project, seat, None, now)
+            crate::release::release_one(store, herdr, &seat.project, seat, None, now, "model")
                 .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
             return Ok(Started::NotYet);
         }
@@ -2018,15 +2018,16 @@ fn review_wait_told_key(project: &str, task: &str, attempt: i64) -> String {
     format!("engine.review_wait_told.{project}.{task}.{attempt}")
 }
 
-/// Tell the captain that a review waits: one open item per task, so the tick
-/// does not fill the inbox with the same news.
+/// Tell the captain that a review waits: one message per task, so the tick
+/// does not fill the inbox with the same news. The news is information, not an
+/// item that asks the captain for an action (T-370): the lane is not blocked.
 fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &str, now: Ts) -> GearResult<()> {
     store.write(|tx| {
         let captain = tx.captain_of(project)?.ok_or_else(|| {
             GearError::new(ErrorCode::NoTarget, format!("project {project} has no captain"))
         })?;
         let told_key = review_wait_told_key(project, &task.task, task.attempt);
-        // One open item per task: the captain is told once, not every tick.
+        // One message per task: the captain is told once, not every tick.
         // And once per attempt: a resolved item does not bring the same news
         // back on the next tick (T-214).
         let already = tx.get_meta(&told_key)?.is_some()
@@ -2051,7 +2052,7 @@ fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &st
             sender: task.writer.clone(),
             sender_gen,
             recipient: captain.id.clone(),
-            kind: MsgKind::Question,
+            kind: MsgKind::System,
             urgent: false,
             body: format!(
                 "The review of {} (attempt {}) waits: {reason}, so the \
@@ -2060,7 +2061,7 @@ fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &st
             ),
             reply_to: None,
             needs_ack: false,
-            state: MsgState::Open,
+            state: MsgState::Info,
             created: now,
         };
         tx.insert_message(&message)?;
@@ -2291,6 +2292,38 @@ lanes = ["minimax-cn/MiniMax-M3.1-Flash"]
 review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] }]
 "#;
 
+    /// The same project with room for two temp seats: both can be busy.
+    const CONFIG_TWO_SLOTS: &str = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 2
+
+[captain]
+pane = "w1:p9"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[temps]
+kind = "codex"
+profile = "codex"
+
+[models]
+lanes = ["minimax-cn/MiniMax-M3.1-Flash"]
+review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] }]
+"#;
+
     /// The same project with no `[temps]` at all: no reviewer can start.
     const CONFIG_NO_REVIEWERS: &str = r#"
 [project]
@@ -2321,7 +2354,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 
     /// An engine that knows the codex profile.
     fn cfg() -> EngineCfg {
-        let mut cfg = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
+        let mut cfg = EngineCfg { db_path: crate::testtmp::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
         for kind in ["codex", "opencode", "claude"] {
             cfg.profiles
                 .insert(kind.to_string(), gear_herdr::builtin(kind).unwrap());
@@ -3546,9 +3579,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 
     #[test]
     fn direct_checkout_stashes_dirty_worktrees_and_reports_them() {
-        let root = std::env::temp_dir().join(format!("gear-review-direct-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::testtmp::temp("gear-review-direct");
         sh(&root, "git init -q --bare origin.git && git init -q -b dev work");
         let work = root.join("work");
         std::fs::write(work.join("readme"), "base").unwrap();
@@ -3587,9 +3618,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 
     #[test]
     fn real_git_checkout_uses_the_submitted_commit() {
-        let root = std::env::temp_dir().join(format!("gear-review-clean-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::testtmp::temp("gear-review-clean");
         sh(&root, "git init -q --bare origin.git && git init -q -b dev work");
         let work = root.join("work");
         std::fs::write(work.join("readme"), "base").unwrap();
@@ -4132,14 +4161,59 @@ review = [
             store.read(|tx| tx.get_seat("p:review-1")).unwrap().is_none(),
             "no seat is created while the quota is full"
         );
-        // The captain is told once.
+        // The captain is told once: the news is information, not a captain
+        // action item (T-370).
+        let told = thread(&mut store, "T-1:1");
+        assert_eq!(told.len(), 1, "the captain is told: {told:?}");
+        assert_eq!(told[0].recipient, "p:captain");
+        assert_eq!(told[0].kind, MsgKind::System);
+        assert_eq!(told[0].state, MsgState::Info);
+        assert!(told[0].body.contains("T-1"), "{}", told[0].body);
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 11)).unwrap();
-        assert_eq!(inbox.len(), 1, "the captain is told: {inbox:?}");
-        assert!(inbox[0].body.contains("T-1"), "{}", inbox[0].body);
+        assert!(inbox.is_empty(), "nothing rings the captain: {inbox:?}");
         // The next tick does not tell the captain again.
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
-        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 21)).unwrap();
-        assert_eq!(inbox.len(), 1, "one open item per task: {inbox:?}");
+        assert_eq!(thread(&mut store, "T-1:1").len(), 1, "one message per task");
+    }
+
+    /// T-370: the "the review waits: every temp seat is in use" notice is
+    /// information, not a captain item: it holds no INBOX slot and rings
+    /// nothing, and it stays told once per attempt.
+    #[test]
+    fn the_review_waits_notice_is_information_while_both_temp_seats_are_busy() {
+        let mut store = world(CONFIG_TWO_SLOTS);
+        let mut herdr = FakeHerdr::new();
+        store
+            .write(|tx| {
+                testing::seed_temp_seat(tx, "p", "review-1", "T-9", "wt9:p1", "codex", T0)?;
+                testing::seed_temp_seat(tx, "p", "review-2", "T-8", "wt8:p1", "codex", T0)?;
+                Ok(())
+            })
+            .unwrap();
+
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        assert_eq!(report.waiting, vec!["T-1".to_string()]);
+
+        // One message, told as information: the captain's information list,
+        // not his action items.
+        let told = thread(&mut store, "T-1:1");
+        assert_eq!(told.len(), 1, "the captain is told once: {told:?}");
+        assert_eq!(told[0].recipient, "p:captain");
+        assert_eq!(told[0].kind, MsgKind::System);
+        assert_eq!(told[0].state, MsgState::Info);
+        assert!(
+            told[0].body.contains("waits: every temp seat is in use"),
+            "{}",
+            told[0].body
+        );
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 11)).unwrap();
+        assert!(inbox.is_empty(), "nothing rings the captain: {inbox:?}");
+
+        // A second tick writes none.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        assert_eq!(thread(&mut store, "T-1:1").len(), 1, "a second message was added");
+        let empty = store.read(|tx| tx.thread_messages("p", "T-1:2")).unwrap();
+        assert!(empty.is_empty(), "a second message was added: {empty:?}");
     }
 
     /// T-214: the "the review waits" notice is told once per attempt. A
@@ -4152,12 +4226,16 @@ review = [
 
         // The first tick: the review waits, the captain is told once.
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        let told = thread(&mut store, "T-1:1");
+        assert_eq!(told.len(), 1, "the captain is told: {told:?}");
+        assert_eq!(told[0].kind, MsgKind::System);
+        assert_eq!(told[0].state, MsgState::Info);
+        assert!(told[0].body.contains("T-1"), "{}", told[0].body);
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 11)).unwrap();
-        assert_eq!(inbox.len(), 1, "the captain is told: {inbox:?}");
-        assert!(inbox[0].body.contains("T-1"), "{}", inbox[0].body);
+        assert!(inbox.is_empty(), "nothing rings the captain: {inbox:?}");
 
         // The captain resolves the item.
-        let id = inbox[0].id.clone();
+        let id = told[0].id.clone();
         store
             .write(|tx| {
                 tx.update_message_state("p", &id, MsgState::Resolved, Some("ok"), None, None, T0 + 12)
@@ -4170,6 +4248,7 @@ review = [
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 31)).unwrap();
         assert!(inbox.is_empty(), "the notice comes back: {inbox:?}");
+        assert_eq!(thread(&mut store, "T-1:1").len(), 1, "a second message was added");
         let again = store.read(|tx| tx.thread_messages("p", "T-1:2")).unwrap();
         assert!(again.is_empty(), "a second item was added: {again:?}");
 
@@ -4196,8 +4275,12 @@ review = [
             .unwrap();
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 50).unwrap();
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 51)).unwrap();
-        assert_eq!(inbox.len(), 1, "the next attempt is told again: {inbox:?}");
-        assert!(inbox[0].body.contains("attempt 2"), "{}", inbox[0].body);
+        assert!(inbox.is_empty(), "the next attempt rings nothing: {inbox:?}");
+        let told = thread(&mut store, "T-1:2");
+        assert_eq!(told.len(), 1, "the next attempt is told again: {told:?}");
+        assert_eq!(told[0].kind, MsgKind::System);
+        assert_eq!(told[0].state, MsgState::Info);
+        assert!(told[0].body.contains("attempt 2"), "{}", told[0].body);
     }
 
     #[test]

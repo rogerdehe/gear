@@ -465,8 +465,12 @@ fn q_leaves_the_board() {
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains("GEAR · p"), "{text}");
     assert!(text.contains("LANES"), "{text}");
-    // The frame is drawn on the screen, so it starts with the clear.
-    assert!(text.contains("\x1b[2J"), "{text:?}");
+    // The frame is drawn in place (T-403): it opens a synchronized update and
+    // never clears the whole screen.
+    assert!(text.contains("\x1b[?2026h\x1b[H"), "{text:?}");
+    assert!(!text.contains("\x1b[2J"), "the screen is never cleared whole: {text:?}");
+    assert!(text.contains("\x1b[K"), "every line erases its rest: {text:?}");
+    assert!(text.contains("\x1b[J"), "the screen below the frame is erased: {text:?}");
 }
 
 #[test]
@@ -883,6 +887,11 @@ fn world_with_a_voyage() -> Store {
     let mut store = world();
     store
         .write(|tx| {
+            // The config reads minimax-cn: the reading below is one the
+            // project reads now (T-383).
+            let mut row = tx.get_project("p")?.unwrap();
+            row.config_toml = "[[quota.sources]]\nprovider = \"minimax-cn\"\nreader = \"minimax\"\n".to_string();
+            tx.update_project(&row)?;
             tx.upsert_voyage(&gear_store::VoyageRow {
                 project: "p".into(),
                 milestone: "M4".into(),
@@ -917,8 +926,9 @@ struct Frames {
     buffer: String,
 }
 
-/// The clear-screen prefix every frame starts with.
-const CLEAR: &str = "\x1b[H\x1b[2J";
+/// The clear-screen prefix every frame starts with: the synchronized update
+/// and the home position (T-403: the screen is never cleared whole).
+const CLEAR: &str = "\x1b[?2026h\x1b[H";
 
 /// The start of the footer, which an 80 column terminal shows: the whole
 /// footer is longer than the screen.
@@ -933,6 +943,40 @@ impl Frames {
     /// The next frame that does not hold `needle`.
     fn next_without(&mut self, needle: &str, timeout: Duration) -> String {
         self.wait(needle, false, timeout)
+    }
+
+    /// Whether no frame at all was written within `timeout`.
+    ///
+    /// The board writes a frame only when it says something new (T-403): a
+    /// key or a click that changes nothing leaves the screen as it is, so no
+    /// frame arrives.
+    fn quiet(&mut self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if self.take_frame().is_some() {
+                return false;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return true;
+            }
+            let mut fds = libc::pollfd { fd: self.master, events: libc::POLLIN, revents: 0 };
+            let millis = (deadline.saturating_duration_since(now)).as_millis().min(50) as i32;
+            // SAFETY: `fds` is one pollfd we own; the call only waits.
+            let ready = unsafe { libc::poll(&mut fds, 1, millis) };
+            if ready <= 0 {
+                continue;
+            }
+            let mut chunk = [0u8; 4096];
+            // SAFETY: the buffer is one chunk long.
+            let read = unsafe {
+                libc::read(self.master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+            };
+            if read > 0 {
+                self.buffer
+                    .push_str(&String::from_utf8_lossy(&chunk[..read as usize]));
+            }
+        }
     }
 
     /// Wait for a **complete** frame: the text between a clear-screen and the
@@ -1166,21 +1210,29 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     let _frame = frames.next("LANES", Duration::from_secs(5));
 
     // A click on the first row of the first view picks that row, and `Enter`
-    // opens its panel.
+    // opens its panel. The row is the one the board already shows as picked,
+    // and a frame that says what the last one said is not written (T-403):
+    // the selection is moved off it first, so the click is a change.
+    press(pty.master, b"j");
+    let _frame = frames.next("› runtime", Duration::from_secs(5));
     press(pty.master, b"\x1b[<0;1;7M");
     let _frame = frames.next("› data", Duration::from_secs(5));
     press(pty.master, b"\r");
     let frame = frames.next("lane data", Duration::from_secs(5));
     assert!(frame.contains("LEFT, in order"), "{frame}");
 
-    // The selection never walks past the last row: `j` twice on two lanes
-    // keeps the last one, and `Enter` opens it.
+    // The selection never walks past the last row: `j` moves to the last
+    // lane, a second `j` has nowhere to go and writes no frame at all, and
+    // `Enter` opens the last lane.
     press(pty.master, b"x");
     let _frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
     press(pty.master, b"j");
-    let _frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
-    press(pty.master, b"j");
     let _frame = frames.next("› runtime", Duration::from_secs(5));
+    press(pty.master, b"j");
+    assert!(
+        frames.quiet(Duration::from_millis(300)),
+        "a key that moves nothing writes no frame"
+    );
     press(pty.master, b"\r");
     let _frame = frames.next("lane runtime", Duration::from_secs(5));
 
@@ -1330,7 +1382,7 @@ fn a_board_of_one_project_has_no_project_key() {
 fn a_frame_without_the_footer_is_never_accepted() {
     let mut frames = Frames { master: -1, buffer: String::new() };
     // The clear-screen and the body, but no footer yet.
-    frames.buffer.push_str("\x1b[H\x1b[2JGEAR · p\nLANES\n");
+    frames.buffer.push_str("\x1b[?2026h\x1b[HGEAR · p\nLANES\n");
     assert!(
         frames.take_frame().is_none(),
         "a frame without the footer is not a frame"
@@ -1429,9 +1481,14 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     let _frame = frames.next("LANES", Duration::from_secs(5));
 
     // The panel of a lane with seventeen tasks is taller than the terminal: it
-    // keeps both borders and the footer's row (F3).
+    // keeps both borders and the footer's row (F3). The first lane is the one
+    // the board shows as picked, and a click that picks it again writes no
+    // frame (T-403): `Enter` opens it from there.
     press(pty.master, b"\x1b[<0;1;7M");
-    let _frame = frames.next("› data", Duration::from_secs(5));
+    assert!(
+        frames.quiet(Duration::from_millis(300)),
+        "a click on the picked row writes no frame"
+    );
     press(pty.master, b"\r");
     let frame = frames.next("LEFT, in order", Duration::from_secs(5));
     assert!(frame.contains("┐"), "the right border of the panel: {frame}");
@@ -1443,12 +1500,13 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     );
     // Any key closes the panel.
     press(pty.master, b"x");
-    let _frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
+    let frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
 
     // The Graph tab is clicked where it is drawn (F2: the frame is written
     // without a trailing newline, so the row the user sees is the row the hit
-    // testing expects).
-    let frame = frames.next("LANES", Duration::from_secs(5));
+    // testing expects). The frame that closed the panel is the one on the
+    // screen, and a frame that reads like the last one written is not written
+    // again (T-403).
     let tab = column_of(&frame, 3, "2 Tasks") + 2;
     press(pty.master, format!("\x1b[<0;{tab};4M").as_bytes());
     let _frame = frames.next("dev", Duration::from_secs(5));
@@ -1457,19 +1515,24 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     // press is read: the board redraws on its own too, and a pty whose output
     // is not read blocks the board (F9). The heading scrolls away with the
     // rows above the selected one (T-342), so the frames are drained by their
-    // footer.
+    // footer. A frame is written only when the selection moves (T-403), so the
+    // last one drained is the one on the screen.
+    let mut frame = String::new();
     for _ in 0..16 {
         press(pty.master, b"j");
-        let _frame = frames.last_with(FOOTER_START, Duration::from_secs(5));
+        frame = frames.last_with(FOOTER_START, Duration::from_secs(5));
     }
-    let frame = frames.last_with("T-17", Duration::from_secs(5));
     assert!(frame.contains("T-17"), "the last task stays visible: {frame}");
 
     // A click on the footer's row and on the spacer below the data selects
-    // nothing (F8): the selection stays on the last task.
+    // nothing (F8): the selection stays on the last task, and no frame is
+    // written (T-403).
     press(pty.master, b"\x1b[<0;1;24M");
     press(pty.master, b"\x1b[<0;1;23M");
-    let _frame = frames.next(FOOTER_START, Duration::from_secs(5));
+    assert!(
+        frames.quiet(Duration::from_millis(300)),
+        "a click that selects nothing writes no frame"
+    );
 
     // `Enter` opens the panel of the task that is visible.
     press(pty.master, b"\r");
@@ -1508,26 +1571,29 @@ fn a_long_graph_draws_its_last_task() {
     assert!(text.contains("T-17"), "the last task is drawn: {text}");
 }
 
-/// Keys that send the given events, then `q`, on an 80x12 screen.
-struct Events(Vec<Event>);
+/// Keys that send the given events, then `q`, on a screen of the given size.
+struct Events {
+    events: Vec<Event>,
+    size: (usize, usize),
+}
 
 impl Keys for Events {
     fn next_event(&mut self, _timeout: Duration) -> Option<Event> {
-        if self.0.is_empty() {
+        if self.events.is_empty() {
             return Some(Event::Key('q'));
         }
-        Some(self.0.remove(0))
+        Some(self.events.remove(0))
     }
 
     fn size(&self) -> (usize, usize) {
-        (80, 12)
+        self.size
     }
 }
 
 /// The last frame the board drew: the frames are separated by the clear.
 fn last_frame(out: &[u8]) -> String {
     let text = String::from_utf8_lossy(out);
-    text.rsplit("\u{1b}[H\u{1b}[2J").next().unwrap_or_default().to_string()
+    text.rsplit("\u{1b}[?2026h\u{1b}[H").next().unwrap_or_default().to_string()
 }
 
 /// T-342: a view with more picks than screen rows scrolls so the selected one
@@ -1568,7 +1634,7 @@ fn a_view_scrolls_to_its_selected_pick_and_a_click_keeps_it() {
         ..Options::default()
     };
     let mut out: Vec<u8> = Vec::new();
-    run_with(&mut store, &opts, &mut out, &mut Events(events), None).unwrap();
+    run_with(&mut store, &opts, &mut out, &mut Events { events, size: (80, 12) }, None).unwrap();
 
     let frame = last_frame(&out);
     let rows: Vec<&str> = frame.lines().collect();
@@ -1610,7 +1676,7 @@ fn a_click_on_the_top_row_of_a_scrolled_view_picks_the_task_there() {
         ..Options::default()
     };
     let mut out: Vec<u8> = Vec::new();
-    run_with(&mut store, &opts, &mut out, &mut Events(events), None).unwrap();
+    run_with(&mut store, &opts, &mut out, &mut Events { events, size: (80, 12) }, None).unwrap();
 
     let frame_text = last_frame(&out);
     let rows: Vec<&str> = frame_text.lines().collect();
@@ -1630,3 +1696,358 @@ fn a_click_on_the_top_row_of_a_scrolled_view_picks_the_task_there() {
         "the selection moved off the last task: {frame_text}"
     );
 }
+
+// ---- T-383: the QUOTA lines of the board
+
+/// The Now view's frame, wide and tall enough for the whole quota block.
+fn now_frame(store: &mut Store, now: i64) -> String {
+    let board = build(
+        store,
+        &gear_board::Options { project: Some("p".into()), ..Default::default() },
+        now,
+    )
+    .unwrap();
+    let screen = crate::screen(gear_board::frame::Tab::Now, 0, (120, 70));
+    gear_board::frame::canvas(&board, &screen, None).text()
+}
+
+/// The project `p` whose config reads `providers`, with the given quota
+/// readings in the meta (`provider` → the reading's JSON).
+fn world_reading_custom(providers: &[&str], readings: &[(&str, &str)]) -> Store {
+    let mut store = world();
+    store
+        .write(|tx| {
+            let mut row = tx.get_project("p")?.unwrap();
+            row.config_toml = providers
+                .iter()
+                .map(|provider| {
+                    format!("[[quota.sources]]\nprovider = \"{provider}\"\nreader = \"codex\"\n")
+                })
+                .collect();
+            tx.update_project(&row)?;
+            for (provider, reading) in readings {
+                tx.set_meta(&format!("quota.reading.{provider}"), reading)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// One reading, as the engine writes it: one window, one used percent, one
+/// reset and when it was read.
+fn reading_json(provider: &str, window: &str, reset: i64, read_at: i64) -> String {
+    format!(
+        r#"{{"provider":"{provider}","windows":[{{"name":"{window}","used_percent":63.0,"resets_at":{reset}}}],"read_at":{read_at}}}"#
+    )
+}
+
+#[test]
+fn the_quota_shows_only_the_providers_the_project_reads() {
+    // The config reads codex alone; a reading of an earlier config stays in
+    // the meta and is not shown (T-383).
+    let mut store = world_reading_custom(
+        &["codex"],
+        &[
+            (
+                "codex",
+                &reading_json("codex", "weekly", T0 + 6 * 86_400, T0),
+            ),
+            (
+                "minimax-cn",
+                r#"{"provider":"minimax-cn","windows":[{"name":"5h","used_percent":64.0,"resets_at":1800003600}],"read_at":1800000000}"#,
+            ),
+        ],
+    );
+    let frame = now_frame(&mut store, T0);
+    assert!(frame.contains("codex"), "{frame}");
+    assert!(!frame.contains("minimax-cn"), "{frame}");
+}
+
+#[test]
+fn a_reset_days_away_prints_the_day_and_a_later_one_the_clock_alone() {
+    let week = T0 + 6 * 86_400;
+    let hours = T0 + 3 * 3600;
+    let mut store = world_reading_custom(
+        &["codex", "minimax-cn"],
+        &[
+            ("codex", &reading_json("codex", "weekly", week, T0)),
+            ("minimax-cn", &reading_json("minimax-cn", "5h", hours, T0)),
+        ],
+    );
+    let frame = now_frame(&mut store, T0);
+    // A week out: the month and the day, then the time.
+    let line = frame
+        .lines()
+        .find(|line| line.contains("codex"))
+        .unwrap_or_else(|| panic!("no codex line: {frame}"));
+    let reset = line.split("resets ").nth(1).unwrap_or_else(|| panic!("no reset: {line}"));
+    let mut words = reset.split(' ');
+    let month = words.next().unwrap_or_default();
+    let day = words.next().unwrap_or_default();
+    let time = words.next().unwrap_or_default();
+    assert_eq!(month.len(), 3, "the month is a word: {line}");
+    assert!(month.chars().all(|c| c.is_ascii_alphabetic()), "{line}");
+    assert!(day.parse::<u32>().is_ok(), "the day is a number: {line}");
+    assert_eq!(time.len(), 5, "then the time: {line}");
+    assert_eq!(&time[2..3], ":", "{line}");
+    // The date is the one the clock of the machine gives.
+    assert!(line.contains(&gear_board::idle::day_clock(week)), "{line}");
+    // Three hours out: only the clock, as today.
+    let line = frame
+        .lines()
+        .find(|line| line.contains("minimax-cn"))
+        .unwrap_or_else(|| panic!("no minimax-cn line: {frame}"));
+    assert!(
+        line.contains(&format!("resets {}", gear_board::idle::clock(hours))),
+        "{line}"
+    );
+}
+
+#[test]
+fn a_reading_half_an_hour_old_says_its_age() {
+    let mut store = world_reading_custom(
+        &["codex"],
+        &[("codex", &reading_json("codex", "weekly", T0 + 6 * 86_400, T0 - 45 * 60))],
+    );
+    let frame = now_frame(&mut store, T0);
+    assert!(frame.contains("(read 45 min ago)"), "{frame}");
+}
+
+// ---- T-411: the wheel and the page keys scroll a long view
+
+/// A hundred tasks on one lane: a view no viewport shows whole, so what the
+/// wheel and the page keys do to the selection is visible on the frame.
+fn world_with_a_hundred_tasks() -> Store {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            for n in 1..=100 {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: format!("T-{n:02}"),
+                    rank: n as i64,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("data".into()),
+                    milestone: Some("M4".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// The board's last frame over the given events, on a screen of a given size.
+fn run_events(store: &mut Store, events: Vec<Event>, size: (usize, usize)) -> String {
+    let out = run_events_output(store, events, size);
+    last_frame(out.as_bytes())
+}
+
+/// Everything the board wrote over the given events: every frame, in order.
+fn run_events_output(store: &mut Store, events: Vec<Event>, size: (usize, usize)) -> String {
+    let opts = Options {
+        project: Some("p".into()),
+        color: false,
+        refresh: Duration::from_millis(1),
+        ..Options::default()
+    };
+    let mut out: Vec<u8> = Vec::new();
+    run_with(store, &opts, &mut out, &mut Events { events, size }, None).unwrap();
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// T-411: ten notches of the wheel move the selection three picks each, the
+/// wheel stops at the first pick, and a page key moves a screenful with the
+/// viewport.
+#[test]
+fn the_wheel_and_the_page_keys_move_the_selection_over_a_long_view() {
+    use gear_board::frame;
+    let mut store = world_with_a_hundred_tasks();
+    let size = (80, 40);
+
+    // Ten notches down from the first pick: pick 30, drawn on its own row and
+    // lit (the viewport has not moved yet).
+    let mut events = vec![Event::Key('2')];
+    events.extend((0..10).map(|_| Event::Mouse { button: 65, x: 1, y: 7 }));
+    let frame = run_events(&mut store, events, size);
+    let rows: Vec<&str> = frame.lines().collect();
+    let row = frame::FIRST_ROW + 30;
+    assert!(
+        rows.get(row).unwrap_or(&"").contains("T-31"),
+        "the thirtieth pick's row holds T-31: {frame}"
+    );
+    assert!(
+        rows.get(row).unwrap_or(&"").contains("\u{1b}[7m"),
+        "the wheel's pick is the lit row: {frame}"
+    );
+
+    // The wheel up at the first pick stays there.
+    let mut events = vec![Event::Key('2')];
+    events.extend((0..10).map(|_| Event::Mouse { button: 64, x: 1, y: 7 }));
+    let frame = run_events(&mut store, events, size);
+    let rows: Vec<&str> = frame.lines().collect();
+    assert!(
+        rows.get(frame::FIRST_ROW).unwrap_or(&"").contains("T-01"),
+        "the wheel up stays at the first pick: {frame}"
+    );
+    assert!(
+        rows.get(frame::FIRST_ROW).unwrap_or(&"").contains("\u{1b}[7m"),
+        "the first pick is the lit row: {frame}"
+    );
+
+    // A page down from the first pick: the view shows the rows (40 - 7 = 33),
+    // so the pick one screen down is the 34th task, and the viewport followed
+    // it: the heading's row scrolled away and the first pick's row is drawn on
+    // the view's first row.
+    let frame = run_events(&mut store, vec![Event::Key('2'), Event::PageDown], size);
+    let rows: Vec<&str> = frame.lines().collect();
+    let lit = frame::FIRST_ROW + 33 - 2;
+    assert!(
+        rows.get(lit).unwrap_or(&"").contains("T-34"),
+        "the page down picks the task one screen down: {frame}"
+    );
+    assert!(
+        rows.get(lit).unwrap_or(&"").contains("\u{1b}[7m"),
+        "the page key's pick is the lit row: {frame}"
+    );
+    assert!(
+        rows.get(frame::VIEW_ROW).unwrap_or(&"").contains("T-02"),
+        "the viewport moved with the selection: {frame}"
+    );
+    assert!(
+        !rows.get(frame::VIEW_ROW).unwrap_or(&"").contains("dev"),
+        "the heading scrolled away: {frame}"
+    );
+
+    // A page up comes back to the first pick.
+    let frame = run_events(
+        &mut store,
+        vec![Event::Key('2'), Event::PageDown, Event::PageUp],
+        size,
+    );
+    let rows: Vec<&str> = frame.lines().collect();
+    assert!(
+        rows.get(frame::FIRST_ROW).unwrap_or(&"").contains("T-01"),
+        "the page up comes back to the first pick: {frame}"
+    );
+    assert!(
+        rows.get(frame::VIEW_ROW).unwrap_or(&"").contains("dev"),
+        "the heading is back: {frame}"
+    );
+}
+
+/// T-411: a wheel notch is never a click. It closes a panel as an arrow does
+/// and opens none, and a notch where the tabs are drawn switches no view.
+#[test]
+fn a_wheel_notch_is_never_a_click() {
+    use gear_board::frame;
+    let mut store = world_with_a_hundred_tasks();
+    let size = (80, 40);
+
+    // `Enter` opens the panel of the first task; the next notch closes it as
+    // an arrow would, and no panel is opened in its place. The panel is drawn
+    // on the frame before the notch, so its absence after it says something
+    // (the panel's frame is not the last one: the key that closes it is read
+    // after it).
+    let opened = run_events_output(&mut store, vec![Event::Key('2'), Event::Key('\r')], size);
+    assert!(opened.contains("ROUNDS"), "`Enter` opens the panel: {opened}");
+    let frame = run_events(
+        &mut store,
+        vec![Event::Key('2'), Event::Key('\r'), Event::Mouse { button: 65, x: 1, y: 7 }],
+        size,
+    );
+    let rows: Vec<&str> = frame.lines().collect();
+    assert!(!frame.contains("ROUNDS"), "the wheel opens no panel: {frame}");
+    assert!(
+        rows.get(frame::FIRST_ROW).unwrap_or(&"").contains("T-01"),
+        "the notch that closed the panel moved nothing: {frame}"
+    );
+
+    // A notch on the tab row is not a click on the tab under it: the view
+    // stays the task view and the selection moves three picks.
+    let frame = run_events(
+        &mut store,
+        vec![Event::Key('2'), Event::Mouse { button: 65, x: 1, y: 4 }],
+        size,
+    );
+    let rows: Vec<&str> = frame.lines().collect();
+    let row = frame::FIRST_ROW + 3;
+    assert!(
+        rows.get(row).unwrap_or(&"").contains("T-04"),
+        "a notch on the tab row scrolls instead of switching the view: {frame}"
+    );
+    assert!(
+        rows.get(row).unwrap_or(&"").contains("\u{1b}[7m"),
+        "the notch's pick is the lit row: {frame}"
+    );
+}
+
+/// T-411: the page keys arrive as `[5~` and `[6~`, and the wheel's SGR
+/// sequence is still a mouse event with its own button.
+#[test]
+fn the_page_keys_parse_and_the_wheel_is_still_a_mouse() {
+    let pty = Pty::open();
+    let slave = pty.slave;
+    let (ready, is_ready) = std::sync::mpsc::channel();
+    let (left, events) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        // Raw mode is on once `Terminal::on` returns: only then do the bytes
+        // come one at a time instead of waiting for a newline.
+        let mut keys = gear_board::Terminal::on(slave);
+        let _ = ready.send(());
+        for _ in 0..5 {
+            if left.send(keys.next_event(Duration::from_secs(5))).is_err() {
+                break;
+            }
+        }
+    });
+    is_ready.recv_timeout(Duration::from_secs(5)).expect("the terminal is in raw mode");
+    press(pty.master, b"\x1b[5~");
+    press(pty.master, b"\x1b[6~");
+    press(pty.master, b"\x1b[<64;10;20M");
+    press(pty.master, b"\x1b[<65;10;20M");
+    press(pty.master, b"\x1b[<0;1;7M");
+
+    let read = |events: &std::sync::mpsc::Receiver<Option<Event>>| {
+        events.recv_timeout(Duration::from_secs(5)).unwrap_or(None)
+    };
+    assert_eq!(read(&events), Some(Event::PageUp), "`[5~` is the page up");
+    assert_eq!(read(&events), Some(Event::PageDown), "`[6~` is the page down");
+    assert_eq!(
+        read(&events),
+        Some(Event::Mouse { button: 64, x: 10, y: 20 }),
+        "the wheel up is still a mouse"
+    );
+    assert_eq!(
+        read(&events),
+        Some(Event::Mouse { button: 65, x: 10, y: 20 }),
+        "the wheel down is still a mouse"
+    );
+    assert_eq!(
+        read(&events),
+        Some(Event::Mouse { button: 0, x: 1, y: 7 }),
+        "the left click keeps its button"
+    );
+    reader.join().ok();
+}
+
+
