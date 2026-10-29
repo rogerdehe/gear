@@ -120,6 +120,35 @@ fn shell_quote(path: &str) -> String {
     format!("'{}'", path.replace('\'', r"'\''"))
 }
 
+/// The prefix of every seat's environment line (T-420): the seat's own scratch
+/// directory, made and exported as `TMPDIR` as one shell command, so every
+/// temp file of the seat — pi, codex, claude, cargo and the OS temp API all
+/// read `TMPDIR` — lands there and never in the system temp directory. The
+/// worktree default is ignored by the repository it belongs to, so it never
+/// shows up as an uncommitted path. `None` = the seat has neither a project
+/// scratch dir nor a worktree, so there is nothing to point it at.
+pub(crate) fn tmpdir_prefix(
+    conventions: &gear_app::config::Conventions,
+    project: &str,
+    seat: &str,
+    worktree: Option<&str>,
+) -> Option<String> {
+    let scratch = scratch_dir(conventions, project, seat, worktree)?;
+    if conventions
+        .scratch_dir
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        if let Some(worktree) = worktree {
+            exclude_gear_dir(worktree);
+        }
+    }
+    let scratch = shell_quote(&scratch);
+    Some(format!("mkdir -p {scratch}; export TMPDIR={scratch}; "))
+}
+
 /// The worktree default scratch (T-413) lives in `<worktree>/.gear/tmp`, so the
 /// repository ignores `.gear/`: the line is appended once to the common dir's
 /// `info/exclude`, which every worktree of the repository shares. A path that
@@ -606,18 +635,12 @@ fn onboard_seat(
         })
         .map_err(|e| format!("worktree path: {}", e.detail))?;
 
-    // 3a. the seat's scratch directory (T-413): the project's
+    // 3a. the seat's scratch directory (T-413, T-420): the project's
     //    `[conventions].scratch_dir` when it names one, else the lane's own
-    //    worktree. The line comes first, so every temp file of the seat —
-    //    pi, codex, claude, cargo and the OS temp API all read `TMPDIR` — lands
+    //    worktree. The line comes first, so every temp file of the seat lands
     //    there and never in the system temp directory.
-    if let Some(scratch) = scratch_dir(&config.conventions, &seat.project, &seat.name, Some(&created.path)) {
-        let scratch = shell_quote(&scratch);
-        plan.env_command =
-            format!("mkdir -p {scratch}; export TMPDIR={scratch}; {}", plan.env_command);
-        if config.conventions.scratch_dir.as_deref().map(str::trim).unwrap_or("").is_empty() {
-            exclude_gear_dir(&created.path);
-        }
+    if let Some(prefix) = tmpdir_prefix(&config.conventions, &seat.project, &seat.name, Some(&created.path)) {
+        plan.env_command = format!("{prefix}{}", plan.env_command);
     }
 
     // 3b. the pane must be a shell. A seat retried while its agent still runs
