@@ -1,7 +1,7 @@
 //! Contract for gear_app::config (T-7). Pure: no store, no Herdr.
 
 use gear_app::config::{
-    parse, validate, ConfigIssue, Conventions, Models, QuotaPolicy, Repo, Timing,
+    parse, validate, ConfigIssue, Conventions, Models, QuotaPolicy, Repo, Timing, WaitPolicy,
 };
 use gear_model::ErrorCode;
 
@@ -234,6 +234,19 @@ fn models_parse_with_defaults() {
     assert_eq!(cfg.models.quota_reset_h, 4);
     assert!(cfg.lanes[0].models.is_empty());
     assert_eq!(parse(&format!("{MINIMAL}\n[models]\non_quota = {{ lanes = \"later\" }}\n")).unwrap_err().code, ErrorCode::BadFormat);
+}
+
+#[test]
+fn wait_policy_parses_and_defaults_to_keep() {
+    // T-325: without `on_wait` a parked lane keeps its agent.
+    let cfg = parse(&format!("{MINIMAL}{MODELS}")).unwrap();
+    assert_eq!(cfg.models.on_wait, WaitPolicy::Keep);
+    let cfg = parse(&format!("{MINIMAL}\n[models]\non_wait = \"release\"\n")).unwrap();
+    assert_eq!(cfg.models.on_wait, WaitPolicy::Release);
+    assert_eq!(
+        parse(&format!("{MINIMAL}\n[models]\non_wait = \"sometimes\"\n")).unwrap_err().code,
+        ErrorCode::BadFormat
+    );
 }
 
 #[test]

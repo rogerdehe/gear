@@ -454,6 +454,18 @@ pub enum QuotaPolicy {
     Wait,
 }
 
+/// What happens to a lane's agent while it is parked on a long quota wait
+/// (T-325): keep the agent, or release it until the reset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WaitPolicy {
+    /// The agent stays; it waits out the quota in its pane.
+    #[default]
+    Keep,
+    /// The agent exits until the reset; its worktree and session are kept.
+    Release,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct OnQuota {
@@ -471,6 +483,8 @@ pub struct Models {
     pub review: Vec<ModelEntry>,
     pub captain: Vec<ModelEntry>,
     pub on_quota: OnQuota,
+    /// What a lane parked on a long quota wait does with its agent (T-325).
+    pub on_wait: WaitPolicy,
     pub quota_reset_h: u32,
     /// How a model is found in its CLI's model picker and recognised on the
     /// status bar, keyed by the model id (T-33): `[models.switch."<id>"]`
@@ -651,6 +665,7 @@ impl Default for Models {
             review: Vec::new(),
             captain: Vec::new(),
             on_quota: OnQuota::default(),
+            on_wait: WaitPolicy::default(),
             quota_reset_h: 5,
             switch: BTreeMap::new(),
         }

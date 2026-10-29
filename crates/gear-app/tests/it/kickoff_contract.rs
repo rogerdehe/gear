@@ -227,6 +227,24 @@ fn a_role_with_one_model_waits_instead_of_falling_back() {
     );
 }
 
+/// T-325: the skeleton asks the wait policy once, and its default is `keep`:
+/// a lane parked on a quota wait keeps its agent unless the user says otherwise.
+#[test]
+fn the_skeleton_asks_the_wait_policy_and_keeps_the_agent() {
+    let text = kickoff::skeleton(&inventory());
+    let config = gear_app::config::parse(&text).expect("the skeleton is valid gear.toml");
+
+    assert!(
+        text.contains("on_wait = \"keep\""),
+        "{text}"
+    );
+    assert_eq!(config.models.on_wait, gear_app::config::WaitPolicy::Keep);
+    // Right after the quota policy, so the two are read together.
+    let lines: Vec<&str> = text.lines().collect();
+    let quota = lines.iter().position(|l| l.starts_with("on_quota = ")).unwrap();
+    assert!(lines[quota + 1].starts_with("on_wait = \"keep\""), "{}", lines[quota + 1]);
+}
+
 /// T-42: the skeleton's header tells the user how to register the config:
 /// the `gear/` path the README and the captain guide use, and no `GEAR_DB`
 /// (the store has a default).
