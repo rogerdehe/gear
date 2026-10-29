@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=755 -->
+<!-- gear-plan project=gear base=756 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -130,8 +130,8 @@ eta: 21h
 - station M-5558: keep course 1020 min in, 37 left; T-415's merge conflicts with T-411 in board_contract.rs: back to mast as a 10 min rework
 - 2026-10-29 04:42 scope: v0.5.0 is cut with the S1 tasks merged when T-366 hands in; the S1 tasks still queued (T-376, T-380, T-386, T-400, T-401, T-402, T-406, T-407, T-413, T-415, T-419) are listed in v0.5.1's notes | why: done clause (5), a release at each station, and S1's tail sits deep in hull's queue | else: v0.5.0 waits until near the voyage's end
 - station M-5569: keep course 1029 min in, 126 done, 36 left; reviews remain the wait
-- 2026-10-29 04:50 scope: T-419 becomes scripts/build-slot.sh, as agreed with the other project's captain: N divides the free cores by the build-slot runs alive on the machine (both projects run through the same script, so a burst of eight sees eight), with the memory clamps; it moves to S2 (v0.5.1), v0.5.0 being cut now
-- 2026-10-29 04:56 scope: T-419 takes the other captain's three fixes: a nested run passes through (BUILD_SLOT), the running count is the larger of two samples 400 ms apart, GOMAXPROCS is cores / N so Go's -p times -parallel stays at the core count
+- 2026-10-29 04:47 scope: T-419 becomes scripts/build-slot.sh, as agreed with the other project's captain: N divides the free cores by the build-slot runs alive on the machine (both projects run through the same script, so a burst of eight sees eight), with the memory clamps; it moves to S2 (v0.5.1), v0.5.0 being cut now
+- 2026-10-29 04:50 scope: T-419 takes the other captain's three fixes: a nested run passes through (BUILD_SLOT), the running count is the larger of two samples 400 ms apart, GOMAXPROCS is cores / N so Go's -p times -parallel stays at the core count
 
 
 # Queue
