@@ -2120,6 +2120,10 @@ pub fn run_with(
     // walks through them.
     let mut shown = 0usize;
     let mut first = true;
+    // The voyage the whole board shows (T-357): the one the options name, else
+    // the measured one. `[`, `]` and a click on a label pick another, and every
+    // frame is built with the pick.
+    let mut milestone: Option<String> = opts.milestone.clone();
     // The board that was built last, and what it was built from (T-384). The
     // whole board is kept: a refresh that finds nothing changed redraws it
     // instead of building it again, and a key that only moves the selection,
@@ -2158,7 +2162,8 @@ pub fn run_with(
             || version != kept_version
             || at.duration_since(built_at) >= hook::stale_after();
         if stale {
-            match build_with_agents(store, opts, now_ts(), agents.as_deref()) {
+            let shown_opts = Options { milestone: milestone.clone(), ..opts.clone() };
+            match build_with_agents(store, &shown_opts, now_ts(), agents.as_deref()) {
                 Ok(mut board) => {
                     // The frame draws the shown project: the project the board
                     // was opened with is the only one then, and every other
@@ -2305,6 +2310,35 @@ pub fn run_with(
                     panel = None;
                     break;
                 }
+                // `[` and `]` pick the voyage the whole board shows (T-357):
+                // the list is newest first, so `[` goes one entry older and `]`
+                // one newer, and the oldest and the newest voyage stay where
+                // they are.
+                Event::Key(character @ ('[' | ']')) => {
+                    let picked = kept.as_ref().and_then(|board| {
+                        let project = board.projects.first()?;
+                        let shown = project.shown.as_ref()?.milestone.as_str();
+                        let index = project
+                            .voyage_list
+                            .iter()
+                            .position(|entry| entry.milestone == shown)?;
+                        let next = if character == '[' {
+                            (index + 1).min(project.voyage_list.len() - 1)
+                        } else {
+                            index.saturating_sub(1)
+                        };
+                        project.voyage_list.get(next).map(|entry| entry.milestone.clone())
+                    });
+                    if let Some(picked) = picked {
+                        milestone = Some(picked);
+                        screen.selected = 0;
+                        panel = None;
+                        // The kept board shows another voyage: the next frame
+                        // is built for the pick.
+                        kept = None;
+                        break;
+                    }
+                }
                 // The `d` key unfolds the header and folds it again (T-354):
                 // the tab and the selection stay where they were.
                 Event::Key('d') | Event::Key('D') => {
@@ -2379,7 +2413,24 @@ pub fn run_with(
                     // (T-353).
                     let column = x.saturating_sub(1) as usize;
                     let row = y.saturating_sub(1) as usize;
-                    if row == layout.tab_row {
+                    if row == 0 {
+                        // A click on a voyage's label on the first row picks
+                        // that voyage (T-357): the whole board shows it.
+                        let picked = layout
+                            .voyages
+                            .iter()
+                            .find(|(first, last, _)| column >= *first && column <= *last)
+                            .map(|(_, _, named)| named.clone());
+                        if let Some(picked) = picked {
+                            milestone = Some(picked);
+                            screen.selected = 0;
+                            panel = None;
+                            // The kept board shows another voyage: the next
+                            // frame is built for the pick.
+                            kept = None;
+                            break;
+                        }
+                    } else if row == layout.tab_row {
                         let picked = layout
                             .tabs
                             .iter()
