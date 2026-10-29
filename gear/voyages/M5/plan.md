@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=732 -->
+<!-- gear-plan project=gear base=733 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -113,6 +113,7 @@ eta: 16h
 - 2026-10-29 07:10 hand-fix: the system disk filled (1 GB free): the captain deleted rebuildable caches, test temp directories older than an hour and another project's scratch copies in /tmp older than two hours on the user's order; a new task at the front of hull moves our test temp files off the system disk
 - 2026-10-29 07:40 scope: this machine's TMPDIR now points at the data disk (shell profile, pi setting, launchd), so T-413 (GEAR sets each seat's TMPDIR, for every user's machine) moves behind T-402 on hull; T-412 (tests delete their temp folders, lanes never write /tmp) stays first
 - station M-5422: keep course 840 min in; hull 348 min and mast 257 min against 120 left; T-409, T-401 and T-402 move to mast, which fills the board chain's review waits with them
+- 2026-10-29 08:00 staff: mast sat idle about 40 min holding T-367 after reporting it blocked on T-366 (the engine kept the attempt open, so no next task came); T-367 moves to hull, which closes mast's attempt; it starts after T-366 merges. The blocked report not freeing the lane goes to the M6 backlog
 
 # Queue
 
@@ -866,7 +867,7 @@ accept: The README holds the table with every row above and each label replaced 
 deps: T-358
 estimate: 10
 
-## T-367 [must] lane=mast milestone=M5 required
+## T-367 [must] lane=hull milestone=M5 required
 goal: [v0.5.1 S2] Release v0.5.1, station S2 of M5. Change, no other design: (1) the version is 0.5.1 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.5.1.md, in the form of docs/releases/v0.4.10.md: one line per task of station S2 merged since the previous release (its T-number and what it changed for a user, from its goal), then "Skill" with what the release review changed in skills/ (the captain adds that text to this contract before the task starts; "nothing" when nothing changed). The captain merges dev into main, tags v0.5.1 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.5.1"; docs/releases/v0.5.1.md lists every merged S2 task. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
 deps: T-366, T-272, T-273, T-275, T-323, T-324, T-325, T-326, T-327, T-328, T-338

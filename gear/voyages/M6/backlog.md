@@ -45,3 +45,6 @@
 
 ## A repeated confirmed goal/bar/eta change records no second decision
 - 2026-10-29 M5 (T-410 review F1): the decision key in plan.rs record_voyages holds only project, milestone, field and the old and new text, so the same confirmed transition a second time in one voyage is skipped by insert_decision_if_new. Add the plan version to the key and a test with three confirmed transitions.
+
+## A lane that reports blocked keeps its task and gets nothing else
+- 2026-10-29 M5: mast reported T-367 blocked on T-366 (`gear send --kind blocked --on T-366`) and then sat idle about 40 minutes: the attempt stayed Started, so the engine assigned no next task. A blocked report with `--on` should park the attempt and free the lane for its next startable task, and the captain should hear when a lane is idle with queued work.
