@@ -3,7 +3,6 @@
 //! home page keeps the older rule — a task of a landed voyage that still waits
 //! for work is a decision the captain owes.
 
-use gear_board::frame::token_tasks;
 use gear_model::{AttemptState, SeatRole, TaskState};
 use gear_store::{testing, AttemptRow, AttemptStep, Store, TaskRow, VoyageRow};
 
@@ -138,8 +137,14 @@ fn the_board_counts_and_works_the_current_voyage_only() {
     // The two M2 tasks; the done task of the landed M1 voyage is history.
     assert_eq!(plan.totals.tasks, 2, "the tasks of M2: {:?}", plan.totals);
     assert_eq!(plan.totals.done, 1);
-    // The Time & tokens view lists no task of M1.
-    let listed: Vec<&str> = token_tasks(&plan).iter().map(|(_, task)| task.id.as_str()).collect();
+    // The Cost view's rows are the lanes' own tasks (T-363): no task of M1.
+    let listed: Vec<&str> = plan
+        .lanes
+        .iter()
+        .flat_map(|lane| lane.tasks.iter())
+        .filter(|task| task.actual_min.unwrap_or(0) > 0)
+        .map(|task| task.id.as_str())
+        .collect();
     assert!(!listed.contains(&"T-1"), "no task of the landed voyage: {listed:?}");
     assert!(listed.contains(&"T-2"), "the measured task of M2: {listed:?}");
     // Nor does the lane line.
