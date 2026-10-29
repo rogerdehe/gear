@@ -21,6 +21,10 @@ pub enum Event {
     Left,
     /// The arrow right.
     Right,
+    /// The page up (T-411): the selection moves up a screenful.
+    PageUp,
+    /// The page down (T-411): the selection moves down a screenful.
+    PageDown,
     /// The shift-tab (the tab before).
     BackTab,
     /// A click (the SGR mouse): the button (0 = the left one) and the
@@ -92,14 +96,21 @@ impl Keys for Terminal {
         // An escape: the arrows, the shift-tab and the mouse.
         let rest = self.read_sequence()?;
         match rest.as_bytes().first() {
-            Some(b'[') => match rest.as_bytes().get(1) {
-                Some(b'A') => Some(Event::Up),
-                Some(b'B') => Some(Event::Down),
-                Some(b'C') => Some(Event::Right),
-                Some(b'D') => Some(Event::Left),
-                Some(b'Z') => Some(Event::BackTab),
-                Some(b'<') => mouse_event(&rest),
-                _ => Some(Event::Key('\u{1b}')),
+            // The page keys end with `~` (T-411): `[5~` is the page up and
+            // `[6~` the page down. The mouse keeps its own sequence: the wheel
+            // arrives as the SGR buttons 64 and 65.
+            Some(b'[') => match rest.as_str() {
+                "[5~" => Some(Event::PageUp),
+                "[6~" => Some(Event::PageDown),
+                _ => match rest.as_bytes().get(1) {
+                    Some(b'A') => Some(Event::Up),
+                    Some(b'B') => Some(Event::Down),
+                    Some(b'C') => Some(Event::Right),
+                    Some(b'D') => Some(Event::Left),
+                    Some(b'Z') => Some(Event::BackTab),
+                    Some(b'<') => mouse_event(&rest),
+                    _ => Some(Event::Key('\u{1b}')),
+                },
             },
             _ => Some(Event::Key('\u{1b}')),
         }
@@ -143,8 +154,8 @@ impl Terminal {
                 break;
             }
             out.push(byte[0] as char);
-            // The mouse sequence ends with M or m.
-            if byte[0] == b'M' || byte[0] == b'm' {
+            // The mouse sequence ends with M or m, the page keys with `~`.
+            if byte[0] == b'M' || byte[0] == b'm' || byte[0] == b'~' {
                 break;
             }
             // The arrows and the shift-tab end after their last letter.

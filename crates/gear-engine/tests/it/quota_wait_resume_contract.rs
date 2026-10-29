@@ -73,8 +73,8 @@ quota_reset_h = 1
 /// The engine's configuration: the built-ins (pi among them) and a scratch db.
 fn cfg() -> EngineCfg {
     let mut cfg = EngineCfg {
-        db_path: std::env::temp_dir()
-            .join(format!("gear-engine-tests-{}/gear.db", std::process::id()))
+        db_path: crate::temp("gear-engine-tests")
+            .join("gear.db")
             .to_string_lossy()
             .into_owned(),
         ..Default::default()

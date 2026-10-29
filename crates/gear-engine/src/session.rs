@@ -1295,7 +1295,7 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
 
     /// An engine that knows the codex profile.
     fn cfg() -> EngineCfg {
-        let mut cfg = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
+        let mut cfg = EngineCfg { db_path: crate::testtmp::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
         cfg.profiles
             .insert("codex".to_string(), gear_herdr::builtin("codex").unwrap());
         cfg
