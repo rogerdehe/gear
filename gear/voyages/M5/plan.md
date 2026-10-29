@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=649 -->
+<!-- gear-plan project=gear base=650 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -770,3 +770,8 @@ goal: [v0.5.0 S1] The review packet names the diff against the remote integratio
 accept: review.rs tests: the review packet with the default config contains "git fetch origin && git diff origin/dev...<candidate>"; with `remote = "upstream"` it names upstream; the existing packet tests pass after their expected text follows. Run only `make check CRATE=gear-engine`; the merge gate runs `make gate`.
 deps: T-376
 estimate: 15
+
+## T-382 [must] lane=mast milestone=M5 required
+goal: [v0.5.0 S1] The lane rules say never to format a whole crate (F-140, T-306: `cargo fmt -p gear-app` rewrote every file of the crate, because the tree is not rustfmt-clean and neither `make check` nor the gate runs a format check; the lane had to revert and redo its change). Text change only, exactly this: skills/gear/references/rules/lane.md, after the `git stash` line T-374 added: "- Never run `cargo fmt` on a crate or the workspace: this tree is not rustfmt-clean, so it rewrites files you did not touch. Keep the style of the lines around yours by hand." The code change is this file only.
+accept: The lane rules print the line; the skill topic tests pass. Run only `make check CRATE=gear-app`; the merge gate runs `make gate`.
+estimate: 10
