@@ -358,8 +358,8 @@ fn a_long_lane_name_never_moves_the_text_columns() {
     let decisions = frame(&board, &crate::screen(Tab::Log, 0, size), None);
     let long = line_with(&decisions, "friction of rewrite");
     let short = line_with(&decisions, "friction of hull");
-    assert!(long.contains("T-2 rewrite open"), "{decisions}");
-    assert_eq!(column(long, "open"), column(short, "open"), "{decisions}");
+    assert!(long.contains("T-2 rewrite unread"), "{decisions}");
+    assert_eq!(column(long, "unread"), column(short, "unread"), "{decisions}");
 
     // Cost: the lane names are padded to one width, so the estimates line up
     // under their heading whichever lane the row names.

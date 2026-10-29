@@ -692,103 +692,89 @@ fn view_tasks(
     picks.into_iter().map(|(at, _)| at).collect()
 }
 
-/// The fourth view: the captain's decisions (★ = worth a look at landing) and
-/// the agents' friction reports (the prototype).
+/// The fourth view: the log (README change 10) — what changed the course, then
+/// every decision and the agents' friction reports (the prototype).
+///
+/// The user found M4's log a wall of text, so the starred decisions — the ones
+/// that changed the course — come first as a summary, and the full list below
+/// it holds every decision, its reason under it; the friction reports close the
+/// view.
 fn view_decisions(
     project: &ProjectBoard,
     screen: &Screen,
     canvas: &mut Canvas,
     top: usize,
 ) -> Vec<usize> {
-    canvas.put_line(
-        0,
-        top,
-        &Line::styled("DECISIONS MADE  (★ = worth a look at landing)", Style::bold()),
-    );
-    let mut picks = Vec::new();
+    canvas.put_styled(1, top, "WHAT CHANGED THE COURSE  (★)", Style::bold());
     let mut row = top + 1;
-    // The starred decisions are the ones the user reads in full (F1): the
-    // others are counted by kind below.
+    // The starred decisions are the ones that changed the course: the summary
+    // the user reads first. A voyage that changed nothing says so.
     let starred: Vec<&crate::DecisionBoard> =
         project.decisions.iter().filter(|decision| decision.star).collect();
-    for (index, decision) in starred.iter().enumerate() {
-        let picked = index == screen.selected;
-        canvas.put_line(
-            0,
-            row,
-            &mark(picked)
-                .push(" ", Style::PLAIN)
-                .push(
-                    format!("{} ★ {:<9}", clock_of(&decision.at), decision.kind),
-                    Style::fg(Color::Warn),
-                )
-                .push(" ", Style::PLAIN)
-                .push(decision.what.clone(), Style::PLAIN),
-        );
-        // The decision is what the selection moves over; its reason is not.
-        picks.push(row);
+    if starred.is_empty() {
+        canvas.put_styled(3, row, "nothing", Style::fg(Color::Dim));
         row += 1;
+    }
+    for decision in &starred {
+        canvas.put_styled(
+            3,
+            row,
+            &format!("{} ★ {}", clock_of(&decision.at), decision.what),
+            Style::fg(Color::Warn),
+        );
+        row += 1;
+    }
+    // The full list: every decision is a pick, its reason is not.
+    row += 1;
+    canvas.put_styled(
+        1,
+        row,
+        &format!("ALL DECISIONS ({})", project.decisions.len()),
+        Style::bold(),
+    );
+    let mut picks = Vec::new();
+    for (index, decision) in project.decisions.iter().enumerate() {
+        row += 1;
+        let picked = index == screen.selected;
+        canvas.put_styled(1, row, if picked { "›" } else { " " }, Style::fg(Color::Acc));
+        canvas.put_styled(
+            3,
+            row,
+            &format!(
+                "{} {} {:<9}",
+                clock_of(&decision.at),
+                if decision.star { '★' } else { ' ' },
+                decision.kind
+            ),
+            if decision.star { Style::fg(Color::Warn) } else { Style::PLAIN },
+        );
+        canvas.put_styled(22, row, &decision.what, Style::PLAIN);
+        picks.push(row);
         // The reason stands on its own line, as the prototype draws it: a
         // decision line with the reason appended loses it on a narrow screen
         // (F2).
         if let Some(why) = &decision.why {
-            canvas.put_line(
-                0,
-                row,
-                &Line::plain(format!("{:22}", ""))
-                    .push(format!("why: {why}"), Style::fg(Color::Dim)),
-            );
             row += 1;
+            canvas.put_styled(22, row, &format!("why: {why}"), Style::fg(Color::Dim));
         }
-    }
-    // The count of the decisions by kind (§7.2): the landing review shows it
-    // next to the starred lines.
-    if !project.decisions.is_empty() {
-        row += 1;
-        canvas.put_line(0, row, &Line::plain(format!("by kind: {}", counts_of_kind(project))));
-        row += 1;
     }
     // The friction reports the agents left (§6.1): an open one is unread.
-    row += 1;
-    canvas.put_line(0, row, &Line::styled("FRICTION REPORTS FROM AGENTS", Style::bold()));
-    row += 1;
-    let width = lane_width(project.frictions.iter().map(|friction| friction.lane.as_str()), 6, 1);
+    row += 2;
+    canvas.put_styled(1, row, "FRICTION REPORTS FROM AGENTS", Style::bold());
     for friction in &project.frictions {
-        let (status, color) =
-            if friction.closed { ("closed", Color::Dim) } else { ("open", Color::Warn) };
-        canvas.put_line(
-            0,
-            row,
-            &Line::plain("  ")
-                .push(
-                    format!("{} {:<width$}", friction.task, friction.lane),
-                    lane_style(project, &friction.lane),
-                )
-                .push(format!("{status:<8}"), Style::fg(color))
-                .push(friction.body.clone(), Style::PLAIN),
-        );
         row += 1;
+        canvas.put_styled(
+            3,
+            row,
+            &format!("{} {:<5}", friction.task, friction.lane),
+            lane_style(project, &friction.lane),
+        );
+        let (status, color) =
+            if friction.closed { ("read", Color::Dim) } else { ("unread", Color::Warn) };
+        canvas.put_styled(15, row, &format!("{status:<7}"), Style::fg(color));
+        canvas.put_styled(23, row, &friction.body, Style::PLAIN);
     }
     picks
-}
-
-/// The decisions of the project that are not starred, by kind: `2 scope, 1 cut`.
-///
-/// The starred ones are read in full above; this is the count of the others
-/// (§7.2).
-fn counts_of_kind(project: &ProjectBoard) -> String {
-    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
-    for decision in &project.decisions {
-        if decision.star {
-            continue;
-        }
-        *counts.entry(decision.kind.as_str()).or_default() += 1;
-    }
-    counts
-        .into_iter()
-        .map(|(kind, count)| format!("{count} {kind}"))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// The colour of a ratio of the actual time to the estimate.
