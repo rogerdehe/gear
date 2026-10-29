@@ -166,25 +166,25 @@ fn column(line: &str, needle: &str) -> usize {
 }
 
 #[test]
-fn a_task_over_its_estimate_has_a_yellow_bar() {
+fn a_task_over_its_estimate_is_red() {
     let board = board();
     let screen = canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
     let text = screen.text();
-    // T-2 has run 60 of its 30 minutes: the bar is full and yellow.
-    let (row, x) = find(&text, "██████████ 60/30m");
-    assert_eq!(screen.style_at(x, row).fg, Some(Color::Warn), "{text}");
+    // T-2 has run 60 of its 30 minutes: its TIME is full red and carries the
+    // warning mark (T-359).
+    let (row, x) = find(&text, "60/30m ⚠");
+    assert_eq!(screen.style_at(x, row).fg, Some(Color::Bad), "{text}");
     let ansi = screen.ansi(true);
-    let end = ansi.find("██████████ 60/30m\u{1b}[0m").expect("the bar ends its yellow run");
-    assert!(ansi[..end].rfind("\u{1b}[") == ansi[..end].rfind("\u{1b}[33m"), "{ansi:?}");
+    let end = ansi.find("60/30m ⚠\u{1b}[0m").expect("the time ends its red run");
+    assert!(ansi[..end].rfind("\u{1b}[") == ansi[..end].rfind("\u{1b}[31m"), "{ansi:?}");
     // The heading of what needs a look is yellow and bold.
     let (row, x) = find(&text, "NEEDS A LOOK");
     assert_eq!(screen.style_at(x, row), Style::fg(Color::Warn).and_bold());
-    // A lane name is bold, in its lane colour (the first lane is cyan).
-    let (row, x) = find(&text, "› hull");
-    assert_eq!(screen.style_at(x, row).fg, Some(Color::Acc));
-    // The selected row is lit across the width (README change 13): the lane
-    // name's own colour is not drawn on it.
-    assert_eq!(screen.style_at(x + 2, row), Style { fg: None, bold: false, reverse: true });
+    // An unselected lane's name is bold, in its lane colour (the second lane
+    // is magenta); the mark before it stays accent-coloured, even on a space.
+    let (row, _) = find(&text, "T-2 Give internal");
+    assert_eq!(screen.style_at(1, row), Style::fg(Color::Acc));
+    assert_eq!(screen.style_at(3, row), Style::fg(Color::Mag).and_bold());
 }
 
 #[test]
@@ -195,7 +195,7 @@ fn the_selected_row_is_lit_across_the_width_in_one_colour() {
     let screen_of = crate::screen(Tab::Now, 1, size);
     let screen = canvas(&board, &screen_of, None);
     let text = screen.text();
-    let (row, _) = find(&text, "› rewrite");
+    let (row, _) = find(&text, "T-2 Give internal");
     let lit = Style { fg: None, bold: false, reverse: true };
     for column in 1..size.0 - 1 {
         assert_eq!(screen.style_at(column, row), lit, "column {column} of the lit row: {text}");
@@ -334,12 +334,15 @@ fn a_long_lane_name_never_moves_the_text_columns() {
     let head = line_with(&graph, "dev");
     assert!(head.contains("rewrit") && head.contains("hull"), "{head:?}");
 
-    // Now: the middle column starts at the same place for both lanes.
+    // Now: the table's NOW DOING column starts at column 9 for every lane,
+    // whatever the name: a name longer than five cells runs into it and is cut
+    // by the task there, as the prototype paints it (T-359).
     let now = frame(&board, &crate::screen(Tab::Now, 0, size), None);
-    assert!(now.contains("rewrite T-2 Give internal"), "{now}");
-    let long = line_with(&now, "rewrite T-2");
-    let short = line_with(&now, "› hull");
-    assert_eq!(column(long, "T-2"), column(short, "hull") + "rewrite".len() + 1, "{now}");
+    assert!(now.contains("rewritT-2 Give internal"), "{now}");
+    let long = line_with(&now, "T-2 Give internal");
+    let short = line_with(&now, "nothing left planned for this lane");
+    assert_eq!(column(long, "T-2 Give internal"), 9, "{now}");
+    assert_eq!(column(short, "nothing left planned for this lane"), 9, "{now}");
 
     // Decisions: the friction's status follows the lane after a space.
     let decisions = frame(&board, &crate::screen(Tab::Log, 0, size), None);
