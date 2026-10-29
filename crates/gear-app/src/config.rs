@@ -379,6 +379,14 @@ pub const BRANCH_MAX_AGE_MIN: u32 = 120;
 /// branches rot, and the captain is told to clean up.
 pub const BRANCH_MAX_PER_LANE: u32 = 3;
 
+/// The default no-push clock in minutes: a lane working this long without a
+/// push to its task branch is asked why.
+pub const PUSH_INTERVAL_MIN: u32 = 20;
+
+/// The default minutes a lane has to answer that question to the captain;
+/// no answer in time is reported to the captain as a lane in trouble.
+pub const PUSH_REPLY_MIN: u32 = 10;
+
 /// Defaults: integration "dev", release "main", staging "" (none), review_max_rounds 3,
 /// max_task_min 60, the branches GEAR itself uses (T-252), gate "" (none: a
 /// project names its own gate, T-255).
@@ -399,6 +407,12 @@ pub struct Conventions {
     /// The open voyages' task branches on the remote may number at most
     /// lanes × this; more are named to the captain. Default 3.
     pub branch_max_per_lane: u32,
+    /// A lane working this many minutes without a push is asked to tell the
+    /// captain why. Default 20.
+    pub push_interval_min: u32,
+    /// The minutes the lane has for that answer; without it the captain is
+    /// told the lane is in trouble. Default 10.
+    pub push_reply_min: u32,
     /// What the engine runs in its integration worktree after a merge, before
     /// it pushes (T-12). No default (T-255): GEAR cannot know another stack's
     /// build + test command, so the project names its own — a `[[repos]]`
@@ -446,6 +460,8 @@ impl Default for Conventions {
             max_task_min: MAX_TASK_MIN,
             branch_max_age_min: BRANCH_MAX_AGE_MIN,
             branch_max_per_lane: BRANCH_MAX_PER_LANE,
+            push_interval_min: PUSH_INTERVAL_MIN,
+            push_reply_min: PUSH_REPLY_MIN,
             gate: String::new(),
             task_branch: gear_model::branch::TASK_BRANCH.to_string(),
             review_branch: gear_model::branch::REVIEW_BRANCH.to_string(),
@@ -913,6 +929,18 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         issues.push(issue(
             "conventions.branch_max_per_lane",
             format!("must be at least one (the default is {BRANCH_MAX_PER_LANE})"),
+        ));
+    }
+    if cfg.conventions.push_interval_min == 0 {
+        issues.push(issue(
+            "conventions.push_interval_min",
+            format!("must be at least one minute (the default is {PUSH_INTERVAL_MIN})"),
+        ));
+    }
+    if cfg.conventions.push_reply_min == 0 {
+        issues.push(issue(
+            "conventions.push_reply_min",
+            format!("must be at least one minute (the default is {PUSH_REPLY_MIN})"),
         ));
     }
     for (model, price) in &cfg.prices {

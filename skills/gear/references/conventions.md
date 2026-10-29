@@ -115,6 +115,8 @@ gate = "make test"      # the project's own build + test, run before every merge
 max_task_min = 60       # no task is planned longer than this; a plan that asks for more is refused
 branch_max_age_min = 120  # a task branch older than this is named to the captain
 branch_max_per_lane = 3   # more than lanes × this open-voyage task branches is named to the captain
+push_interval_min = 20    # a lane this long without a push is asked to tell the captain why
+push_reply_min = 10       # its time to answer; no answer is an urgent item to the captain
 ```
 
 `max_task_min` (default 60) caps a task's `estimate:`: a lane works unattended and is reviewed only at its hand-in, so a task of hours is a stretch nobody checks and one wrong turn costs all of it — bigger work is cut into tasks of at most `max_task_min`, each with its own test cycle (`gear --skill decompose` §1 rule 5). A rework estimate (`estimate=` on a fail verdict) is not capped.
