@@ -230,17 +230,13 @@ impl Probe {
 
     /// A step begins: a step this op already began (an engine restart in the
     /// middle of it) keeps that durable beginning; every other one starts now.
+    /// A retry of a step that already ended gets a new boundary, or it would
+    /// carry the first attempt's time (F1 of the T-407 review).
     fn begin(&mut self, name: &str) {
         if self.kept.iter().any(|(step, _, end)| step == name && end.is_none()) {
             return;
         }
-        let begin = self
-            .kept
-            .iter()
-            .find(|(step, _, _)| step == name)
-            .map(|(_, begin, _)| *begin)
-            .unwrap_or_else(now_ms);
-        self.kept.push((name.to_string(), begin, None));
+        self.kept.push((name.to_string(), now_ms(), None));
         self.save();
     }
 
@@ -6783,6 +6779,39 @@ gate = "{project_gate}"
         assert_eq!(kept[0].0, "fetch");
         assert_eq!(kept[0].1, began, "the beginning is the durable one");
         assert!(kept[0].2.is_some(), "and the step has its end now: {kept:?}");
+    }
+
+    /// F1 of the T-407 review: a retry starts a new boundary for a step
+    /// whose earlier boundary ended, so each attempt's step time is its own —
+    /// not the time since the first attempt's fetch began.
+    #[test]
+    fn a_retried_step_logs_its_own_time() {
+        // The durable record of an earlier attempt: fetch began at 1000 ms and
+        // ended at 1200 ms (the reviewer's numbers). The retry reopens it.
+        let mut probe = Probe {
+            task: "T-9073".into(),
+            started_ms: 500,
+            kept: vec![("fetch".into(), 1000, Some(1200))],
+            store: None,
+        };
+        probe.begin("fetch");
+        let retry = probe
+            .kept
+            .iter()
+            .find(|(step, begin, end)| step == "fetch" && end.is_none() && *begin > 1200)
+            .unwrap_or_else(|| panic!("the retry has its own boundary: {:?}", probe.kept));
+        assert!(retry.1 > 1200, "the retry starts now, not at the ended boundary");
+        probe.step("fetch");
+        let line = crate::ops::probe_log()
+            .into_iter()
+            .find(|line| line.starts_with("probe merge T-9073 fetch "))
+            .expect("the retry's fetch line");
+        let ms: i64 = line.split_whitespace().nth(4).unwrap().parse().unwrap();
+        // Its own time (a few milliseconds), not the 1000 ms between the first
+        // attempt's beginning and now.
+        assert!((0..5_000).contains(&ms), "the retry's fetch reads its own time: {line}");
+        // The earlier attempt keeps its completed boundary.
+        assert_eq!(probe.kept.iter().filter(|(step, _, _)| step == "fetch").count(), 2);
     }
 
     /// T-296: with the default template the merge commits read exactly as they

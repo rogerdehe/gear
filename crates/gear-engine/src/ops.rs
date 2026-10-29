@@ -452,10 +452,24 @@ pub fn execute_intended(
             // types the text and sends the Enter in one call, so the typed
             // step runs from the op's intent to now and the Enter's own step
             // is the same instant (0 ms) — its boundary is logged all the same.
-            if let (Prepared::Run { probe: Some((task, created)), .. }, OpState::Submitted) = (item, state) {
-                let typed = ms(now.saturating_sub(*created));
-                probe("deliver", task, "typed", typed, typed);
-                probe("deliver", task, "enter", 0, typed);
+            // A delivery that fails while it is aimed (the agent is gone, or
+            // Herdr refuses it) finishes at once: its own `failed` and `done`
+            // lines, from the op's durable intent, as a confirmed one's (F2 of
+            // the T-407 review).
+            if let (Prepared::Run { probe: Some((task, created)), .. }, _) = (item, state) {
+                match state {
+                    OpState::Submitted => {
+                        let typed = ms(now.saturating_sub(*created));
+                        probe("deliver", task, "typed", typed, typed);
+                        probe("deliver", task, "enter", 0, typed);
+                    }
+                    OpState::Failed => {
+                        let total = ms(now.saturating_sub(*created));
+                        probe("deliver", task, "failed", total, total);
+                        probe("deliver", task, "done", total, total);
+                    }
+                    _ => {}
+                }
             }
             results.push((item.id().to_string(), state.as_str().to_string()));
         }
