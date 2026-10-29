@@ -30,6 +30,31 @@ Now is one table, one row per lane: LANE, NOW DOING, STAGE, TIME (actual/estimat
 
 ENDS and the idle time come from each lane's queue played forward (the engine's run-dry forecast in feed.rs does the same; the board reuses it): a lane is free again when it hands a task in; its next task starts when the lane is free and every task it depends on has merged (hand-in plus the voyage's measured review-and-merge time); durations are the estimate left times the lane's measured pace (actual / estimate of its merged tasks); the gap between free and start is idle time. The board does not print this explanation.
 
+## Change → task
+
+Which task built each change above and each element of the Four views, as the plan names them:
+
+| Change | Task |
+| --- | --- |
+| 1 every voyage | T-350, T-353, T-357 |
+| 2 the goal boxed | T-353, T-358 |
+| 3 every header row says what it is | T-334, T-354, T-355 |
+| 4 time against the plan | T-349, T-354, T-355 |
+| 5 the full width | T-354, T-355, T-359, T-361 |
+| 6 tasks of this voyage only | T-350, T-351, T-354, T-355, T-359 |
+| 7 task stages in words | T-346, T-347 |
+| 8 Tasks as a git graph | T-361, T-362 |
+| 9 workload folded into Now | T-341, T-349, T-359 |
+| 10 Log summary | T-364 |
+| 11 Cost by lane | T-363 |
+| 12 clicks | T-356, T-357 |
+| 13 whole-row selection | T-339, T-342 |
+| 14 folded header | T-354, T-355 |
+| 15 framed tabs | T-356 |
+| Four views / Now table | T-359 |
+| TO HANDLE and quota | T-360 |
+| golden frames | T-276, T-339, T-340, T-343, T-344, T-345 |
+
 ## Golden frames
 
 `python3 gear/voyages/M5/board/prototype.py --golden <dir>` draws the frames without a terminal and writes them to
