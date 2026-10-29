@@ -465,7 +465,7 @@ fn q_leaves_the_board() {
 
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains("GEAR · p"), "{text}");
-    assert!(text.contains("LANES"), "{text}");
+    assert!(text.contains("NOW DOING"), "{text}");
     // The frame is drawn in place (T-403): it opens a synchronized update and
     // never clears the whole screen.
     assert!(text.contains("\x1b[?2026h\x1b[H"), "{text:?}");
@@ -713,7 +713,7 @@ fn every_row_of_the_frame_starts_at_column_zero_in_raw_mode() {
     let text = String::from_utf8_lossy(&captured);
     assert!(text.contains("! engine down"), "{text}");
     assert!(text.contains("GEAR · p"), "{text}");
-    assert!(text.contains("LANES"), "{text}");
+    assert!(text.contains("NOW DOING"), "{text}");
 
     // Every row starts at column zero: the frame does not drift right.
     let rows = row_starts(&captured);
@@ -809,9 +809,11 @@ fn the_board_frame_reads_herdr_and_still_renders_when_observation_fails() {
         run_with(&mut store, &options(), &mut out, &mut keys, Some(&mut herdr)).unwrap();
         let text = String::from_utf8(out).unwrap();
         // The first view shows the lanes; the agent state of the lane is in
-        // the model, and the lane's task is in the frame.
-        assert!(text.contains("LANES"), "{text}");
-        assert!(text.contains("runtime"), "{text}");
+        // the model, and the lane's task is in the frame. A lane name longer
+        // than five cells runs into NOW DOING and is cut by the task there,
+        // as the prototype paints it (T-359).
+        assert!(text.contains("NOW DOING"), "{text}");
+        assert!(text.contains("runtim"), "{text}");
         assert!(expected == "working" || expected == "unknown");
     }
 }
@@ -1254,14 +1256,14 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
 
     // The first frame: the title, the bars, the tabs and the first view.
     let mut frames = Frames { master: pty.master, buffer: String::new() };
-    let frame = frames.next("LANES", Duration::from_secs(5));
+    let frame = frames.next("NOW DOING", Duration::from_secs(5));
     assert!(frame.contains("GEAR · p"), "{frame}");
     assert!(frame.contains("1 Now"), "{frame}");
     assert!(frame.contains("4 Log"), "{frame}");
-    assert!(frame.contains("LANES"), "{frame}");
+    assert!(frame.contains("NOW DOING"), "{frame}");
     // The data of the store is on the frame: the idle reason of a lane, the
     // quota reading and the done sentence.
-    assert!(frame.contains("idle:"), "{frame}");
+    assert!(frame.contains("handed in, waits for a"), "{frame}");
     assert!(frame.contains("minimax-cn"), "{frame}");
     assert!(frame.contains("rework resumes its session"), "{frame}");
     // The head of the board is the prototype's (T-353): the goal box and the
@@ -1283,7 +1285,7 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
 
     // The left arrow moves back.
     press(pty.master, b"\x1b[D");
-    let _frame = frames.next("LANES", Duration::from_secs(5));
+    let _frame = frames.next("NOW DOING", Duration::from_secs(5));
 
     // A click on the Graph tab, where it is drawn, moves to the graph. The
     // click counts from 1: the tab's first column plus one (T-353).
@@ -1294,14 +1296,14 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     // A click on the Now tab, where it is drawn, comes back to the lanes.
     let now = column_of(&frame, head.tab_row, "1 Now") + 1;
     press(pty.master, format!("\x1b[<0;{now};{row}M", row = head.tab_row + 1).as_bytes());
-    let _frame = frames.next("LANES", Duration::from_secs(5));
+    let _frame = frames.next("NOW DOING", Duration::from_secs(5));
 
     // A click on the first row of the first view picks that row, and `Enter`
     // opens its panel. The row is the one the board already shows as picked,
     // and a frame that says what the last one said is not written (T-403):
     // the selection is moved off it first, so the click is a change.
     press(pty.master, b"j");
-    let _frame = frames.next("› runtime", Duration::from_secs(5));
+    let _frame = frames.next("› runtim", Duration::from_secs(5));
     press(pty.master, format!("\x1b[<0;1;{pick_row}M").as_bytes());
     let _frame = frames.next("› data", Duration::from_secs(5));
     press(pty.master, b"\r");
@@ -1314,7 +1316,7 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     press(pty.master, b"x");
     let _frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
     press(pty.master, b"j");
-    let _frame = frames.next("› runtime", Duration::from_secs(5));
+    let _frame = frames.next("› runtim", Duration::from_secs(5));
     press(pty.master, b"j");
     assert!(
         frames.quiet(Duration::from_millis(300)),
@@ -1377,7 +1379,7 @@ fn a_board_without_a_project_shows_them_one_at_a_time() {
 
     // The first frame shows the first project: its name is the first row's.
     let mut frames = Frames { master: pty.master, buffer: String::new() };
-    let frame = frames.next("LANES", Duration::from_secs(5));
+    let frame = frames.next("NOW DOING", Duration::from_secs(5));
     let title = plain(frame.lines().next().unwrap_or_default());
     assert!(title.trim_start().starts_with("GEAR · a "), "{title}");
 
@@ -1568,7 +1570,7 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     });
 
     let mut frames = Frames { master: pty.master, buffer: String::new() };
-    let _frame = frames.next("LANES", Duration::from_secs(5));
+    let _frame = frames.next("NOW DOING", Duration::from_secs(5));
 
     // The panel of a lane with seventeen tasks is taller than the terminal: it
     // keeps both borders and the footer's row (F3). The first lane is the one
@@ -2317,4 +2319,226 @@ fn cancelled_tasks_are_not_counted_in_the_totals() {
     for id in ["T-6", "T-7", "T-8", "T-9"] {
         assert!(ids.contains(&id), "{id} stays in the Tasks view: {ids:?}");
     }
+}
+
+/// T-359: the Now view's table has the prototype's columns: the task column
+/// `tw = max(30, min(52, W - 110))` puts STAGE at 63 on a 200-column screen.
+#[test]
+fn the_now_table_puts_stage_at_the_prototype_column() {
+    use gear_board::frame::{self, Tab};
+
+    let mut store = world_with_a_voyage();
+    let board = build(&mut store, &options(), now_seconds()).unwrap();
+    let screen = crate::screen(Tab::Now, 0, (200, 40));
+    let text = frame::canvas(&board, &screen, None).text();
+    let top = frame::layout(&board, &screen).top;
+    assert_eq!(column_of(&text, top, "STAGE"), 63, "{text}");
+    let row = text.lines().nth(top).unwrap_or_default();
+    assert!(row.contains("LANE"), "{row:?}");
+    assert!(row.contains("NOW DOING"), "{row:?}");
+    assert!(row.contains("LANE DONE"), "{row:?}");
+    assert!(row.contains("ENDS"), "{row:?}");
+}
+
+/// T-359: a landed voyage's lanes are retired at the landing, in Dim, and no
+/// lane carries an end time any more.
+#[test]
+fn a_landed_voyage_s_lane_reads_retired_at_the_landing_and_has_no_ends() {
+    use gear_board::frame::{self, Tab};
+    use gear_board::style::{Color, Style};
+
+    let mut store = world_with_a_voyage();
+    store
+        .write(|tx| {
+            for id in ["T-2", "T-3", "T-4"] {
+                let mut row = tx.get_task("p", id)?.expect("the task");
+                row.state = TaskState::Done;
+                tx.update_task(&row)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let board = build(&mut store, &options(), now_seconds()).unwrap();
+    assert!(!board.projects[0].shown.as_ref().expect("the voyage").sailing);
+    // The second lane's row is not the lit one: its Dim reason is readable.
+    let screen = crate::screen(Tab::Now, 1, (160, 40));
+    let canvas = frame::canvas(&board, &screen, None);
+    let text = canvas.text();
+    let rows: Vec<usize> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains("retired at the landing"))
+        .map(|(row, _)| row)
+        .collect();
+    assert_eq!(rows.len(), 2, "both lanes retired:\n{text}");
+    let row = rows[0];
+    assert_eq!(canvas.style_at(9, row), Style::fg(Color::Dim), "{text}");
+    assert!(!text.lines().nth(row).unwrap_or_default().contains('~'), "{text}");
+}
+
+/// T-359: a lane with nothing open says what its next task waits for, with the
+/// dependency's lane and stage words.
+#[test]
+fn a_lane_with_nothing_open_names_the_dependency_it_waits_for() {
+    use gear_board::frame::{self, Tab};
+
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(tx, "p", "mast", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p3", "opencode", T0)?;
+            tx.upsert_voyage(&VoyageRow {
+                project: "p".into(),
+                milestone: "M4".into(),
+                title: "one voyage".into(),
+                done: Some("it is delivered".into()),
+                bar: None,
+                eta: Some("8h".into()),
+                departure: Some(T0 - 3600),
+                departure_tasks: Some(2),
+                departure_estimate_min: Some(60),
+                updated: T0 - 3600,
+            })?;
+            for (id, rank, lane, state, deps) in [
+                ("T-1", 1, "mast", TaskState::Running, vec![]),
+                ("T-2", 2, "hull", TaskState::Ready, vec!["T-1".to_string()]),
+            ] {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state,
+                    priority: "must".into(),
+                    lane: Some(lane.into()),
+                    milestone: Some("M4".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps,
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(30),
+                    issue: None,
+                    updated: T0,
+                })?;
+            }
+            tx.insert_attempt(&AttemptRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:mast".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Started,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    let board = build(&mut store, &options(), T0 + 60).unwrap();
+    let text = frame::canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None).text();
+    assert!(
+        text.contains("next T-2 waits for T-1 (mast, working)"),
+        "{text}"
+    );
+}
+
+/// T-359, the captain's answer M-6103: a cancelled task is not the lane's NOW
+/// DOING, whatever stage the graph still gives it; the lane's next open task
+/// is.
+#[test]
+fn a_cancelled_task_is_not_the_now_doing_of_its_lane() {
+    use gear_board::frame::{self, Tab};
+
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            tx.upsert_voyage(&VoyageRow {
+                project: "p".into(),
+                milestone: "M4".into(),
+                title: "one voyage".into(),
+                done: Some("it is delivered".into()),
+                bar: None,
+                eta: Some("8h".into()),
+                departure: Some(T0 - 3600),
+                departure_tasks: Some(2),
+                departure_estimate_min: Some(60),
+                updated: T0 - 3600,
+            })?;
+            for (id, rank, state) in [
+                ("T-1", 1, TaskState::Cancelled),
+                ("T-2", 2, TaskState::Running),
+            ] {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state,
+                    priority: "must".into(),
+                    lane: Some("data".into()),
+                    milestone: Some("M4".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(30),
+                    issue: None,
+                    updated: T0,
+                })?;
+                // A cancelled task keeps the attempt that made its stage open.
+                tx.insert_attempt(&AttemptRow {
+                    project: "p".into(),
+                    task: id.into(),
+                    n: 1,
+                    seat: "p:data".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Started,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let board = build(&mut store, &options(), T0 + 60).unwrap();
+    let text = frame::canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None).text();
+    assert!(text.contains("data  T-2"), "{text}");
+    assert!(!text.contains("data  T-1"), "the cancelled task is NOW DOING:\n{text}");
 }
