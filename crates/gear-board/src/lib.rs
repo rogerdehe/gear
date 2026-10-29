@@ -1580,7 +1580,8 @@ pub fn run(store: &mut Store, opts: &Options, out: &mut dyn Write, mut herdr: Op
 /// store's `data_version` moved, Herdr's agent list moved, or the kept board's
 /// clock got old ([`REBUILD_AFTER`]). Every other frame redraws the board that
 /// was built last, and Herdr is asked for its agents at most every
-/// [`AGENTS_EVERY`].
+/// [`AGENTS_EVERY`]. A frame that reads like the last one written is not
+/// written at all (T-403): the screen keeps it.
 pub fn run_with(
     store: &mut Store,
     opts: &Options,
@@ -1614,6 +1615,10 @@ pub fn run_with(
     // between.
     let mut agents: Option<Vec<AgentInfo>> = None;
     let mut agents_at: Option<std::time::Instant> = None;
+    // The frame that was written last (T-403). A frame that says what that one
+    // said is not written at all: the board redraws in place, and rewriting
+    // the same text only makes the page blink.
+    let mut written: Option<String> = None;
     loop {
         let at = std::time::Instant::now();
         let mut agents_changed = false;
@@ -1665,16 +1670,22 @@ pub fn run_with(
                         e.code, e.detail
                     );
                     screen::draw(out, &text).map_err(write_error)?;
+                    written = Some(text);
                     let deadline = std::time::Instant::now() + opts.refresh;
                     let _ = keys.next_event(deadline.saturating_duration_since(std::time::Instant::now()));
                     continue;
                 }
             }
         }
+        // A resize has thrown away what the screen showed (T-403): the frame
+        // is drawn once, over a full clear, even when it says what the last
+        // one said. Nothing else clears the screen.
+        let size = keys.size();
+        let resized = size != screen.size;
+        screen.size = size;
         // The selection moves over the rows the view paints as picks, and
         // never leaves them (F4): a view that shrank, or a key pressed at its
         // end, does not lose the selection.
-        screen.size = keys.size();
         let mut tall = frame::Canvas::new(screen.size.0, 1000);
         let picks = {
             let board = kept.as_ref().expect("the board was just built or kept");
@@ -1686,7 +1697,14 @@ pub fn run_with(
             frame::canvas(board, &screen, panel.as_deref()).ansi(opts.color)
         };
         first = false;
-        screen::draw(out, &text).map_err(write_error)?;
+        if resized {
+            out.write_all(b"\x1b[2J").map_err(write_error)?;
+            written = None;
+        }
+        if written.as_deref() != Some(text.as_str()) {
+            screen::draw(out, &text).map_err(write_error)?;
+            written = Some(text);
+        }
         let deadline = std::time::Instant::now() + opts.refresh;
         loop {
             let now = std::time::Instant::now();
