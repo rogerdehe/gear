@@ -175,6 +175,9 @@ impl Stage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphTask {
     pub id: String,
+    /// The queue position of the task in the plan, ascending (the store's
+    /// rank).
+    pub rank: i64,
     /// The lane that owns the task.
     pub lane: String,
     pub stage: Stage,
@@ -192,6 +195,9 @@ pub struct GraphTask {
     pub deps: Vec<String>,
     /// When the task was merged into `dev`.
     pub finished: Option<Ts>,
+    /// When the lane first started the task: the earliest `started` of its
+    /// attempts.
+    pub started: Option<Ts>,
 }
 
 /// The tasks of the graph, in the order the prototype draws them: the queued
@@ -217,6 +223,7 @@ pub fn tasks(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<GraphTask>> 
         let (actual, finished) = actual_of(&history, now);
         tasks.push(GraphTask {
             id: row.id.clone(),
+            rank: row.rank,
             lane: row.lane.clone().unwrap_or_default(),
             stage: stage_of(tx, project, row)?,
             moved_to: None,
@@ -226,6 +233,7 @@ pub fn tasks(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<GraphTask>> 
             rounds: history.attempts.len(),
             deps: row.deps.clone(),
             finished,
+            started: history.span().0,
         });
     }
     Ok(order(tasks))
@@ -255,6 +263,178 @@ fn order(mut tasks: Vec<GraphTask>) -> Vec<GraphTask> {
     ordered.extend(rest.iter().filter(|task| task.stage.is_open()).cloned());
     ordered.extend(done);
     ordered
+}
+
+/// One row of the git-style graph: the cells of the drawing at their columns,
+/// the task the row is about (a row that is not about a task has none) and the
+/// text after the drawing, which starts at `info_x`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphRow {
+    pub cells: Vec<(usize, char, Style)>,
+    /// The task of the row: the row of a waiting task, the stage row of an
+    /// open one, the row of a merge; a fork row has none.
+    pub task: Option<String>,
+    /// The text after the drawing: the id, the title, what the task is doing
+    /// and its time.
+    pub text: String,
+    /// The style of the text.
+    pub style: Style,
+}
+
+/// The rows of the git-style graph (the prototype's `view_graph`), newest on
+/// top: `dev` on the left, each task a branch of its lane that leaves dev
+/// where its work starts and joins it where it merges, and a task that has not
+/// started yet hangs dashed in its lane, naming what it waits for.
+///
+/// A time is in minutes from `departure`. The drawing stands in columns (a lane
+/// every six from 9) and the text after it starts at `info_x`; `tw` is the
+/// width of its title column.
+pub fn git_rows(
+    tasks: &[GraphTask],
+    lanes: &[String],
+    departure: Ts,
+    width: usize,
+) -> Vec<GraphRow> {
+    // The plan's order: a task's rank is its queue position.
+    let mut plan: Vec<&GraphTask> = tasks.iter().collect();
+    plan.sort_by_key(|task| task.rank);
+    let col = |lane: &str| 9 + 6 * lane_index(lanes, lane);
+    let last = lanes.len().saturating_sub(1);
+    let info_x = 9 + 6 * last + 6;
+    let tw = (width as i64 - info_x as i64 - 52).clamp(30, 56) as usize;
+    let lane_style = |task: &GraphTask| Style::fg(lane_color(lanes, &task.lane));
+    let minutes = |at: Ts| (at - departure) / 60;
+    // The tasks whose branch is open: work started and not merged yet.
+    let mut live: Vec<&str> = plan
+        .iter()
+        .filter(|task| task.started.is_some() && task.finished.is_none())
+        .map(|task| task.id.as_str())
+        .collect();
+    // The lines of the open branches, down the rows, but the one of `skip`.
+    let verticals = |live: &[&str], skip: Option<&str>| -> Vec<(usize, char, Style)> {
+        plan.iter()
+            .filter(|task| live.contains(&task.id.as_str()) && Some(task.id.as_str()) != skip)
+            .map(|task| (col(&task.lane), '│', lane_style(task)))
+            .collect()
+    };
+    let mut rows: Vec<GraphRow> = Vec::new();
+    // The tasks that have not started hang in their lanes, in the plan's order,
+    // so the one to run last sits just above the running ones.
+    let waiting: Vec<&GraphTask> = plan
+        .iter()
+        .copied()
+        .filter(|task| task.started.is_none() && task.stage != Stage::Moved)
+        .collect();
+    for task in &waiting {
+        let x = col(&task.lane);
+        let style = lane_style(task);
+        let mut cells = verticals(&live, None);
+        cells.push((x, '○', style.and_bold()));
+        rows.push(GraphRow {
+            cells,
+            task: Some(task.id.clone()),
+            text: git_info(task, tw),
+            style: Style::fg(Color::Dim),
+        });
+        let mut cells = verticals(&live, None);
+        cells.push((x, '┆', style));
+        rows.push(GraphRow {
+            cells,
+            task: Some(task.id.clone()),
+            text: String::new(),
+            style: Style::PLAIN,
+        });
+    }
+    // The starts and the merges, the newest first; equal minutes keep the
+    // plan's order (a stable sort).
+    let mut events: Vec<(i64, u8, &GraphTask)> = Vec::new();
+    for task in &plan {
+        if let Some(started) = task.started {
+            events.push((minutes(started), 0, task));
+        }
+        if let Some(finished) = task.finished {
+            events.push((minutes(finished), 1, task));
+        }
+    }
+    events.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+    for (at, kind, task) in events {
+        let x = col(&task.lane);
+        let style = lane_style(task);
+        let skip = Some(task.id.as_str());
+        if kind == 1 {
+            // The merge: the branch joins dev.
+            let mut cells = verticals(&live, skip);
+            cells.push((3, '●', Style::fg(Color::Ok).and_bold()));
+            cells.extend((4..x).map(|column| (column, '─', style)));
+            cells.push((x, '╯', style));
+            live.push(task.id.as_str());
+            let mut text = git_info(task, tw);
+            if let Some(finished) = task.finished {
+                text.push_str(&format!("  merged {}", clock(finished)));
+            }
+            rows.push(GraphRow {
+                cells,
+                task: Some(task.id.clone()),
+                text,
+                style: Style::PLAIN,
+            });
+        } else {
+            // The start: the branch leaves dev. An open task stands on its
+            // branch first.
+            if task.stage.is_open() {
+                let mut cells = verticals(&live, skip);
+                cells.push((x, symbol_of(task.stage), Style::fg(task.stage.color()).and_bold()));
+                rows.push(GraphRow {
+                    cells,
+                    task: Some(task.id.clone()),
+                    text: git_info(task, tw),
+                    style: Style::bold(),
+                });
+            }
+            let mut cells = verticals(&live, skip);
+            cells.push((3, '├', Style::fg(Color::Ok)));
+            cells.extend((4..x).map(|column| (column, '─', style)));
+            cells.push((x, '╮', style));
+            live.retain(|id| *id != task.id.as_str());
+            let mut text = format!("{:7}starts +{}", "", hm(at));
+            if !task.deps.is_empty() {
+                text.push_str(&format!(" after {}", task.deps.join(", ")));
+            }
+            rows.push(GraphRow {
+                cells,
+                task: None,
+                text,
+                style: Style::fg(Color::Dim),
+            });
+        }
+    }
+    rows
+}
+
+/// A span of minutes as the graph says it: the hours always, then the minutes.
+fn hm(minutes: i64) -> String {
+    format!("{}h{:02}m", minutes / 60, minutes % 60)
+}
+
+/// The one character a stage draws in its lane.
+fn symbol_of(stage: Stage) -> char {
+    stage.symbol().chars().next().unwrap_or(' ')
+}
+
+/// The text of a graph row after the drawing: the id, the title, what the task
+/// is doing and its time (the prototype's `info` in `view_graph`).
+fn git_info(task: &GraphTask, tw: usize) -> String {
+    let estimate = task.est_min.unwrap_or(0);
+    let actual = task.actual_min.unwrap_or(0);
+    let time = if actual > 0 { format!("{actual}/{estimate}m") } else { format!("{estimate}m") };
+    let rounds = if task.rounds > 1 { format!(" · {} rounds", task.rounds) } else { String::new() };
+    format!(
+        "{:<7}{:<tw$}  {:<36}{time}{rounds}",
+        task.id,
+        cut(&task.title, tw),
+        cut(&Stage::words(task), 36),
+        tw = tw
+    )
 }
 
 /// The lanes of the project, in seat order: one column each.
