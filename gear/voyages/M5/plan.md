@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=712 -->
+<!-- gear-plan project=gear base=713 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -105,6 +105,7 @@ eta: 16h
 - 2026-10-29 09:45 hand-fix: another project's review seats restarted in a loop (844 temp starts for about fifty reviews): the idle sweep releases a Standby reviewer that still holds its pending review; T-391 fixes it, and that captain lowered `[quota] temps` from 6 to 3 until the fix is in the shared binary | why: each restart costs a login shell and a codex launch on the shared machine | else: the loop runs until the voyage ends
 - ★ 2026-10-29 09:20 estimate: the 24 h eta proposal is withdrawn; the eta stays 16 h and a short clock is answered by working faster, never by moving the eta | why: the forecast was wrong, not the lanes: crates/gear-board/src/voyage.rs measures a lane by the sum of its tasks' start-to-merge spans, but review and merge run beside the lane's next task, so the same minutes count twice; measured by throughput (estimate done per lane wall minute since departure) hull runs 0.65 (550 min left → about 357) and mast 0.32 (895 left → about 290), a finish near 845 min of 960; T-390 fixes the forecast, T-385 moves to mast to even the lanes | else: the station alarms keep pushing the eta out- station M-5296: keep course 710 min in, 111 done; mast 328 min against 250 left: mast keeps only the board chain (T-349 to T-365) and T-403; T-401, T-335, T-376, T-380, T-386 and T-407 move to hull. T-392's gate failed on github_contract tests timing out under load 43 (they pass on dev in 14 s): remerge
 - station M-5296: keep course 710 min in, 111 done; mast 328 min against 250 left: mast keeps only the board chain (T-349 to T-365) and T-403; T-401, T-335, T-376, T-380, T-386 and T-407 move to hull. T-392's gate failed on github_contract tests timing out under load 43 (they pass on dev in 14 s); its merge is queued again
+- station M-5309: keep course 720 min in; hull 268 min and mast 269 min are level after M-5296; T-398 goes back for F1 (a stale build SHA after a commit on the same branch is an error in normal use)
 
 # Queue
 
