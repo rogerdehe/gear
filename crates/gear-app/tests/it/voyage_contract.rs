@@ -862,3 +862,58 @@ fn a_block_without_station_clears_the_tasks_station() {
     let block = s.read(|tx| gear_app::plan::show(tx, "p", "T-1")).unwrap();
     assert!(!block.contains("station="), "{block}");
 }
+
+/// T-336: the captain's home page carries the voyage's goal, its bar and how
+/// far the voyage is — the current station and the tasks it has left — right
+/// under the voyage report lines. A lane's page carries no such line.
+#[test]
+fn the_captain_home_page_carries_the_goal_and_the_current_station() {
+    let mut s = world();
+    let text = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: delivery v0.1.0\n\
+                done: users install v0.1.0 without Rust\n\
+                bar: block only loop breaks and data loss; log the rest\neta: 8h\n\
+                station S1: reliability fixes\n\
+                station S2: the board shows the stations\n\
+                # Queue\n\
+                ## NEW [must] lane=heat milestone=M1 station=S1\n\
+                goal: A\naccept: a\nestimate: 30\ndeps: -\n\n\
+                ## NEW [should] lane=heat milestone=M1 station=S1\n\
+                goal: B\naccept: b\nestimate: 30\ndeps: -\n";
+    run(&mut s, text, "r1", NOW).unwrap();
+
+    let (env, fp) = cap();
+    let page = home::build(&mut s, &env, Some(&fp), NOW + 10).unwrap();
+    let lines: Vec<&str> = page.text.lines().collect();
+    let last_report = lines
+        .iter()
+        .position(|line| line.contains("rework "))
+        .expect("the voyage report lines");
+    assert_eq!(
+        lines[last_report + 1],
+        "Your goal, voyage M1: done: users install v0.1.0 without Rust · bar: block only loop breaks and data loss; log the rest · station S1 (0 of 2 reached): reliability fixes · 2 tasks left in S1 · 2 tasks left in the voyage. Judge every decision against it.",
+        "{}",
+        page.text
+    );
+
+    // A lane's home page carries no goal line.
+    let lane = Env {
+        ctx: Some(GearCtx { project: "p".into(), seat: "heat".into(), generation: 1 }),
+        pane_id: Some("w1:p2".into()),
+        admin: false,
+    };
+    let lane_fp = Fingerprint { pane_id: "w1:p2".into(), kind: Some("opencode".into()), session_ref: None };
+    let lane_page = home::build(&mut s, &lane, Some(&lane_fp), NOW + 10).unwrap();
+    assert!(!lane_page.text.contains("Your goal, voyage"), "{}", lane_page.text);
+
+    // Without stations the goal line says how many tasks are left in the voyage.
+    let mut plain = world();
+    run(&mut plain, &plan(0, FULL), "r2", NOW).unwrap();
+    let plain_page = home::build(&mut plain, &env, Some(&fp), NOW + 10).unwrap();
+    assert!(
+        plain_page.text.contains(
+            "Your goal, voyage M1: done: users install v0.1.0 without Rust · bar: block only loop breaks and data loss; log the rest · 2 tasks left in the voyage. Judge every decision against it."
+        ),
+        "{}",
+        plain_page.text
+    );
+}
