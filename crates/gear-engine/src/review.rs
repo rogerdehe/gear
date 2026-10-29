@@ -1769,6 +1769,13 @@ fn review_packet_for(
     // hand-in was made against, the reviewer is told so and judges the hand-in
     // against its own version.
     let current = saved.as_ref().map(|row| row.contract_version).unwrap_or(version);
+    // The commit message the project asks of a reviewer (T-300): its
+    // `[conventions].review_message`, filled with what is known here. `{what}`
+    // stays in the text — what the commit does is the reviewer's to write.
+    let commit = gear_model::commit::fill(
+        &config.conventions.review_message,
+        &[("project", &config.project.id), ("task", task), ("attempt", &attempt.to_string())],
+    );
     let packet = review_packet(
         task,
         attempt,
@@ -1781,6 +1788,7 @@ fn review_packet_for(
         candidate,
         &repo.integration,
         &review_branch(&config.conventions.review_branch, &config.project.id, &lane, task),
+        &commit,
     );
     // The review's own budget (design §5.1) and what a verdict past it must
     // carry (design §6.2): the reviewer is charged from its own start, and a
@@ -1957,6 +1965,7 @@ fn review_packet(
     candidate: &str,
     integration: &str,
     branch: &str,
+    commit: &str,
 ) -> String {
     // T-282: the task's contract moved past the one this hand-in was made
     // against — the reviewer is told, and still judges the hand-in by its own.
@@ -1981,7 +1990,8 @@ fn review_packet(
          the findings with their severity, the review template and the verdict rule.\n\
          \n\
          Write the review in your worktree at the path your project uses for reviews, commit it \
-         on `{branch}` and push it (the candidate stays untouched).\n\
+         on `{branch}` with the message `{commit}` (replace `{{what}}` with what the commit does) \
+         and push it (the candidate stays untouched).\n\
          \n\
          Every finding is either blocking or logged: a blocking finding names the part of the \
          done-sentence or the bar it breaks. Fail only for a failed mechanical fact, a P0, or a \
@@ -3830,6 +3840,28 @@ review = [
         // The packet itself is unchanged around it.
         assert!(with.contains("Review T-1 attempt 1"), "{with}");
         assert!(with.contains("Diff to review"), "{with}");
+    }
+
+    /// T-300: the review packet names the commit message the project asks for
+    /// — its `[conventions].review_message` — and leaves `{what}` in it, since
+    /// what the commit does is the reviewer's to write.
+    #[test]
+    fn the_review_packet_names_the_projects_review_message() {
+        // The default: `review({task}): {what}`.
+        let mut store = world(CONFIG);
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 2, "abc1234").unwrap();
+        assert!(
+            packet.contains("with the message `review(T-1): {what}`"),
+            "{packet}"
+        );
+
+        // A team with its own form gets its own message, `{what}` still open.
+        let text = format!("{CONFIG}\n[conventions]\nreview_message = \"{{task}}#{{attempt}} review: {{what}}\"\n");
+        let config = gear_app::config::parse(&text).unwrap();
+        let mut store = world(&text);
+        let packet = review_packet_for(&mut store, &config, "T-1", 2, "abc1234").unwrap();
+        assert!(packet.contains("`T-1#2 review: {what}`"), "{packet}");
     }
 
     #[test]
