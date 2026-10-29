@@ -31,6 +31,7 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
         if left > 0 { tx.set_meta(&format!("{key}:watch"), "1")?; }
         let mut crossed = Vec::new();
         let mut markers = Vec::new();
+        let mut past_quarter = false;
         // The course station (design §10.7 row B10): besides the 25/50/75%
         // eta stations, the captain gets a station every 60 min of voyage
         // time. The hour counter is a meta, so a late engine tick does not
@@ -54,12 +55,21 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
             if let (Some(departure), Some(eta)) = (voyage.departure,
                 report.eta.as_deref().and_then(eta_seconds))
             {
-                for quarter in 1..=3 {
+                // Every quarter the elapsed time has crossed rings, not only
+                // 25/50/75%: a voyage past its eta keeps telling the captain
+                // plainly that the eta is passed and by how much, until it
+                // lands (T-414). Each quarter rings once.
+                let elapsed = (now - departure).max(0);
+                let max_quarter = i128::from(elapsed) * 4 / i128::from(eta);
+                for quarter in 1..=max_quarter {
                     let marker = format!("{key}:eta:{quarter}");
-                    if i128::from((now - departure).max(0)) * 4 >= i128::from(eta) * quarter
-                        && tx.get_meta(&marker)?.is_none()
-                    {
-                        crossed.push(format!("{}% eta", quarter * 25));
+                    if tx.get_meta(&marker)?.is_none() {
+                        crossed.push(if quarter >= 4 {
+                            past_quarter = true;
+                            format!("{}% eta (past eta by {} min)", quarter * 25, (elapsed - eta) / 60)
+                        } else {
+                            format!("{}% eta", quarter * 25)
+                        });
                         markers.push(marker);
                     }
                 }
@@ -136,11 +146,18 @@ Close this with `station <id>: land`.",
             (Some(eta), Some(projected)) => projected.saturating_mul(60) > eta,
             _ => false,
         };
+        // A station that reports a crossed 100%+ quarter is urgent whatever
+        // the projection says: the voyage is past its eta now.
+        let body = if past_quarter {
+            format!("{body}\nPast the eta: speed up (rebalance lanes, cut waiting, fix rework fast); the eta does not move.")
+        } else {
+            body
+        };
         let message = tx.insert_message(&NewMessage {
             meta: None,
             project: project.into(), thread: format!("station:{}", report.milestone),
             task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
-            recipient: captain.id.clone(), kind: MsgKind::System, urgent: past_eta,
+            recipient: captain.id.clone(), kind: MsgKind::System, urgent: past_eta || past_quarter,
             body, reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
         })?;
         for marker in markers { tx.set_meta(&marker, &message.id)?; }

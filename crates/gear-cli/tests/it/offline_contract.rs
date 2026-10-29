@@ -9,8 +9,7 @@ use std::process::Command;
 
 #[test]
 fn a_test_cannot_clone_over_the_network() {
-    let dir = std::env::temp_dir().join(format!("gear-offline-{}-clone", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = crate::scratch::temp("gear-offline-clone");
     let out = Command::new("git")
         .args(["clone", "https://example.com/owner/repo.git"])
         .arg(&dir)

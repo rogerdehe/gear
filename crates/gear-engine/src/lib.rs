@@ -1072,6 +1072,10 @@ fn doorbell_inputs(
     Ok(inputs)
 }
 
+/// Scratch directories of the unit tests, removed when the test is done (T-412).
+#[cfg(test)]
+pub(crate) mod testtmp;
+
 #[cfg(test)]
 mod t209_tick_tests {
     use super::*;
@@ -1133,7 +1137,7 @@ review=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high
         }).unwrap();
         let _=seat;
         let mut herdr=FakeHerdr::new(); herdr.add_shell(pane); herdr.add_shell("w1:p9");
-        let mut cfg=EngineCfg::default(); cfg.db_path="/tmp/t209.db".into();
+        let mut cfg=EngineCfg::default(); cfg.db_path=crate::testtmp::temp("t209").join("t209.db").to_string_lossy().into_owned();
         for kind in ["codex","claude"] { cfg.profiles.insert(kind.into(),gear_herdr::builtin(kind).unwrap()); }
         (store,herdr,cfg,pane.into())
     }
@@ -1280,7 +1284,7 @@ review=[{{model="{review_model}",cli="codex",args=["-c","model_reasoning_effort=
         let mut herdr = FakeHerdr::new();
         herdr.add_shell(pane);
         herdr.add_shell("w1:p9");
-        let mut cfg = EngineCfg { db_path: "/tmp/t226.db".into(), ..EngineCfg::default() };
+        let mut cfg = EngineCfg { db_path: crate::testtmp::temp("t226").join("t226.db").to_string_lossy().into_owned(), ..EngineCfg::default() };
         for kind in ["codex", "claude", "opencode", "pi"] {
             cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
         }

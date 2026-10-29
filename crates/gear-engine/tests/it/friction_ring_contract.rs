@@ -1,7 +1,12 @@
-//! T-169 (design §6.4): the friction ring. The captain hears about the open
-//! friction reports when it has nothing else to do — one item on the thread
+//! T-169 (design §6.4): the friction ring — one item on the thread
 //! `friction`, at most once per 30 minutes, updated by a new report and
 //! closed when every report it lists is closed.
+//!
+//! T-416: the ring no longer waits for an idle captain (a captain on a long
+//! voyage always has an actionable item and the reports were never rung), the
+//! item names each report with its task, role and the start of its body, and
+//! an item resolved while its reports are still open comes back after the
+//! cooldown.
 
 use gear_engine::{tick, EngineCfg};
 use gear_herdr::{fake::FakeHerdr, AgentStatus};
@@ -141,7 +146,11 @@ fn an_idle_captain_gets_one_item_naming_the_open_reports() {
     assert!(!open[0].urgent, "an information item");
     assert_eq!(
         open[0].body,
-        "3 friction reports: F-1 F-2 F-3. Run gear friction.",
+        "3 friction reports:\n\
+         F-3 T-3 dev: the contract was unclear\n\
+         F-2 T-2 dev: no permission for the sandbox\n\
+         F-1 T-1 dev: the build took forever\n\
+         run gear friction",
         "{}",
         open[0].body
     );
@@ -152,30 +161,30 @@ fn an_idle_captain_gets_one_item_naming_the_open_reports() {
     assert_eq!(items(&mut w.store).len(), 1, "one item per ring");
 }
 
+/// T-416: a captain on a long voyage always has an actionable item; the
+/// reports must reach it all the same.
 #[test]
-fn a_captain_with_an_open_item_gets_no_ring() {
+fn a_busy_captain_still_gets_the_ring() {
     let mut w = world();
     report(&mut w.store, "T-1", "the build took forever");
     captain_item(&mut w.store, T0);
 
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
-    assert!(report.friction.is_empty(), "the captain has work of its own: {report:?}");
-    assert!(items(&mut w.store).is_empty());
-
-    // The captain is idle again: the ring comes.
-    w.store
-        .write(|tx| {
-            let item = tx
-                .thread_messages("p", "T-1:1")?
-                .into_iter()
-                .find(|message| message.recipient == "p:captain")
-                .unwrap();
-            tx.update_message_state("p", &item.id, MsgState::Resolved, Some("seen"), None, None, T0 + 2)
-        })
-        .unwrap();
-    let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 3).unwrap();
     assert_eq!(report.friction, vec!["friction:opened".to_string()], "{report:?}");
-    assert_eq!(items(&mut w.store).len(), 1);
+    let open = items(&mut w.store);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].recipient, "p:captain");
+    assert_eq!(
+        open[0].body,
+        "1 friction report:\nF-1 T-1 dev: the build took forever\nrun gear friction",
+        "{}",
+        open[0].body
+    );
+
+    // The captain's own work is untouched: it still waits.
+    let work = w.store.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap();
+    assert_eq!(work.len(), 1, "{work:?}");
+    assert_eq!(work[0].state, MsgState::Open);
 }
 
 #[test]
@@ -183,7 +192,10 @@ fn a_new_report_updates_the_item() {
     let mut w = world();
     report(&mut w.store, "T-1", "the build took forever");
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
-    assert_eq!(items(&mut w.store)[0].body, "1 friction report: F-1. Run gear friction.");
+    assert_eq!(
+        items(&mut w.store)[0].body,
+        "1 friction report:\nF-1 T-1 dev: the build took forever\nrun gear friction"
+    );
 
     // A second report arrives while the item is open.
     report(&mut w.store, "T-2", "a missing tool");
@@ -192,7 +204,13 @@ fn a_new_report_updates_the_item() {
     let all = items(&mut w.store);
     assert_eq!(all.len(), 1, "the same item, no second one: {all:?}");
     assert_eq!(all[0].state, MsgState::Open);
-    assert_eq!(all[0].body, "2 friction reports: F-1 F-2. Run gear friction.");
+    assert_eq!(
+        all[0].body,
+        "2 friction reports:\n\
+         F-2 T-2 dev: a missing tool\n\
+         F-1 T-1 dev: the build took forever\n\
+         run gear friction"
+    );
 }
 
 #[test]
@@ -212,7 +230,10 @@ fn closing_every_report_closes_the_item() {
     let all = items(&mut w.store);
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].state, MsgState::Open, "one report is still open");
-    assert_eq!(all[0].body, "1 friction report: F-2. Run gear friction.");
+    assert_eq!(
+        all[0].body,
+        "1 friction report:\nF-2 T-2 dev: a missing tool\nrun gear friction"
+    );
 
     // Every report is closed: the item closes itself.
     w.store
@@ -258,7 +279,10 @@ fn the_ring_waits_thirty_minutes_before_it_rings_again() {
     let all = items(&mut w.store);
     assert_eq!(all.len(), 2, "a new item after the window: {all:?}");
     assert_eq!(all[1].state, MsgState::Open);
-    assert_eq!(all[1].body, "1 friction report: F-2. Run gear friction.");
+    assert_eq!(
+        all[1].body,
+        "1 friction report:\nF-2 T-2 dev: a missing tool\nrun gear friction"
+    );
 }
 
 /// F1 of the review: the friction item is not an ordinary stale item. The
@@ -297,12 +321,11 @@ fn the_friction_item_is_not_promoted_and_does_not_ring_the_captain_again() {
     assert!(!items(&mut w.store)[0].urgent);
 }
 
-/// F2 of the review: the ring needs a report the captain has not been told
-/// about yet. A captain who resolved the item does not get the same reports
-/// again when the cooldown is over; a new report rings once, and the gate
-/// survives a restart.
+/// T-416: an item the captain resolves while its reports are still open
+/// counts as rung, not as handled: the next ring after the cooldown names the
+/// reports still open again. Resolving the item alone closes no report.
 #[test]
-fn a_resolved_item_rings_again_only_for_a_new_report() {
+fn a_resolved_item_comes_back_with_the_reports_still_open() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("gear.db");
     let mut w = world_at(&path);
@@ -311,22 +334,26 @@ fn a_resolved_item_rings_again_only_for_a_new_report() {
     // The first ring: the item names F-1.
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
     let first = items(&mut w.store).remove(0);
-    assert_eq!(first.body, "1 friction report: F-1. Run gear friction.");
+    assert_eq!(
+        first.body,
+        "1 friction report:\nF-1 T-1 dev: the build took forever\nrun gear friction"
+    );
 
-    // The captain resolves it by hand (what `gear reply M-n --resolve` does).
+    // The captain resolves it by hand (what `gear reply M-n --resolve` does):
+    // the report stays open.
     w.store
         .write(|tx| {
             tx.update_message_state("p", &first.id, MsgState::Resolved, Some("seen"), None, None, T0 + 2)
         })
         .unwrap();
 
-    // The cooldown is over, but no report is new: no second item.
-    let tick_report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1801).unwrap();
-    assert!(tick_report.friction.is_empty(), "no new report, no ring: {tick_report:?}");
-    assert_eq!(items(&mut w.store).len(), 1, "no second item");
+    // The cooldown is not over yet: no second item.
+    let tick_report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 60).unwrap();
+    assert!(tick_report.friction.is_empty(), "too soon: {tick_report:?}");
+    assert_eq!(items(&mut w.store).len(), 1, "no second item yet");
 
-    // A restart does not forget what the captain has been told: the gate
-    // holds across a reload of the store.
+    // A restart does not forget the last ring: the cooldown holds across a
+    // reload of the store.
     drop(w.store);
     let store = Store::open(&path).unwrap();
     let mut herdr = FakeHerdr::new();
@@ -334,16 +361,69 @@ fn a_resolved_item_rings_again_only_for_a_new_report() {
     let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
     cfg.profiles.insert("claude".to_string(), gear_herdr::builtin("claude").unwrap());
     let mut w = World { store, herdr, cfg };
-    let tick_report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1802).unwrap();
+    let tick_report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1000).unwrap();
     assert!(tick_report.friction.is_empty(), "the state survives the restart: {tick_report:?}");
-    assert_eq!(items(&mut w.store).len(), 1, "no second item");
 
-    // A new report rings once, and the item names every open report.
-    report(&mut w.store, "T-2", "a missing tool");
-    let tick_report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1803).unwrap();
+    // Half an hour after the ring, the item comes back with F-1 still open.
+    let tick_report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1801).unwrap();
     assert_eq!(tick_report.friction, vec!["friction:opened".to_string()], "{tick_report:?}");
     let all = items(&mut w.store);
     assert_eq!(all.len(), 2, "exactly one new item: {all:?}");
     assert_eq!(all[1].state, MsgState::Open);
-    assert_eq!(all[1].body, "2 friction reports: F-1 F-2. Run gear friction.");
+    assert_eq!(
+        all[1].body,
+        "1 friction report:\nF-1 T-1 dev: the build took forever\nrun gear friction",
+        "{}",
+        all[1].body
+    );
+
+    // At most one ring per 30 minutes.
+    let tick_report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1810).unwrap();
+    assert!(tick_report.friction.is_empty(), "one ring per window: {tick_report:?}");
+    assert_eq!(items(&mut w.store).len(), 2, "no third item");
+
+    // Closing the report closes the item, as today.
+    w.store
+        .write(|tx| tx.close_friction("p", "F-1", "fixed the fixture", T0 + 1811))
+        .unwrap();
+    let tick_report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1812).unwrap();
+    assert_eq!(tick_report.friction, vec!["friction:closed".to_string()], "{tick_report:?}");
+    let all = items(&mut w.store);
+    assert_eq!(all.len(), 2, "no third item: the second one closed");
+    assert_eq!(all[1].state, MsgState::Resolved);
+}
+
+/// T-416: one item names at most ten reports, newest first, and says how many
+/// it left out.
+#[test]
+fn the_item_names_at_most_ten_reports() {
+    let mut w = world();
+    for n in 1..=13 {
+        report(&mut w.store, &format!("T-{n}"), &format!("slowdown number {n}"));
+    }
+
+    let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+    assert_eq!(report.friction, vec!["friction:opened".to_string()], "{report:?}");
+    let open = items(&mut w.store);
+    assert_eq!(open.len(), 1, "{open:?}");
+    let mut expected = String::from("13 friction reports:");
+    for n in (4..=13).rev() {
+        expected.push_str(&format!("\nF-{n} T-{n} dev: slowdown number {n}"));
+    }
+    expected.push_str("\nand 3 more: run gear friction");
+    assert_eq!(open[0].body, expected, "{}", open[0].body);
+}
+
+/// T-416: the item quotes the first 160 characters of a report's body.
+#[test]
+fn the_item_quotes_the_start_of_a_body() {
+    let mut w = world();
+    let long = format!("{}the tail", "a".repeat(160));
+    report(&mut w.store, "T-1", &long);
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+    let all = items(&mut w.store);
+    let expected = format!("1 friction report:\nF-1 T-1 dev: {}\nrun gear friction", "a".repeat(160));
+    assert_eq!(all[0].body, expected, "{}", all[0].body);
+    assert!(!all[0].body.contains("the tail"), "{}", all[0].body);
 }

@@ -61,16 +61,7 @@ mod tests {
 
     /// A scratch HOME.
     fn home(name: &str) -> std::path::PathBuf {
-        let home = std::env::temp_dir().join(format!(
-            "gear-trust-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        ));
-        std::fs::create_dir_all(&home).unwrap();
-        home
+        crate::testtmp::temp(&format!("gear-trust-{name}"))
     }
 
     #[test]

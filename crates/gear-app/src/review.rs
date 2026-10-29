@@ -353,8 +353,7 @@ mod findings_tests {
 
     #[test]
     fn a_path_is_read_into_the_store() {
-        let dir = std::env::temp_dir().join(format!("gear-findings-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testtmp::temp("gear-findings");
         let file = dir.join("T-1.md");
         std::fs::write(&file, "# Findings\n\nP1: the rows drift.\n").unwrap();
         let text = findings_text(file.to_str().unwrap()).unwrap();
@@ -365,8 +364,7 @@ mod findings_tests {
 
     #[test]
     fn a_path_with_spaces_is_read() {
-        let dir = std::env::temp_dir().join(format!("gear-findings-sp-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testtmp::temp("gear-findings-sp");
         let file = dir.join("T-1 draft.md");
         std::fs::write(&file, "P2: the header is stale.\n").unwrap();
         let text = findings_text(file.to_str().unwrap()).unwrap();

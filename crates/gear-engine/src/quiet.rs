@@ -154,7 +154,16 @@ pub fn tick(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
     let reply = i64::from(conventions.push_reply_min.max(1)) * 60;
     let captain = tx.captain_of(project)?.map(|seat| seat.id);
     for seat in tx.seats_of_project(project)? {
-        let Some(attempt) = eligible(tx, &seat)? else { continue };
+        let Some(attempt) = eligible(tx, &seat)? else {
+            // A hold is not the lane's own time: while a lane seat is not
+            // eligible the no-push clock stands still, so a released lane is
+            // asked from the end of the hold, not all at once (T-417).
+            if seat.role == SeatRole::Lane {
+                tx.set_meta(&base_key(&seat.id), &now.to_string())?;
+                tx.set_meta(&reply_key(&seat.id), "")?;
+            }
+            continue
+        };
         let (branch, push) = last_push(tx, &seat, &attempt)?;
         let base = tx.get_meta(&base_key(&seat.id))?.and_then(|s| s.parse::<Ts>().ok()).unwrap_or(0);
         let asked = tx.get_meta(&reply_key(&seat.id))?.filter(|s| !s.is_empty()).and_then(|s| s.parse::<Ts>().ok());
@@ -371,6 +380,24 @@ mod tests {
         git(dir.path(), &["update-ref", "refs/remotes/origin/heat/t1", "HEAD"], None);
         s.write(|tx| tick(tx, "p", T + 1201 + 700)).unwrap();
         assert!(messages(&mut s, "quiet:p:heat").is_empty(), "a push settles the question");
+    }
+
+    /// A hold is not counted: 3 h held with no push, then active, is not
+    /// asked in the first tick and is asked once after the interval (T-417).
+    #[test]
+    fn a_hold_is_not_counted_by_the_no_push_clock() {
+        let dir = repo_with_commit();
+        let mut s = world(dir.path().to_str().unwrap());
+        s.write(|tx| {
+            tx.set_seat_state("p:heat", SeatState::Held, None, T)?;
+            tick(tx, "p", T + 3 * 3600)
+        }).unwrap();
+        assert!(messages(&mut s, "quiet-lane:p:heat").is_empty(), "a held lane is not asked");
+        s.write(|tx| tx.set_seat_state("p:heat", SeatState::Active, None, T + 3 * 3600)).unwrap();
+        s.write(|tx| tick(tx, "p", T + 3 * 3600 + 1199)).unwrap();
+        assert!(messages(&mut s, "quiet-lane:p:heat").is_empty(), "the clock runs from the end of the hold");
+        s.write(|tx| tick(tx, "p", T + 3 * 3600 + 1201)).unwrap();
+        assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 1, "asked once after the interval");
     }
 
     /// The two times are the project's: 15 and 5 here.
