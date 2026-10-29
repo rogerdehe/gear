@@ -321,9 +321,10 @@ pub fn canvas(board: &Board, screen: &Screen, panel: Option<&[Line]>) -> Canvas 
     let picks = view(board, screen, &mut tall, top);
     // The selected row stays on the screen: the rows above it scroll away
     // (F8). The offset is the one the mouse hit testing uses.
-    let offset = offset_of(&picks, screen.selected, top, height);
-    let last = height.saturating_sub(2);
-    // The footer's row and the row above it stay the frame's.
+    let last = view_bottom(screen.tab, height);
+    let offset = offset_of(&picks, screen.selected, top, last);
+    // The footer's row, the legend's row and the row above them stay the
+    // frame's.
     canvas.copy_rows(&tall, top + offset, top, last.saturating_sub(top));
     // The selected row is lit across the width, in one colour (README change
     // 13).
@@ -332,6 +333,10 @@ pub fn canvas(board: &Board, screen: &Screen, panel: Option<&[Line]>) -> Canvas 
             canvas.light_row(row);
         }
     }
+    if screen.tab == Tab::Tasks {
+        // The Tasks view's legend (the prototype's row `h - 2`).
+        canvas.put_styled(1, height.saturating_sub(2), TASKS_LEGEND, Style::fg(Color::Dim));
+    }
     canvas.put_styled(1, height - 1, FOOTER, Style::fg(Color::Dim));
     if let Some(panel) = panel {
         draw_panel(&mut canvas, panel);
@@ -339,14 +344,26 @@ pub fn canvas(board: &Board, screen: &Screen, panel: Option<&[Line]>) -> Canvas 
     canvas
 }
 
+/// The row the view's own rows stop at (exclusive): the footer's row is
+/// `height - 1`, and the Tasks view keeps the legend's row `height - 2` (the
+/// prototype stops its graph at `h - 3`).
+pub fn view_bottom(tab: Tab, height: usize) -> usize {
+    match tab {
+        Tab::Tasks => height.saturating_sub(3),
+        _ => height.saturating_sub(2),
+    }
+}
+
+/// The legend under the Tasks view (the prototype's row `h - 2`).
+pub const TASKS_LEGEND: &str = "● merged into dev   ◉ working   ◎ in review   ◍ passed / merging   ↺ reworking   ○┆ not started   a branch leaves dev where its work starts and joins it where it merges · ↑↓ select: its deps light up";
+
 /// The offset of the first visible row of a view (the viewport, F8).
 ///
 /// The rows above it are scrolled away, so the mouse hit testing adds the
 /// same offset to the row the user clicked. The offset is zero while the
-/// selected pick's row is above the footer's spacer, else the smallest offset
-/// that shows it.
-pub fn offset_of(picks: &[usize], selected: usize, top: usize, height: usize) -> usize {
-    let last = height.saturating_sub(2);
+/// selected pick's row is above `last` (the first row below the view), else the
+/// smallest offset that shows it.
+pub fn offset_of(picks: &[usize], selected: usize, top: usize, last: usize) -> usize {
     let Some(row) = picks.get(selected).copied() else {
         return 0;
     };
@@ -532,34 +549,143 @@ pub fn view(board: &Board, screen: &Screen, canvas: &mut Canvas, top: usize) -> 
     };
     match screen.tab {
         Tab::Now => view_now(project, board.now, screen, canvas, top),
-        Tab::Tasks => view_tasks(project, screen, canvas, top),
+        Tab::Tasks => view_tasks(project, board.now, screen, canvas, top),
         Tab::Cost => view_tokens(project, screen, canvas, top),
         Tab::Log => view_decisions(project, screen, canvas, top),
     }
 }
 
-/// The second view: the work as a graph, painted from the graph's own lines.
+/// The departure of the shown voyage: its elapsed minutes back from `now`.
+fn voyage_departure(project: &ProjectBoard, now: gear_model::Ts) -> gear_model::Ts {
+    project
+        .voyages
+        .first()
+        .and_then(|voyage| voyage.elapsed_min)
+        .map(|elapsed| now - elapsed * 60)
+        .unwrap_or(now)
+}
+
+/// The lanes of the Tasks view, in the prototype's order: the lane of the
+/// first task in plan order, then the next new one, and a lane of
+/// `project.lanes` that no shown task names after them.
+///
+/// The prototype draws its voyage's lanes in the plan's order (`LANES`), while
+/// `project.lanes` is in seat order (a seat id sorts by name), so the two orders
+/// differ once a voyage has three lanes (hull, mast, keel against hull, keel,
+/// mast). The golden frames are the prototype's, so the view takes the plan's
+/// order (T-362, the captain's answer to M-5869 pending).
+fn task_lanes(project: &ProjectBoard) -> Vec<String> {
+    let mut plan: Vec<&graph::GraphTask> = project.graph.iter().collect();
+    plan.sort_by_key(|task| task.rank);
+    let mut lanes: Vec<String> = Vec::new();
+    for task in plan {
+        if !lanes.contains(&task.lane) {
+            lanes.push(task.lane.clone());
+        }
+    }
+    for lane in lane_order(project) {
+        if !lanes.iter().any(|known| known == lane) {
+            lanes.push(lane.to_string());
+        }
+    }
+    lanes
+}
+
+/// The rows the Tasks view draws: the git graph of the project's tasks,
+/// measured from the shown voyage's departure (the prototype's `view_graph`).
+pub fn task_rows(project: &ProjectBoard, now: gear_model::Ts, width: usize) -> Vec<graph::GraphRow> {
+    graph::git_rows(&project.graph, &task_lanes(project), voyage_departure(project, now), width)
+}
+
+/// The tasks of the Tasks view's picks, in order: the rows with a task and a
+/// text — the rows `Enter` opens.
+pub fn task_picks(project: &ProjectBoard, now: gear_model::Ts, width: usize) -> Vec<String> {
+    task_rows(project, now, width)
+        .into_iter()
+        .filter(|row| !row.text.is_empty())
+        .filter_map(|row| row.task)
+        .collect()
+}
+
+/// The second view: the work as a git graph (README change 8): `dev` on the
+/// left, each task a branch of its lane, the newest work on top.
 fn view_tasks(
     project: &ProjectBoard,
+    now: gear_model::Ts,
     screen: &Screen,
     canvas: &mut Canvas,
     top: usize,
 ) -> Vec<usize> {
-    // The graph's own highlighter still knows the selection (its dependency
-    // marks); the reversed cells it draws are the row the canvas lights on its
-    // own, one colour across the width (README change 13).
-    let lines = graph::styled_lines(&project.graph, &project.graph_lanes, Some(screen.selected));
-    let count = project.graph.len();
-    let mut picks = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        let row = top + index;
-        canvas.put_line(0, row, line);
-        // The first line is the head of the columns; then one line per task.
-        if (1..=count).contains(&index) {
-            picks.push(row);
+    let lanes = task_lanes(project);
+    let width = canvas.width();
+    let info_x = 9 + 6 * lanes.len().saturating_sub(1) + 6;
+    let tw = (width as i64 - info_x as i64 - 52).clamp(30, 56) as usize;
+    // The head of the columns: dev, the lanes and the text's columns.
+    canvas.put_styled(2, top, "dev", Style::fg(Color::Ok).and_bold());
+    for (index, lane) in lanes.iter().enumerate() {
+        canvas.put_styled(
+            9 + 6 * index - 1,
+            top,
+            lane,
+            Style::fg(lane_color(&lanes, lane)).and_bold(),
+        );
+    }
+    canvas.put_styled(
+        info_x,
+        top,
+        &format!("{:<7}{:<tw$}  {:<36}time", "task", "what", "stage"),
+        Style::fg(Color::Dim),
+    );
+    // One row per row of the graph: dev's line, the cells of the drawing and
+    // the text after it.
+    let rows = task_rows(project, now, width);
+    let mut picks: Vec<(usize, String)> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let at = top + 1 + index;
+        canvas.put_styled(3, at, "│", Style::fg(Color::Ok));
+        for (x, character, style) in &row.cells {
+            canvas.put_styled(*x, at, &character.to_string(), *style);
+        }
+        if row.text.is_empty() {
+            continue;
+        }
+        canvas.put_styled(info_x, at, &row.text, row.style);
+        if let Some(task) = &row.task {
+            picks.push((at, task.clone()));
         }
     }
-    picks
+    // The selected pick's dependencies light up: what it needs, and what waits
+    // for it.
+    if let Some((_, selected)) = picks.get(screen.selected) {
+        let deps_of = |task: &str| -> Vec<String> {
+            project
+                .graph
+                .iter()
+                .find(|row| row.id == task)
+                .map(|row| row.deps.clone())
+                .unwrap_or_default()
+        };
+        let needed = deps_of(selected);
+        for (at, task) in &picks {
+            let waits = deps_of(task);
+            let mark = if needed.contains(task) {
+                // The row's task is what the selected one waits for.
+                format!("◂ needed by {selected}")
+            } else if waits.contains(selected) {
+                // The row's task waits for the selected one.
+                format!("▸ waits for {selected}")
+            } else {
+                continue;
+            };
+            canvas.put_styled(
+                width.saturating_sub(22),
+                *at,
+                &mark,
+                Style::fg(Color::Warn).and_bold(),
+            );
+        }
+    }
+    picks.into_iter().map(|(at, _)| at).collect()
 }
 
 /// The fourth view: the captain's decisions (★ = worth a look at landing) and
