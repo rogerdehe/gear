@@ -3097,7 +3097,8 @@ fn modified(path: &std::path::Path) -> Option<std::time::SystemTime> {
 
 /// [`run_engine`] with the tick call injectable, so a test can drive the
 /// "a failing tick does not stop the loop" path — and `stop`, which the loop
-/// asks before each tick and once per second of the sleep between ticks.
+/// asks before each tick and once per second of the sleep between ticks — and
+/// `watch`, which says when the binary on disk is a newer build (T-398).
 fn run_engine_with(
     store: &mut gear_store::Store,
     herdr: &mut dyn gear_herdr::HerdrAct,
