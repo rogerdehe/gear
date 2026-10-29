@@ -2695,7 +2695,7 @@ fn cmd_run() -> GearResult<()> {
     run_engine(&mut store, &mut herdr, &cfg, &mut clock, None, &mut out)
 }
 
-/// The engine's start line: which build it runs, so the log says when a
+/// The engine's start line, with the build it runs, so the log says when a
 /// replaced binary is being run by an old engine (T-398). `build` is the git
 /// sha `build.rs` read at build time ("unknown" without git).
 fn engine_start_line(pid: u32, db: &std::path::Path, version: &str, build: &str) -> String {
