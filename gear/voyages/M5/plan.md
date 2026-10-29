@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=719 -->
+<!-- gear-plan project=gear base=720 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -949,6 +949,3 @@ estimate: 25
 goal: [v0.5.0 S1] The skill tells every captain to cap the lanes' builds through the project's Makefile. Text changes only, exactly these: (1) skills/gear/references/captain.md, §1 Kickoff step 4 ("Write the config"), after its first sentence: "Before departure the repository has a Makefile (or the stack's equivalent) with one target per cost, and the gate is one of them: `check` — what a lane or reviewer runs: one package or crate, given as an argument it refuses to run without, with its build jobs and test threads capped (2 and 2 on a shared machine); `gate` — the merge gate the engine runs once per merge: the whole build and suite, still capped; `full` — uncapped, run by you alone for a release. Lanes and reviewers never build or test the whole repository themselves." (2) skills/gear/references/decompose.md, §2 Writing a task, the `accept` bullet: add "It names the exact capped check the lane runs (`Run only \`make check <the package this task changes>\`; the merge gate runs \`make gate\``), never a whole-repo build or test." (3) skills/gear/references/rules/lane.md, the line "Before handing in: Run the packet's acceptance commands…": it already says never `make full`; add "and never a whole-repository build or test of your own." The code change is these three files only.
 accept: The three texts read as above (`gear --skill captain`, `gear --skill decompose`, the lane rules); the skill topic tests pass. Run only `make check CRATE=gear-app`; the merge gate runs `make gate`.
 estimate: 10
-
-# Verdicts
-- T-408 attempt=1 contract=2 candidate=5d2f8c9e pass why="F1 needs a finished voyage that still has a merge in flight or an open merge-failed item; that is outside normal use (a finished voyage has no retries), so it is logged in the M6 backlog; the normal case, stale items of finished voyages and gone candidates, is fixed and tested"
