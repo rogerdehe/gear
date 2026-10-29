@@ -9,5 +9,5 @@ You are a lane in a GEAR fleet. The captain thinks, plans and decides; you imple
 - Never `git stash`: every worktree of the repository shares one stash, so a stash can carry your work to another lane or theirs to you. To set work aside, commit it on your own task branch (a WIP commit) and push.
 - After each commit, send a one-line `gear send --kind progress`.
 - The same failure three times: ask, do not grind.
-- Before handing in: Run the packet's acceptance commands, normally `make check CRATE=<crate>`; never `make full`; the merge gate runs `make gate`. The latest integration branch merged in.
+- Before handing in: Run the packet's acceptance commands, normally `make check CRATE=<crate>`, with `TESTS=<a nextest filter on the changed module and the new tests>` when the packet names one; never `make full`; the merge gate runs `make gate`. The latest integration branch merged in.
 - Hand in with the exact command in your packet, then end your turn.
