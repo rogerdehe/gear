@@ -157,7 +157,27 @@ fn a_lane_helping_on_an_unanswered_instruction_is_not_interrupted() {
     assert_eq!(interrupts(&w), 0, "an unanswered captain instruction is help, not idleness");
     reply(&mut w, &instruction, T0+900);
     run(&mut w, 901);
+    // T-324: a helping lane's busy condition is recovered each tick, so the
+    // timer of the condition starts at the reply.
+    assert_eq!(interrupts(&w), 0, "the condition starts a new timer at the reply");
+    run(&mut w, 1201);
     assert_eq!(interrupts(&w), 1, "the reply ends the help, so the condition interrupts");
+}
+
+#[test]
+fn a_lane_helping_on_an_unanswered_instruction_raises_no_busy_item() {
+    let mut w = world();
+    let instruction = instruct(&mut w, T0);
+    for seconds in [0, 599, 601, 1200, 1799] { run(&mut w, seconds); }
+    assert!(items(&mut w).is_empty(), "a lane that helps is busy on purpose");
+
+    // The reply ends the help: the condition counts as before, from the reply.
+    reply(&mut w, &instruction, T0 + 1799);
+    run(&mut w, 1800);
+    run(&mut w, 2400);
+    assert!(items(&mut w).is_empty(), "strictly more than ten minutes is needed");
+    run(&mut w, 2401);
+    assert_eq!(items(&mut w).len(), 1, "the reply ends the help, so the lane is busy with no task");
 }
 
 #[test]

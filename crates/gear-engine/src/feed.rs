@@ -86,6 +86,23 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
             }
             continue;
         }
+        // A lane helping on an unanswered instruction of the captain (T-324,
+        // T-323) is busy on purpose: it opens no IDLE item, and the open one
+        // closes with the fact, as for a parked lane.
+        if let Some(help) = gear_board::idle::helping(tx, project, &seat, now)? {
+            tx.set_meta(&state_key, "0")?;
+            if close(
+                tx,
+                project,
+                &seat.name,
+                &captain.id,
+                &format!("the lane is {}", help.text()),
+                now,
+            )? {
+                changes.push(FeedChange { lane: seat.name.clone(), action: "closed" });
+            }
+            continue;
+        }
         // Ready work, less what a delivery already took: a task with a
         // Delivered/started attempt is not available any more (R4).
         let mut ready = 0;
