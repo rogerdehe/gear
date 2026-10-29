@@ -60,3 +60,18 @@
 
 ## The stall item fires on a delivery that is still being sent
 - 2026-10-29 M5: three captain stall items in an hour (M-5520, M-5544, M-5584) named a lane "stuck" on a delivery that was `intended, 0 min` and confirmed within 30 s. The stall check should wait out `[timing] delivery_grace_s` (180) before it counts an unconfirmed delivery.
+
+## macOS scans every new build binary
+- 2026-10-29 M5: syspolicyd (Gatekeeper) ran at about 250 % CPU for hours: every test binary, build script and fresh tool a lane, reviewer or merge gate builds is assessed on its first run, so git calls and test starts slowed many times over on a busy machine, and a reviewer saw compiles stall on signature checks. The fix is the machine's: `sudo spctl developer-mode enable-terminal`, then System Settings → Privacy & Security → Developer Tools on for the terminal app that hosts Herdr, and restart it. Candidate for the skill (`gear admin kickoff` could check it and say so on macOS), since every Rust or Go fleet on a Mac hits it.
+
+## A warm reviewer is told the previous review's directory
+- 2026-10-29 M5 (F-185, F-197): a reviewer seat reused for another task got a packet whose working directory was the previous review's worktree (review/t336 for T-331, review/t407 for T-420); the reviewer found the right one itself each time, at a few minutes' cost. The packet of a warm seat should name the worktree of the task it now reviews.
+
+## The slow-step report misses a failed observation
+- 2026-10-29 M5 (T-386 review F1): crates/gear-engine/src/lib.rs fn tick returns early when observe::snapshot fails (about line 302), before note_slow, so a slow failed Herdr observation is not in the tick's slow-step report. Note the step before the early return.
+
+## init names the reviewers by [temps] kind, not by the review entry's CLI
+- 2026-10-29 M5 (another project's captain): with [temps] kind = "pi" and [models].review = [{ model = "gpt-6.1-terra", cli = "codex" }], `gear admin init` prints "reviewers: 4 x pi gpt-6.1-terra" and crates/gear-app/src/kickoff.rs (about line 236) checks the review chain against the [temps] kind, while the engine starts the reviewers on codex as the entry says. The line and the model check should follow each entry's own CLI.
+
+## No command files a bug issue on the forge
+- 2026-10-29 M5 (another project's captain): a voyage policy asked for a GitHub issue per production bug a test found; GEAR's [github] mode only imports issues and comments on task PRs, so the captain filed them with gh by hand. A captain command that files an issue through the engine's forge ops (once, retried, recorded) would keep that path inside GEAR.
