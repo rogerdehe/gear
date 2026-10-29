@@ -78,35 +78,53 @@ pub(crate) fn target(
 /// The labels a model switch needs, derived from OpenCode's own catalogue
 /// (T-94): the status bar and the picker both show `<model name> <provider
 /// name>` as OpenCode renders them. `variant` is the chain's, when it names
-/// one. `None` when the catalogue does not hold the model at all (the caller
-/// keeps its own "no labels" refusal).
+/// one.
+///
+/// `Ok(None)` means the list was read, is not empty, and has no such model
+/// (or the id has no `/`): the caller keeps its own "no labels" refusal.
+/// `Err` means the catalogue could not be read at all — the model is then not
+/// known to be absent, and must never be reported as absent (T-307).
 pub(crate) fn derived_labels(
     herdr: &mut dyn HerdrAct,
     model: &str,
     variant: Option<&str>,
     directory: Option<&str>,
-) -> Option<gear_app::config::ModelSwitch> {
-    let (provider, id) = model.split_once('/')?;
+) -> Result<Option<gear_app::config::ModelSwitch>, String> {
+    let Some((provider, id)) = model.split_once('/') else {
+        return Ok(None);
+    };
     let mut args = vec!["model.list".into()];
     if let Some(directory) = directory {
         args.extend(["--param".into(), format!("location[directory]={directory}")]);
     }
-    let catalog = herdr.opencode_api(&args).ok()?;
-    let models = data(&catalog).as_array()?;
-    let info = models
+    let catalog = herdr.opencode_api(&args)?;
+    let Some(models) = data(&catalog).as_array() else {
+        return Err("model.list did not return a list".into());
+    };
+    // An empty list is "not loaded yet", never "the model is absent".
+    if models.is_empty() {
+        return Err("the model list is not loaded yet".into());
+    }
+    let Some(info) = models
         .iter()
-        .find(|m| m["providerID"] == provider && m["id"] == id)?;
+        .find(|m| m["providerID"] == provider && m["id"] == id)
+    else {
+        return Ok(None);
+    };
     let model_name = info["name"].as_str().unwrap_or(id);
     // The display name as OpenCode renders it in the status bar: the provider's
     // own name from `provider.list` (F1 of the T-94 review), e.g. "MiniMax
-    // (minimax.cn)" or "OpenCode Go", not its id.
-    let provider_name = provider_display_name(herdr, provider, directory).unwrap_or_else(|| provider.to_string());
+    // (minimax.cn)" or "OpenCode Go", not its id. Without it there is no label
+    // OpenCode would show, and no fallback to the id.
+    let Some(provider_name) = provider_display_name(herdr, provider, directory) else {
+        return Err(format!("provider.list has no name for {provider}"));
+    };
     let text = format!("{model_name} {provider_name}");
-    Some(gear_app::config::ModelSwitch {
+    Ok(Some(gear_app::config::ModelSwitch {
         picker: text.clone(),
         bar: text,
         variant: variant.map(str::to_string),
-    })
+    }))
 }
 
 /// The provider's display name from OpenCode's `provider.list` (F1 of the
@@ -371,6 +389,7 @@ variant = "max"
             {"id": "opencode-go", "name": "OpenCode Go"}
         ]})));
         let labels = derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", None, Some("/repo"))
+            .expect("the catalogue is readable")
             .expect("the catalogue holds it");
         assert_eq!(labels.bar, "MiniMax-M3.1-Flash MiniMax (minimax.cn)");
         assert_eq!(labels.picker, "MiniMax-M3.1-Flash MiniMax (minimax.cn)");
@@ -378,7 +397,10 @@ variant = "max"
 
         // A model the catalogue does not hold has no labels to derive.
         herdr.api_replies.push_back(Ok(json!({"data": [{"providerID": "x", "id": "y"}]})));
-        assert!(derived_labels(&mut herdr, "minimax-cn/nope", None, Some("/repo")).is_none());
+        assert_eq!(
+            derived_labels(&mut herdr, "minimax-cn/nope", None, Some("/repo")),
+            Ok(None)
+        );
 
         // The chain's variant rides along when it names one.
         herdr.api_replies.push_back(Ok(json!({"data": [{
@@ -388,7 +410,51 @@ variant = "max"
         }]})));
         herdr.api_replies.push_back(Ok(json!({"data": [{"id": "minimax-cn", "name": "MiniMax (minimax.cn)"}]})));
         let labels = derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", Some("max"), None)
+            .expect("the catalogue is readable")
             .expect("the catalogue holds it");
         assert_eq!(labels.variant.as_deref(), Some("max"));
+    }
+
+    /// T-307: a catalogue that cannot be read is an error, never "the model is
+    /// absent": the captain must not be sent after a model id that is right.
+    #[test]
+    fn an_unreadable_catalogue_is_an_error_not_an_absent_model() {
+        // The API call itself fails: its own text is the reason.
+        let mut herdr = FakeHerdr::new();
+        herdr.api_replies.push_back(Err("connection refused".into()));
+        assert_eq!(
+            derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", None, Some("/repo")),
+            Err("connection refused".into())
+        );
+
+        // The reply is not a list.
+        let mut herdr = FakeHerdr::new();
+        herdr.api_replies.push_back(Ok(json!({"data": {"models": []}})));
+        assert_eq!(
+            derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", None, Some("/repo")),
+            Err("model.list did not return a list".into())
+        );
+
+        // An empty list is "not loaded yet", not "absent".
+        let mut herdr = FakeHerdr::new();
+        herdr.api_replies.push_back(Ok(json!({"data": []})));
+        assert_eq!(
+            derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", None, Some("/repo")),
+            Err("the model list is not loaded yet".into())
+        );
+
+        // The model is there but provider.list gives no name: a reason, and no
+        // fallback to the provider id as a label.
+        let mut herdr = FakeHerdr::new();
+        herdr.api_replies.push_back(Ok(json!({"data": [{
+            "providerID": "minimax-cn",
+            "id": "MiniMax-M3.1-Flash",
+            "name": "MiniMax-M3.1-Flash"
+        }]})));
+        herdr.api_replies.push_back(Ok(json!({"data": [{"id": "opencode-go", "name": "OpenCode Go"}]})));
+        assert_eq!(
+            derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", None, Some("/repo")),
+            Err("provider.list has no name for minimax-cn".into())
+        );
     }
 }
