@@ -1076,7 +1076,10 @@ pub(crate) fn reconcile_config(
         // baseline for existing lanes without confusing a quota fallback with
         // an explicit configuration change.
         let reapply = previous.is_some() || version > 1;
-        let kind_changed = reapply && current_cli != target_cli && !on_later_entry && (changed || previous.is_none());
+        // An explicit config change of CLI restarts the seat even when its
+        // old model/CLI is still a later entry of the new chain; only a seat
+        // the quota policy moved down its chain is left alone (T-400 F1).
+        let kind_changed = reapply && current_cli != target_cli && !quota_fallback && (changed || previous.is_none());
         let model_changed = reapply && ((changed && previous.as_ref().is_some_and(|old|
             (old["model"] != desired["model"] && (model.is_empty() || current_model.as_deref() != Some(model)))
                 || old["args"] != desired["args"]))
@@ -1316,6 +1319,26 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         let args=herdr.calls.iter().find_map(|c|if let Call::AgentStart {args,..}=c {Some(args)} else {None}).unwrap();
         assert!(args.windows(2).any(|w|w==["--model","new-model"]),"{args:?}");
         assert_eq!(store.read(|tx|tx.get_meta(&model_meta_key("p:heat"))).unwrap().as_deref(),Some("new-model"));
+    }
+    #[test]
+    fn review_reinit_cli_change_retaining_old_cli_as_fallback() {
+        // F1 of the T-400 review: the old CLI staying a later entry of the new
+        // chain must not swallow an explicit CLI change.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap(), false);
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        // Same model, new preferred CLI; the old CLI remains a fallback.
+        change(&mut store, "codex", "old-model");
+        store.write(|tx| {
+            let mut p = tx.get_project("p")?.unwrap();
+            p.config_toml = p.config_toml.replace(
+                "lanes = [{model=\"old-model\", cli=\"codex\"}]",
+                "lanes = [{model=\"old-model\", cli=\"codex\"}, {model=\"old-model\", cli=\"pi\"}]");
+            tx.update_project(&p)
+        }).unwrap();
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T+1).unwrap();
+        assert!(pending(&mut store, "p:heat").unwrap().is_some(),
+            "explicit pi-to-codex config change must schedule a restart, even when pi remains a fallback");
     }
     #[test]
     fn a_lane_on_a_later_chain_entry_is_left_to_the_quota_step() {
