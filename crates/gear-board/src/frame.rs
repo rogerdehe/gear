@@ -950,8 +950,8 @@ fn unfolded_rows(
     row + 1
 }
 
-/// Minutes as the folded header reads them: always the hours, the minutes in
-/// two digits (`0h25m`; T-354). The board's other texts keep [`hours`].
+/// Minutes as the header reads them: always the hours, the minutes in two
+/// digits (`0h25m`; T-354). The board's other texts keep [`hours`].
 fn hm(minutes: i64) -> String {
     format!("{}h{:02}m", minutes / 60, minutes % 60)
 }

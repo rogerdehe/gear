@@ -765,5 +765,3 @@ fn the_log_view_paints_the_prototype_rows() {
     let open = view_differences(Tab::Log, "log-open", 22, (22, 46));
     assert!(open.is_empty(), "\n{}", open.join("\n"));
 }
-
-
