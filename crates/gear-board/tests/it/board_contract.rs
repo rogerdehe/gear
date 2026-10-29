@@ -2046,23 +2046,15 @@ fn a_reset_days_away_prints_the_day_and_a_later_one_the_clock_alone() {
         ],
     );
     let frame = now_frame(&mut store, T0);
-    // A week out: the month and the day, then the time.
+    // A week out: the local month and the day, without the time (T-360).
     let line = frame
         .lines()
         .find(|line| line.contains("codex"))
         .unwrap_or_else(|| panic!("no codex line: {frame}"));
-    let reset = line.split("resets ").nth(1).unwrap_or_else(|| panic!("no reset: {line}"));
-    let mut words = reset.split(' ');
-    let month = words.next().unwrap_or_default();
-    let day = words.next().unwrap_or_default();
-    let time = words.next().unwrap_or_default();
-    assert_eq!(month.len(), 3, "the month is a word: {line}");
-    assert!(month.chars().all(|c| c.is_ascii_alphabetic()), "{line}");
-    assert!(day.parse::<u32>().is_ok(), "the day is a number: {line}");
-    assert_eq!(time.len(), 5, "then the time: {line}");
-    assert_eq!(&time[2..3], ":", "{line}");
-    // The date is the one the clock of the machine gives.
-    assert!(line.contains(&gear_board::idle::day_clock(week)), "{line}");
+    assert!(
+        line.contains(&format!("resets {}", gear_board::idle::month_day(week))),
+        "{line}"
+    );
     // Three hours out: only the clock, as today.
     let line = frame
         .lines()
@@ -2072,16 +2064,6 @@ fn a_reset_days_away_prints_the_day_and_a_later_one_the_clock_alone() {
         line.contains(&format!("resets {}", gear_board::idle::clock(hours))),
         "{line}"
     );
-}
-
-#[test]
-fn a_reading_half_an_hour_old_says_its_age() {
-    let mut store = world_reading_custom(
-        &["codex"],
-        &[("codex", &reading_json("codex", "weekly", T0 + 6 * 86_400, T0 - 45 * 60))],
-    );
-    let frame = now_frame(&mut store, T0);
-    assert!(frame.contains("(read 45 min ago)"), "{frame}");
 }
 
 // ---- T-411: the wheel and the page keys scroll a long view
@@ -2644,4 +2626,198 @@ fn a_cancelled_task_is_not_the_now_doing_of_its_lane() {
     let text = frame::canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None).text();
     assert!(text.contains("data  T-2"), "{text}");
     assert!(!text.contains("data  T-1"), "the cancelled task is NOW DOING:\n{text}");
+}
+
+// ---- T-360: under the lanes the Now view lists what to handle, each item
+// with who acts, and the quota on one line.
+
+/// A merged task is history: a past-estimate one is not an item to handle.
+#[test]
+fn a_merged_task_past_its_estimate_is_not_an_item_to_handle() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            // T-1 is done: 40 minutes on an estimate of 20.
+            let mut row = tx.get_task("p", "T-1")?.unwrap();
+            row.estimate_min = Some(20);
+            tx.update_task(&row)?;
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:data".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Accepted,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T0)?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::HandedIn, T0 + 40 * 60)?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Merged, T0 + 40 * 60)?;
+            Ok(())
+        })
+        .unwrap();
+    let frame = now_frame(&mut store, T0 + 60 * 60);
+    assert!(!frame.contains("T-1 data"), "{frame}");
+    assert!(!frame.contains("past its estimate"), "{frame}");
+    assert!(frame.contains("TO HANDLE (0)"), "{frame}");
+    assert!(frame.contains("nothing"), "{frame}");
+}
+
+/// An open task that took more than one round is an item, and the captain is
+/// told what to do with it.
+#[test]
+fn an_open_reworked_task_is_an_item_to_handle() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            let mut row = tx.get_task("p", "T-2")?.unwrap();
+            row.estimate_min = Some(25);
+            tx.update_task(&row)?;
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-2".into(),
+                n: 2,
+                seat: "p:runtime".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Started,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            tx.set_attempt_time("p", "T-2", 2, AttemptStep::Started, T0)?;
+            Ok(())
+        })
+        .unwrap();
+    let frame = now_frame(&mut store, T0 + 30 * 60);
+    assert!(frame.contains("⚠ T-2 runtime round 2,"), "the item names its lane and round: {frame}");
+    assert!(frame.contains("the captain scopes what is left"), "{frame}");
+}
+
+/// The items follow the plan's order, not the lanes' grouping: a keel task
+/// ranked before a hull task is listed first.
+#[test]
+fn the_items_follow_the_plan_order_across_lanes() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            // The seat order puts hull before keel; the plan ranks keel first.
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            testing::seed_active_seat(tx, "p", "keel", SeatRole::Lane, "w1:p3", "opencode", T0)?;
+            tx.upsert_voyage(&VoyageRow {
+                project: "p".into(),
+                milestone: "M4".into(),
+                title: "one voyage".into(),
+                done: Some("it is delivered".into()),
+                bar: None,
+                eta: Some("8h".into()),
+                departure: Some(T0 - 3600),
+                departure_tasks: Some(2),
+                departure_estimate_min: Some(20),
+                updated: T0 - 3600,
+            })?;
+            for (id, rank, lane) in [("T-262", 1, "keel"), ("T-263", 2, "hull")] {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state: TaskState::Running,
+                    priority: "must".into(),
+                    lane: Some(lane.into()),
+                    milestone: Some("M4".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(10),
+                    issue: None,
+                    updated: T0,
+                })?;
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: id.into(),
+                    n: 1,
+                    seat: format!("p:{lane}"),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Started,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })?;
+                tx.set_attempt_time("p", id, 1, AttemptStep::Started, T0)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let frame = now_frame(&mut store, T0 + 30 * 60);
+    let keel = frame.find("T-262 keel").expect("the keel item");
+    let hull = frame.find("T-263 hull").expect("the hull item");
+    assert!(keel < hull, "the plan's order, not the lanes': {frame}");
+}
+
+/// The quota is one line: every window of every reading, the provider's name
+/// first, and a reset two days away names its day.
+#[test]
+fn the_quota_is_one_line_with_a_day_two_days_away() {
+    let in_two_days = T0 + 2 * 86_400;
+    let mut store = world_reading_custom(
+        &["codex", "minimax-cn"],
+        &[
+            ("codex", &reading_json("codex", "weekly", in_two_days, T0)),
+            ("minimax-cn", &reading_json("minimax-cn", "5h", T0 + 3600, T0)),
+        ],
+    );
+    let frame = now_frame(&mut store, T0);
+    let line = frame
+        .lines()
+        .find(|line| line.contains("Quota"))
+        .unwrap_or_else(|| panic!("no quota line: {frame}"));
+    // The hour-out window comes first: the windows are ordered by their reset.
+    let minimax = line.find("minimax-cn 5h 63%").unwrap_or_else(|| panic!("no minimax-cn window: {line}"));
+    let codex = line.find("codex weekly 63%").unwrap_or_else(|| panic!("no codex window: {line}"));
+    assert!(minimax < codex, "the window that resets first comes first: {line}");
+    assert!(
+        line.contains(&format!(
+            "codex weekly 63% · resets {}",
+            gear_board::idle::month_day(in_two_days)
+        )),
+        "a reset two days away is a date: {line}"
+    );
 }

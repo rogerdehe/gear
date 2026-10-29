@@ -429,9 +429,15 @@ fn scan(input: &Input) -> Result<Findings, String> {
         // points at is work no merge will take (T-64). It is not an open
         // change, so it neither conflicts with integration nor pairs with an
         // open task.
+        // A candidate git cannot resolve (a commit this clone lacks, or a
+        // branch name stored before T-421) is no candidate: the task is judged
+        // by its branch below, and one such task never fails the whole repo's
+        // scan (T-431).
         if let Some(candidate) = &task.candidate {
-            if ancestor(&input.repo, candidate, &integration)? {
-                continue;
+            if let Some(candidate) = revision(&input.repo, candidate)? {
+                if ancestor(&input.repo, &candidate, &integration)? {
+                    continue;
+                }
             }
         }
         let name = crate::dispatch::task_branch(&task.task_branch, &task.project, &task.lane, &task.task);

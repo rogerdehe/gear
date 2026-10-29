@@ -177,9 +177,11 @@ fn a_task_over_its_estimate_is_red() {
     let ansi = screen.ansi(true);
     let end = ansi.find("60/30m ⚠\u{1b}[0m").expect("the time ends its red run");
     assert!(ansi[..end].rfind("\u{1b}[") == ansi[..end].rfind("\u{1b}[31m"), "{ansi:?}");
-    // The heading of what needs a look is yellow and bold.
-    let (row, x) = find(&text, "NEEDS A LOOK");
-    assert_eq!(screen.style_at(x, row), Style::fg(Color::Warn).and_bold());
+    // The block's heading is yellow and bold, and the over-estimate item is
+    // yellow with the warning mark (T-360).
+    let (row, x) = find(&text, "TO HANDLE (");
+    assert_eq!(screen.style_at(x, row), Style::fg(Color::Warn).and_bold(), "{text}");
+    assert_eq!(screen.style_at(3, row + 1), Style::fg(Color::Warn), "{text}");
     // An unselected lane's name is bold, in its lane colour (the second lane
     // is magenta); the mark before it stays accent-coloured, even on a space.
     let (row, _) = find(&text, "T-2 Give internal");
