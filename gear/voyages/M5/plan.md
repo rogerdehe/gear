@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=654 -->
+<!-- gear-plan project=gear base=655 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -77,6 +77,7 @@ eta: 16h
 - 2026-10-29 07:50 scope: another project's settled tasks kept raising urgent review-overrun items for hours: a review round counts as live until a reviewer's verdict, and a captain's verdict never ends it; T-381 at the head of hull's queue | why: a normal-use error that teaches captains to ignore urgent items | else: every captain-settled rework rings for ever
 - station M-4917: keep course 449 min in, 75 done; forecast 1218 min; the eta waits for the user
 
+- station M-4936: keep course 468 min in, 78 done; forecast 1169 min; the eta waits for the user
 # Queue
 
 ## T-381 [must] lane=hull milestone=M5 required
