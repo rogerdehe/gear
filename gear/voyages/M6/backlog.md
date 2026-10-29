@@ -97,3 +97,6 @@
 
 ## An accepted review whose branch never reached the remote
 - 2026-10-29 M5 (the other project, T-265, M-3539): the verdict was accepted, then the merge refused because origin/<project>/review/t265 did not exist; the reviewer's push had not landed and nothing checked it. The engine should confirm the review branch on the remote when it records the verdict (or push the seat's local branch itself) before the task is accepted.
+
+## Direction-check and review packets quote the goal, not the rework that replaced it
+- 2026-10-29 M5 (the other project: T-254's direction check M-3565 held the lane to the original goal's "all 3 clickable" while the applied rework narrowed it to two Settings cases and a prototype exemption; T-271 similar). A packet for a rework round should show the latest applied rework text first, marked as the instruction that governs where it differs from the goal, and the reviewer should judge against it. Also: T-270 was a second accepted review whose branch never reached the remote (see above).
