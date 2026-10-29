@@ -436,7 +436,7 @@ fn codex(session: &str, now: Ts, home: &Path) -> Result<Reading, String> {
             let Some(entry) = limits.get(name) else { continue };
             let Some(used) = entry.get("used_percent").and_then(Value::as_f64) else { continue };
             windows.push(Window {
-                name: name.to_string(),
+                name: window_name(name, entry),
                 used_percent: used,
                 resets_at: entry.get("resets_at").and_then(time_of),
             });
@@ -454,6 +454,24 @@ fn codex(session: &str, now: Ts, home: &Path) -> Result<Reading, String> {
         windows,
         read_at: now,
     })
+}
+
+/// The name of a Codex window: its length when the rollout says one (T-383).
+///
+/// `5h` for 300 minutes, `weekly` for 10080, else `<minutes / 60>h` when the
+/// minutes divide by 60, else `<minutes>m`. The API's own key
+/// (`primary`/`secondary`) is the name only when there is no `window_minutes`.
+fn window_name(key: &str, entry: &Value) -> String {
+    let Some(minutes) = entry.get("window_minutes").and_then(Value::as_f64) else {
+        return key.to_string();
+    };
+    let minutes = minutes.round() as i64;
+    match minutes {
+        300 => "5h".to_string(),
+        10_080 => "weekly".to_string(),
+        minutes if minutes % 60 == 0 => format!("{}h", minutes / 60),
+        minutes => format!("{minutes}m"),
+    }
 }
 
 /// A time of a provider's answer: a number (seconds or milliseconds) or a
