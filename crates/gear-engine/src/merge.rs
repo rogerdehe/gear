@@ -401,6 +401,13 @@ pub fn merge_passed(
         // (T-253): the project's own template.
         let lane = lane_of(store, project, op.task.as_deref())?;
         let review_fallback = review_branch(&config.conventions.review_branch, project, &lane, &task);
+        // The project's own merge message (T-296): `{project}` and `{task}` do
+        // not change between the attempts of one op, so they are filled once
+        // here; `{source}` is what the attempt merges, filled by the worker.
+        let commit = gear_model::commit::fill(
+            &config.conventions.merge_message,
+            &[("project", project), ("task", &task)],
+        );
         let finished = Arc::new(Mutex::new(None));
         let output = finished.clone();
         let job = op.clone();
@@ -433,6 +440,7 @@ pub fn merge_passed(
                         &job_wait,
                         pr.as_ref(),
                         &fallback,
+                        &commit,
                     ) {
                         Step::Merged(lines) => Report::Merged(lines),
                         Step::Pr { pr, head } => Report::Pr { pr, head },
@@ -637,10 +645,11 @@ fn merge_with_retries(
     wait: &RetryWait,
     pr: Option<&PrTarget>,
     review_fallback: &str,
+    commit: &str,
 ) -> Step {
     let mut attempt = 0;
     loop {
-        match merge_one_locked(worktree, repo, op, lock, others, remote, pr, review_fallback) {
+        match merge_one_locked(worktree, repo, op, lock, others, remote, pr, review_fallback, commit) {
             Step::Merged(lines) => return Step::Merged(lines),
             Step::Pr { pr, head } => return Step::Pr { pr, head },
             Step::Waiting(tasks) => return Step::Waiting(tasks),
@@ -1538,6 +1547,12 @@ fn merge_one(
         let task = op.task.clone().unwrap_or_default();
         gear_model::branch::expand(gear_model::branch::REVIEW_BRANCH, "", "", &task)
     };
+    // The tests' default message: the project's default, with `{task}` filled
+    // once as the engine fills it (T-296).
+    let commit = gear_model::commit::fill(
+        gear_model::commit::MERGE_MESSAGE,
+        &[("task", op.task.as_deref().unwrap_or_default())],
+    );
     step_result(merge_one_locked(
         worktree,
         repo,
@@ -1548,6 +1563,7 @@ fn merge_one(
         Target { name: "origin", runner: &FetchRemote },
         None,
         &review,
+        &commit,
     ))
 }
 
@@ -1595,6 +1611,7 @@ fn merge_one_locked(
     remote: Target<'_>,
     pr: Option<&PrTarget>,
     review_fallback: &str,
+    commit: &str,
 ) -> Step {
     let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(lock));
     let dir = Path::new(&worktree.path);
@@ -1753,7 +1770,7 @@ fn merge_one_locked(
                 "--no-ff",
                 pinned,
                 "-m",
-                &format!("merge({task}): {pinned}"),
+                &gear_model::commit::fill(commit, &[("source", pinned)]),
             ],
         ) {
             // Abort and leave the worktree exactly at the integration branch.
@@ -1822,7 +1839,7 @@ fn merge_one_locked(
     //    The review's commits go onto the pull request's head, and the pull
     //    request is what lands the task.
     if let Some(pr) = pr {
-        return pr_head(dir, &git, &task, &sha, &review_ref, has_review, pr, remote);
+        return pr_head(dir, &git, &sha, &review_ref, has_review, pr, remote, commit);
     }
 
     // 9b. push, then close the branches the merge consumed.
@@ -1958,12 +1975,12 @@ impl Pushed {
 fn pr_head(
     dir: &Path,
     git: &impl Fn(&Path, &[&str]) -> Result<String, String>,
-    task: &str,
     candidate: &str,
     review_ref: &str,
     has_review: bool,
     pr: &PrTarget,
     remote: Target<'_>,
+    commit: &str,
 ) -> Step {
     // The candidate is the base of the head: the review's commits go on top
     // of it, and the push is a fast-forward of the branch the claim opened.
@@ -1982,7 +1999,7 @@ fn pr_head(
                 "--no-ff",
                 review_ref,
                 "-m",
-                &format!("merge({task}): {review_ref}"),
+                &gear_model::commit::fill(commit, &[("source", review_ref)]),
             ],
         ) {
             let _ = git(dir, &["merge", "--abort"]);
@@ -4228,6 +4245,28 @@ gate = "{gate}"
         queued_merge_candidate(scratch, gate, &candidate)
     }
 
+    /// A queued merge whose project config carries its own `merge_message`
+    /// (T-296): everything else is [`queued_merge`].
+    fn queued_merge_templated(
+        scratch: &Scratch,
+        gate: &str,
+        template: &str,
+    ) -> (Store, gear_herdr::fake::FakeHerdr, EngineCfg) {
+        let (mut store, herdr, cfg) = queued_merge(scratch, gate);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                // `[conventions]` is the config text's last section, so the
+                // line lands in it.
+                project.config_toml =
+                    format!("{}\nmerge_message = \"{template}\"\n", config_text(gate));
+                tx.update_project(&project)?;
+                Ok(())
+            })
+            .unwrap();
+        (store, herdr, cfg)
+    }
+
     /// T-165 (review F2, design §10.7 row B03-01): a task whose work is
     /// already on the integration branch — it landed with another task's
     /// merge — is not merged again: no merge op is queued for it, and a merge
@@ -4527,6 +4566,11 @@ gate = "{gate}"
             let task = op.task.clone().unwrap_or_default();
             gear_model::branch::expand(gear_model::branch::REVIEW_BRANCH, "", "", &task)
         };
+        // The tests' default message, as [`merge_one`] passes it (T-296).
+        let commit = gear_model::commit::fill(
+            gear_model::commit::MERGE_MESSAGE,
+            &[("task", op.task.as_deref().unwrap_or_default())],
+        );
         step_result(merge_with_retries(
             worktree,
             repo,
@@ -4537,6 +4581,7 @@ gate = "{gate}"
             wait,
             None,
             &review,
+            &commit,
         ))
     }
 
@@ -5369,6 +5414,47 @@ gate = "{project_gate}"
         let branches = &state.branches;
         assert!(!branches.contains("heat/t5"), "{branches}");
         assert!(!branches.contains("review/t5"), "{branches}");
+    }
+
+    /// T-296: with the default template the merge commits read exactly as they
+    /// read before: the candidate by its sha, and the review branch, under
+    /// `merge(T-5): `.
+    #[test]
+    fn the_default_merge_message_names_the_task_and_what_it_merged() {
+        let scratch = Scratch::new("merge-message-default");
+        let candidate = scratch.head_of("heat/t5");
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, "true");
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        wait_merge(&mut store, &mut herdr, &cfg);
+
+        let log = scratch.dev_log();
+        assert!(log_has(&log, &format!("merge(T-5): {candidate}")), "{log}");
+        assert!(log_has(&log, "merge(T-5): origin/review/t5"), "{log}");
+    }
+
+    /// T-296: a team with commit rules reads its own message. `{project}` and
+    /// `{task}` are filled once per op, `{source}` on every merge of it.
+    #[test]
+    fn a_project_merge_message_replaces_the_default() {
+        let scratch = Scratch::new("merge-message-template");
+        let candidate = scratch.head_of("heat/t5");
+        let (mut store, mut herdr, cfg) = queued_merge_templated(
+            &scratch,
+            "true",
+            "chore(merge): {task} [{project}] {source}",
+        );
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        wait_merge(&mut store, &mut herdr, &cfg);
+
+        let log = scratch.dev_log();
+        assert!(
+            log_has(&log, &format!("chore(merge): T-5 [p] {candidate}")),
+            "{log}"
+        );
+        assert!(log_has(&log, "chore(merge): T-5 [p] origin/review/t5"), "{log}");
+        assert!(!log.contains("merge(T-5)"), "the default is not used: {log}");
     }
 
     /// A push rejected because dev moved during the gate (the captain pushed)
