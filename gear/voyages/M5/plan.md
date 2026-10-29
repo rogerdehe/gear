@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=730 -->
+<!-- gear-plan project=gear base=731 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -112,6 +112,7 @@ eta: 16h
 - 2026-10-29 06:00 scope: a departed voyage's goal, bar and eta are guarded by the engine (new task at the front of hull): apply refuses a change without --confirmed, passed only when the user asked for it and confirmed it
 - 2026-10-29 07:10 hand-fix: the system disk filled (1 GB free): the captain deleted rebuildable caches, test temp directories older than an hour and another project's scratch copies in /tmp older than two hours on the user's order; a new task at the front of hull moves our test temp files off the system disk
 - 2026-10-29 07:40 scope: this machine's TMPDIR now points at the data disk (shell profile, pi setting, launchd), so T-413 (GEAR sets each seat's TMPDIR, for every user's machine) moves behind T-402 on hull; T-412 (tests delete their temp folders, lanes never write /tmp) stays first
+- station M-5422: keep course 840 min in; hull 348 min and mast 257 min against 120 left; T-409, T-401 and T-402 move to mast, which fills the board chain's review waits with them
 
 # Queue
 
@@ -145,9 +146,9 @@ goal: [v0.5.0 S1] A task settled as mechanical merges without a review branch (2
 accept: A merge.rs test: a mechanically settled task with no review branch on the remote merges its candidate into dev and closes its task branch; a reviewed task without its review branch still fails as today. A plan test: `- remerge` of a mechanical task queues a payload with `mechanical: true`. Run only `make check CRATE=gear-engine` and `make check CRATE=gear-app`; the merge gate runs `make gate`.
 estimate: 20
 
-## T-409 [now] lane=hull milestone=M5 required
+## T-409 [now] lane=mast milestone=M5 required
 goal: [v0.5.0 S1] The forge's contract tests do not fail the merge gate on a loaded machine (T-392's gate, 2026-10-29: four github_contract tests hit the forge's 30 s call bound at load 43 while the same 18 tests pass in 14 s on dev). The bound is a production setting, not what these tests check. Change crates/gear-forge/tests/it/github_contract.rs fn forge_with only, no other design: the forge it returns is `GitHub::new().with_path(&dir).with_timeout(Duration::from_secs(300))`; the timeout test keeps its own 250 ms bound. The code change is in that test file only.
-accept: `make check CRATE=gear-forge` passes; a_call_past_its_bound_is_a_timeout still sets 250 ms and passes. Run only `make check CRATE=gear-forge`; the merge gate runs `make gate`.
+accept: (Moved to mast for balance at station M-5422: the files this task names are allowed edits for mast.) `make check CRATE=gear-forge` passes; a_call_past_its_bound_is_a_timeout still sets 250 ms and passes. Run only `make check CRATE=gear-forge`; the merge gate runs `make gate`.
 estimate: 10
 
 ## T-411 [now] lane=mast milestone=M5 required
@@ -212,9 +213,9 @@ goal: [v0.5.0 S1] Changing a lane's model mid-voyage is documented and proven, i
 accept: The two engine tests above pass (one of them switches the CLI, pi to codex), and the existing config-change tests in restart.rs pass; the two skill texts read as above. Run only `make check CRATE=gear-engine`; the merge gate runs `make gate`.
 estimate: 30
 
-## T-401 [must] lane=hull milestone=M5 required
+## T-401 [must] lane=mast milestone=M5 required
 goal: [v0.5.0 S1] A staffing change after departure is authorized by a confirmation, not by pasted words: T-392 made `gear admin init` refuse it without `--user "<the user's words>"`, and GEAR is not to store the user's words. A sensitive change (goal, bar, staffing) happens only when the user asks for it, and then the captain confirms it with the user in a dialog; at every other time the captain asks nothing and changes none of them. Change, no other design: (1) crates/gear-cli/src/main.rs `AdminOp::Init`: `--user <words>` becomes `#[arg(long)] confirmed: bool` ("the user asked for this staffing change and confirmed it"), passed through as `confirmed: bool` in place of `user: Option<&str>`; (2) crates/gear-app/src/admin.rs: the refusal text ends "— change staffing only when the user asks; confirm it with them, then run init again with --confirmed", and the starred staff decision's why is "confirmed by the user" (no words stored; the blank-words check of T-392's rework goes); (3) skills/gear/references/captain.md: T-392's sentence becomes "Staffing (`[quota]`, `[[lanes]]`, `[temps]`, `[models]`) is agreed at kickoff; mid-voyage init refuses a change to it until you pass --confirmed.", and one rule in the section on talking to the user: "Ask the user to confirm (a dialog) only when they ask you to change the goal, the bar or the staffing; never ask anything otherwise, and never change those on your own." The code change is in crates/gear-cli/src/main.rs, crates/gear-app/src/admin.rs and skills/gear/references/captain.md only; tests go where the crates keep them.
-accept: (Moved to hull for balance at station M-5296: the files this task names are allowed edits for hull.) gear-app tests: the T-392 staffing tests run with `confirmed: true` in place of user words and the decision's why is "confirmed by the user"; without it the refusal text ends with the --confirmed sentence. A CLI test: `gear admin init --confirmed` parses and `--user` is gone. Run only `make check CRATE=gear-app` and `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+accept: (Moved to mast for balance at station M-5422: the files this task names are allowed edits for mast.) gear-app tests: the T-392 staffing tests run with `confirmed: true` in place of user words and the decision's why is "confirmed by the user"; without it the refusal text ends with the --confirmed sentence. A CLI test: `gear admin init --confirmed` parses and `--user` is gone. Run only `make check CRATE=gear-app` and `make check CRATE=gear-cli`; the merge gate runs `make gate`.
 deps: T-392
 estimate: 20
 
@@ -224,9 +225,9 @@ accept: Engine tests: an onboarded lane's env line starts with `mkdir -p <worktr
 estimate: 40
 
 
-## T-402 [now] lane=hull milestone=M5 required
+## T-402 [now] lane=mast milestone=M5 required
 goal: [v0.5.0 S1] A merged task branch whose only commits past the candidate are the lane's report is deleted without ringing the captain (2026-10-29: after v0.4.11 the captain was told for T-389, whose extra commit f5ca15f0 wrote only gear/voyages/M5/reports/T-389.md; lanes often push their report after the hand-in, so every such merge would ring). Change crates/gear-engine/src/merge.rs fn close_branches only, no other design: in the branch that keeps a task branch with commits not on the integration branch, list the files those commits change (`git diff --name-only HEAD...<remote>/<branch>`); when every one lies in a `reports/` directory (a path segment `/reports/`), delete the branch as the other closed branches are and add it to `closed`; otherwise keep it and name its commits as today. The code change is in crates/gear-engine/src/merge.rs only; tests go where the crate keeps them.
-accept: merge.rs tests: a task branch one commit past the candidate that adds only `gear/voyages/M1/reports/T-5.md` is closed after the merge and the captain gets no item; one whose extra commit touches a source file is kept and named as today. Run only `make check CRATE=gear-engine`; the merge gate runs `make gate`.
+accept: (Moved to mast for balance at station M-5422: the files this task names are allowed edits for mast.) merge.rs tests: a task branch one commit past the candidate that adds only `gear/voyages/M1/reports/T-5.md` is closed after the merge and the captain gets no item; one whose extra commit touches a source file is kept and named as today. Run only `make check CRATE=gear-engine`; the merge gate runs `make gate`.
 estimate: 15
 
 ## T-395 [now] lane=hull milestone=M5 required
