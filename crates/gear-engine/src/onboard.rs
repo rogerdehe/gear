@@ -58,6 +58,86 @@ fn common_dir(dir: &str) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
+/// Where a seat's temp files go (T-413): `<scratch_dir>/<project>/<seat>` when
+/// the project names a `[conventions].scratch_dir` (`~` is the home folder),
+/// else the seat's own worktree holds them under `.gear/tmp`. `None` = the seat
+/// has neither, so there is nothing to point it at.
+pub(crate) fn scratch_dir(
+    conventions: &gear_app::config::Conventions,
+    project: &str,
+    seat: &str,
+    worktree: Option<&str>,
+) -> Option<String> {
+    match conventions
+        .scratch_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+    {
+        Some(dir) => Some(
+            expand_home(dir)
+                .join(project)
+                .join(seat)
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        None => worktree
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                std::path::Path::new(path)
+                    .join(".gear")
+                    .join("tmp")
+                    .to_string_lossy()
+                    .into_owned()
+            }),
+    }
+}
+
+/// A path that starts with `~` is in the home folder of the user.
+fn expand_home(path: &str) -> std::path::PathBuf {
+    let path = path.trim();
+    let Some(home) = std::env::var_os("HOME") else {
+        return std::path::PathBuf::from(path);
+    };
+    match path.strip_prefix('~') {
+        Some(rest) => {
+            let rest = rest.strip_prefix('/').unwrap_or(rest);
+            let mut home = std::path::PathBuf::from(home);
+            if !rest.is_empty() {
+                home.push(rest);
+            }
+            home
+        }
+        None => std::path::PathBuf::from(path),
+    }
+}
+
+/// The worktree default scratch (T-413) lives in `<worktree>/.gear/tmp`, so the
+/// repository ignores `.gear/`: the line is appended once to the common dir's
+/// `info/exclude`, which every worktree of the repository shares. A path that
+/// is not a git repository, or cannot be written, is left as it is: the ignore
+/// only keeps `git status` quiet, it never decides a merge.
+fn exclude_gear_dir(worktree: &str) {
+    const LINE: &str = ".gear/";
+    let Some(common) = common_dir(worktree) else { return };
+    let info = std::path::Path::new(&common).join("info");
+    if std::fs::create_dir_all(&info).is_err() {
+        return;
+    }
+    let exclude = info.join("exclude");
+    let mut text = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if text.lines().any(|line| line.trim() == LINE) {
+        return;
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(LINE);
+    text.push('\n');
+    let _ = std::fs::write(&exclude, text);
+}
+
 /// The other repository the worktree at `path` belongs to, when it is not the
 /// one at `repo` (T-253). Herdr places a worktree by the repo folder's name and
 /// the branch, so two repos with the same folder name and the same seat branch
@@ -518,6 +598,18 @@ fn onboard_seat(
             tx.set_meta(&worktree_repo_path_key(&seat.id, &worktree.repo), &created.path)
         })
         .map_err(|e| format!("worktree path: {}", e.detail))?;
+
+    // 3a. the seat's scratch directory (T-413): the project's
+    //    `[conventions].scratch_dir` when it names one, else the lane's own
+    //    worktree. The line comes first, so every temp file of the seat —
+    //    pi, codex, claude, cargo and the OS temp API all read `TMPDIR` — lands
+    //    there and never in the system temp directory.
+    if let Some(scratch) = scratch_dir(&config.conventions, &seat.project, &seat.name, Some(&created.path)) {
+        plan.env_command = format!("mkdir -p {scratch}; export TMPDIR={scratch}; {}", plan.env_command);
+        if config.conventions.scratch_dir.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            exclude_gear_dir(&created.path);
+        }
+    }
 
     // 3b. the pane must be a shell. A seat retried while its agent still runs
     //    there (the agent never exited, M3 fixture re-run) would get the
@@ -1681,7 +1773,7 @@ repo = "web"
             env.contains(r#"OPENCODE_CONFIG_CONTENT='{"model":"minimax-cn/MiniMax-M3.1-Flash"}'"#),
             "the environment line must carry the lane's model: {env}"
         );
-        assert!(env.starts_with(&format!("export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path)), "{env}");
+        assert!(env.starts_with(&format!("mkdir -p /fake-worktrees/toy-heat/.gear/tmp; export TMPDIR=/fake-worktrees/toy-heat/.gear/tmp; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path)), "{env}");
         // The model is only read by a process that inherits the pane's
         // environment, so the agent gets a private server.
         assert!(!start_args(&herdr).contains(&"--standalone".to_string()), "no --standalone (L-56): {:?}", start_args(&herdr));
@@ -1791,7 +1883,7 @@ repo = "web"
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
         assert_eq!(active, vec!["toy:heat".to_string()]);
-        assert_eq!(env_line(&herdr), format!("export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path));
+        assert_eq!(env_line(&herdr), format!("mkdir -p /fake-worktrees/toy-heat/.gear/tmp; export TMPDIR=/fake-worktrees/toy-heat/.gear/tmp; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path));
         assert_eq!(start_args(&herdr), vec!["--auto".to_string()]);
     }
 
@@ -1893,5 +1985,95 @@ repo = "web"
         assert_eq!(sh(&worktree, "git config --worktree core.hooksPath"), own, "not ours");
         assert!(std::path::Path::new(&own).join("pre-push").exists(), "its hooks stay");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// T-413: the lane's temp files go in its own scratch directory and never
+    /// in the system temp directory: `TMPDIR` is `<worktree>/.gear/tmp`, which
+    /// the repository is told to ignore — once.
+    #[test]
+    fn a_lane_writes_its_temp_files_in_its_worktree_scratch_dir() {
+        let sh = |dir: &std::path::Path, command: &str| {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{command}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        // A real repo with a linked worktree for the lane (the exclude file is
+        // the repository's, shared by every worktree of it).
+        let root = crate::testtmp::temp("gear-onboard-scratch");
+        sh(&root, "git init -q -b dev work");
+        let work = root.join("work");
+        std::fs::write(work.join("README.md"), "dev\n").unwrap();
+        sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
+        sh(&work, "git worktree add -q -b toy/heat ../heat dev");
+        let worktree = root.join("heat");
+
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w1:p2");
+        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        assert_eq!(active, vec!["toy:heat".to_string()]);
+        let scratch = worktree.join(".gear").join("tmp");
+        assert!(
+            env_line(&herdr).starts_with(&format!(
+                "mkdir -p {}; export TMPDIR={}; export GEAR_CTX=toy:heat:1; export GEAR_DB={}",
+                scratch.display(),
+                scratch.display(),
+                cfg().db_path
+            )),
+            "{}",
+            env_line(&herdr)
+        );
+
+        // The repository ignores `.gear/`, the line added once only.
+        let exclude = work.join(".git").join("info").join("exclude");
+        let lines = |path: &std::path::Path| {
+            std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.trim() == ".gear/")
+                .count()
+        };
+        assert_eq!(lines(&exclude), 1, "the repository ignores .gear/");
+        exclude_gear_dir(&worktree.to_string_lossy());
+        assert_eq!(lines(&exclude), 1, "the line is added once");
+    }
+
+    /// T-413: a project may name the parent (`[conventions].scratch_dir`):
+    /// each seat gets `<scratch_dir>/<project>/<seat>`.
+    #[test]
+    fn a_project_scratch_dir_holds_each_seat_own_directory() {
+        let scratch = crate::testtmp::temp("gear-onboard-scratch-dir").join("scratch");
+        let config_toml = format!(
+            "{CONFIG}\n[conventions]\nscratch_dir = \"{}\"\n",
+            scratch.display()
+        );
+        let mut store = world(&config_toml);
+        let mut herdr = FakeHerdr::new();
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        assert_eq!(active, vec!["toy:heat".to_string()]);
+        let own = scratch.join("toy").join("heat");
+        assert!(
+            env_line(&herdr).starts_with(&format!(
+                "mkdir -p {}; export TMPDIR={}; export GEAR_CTX=toy:heat:1; export GEAR_DB={}",
+                own.display(),
+                own.display(),
+                cfg().db_path
+            )),
+            "{}",
+            env_line(&herdr)
+        );
     }
 }

@@ -770,6 +770,8 @@ fn release_seat(
                 tx.set_seat_state(&seat.id, SeatState::Released, Some(reason), now)
             })
             .map_err(|e| e.detail)?;
+        // T-413: the seat's scratch directory goes with it.
+        remove_scratch(store, project, seat);
         log_release(release_line(seat, seat.state, reason, caller));
         return Ok(true);
     }
@@ -902,8 +904,28 @@ fn release_seat(
     if !matches!(seat.state_reason.as_deref(), Some(REVIEW_DONE) | Some(IDLE_REVIEWER_RELEASED)) {
         log_release(release_line(seat, seat.state, &reason, caller));
     }
-    let _ = project;
+    // T-413: the seat's scratch directory goes with it; the worktree and its
+    // build cache stay.
+    remove_scratch(store, project, seat);
     Ok(true)
+}
+
+/// T-413: a released seat takes its scratch directory with it: the next job on
+/// the seat — or the lane's next start — makes a fresh one. Only temp files go;
+/// the worktree and its build cache stay (17 §8a). A directory that is not
+/// there, or cannot be removed, is left as it is: a scratch directory never
+/// decides whether a seat is free.
+fn remove_scratch(store: &mut Store, project: &str, seat: &SeatRow) {
+    let Ok(conventions) = gear_app::config::conventions_or_default(store, project) else { return };
+    let worktree = store
+        .read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(&seat.id)))
+        .ok()
+        .flatten()
+        .filter(|path| !path.is_empty());
+    let Some(scratch) = crate::onboard::scratch_dir(&conventions, project, &seat.name, worktree.as_deref()) else {
+        return;
+    };
+    let _ = std::fs::remove_dir_all(&scratch);
 }
 
 /// Release the reviewer seats that run **no reviewer** (B02-04).
@@ -1119,6 +1141,9 @@ fn retire_one(
             tx.set_seat_state(&seat.id, SeatState::Retired, Some("retired"), now)
         })
         .map_err(|e| e.detail)?;
+    // T-413: the lane's scratch directory goes with it, like a released
+    // seat's; its worktree and build cache stay.
+    remove_scratch(store, &seat.project, seat);
     Ok(())
 }
 
@@ -1646,6 +1671,38 @@ profile = "codex"
         // A further tick does nothing.
         let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 40).unwrap();
         assert!(report.released.is_empty());
+    }
+
+    /// T-413: a released seat takes its scratch directory with it — only after
+    /// its agent is gone, so nothing writes there any more.
+    #[test]
+    fn a_released_seat_takes_its_scratch_directory_with_it() {
+        let worktree = crate::testtmp::temp("gear-release-scratch").join("wt");
+        let scratch = worktree.join(".gear").join("tmp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join("probe"), "x").unwrap();
+
+        let mut store = world(TaskState::Cancelled, "w1:p1", "codex");
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    &crate::onboard::worktree_path_key("p:r-1"),
+                    &worktree.to_string_lossy(),
+                )
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+
+        // The agent leaves first: the scratch is still there.
+        assert!(!release_one(&mut store, &mut herdr, "p", &seat, None, T0 + 10, "test").unwrap());
+        assert!(scratch.is_dir(), "the scratch goes with the seat, not before it");
+
+        // The seat is free: its scratch directory is gone.
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert!(release_one(&mut store, &mut herdr, "p", &seat, None, T0 + 20, "test").unwrap());
+        assert!(!scratch.exists(), "the released seat's scratch directory is gone");
     }
 
     #[test]
