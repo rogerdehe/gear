@@ -1,6 +1,6 @@
 # Review of T-425
 
-Status: running
+Status: done
 Verdict: pass
 Reviewed: review/t425 @ fafd11ed   Reviewer: gear:review-11 (deepseek-v4-pro-0813)   Round: 3
 
