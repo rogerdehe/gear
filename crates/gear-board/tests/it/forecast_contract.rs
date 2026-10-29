@@ -121,7 +121,10 @@ fn merged(
 }
 
 fn board(store: &mut Store) -> ProjectBoard {
-    let options = gear_board::Options { project: Some("p".into()), ..Default::default() };
+    let options = gear_board::Options {
+        project: Some("p".into()),
+        ..Default::default()
+    };
     gear_board::build(store, &options, NOW)
         .unwrap()
         .projects
@@ -210,15 +213,28 @@ fn the_board_plays_each_lane_forward_while_the_voyage_has_open_work() {
 
     // One end per lane, in the lanes' order.
     assert_eq!(
-        plan.forecast.iter().map(|end| end.lane.clone()).collect::<Vec<_>>(),
-        plan.lanes.iter().map(|lane| lane.lane.clone()).collect::<Vec<_>>()
+        plan.forecast
+            .iter()
+            .map(|end| end.lane.clone())
+            .collect::<Vec<_>>(),
+        plan.lanes
+            .iter()
+            .map(|lane| lane.lane.clone())
+            .collect::<Vec<_>>()
     );
     assert_eq!(plan.forecast.len(), 2);
     // T-4 waits for T-3, which is still on the keel lane: hull is idle until
     // then, and the wait names T-3.
-    let hull = plan.forecast.iter().find(|end| end.lane == "hull").expect("hull");
+    let hull = plan
+        .forecast
+        .iter()
+        .find(|end| end.lane == "hull")
+        .expect("hull");
     assert_eq!(
-        hull.waits.iter().map(|(_, dep)| dep.as_str()).collect::<Vec<_>>(),
+        hull.waits
+            .iter()
+            .map(|(_, dep)| dep.as_str())
+            .collect::<Vec<_>>(),
         vec!["T-3"]
     );
     assert!(hull.end_min > 0);

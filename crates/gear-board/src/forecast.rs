@@ -289,25 +289,41 @@ mod tests {
         let hull = lane(&ends, "hull");
         assert_eq!(hull.end_min, 134);
         assert_eq!(hull.waits, vec![(91, "T-266".to_string())]);
-        assert!((hull.pace - 1.18).abs() < 1e-9, "hull's pace is {}", hull.pace);
+        assert!(
+            (hull.pace - 1.18).abs() < 1e-9,
+            "hull's pace is {}",
+            hull.pace
+        );
 
         // mast: nothing blocks it, and its pace is 96 minutes over 85.
         let mast = lane(&ends, "mast");
         assert_eq!(mast.end_min, 102);
         assert!(mast.waits.is_empty(), "mast waits on {:?}", mast.waits);
-        assert!((mast.pace - 96.0 / 85.0).abs() < 1e-9, "mast's pace is {}", mast.pace);
+        assert!(
+            (mast.pace - 96.0 / 85.0).abs() < 1e-9,
+            "mast's pace is {}",
+            mast.pace
+        );
 
         // keel: T-262 is in review, so T-265 waits 15 minutes for it.
         let keel = lane(&ends, "keel");
         assert_eq!(keel.end_min, 61);
         assert_eq!(keel.waits, vec![(15, "T-262".to_string())]);
-        assert!((keel.pace - 0.9).abs() < 1e-9, "keel's pace is {}", keel.pace);
+        assert!(
+            (keel.pace - 0.9).abs() < 1e-9,
+            "keel's pace is {}",
+            keel.pace
+        );
     }
 
     #[test]
     fn a_lane_with_nothing_planned_ends_at_once() {
         // A lane no job speaks for ends at once, whatever the others do.
-        let ends = forecast(&m5(), &["hull".to_string(), "temp".to_string()], REVIEW_MERGE_MIN);
+        let ends = forecast(
+            &m5(),
+            &["hull".to_string(), "temp".to_string()],
+            REVIEW_MERGE_MIN,
+        );
         assert_eq!(
             ends[1],
             LaneEnd {
@@ -323,16 +339,14 @@ mod tests {
 
     #[test]
     fn a_dependency_nobody_speaks_for_never_merges() {
-        let jobs = vec![
-            Job {
-                id: "T-1".to_string(),
-                lane: "hull".to_string(),
-                stage: Stage::Queued,
-                est_min: 10,
-                actual_min: 0,
-                deps: vec!["T-404".to_string()],
-            },
-        ];
+        let jobs = vec![Job {
+            id: "T-1".to_string(),
+            lane: "hull".to_string(),
+            stage: Stage::Queued,
+            est_min: 10,
+            actual_min: 0,
+            deps: vec!["T-404".to_string()],
+        }];
         let ends = forecast(&jobs, &["hull".to_string()], REVIEW_MERGE_MIN);
         assert_eq!(ends[0].waits, vec![(NO_DEP, "T-404".to_string())]);
         assert_eq!(ends[0].end_min, NO_DEP + 10 + REVIEW_MERGE_MIN);
@@ -349,10 +363,19 @@ mod tests {
             deps: Vec::new(),
         };
         // 300 of 10 minutes would be a pace of 30; the clamp holds it at 3.
-        assert_eq!(forecast(&[job("T-1", 10, 300)], &["hull".to_string()], 15)[0].pace, 3.0);
+        assert_eq!(
+            forecast(&[job("T-1", 10, 300)], &["hull".to_string()], 15)[0].pace,
+            3.0
+        );
         // 1 of 300 would be 0.003; the clamp holds it at 0.5.
-        assert_eq!(forecast(&[job("T-1", 300, 1)], &["hull".to_string()], 15)[0].pace, 0.5);
+        assert_eq!(
+            forecast(&[job("T-1", 300, 1)], &["hull".to_string()], 15)[0].pace,
+            0.5
+        );
         // A lane whose estimates are 0 divides by one, not by zero.
-        assert_eq!(forecast(&[job("T-1", 0, 4)], &["hull".to_string()], 15)[0].pace, 3.0);
+        assert_eq!(
+            forecast(&[job("T-1", 0, 4)], &["hull".to_string()], 15)[0].pace,
+            3.0
+        );
     }
 }
