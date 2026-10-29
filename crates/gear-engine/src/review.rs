@@ -903,7 +903,7 @@ fn prepare_seat_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn Her
             if used >= 3 {
                 let reason = format!("review checkout failed {used} times: {}", error.detail);
                 if seat.state == SeatState::Standby {
-                    crate::release::release_one(store, herdr, &seat.project, seat, None, now)
+                    crate::release::release_one(store, herdr, &seat.project, seat, None, now, "checkout")
                         .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
                 } else {
                     park(store, &seat.id, &reason, now)?;
@@ -1207,7 +1207,7 @@ fn start_reviewer(
         if !ready { return Ok(Started::NotYet) }
         let current_repo = store.read(|tx| tx.get_meta(&repo_key(&seat.id)))?.unwrap_or_else(|| config.root_repo().path);
         if current_repo != repo.path {
-            crate::release::release_one(store, herdr, &seat.project, seat, None, now)
+            crate::release::release_one(store, herdr, &seat.project, seat, None, now, "repo")
                 .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
             return Ok(Started::NotYet);
         }
@@ -1215,7 +1215,7 @@ fn start_reviewer(
         let (recorded, current_model) = store.read(|tx| Ok((tx.get_meta(&review_model_key(&seat.id))?, tx.get_meta(&crate::model::model_meta_key(&seat.id))?)))?;
         let model_matches = entry.is_none_or(|entry| current_model.as_deref() == Some(entry.model()));
         if recorded.as_deref() != Some(selected.as_str()) || !model_matches {
-            crate::release::release_one(store, herdr, &seat.project, seat, None, now)
+            crate::release::release_one(store, herdr, &seat.project, seat, None, now, "model")
                 .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
             return Ok(Started::NotYet);
         }
