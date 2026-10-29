@@ -500,6 +500,7 @@ fn apply_queue(
                     .ok_or_else(|| bad(item.line, format!("task {id} does not exist")))?;
                 task.rank = rank;
                 task.priority = priority_str(item.priority).to_string();
+                let old_lane = task.lane.clone();
                 task.lane = item.lane.clone();
                 task.milestone = item.milestone.clone();
                 task.required = item.required;
@@ -559,6 +560,80 @@ fn apply_queue(
                     Some("ready") => task.state = TaskState::Ready,
                     _ => {}
                 }
+                // A task moved to another lane takes its work with it (T-311):
+                // the old lane's attempts close, so its seat is free and it
+                // stops working on a task that is not its own any more. The
+                // rule is keyed on the attempts, not on the state — a rework
+                // attempt is opened while the task is Ready. A task with no
+                // attempt in progress only changes its lane.
+                if let (Some(new_lane), Some(old_lane)) = (item.lane.as_deref(), old_lane.as_deref()) {
+                    let moving = new_lane != old_lane
+                        && !matches!(item.state.as_deref(), Some("cancelled"));
+                    if moving {
+                        let attempts = tx.attempts_of_task(project, id)?;
+                        // A handed-in attempt is under review: its verdict
+                        // belongs to the lane that did the work, so the move
+                        // waits for it.
+                        if let Some(handed_in) = attempts
+                            .iter()
+                            .find(|attempt| attempt.state == AttemptState::Submitted)
+                        {
+                            return Err(bad(
+                                item.line,
+                                format!(
+                                    "{id} is handed in (attempt {}) and under review: change its lane after the verdict",
+                                    handed_in.n
+                                ),
+                            ));
+                        }
+                        // The seats to clear the wait pause of, read before
+                        // the attempts are closed.
+                        let seats: Vec<String> = attempts
+                            .iter()
+                            .filter(|attempt| attempt.state.occupies_seat())
+                            .map(|attempt| attempt.seat.clone())
+                            .collect();
+                        let closed = abandon_open_attempts(tx, project, id, now)?;
+                        if closed {
+                            clear_wait(tx, project, &mut task, &seats, now)?;
+                            task.state = TaskState::Ready;
+                            let old_seat = format!("{project}:{old_lane}");
+                            if tx.get_seat(&old_seat)?.is_some() {
+                                tx.insert_message(&NewMessage {
+                                    meta: None,
+                                    project: project.to_string(),
+                                    thread: format!("{id}:moved"),
+                                    task: Some(id.clone()),
+                                    attempt: None,
+                                    sender: by_seat.to_string(),
+                                    sender_gen: by_gen,
+                                    recipient: old_seat,
+                                    kind: MsgKind::Instruction,
+                                    urgent: false,
+                                    body: format!(
+                                        "{id} moved to lane {new_lane}; stop work on it, nothing to hand in"
+                                    ),
+                                    reply_to: None,
+                                    needs_ack: false,
+                                    state: MsgState::Open,
+                                    created: now,
+                                })?;
+                            }
+                        }
+                        let moved = format!("{id} moved {old_lane} → {new_lane}");
+                        record_gear_decision(
+                            tx,
+                            project,
+                            &voyage,
+                            applied_version,
+                            "staff",
+                            &moved,
+                            None,
+                            &moved,
+                            now,
+                        )?;
+                    }
+                }
                 task.updated = now;
 
                 // A change to any contract field (goal, accept, evidence-files
@@ -595,15 +670,14 @@ fn apply_queue(
                         };
                         tx.insert_contract(&next)?;
                         task.contract_version = version;
-                        if task.wait_on.take().is_some() {
-                            task.wait_cond = None;
-                            let pauses = tx.pauses_of_project(project)?;
-                            let seats: std::collections::BTreeSet<_> = tx.attempts_of_task(project, id)?.into_iter().filter(|a| matches!(a.state, AttemptState::Started | AttemptState::Stopped)).map(|a| a.seat).collect();
-                            for seat in seats {
-                                if pauses.iter().any(|p| p.seat == seat && p.kind == "wait" && p.end_at.is_none()) {
-                                    tx.close_pause(project, &seat, "wait", now)?;
-                                }
-                            }
+                        if task.wait_on.is_some() {
+                            let seats: Vec<String> = tx
+                                .attempts_of_task(project, id)?
+                                .into_iter()
+                                .filter(|a| matches!(a.state, AttemptState::Started | AttemptState::Stopped))
+                                .map(|a| a.seat)
+                                .collect();
+                            clear_wait(tx, project, &mut task, &seats, now)?;
                         }
                         contract_changed.push((id.clone(), version));
 
@@ -2887,40 +2961,7 @@ fn cancel_task(
     by_gen: i64,
     now: Ts,
 ) -> GearResult<()> {
-    let mut closed = false;
-    for mut attempt in tx.attempts_of_task(project, &task.id)? {
-        if attempt.state.is_terminal() {
-            continue;
-        }
-        if !AttemptState::can_transition(attempt.state, AttemptState::Abandoned) {
-            // The model keeps UNKNOWN from Abandoned directly — the engine
-            // never guesses an outcome. A cancelled task does not guess
-            // either: it stops the attempt first, then abandons it, so the
-            // lane is not left busy with a task nobody wants (T-93).
-            if attempt.state == AttemptState::Unknown
-                && AttemptState::can_transition(AttemptState::Unknown, AttemptState::Stopped)
-                && AttemptState::can_transition(AttemptState::Stopped, AttemptState::Abandoned)
-            {
-                attempt.state = AttemptState::Stopped;
-                attempt.updated = now;
-                tx.update_attempt(&attempt)?;
-            } else {
-                return Err(GearError::new(
-                    ErrorCode::BadTransition,
-                    format!(
-                        "attempt {} of task {} is {}, it cannot be abandoned",
-                        attempt.n,
-                        task.id,
-                        attempt.state.as_str()
-                    ),
-                ));
-            }
-        }
-        attempt.state = AttemptState::Abandoned;
-        attempt.updated = now;
-        tx.update_attempt(&attempt)?;
-        closed = true;
-    }
+    let closed = abandon_open_attempts(tx, project, &task.id, now)?;
     // The lane that was working on it hears why, in one line.
     let Some(lane) = task.lane.as_deref() else {
         return Ok(());
@@ -2944,6 +2985,76 @@ fn cancel_task(
             state: MsgState::Open,
             created: now,
         })?;
+    }
+    Ok(())
+}
+
+/// Close every open attempt of a task (T-93, T-311): a cancelled task and a
+/// task that moves to another lane both finish with their attempts abandoned,
+/// so the seat is free for the next task. Returns whether one was closed.
+fn abandon_open_attempts(
+    tx: &Tx<'_>,
+    project: &str,
+    task_id: &str,
+    now: Ts,
+) -> GearResult<bool> {
+    let mut closed = false;
+    for mut attempt in tx.attempts_of_task(project, task_id)? {
+        if attempt.state.is_terminal() {
+            continue;
+        }
+        if !AttemptState::can_transition(attempt.state, AttemptState::Abandoned) {
+            // The model keeps UNKNOWN from Abandoned directly — the engine
+            // never guesses an outcome. A cancelled task does not guess
+            // either: it stops the attempt first, then abandons it, so the
+            // lane is not left busy with a task nobody wants (T-93).
+            if attempt.state == AttemptState::Unknown
+                && AttemptState::can_transition(AttemptState::Unknown, AttemptState::Stopped)
+                && AttemptState::can_transition(AttemptState::Stopped, AttemptState::Abandoned)
+            {
+                attempt.state = AttemptState::Stopped;
+                attempt.updated = now;
+                tx.update_attempt(&attempt)?;
+            } else {
+                return Err(GearError::new(
+                    ErrorCode::BadTransition,
+                    format!(
+                        "attempt {} of task {} is {}, it cannot be abandoned",
+                        attempt.n,
+                        task_id,
+                        attempt.state.as_str()
+                    ),
+                ));
+            }
+        }
+        attempt.state = AttemptState::Abandoned;
+        attempt.updated = now;
+        tx.update_attempt(&attempt)?;
+        closed = true;
+    }
+    Ok(closed)
+}
+
+/// Clear a task's wait: the wait and its condition go, and the wait pause of
+/// every seat that was working on the task closes. The plan does it for a
+/// contract change (T-8) and for a task moved to another lane (T-311); the
+/// seats are the attempts' ones, read before the attempts are closed.
+fn clear_wait(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &mut TaskRow,
+    seats: &[String],
+    now: Ts,
+) -> GearResult<()> {
+    if task.wait_on.take().is_none() {
+        return Ok(());
+    }
+    task.wait_cond = None;
+    let pauses = tx.pauses_of_project(project)?;
+    for seat in seats {
+        if pauses.iter().any(|p| p.seat == *seat && p.kind == "wait" && p.end_at.is_none()) {
+            tx.close_pause(project, seat, "wait", now)?;
+        }
     }
     Ok(())
 }
