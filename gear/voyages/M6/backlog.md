@@ -32,3 +32,5 @@
 - A captain's coverage report (another project, 2026-10-29): accepted attempts whose candidate is not an ancestor of the integration branch, and failing cases that no task names (83 of 159 reds there were named by no packet, found only when a reviewer hit a package check that could not pass).
 
 - Slash commands typed into an agent (`/new`, `/resume`, `/compact`) go in one character at a time and are slow; type them in one go, and handle the dialogs some CLIs open after them (codex asks whether to work in the current worktree or a new one).
+
+- Performance: GEAR is a scheduler and must run near idle (the engine and each board under a few percent of one core, tens of MB). Measured 2026-10-29: engine 15-78 % CPU in spikes, boards 20-34 %, about 20 MB each; the engine's cost is SQLite reads in the overrun step (fixed in M5 by T-406) and the board's full rebuilds (T-384). M6 reads the M5 probe lines (T-407) and fixes the slow operations they show, starting with every multi-tick step that waits a whole tick between steps.
