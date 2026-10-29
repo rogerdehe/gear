@@ -109,3 +109,6 @@
 
 ## A direction-check packet reads as a lane packet
 - 2026-10-29 M5 (the other project, M-3899): review-4 on direction/t-307 (candidate 8da2ef276) got a packet that says "You implement" and gives the lane's result command, so it asked whether it was a direction check or a full review. A direction-check packet should say what it is in its first line and give only the direction verdict command. The same evening review-3, bound to T-296, ran diffs of T-307 (M-3900): see "A review job replaced mid-review"; each review packet should open with the seat's binding (task, attempt, branch, expected HEAD) and the reviewer should check pwd, branch and HEAD against it before reading.
+
+## No plan state holds a task back from delivery
+- 2026-10-29 M5 (the other project): the captain was told (wrongly, by this captain) that `state: draft` keeps a packet from delivery; the plan parser accepts only `state: ready` and `state: cancelled`, and Draft exists only in the store. A packet still under discussion can be held only by queue order or deps. A `state: draft` (or `hold`) line that keeps a task out of delivery until set ready would cover it.
