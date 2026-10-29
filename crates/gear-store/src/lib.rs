@@ -13,14 +13,26 @@ use gear_model::{
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod migrate;
 
 pub const SCHEMA_SQL: &str = include_str!("schema.sql");
 pub use migrate::{OLDEST_VERSION, SCHEMA_VERSION, STEPS};
-/// SQLite busy timeout for every connection.
-pub const BUSY_TIMEOUT_MS: u64 = 5_000;
+/// SQLite busy timeout for every connection. A caller waits for the store
+/// rather than failing with `Locked` (T-379, F-129): a `gear` call queues
+/// behind a slow writer instead of giving up after five seconds.
+pub const BUSY_TIMEOUT_MS: u64 = 30_000;
+
+/// A write that holds the store longer than this prints one line to stderr,
+/// naming the caller that held it (T-379). The engine's stderr is its log.
+pub const SLOW_WRITE_MS: u64 = 1_000;
+
+/// The line [`Store::write`] prints when it held the store over
+/// [`SLOW_WRITE_MS`]: the elapsed time and the caller's location.
+pub fn slow_write_line(ms: u128, caller: &'static std::panic::Location<'static>) -> String {
+    format!("gear-store: a write held the store for {ms} ms ({caller})")
+}
 
 /// The budget of a round whose task has no estimate (§5.1). The design
 /// names the estimate for a dev round and the measured median for a review
@@ -681,22 +693,37 @@ impl Store {
 
     /// Run `f` inside `BEGIN IMMEDIATE`. Commit on `Ok`, roll back on `Err`.
     /// Lock timeout maps to `ErrorCode::Locked` with nothing written.
+    ///
+    /// The time from `BEGIN IMMEDIATE` to the commit or rollback is measured:
+    /// a write over [`SLOW_WRITE_MS`] prints one line to stderr naming the
+    /// caller ([`slow_write_line`]), so a writer that held the store shows.
+    ///
+    /// The clock starts **after** the transaction is acquired (F1 of the
+    /// T-379 review): a caller that queued for the lock is waiting, not
+    /// holding the store, and the line must not blame it for the wait.
+    #[track_caller]
     pub fn write<T>(&mut self, f: impl FnOnce(&Tx<'_>) -> GearResult<T>) -> GearResult<T> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_sqlite)?;
+        let started = Instant::now();
         let tx = Tx { tx };
-        match f(&tx) {
-            Ok(value) => {
-                tx.tx.commit().map_err(map_sqlite)?;
-                Ok(value)
-            }
+        let result = match f(&tx) {
+            Ok(value) => tx.tx.commit().map_err(map_sqlite).map(|()| value),
             Err(e) => {
                 drop(tx); // rolls back, nothing written
                 Err(e)
             }
+        };
+        let elapsed = started.elapsed();
+        if elapsed.as_millis() > u128::from(SLOW_WRITE_MS) {
+            eprintln!(
+                "{}",
+                slow_write_line(elapsed.as_millis(), std::panic::Location::caller())
+            );
         }
+        result
     }
 
     /// Run `f` in a deferred (read) transaction for a consistent snapshot.
@@ -3096,7 +3123,9 @@ impl<'s> Tx<'s> {
     ///   asked for, or `max(10, ceil(estimate_min / 2))`;
     /// - a review round: 1.5 × the median active time of the last 10
     ///   finished review rounds of the same model, at least 10 min; with
-    ///   fewer than 3 such rounds, 30 min.
+    ///   fewer than 3 such rounds, 30 min. Only rounds that measured
+    ///   activity count: a round with `active_s` 0 says nothing about how
+    ///   long a review takes, so it is not part of the sample.
     pub fn round_budget_min(
         &self,
         project: &str,
@@ -3139,12 +3168,19 @@ impl<'s> Tx<'s> {
     }
 
     /// The measured budget of a review round (§5.1).
+    ///
+    /// The median is taken over the last 10 ended review rounds that
+    /// measured some activity (`active_s > 0`). A round whose usage was
+    /// never read carries 0 and would drag the median to the floor; it says
+    /// nothing about how long a review takes, so it is left out of the
+    /// sample instead.
     fn review_budget_min(&self, project: &str, model: Option<&str>) -> GearResult<i64> {
         let mut stmt = self
             .tx
             .prepare(
                 "SELECT active_s FROM rounds
                  WHERE project=?1 AND role='review' AND end_at IS NOT NULL AND model IS ?2
+                   AND active_s > 0
                  ORDER BY end_at DESC LIMIT 10",
             )
             .map_err(map_sqlite)?;

@@ -1373,7 +1373,14 @@ fn start_reviewer(
                     return Ok(Started::NotYet);
                 }
                 other => {
-                    park(store, &seat.id, &step_failure("agent_start", &other), now)?;
+                    // A CLI that is not installed says so on the pane (T-286):
+                    // the seat is parked for the install, not for a model move.
+                    let tail = herdr.read_tail(&pane, 16).unwrap_or_default();
+                    let reason = match crate::start::cli_missing(&tail, kind) {
+                        Some(line) => crate::start::cli_missing_text(kind, &line),
+                        None => step_failure("agent_start", &other),
+                    };
+                    park(store, &seat.id, &reason, now)?;
                     return Ok(Started::NotYet);
                 }
             }
@@ -4218,6 +4225,61 @@ review = [
         assert!(worktrees(&herdr).is_empty(), "no second worktree");
         let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Active);
+    }
+
+    /// A reviewer whose CLI is not installed says so on the pane (T-286): the
+    /// seat is parked with the install, not left to try again.
+    #[test]
+    fn a_reviewer_whose_cli_is_missing_parks_with_the_install() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        let pane = "wt1:p1";
+        herdr.add_shell(pane);
+        store
+            .write(|tx| {
+                tx.insert_seat(&SeatRow {
+                    id: "p:review-1".into(),
+                    project: "p".into(),
+                    role: SeatRole::Temp,
+                    name: "review-1".into(),
+                    profile: "codex".into(),
+                    generation: 1,
+                    state: SeatState::Starting,
+                    state_since: T0,
+                    state_reason: Some("onboarding".into()),
+                    task_id: Some("T-1".into()),
+                })?;
+                tx.insert_binding(&BindingRow {
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    session: "sess".into(),
+                    pane_id: pane.into(),
+                    kind: "codex".into(),
+                    session_ref: None,
+                    status: BindingStatus::Pending,
+                    handover_id: None,
+                    created: T0,
+                })?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
+                Ok(())
+            })
+            .unwrap();
+        // The shell could not find the CLI when the start came.
+        herdr.set_screen(pane, "zsh: command not found: codex");
+        herdr.refuse_starts = Some(("agent_start_timeout".into(), 1));
+
+        let report =
+            start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+
+        assert!(report.started.is_empty(), "the reviewer is not up");
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Unknown, "parked for a human");
+        let reason = seat.state_reason.unwrap_or_default();
+        assert!(
+            reason.contains("the codex CLI is not installed or not on PATH"),
+            "{reason}"
+        );
+        assert!(herdr.started_agents.is_empty(), "no agent was started");
     }
 
     #[test]

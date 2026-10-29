@@ -212,3 +212,14 @@ fn release_is_a_staff_line() {
             .contains("`release` takes only a lane")
     );
 }
+
+/// T-305: `- rebind <lane> cancel` is a staff line of its own.
+#[test]
+fn rebind_cancel_is_a_staff_line() {
+    let d = parse("<!-- gear-plan project=p base=1 -->\n# Staff\n- rebind hull cancel\n").unwrap();
+    assert!(matches!(&d.staff[0], StaffItem::RebindCancel { lane, .. } if lane == "hull"));
+    assert!(
+        bad_line("<!-- gear-plan project=p base=1 -->\n# Staff\n- rebind hull cancel now\n")
+            .contains("`rebind ... cancel` takes only a lane")
+    );
+}

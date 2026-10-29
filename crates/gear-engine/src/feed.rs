@@ -152,7 +152,8 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
         // The captain may resolve an alert without refilling immediately. The
         // same condition stays acknowledged until it worsens, recovers, or is due again.
         let body = if ready == 0 && !working {
-            format!("lane {} is IDLE", seat.name)
+            // T-293: the IDLE item says what it means, not only the state.
+            format!("lane {} is IDLE: no next task to dispatch (its agent may still be finishing a turn); plan a task for it or move one to it", seat.name)
         } else if let Some(dry) = dry {
             // The same words the plan apply uses: the lane has nothing to
             // start after its current task.

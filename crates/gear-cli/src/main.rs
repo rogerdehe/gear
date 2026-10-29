@@ -975,6 +975,11 @@ fn cmd_admin_init(
         // The project is registered with this config version; a re-init
         // stores the next one (T-6).
         println!("project {} (config v{})", r.project, r.config_version);
+        // T-373: a changed `conventions.seat_branch` leaves worktrees behind;
+        // name them and the command that takes each one away.
+        for line in &r.stale_worktrees {
+            println!("{line}");
+        }
         for seat in &r.seats {
             println!("seat {seat}");
         }
@@ -3978,7 +3983,7 @@ path="api"
         }).unwrap();
         let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind heat repo=api owns=[src/, tests/]\n");
         let out = run_plan(&mut store, &env("captain", CAP_PANE), &mut herdr, Some(&path), None, None, "rebind", T0+1, false).unwrap();
-        assert!(out.contains("rebind heat: waits for T-1"), "{out}");
+        assert!(out.contains("rebind heat: repo root → api, owns [src/] → [src/, tests/]: waits for T-1"), "{out}");
     }
 
     /// The JSON output carries the same warnings as the text: the lanes that

@@ -98,6 +98,10 @@ pub fn apply(
     // before the write transaction (the store is never held while a subprocess
     // runs) and only for the done tasks this draft cancels.
     let cancellable = cancellable_done_tasks(store, draft)?;
+    // T-92 F1: a remerge of a candidate that is already on the integration
+    // branch has nothing to queue. Also a git question, asked here for the
+    // same reason: the store is never held while a subprocess runs.
+    let already_merged = remerges_already_merged(store, draft)?;
     // The verdicts that name the merge that landed their work are checked
     // before anything is written (git runs outside the store transaction).
     require_integrated_by(store, draft)?;
@@ -138,6 +142,7 @@ pub fn apply(
                 draft,
                 text,
                 &cancellable,
+                &already_merged,
                 agents,
                 now,
             )?;
@@ -177,6 +182,7 @@ fn apply_queue(
     draft: &Draft,
     text: &str,
     cancellable: &BTreeSet<String>,
+    already_merged: &BTreeSet<String>,
     agents: Option<&[gear_herdr::AgentInfo]>,
     now: Ts,
 ) -> GearResult<ApplyResult> {
@@ -231,9 +237,35 @@ fn apply_queue(
     let mut staffed: Vec<String> = Vec::new();
     for item in &draft.staff {
         if let StaffItem::Rebind { lane, repo, owns, line } = item {
+            // The old values come from the stored config, before the request:
+            // an idle lane's rebind is applied in this call (T-305).
+            let (old_repo, old_owns) = lane_binding(tx, project, lane, *line)?;
             let waiting = request_rebind(tx, project, lane, repo, owns, *line)?;
-            let message = if waiting.is_empty() { format!("rebind {lane}: applied") }
-                else { format!("rebind {lane}: waits for {}", waiting.join(", ")) };
+            let preview = rebind_preview(&old_repo, repo, &old_owns, owns);
+            let message = if waiting.is_empty() {
+                let mut text = format!("rebind {lane}: {preview}: applied");
+                // The undo is the rebind line back to the old binding; a lane
+                // in the project root has none (a repo is named, not "root").
+                if !old_repo.is_empty() {
+                    text.push_str(&format!(
+                        " (to undo: - rebind {lane} repo={old_repo} owns=[{}])",
+                        old_owns.join(", ")
+                    ));
+                }
+                text
+            } else {
+                format!(
+                    "rebind {lane}: {preview}: waits for {}; nothing changes until then (to withdraw: - rebind {lane} cancel)",
+                    waiting.join(", ")
+                )
+            };
+            warnings.push(message.clone());
+            staffed.push(message);
+            record_gear_decision(tx, project, &voyage, applied_version, "staff", &staff_text(item), None, &staff_text(item), now)?;
+            continue;
+        }
+        if let StaffItem::RebindCancel { lane, line } = item {
+            let message = cancel_rebind(tx, project, lane, *line)?;
             warnings.push(message.clone());
             staffed.push(message);
             record_gear_decision(tx, project, &voyage, applied_version, "staff", &staff_text(item), None, &staff_text(item), now)?;
@@ -528,7 +560,13 @@ fn apply_queue(
                         // the failed merge and the push refusal are history,
                         // and the captain's own decision is the answer. The
                         // failed op itself stays as history; no op is created.
-                        resolved.extend(resolve_merge_items(tx, project, id, now)?);
+                        resolved.extend(resolve_merge_items(
+                            tx,
+                            project,
+                            id,
+                            "cancelled by the captain",
+                            now,
+                        )?);
                     }
                     Some("ready") => task.state = TaskState::Ready,
                     _ => {}
@@ -625,9 +663,21 @@ fn apply_queue(
     // in this transaction; a target already reached is skipped. `remerge` (T-92)
     // is not a seat: it queues a new merge op for a task whose merge failed.
     for item in &draft.staff {
-        if matches!(item, StaffItem::Rebind { .. }) { continue; }
+        if matches!(item, StaffItem::Rebind { .. } | StaffItem::RebindCancel { .. }) { continue; }
         if let StaffItem::Remerge { task, .. } = item {
-            remerge(tx, project, task, staff_line(item), now)?;
+            // T-92 F1: a candidate that is already on the integration branch
+            // needs no new merge op; the remerge only settles its failed-merge
+            // item and says so.
+            if let Some(note) = remerge(
+                tx,
+                project,
+                task,
+                staff_line(item),
+                now,
+                already_merged.contains(task),
+            )? {
+                warnings.push(note);
+            }
             // The decision log (design §7.4): a staff line is a decision.
             record_gear_decision(
                 tx,
@@ -701,6 +751,7 @@ fn apply_queue(
             StaffItem::Retry { .. } => unreachable!("retry is applied above"),
             StaffItem::Release { .. } => unreachable!("release is applied above"),
             StaffItem::Rebind { .. } => unreachable!("rebind is applied above"),
+            StaffItem::RebindCancel { .. } => unreachable!("rebind is applied above"),
         };
         let seat_id = format!("{project}:{lane}");
         let seat = tx.get_seat(&seat_id)?.ok_or_else(|| {
@@ -1063,6 +1114,69 @@ fn cancellable_done_tasks(store: &mut Store, draft: &Draft) -> GearResult<BTreeS
     Ok(cancellable)
 }
 
+/// The remerge lines of this draft whose accepted candidate is already on the
+/// integration branch (T-92 F1): a candidate that landed by another way — a
+/// hand merge, another task that carried it — has nothing left to merge, and
+/// its open `merge-failed:<task>` item would otherwise stay open forever.
+///
+/// A git failure does not put a task in the set: the remerge then runs as
+/// before and the engine's merge confirms the already-merged candidate itself.
+fn remerges_already_merged(
+    store: &mut Store,
+    draft: &Draft,
+) -> GearResult<BTreeSet<String>> {
+    let wanted: Vec<&String> = draft
+        .staff
+        .iter()
+        .filter_map(|item| match item {
+            StaffItem::Remerge { task, .. } => Some(task),
+            _ => None,
+        })
+        .collect();
+    if wanted.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let project = draft.project.clone();
+    let (rows, text) = store.read(|tx| {
+        let mut rows: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+        for id in &wanted {
+            let Some(task) = tx.get_task(&project, id)? else {
+                continue; // the remerge names a missing task
+            };
+            let candidate = tx
+                .attempts_of_task(&project, id)?
+                .into_iter()
+                .rev()
+                .find(|attempt| attempt.state == AttemptState::Accepted)
+                .and_then(|attempt| attempt.candidate);
+            rows.push((id.to_string(), task.lane.clone(), candidate));
+        }
+        let text = tx
+            .get_project(&project)?
+            .map(|row| row.config_toml)
+            .unwrap_or_default();
+        Ok((rows, text))
+    })?;
+    // A store written before a config was stored has nothing to ask git with,
+    // and text that does not parse is not a gate here.
+    if text.trim().is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let Ok(config) = crate::config::parse(&text) else {
+        return Ok(BTreeSet::new());
+    };
+    let mut already = BTreeSet::new();
+    for (id, lane, candidate) in rows {
+        let Some(candidate) = candidate else {
+            continue; // the remerge names the missing attempt
+        };
+        if matches!(on_integration(&config, lane.as_deref(), &candidate), Ok(true)) {
+            already.insert(id);
+        }
+    }
+    Ok(already)
+}
+
 /// Whether `candidate` is on the repo's integration branch at the project's
 /// remote (T-112, T-257: `[conventions].remote`). The branch is fetched first:
 /// a local tracking ref may be stale, and the answer must be about the remote
@@ -1130,13 +1244,16 @@ fn on_integration(
     }
 }
 
-/// Close the open merge items of a cancelled task (T-112): its failed merge and
-/// its push refusal are history, resolved "cancelled by the captain". Returns
-/// the message ids that were closed.
+/// Close the open merge items of a task (T-112: a cancelled task; T-92 F1: a
+/// remerge of an already-merged candidate): its failed merge and its push
+/// refusal are history. `result` is the line the captain reads — "cancelled by
+/// the captain" or "the candidate <sha> is already on the integration branch".
+/// Returns the message ids that were closed.
 fn resolve_merge_items(
     tx: &Tx<'_>,
     project: &str,
     task: &str,
+    result: &str,
     now: Ts,
 ) -> GearResult<Vec<String>> {
     let mut resolved = Vec::new();
@@ -1161,7 +1278,7 @@ fn resolve_merge_items(
                 project,
                 &message.id,
                 gear_model::MsgState::Resolved,
-                Some("cancelled by the captain"),
+                Some(result),
                 None,
                 None,
                 now,
@@ -1197,7 +1314,8 @@ pub fn staff_line(item: &StaffItem) -> usize {
         | StaffItem::Retry { line, .. }
         | StaffItem::Release { line, .. }
         | StaffItem::Remerge { line, .. }
-        | StaffItem::Rebind { line, .. } => *line,
+        | StaffItem::Rebind { line, .. }
+        | StaffItem::RebindCancel { line, .. } => *line,
     }
 }
 
@@ -1206,6 +1324,39 @@ pub fn staff_line(item: &StaffItem) -> usize {
 struct RebindRequest { repo: String, owns: Vec<String> }
 
 pub fn rebind_pending_key(seat: &str) -> String { format!("lane-rebind:{seat}") }
+
+/// The lane's binding before a rebind (T-305): the repo's name ("" for the
+/// project root) and the paths it owns.
+fn lane_binding(tx: &Tx<'_>, project: &str, lane: &str, line: usize) -> GearResult<(String, Vec<String>)> {
+    let row = tx.get_project(project)?.ok_or_else(|| bad(line, "project not found"))?;
+    let config = crate::config::parse(&row.config_toml)?;
+    let owns = config.lanes.iter().find(|l| l.name == lane).map(|l| l.owns.clone()).unwrap_or_default();
+    Ok((config.repo_of_lane(lane).name, owns))
+}
+
+/// The preview of a rebind, which is the apply line itself (T-305): what
+/// changes, old and new.
+fn rebind_preview(old_repo: &str, new_repo: &str, old_owns: &[String], new_owns: &[String]) -> String {
+    let old = if old_repo.is_empty() { "root" } else { old_repo };
+    format!("repo {old} → {new_repo}, owns [{}] → [{}]", old_owns.join(", "), new_owns.join(", "))
+}
+
+/// `- rebind <lane> cancel` (T-305): the way back from a recorded request.
+fn cancel_rebind(tx: &Tx<'_>, project: &str, lane: &str, line: usize) -> GearResult<String> {
+    let seat_id = format!("{project}:{lane}");
+    let seat = tx.get_seat(&seat_id)?.ok_or_else(|| bad(line, format!("no seat {seat_id}")))?;
+    if seat.role != SeatRole::Lane || seat.state == SeatState::Retired { return Err(bad(line, "rebind needs a non-retired lane")); }
+    if tx.get_meta(&format!("lane-rebind-applied:{seat_id}"))?.is_some_and(|v| !v.is_empty()) {
+        return Err(bad(line, format!("lane {lane} is still moving to its new worktree")));
+    }
+    let key = rebind_pending_key(&seat_id);
+    if tx.get_meta(&key)?.is_some_and(|v| !v.is_empty()) {
+        tx.set_meta(&key, "")?;
+        Ok(format!("rebind {lane}: the pending rebind is withdrawn"))
+    } else {
+        Ok(format!("rebind {lane}: nothing pending to withdraw"))
+    }
+}
 
 fn rebind_config(tx: &Tx<'_>, project: &str, lane: &str, request: &RebindRequest, line: usize) -> GearResult<String> {
     let row = tx.get_project(project)?.ok_or_else(|| bad(line, "project not found"))?;
@@ -1721,13 +1872,19 @@ fn project_config(
 /// Only a task whose **last merge op failed** can be retried: a merge that is
 /// still in flight is not queued twice, and a task that is merged has nothing
 /// to do. Anything else is refused with the reason, like every plan line.
+///
+/// `already` is the answer of `remerges_already_merged` (T-92 F1): when the
+/// accepted candidate is on the integration branch already, no op is queued —
+/// the task's open `merge-failed:<task>` and `push:<task>` items are resolved
+/// and the line the captain reads is returned, so the apply warns.
 fn remerge(
     tx: &gear_store::Tx<'_>,
     project: &str,
     task_id: &str,
     line: usize,
     now: Ts,
-) -> GearResult<()> {
+    already: bool,
+) -> GearResult<Option<String>> {
     let task = tx.get_task(project, task_id)?.ok_or_else(|| {
         bad(line, format!("no task {task_id} in this project"))
     })?;
@@ -1800,6 +1957,22 @@ fn remerge(
     // The same payload the engine writes when a review passes: the lane's
     // branch (a hint for closing it, named by the project's template — T-252),
     // the accepted candidate and the review branch.
+    if already {
+        // T-92 F1: the work landed by another way. The merge is not queued
+        // again; the failed-merge item is answered with the candidate's sha.
+        resolve_merge_items(
+            tx,
+            project,
+            task_id,
+            &format!(
+                "the candidate {candidate} is already on the integration branch"
+            ),
+            now,
+        )?;
+        return Ok(Some(format!(
+            "remerge {task_id}: {candidate} is already on the integration branch: no merge queued, its failed-merge item resolved"
+        )));
+    }
     let lane = task.lane.clone().unwrap_or_default();
     let conventions = project_config(tx, project)?
         .map(|config| config.conventions)
@@ -1831,7 +2004,7 @@ fn remerge(
         }),
         created: now,
     })?;
-    Ok(())
+    Ok(None)
 }
 
 fn priority_str(priority: Priority) -> &'static str {
@@ -2996,6 +3169,7 @@ fn staff_text(item: &StaffItem) -> String {
         StaffItem::Release { name, .. } => format!("release {name}"),
         StaffItem::Remerge { task, .. } => format!("remerge {task}"),
         StaffItem::Rebind { lane, repo, owns, .. } => format!("rebind {lane} repo={repo} owns=[{}]", owns.join(", ")),
+        StaffItem::RebindCancel { lane, .. } => format!("rebind {lane} cancel"),
     }
 }
 
@@ -3056,7 +3230,9 @@ fn record_voyages(tx: &Tx<'_>, project: &str, draft: &crate::draft::Draft, now: 
 /// (attempt number of the open attempt; `<n>` literally when there is none;
 /// the reports folder is the voyage's, T-257, and `<path>` stays for a task
 /// without milestone).
-/// A pending newer contract version is appended as `## Pending update: v<m>`.
+/// A pending newer contract version is appended as `## Pending update: v<m>`
+/// followed by that version's goal and acceptance and the line saying a bare
+/// `gear` adopts it (T-378).
 /// Missing task → `NoTarget`. Read-only.
 pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) -> GearResult<String> {
     let row = tx.get_task(project, task)?.ok_or_else(|| {
@@ -3208,7 +3384,21 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
         }
     }
     if row.contract_version > adopted {
-        text.push_str(&format!("\n## Pending update: v{}\n", row.contract_version));
+        // The bare header alone left the lane unable to read what the newer
+        // contract asks for without `gear plan show` (T-378, F-133), so the
+        // packet carries its wording too.
+        let pending = tx
+            .get_contract(project, task, row.contract_version)?
+            .ok_or_else(|| {
+                GearError::new(
+                    ErrorCode::NoTarget,
+                    format!("task {task} has no contract v{}", row.contract_version),
+                )
+            })?;
+        text.push_str(&format!(
+            "\n## Pending update: v{}\nGoal (v{}):\n{}\n\nAcceptance (v{}):\n{}\n\nRun `gear` (no arguments) to adopt it, then work and hand in to v{}.\n",
+            row.contract_version, row.contract_version, pending.goal, row.contract_version, pending.accept, row.contract_version
+        ));
     }
     text.push_str("\nYou implement; you never design. If anything here is unclear or contradicts the design or a message, stop and send gear send --kind question (Question / Options / Context / Default) at once, then go on with your default. Commit and push this branch at least every 15 minutes.\n");
     Ok(text)
