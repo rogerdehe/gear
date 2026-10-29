@@ -2879,16 +2879,18 @@ impl<'s> Tx<'s> {
     /// their `overrun:<task>:<role>` thread (T-381's resolution). A settled
     /// round's item is resolved on the tick that looks at it, so the round is
     /// no longer selected after that.
+    ///
+    /// The membership of the answered threads is read once, uncorrelated: a
+    /// correlated subquery scanned the project's whole message history once
+    /// per ended round and held the write for seconds (F1 of the T-406 review).
     pub fn rounds_to_process(&self, project: &str) -> GearResult<Vec<RoundRow>> {
         let mut stmt = self
             .tx
             .prepare(&round_select(
                 " WHERE project=?1
-                    AND (end_at IS NULL OR EXISTS (
-                      SELECT 1 FROM messages m
-                       WHERE m.project=rounds.project
-                         AND m.thread='overrun:'||rounds.task||':'||rounds.role
-                         AND m.attempt=rounds.attempt AND m.kind='system'
+                    AND (end_at IS NULL OR ('overrun:'||task||':'||role, attempt) IN (
+                      SELECT m.thread, m.attempt FROM messages m
+                       WHERE m.project=?1 AND m.kind='system'
                          AND m.state IN ('open', 'waiting')))
                   ORDER BY start_at, task, role",
             ))

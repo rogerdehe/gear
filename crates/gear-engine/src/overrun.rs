@@ -443,4 +443,31 @@ mod tests {
         tick_at(&mut s, 700);
         assert_eq!(processed(), 1, "only the dev round is left");
     }
+
+    /// F1 of the T-406 review: the selection must read the project's messages
+    /// once, not once per ended round. Thousands of messages and hundreds of
+    /// ended rounds are a normal project's history; the selection still has to
+    /// be cheap enough for the tick's write.
+    #[test]
+    fn a_long_history_does_not_cost_the_rounds_query() {
+        let mut s = world();
+        s.write(|tx| {
+            for n in 0..300 {
+                let key = RoundKey { project:"p".into(), task:format!("T-old-{n}"), attempt:1, role:"dev".into() };
+                tx.insert_round(&NewRound { key:key.clone(), seat:"p:heat".into(), generation:1, cli:"codex".into(), model:None, start_at:T-9000 })?;
+                tx.close_round(&key, T-8000)?;
+            }
+            for n in 0..10_000 {
+                let task = format!("T-old-{}", n % 300);
+                tx.insert_message(&NewMessage { project:"p".into(), thread:format!("{task}:1"), task:Some(task), attempt:Some(1), sender:"p:heat".into(), sender_gen:1, recipient:"p:captain".into(), kind:MsgKind::Progress, urgent:false, body:"work update".into(), reply_to:None, needs_ack:false, state:MsgState::Info, created:T-9000+n, meta:None })?;
+            }
+            Ok(())
+        }).unwrap();
+        let started = std::time::Instant::now();
+        let rounds = s.read(|tx| tx.rounds_to_process("p")).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(rounds.len(), 1, "only the open round is selected");
+        assert!(elapsed < std::time::Duration::from_millis(500),
+            "the rounds query took {elapsed:?} on 10 000 messages and 300 ended rounds");
+    }
 }
