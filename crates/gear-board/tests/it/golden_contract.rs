@@ -130,37 +130,20 @@ struct Pending {
 const PENDING: &[Pending] = &[
     // (5) The rows the queued tasks build. Row 47 (the footer) is compared
     // from the start: T-341 drew it.
-    Pending { frame: "now-folded", rows: (10, 12), cols: (0, 159), swap: None, by: "T-356" },
-    Pending { frame: "tasks-folded", rows: (10, 12), cols: (0, 159), swap: None, by: "T-356" },
-    Pending { frame: "cost-folded", rows: (10, 12), cols: (0, 159), swap: None, by: "T-356" },
-    Pending { frame: "log-folded", rows: (10, 12), cols: (0, 159), swap: None, by: "T-356" },
-    Pending { frame: "now-open", rows: (18, 20), cols: (0, 159), swap: None, by: "T-356" },
-    Pending { frame: "tasks-open", rows: (18, 20), cols: (0, 159), swap: None, by: "T-356" },
-    Pending { frame: "cost-open", rows: (18, 20), cols: (0, 159), swap: None, by: "T-356" },
-    Pending { frame: "log-open", rows: (18, 20), cols: (0, 159), swap: None, by: "T-356" },
-
+    // T-356 drew the tab bar (rows 10 to 12, and 18 to 20 unfolded), so the
+    // view starts on the prototype's own first row (14, and 22 unfolded) and
+    // the views compare from there with no exclusion.
     Pending { frame: "now-folded", rows: (13, 18), cols: (0, 159), swap: None, by: "T-359" },
     Pending { frame: "now-open", rows: (21, 26), cols: (0, 159), swap: None, by: "T-359" },
     Pending { frame: "now-folded", rows: (19, 46), cols: (0, 159), swap: None, by: "T-360" },
     Pending { frame: "now-open", rows: (27, 46), cols: (0, 159), swap: None, by: "T-360" },
 
-    // T-362 draws the Tasks view to the prototype's rows, but the board's own
-    // view starts on row 5: the rows below are the prototype's, which the view
-    // reaches once the header is the prototype's height (T-353..T-356, T-356
-    // puts the view's first row there). The view's own rows are held to the
-    // golden rows by `the_tasks_view_paints_the_prototype_rows`.
-    Pending { frame: "tasks-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-356: the view's first row" },
-    Pending { frame: "tasks-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-356: the view's first row" },
-    // T-363 draws the Cost view to the prototype's rows too, but it waits for
-    // the same header; `the_cost_view_paints_the_prototype_rows` holds those
-    // rows to the golden frames at the prototype's own origin.
-    Pending { frame: "cost-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-363 (T-356 removes it)" },
-    Pending { frame: "cost-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-363 (T-356 removes it)" },
-    // T-364 draws the Log view to the prototype's rows too, but it waits for
-    // the same header; `the_log_view_paints_the_prototype_rows` holds those
-    // rows to the golden frames at the prototype's own origin.
-    Pending { frame: "log-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-364 (T-356 removes it)" },
-    Pending { frame: "log-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-364 (T-356 removes it)" },
+    // T-362, T-363 and T-364 drew the Tasks, Cost and Log views to the
+    // prototype's rows; their own tests
+    // (`the_tasks_view_paints_the_prototype_rows`, and the same for the cost
+    // and the log) hold those rows to the golden frames at the prototype's own
+    // origin. T-356 put the view's first row there, so the frames compare from
+    // it with no exclusion.
 
     // (6) The prototype's constants contradict its own formulas, so no store
     // can give both.
@@ -201,8 +184,15 @@ const PENDING: &[Pending] = &[
     Pending { frame: "tasks-folded", rows: (15, 15), cols: (92, 122), swap: None, by: "prototype data: T-267 stage" },
     Pending { frame: "tasks-open", rows: (23, 23), cols: (92, 122), swap: None, by: "prototype data: T-267 stage" },
     // The prototype colours lane `mast` blue by name, the board colours lanes
-    // by their order: its blue is the board's magenta, bold for bold.
+    // by their order: its blue is the board's magenta, bold for bold. The
+    // Tasks and the Cost views name the lanes on their rows, which T-356 put on
+    // the prototype's own rows, so their frames need the swap too.
     Pending { frame: "now-folded", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
+    Pending { frame: "now-open", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
+    Pending { frame: "tasks-folded", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
+    Pending { frame: "tasks-open", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
+    Pending { frame: "cost-folded", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
+    Pending { frame: "cost-open", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
 ];
 
 /// The eight frames the prototype draws: `(name, tab, detail)`.
