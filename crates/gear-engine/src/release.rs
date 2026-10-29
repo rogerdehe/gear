@@ -315,7 +315,7 @@ pub fn release_finished_reviews(
                 }
                 // `release_one_ending_its_review` clears the reservation the
                 // seat leaves behind, in the same write as its transition.
-                match release_one_ending_its_review(store, herdr, project, &seat, now) {
+                match release_one_ending_its_review(store, herdr, project, &seat, now, "agent-gone") {
                     Ok(true) => report.released.push(seat.id.clone()),
                     Ok(false) => {}
                     Err(_) => report.failed.push(seat.id.clone()),
@@ -585,7 +585,7 @@ pub(crate) fn release_one(
     now: Ts,
     caller: &str,
 ) -> Result<bool, String> {
-    release_seat(store, herdr, project, seat, task, now, false)
+    release_seat(store, herdr, project, seat, task, now, caller, false)
 }
 
 /// The release of a `Standby` reviewer whose agent is gone (T-399): the review
@@ -597,8 +597,9 @@ fn release_one_ending_its_review(
     project: &str,
     seat: &SeatRow,
     now: Ts,
+    caller: &str,
 ) -> Result<bool, String> {
-    release_seat(store, herdr, project, seat, None, now, true)
+    release_seat(store, herdr, project, seat, None, now, caller, true)
 }
 
 /// The steps of one release, shared by `release_one` and the release that ends
@@ -610,6 +611,7 @@ fn release_seat(
     seat: &SeatRow,
     task: Option<&str>,
     now: Ts,
+    caller: &str,
     ending_its_review: bool,
 ) -> Result<bool, String> {
     let pane = binding_pane(store, seat)?;
