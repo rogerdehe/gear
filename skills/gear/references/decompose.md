@@ -16,7 +16,7 @@ For the captain. GEAR does not care which method produced the raw material — y
 A task in the plan is a header plus `goal`, `accept`, `estimate`, `deps`. The engine turns it into the lane's packet together with the voyage's `done:` and `bar:`.
 
 - **goal** — what exists afterwards and why (who uses it, for what). Add what the lane cannot see: what runs at the same time, the rules it must not break, the cases that are easy to miss (empty data, a change mid-flow, a restart, one item failing), the SOP or file that already holds the answer. A lane working in a child repo cannot see the parent repo's documents: write their absolute path into the goal.
-- **accept** — checkable results, including **how it is proven in its real environment** (a real terminal, a real repository, a real agent) when the task touches one. Concrete acceptance is the best predictor of a first-time pass. When the crate's suite is slow (over a minute), the named check carries `TESTS=` with the changed module's tests.
+- **accept** — checkable results, including **how it is proven in its real environment** (a real terminal, a real repository, a real agent) when the task touches one. Concrete acceptance is the best predictor of a first-time pass. When the crate's suite is slow (over a minute), the named check carries `TESTS=` with the changed module's tests. It names the exact capped check the lane runs (Run only `make check <the package this task changes>`; the merge gate runs `make gate`), never a whole-repo build or test.
 - Write it so the lane cannot misread it. Lines that decide nothing ("handle edge cases", "add tests") are not goals.
 
 ## 3. Procedure

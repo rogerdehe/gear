@@ -416,6 +416,46 @@ pub fn clock(until: Ts) -> String {
     format!("{hour:02}:{minute:02}")
 }
 
+/// The day and the time of day, as the user's clock sees it (`Oct 30 00:35`).
+pub fn day_clock(until: Ts) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let seconds = until as libc::time_t;
+    let mut parts: libc::tm = unsafe { std::mem::zeroed() };
+    let local = unsafe { libc::localtime_r(&seconds, &mut parts) };
+    let (month, day, hour, minute) = if local.is_null() {
+        // No local time: the clock of the machine is not readable.
+        let (month, day) = civil_from_days(until.div_euclid(86_400));
+        (month, day, (until / 3600) % 24, (until % 3600) / 60)
+    } else {
+        (
+            parts.tm_mon as i64 + 1,
+            parts.tm_mday as i64,
+            parts.tm_hour as i64,
+            parts.tm_min as i64,
+        )
+    };
+    let month = MONTHS[(month.clamp(1, 12) - 1) as usize];
+    format!("{month} {day} {hour:02}:{minute:02}")
+}
+
+/// The month and the day of a count of days since 1970-01-01, in UTC.
+///
+/// The fallback of [`day_clock`], when the machine's local time is not
+/// readable.
+fn civil_from_days(days: i64) -> (i64, i64) {
+    let days = days + 719_468;
+    let day_of_era = days.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 };
+    (month, day)
+}
+
 /// An RFC 3339 time (`2026-10-27T10:00:00Z`) in epoch seconds.
 fn rfc3339(text: &str) -> Option<Ts> {
     let text = text.trim();

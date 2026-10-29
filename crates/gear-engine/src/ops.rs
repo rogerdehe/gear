@@ -984,6 +984,11 @@ fn resubmit_key(op_id: &str) -> String {
     format!("engine.resubmit.{op_id}")
 }
 
+/// The meta key that marks an op as already typed again (T-404).
+fn retype_key(op_id: &str) -> String {
+    format!("engine.retype.{op_id}")
+}
+
 /// The needle a pane must show for `text`: its first line, cut to its first
 /// [`UNSENT_NEEDLE_CHARS`] characters. `None` = nothing to look for.
 fn unsent_needle(text: &str) -> Option<String> {
@@ -1024,6 +1029,13 @@ fn tail_shows(tail: &str, needle: &str) -> bool {
 /// A failed read or a refused key changes nothing (no meta, no second try at
 /// once). A confirmed op is never touched: the lane read its packet.
 ///
+/// When the tail does **not** show the text, the delivery never reached the
+/// input box at all — a codex lane showed its empty input placeholder while
+/// the op stayed Submitted (T-404). The delivery is then typed again once
+/// with `herdr prompt` (text + Enter), unless it was typed again before
+/// (`engine.retype.<op id>` not set), and the meta key records it; a refused
+/// prompt changes nothing. A retyped op is listed in the same `resubmitted`
+/// result.
 pub fn resubmit_unsent(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -1048,19 +1060,21 @@ pub fn resubmit_unsent(
             if binding.status != BindingStatus::Active {
                 continue;
             }
-            if tx.get_meta(&resubmit_key(&op.id))?.is_some() {
+            if tx.get_meta(&resubmit_key(&op.id))?.is_some()
+                || tx.get_meta(&retype_key(&op.id))?.is_some()
+            {
                 continue;
             }
             let Some(text) = op.payload.get("text").and_then(serde_json::Value::as_str) else {
                 continue;
             };
             let Some(needle) = unsent_needle(text) else { continue };
-            out.push((op.id.clone(), binding.pane_id.clone(), needle));
+            out.push((op.id.clone(), binding.pane_id.clone(), needle, text.to_string()));
         }
         Ok(out)
     })?;
     let mut sent = Vec::new();
-    for (op_id, pane, needle) in candidates {
+    for (op_id, pane, needle, text) in candidates {
         // Only an agent that has nothing better to do left the text unsent.
         let Ok(Some(agent)) = herdr.agent_get(&pane) else { continue };
         if !matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done) {
@@ -1068,6 +1082,13 @@ pub fn resubmit_unsent(
         }
         let Ok(tail) = herdr.read_tail(&pane, UNSENT_READ_LINES) else { continue };
         if !tail_shows(&tail, &needle) {
+            // The text never reached the input box (T-404): it is typed again
+            // once, and a refused prompt changes nothing, not even the meta.
+            if !matches!(herdr.prompt(&pane, &text), Outcome::Ok(())) {
+                continue;
+            }
+            store.write(|tx| tx.set_meta(&retype_key(&op_id), &now.to_string()))?;
+            sent.push(op_id);
             continue;
         }
         // The Enter itself: a refused key changes nothing, not even the meta.
@@ -2132,6 +2153,10 @@ mod tests {
 
         assert_eq!(sent, vec!["O-1".to_string()]);
         assert_eq!(enters(&herdr, LANE_PANE), 1, "the Enter is pressed once");
+        assert!(
+            herdr.prompts_to(LANE_PANE).is_empty(),
+            "the text is in the input box: it is not typed again"
+        );
         assert_eq!(
             store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(),
             Some((T0 + 40).to_string()),
@@ -2159,16 +2184,79 @@ mod tests {
         assert_eq!(store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(), None);
     }
 
+    /// A codex lane whose delivery never reached the input: a named agent
+    /// (a prompt to an unnamed agent is refused) and a screen with the empty
+    /// input placeholder.
+    fn unsent_lost_herdr(status: AgentStatus) -> FakeHerdr {
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(LANE_PANE, "opencode", status, "p-heat");
+        herdr.set_screen(LANE_PANE, "> \n  ? for shortcuts, 0 tokens");
+        herdr
+    }
+
     #[test]
-    fn a_tail_without_the_text_gets_no_enter() {
+    fn a_delivery_that_never_reached_the_input_is_typed_again_once() {
+        // T-404: the op stayed Submitted while the pane showed an empty input
+        // and the agent sat idle — nobody had retyped the lost delivery.
         let mut store = lane_world();
         store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
-        let mut herdr = unsent_herdr(AgentStatus::Idle, "> gear status\n> T-2 in review");
+        let mut herdr = unsent_lost_herdr(AgentStatus::Idle);
 
-        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap();
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 90).unwrap();
 
-        assert!(sent.is_empty(), "the text is not in the pane");
-        assert_eq!(enters(&herdr, LANE_PANE), 0);
+        assert_eq!(sent, vec!["O-1".to_string()]);
+        assert_eq!(
+            herdr.prompts_to(LANE_PANE),
+            vec![UNSENT_TEXT],
+            "the delivery is typed again"
+        );
+        assert_eq!(enters(&herdr, LANE_PANE), 0, "the prompt carries its own Enter");
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.retype.O-1")).unwrap(),
+            Some((T0 + 90).to_string()),
+            "the retype is recorded with its time"
+        );
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(),
+            None,
+            "the Enter path was not the one that ran"
+        );
+
+        let again = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 120).unwrap();
+
+        assert!(again.is_empty(), "the op was typed again already");
+        assert_eq!(herdr.prompts_to(LANE_PANE).len(), 1, "a second pass types nothing");
+    }
+
+    #[test]
+    fn a_delivery_younger_than_the_window_is_not_typed_again() {
+        // The text may still be on its way: nothing is typed in the window.
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_lost_herdr(AgentStatus::Idle);
+
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+
+        assert!(sent.is_empty());
+        assert!(herdr.prompts_to(LANE_PANE).is_empty());
+        assert_eq!(store.read(|tx| tx.get_meta("engine.retype.O-1")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_refused_retype_changes_nothing() {
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_lost_herdr(AgentStatus::Idle);
+
+        herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "injected".into() });
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 90).unwrap();
+
+        assert!(sent.is_empty(), "a refused prompt is no retype");
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.retype.O-1")).unwrap(),
+            None,
+            "and it is not recorded"
+        );
     }
 
     #[test]
@@ -2180,6 +2268,20 @@ mod tests {
         let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap();
 
         assert!(sent.is_empty(), "a working agent is not interrupted");
+        assert_eq!(enters(&herdr, LANE_PANE), 0);
+        assert!(herdr.prompts_to(LANE_PANE).is_empty());
+    }
+
+    #[test]
+    fn a_working_agent_with_an_empty_input_is_not_typed_again() {
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_lost_herdr(AgentStatus::Working);
+
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 90).unwrap();
+
+        assert!(sent.is_empty(), "a working agent is not interrupted");
+        assert!(herdr.prompts_to(LANE_PANE).is_empty(), "nor typed into");
         assert_eq!(enters(&herdr, LANE_PANE), 0);
     }
 
@@ -2198,7 +2300,9 @@ mod tests {
 
         assert!(sent.is_empty(), "the lane read its packet");
         assert_eq!(enters(&herdr, LANE_PANE), 0);
+        assert!(herdr.prompts_to(LANE_PANE).is_empty(), "a confirmed op is not typed again");
         assert_eq!(store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(), None);
+        assert_eq!(store.read(|tx| tx.get_meta("engine.retype.O-1")).unwrap(), None);
     }
 
     #[test]

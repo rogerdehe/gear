@@ -1,6 +1,7 @@
 //! Contract for gear_app::draft::parse (T-31, design/05). Pure.
 
-use gear_app::draft::{parse, Priority, StaffItem};
+use gear_app::draft::{milestone_stations, parse, Priority, StaffItem};
+use gear_store::VoyageStation;
 use gear_model::ErrorCode;
 
 const FULL: &str = r#"<!-- gear-plan project=harbor base=12 -->
@@ -221,5 +222,52 @@ fn rebind_cancel_is_a_staff_line() {
     assert!(
         bad_line("<!-- gear-plan project=p base=1 -->\n# Staff\n- rebind hull cancel now\n")
             .contains("`rebind ... cancel` takes only a lane")
+    );
+}
+
+/// M5 S3: the `# Milestone` block names the voyage's stations, in order.
+#[test]
+fn the_milestone_block_names_the_stations_in_order() {
+    let body = "done: users install it\nbar: keep it simple\neta: 8h\n\
+                station S1: reliability fixes and conventions as configuration, released as v0.5.0\n\
+                station S2: the board matches the prototype\n";
+    let stations = milestone_stations(body).unwrap();
+    assert_eq!(
+        stations,
+        vec![
+            VoyageStation { id: "S1".into(), needs: "reliability fixes and conventions as configuration, released as v0.5.0".into() },
+            VoyageStation { id: "S2".into(), needs: "the board matches the prototype".into() },
+        ]
+    );
+    // A block without a station line has none.
+    assert!(milestone_stations("done: x\nbar: y\neta: 8h\n").unwrap().is_empty());
+}
+
+/// M5 S3: a repeated id, an empty id and empty needs are refused, naming the line.
+#[test]
+fn a_broken_station_line_is_refused() {
+    for line in [
+        "station S1: first\nstation S1: again",
+        "station : no id",
+        "station S1:",
+    ] {
+        let err = milestone_stations(line).unwrap_err();
+        assert!(err.contains(&format!("got {:?}", line.lines().last().unwrap())), "{err}");
+        assert!(err.contains("station <id>: <what reaching it needs>"), "{err}");
+    }
+}
+
+/// M5 S3: a queue header carries the task's station; a repeated or empty one is refused.
+#[test]
+fn a_queue_header_carries_the_station() {
+    let d = parse("<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [must] lane=heat milestone=M1 station=S2\ngoal: A\naccept: a\ndeps: -\n").unwrap();
+    assert_eq!(d.queue[0].station.as_deref(), Some("S2"));
+    assert!(
+        bad_line("<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [must] lane=heat milestone=M1 station=S2 station=S3\ngoal: A\naccept: a\ndeps: -\n")
+            .contains("repeated `station=` in one queue block header")
+    );
+    assert!(
+        bad_line("<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [must] lane=heat milestone=M1 station=\ngoal: A\naccept: a\ndeps: -\n")
+            .contains("`station=` needs a station id")
     );
 }

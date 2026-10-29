@@ -2,7 +2,7 @@
 //! Do not edit these tests to make them pass; report back if one looks wrong.
 
 use gear_model::{ErrorCode, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState};
-use gear_store::{testing, BindingStatus, NewMessage, NewOp, RequestOutcome, Store, ViewRecord, SCHEMA_VERSION};
+use gear_store::{testing, BindingStatus, NewMessage, NewOp, RequestOutcome, Store, ViewRecord, VoyageStation, SCHEMA_VERSION};
 use serde_json::json;
 
 const NOW: i64 = 1_800_000_000;
@@ -363,4 +363,102 @@ fn a_captain_quota_episode_survives_reopening_the_store() {
     assert!(store.read(|tx| tx.captain_quota_paused("p")).unwrap());
     store.write(|tx| tx.set_captain_quota("p", None)).unwrap();
     assert!(!store.read(|tx| tx.captain_quota_paused("p")).unwrap());
+}
+
+/// T-329: the voyage's stations round-trip in plan order, in meta.
+#[test]
+fn voyage_stations_round_trip_in_order() {
+    let mut s = store();
+    let stations = vec![
+        VoyageStation {
+            id: "S1".into(),
+            needs: "the window answers".into(),
+        },
+        VoyageStation {
+            id: "S2".into(),
+            needs: "the board shows the course".into(),
+        },
+    ];
+    s.write(|tx| tx.set_voyage_stations("p", "M5", &stations))
+        .unwrap();
+    assert_eq!(
+        s.read(|tx| tx.voyage_stations("p", "M5")).unwrap(),
+        stations
+    );
+    // The key holds one `<id>: <needs>` line per station.
+    assert_eq!(
+        s.read(|tx| tx.get_meta("voyage-stations:p:M5"))
+            .unwrap()
+            .as_deref(),
+        Some("S1: the window answers\nS2: the board shows the course")
+    );
+}
+
+/// T-329: a needs text with a colon of its own round-trips; the line splits
+/// only at its first `": "`.
+#[test]
+fn voyage_station_needs_keep_their_colons() {
+    let mut s = store();
+    let stations = vec![VoyageStation {
+        id: "S2".into(),
+        needs: "the board: all four views".into(),
+    }];
+    s.write(|tx| tx.set_voyage_stations("p", "M5", &stations))
+        .unwrap();
+    assert_eq!(
+        s.read(|tx| tx.voyage_stations("p", "M5")).unwrap(),
+        stations
+    );
+}
+
+/// T-329: an empty list reads back empty, and so does another milestone or
+/// another project.
+#[test]
+fn an_empty_or_other_voyage_has_no_stations() {
+    let mut s = store();
+    let stations = vec![VoyageStation {
+        id: "S1".into(),
+        needs: "the window answers".into(),
+    }];
+    s.write(|tx| tx.set_voyage_stations("p", "M5", &stations))
+        .unwrap();
+    assert!(s
+        .read(|tx| tx.voyage_stations("p", "M6"))
+        .unwrap()
+        .is_empty());
+    assert!(s
+        .read(|tx| tx.voyage_stations("q", "M5"))
+        .unwrap()
+        .is_empty());
+    s.write(|tx| tx.set_voyage_stations("p", "M5", &[]))
+        .unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_meta("voyage-stations:p:M5"))
+            .unwrap()
+            .as_deref(),
+        Some("")
+    );
+    assert!(s
+        .read(|tx| tx.voyage_stations("p", "M5"))
+        .unwrap()
+        .is_empty());
+}
+
+/// T-329: a task's station round-trips and `None` clears it.
+#[test]
+fn a_task_station_round_trips_and_clears() {
+    let mut s = store();
+    assert_eq!(s.read(|tx| tx.task_station("p", "T-1")).unwrap(), None);
+    s.write(|tx| tx.set_task_station("p", "T-1", Some("S2")))
+        .unwrap();
+    assert_eq!(
+        s.read(|tx| tx.task_station("p", "T-1")).unwrap(),
+        Some("S2".into())
+    );
+    // Another task and another project have none.
+    assert_eq!(s.read(|tx| tx.task_station("p", "T-2")).unwrap(), None);
+    assert_eq!(s.read(|tx| tx.task_station("q", "T-1")).unwrap(), None);
+    s.write(|tx| tx.set_task_station("p", "T-1", None))
+        .unwrap();
+    assert_eq!(s.read(|tx| tx.task_station("p", "T-1")).unwrap(), None);
 }

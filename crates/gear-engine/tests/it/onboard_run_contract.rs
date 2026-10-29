@@ -46,7 +46,7 @@ fn cfg() -> EngineCfg {
 #[test]
 fn queued_lane_gets_worktree_env_and_agent() {
     let mut s = Store::open_in_memory().unwrap();
-    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, CONFIG,Some(crate::skill_home()), T0).unwrap();
+    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, CONFIG,Some(crate::skill_home()), None, T0).unwrap();
     let mut herdr = FakeHerdr::new();
     let active = onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap();
     assert_eq!(active, vec!["toy:heat".to_string()]);
@@ -68,7 +68,7 @@ fn queued_lane_gets_worktree_env_and_agent() {
 #[test]
 fn a_failed_step_parks_the_seat_in_needs_check() {
     let mut s = Store::open_in_memory().unwrap();
-    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, CONFIG,Some(crate::skill_home()), T0).unwrap();
+    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, CONFIG,Some(crate::skill_home()), None, T0).unwrap();
     let mut herdr = FakeHerdr::new();
     herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "worktree_exists".into() });
     assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap().is_empty());
@@ -84,7 +84,7 @@ fn a_lane_that_cannot_start_on_its_model_rings_the_captain() {
     let mut s = Store::open_in_memory().unwrap();
     let with_models = CONFIG.to_owned()
         + "\n[models]\nlanes = [\"minimax-cn/MiniMax-M3.1-Flash\", \"deepseek/deepseek-flash\"]\n";
-    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, &with_models,Some(crate::skill_home()), T0).unwrap();
+    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, &with_models,Some(crate::skill_home()), None, T0).unwrap();
     let mut herdr = FakeHerdr::new();
 
     assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap().is_empty());
@@ -113,13 +113,13 @@ fn a_startup_switch_timeout_or_removed_labels_rings_once() {
         let with_labels = without_labels.clone()
             + "\n[models.switch.\"deepseek/deepseek-flash\"]\npicker = \"DeepSeek V4.1 Flash\"\nbar = \"DeepSeek V4.1 Flash\"\n";
         let env = Env { ctx: None, pane_id: None, admin: true };
-        admin::init_with_home(&mut s, &env, &with_labels,Some(crate::skill_home()), T0).unwrap();
+        admin::init_with_home(&mut s, &env, &with_labels,Some(crate::skill_home()), None, T0).unwrap();
         let mut herdr = FakeHerdr::new();
         herdr.start_screen = Some("Build auto · wrong-model · high".into());
         assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap().is_empty());
         assert!(gear_engine::switch::pending(&mut s, "toy:heat").unwrap().is_some());
         if remove_labels {
-            admin::init_with_home(&mut s, &env, &without_labels,Some(crate::skill_home()), T0 + 2).unwrap();
+            admin::init_with_home(&mut s, &env, &without_labels,Some(crate::skill_home()), None, T0 + 2).unwrap();
         }
         for tick in 0..30 {
             assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 3 + tick).unwrap().is_empty());
@@ -140,7 +140,7 @@ fn a_startup_switch_timeout_or_removed_labels_rings_once() {
 fn a_lane_added_by_a_config_change_is_onboarded_with_the_latest_config() {
     let mut s = Store::open_in_memory().unwrap();
     let admin_env = Env { ctx: None, pane_id: None, admin: true };
-    admin::init_with_home(&mut s, &admin_env, CONFIG,Some(crate::skill_home()), T0).unwrap();
+    admin::init_with_home(&mut s, &admin_env, CONFIG,Some(crate::skill_home()), None, T0).unwrap();
     let mut herdr = FakeHerdr::new();
     assert_eq!(
         onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap(),
@@ -152,7 +152,7 @@ fn a_lane_added_by_a_config_change_is_onboarded_with_the_latest_config() {
         .replace("lanes = 1", "lanes = 2")
         .replace(r#"repo = "/repo""#, r#"repo = "/repo2""#)
         + "\n[[lanes]]\nname = \"pricing\"\nduty = \"prices\"\nowns = [\"lib/\"]\nkind = \"opencode\"\nprofile = \"opencode\"\n";
-    admin::init_with_home(&mut s, &admin_env, &changed,Some(crate::skill_home()), T0 + 2).unwrap();
+    admin::init_with_home(&mut s, &admin_env, &changed,Some(crate::skill_home()), None, T0 + 2).unwrap();
 
     // The new lane is onboarded; the lane that was there is not touched.
     let active = onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 3).unwrap();
@@ -171,7 +171,7 @@ fn a_lane_added_by_a_config_change_is_onboarded_with_the_latest_config() {
 fn a_lane_missing_from_the_config_snapshot_is_skipped_not_parked() {
     let mut s = Store::open_in_memory().unwrap();
     let admin_env = Env { ctx: None, pane_id: None, admin: true };
-    admin::init_with_home(&mut s, &admin_env, CONFIG,Some(crate::skill_home()), T0).unwrap();
+    admin::init_with_home(&mut s, &admin_env, CONFIG,Some(crate::skill_home()), None, T0).unwrap();
     // The seat a re-init would have committed just before the roster read.
     s.write(|tx| {
         tx.insert_seat(&SeatRow {
@@ -205,7 +205,7 @@ fn a_lane_missing_from_the_config_snapshot_is_skipped_not_parked() {
     // The config change lands; the next tick onboards the lane.
     let changed = CONFIG.replace("lanes = 1", "lanes = 2")
         + "\n[[lanes]]\nname = \"pricing\"\nduty = \"prices\"\nowns = [\"lib/\"]\nkind = \"opencode\"\nprofile = \"opencode\"\n";
-    admin::init_with_home(&mut s, &admin_env, &changed,Some(crate::skill_home()), T0 + 2).unwrap();
+    admin::init_with_home(&mut s, &admin_env, &changed,Some(crate::skill_home()), None, T0 + 2).unwrap();
     assert_eq!(
         onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 3).unwrap(),
         vec!["toy:pricing".to_string()]
@@ -273,7 +273,7 @@ gate = "make test"
     std::env::set_var("HOME", &home);
 
     let mut s = Store::open_in_memory().unwrap();
-    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, BOTH,Some(crate::skill_home()), T0).unwrap();
+    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, BOTH,Some(crate::skill_home()), None, T0).unwrap();
     let mut herdr = FakeHerdr::new();
     let mut c = cfg();
     c.profiles.insert("grok".into(), builtin("grok").unwrap());
@@ -327,10 +327,14 @@ fn a_released_lane_whose_agent_is_gone_is_onboarded_and_given_its_task() {
         &Env { ctx: None, pane_id: None, admin: true },
         CONFIG,
         Some(crate::skill_home()),
+        None,
         T0,
     )
     .unwrap();
     let mut herdr = FakeHerdr::new();
+    // A delivered prompt starts the lane's turn, as a real agent does (T-404:
+    // an idle agent with no delivery in its tail is a lost delivery).
+    herdr.prompt_starts_turn = true;
     let cfg = cfg();
 
     let cap = Fingerprint { pane_id: "w1:p1".into(), kind: Some("claude".into()), session_ref: None };
@@ -398,6 +402,7 @@ fn an_unnamed_leftover_agent_is_named_and_asked_to_exit_in_the_same_tick() {
         &Env { ctx: None, pane_id: None, admin: true },
         CONFIG,
         Some(crate::skill_home()),
+        None,
         T0,
     )
     .unwrap();

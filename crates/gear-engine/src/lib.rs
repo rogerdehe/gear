@@ -661,11 +661,23 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         if let Err(e) = store.write(|tx| {
             let missing = missing_seats.contains(&seat);
             tx.set_meta(&format!("stall-missing:{seat}"), if missing { "1" } else { "" })?;
+            let row = tx.get_seat(&seat)?;
+            // T-324: a lane helping on an unanswered captain instruction is
+            // busy on purpose. While its agent is present no stall item is
+            // written; a missing agent ("its agent is gone from its pane") is
+            // still told.
+            if !missing {
+                if let Some(row) = row.as_ref() {
+                    if gear_board::idle::helping(tx, &row.project, row, now)?.is_some() {
+                        return Ok(false);
+                    }
+                }
+            }
             // T-287: a seat the engine already restarted once on this config
             // that is missing again ends the same way (M4.2 #17). Its item says
             // so, and names the pane and the config as the place to look, so
             // the captain does not spend a second restart on it.
-            let again = match (missing, tx.get_seat(&seat)?) {
+            let again = match (missing, row) {
                 (true, Some(row)) => restart_spent(tx, &row)?,
                 _ => false,
             };
