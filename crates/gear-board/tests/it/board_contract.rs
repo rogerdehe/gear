@@ -129,6 +129,90 @@ fn the_lane_line_names_the_stage_in_the_words_of_the_graph() {
     assert_eq!(task.stage_words, "handed in, waits for a reviewer");
 }
 
+/// T-347, F1 of the review of attempt 1: a cancelled task is not the lane's
+/// current task. Cancelling keeps the terminal attempt, so a task cancelled
+/// after a failed verdict still has a rejected last attempt and the classifier
+/// still calls its stage open; the graph leaves such a task out, and the lane
+/// line names the lane's next open task instead.
+#[test]
+fn a_cancelled_task_is_not_the_current_task_of_its_lane() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            for (id, rank, state) in
+                [("T-1", 1, TaskState::Cancelled), ("T-2", 2, TaskState::Running)]
+            {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: Some("M5".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+            }
+            // The cancelled task keeps its rejected attempt; the running one
+            // is on its first attempt, started.
+            for (task, state) in
+                [("T-1", AttemptState::Rejected), ("T-2", AttemptState::Started)]
+            {
+                tx.insert_attempt(&AttemptRow {
+                    project: "p".into(),
+                    task: task.into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let board = store.read(|tx| gear_board::project(tx, "p", T0 + 60)).unwrap();
+    let lane = board.lanes.iter().find(|lane| lane.lane == "heat").unwrap();
+    // The cancelled task is in the lane model and its stage reads open...
+    let cancelled = lane.tasks.iter().find(|task| task.id == "T-1").unwrap();
+    assert_eq!(cancelled.state, TaskState::Cancelled);
+    assert_eq!(cancelled.stage, gear_board::graph::Stage::SentBack);
+    // ...and the lane's current task is the next open one, not it.
+    assert_eq!(gear_board::lane_line(lane), "heat · agent unknown · T-2 working · 0 queued");
+    // The graph leaves the cancelled task out, so the lane line and the views
+    // agree on what the lane works on.
+    assert!(
+        board.graph.iter().all(|task| task.id != "T-1"),
+        "the graph does not draw a cancelled task"
+    );
+}
+
 #[test]
 fn a_lane_with_no_tasks_is_shown_without_a_current_task() {
     let mut store = Store::open_in_memory().unwrap();

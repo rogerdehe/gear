@@ -936,9 +936,16 @@ fn observed_agent_state(
 ///
 /// The current task is the first task of the lane that is on its way between
 /// its delivery and its merge, named in the stage words the board's views use
-/// (T-347).
+/// (T-347). A cancelled task is never the lane's current task, even when its
+/// last attempt was rejected and the classifier still calls that stage open
+/// (F1 of the review): the graph leaves a cancelled task out, so the lane line
+/// names the lane's next open task instead.
 pub fn lane_line(lane: &LaneBoard) -> String {
-    let current = lane.tasks.iter().find(|task| task.stage.is_open());
+    let current = lane
+        .tasks
+        .iter()
+        .filter(|task| task.state != TaskState::Cancelled)
+        .find(|task| task.stage.is_open());
     let current = current.map(|task| format!("{} {}", task.id, task.stage_words))
         .unwrap_or_else(|| match &lane.helping {
             // A lane that helps says what it helps on (T-323).
