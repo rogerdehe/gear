@@ -26,6 +26,11 @@ const START_GRACE_S: i64 = 60;
 /// seat is parked and the captain told, instead of starting it again.
 const AGENT_GONE_LIMIT: u32 = 3;
 
+/// How long a `Standby` reviewer whose pane holds no agent is left alone
+/// before it is released: a review can be handed over to it on any tick, and
+/// Herdr may report its agent a moment late (as `START_GRACE_S` above).
+const STANDBY_AGENT_GONE_S: i64 = 60;
+
 /// What the release step did in one tick.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReleaseReport {
@@ -214,6 +219,47 @@ pub fn release_finished_reviews(
                     continue;
                 }
                 match release_one(store, herdr, project, &seat, Some(&task), now) {
+                    Ok(true) => report.released.push(seat.id.clone()),
+                    Ok(false) => {}
+                    Err(_) => report.failed.push(seat.id.clone()),
+                }
+            }
+            // T-399: a Standby reviewer whose agent is gone holds a temp slot
+            // for a review that never comes — `start_reviewer` (review.rs)
+            // hands a review only to a seat whose agent is `Idle` or `Done`,
+            // so such a seat keeps its slot while other reviews wait for one
+            // (2026-10-29: review-11 sat Standby 21 min with no agent while
+            // T-347, T-389 and T-397 waited for a seat). It leaves like the
+            // surplus Standby reviewer of the sweep below, and its pending
+            // review ends with it, so `start_reviews` starts that review again
+            // on a free seat.
+            //
+            // A pane that cannot be read is an observation failure, not an
+            // absence (design/08, T-264): such a seat keeps its slot.
+            SeatState::Standby => {
+                let pane = match binding_pane(store, &seat) {
+                    Ok(Some(pane)) => pane,
+                    // Without a live binding there is no pane to look at: the
+                    // sweep for dead temps owns such a seat.
+                    Ok(None) => continue,
+                    Err(_) => {
+                        report.failed.push(seat.id.clone());
+                        continue;
+                    }
+                };
+                // A seat that just got its verdict may be handed the next
+                // review on the next tick: it waits for this one.
+                if now - seat.state_since <= STANDBY_AGENT_GONE_S {
+                    continue;
+                }
+                match herdr.agent_get(&pane) {
+                    Ok(None) => {}
+                    Ok(Some(_)) | Err(_) => continue,
+                }
+                // The review it waited for is not handed to a dead seat: with
+                // the key gone, the normal pass starts it on a free seat.
+                store.write(|tx| tx.set_meta(&pending_key, ""))?;
+                match release_one(store, herdr, project, &seat, None, now) {
                     Ok(true) => report.released.push(seat.id.clone()),
                     Ok(false) => {}
                     Err(_) => report.failed.push(seat.id.clone()),
@@ -2040,6 +2086,102 @@ profile = "codex"
         assert_eq!(pending.as_deref(), Some("T-1"), "its review is still its job");
         let other = store.read(|tx| tx.get_seat("p:r-2")).unwrap().unwrap();
         assert_eq!(other.state, SeatState::Standby, "it waits for the next review");
+    }
+
+    /// A `Standby` reviewer that waits for a review that is on its way: its
+    /// agent is idle in `w2:p2` and `engine.review_pending.p:r-1` names `T-1`,
+    /// which is handed in and unjudged (so the review is still its job).
+    fn standby_for_a_pending_review(store: &mut Store, since: Ts) {
+        handed_in(store, "T-1");
+        store
+            .write(|tx| {
+                tx.set_seat_state("p:r-1", SeatState::Standby, Some("waiting for its review"), since)?;
+                tx.set_meta("engine.review_pending.p:r-1", "T-1")
+            })
+            .unwrap();
+    }
+
+    /// T-399: a `Standby` reviewer whose pane holds no agent keeps a temp slot
+    /// for a review that is never handed to it (`start_reviewer` takes only a
+    /// seat whose agent is `Idle` or `Done`), while reviews wait for a seat.
+    /// It is released and its pending review ends with it, so the review
+    /// starts again on a free seat.
+    #[test]
+    fn a_standby_reviewer_whose_agent_is_gone_is_released_with_its_review() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        standby_for_a_pending_review(&mut store, T0);
+        let mut herdr = FakeHerdr::new();
+        // The pane is a bare shell: the agent of the seat is gone.
+        herdr.add_shell("w2:p2");
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 120).unwrap();
+
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Releasing, "the dead seat is on its way out");
+        assert_eq!(exits(&herdr), 1, "its pane is closed");
+        let pending = store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap();
+        assert_eq!(pending.as_deref(), Some(""), "its pending review ends with it");
+
+        // The next tick frees the seat: the review starts again on a free one.
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 140).unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Released, "the slot is free");
+        assert_eq!(exits(&herdr), 1, "the close is not repeated");
+    }
+
+    /// T-399: a `Standby` reviewer whose agent is alive waits for the next
+    /// review — its seat is the one the review is handed to.
+    #[test]
+    fn a_standby_reviewer_with_its_agent_keeps_its_slot() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        standby_for_a_pending_review(&mut store, T0);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 120).unwrap();
+
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Standby, "it waits for its review");
+        let pending = store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap();
+        assert_eq!(pending.as_deref(), Some("T-1"), "its review is still its job");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
+    }
+
+    /// T-399: a pane that cannot be read is an observation failure, not an
+    /// absence (design/08, T-264): the seat keeps its slot and its review.
+    #[test]
+    fn a_standby_reviewer_whose_pane_cannot_be_read_keeps_its_slot() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        standby_for_a_pending_review(&mut store, T0);
+        let mut herdr = FakeHerdr::new();
+        herdr.observe_fails = true;
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 120).unwrap();
+
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Standby, "not released on a guess");
+        let pending = store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap();
+        assert_eq!(pending.as_deref(), Some("T-1"), "its review is kept");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
+    }
+
+    /// T-399: a reviewer that has been in `Standby` for less than a minute is
+    /// left alone: a review can be handed over to it on any tick, and its
+    /// agent may be reported a moment late.
+    #[test]
+    fn a_standby_reviewer_of_a_moment_is_not_released() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        standby_for_a_pending_review(&mut store, T0);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w2:p2");
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 30).unwrap();
+
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Standby, "it keeps its slot");
+        let pending = store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap();
+        assert_eq!(pending.as_deref(), Some("T-1"), "its review is kept");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
     }
 
     /// T-259: a reviewer parked in NeedsCheck with no task and no agent in its
