@@ -312,11 +312,24 @@ fn pending_at(pending: &[Pending], frame: Frame, row: usize, col: usize) -> (boo
 }
 
 /// Whether the board's `got` cell draws the prototype's `want` cell: the same
-/// character, colour and reverse mark, unless `swap` stands for the colour.
+/// character and reverse mark, and its colour — unless `swap` stands for it.
 fn matches(want: &Cell, got: &Cell, swap: Option<(char, char)>) -> bool {
-    want.text == got.text
-        && want.reverse == got.reverse
-        && (want.colour == got.colour || swap == Some((want.colour, got.colour)))
+    want.text == got.text && want.reverse == got.reverse && colour_matches(want.colour, got.colour, swap)
+}
+
+/// Whether the board's `got` colour letter stands for the prototype's `want`
+/// colour: the same letter, or the declared `swap` — which keeps its case, so a
+/// plain lane's `u` stands for `m` and a bold lane's `U` for `M`, never `U`
+/// for `m`.
+fn colour_matches(want: char, got: char, swap: Option<(char, char)>) -> bool {
+    if want == got {
+        return true;
+    }
+    let Some((want_letter, got_letter)) = swap else {
+        return false;
+    };
+    (want == want_letter && got == got_letter)
+        || (want == want_letter.to_ascii_uppercase() && got == got_letter.to_ascii_uppercase())
 }
 
 /// Why `frame` fails the gate: the cells that differ and the pending entries
@@ -364,10 +377,9 @@ fn failures(frame: Frame, want: &Planes, got: &Planes, pending: &[Pending]) -> V
         let matches_now = (entry.rows.0..=entry.rows.1).all(|row| {
             (entry.cols.0..=entry.cols.1).all(|col| {
                 let (want_cell, got_cell) = (want_cells[row][col], got_cells[row][col]);
-                // A swap entry whose cell still needs the swap has not
-                // arrived: the board draws the prototype's colour.
-                !matches(&want_cell, &got_cell, None)
-                    && !(entry.swap.is_some() && matches(&want_cell, &got_cell, entry.swap))
+                // Every cell has to match without the swap: a swap entry whose
+                // cell still needs the swap has not arrived either.
+                matches(&want_cell, &got_cell, None)
             })
         });
         if matches_now {
@@ -444,4 +456,60 @@ fn a_difference_is_reported() {
         problems.iter().any(|line| line.contains("row 3 col 7")),
         "the gate names row 3 col 7: {problems:?}"
     );
+}
+
+/// A frame of one cell (`x`) in `colour`, upright: the gate's smallest case.
+fn one_cell(colour: char) -> Planes {
+    Planes {
+        text: vec!["x".to_string()],
+        colour: vec![colour.to_string()],
+        reverse: vec![".".to_string()],
+    }
+}
+
+/// The removal message of a `NEW:` entry that its frame has caught up with.
+const RETIRED: &str = "pending NEW: task on probe rows 0-0 matches now: remove the entry";
+
+/// A `NEW:` skip entry over the one cell of the probe frame.
+fn new_entry(swap: Option<(char, char)>) -> Pending {
+    Pending { frame: "probe", rows: (0, 0), cols: (0, 0), swap, by: "NEW: task" }
+}
+
+#[test]
+fn a_new_entry_that_matches_now_is_retired() {
+    // The review of T-345, F1: the entry goes once the cell matches, and the
+    // gate has to say so — the inverted predicate kept it forever.
+    let problems = failures("probe", &one_cell('u'), &one_cell('u'), &[new_entry(None)]);
+    assert_eq!(problems, vec![RETIRED.to_string()]);
+}
+
+#[test]
+fn a_new_entry_whose_cell_still_differs_stays() {
+    // A skip entry leaves its cell uncompared, so the gate says nothing — and
+    // the entry stays: its task has not built the cell yet.
+    let problems = failures("probe", &one_cell('u'), &one_cell('m'), &[new_entry(None)]);
+    assert!(problems.is_empty(), "a skip entry hides its cell and is not retired: {problems:?}");
+}
+
+#[test]
+fn a_new_swap_entry_is_retired_only_when_the_swap_is_not_needed() {
+    // The board draws the prototype's own colour: the entry has nothing left
+    // to stand for, so it goes.
+    let problems = failures("probe", &one_cell('u'), &one_cell('u'), &[new_entry(Some(('u', 'm')))]);
+    assert_eq!(problems, vec![RETIRED.to_string()]);
+    // The cell still needs the swap: the entry stays (and the cell matches).
+    let problems = failures("probe", &one_cell('u'), &one_cell('m'), &[new_entry(Some(('u', 'm')))]);
+    assert!(problems.is_empty(), "the swap covers the cell and keeps the entry: {problems:?}");
+}
+
+#[test]
+fn a_lane_colour_swap_keeps_the_case() {
+    // The review of T-345, F2: the prototype's blue is the board's magenta,
+    // bold for bold — `u` stands for `m` and `U` for `M`, never across cases.
+    let cell = |colour| Cell { text: 'x', colour, reverse: '.' };
+    let swap = Some(('u', 'm'));
+    assert!(matches(&cell('u'), &cell('m'), swap), "a plain lane");
+    assert!(matches(&cell('U'), &cell('M'), swap), "a bold lane");
+    assert!(!matches(&cell('U'), &cell('m'), swap), "a bold prototype letter needs the bold board letter");
+    assert!(!matches(&cell('u'), &cell('M'), swap), "and a plain one the plain");
 }
