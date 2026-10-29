@@ -74,6 +74,7 @@ mod all_tail_contract;
 mod dead_temp_slot_contract;
 mod lane_nudge_contract;
 mod lane_restart_generation_contract;
+mod quota_wait_resume_contract;
 
 /// A scratch home with the GEAR skill installed for every kind (T-83): `init`
 /// refuses a kind whose skill is missing, and these fixtures are not about
