@@ -130,10 +130,6 @@ struct Pending {
 const PENDING: &[Pending] = &[
     // (5) The rows the queued tasks build. Row 47 (the footer) is compared
     // from the start: T-341 drew it.
-    Pending { frame: "now-folded", rows: (7, 9), cols: (0, 159), swap: None, by: "T-354" },
-    Pending { frame: "tasks-folded", rows: (7, 9), cols: (0, 159), swap: None, by: "T-354" },
-    Pending { frame: "cost-folded", rows: (7, 9), cols: (0, 159), swap: None, by: "T-354" },
-    Pending { frame: "log-folded", rows: (7, 9), cols: (0, 159), swap: None, by: "T-354" },
     Pending { frame: "now-open", rows: (7, 17), cols: (0, 159), swap: None, by: "T-355" },
     Pending { frame: "tasks-open", rows: (7, 17), cols: (0, 159), swap: None, by: "T-355" },
     Pending { frame: "cost-open", rows: (7, 17), cols: (0, 159), swap: None, by: "T-355" },
