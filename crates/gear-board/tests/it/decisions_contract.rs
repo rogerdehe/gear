@@ -122,6 +122,9 @@ fn world() -> Store {
                 model: Some("minimax-cn/MiniMax-M3.1-Flash".into()),
                 start_at: departure,
             })?;
+            // The work time of the round (T-348): the board reads the minutes
+            // the lane worked, not the clock since the delivery.
+            tx.set_round_active(&key, 44 * 60)?;
             tx.set_round_tokens(
                 &key,
                 &RoundTokens {
