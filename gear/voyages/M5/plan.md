@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=739 -->
+<!-- gear-plan project=gear base=740 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -118,6 +118,7 @@ eta: 16h
 - ★ 2026-10-29 09:00 hand-fix: on the user's order the captain wrote the branch sweep itself and released v0.4.12: a cancelled task's branches are deleted on the remote, and a task branch older than `[conventions] branch_max_age_min` (120) or more open-voyage task branches than lanes × `branch_max_per_lane` (3) is named to the captain (merged on dev as 167a85b3 with two engine tests); the voyage is held by the user meanwhile
 - ★ 2026-10-29 03:25 hand-fix: on the user's order the captain wrote the no-push question itself and released v0.4.13: a lane with no push for `[conventions] push_interval_min` (20) is asked to tell the captain why within `push_reply_min` (10); no answer and no push raises an urgent captain item; the skill says friction reports must be read and closed (merged on dev as e011c7d0 with three engine tests); its gap, held time counted as quiet time, is a new hull task
 - 2026-10-29 04:00 note: resuming after the user's stop: every accepted attempt is merged or queued as rework (T-297, T-370); the lanes merge origin/dev and push while still held, so the no-push clock starts fresh, then are released; hull/t412 resolves the github_contract.rs conflict with T-409, T-297's rework resolves merge.rs with the branch sweep; mast/t345 (T-345 done) and mast/t367 (T-367 moved to hull) are deleted
+- station M-5461: move 900 min in; superseded by M-5463 an hour later, read after the user's stop (same action)
 - station M-5463: move 980 min in, past the 960 min eta, 43 tasks (1200 min) left; hull 505 min, mast 695 min: the S1 release T-366 waits on T-297's rework, so T-297 runs next on hull and T-370's rework next on mast, before new work; each lane merges dev and pushes before its hold ends
 
 # Queue
