@@ -8,7 +8,9 @@
 //! (`crates/gear-engine/src/waits.rs`), and a station is not reached before its
 //! work is in the integration branch.
 
-use gear_model::{GearResult, TaskState};
+use std::collections::BTreeMap;
+
+use gear_model::{GearResult, TaskState, Ts};
 use gear_store::{TaskRow, Tx};
 
 /// Where a station stands in the voyage's course.
@@ -40,6 +42,11 @@ pub struct StationProgress {
     /// The minutes of estimate its unmerged tasks have left (an unknown
     /// estimate adds 0).
     pub left_min: i64,
+    /// When the station was reached (T-355): the latest merge of its tasks, in
+    /// whole minutes from the voyage's departure. None for a station that is
+    /// not reached, and for every station of a voyage with no departure on
+    /// record.
+    pub reached_at_min: Option<i64>,
 }
 
 /// The voyage's stations, in plan order, with their progress.
@@ -55,6 +62,10 @@ pub fn progress(
     if stations.is_empty() {
         return Ok(Vec::new());
     }
+    // The voyage's departure: reached minutes count from it (T-355).
+    let departure = tx
+        .get_voyage(project, milestone)?
+        .and_then(|voyage| voyage.departure);
     let mut progress: Vec<StationProgress> = stations
         .into_iter()
         .map(|station| StationProgress {
@@ -64,10 +75,13 @@ pub fn progress(
             tasks: 0,
             merged: 0,
             left_min: 0,
+            reached_at_min: None,
         })
         .collect();
+    // The latest merge of each station's tasks: the moment it was reached.
+    let mut latest: BTreeMap<String, Ts> = BTreeMap::new();
     for task in scope(tx, project, milestone)? {
-        let merged = is_merged(tx, project, &task.id)?;
+        let merged_at = merged_at(tx, project, &task.id)?;
         let Some(station) = tx.task_station(project, &task.id)? else {
             continue;
         };
@@ -75,10 +89,16 @@ pub fn progress(
             continue;
         };
         entry.tasks += 1;
-        if merged {
-            entry.merged += 1;
-        } else {
-            entry.left_min += crate::voyage::estimate_of(tx, project, &task)?.unwrap_or(0);
+        match merged_at {
+            Some(at) => {
+                entry.merged += 1;
+                let latest_at = latest.entry(station).or_insert(at);
+                *latest_at = (*latest_at).max(at);
+            }
+            None => {
+                entry.left_min += crate::voyage::estimate_of(tx, project, &task)?
+                    .unwrap_or(0);
+            }
         }
     }
     // A station with no task yet is not reached — nor can one be whose work is
@@ -98,6 +118,17 @@ pub fn progress(
         } else {
             entry.state = StationState::Later;
         }
+    }
+    // A reached station says when the last of its work merged, in minutes from
+    // the departure (T-355).
+    for entry in &mut progress {
+        if entry.state != StationState::Reached {
+            continue;
+        }
+        entry.reached_at_min = latest
+            .get(&entry.id)
+            .zip(departure)
+            .map(|(at, departure)| (at - departure).max(0) / 60);
     }
     Ok(progress)
 }
@@ -169,10 +200,16 @@ fn scope(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<Vec<TaskRow>
 
 /// Whether the task is merged: one of its attempts has a merge time.
 fn is_merged(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<bool> {
+    Ok(merged_at(tx, project, task)?.is_some())
+}
+
+/// When the task merged: the latest of its attempts' merge times.
+fn merged_at(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<Ts>> {
     Ok(tx
         .attempt_times_of_task(project, task)?
         .iter()
-        .any(|(_, times)| times.merged.is_some()))
+        .filter_map(|(_, times)| times.merged)
+        .max())
 }
 
 /// The scope tasks of the voyage that are not merged yet.
