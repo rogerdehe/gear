@@ -1767,10 +1767,10 @@ fn a_click_on_the_top_row_of_a_scrolled_view_picks_the_task_there() {
     use gear_board::frame;
     let (mut store, _now) = crate::golden_fixture::load();
     // The view's first row is the view's: scrolled to T-262 (the ninth pick),
-    // it holds T-268's row. The head takes nine rows (T-353), so the screen is
-    // four rows taller than the 12 it took with the fixed header: the view
-    // keeps its four rows.
-    let size = (160, 16);
+    // it holds T-268's row. The head takes thirteen rows (T-354's three rows),
+    // so the screen is four rows taller than the 12 it took with the fixed
+    // header: the view keeps its four rows.
+    let size = (160, 20);
     let board = build(
         &mut store,
         &Options { project: Some("gear".into()), ..Options::default() },
