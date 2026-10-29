@@ -28,3 +28,5 @@
 - A stall item rings the captain urgently while the lane's next delivery is only just intended: after a fail verdict, M-5036 (mast, T-392 attempt 2) and M-5045 (hull, T-300 attempt 2) each named a delivery 0 minutes old, with "no check-in this generation". Both deliveries were confirmed within a minute, and the engine closed both items before the captain could answer. A stall should wait out the delivery's confirmation window before it rings (crates/gear-engine/src/stall.rs and where the flag is set).
 
 - Branch cleanup gaps (another project, 2026-10-29): a cancelled task's branch is never deleted, and a merged task's branch is kept when its tip moved past the merged candidate (one more push after the merge).
+
+- A captain's coverage report (another project, 2026-10-29): accepted attempts whose candidate is not an ancestor of the integration branch, and failing cases that no task names (83 of 159 reds there were named by no packet, found only when a reviewer hit a package check that could not pass).
