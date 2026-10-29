@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=776 -->
+<!-- gear-plan project=gear base=777 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -152,6 +152,7 @@ eta: 21h
 - 2026-10-29 05:50 config: the engine runs v0.5.0 from dev (build c9f45551, every fix merged since departure: T-399, T-402, T-416, T-417, T-418 among them), restarted between merges, inode checked; M-5675 answered
 - 2026-10-29 05:51 note: T-350's merge gate ran the whole suite on 1 thread for 1015 s (build-slot's load term, fixed at 05:40, pushed after it) and failed for a real conflict with T-415: back to mast as a rework
 - station M-5708: keep course 1094 min in, 138 done, 24 left; the merge gate gets its share of the cores again
+- ★ 2026-10-29 05:55 hand-fix: build-slot's GOMAXPROCS held per run, not per machine (the other captain's reading: six runs each at GOMAXPROCS 10 on ten cores): it is now cores / N for a run alone and at most 2 while other runs are alive, the value the other project measured; the captain's own tool, fixed at the source and sent
 
 
 # Queue
