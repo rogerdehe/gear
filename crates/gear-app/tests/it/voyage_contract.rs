@@ -60,20 +60,6 @@ fn run(s: &mut Store, text: &str, rid: &str, now: i64) -> gear_model::GearResult
     apply(s, &env, Some(&fp), None, &draft, text, rid, now)
 }
 
-/// The same apply, with the draft marked as a change to a departed voyage's
-/// goal, bar or eta that the user asked for and confirmed (T-410).
-fn run_confirmed(
-    s: &mut Store,
-    text: &str,
-    rid: &str,
-    now: i64,
-) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
-    let mut draft = parse(text).unwrap();
-    draft.confirmed = true;
-    let (env, fp) = cap();
-    apply(s, &env, Some(&fp), None, &draft, text, rid, now)
-}
-
 /// A draft with one milestone block (body as given) and two tasks on it.
 fn plan(base: i64, body: &str) -> String {
     format!(
@@ -119,8 +105,8 @@ fn an_eta_that_is_not_a_duration_is_refused() {
     let mut s = world();
     // Durations apply: one group, then several.
     run(&mut s, &plan(0, "done: users install it\nbar: keep it simple\neta: 8h\n"), "r1", NOW).unwrap();
-    // T-410: the eta of a departed voyage moves only with the user's word.
-    run_confirmed(
+    // T-331: the eta of a departed voyage is not locked.
+    run(
         &mut s,
         &plan(1, "done: users install it\nbar: keep it simple\neta: 1d 4h\n"),
         "r2",
@@ -214,133 +200,190 @@ fn a_voyage_is_stored_with_its_departure_and_shown() {
     assert!(page.text.contains("Voyage M1 delivery v0.1.0"), "{}", page.text);
     assert!(page.text.contains("done: users install v0.1.0 without Rust"), "{}", page.text);
 
-    // A later apply updates the words but never moves the departure (T-410:
-    // the change of a departed voyage's words needs the user's confirmation).
-    let later = plan(1, "done: users install v0.1.1 without Rust\nbar: keep only loop breaks\neta: 9h\n");
-    run_confirmed(&mut s, &later, "r2", NOW + 100).unwrap();
+    // A later apply may move the eta but never the words or the departure
+    // (T-331: the goal of a departed voyage is locked).
+    let later = plan(1, "done: users install v0.1.0 without Rust\nbar: block only loop breaks and data loss; log the rest\neta: 9h\n");
+    run(&mut s, &later, "r2", NOW + 100).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
         (voyage.done.as_deref(), voyage.eta.as_deref()),
-        (Some("users install v0.1.1 without Rust"), Some("9h"))
+        (Some("users install v0.1.0 without Rust"), Some("9h"))
     );
     assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(2)));
 }
 
-/// T-410: a departed voyage's goal, bar and eta change only when the user
-/// asked for it and confirmed it. Without the confirmation the whole apply is
-/// refused with nothing written; with it the change applies and a starred
-/// decision of kind `user` records it.
+/// T-331: a departed voyage's goal belongs to the user. An apply that changes
+/// its `title`, `done:`, `bar:` or stations is refused with GOAL_LOCKED and
+/// writes nothing; the `eta:` is not locked.
 #[test]
-fn a_departed_voyage_changes_only_with_the_users_confirmation() {
+fn a_departed_voyages_goal_is_locked() {
     let mut s = world();
     run(&mut s, &plan(0, FULL), "r1", NOW).unwrap();
+    let stored = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
 
-    // `done:`, `bar:` and `eta:` each refused on their own, and the whole
-    // apply with them: the version, the voyage and the tasks stay as they
-    // were.
-    let changed = [
-        ("done", "done: users install v0.2.0 without Rust\nbar: block only loop breaks and data loss; log the rest\neta: 8h\n"),
-        ("bar", "done: users install v0.1.0 without Rust\nbar: block everything\neta: 8h\n"),
-        ("eta", "done: users install v0.1.0 without Rust\nbar: block only loop breaks and data loss; log the rest\neta: 10h\n"),
-    ];
-    for (n, (field, body)) in changed.into_iter().enumerate() {
+    for (n, (field, text, line)) in [
+        (
+            "title",
+            plan(0, FULL).replace("delivery v0.1.0", "delivery v0.2.0"),
+            "title: «delivery v0.1.0» → «delivery v0.2.0»",
+        ),
+        (
+            "done",
+            plan(
+                0,
+                "done: users install v0.2.0 without Rust\nbar: block only loop breaks and data loss; log the rest\neta: 8h\n",
+            ),
+            "done: «users install v0.1.0 without Rust» → «users install v0.2.0 without Rust»",
+        ),
+        (
+            "bar",
+            plan(
+                0,
+                "done: users install v0.1.0 without Rust\nbar: block everything\neta: 8h\n",
+            ),
+            "bar: «block only loop breaks and data loss; log the rest» → «block everything»",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let base = s.read(|tx| tx.plan_version("p")).unwrap();
-        let err = run(&mut s, &plan(base, body), &format!("r-bad-{n}"), NOW + 10 + n as i64)
-            .unwrap_err();
-        assert_eq!(err.code, ErrorCode::BadFormat, "{field}");
-        assert!(
-            err.detail.contains(&format!("milestone M1: {field} changed after departure")),
-            "{field}: {}",
-            err.detail
-        );
+        let text = text.replacen("base=0", &format!("base={base}"), 1);
+        let err = run(&mut s, &text, &format!("r-bad-{n}"), NOW + 10 + n as i64).unwrap_err();
+        assert_eq!(err.code, ErrorCode::GoalLocked, "{field}");
         assert!(
             err.detail.contains(
-                "the goal, the bar and the eta change only when the user asks; confirm it with them, then apply again with --confirmed"
+                "voyage M1 has departed: its goal belongs to the user and is locked. This apply changes it:"
             ),
             "{field}: {}",
             err.detail
         );
-        if field == "eta" {
-            assert!(err.detail.contains("stored \"8h\", got \"10h\""), "{}", err.detail);
-        }
+        assert!(err.detail.contains(line), "{field}: {}", err.detail);
+        assert!(err.detail.ends_with("Put the stored words back."), "{field}: {}", err.detail);
         // Nothing was written: the version, the stored words and the tasks.
         assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), base, "{field}");
         let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
         assert_eq!(
-            (voyage.done.as_deref(), voyage.bar.as_deref(), voyage.eta.as_deref()),
+            (voyage.title.as_str(), voyage.done.as_deref(), voyage.bar.as_deref(), voyage.eta.as_deref()),
             (
-                Some("users install v0.1.0 without Rust"),
-                Some("block only loop breaks and data loss; log the rest"),
-                Some("8h")
+                stored.title.as_str(),
+                stored.done.as_deref(),
+                stored.bar.as_deref(),
+                stored.eta.as_deref()
             ),
             "{field}"
         );
         assert_eq!(s.read(|tx| tx.tasks_of_project("p")).unwrap().len(), 2, "{field}");
     }
 
-    // The user asked for all three and confirmed it: the change applies and
-    // each field becomes a starred decision of kind `user`.
+    // The eta is not locked: its change applies, with no confirmation.
     let base = s.read(|tx| tx.plan_version("p")).unwrap();
-    let asked = plan(
+    let eta = plan(
         base,
-        "done: users install v0.2.0 without Rust\nbar: keep only loop breaks\neta: 10h\n",
+        "done: users install v0.1.0 without Rust\nbar: block only loop breaks and data loss; log the rest\neta: 10h\n",
     );
-    run_confirmed(&mut s, &asked, "r-confirmed", NOW + 100).unwrap();
+    run(&mut s, &eta, "r-eta", NOW + 100).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
-    assert_eq!(
-        (voyage.done.as_deref(), voyage.bar.as_deref(), voyage.eta.as_deref()),
-        (
-            Some("users install v0.2.0 without Rust"),
-            Some("keep only loop breaks"),
-            Some("10h")
-        )
-    );
-    let decisions = s.read(|tx| tx.decisions_of("p", "M1")).unwrap();
-    let confirmed: Vec<_> = decisions.iter().filter(|d| d.kind == "user").collect();
-    assert_eq!(confirmed.len(), 3, "{decisions:?}");
-    for (decision, what) in confirmed.iter().zip([
-        "done of M1 changed from \"users install v0.1.0 without Rust\" to \"users install v0.2.0 without Rust\"",
-        "bar of M1 changed from \"block only loop breaks and data loss; log the rest\" to \"keep only loop breaks\"",
-        "eta of M1 changed from \"8h\" to \"10h\"",
-    ]) {
-        assert!(decision.star, "the confirmation is starred: {decision:?}");
-        assert_eq!(decision.what, what);
-        assert_eq!(decision.why.as_deref(), Some("confirmed by the user"));
-        assert_eq!(
-            decision.line.as_deref(),
-            Some(format!("{what} | why: confirmed by the user").as_str())
-        );
-    }
+    assert_eq!((voyage.done.as_deref(), voyage.eta.as_deref()), (stored.done.as_deref(), Some("10h")));
+    assert!(s.read(|tx| tx.decisions_of("p", "M1")).unwrap().is_empty());
 
-    // An unchanged block applies as before, with no confirmation needed.
-    let unchanged = plan(base + 1, "done: users install v0.2.0 without Rust\nbar: keep only loop breaks\neta: 10h\n");
+    // The unchanged block applies as before.
+    let unchanged = plan(base + 1, FULL);
     run(&mut s, &unchanged, "r-same", NOW + 200).unwrap();
-    assert_eq!(s.read(|tx| tx.decisions_of("p", "M1")).unwrap().len(), decisions.len());
 }
 
-/// T-410: a milestone that has not departed yet changes its words freely.
+/// T-331: fields are compared collapsed, so a whitespace-only difference is no
+/// change and the apply is not refused.
 #[test]
-fn a_voyage_that_has_not_departed_changes_without_confirmation() {
+fn a_whitespace_only_difference_is_no_change() {
     let mut s = world();
-    // A block with no task: the milestone has its words but no departure.
-    let block = |base: i64, eta: &str| {
+    run(&mut s, &plan(0, FULL), "r1", NOW).unwrap();
+    let text = plan(
+        1,
+        "done: users  install   v0.1.0 without Rust\nbar: block only loop breaks and data loss;\tlog the rest\neta: 8h\n",
+    );
+    run(&mut s, &text, "r2", NOW + 10).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(
+        (
+            gear_app::decision::collapsed(voyage.done.as_deref().unwrap()),
+            gear_app::decision::collapsed(voyage.bar.as_deref().unwrap()),
+            voyage.eta.as_deref()
+        ),
+        (
+            "users install v0.1.0 without Rust".to_string(),
+            "block only loop breaks and data loss; log the rest".to_string(),
+            Some("8h")
+        )
+    );
+}
+
+/// T-331: a departed voyage without stations may be given its first list once;
+/// changing that list afterwards is refused like the rest of its goal.
+#[test]
+fn a_departed_voyage_gets_its_first_stations_once() {
+    let mut s = world();
+    run(&mut s, &plan(0, FULL), "r1", NOW).unwrap();
+    assert!(s.read(|tx| tx.voyage_stations("p", "M1")).unwrap().is_empty());
+
+    let with = |base: i64, s2: &str| {
         format!(
-            "<!-- gear-plan project=p base={base} -->\n# Milestone M1: delivery\ndone: users install it\nbar: keep it simple\neta: {eta}\n"
+            "<!-- gear-plan project=p base={base} -->\n# Milestone M1: delivery v0.1.0\n{FULL}station S1: the board matches the prototype\nstation S2: {s2}\n# Queue\n"
         )
     };
-    run(&mut s, &block(0, "8h"), "r1", NOW).unwrap();
+    run(&mut s, &with(1, "released as v0.5.0"), "r2", NOW + 10).unwrap();
+    let stations = s.read(|tx| tx.voyage_stations("p", "M1")).unwrap();
+    assert_eq!(stations.len(), 2, "{stations:?}");
+
+    let base = s.read(|tx| tx.plan_version("p")).unwrap();
+    let err = run(&mut s, &with(base, "released as v0.6.0"), "r3", NOW + 20).unwrap_err();
+    assert_eq!(err.code, ErrorCode::GoalLocked);
+    assert!(
+        err.detail.contains(
+            "stations: «S1: the board matches the prototype; S2: released as v0.5.0» → «S1: the board matches the prototype; S2: released as v0.6.0»"
+        ),
+        "{}",
+        err.detail
+    );
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), base, "nothing written");
+    let kept = s.read(|tx| tx.voyage_stations("p", "M1")).unwrap();
+    assert_eq!(kept[1].needs, "released as v0.5.0", "{kept:?}");
+}
+
+/// T-331: a milestone that has not departed yet changes its words freely.
+#[test]
+fn a_voyage_that_has_not_departed_changes_freely() {
+    let mut s = world();
+    let block = |base: i64, title: &str, done: &str, bar: &str, eta: &str| {
+        format!(
+            "<!-- gear-plan project=p base={base} -->\n# Milestone M1: {title}\ndone: {done}\nbar: {bar}\neta: {eta}\n"
+        )
+    };
+    run(&mut s, &block(0, "delivery", "users install it", "keep it simple", "8h"), "r1", NOW).unwrap();
     assert_eq!(
         s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap().departure,
         None
     );
-    run(&mut s, &block(1, "10h"), "r2", NOW + 10).unwrap();
+    run(
+        &mut s,
+        &block(1, "delivery v2", "users install v2", "block only loop breaks", "10h"),
+        "r2",
+        NOW + 10,
+    )
+    .unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
-        s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap().eta.as_deref(),
-        Some("10h")
+        (voyage.title.as_str(), voyage.done.as_deref(), voyage.bar.as_deref(), voyage.eta.as_deref()),
+        (
+            "delivery v2",
+            Some("users install v2"),
+            Some("block only loop breaks"),
+            Some("10h")
+        )
     );
     assert!(
         s.read(|tx| tx.decisions_of("p", "M1")).unwrap().is_empty(),
-        "no confirmation, no decision"
+        "no locked goal, no decision"
     );
 }
 
@@ -383,13 +426,14 @@ fn the_departure_is_the_first_task_creation_even_without_the_block() {
     assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW + 10), Some(1)));
     assert!(s.read(|tx| render_task_packet(tx, "p", "T-1")).unwrap().contains("with 1 tasks"));
 
-    // base 2: the block again plus a second task — the words update (the user
-    // asked for the change and confirmed it, T-410), the departure stays.
-    let more = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: release v2\ndone: users install v2\nbar: keep it simple\neta: 9h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
-    run_confirmed(&mut s, more, "r3", NOW + 20).unwrap();
+    // base 2: the block again plus a second task — the words are locked
+    // (T-331), so only the eta moves; the departure stays.
+    let more = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 9h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
+    run(&mut s, more, "r3", NOW + 20).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW + 10), Some(1)));
-    assert_eq!(voyage.done.as_deref(), Some("users install v2"));
+    assert_eq!(voyage.done.as_deref(), Some("users install it"), "the goal is locked");
+    assert_eq!(voyage.eta.as_deref(), Some("9h"));
 }
 
 /// R2 (review): a grandfathered milestone whose block arrives later keeps the
@@ -400,31 +444,32 @@ fn editing_a_grandfathered_milestone_keeps_its_historical_departure() {
     // T-1 is created on M1 with no block at all.
     let first = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, first, "r1", NOW).unwrap();
-    // Much later the block arrives together with T-2: the words of a voyage
-    // that departed without them come with the user's confirmation (T-410),
-    // since no stored field is exempt from the guard.
+    // Much later the block arrives together with T-2: the voyage departed
+    // without words, so it takes its first block freely (T-331, T-22).
     let block = "<!-- gear-plan project=p base=1 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
-    let err = run(&mut s, block, "r2-bare", NOW + 100).unwrap_err();
-    assert_eq!(err.code, ErrorCode::BadFormat);
-    assert!(
-        err.detail.contains("milestone M1: done changed after departure (stored \"\", got \"users install it\")"),
-        "{}",
-        err.detail
-    );
-    run_confirmed(&mut s, block, "r2", NOW + 100).unwrap();
+    run(&mut s, block, "r2", NOW + 100).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
         (voyage.departure, voyage.departure_tasks),
         (Some(NOW), Some(1)),
         "the departure is the first task's creation, not the edit"
     );
-    // Another metadata edit (with the user's confirmation, T-410): still
-    // unchanged.
+    assert_eq!(voyage.done.as_deref(), Some("users install it"));
+    // Now the voyage has its words: another edit of them is refused (T-331),
+    // and the stored words and the departure stay.
     let edit = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: release v2\ndone: users install v2\nbar: keep it simple\neta: 9h\n# Queue\n";
-    run_confirmed(&mut s, edit, "r3", NOW + 200).unwrap();
+    let err = run(&mut s, edit, "r3", NOW + 200).unwrap_err();
+    assert_eq!(err.code, ErrorCode::GoalLocked);
+    assert!(err.detail.contains("title: «release» → «release v2»"), "{}", err.detail);
+    assert!(err.detail.contains("done: «users install it» → «users install v2»"), "{}", err.detail);
+    assert!(err.detail.contains("bar: «block only loop breaks» → «keep it simple»"), "{}", err.detail);
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 2, "nothing written");
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(1)));
-    assert_eq!(voyage.done.as_deref(), Some("users install v2"));
+    assert_eq!(
+        (voyage.title.as_str(), voyage.done.as_deref(), voyage.bar.as_deref(), voyage.eta.as_deref()),
+        ("release", Some("users install it"), Some("block only loop breaks"), Some("8h"))
+    );
 }
 
 /// R3 (review) of T-22, narrowed by T-246: the snapshot lists only the

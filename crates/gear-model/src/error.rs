@@ -93,3 +93,15 @@ impl GearError {
 }
 
 pub type GearResult<T> = Result<T, GearError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T-331: the lock on a departed voyage's goal has its own code.
+    #[test]
+    fn a_locked_goal_has_its_code() {
+        assert_eq!(ErrorCode::GoalLocked.as_str(), "GOAL_LOCKED");
+        assert_eq!(ErrorCode::GoalLocked.exit_code(), 1);
+    }
+}
