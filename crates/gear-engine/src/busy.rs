@@ -31,7 +31,12 @@ pub fn check(tx: &Tx<'_>, project: &str, observed: &[SeatObs], now: Ts) -> GearR
             recover(tx, project, &key, now)?;
             tx.set_meta(&format!("{key}:generation"), &generation)?;
         }
-        if !qualifies(tx, project, &seat, obs)? {
+        // A lane helping on an unanswered captain instruction (T-324, T-323)
+        // is busy on purpose: it does not qualify, so it goes the recover way
+        // as any lane that does not.
+        if gear_board::idle::helping(tx, project, &seat, now)?.is_some()
+            || !qualifies(tx, project, &seat, obs)?
+        {
             recover(tx, project, &key, now)?;
             continue;
         }

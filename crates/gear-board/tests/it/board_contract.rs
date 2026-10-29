@@ -6,8 +6,10 @@
 use std::time::Duration;
 
 use gear_board::{build, render, run_with, to_json, EngineState, Event, Keys, Options, View};
-use gear_model::{MsgKind, MsgState, SeatRole, TaskState};
-use gear_store::{testing, ContractRow, NewMessage, Store, TaskRow};
+use gear_model::{AttemptState, MsgKind, MsgState, SeatRole, TaskState};
+use gear_store::{
+    testing, AttemptRow, AttemptStep, ContractRow, NewMessage, NewRound, RoundKey, Store, TaskRow,
+};
 
 const T0: i64 = 1_800_000_000;
 
@@ -49,6 +51,33 @@ fn world() -> Store {
                      issue: None,updated: T0,
                 })?;
             }
+            // The attempts behind the states: the lane lines read the stage the
+            // graph gives the task, not its state word (T-347).
+            for (task, lane, state) in [
+                ("T-2", "runtime", AttemptState::Started),
+                ("T-3", "data", AttemptState::Submitted),
+            ] {
+                tx.insert_attempt(&AttemptRow {
+                    project: "p".into(),
+                    task: task.into(),
+                    n: 1,
+                    seat: format!("p:{lane}"),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                })?;
+            }
             Ok(())
         })
         .unwrap();
@@ -69,12 +98,120 @@ fn the_board_shows_the_totals_and_every_lane_queue() {
     assert!(text.contains("Totals: 4 tasks · 1 done · 1 in progress · 1 waiting"), "{text}");
     // The lanes come in seat order, their tasks in queue order.
     assert!(
-        text.contains("Lane data · agent unknown · T-3 waiting · 0 queued · rework 0/0 · no task yet\n  T-1 done\n  T-3 waiting"),
+        text.contains("Lane data · agent unknown · T-3 handed in, waits for a reviewer · 0 queued · rework 0/1 · no task yet\n  T-1 done\n  T-3 waiting"),
         "{text}"
     );
     assert!(
-        text.contains("Lane runtime · agent unknown · T-2 in progress · 1 queued · rework 0/0 · no task yet\n  T-2 in progress\n  T-4 queued"),
+        text.contains("Lane runtime · agent unknown · T-2 working · 1 queued · rework 0/0 · no task yet\n  T-2 in progress\n  T-4 queued"),
         "{text}"
+    );
+}
+
+/// T-347: the lane line names the task's stage in the words of the board's
+/// views, so the board and the captain's home page never disagree.
+#[test]
+fn the_lane_line_names_the_stage_in_the_words_of_the_graph() {
+    let mut store = world();
+    let board = store.read(|tx| gear_board::project(tx, "p", T0 + 60)).unwrap();
+    let line = |name: &str| {
+        let lane = board.lanes.iter().find(|lane| lane.lane == name).expect("the lane");
+        gear_board::lane_line(lane)
+    };
+    // A lane working on attempt 1.
+    assert_eq!(line("runtime"), "runtime · agent unknown · T-2 working · 1 queued");
+    // A lane whose task waits for a reviewer: the stage says so, not "waiting".
+    assert_eq!(
+        line("data"),
+        "data · agent unknown · T-3 handed in, waits for a reviewer · 0 queued"
+    );
+    // The lane's line and the graph's task panel say the same words.
+    let data = board.lanes.iter().find(|lane| lane.lane == "data").unwrap();
+    let task = data.tasks.iter().find(|task| task.id == "T-3").unwrap();
+    assert_eq!(task.stage, gear_board::graph::Stage::Handed);
+    assert_eq!(task.stage_words, "handed in, waits for a reviewer");
+}
+
+/// T-347, F1 of the review of attempt 1: a cancelled task is not the lane's
+/// current task. Cancelling keeps the terminal attempt, so a task cancelled
+/// after a failed verdict still has a rejected last attempt and the classifier
+/// still calls its stage open; the graph leaves such a task out, and the lane
+/// line names the lane's next open task instead.
+#[test]
+fn a_cancelled_task_is_not_the_current_task_of_its_lane() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            for (id, rank, state) in
+                [("T-1", 1, TaskState::Cancelled), ("T-2", 2, TaskState::Running)]
+            {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: Some("M5".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+            }
+            // The cancelled task keeps its rejected attempt; the running one
+            // is on its first attempt, started.
+            for (task, state) in
+                [("T-1", AttemptState::Rejected), ("T-2", AttemptState::Started)]
+            {
+                tx.insert_attempt(&AttemptRow {
+                    project: "p".into(),
+                    task: task.into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let board = store.read(|tx| gear_board::project(tx, "p", T0 + 60)).unwrap();
+    let lane = board.lanes.iter().find(|lane| lane.lane == "heat").unwrap();
+    // The cancelled task is in the lane model and its stage reads open...
+    let cancelled = lane.tasks.iter().find(|task| task.id == "T-1").unwrap();
+    assert_eq!(cancelled.state, TaskState::Cancelled);
+    assert_eq!(cancelled.stage, gear_board::graph::Stage::SentBack);
+    // ...and the lane's current task is the next open one, not it.
+    assert_eq!(gear_board::lane_line(lane), "heat · agent unknown · T-2 working · 0 queued");
+    // The graph leaves the cancelled task out, so the lane line and the views
+    // agree on what the lane works on.
+    assert!(
+        board.graph.iter().all(|task| task.id != "T-1"),
+        "the graph does not draw a cancelled task"
     );
 }
 
@@ -200,6 +337,103 @@ fn the_board_is_json() {
     assert_eq!(doc["projects"][0]["lanes"][0]["tasks"][0]["state"], "done");
 }
 
+#[test]
+fn a_task_is_measured_by_the_time_its_lane_worked_on_it() {
+    // T-348: the actual minutes of a task are the `active_s` of its dev and
+    // rework rounds, not the clock since its delivery (T-241 showed "working
+    // 89/25m" where the rework took 17 minutes).
+    let mut store = Store::open_in_memory().unwrap();
+    let now = T0 + 3 * 3600;
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p1", "pi", T0)?;
+            for (id, rank) in [("T-1", 1), ("T-2", 2)] {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state: TaskState::Running,
+                    priority: "must".into(),
+                    lane: Some("data".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+                // Both were delivered three hours ago.
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: id.into(),
+                    n: 1,
+                    seat: "p:data".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Started,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })?;
+                tx.set_attempt_time("p", id, 1, AttemptStep::Started, T0)?;
+            }
+            // T-1 worked for 25 minutes and then reworked it for 10.
+            for (attempt, role, active_s) in [(1, "dev", 1500), (2, "rework", 600)] {
+                let key = RoundKey {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt,
+                    role: role.into(),
+                };
+                tx.insert_round(&NewRound {
+                    key: key.clone(),
+                    seat: "p:data".into(),
+                    generation: 1,
+                    cli: "pi".into(),
+                    model: None,
+                    start_at: T0,
+                })?;
+                tx.set_round_active(&key, active_s)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let board = build(&mut store, &options(), now).unwrap();
+    let tasks = &board.projects[0].lanes[0].tasks;
+    let worked = tasks.iter().find(|task| task.id == "T-1").unwrap();
+    assert_eq!(worked.actual_min, Some(35), "the work time of the two rounds");
+    // A task without a dev or rework round keeps its span.
+    let span = tasks.iter().find(|task| task.id == "T-2").unwrap();
+    assert_eq!(span.actual_min, Some(180), "the span of a task with no round");
+
+    let graph = store
+        .read(|tx| gear_board::graph::tasks(tx, "p", now))
+        .unwrap();
+    let worked = graph.iter().find(|task| task.id == "T-1").unwrap();
+    assert_eq!(worked.actual_min, Some(35), "the same work time in the graph");
+    let span = graph.iter().find(|task| task.id == "T-2").unwrap();
+    assert_eq!(span.actual_min, Some(180), "the same span in the graph");
+}
+
 /// Keys that say `q` after the given number of timeouts.
 struct Quitter {
     timeouts: usize,
@@ -269,7 +503,7 @@ fn a_task_in_review_is_shown_as_in_review() {
     let text = render(&build(&mut store, &options(), T0).unwrap(), View::Lanes);
 
     assert!(
-        text.contains("Lane data · agent unknown · T-3 waiting · 0 queued · rework 0/0 · no task yet\n  T-1 done\n  T-3 waiting\n  T-5 in review"),
+        text.contains("Lane data · agent unknown · T-3 handed in, waits for a reviewer · 0 queued · rework 0/1 · no task yet\n  T-1 done\n  T-3 waiting\n  T-5 in review"),
         "{text}"
     );
     // A task in review is not done and not running: the totals say so.
@@ -535,7 +769,7 @@ fn agent_state_is_reported_independently_of_task_state() {
         let agents = herdr.agents().unwrap();
         let board = gear_board::build_with_agents(&mut store, &options(), T0, Some(&agents)).unwrap();
         let text = render(&board, View::Lanes);
-        assert!(text.contains(&format!("Lane runtime · agent {word} · T-2 in progress · 1 queued")), "{text}");
+        assert!(text.contains(&format!("Lane runtime · agent {word} · T-2 working · 1 queued")), "{text}");
         let doc: serde_json::Value = serde_json::from_str(&to_json(&board).unwrap()).unwrap();
         assert_eq!(doc["projects"][0]["lanes"][1]["agent_state"], word);
     }
@@ -547,14 +781,14 @@ fn failed_observation_and_a_missing_or_replaced_agent_are_distinct() {
     use gear_herdr::{fake::FakeHerdr, AgentStatus, HerdrRead};
     let mut store = world();
     let board = gear_board::build_with_agents(&mut store, &options(), T0, None).unwrap();
-    assert!(render(&board, View::Lanes).contains("runtime · agent unknown · T-2 in progress"));
+    assert!(render(&board, View::Lanes).contains("runtime · agent unknown · T-2 working"));
     let board = gear_board::build_with_agents(&mut store, &options(), T0, Some(&[])).unwrap();
-    assert!(render(&board, View::Lanes).contains("runtime · agent missing · T-2 in progress"));
+    assert!(render(&board, View::Lanes).contains("runtime · agent missing · T-2 working"));
     let mut herdr = FakeHerdr::new();
     herdr.add_agent("w1:p3", "claude", AgentStatus::Working);
     let agents = herdr.agents().unwrap();
     let board = gear_board::build_with_agents(&mut store, &options(), T0, Some(&agents)).unwrap();
-    assert!(render(&board, View::Lanes).contains("runtime · agent unknown · T-2 in progress"));
+    assert!(render(&board, View::Lanes).contains("runtime · agent unknown · T-2 working"));
 }
 
 #[test]
@@ -649,6 +883,11 @@ fn world_with_a_voyage() -> Store {
     let mut store = world();
     store
         .write(|tx| {
+            // The config reads minimax-cn: the reading below is one the
+            // project reads now (T-383).
+            let mut row = tx.get_project("p")?.unwrap();
+            row.config_toml = "[[quota.sources]]\nprovider = \"minimax-cn\"\nreader = \"minimax\"\n".to_string();
+            tx.update_project(&row)?;
             tx.upsert_voyage(&gear_store::VoyageRow {
                 project: "p".into(),
                 milestone: "M4".into(),
@@ -1395,4 +1634,121 @@ fn a_click_on_the_top_row_of_a_scrolled_view_picks_the_task_there() {
         !frame_text.contains("T-17"),
         "the selection moved off the last task: {frame_text}"
     );
+}
+
+// ---- T-383: the QUOTA lines of the board
+
+/// The Now view's frame, wide and tall enough for the whole quota block.
+fn now_frame(store: &mut Store, now: i64) -> String {
+    let board = build(
+        store,
+        &gear_board::Options { project: Some("p".into()), ..Default::default() },
+        now,
+    )
+    .unwrap();
+    let screen = crate::screen(gear_board::frame::Tab::Now, 0, (120, 70));
+    gear_board::frame::canvas(&board, &screen, None).text()
+}
+
+/// The project `p` whose config reads `providers`, with the given quota
+/// readings in the meta (`provider` → the reading's JSON).
+fn world_reading_custom(providers: &[&str], readings: &[(&str, &str)]) -> Store {
+    let mut store = world();
+    store
+        .write(|tx| {
+            let mut row = tx.get_project("p")?.unwrap();
+            row.config_toml = providers
+                .iter()
+                .map(|provider| {
+                    format!("[[quota.sources]]\nprovider = \"{provider}\"\nreader = \"codex\"\n")
+                })
+                .collect();
+            tx.update_project(&row)?;
+            for (provider, reading) in readings {
+                tx.set_meta(&format!("quota.reading.{provider}"), reading)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// One reading, as the engine writes it: one window, one used percent, one
+/// reset and when it was read.
+fn reading_json(provider: &str, window: &str, reset: i64, read_at: i64) -> String {
+    format!(
+        r#"{{"provider":"{provider}","windows":[{{"name":"{window}","used_percent":63.0,"resets_at":{reset}}}],"read_at":{read_at}}}"#
+    )
+}
+
+#[test]
+fn the_quota_shows_only_the_providers_the_project_reads() {
+    // The config reads codex alone; a reading of an earlier config stays in
+    // the meta and is not shown (T-383).
+    let mut store = world_reading_custom(
+        &["codex"],
+        &[
+            (
+                "codex",
+                &reading_json("codex", "weekly", T0 + 6 * 86_400, T0),
+            ),
+            (
+                "minimax-cn",
+                r#"{"provider":"minimax-cn","windows":[{"name":"5h","used_percent":64.0,"resets_at":1800003600}],"read_at":1800000000}"#,
+            ),
+        ],
+    );
+    let frame = now_frame(&mut store, T0);
+    assert!(frame.contains("codex"), "{frame}");
+    assert!(!frame.contains("minimax-cn"), "{frame}");
+}
+
+#[test]
+fn a_reset_days_away_prints_the_day_and_a_later_one_the_clock_alone() {
+    let week = T0 + 6 * 86_400;
+    let hours = T0 + 3 * 3600;
+    let mut store = world_reading_custom(
+        &["codex", "minimax-cn"],
+        &[
+            ("codex", &reading_json("codex", "weekly", week, T0)),
+            ("minimax-cn", &reading_json("minimax-cn", "5h", hours, T0)),
+        ],
+    );
+    let frame = now_frame(&mut store, T0);
+    // A week out: the month and the day, then the time.
+    let line = frame
+        .lines()
+        .find(|line| line.contains("codex"))
+        .unwrap_or_else(|| panic!("no codex line: {frame}"));
+    let reset = line.split("resets ").nth(1).unwrap_or_else(|| panic!("no reset: {line}"));
+    let mut words = reset.split(' ');
+    let month = words.next().unwrap_or_default();
+    let day = words.next().unwrap_or_default();
+    let time = words.next().unwrap_or_default();
+    assert_eq!(month.len(), 3, "the month is a word: {line}");
+    assert!(month.chars().all(|c| c.is_ascii_alphabetic()), "{line}");
+    assert!(day.parse::<u32>().is_ok(), "the day is a number: {line}");
+    assert_eq!(time.len(), 5, "then the time: {line}");
+    assert_eq!(&time[2..3], ":", "{line}");
+    // The date is the one the clock of the machine gives.
+    assert!(line.contains(&gear_board::idle::day_clock(week)), "{line}");
+    // Three hours out: only the clock, as today.
+    let line = frame
+        .lines()
+        .find(|line| line.contains("minimax-cn"))
+        .unwrap_or_else(|| panic!("no minimax-cn line: {frame}"));
+    assert!(
+        line.contains(&format!("resets {}", gear_board::idle::clock(hours))),
+        "{line}"
+    );
+}
+
+#[test]
+fn a_reading_half_an_hour_old_says_its_age() {
+    let mut store = world_reading_custom(
+        &["codex"],
+        &[("codex", &reading_json("codex", "weekly", T0 + 6 * 86_400, T0 - 45 * 60))],
+    );
+    let frame = now_frame(&mut store, T0);
+    assert!(frame.contains("(read 45 min ago)"), "{frame}");
 }

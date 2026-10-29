@@ -151,6 +151,7 @@ pub fn apply(
             record_tail_decisions(tx, &ctx.project, draft)?;
             fix_departures(tx, &ctx.project, now)?;
             record_voyages(tx, &ctx.project, draft, now)?;
+            record_task_stations(tx, &ctx.project, draft, &result.created)?;
             crate::station::apply_decisions(tx, &ctx.project, draft, now)?;
             serde_json::to_value(&result).map_err(|e| {
                 GearError::new(
@@ -2140,6 +2141,9 @@ pub fn show(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<String> {
     }
     if let Some(milestone) = row.milestone.as_deref() {
         text.push_str(&format!(" milestone={milestone}"));
+        if let Some(station) = tx.task_station(project, task)? {
+            text.push_str(&format!(" station={station}"));
+        }
     }
     if row.required {
         text.push_str(" required");
@@ -3312,8 +3316,12 @@ fn record_voyages(tx: &Tx<'_>, project: &str, draft: &crate::draft::Draft, now: 
                 ));
             }
         }
-        // The words; the departure was fixed when the milestone's first tasks
+        // The stations the block names, in plan order (M5 S3), then the words;
+        // the departure was fixed when the milestone's first tasks
         // were created (fix_departures), so a block edit never moves it.
+        let stations = crate::draft::milestone_stations(body).map_err(|e| {
+            GearError::new(ErrorCode::BadFormat, format!("milestone {id}: {e}"))
+        })?;
         tx.upsert_voyage(&gear_store::VoyageRow {
             project: project.to_string(),
             milestone: id.to_string(),
@@ -3326,6 +3334,58 @@ fn record_voyages(tx: &Tx<'_>, project: &str, draft: &crate::draft::Draft, now: 
             departure_estimate_min: None,
             updated: now,
         })?;
+        tx.set_voyage_stations(project, id, &stations)?;
+    }
+    Ok(())
+}
+
+/// The station each task belongs to (M5 S3): a queue block's `station=<id>` is
+/// written to its task, and a block without one clears the task's station (a
+/// block always carries every field). A station must be one the task's
+/// milestone block names, else nothing is written.
+fn record_task_stations(
+    tx: &Tx<'_>,
+    project: &str,
+    draft: &crate::draft::Draft,
+    created: &[String],
+) -> GearResult<()> {
+    let mut new_items = 0;
+    for item in &draft.queue {
+        let task = match &item.id {
+            Some(task) => task.clone(),
+            None => {
+                let at = new_items;
+                new_items += 1;
+                match created.get(at) {
+                    Some(task) => task.clone(),
+                    None => continue,
+                }
+            }
+        };
+        let Some(station) = item.station.as_deref() else {
+            tx.set_task_station(project, &task, None)?;
+            continue;
+        };
+        let milestone = match item.milestone.clone() {
+            Some(milestone) => Some(milestone),
+            None => tx.get_task(project, &task)?.and_then(|row| row.milestone),
+        };
+        let Some(milestone) = milestone else {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!("{task} names station {station} but has no milestone"),
+            ));
+        };
+        let stations = tx.voyage_stations(project, &milestone)?;
+        if !stations.iter().any(|named| named.id == station) {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "{task} names station {station}, but milestone {milestone} has no `station {station}:` line"
+                ),
+            ));
+        }
+        tx.set_task_station(project, &task, Some(station))?;
     }
     Ok(())
 }

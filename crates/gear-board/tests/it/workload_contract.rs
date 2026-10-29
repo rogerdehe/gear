@@ -15,8 +15,8 @@ fn now_seconds() -> i64 {
 }
 
 /// A voyage with two lanes of very different size and pace: `hull` has little
-/// work left and works at its estimate, `deck` has much more work left and
-/// works twice as slow.
+/// work left, `deck` has much more. Both hand their task in after 30 minutes;
+/// deck's merge lands at 60, which is not lane time any more (T-390).
 fn world() -> Store {
     let mut store = Store::open_in_memory().unwrap();
     let departure = now_seconds() - 3600;
@@ -47,7 +47,8 @@ fn world() -> Store {
         })
         .unwrap();
     // The work: hull measured 30 minutes on 30 of estimate (pace 1.0), deck
-    // measured 60 minutes on 30 of estimate (pace 2.0).
+    // measured the same 30 minutes of lane time on 30 of estimate (pace 1.0):
+    // its minute 30 to 60 was review and merge, run while the lane was free.
     let departure = now_seconds() - 3600;
     store
         .write(|tx| {
@@ -167,26 +168,83 @@ fn the_slower_lane_sets_the_finish_and_is_named() {
     let voyage = &board.projects[0].voyages[0];
 
     // Each lane at its own pace: hull needs 20 minutes (pace 1.0), deck needs
-    // 120 (pace 2.0 on 60 minutes of estimate).
+    // 60 (pace 1.0 on 60 minutes of open estimate). Deck still sets the finish
+    // because it has far more work left.
     let hull = voyage.lanes.iter().find(|lane| lane.lane == "hull").unwrap();
     let deck = voyage.lanes.iter().find(|lane| lane.lane == "deck").unwrap();
     assert_eq!(hull.done_min, 30);
     assert_eq!(hull.left_min, 20);
     assert_eq!(hull.pace, Some(1.0));
     assert_eq!(hull.projected_min, Some(20));
-    assert_eq!(deck.done_min, 60);
+    assert_eq!(deck.done_min, 30, "the merge tail is not the lane's own time");
     assert_eq!(deck.left_min, 60);
-    assert_eq!(deck.pace, Some(2.0));
-    assert_eq!(deck.projected_min, Some(120));
+    assert_eq!(deck.pace, Some(1.0));
+    assert_eq!(deck.projected_min, Some(60));
 
     // The slowest lane sets the finish and is named.
     assert_eq!(
         voyage.slowest_lane.as_ref().map(|(lane, _)| lane.clone()),
         Some("deck".to_string())
     );
-    assert_eq!(voyage.slowest_lane.as_ref().map(|(_, min)| *min), Some(120));
+    assert_eq!(voyage.slowest_lane.as_ref().map(|(_, min)| *min), Some(60));
     let elapsed = voyage.elapsed_min.unwrap();
-    assert_eq!(voyage.projected_min, Some(elapsed + 120));
+    assert_eq!(voyage.projected_min, Some(elapsed + 60));
+}
+
+/// T-390: a lane is measured by its throughput, not by the sum of its tasks'
+/// spans. Task 1 is merged at 40 while task 2 is already running from 20, so
+/// the two spans overlap and the sum would count those minutes twice.
+#[test]
+fn a_lane_is_measured_by_its_throughput_not_the_sum_of_its_spans() {
+    let mut store = Store::open_in_memory().unwrap();
+    let departure = now_seconds() - 120 * 60;
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", NOW)?;
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "pi", NOW)?;
+            testing::seed_active_seat(tx, "p", "mast", SeatRole::Lane, "w1:p3", "pi", NOW)?;
+            tx.upsert_voyage(&gear_store::VoyageRow {
+                project: "p".into(),
+                milestone: "M4".into(),
+                title: "one seat model".into(),
+                done: Some("a rework resumes its session".into()),
+                bar: None,
+                eta: Some("12h".into()),
+                departure: Some(departure),
+                departure_tasks: Some(3),
+                departure_estimate_min: Some(90),
+                updated: NOW,
+            })?;
+            task(tx, "T-1", "hull", 1, TaskState::Done, Some(30))?;
+            task(tx, "T-2", "hull", 2, TaskState::Done, Some(30))?;
+            // mast has open work and no measured history at all.
+            task(tx, "T-3", "mast", 3, TaskState::Ready, Some(100))
+        })
+        .unwrap();
+    store
+        .write(|tx| {
+            attempt(tx, "T-1", departure, departure + 20 * 60, departure + 40 * 60)?;
+            attempt(tx, "T-2", departure + 20 * 60, departure + 40 * 60, departure + 60 * 60)
+        })
+        .unwrap();
+    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
+    let voyage = &board.projects[0].voyages[0];
+    let hull = voyage.lanes.iter().find(|lane| lane.lane == "hull").unwrap();
+    // From the earliest start (0) to the last hand-in (40): 40 minutes of lane
+    // time, where the sum of the spans would be 40 + 40.
+    assert_eq!(hull.done_min, 40);
+    assert_eq!(hull.done_estimate_min, 60);
+    assert_eq!(hull.pace, Some(40.0 / 60.0));
+    assert_eq!(voyage.measured_actual_min, 40);
+    assert_eq!(voyage.pace(), Some(40.0 / 60.0));
+    // A lane with no done task keeps no pace, and the finish stays unknown.
+    let mast = voyage.lanes.iter().find(|lane| lane.lane == "mast").unwrap();
+    assert_eq!(mast.done_min, 0);
+    assert_eq!(mast.pace, None);
+    assert_eq!(voyage.slowest_lane, None);
+    assert_eq!(voyage.projected_min, None);
+    // Each task's own span still sets the slowest task.
+    assert_eq!(voyage.slowest, Some(("T-1".into(), 40)));
 }
 
 #[test]

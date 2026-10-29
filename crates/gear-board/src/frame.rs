@@ -531,7 +531,7 @@ pub fn view(board: &Board, screen: &Screen, canvas: &mut Canvas, top: usize) -> 
         return Vec::new();
     };
     match screen.tab {
-        Tab::Now => view_now(project, screen, canvas, top),
+        Tab::Now => view_now(project, board.now, screen, canvas, top),
         Tab::Tasks => view_tasks(project, screen, canvas, top),
         Tab::Cost => view_tokens(project, screen, canvas, top),
         Tab::Log => view_decisions(project, screen, canvas, top),
@@ -822,6 +822,7 @@ fn quota_color(used_percent: f64) -> Color {
 /// sentence.
 fn view_now(
     project: &ProjectBoard,
+    now: gear_model::Ts,
     screen: &Screen,
     canvas: &mut Canvas,
     top: usize,
@@ -910,18 +911,29 @@ fn view_now(
     rest.push(Line::new());
     rest.push(Line::styled("QUOTA", Style::bold()));
     for reading in &project.quota {
+        // A reading older than half an hour says its age (T-383).
+        let stale = now - reading.read_at;
+        let stale = (stale > 30 * 60).then(|| format!("  (read {} min ago)", stale / 60));
         for window in &reading.windows {
+            // A reset today is a clock time; a later one carries its day.
             let reset = window
                 .resets_at
-                .map(crate::idle::clock)
+                .map(|reset| {
+                    if reset - now <= 24 * 3600 {
+                        crate::idle::clock(reset)
+                    } else {
+                        crate::idle::day_clock(reset)
+                    }
+                })
                 .unwrap_or_else(|| "-".into());
             rest.push(Line::styled(
                 format!(
-                    "  {:<12}{:<6}{} {:>3}% used  resets {reset}",
+                    "  {:<12}{:<6}{} {:>3}% used  resets {reset}{}",
                     reading.provider,
                     window.name,
                     bar(window.used_percent as i64, 100, 14),
-                    window.used_percent.round() as i64
+                    window.used_percent.round() as i64,
+                    stale.as_deref().unwrap_or("")
                 ),
                 Style::fg(quota_color(window.used_percent)),
             ));
@@ -1129,14 +1141,20 @@ pub fn styled_lane_panel(
     rows.push(Line::new());
     rows.push(Line::styled("NOW", Style::bold()));
     for task in mine().filter(|task| task.stage.is_open()) {
-        // The stage says what the task does now, in the prototype's words.
+        // The stage says what the task does now, in the prototype's words —
+        // the same words as the lane lines (T-347).
         rows.push(Line::styled(
             format!(
                 "  {} {} {:<30} {}",
                 task.stage.symbol(),
                 task.id,
                 task.title.chars().take(30).collect::<String>(),
-                graph::Stage::words(task)
+                graph::Stage::words_of(
+                    task.stage,
+                    &task.deps,
+                    task.rounds,
+                    task.moved_to.as_deref()
+                )
             ),
             Style::fg(task.stage.color()),
         ));

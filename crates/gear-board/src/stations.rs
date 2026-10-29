@@ -51,15 +51,15 @@ pub fn progress(
     project: &str,
     milestone: &str,
 ) -> GearResult<Vec<StationProgress>> {
-    let stations = stations_of(tx, project, milestone)?;
+    let stations = tx.voyage_stations(project, milestone)?;
     if stations.is_empty() {
         return Ok(Vec::new());
     }
     let mut progress: Vec<StationProgress> = stations
         .into_iter()
-        .map(|(id, needs)| StationProgress {
-            id,
-            needs,
+        .map(|station| StationProgress {
+            id: station.id,
+            needs: station.needs,
             state: StationState::Later,
             tasks: 0,
             merged: 0,
@@ -68,7 +68,7 @@ pub fn progress(
         .collect();
     for task in scope(tx, project, milestone)? {
         let merged = is_merged(tx, project, &task.id)?;
-        let Some(station) = station_of(tx, project, &task.id)? else {
+        let Some(station) = tx.task_station(project, &task.id)? else {
             continue;
         };
         let Some(entry) = progress.iter_mut().find(|entry| entry.id == station) else {
@@ -184,37 +184,4 @@ fn left_in_voyage(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<usi
         }
     }
     Ok(left)
-}
-
-/// The voyage's stations, in plan order.
-///
-/// The stations are the store's (the stations store task, M5 S3): the meta
-/// `voyage-stations:<project>:<milestone>` holds one `<id>: <needs>` line per
-/// station. The store function is used once it lands; the key and its format
-/// are its own.
-fn stations_of(
-    tx: &Tx<'_>,
-    project: &str,
-    milestone: &str,
-) -> GearResult<Vec<(String, String)>> {
-    let raw = tx
-        .get_meta(&format!("voyage-stations:{project}:{milestone}"))?
-        .unwrap_or_default();
-    Ok(raw
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| {
-            let (id, needs) = line.split_once(": ")?;
-            Some((id.trim().to_string(), needs.trim().to_string()))
-        })
-        .collect())
-}
-
-/// The station the task belongs to, from the meta
-/// `task-station:<project>:<task>` (the stations store task, M5 S3).
-fn station_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<String>> {
-    let raw = tx
-        .get_meta(&format!("task-station:{project}:{task}"))?
-        .unwrap_or_default();
-    Ok((!raw.trim().is_empty()).then(|| raw.trim().to_string()))
 }

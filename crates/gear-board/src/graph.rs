@@ -13,7 +13,7 @@
 use gear_model::{
     AttemptState, GearResult, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState, TaskState, Ts,
 };
-use gear_store::{AttemptRow, AttemptTimes, OpRow, Tx};
+use gear_store::{AttemptRow, AttemptTimes, OpRow, RoundRow, Tx};
 
 use crate::state_word;
 use crate::style::{lane_color, lane_width, Color, Line, Style};
@@ -22,14 +22,17 @@ use crate::style::{lane_color, lane_width, Color, Line, Style};
 struct History {
     attempts: Vec<AttemptRow>,
     times: Vec<(i64, AttemptTimes)>,
+    rounds: Vec<RoundRow>,
 }
 
 impl History {
-    /// The history of a task: its attempts and the time of every step.
+    /// The history of a task: its attempts, the time of every step and its
+    /// rounds.
     fn of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<History> {
         Ok(History {
             attempts: tx.attempts_of_task(project, task)?,
             times: tx.attempt_times_of_task(project, task)?,
+            rounds: tx.rounds_of_task(project, task)?,
         })
     }
 
@@ -137,10 +140,17 @@ impl Stage {
 
     /// What the stage says of the task, in words (the prototype's STAGE).
     pub fn words(task: &GraphTask) -> String {
-        match task.stage {
+        Stage::words_of(task.stage, &task.deps, task.rounds, task.moved_to.as_deref())
+    }
+
+    /// The words of a stage from the facts it needs, without a [`GraphTask`]:
+    /// the board's lanes and the captain's home page say the same words as the
+    /// graph (T-347).
+    pub fn words_of(stage: Stage, deps: &[String], rounds: usize, moved_to: Option<&str>) -> String {
+        match stage {
             Stage::Deps => format!(
                 "waits for {} to merge",
-                if task.deps.is_empty() { "-".to_string() } else { task.deps.join(", ") }
+                if deps.is_empty() { "-".to_string() } else { deps.join(", ") }
             ),
             Stage::Queued => "queued".to_string(),
             Stage::Delivered => "delivered, not started".to_string(),
@@ -150,13 +160,13 @@ impl Stage {
             Stage::Review => "in review".to_string(),
             Stage::Verdict => "waits for the captain's verdict".to_string(),
             Stage::SentBack => "sent back, rework queued".to_string(),
-            Stage::Rework => format!("reworking (round {})", task.rounds),
+            Stage::Rework => format!("reworking (round {rounds})"),
             Stage::Passed => "passed, waits to merge".to_string(),
             Stage::Merging => "merging (gate running)".to_string(),
             Stage::MergeFailed => "merge failed, waits for the captain".to_string(),
             Stage::Merged => "merged".to_string(),
             Stage::Failed => "failed (rounds used up)".to_string(),
-            Stage::Moved => format!("moved to {}", task.moved_to.as_deref().unwrap_or("-")),
+            Stage::Moved => format!("moved to {}", moved_to.unwrap_or("-")),
         }
     }
 }
@@ -258,8 +268,10 @@ pub fn lanes(tx: &Tx<'_>, project: &str) -> GearResult<Vec<String>> {
 }
 
 /// The stage of a task, from the facts the store already has: the first rule
-/// that holds decides.
-fn stage_of(tx: &Tx<'_>, project: &str, task: &gear_store::TaskRow) -> GearResult<Stage> {
+/// that holds decides. The board's lane lines read the same stage (T-347).
+pub(crate) fn stage_of(
+    tx: &Tx<'_>, project: &str, task: &gear_store::TaskRow,
+) -> GearResult<Stage> {
     // Done and failed are endings of the task itself.
     match task.state {
         TaskState::Done => return Ok(Stage::Merged),
@@ -390,10 +402,15 @@ fn op_number(id: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/// The time the task took, and when it was merged.
+/// The time the lane worked on the task, and when it was merged.
 fn actual_of(history: &History, now: Ts) -> (Option<i64>, Option<Ts>) {
     let (start, _handed_in, merged) = history.span();
-    // A task that is not merged yet is measured until now.
+    // The work time, not the clock since the first delivery (T-348).
+    if let Some(worked) = crate::worked_s_of(&history.rounds) {
+        return (Some(worked / 60), merged);
+    }
+    // A task that was never worked on is measured until it was merged, or
+    // until now when it is not merged yet.
     let end = merged.or(Some(now));
     let actual = match (start, end) {
         (Some(start), Some(end)) if end >= start => Some((end - start) / 60),

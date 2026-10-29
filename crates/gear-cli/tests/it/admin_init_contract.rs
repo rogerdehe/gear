@@ -1263,3 +1263,126 @@ fn check_reports_a_staffing_change_of_a_departed_voyage() {
     assert_eq!(headline(&o), "config ok: project p, 1 lanes, 3 reviewers");
     assert_eq!(config_version(&db), 1, "a check writes nothing");
 }
+
+/// A config for project `p` on `repo` whose gate is `gate` — the one line the
+/// change-list tests rewrite (T-388).
+fn config_with_gate(dir: &Path, repo: &Path, gate: &str) -> PathBuf {
+    let path = dir.join("gear.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\
+             \n[quota]\nlanes = 1\ntemps = 0\n\
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+             \n[conventions]\ngate = {gate}\n",
+            repo = serde_json::json!(repo.to_string_lossy()).to_string(),
+            gate = serde_json::json!(gate).to_string()
+        ),
+    )
+    .expect("the config");
+    path
+}
+
+/// T-388: `--check` says what a re-init would change against the config the
+/// store holds — a line diff after the "config ok" line, the registered lines
+/// with `- ` and the file's with `+ ` — and still writes nothing.
+#[test]
+fn check_shows_what_a_re_init_would_change() {
+    let dir = scratch("check-changes");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let db = dir.join("gear.db");
+    let path = config_with_gate(&dir, &repo, "make test");
+    let o = init(&dir, &db, &path, None, true);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let before = std::fs::metadata(&db).expect("the store").len();
+
+    // The file changes one line: the check names it, the old one and the new.
+    let path = config_with_gate(&dir, &repo, "make gate");
+    let o = check_cmd(&dir, &db, &path, None, false, false, None);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o),
+        "config ok: project p, 0 lanes, 0 reviewers\n\
+         changes against the registered config v1:\n\
+         - gate = \"make test\"\n\
+         + gate = \"make gate\"\n\
+         \x20 reviewers: none\n"
+    );
+    assert_eq!(std::fs::metadata(&db).expect("the store").len(), before, "a check writes nothing");
+    assert_eq!(config_version(&db), 1, "the registration stands");
+
+    // The JSON form carries the same lines.
+    let o = check_cmd(&dir, &db, &path, None, false, true, None);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let parsed: serde_json::Value = serde_json::from_str(stdout(&o).trim()).expect("json");
+    assert_eq!(
+        parsed["changes"],
+        serde_json::json!(["- gate = \"make test\"", "+ gate = \"make gate\""])
+    );
+}
+
+/// T-388: the config the store holds gives no change, and the check says so
+/// instead of an empty diff.
+#[test]
+fn check_says_no_change_for_the_registered_config() {
+    let dir = scratch("check-same");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let db = dir.join("gear.db");
+    let path = config_with_gate(&dir, &repo, "make test");
+    let o = init(&dir, &db, &path, None, true);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+
+    let o = check_cmd(&dir, &db, &path, None, false, false, None);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o),
+        "config ok: project p, 0 lanes, 0 reviewers\n\
+         no change against the registered config v1\n\
+         \x20 reviewers: none\n"
+    );
+
+    let o = check_cmd(&dir, &db, &path, None, false, true, None);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let parsed: serde_json::Value = serde_json::from_str(stdout(&o).trim()).expect("json");
+    assert_eq!(parsed["changes"], serde_json::json!([]));
+}
+
+/// T-388: only a project of the file's own id has a registered config to
+/// compare with. Another id — or no store at all — is a first registration:
+/// the check says nothing of a change.
+#[test]
+fn check_says_nothing_of_a_change_for_a_first_registration() {
+    let dir = scratch("check-first");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("the other repo");
+    let db = dir.join("gear.db");
+
+    // No store yet: no change line, and an empty list in the JSON form.
+    let path = config_with_gate(&dir, &repo, "make test");
+    let o = check_cmd(&dir, &db, &path, None, false, false, None);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o),
+        "config ok: project p, 0 lanes, 0 reviewers\n  reviewers: none\n"
+    );
+    let o = check_cmd(&dir, &db, &path, None, false, true, None);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let parsed: serde_json::Value = serde_json::from_str(stdout(&o).trim()).expect("json");
+    assert_eq!(parsed["changes"], serde_json::json!([]));
+
+    // The store holds `p`; a check of `q` on another repository finds no
+    // registered config of its own id.
+    let o = init(&dir, &db, &path, None, true);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let o = check_cmd(&dir, &db, &config_for(&dir, "q", &elsewhere), None, false, false, None);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o),
+        "config ok: project q, 0 lanes, 0 reviewers\n  reviewers: none\n"
+    );
+    assert_eq!(config_version(&db), 1, "the check registered nothing");
+}

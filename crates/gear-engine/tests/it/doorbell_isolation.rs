@@ -151,9 +151,17 @@ impl World {
             .unwrap()
     }
 
-    /// An open item the engine wrote for `to`, in its own thread (T-254: the
-    /// engine's own items, the ones the captain was rung for).
-    fn engine_item(&mut self, to: &str, thread: &str, body: &str, at: i64) -> String {
+    /// An open item for `to`, from `sender`, in its own thread: the batch
+    /// limits group threads by sender, so a test of the batch needs senders.
+    fn item(
+        &mut self,
+        from: &str,
+        to: &str,
+        thread: &str,
+        body: &str,
+        urgent: bool,
+        at: i64,
+    ) -> String {
         self.store
             .write(|tx| {
                 Ok(tx
@@ -163,11 +171,11 @@ impl World {
                         thread: thread.into(),
                         task: None,
                         attempt: None,
-                        sender: "engine".into(),
+                        sender: from.into(),
                         sender_gen: 0,
                         recipient: to.into(),
                         kind: MsgKind::System,
-                        urgent: false,
+                        urgent,
                         body: body.into(),
                         reply_to: None,
                         needs_ack: false,
@@ -177,6 +185,12 @@ impl World {
                     .id)
             })
             .unwrap()
+    }
+
+    /// An open item the engine wrote for `to`, in its own thread (T-254: the
+    /// engine's own items, the ones the captain was rung for).
+    fn engine_item(&mut self, to: &str, thread: &str, body: &str, at: i64) -> String {
+        self.item("engine", to, thread, body, false, at)
     }
 
     /// The review packet of T-7, due for the reviewer's pane.
@@ -608,4 +622,137 @@ fn a_resolved_item_lets_the_next_one_into_the_captains_doorbell() {
     let said = doorbells_to(&w, CAP_PANE);
     assert_eq!(said.len(), 2, "a second doorbell: {said:?}");
     assert_eq!(named_by(&said[1]), vec![second.clone(), third.clone()], "{}", said[1]);
+}
+
+// ---------------------------------------------------------------- T-319
+
+/// The threads `gear` prints under INBOX, each with its `[urgent]` mark and the
+/// message ids it lists.
+fn inbox_threads(home: &str) -> Vec<(bool, Vec<String>)> {
+    let mut threads = Vec::new();
+    let mut inside = false;
+    for line in home.lines() {
+        if line.starts_with("INBOX (") {
+            inside = true;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        if line.starts_with("    ") {
+            // The thread's own bodies and its `+n more` line.
+            continue;
+        }
+        if !line.starts_with("  ") {
+            break;
+        }
+        let urgent = line.contains("[urgent]");
+        let ids = line
+            .split_whitespace()
+            .filter(|word| word.starts_with("M-"))
+            .map(str::to_string)
+            .collect();
+        threads.push((urgent, ids));
+    }
+    threads
+}
+
+/// The `(<k> urgent)` count of a doorbell text, zero when it carries none.
+fn urgent_in_doorbell(text: &str) -> usize {
+    let Some(start) = text.find(" (") else { return 0 };
+    text[start + 2..]
+        .split(" urgent)")
+        .next()
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Trial B04-01: the captain's doorbell named an open urgent item its own
+/// `gear` did not list. T-254 fixed the cause (the doorbell keeps only the ids
+/// in the home page's batch); this is the case that broke, with more items than
+/// one batch holds: eight open items in eight threads from three senders, three
+/// of them urgent. With `per_sender` 2 the second urgent thread of one sender
+/// falls out of the batch, and an urgent item must not be rung for either.
+#[test]
+fn an_urgent_item_past_the_batch_is_not_rung_and_enters_it_later() {
+    let mut w = world();
+    // Sender a: one normal thread and two urgent ones. The oldest normal thread
+    // takes the reserved slot, so `per_sender` 2 keeps one of the urgent ones
+    // and pushes the other past the batch.
+    w.item("p:lane-a", "p:captain", "merge:a1", "T-301: merge of T-301 failed", false, T0 + 10);
+    w.item("p:lane-a", "p:captain", "merge:a2", "T-302: merge of T-302 failed", true, T0 + 20);
+    let past = w.item("p:lane-a", "p:captain", "merge:a3", "T-303: merge of T-303 failed", true, T0 + 30);
+    w.item("p:lane-b", "p:captain", "merge:b1", "T-304: merge of T-304 failed", false, T0 + 40);
+    w.item("p:lane-b", "p:captain", "merge:b2", "T-305: merge of T-305 failed", true, T0 + 50);
+    let normal_past = w.item("p:lane-b", "p:captain", "merge:b3", "T-306: merge of T-306 failed", false, T0 + 60);
+    w.item("p:lane-c", "p:captain", "merge:c1", "T-307: merge of T-307 failed", false, T0 + 70);
+    w.item("p:lane-c", "p:captain", "merge:c2", "T-308: merge of T-308 failed", false, T0 + 80);
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 100).unwrap();
+
+    let said: Vec<String> = doorbells_to(&w, CAP_PANE).into_iter().map(str::to_string).collect();
+    assert_eq!(said.len(), 1, "{said:?}");
+    let named = named_by(&said[0]);
+    assert_eq!(named.len(), 6, "one batch holds six threads: {}", said[0]);
+    assert!(
+        !named.contains(&past),
+        "the urgent item past the batch is not rung: {}",
+        said[0]
+    );
+
+    // The home page lists the same items: every id the doorbell names is under
+    // INBOX, and the doorbell's urgent count is the urgent threads the INBOX
+    // marks among them.
+    let captain = w.store.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
+    let home = home_of(&mut w, &captain, CAP_PANE, "codex", T0 + 100);
+    let threads = inbox_threads(&home.text);
+    let listed: Vec<&String> = threads.iter().flat_map(|(_, ids)| ids.iter()).collect();
+    assert_eq!(threads.len(), 6, "{}", home.text);
+    for id in &named {
+        assert!(listed.contains(&id), "{id} is named but not in the INBOX: {}", home.text);
+    }
+    let urgent_listed = threads.iter().filter(|(urgent, _)| *urgent).count();
+    assert_eq!(
+        urgent_in_doorbell(&said[0]),
+        urgent_listed,
+        "the doorbell's urgent count is the INBOX's: {} | {}",
+        said[0],
+        home.text
+    );
+
+    // Once the captain answers the six, the ones past the batch come into it,
+    // and the next doorbell names them — the same items the home page lists.
+    w.store
+        .write(|tx| {
+            for id in &named {
+                tx.update_message_state("p", id, MsgState::Resolved, Some("handled"), None, None, T0 + 200)?;
+            }
+            for op in tx.ops_of_seat_kind("p:captain", OpKind::Doorbell)? {
+                tx.set_op_state("p", &op.id, OpState::Confirmed, Some("taken"), T0 + 200)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 300).unwrap();
+
+    let said: Vec<String> = doorbells_to(&w, CAP_PANE).into_iter().map(str::to_string).collect();
+    assert_eq!(said.len(), 2, "a second doorbell: {said:?}");
+    let next = named_by(&said[1]);
+    assert_eq!(next.len(), 2, "the two past the batch: {}", said[1]);
+    assert!(
+        next.contains(&past) && next.contains(&normal_past),
+        "the items that came into the batch are named: {}",
+        said[1]
+    );
+
+    let home = home_of(&mut w, &captain, CAP_PANE, "codex", T0 + 300);
+    let listed: Vec<String> = inbox_threads(&home.text)
+        .into_iter()
+        .flat_map(|(_, ids)| ids)
+        .collect();
+    for id in &next {
+        assert!(listed.contains(id), "{id} is named but not in the INBOX: {}", home.text);
+    }
+    assert_eq!(urgent_in_doorbell(&said[1]), 1, "one of the two is urgent: {}", said[1]);
 }
