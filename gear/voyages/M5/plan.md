@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=772 -->
+<!-- gear-plan project=gear base=773 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -146,6 +146,7 @@ eta: 21h
 - ★ 2026-10-29 05:44 hand-fix: build-slot starved every build to 1 job on this busy machine (load 15-30 from agents and the other project; T-350's merge gate ran the whole suite on 1 thread for 15 min): the load term is dropped, N = cores / running with the memory clamps (the other captain had called the 1-minute load the wrong instrument); the captain's own tool, fixed at the source, sent to the other project
 - 2026-10-29 05:48 scope: T-332 is cancelled: T-410 already lets a confirmed change of a departed voyage through and records it as a starred decision, so a goal-change line has nothing left to authorize (mast asked, M-5686); T-335 reads T-410's decisions instead; T-333 creates goal.rs itself
 - 2026-10-29 05:48 staff: the board header chain on mast (T-351 -> T-353 -> T-352 -> T-354 -> T-355 -> T-356 -> T-357) and hull's T-359 -> T-360 and T-386 -> T-407 no longer wait for each link's review and merge: each link branches from the previous link's handed-in branch (the decompose rule: no deps between two tasks of one lane), cross-lane deps stay | why: each link waited 30-40 min for review and merge on the voyage's critical path | else: the chain lands hours after the eta
+- 2026-10-29 05:50 scope: v0.5.1 (T-367, started by hull) is cut, as v0.5.0 was, with what is merged when it hands in; the S1 and S2 tasks still queued go in v0.5.2's notes
 
 
 # Queue
@@ -950,8 +951,8 @@ deps: T-358
 estimate: 10
 
 ## T-367 [must] lane=hull milestone=M5 required
-goal: [v0.5.1 S2] Release v0.5.1, station S2 of M5. Change, no other design: (1) the version is 0.5.1 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.5.1.md, in the form of docs/releases/v0.4.10.md: one line per task of station S2 merged since the previous release (its T-number and what it changed for a user, from its goal), then "Skill" with what the release review changed in skills/ (the captain adds that text to this contract before the task starts; "nothing" when nothing changed). The captain merges dev into main, tags v0.5.1 and publishes the release; this task does not. The code change is in these files only.
-accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.5.1"; docs/releases/v0.5.1.md lists every merged S2 task. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+goal: [v0.5.1 S2] Release v0.5.1, station S2 of M5. Change, no other design: (1) the version is 0.5.1 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.5.1.md, in the form of docs/releases/v0.4.10.md: one line per task merged on origin/dev since v0.5.0 when you hand in (run git log origin/dev --grep='^merge(T-' just before: the S2 tasks and the S1 tasks v0.5.0's notes said would come here), its T-number and what it changed for a user, from its goal; one line naming the S1 and S2 tasks not merged then, which go in v0.5.2's notes; then "Skill": the captain's release review changed skills/ in nothing outside the task lines since v0.5.0, so write "Nothing outside the tasks above." The captain merges dev into main, tags v0.5.1 and publishes the release; this task does not. The code change is in these files only.
+accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.5.1"; docs/releases/v0.5.1.md lists every task merged on origin/dev since v0.5.0 at the hand-in and names the S1/S2 tasks not merged yet. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
 deps: T-366, T-272, T-273, T-275, T-323, T-324, T-325, T-326, T-327, T-328, T-338
 estimate: 15
 
