@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=748 -->
+<!-- gear-plan project=gear base=749 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -127,9 +127,6 @@ eta: 21h
 - station M-5514: keep course 1003 min in, 120 done, 41 left; measured 8.5 min a task with two lanes puts the finish about 100 min past the 21h eta; the board chain is serial in frame.rs and hull is the slowest lane, so moving board tasks to hull gains nothing; the hand-ins wait on two review seats (three queued at 04:15): a third review seat is proposed to the user
 - station M-5533: keep course 1012 min in, 123 done, 38 left; same as M-5514: reviews are the wait, a third review seat is with the user
 
-
-# Verdicts
-- T-401 attempt=1 contract=3 candidate=5b9838022eea2359824a3d64729a50952a6c6e31 fail estimate=10 rework="F1 of the review: skills/gear/references/captain.md contradicts itself. Move the confirmation rule (a goal, bar or staffing change only when the user asked and confirmed it in a dialog) from the kickoff paragraph (line 31) into daily-loop step 6, replacing its broader instruction to ask about release, money, scope and destructive acts; qualify line 172 (no dialog tool, talk in chat) with that one exception. Keep the kickoff confirmation as it is. captain.md only; run make check CRATE=gear-cli."
 
 # Queue
 
