@@ -69,3 +69,6 @@
 
 ## The slow-step report misses a failed observation
 - 2026-10-29 M5 (T-386 review F1): crates/gear-engine/src/lib.rs fn tick returns early when observe::snapshot fails (about line 302), before note_slow, so a slow failed Herdr observation is not in the tick's slow-step report. Note the step before the early return.
+
+## init names the reviewers by [temps] kind, not by the review entry's CLI
+- 2026-10-29 M5 (another project's captain): with [temps] kind = "pi" and [models].review = [{ model = "gpt-6.1-terra", cli = "codex" }], `gear admin init` prints "reviewers: 4 x pi gpt-6.1-terra" and crates/gear-app/src/kickoff.rs (about line 236) checks the review chain against the [temps] kind, while the engine starts the reviewers on codex as the entry says. The line and the model check should follow each entry's own CLI.
