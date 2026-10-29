@@ -883,6 +883,11 @@ fn world_with_a_voyage() -> Store {
     let mut store = world();
     store
         .write(|tx| {
+            // The config reads minimax-cn: the reading below is one the
+            // project reads now (T-383).
+            let mut row = tx.get_project("p")?.unwrap();
+            row.config_toml = "[[quota.sources]]\nprovider = \"minimax-cn\"\nreader = \"minimax\"\n".to_string();
+            tx.update_project(&row)?;
             tx.upsert_voyage(&gear_store::VoyageRow {
                 project: "p".into(),
                 milestone: "M4".into(),
@@ -1629,4 +1634,121 @@ fn a_click_on_the_top_row_of_a_scrolled_view_picks_the_task_there() {
         !frame_text.contains("T-17"),
         "the selection moved off the last task: {frame_text}"
     );
+}
+
+// ---- T-383: the QUOTA lines of the board
+
+/// The Now view's frame, wide and tall enough for the whole quota block.
+fn now_frame(store: &mut Store, now: i64) -> String {
+    let board = build(
+        store,
+        &gear_board::Options { project: Some("p".into()), ..Default::default() },
+        now,
+    )
+    .unwrap();
+    let screen = crate::screen(gear_board::frame::Tab::Now, 0, (120, 70));
+    gear_board::frame::canvas(&board, &screen, None).text()
+}
+
+/// The project `p` whose config reads `providers`, with the given quota
+/// readings in the meta (`provider` → the reading's JSON).
+fn world_reading_custom(providers: &[&str], readings: &[(&str, &str)]) -> Store {
+    let mut store = world();
+    store
+        .write(|tx| {
+            let mut row = tx.get_project("p")?.unwrap();
+            row.config_toml = providers
+                .iter()
+                .map(|provider| {
+                    format!("[[quota.sources]]\nprovider = \"{provider}\"\nreader = \"codex\"\n")
+                })
+                .collect();
+            tx.update_project(&row)?;
+            for (provider, reading) in readings {
+                tx.set_meta(&format!("quota.reading.{provider}"), reading)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// One reading, as the engine writes it: one window, one used percent, one
+/// reset and when it was read.
+fn reading_json(provider: &str, window: &str, reset: i64, read_at: i64) -> String {
+    format!(
+        r#"{{"provider":"{provider}","windows":[{{"name":"{window}","used_percent":63.0,"resets_at":{reset}}}],"read_at":{read_at}}}"#
+    )
+}
+
+#[test]
+fn the_quota_shows_only_the_providers_the_project_reads() {
+    // The config reads codex alone; a reading of an earlier config stays in
+    // the meta and is not shown (T-383).
+    let mut store = world_reading_custom(
+        &["codex"],
+        &[
+            (
+                "codex",
+                &reading_json("codex", "weekly", T0 + 6 * 86_400, T0),
+            ),
+            (
+                "minimax-cn",
+                r#"{"provider":"minimax-cn","windows":[{"name":"5h","used_percent":64.0,"resets_at":1800003600}],"read_at":1800000000}"#,
+            ),
+        ],
+    );
+    let frame = now_frame(&mut store, T0);
+    assert!(frame.contains("codex"), "{frame}");
+    assert!(!frame.contains("minimax-cn"), "{frame}");
+}
+
+#[test]
+fn a_reset_days_away_prints_the_day_and_a_later_one_the_clock_alone() {
+    let week = T0 + 6 * 86_400;
+    let hours = T0 + 3 * 3600;
+    let mut store = world_reading_custom(
+        &["codex", "minimax-cn"],
+        &[
+            ("codex", &reading_json("codex", "weekly", week, T0)),
+            ("minimax-cn", &reading_json("minimax-cn", "5h", hours, T0)),
+        ],
+    );
+    let frame = now_frame(&mut store, T0);
+    // A week out: the month and the day, then the time.
+    let line = frame
+        .lines()
+        .find(|line| line.contains("codex"))
+        .unwrap_or_else(|| panic!("no codex line: {frame}"));
+    let reset = line.split("resets ").nth(1).unwrap_or_else(|| panic!("no reset: {line}"));
+    let mut words = reset.split(' ');
+    let month = words.next().unwrap_or_default();
+    let day = words.next().unwrap_or_default();
+    let time = words.next().unwrap_or_default();
+    assert_eq!(month.len(), 3, "the month is a word: {line}");
+    assert!(month.chars().all(|c| c.is_ascii_alphabetic()), "{line}");
+    assert!(day.parse::<u32>().is_ok(), "the day is a number: {line}");
+    assert_eq!(time.len(), 5, "then the time: {line}");
+    assert_eq!(&time[2..3], ":", "{line}");
+    // The date is the one the clock of the machine gives.
+    assert!(line.contains(&gear_board::idle::day_clock(week)), "{line}");
+    // Three hours out: only the clock, as today.
+    let line = frame
+        .lines()
+        .find(|line| line.contains("minimax-cn"))
+        .unwrap_or_else(|| panic!("no minimax-cn line: {frame}"));
+    assert!(
+        line.contains(&format!("resets {}", gear_board::idle::clock(hours))),
+        "{line}"
+    );
+}
+
+#[test]
+fn a_reading_half_an_hour_old_says_its_age() {
+    let mut store = world_reading_custom(
+        &["codex"],
+        &[("codex", &reading_json("codex", "weekly", T0 + 6 * 86_400, T0 - 45 * 60))],
+    );
+    let frame = now_frame(&mut store, T0);
+    assert!(frame.contains("(read 45 min ago)"), "{frame}");
 }

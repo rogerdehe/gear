@@ -330,12 +330,48 @@ fn the_codex_windows_are_read_from_the_newest_count_of_the_rollout() {
     assert_eq!(reading.provider, "codex");
     assert_eq!(reading.read_at, T13);
     assert_eq!(reading.windows.len(), 2, "{reading:?}");
-    assert_eq!(reading.windows[0].name, "primary");
+    assert_eq!(reading.windows[0].name, "5h");
     assert!((reading.windows[0].used_percent - 12.5).abs() < 1e-9);
     assert_eq!(reading.windows[0].resets_at, Some(1_793_020_000));
-    assert_eq!(reading.windows[1].name, "secondary");
+    assert_eq!(reading.windows[1].name, "weekly");
     assert!((reading.windows[1].used_percent - 42.5).abs() < 1e-9);
     assert_eq!(reading.windows[1].resets_at, Some(1_793_020_100));
+}
+
+/// T-383: the window's name is its length, and the API's key only when the
+/// rollout says no `window_minutes`.
+#[test]
+fn a_codex_window_is_named_by_its_length() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let thread = "0199aaaa-bbbb-cccc-dddd-eeeeffff0001";
+    let name_of = |window: serde_json::Value| {
+        let count = json!({
+            "timestamp": iso(T13),
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "rate_limits": {"primary": window}
+            }
+        });
+        let path = write_lines(
+            &codex_day_dir(&home, now())
+                .join(format!("rollout-2026-10-26T12-00-00-{thread}.jsonl")),
+            &[count],
+        );
+        assert!(path.is_file());
+        let reading =
+            read_quota_in(QuotaReader::Codex, "", Some(thread), T13, &home).unwrap();
+        reading.windows[0].name.clone()
+    };
+    // 10080 minutes is the week, 300 the five hours.
+    assert_eq!(name_of(json!({"used_percent": 1.0, "window_minutes": 10080})), "weekly");
+    assert_eq!(name_of(json!({"used_percent": 1.0, "window_minutes": 300})), "5h");
+    // Any other length divides or is minutes.
+    assert_eq!(name_of(json!({"used_percent": 1.0, "window_minutes": 120})), "2h");
+    assert_eq!(name_of(json!({"used_percent": 1.0, "window_minutes": 90})), "90m");
+    // No length: the API's own key.
+    assert_eq!(name_of(json!({"used_percent": 1.0})), "primary");
 }
 
 #[test]
