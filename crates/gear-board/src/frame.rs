@@ -1078,85 +1078,88 @@ fn row_cut(row: &Line, width: usize) -> Line {
 }
 
 /// The lane's panel: what it did, what it does now and what it has left.
-pub fn lane_panel(lane: &LaneBoard) -> Vec<String> {
-    styled_lane_panel(lane, Color::Dim).into_iter().map(|line| line.text).collect()
+///
+/// `tasks` are the graph's records of the project (T-346): the panel shows the
+/// lane's own, each with the stage the store's facts gave it.
+pub fn lane_panel(lane: &LaneBoard, tasks: &[graph::GraphTask]) -> Vec<String> {
+    styled_lane_panel(lane, tasks, Color::Dim).into_iter().map(|line| line.text).collect()
+}
+
+/// Whether the graph task is in the lane's queue: a task a plan left without a
+/// lane shows in the `unassigned` lane.
+fn in_lane(task: &graph::GraphTask, lane: &str) -> bool {
+    if task.lane.is_empty() {
+        lane == "unassigned"
+    } else {
+        task.lane == lane
+    }
 }
 
 /// The lane's panel in the prototype's colours; `color` is the lane's own.
-pub fn styled_lane_panel(lane: &LaneBoard, color: Color) -> Vec<Line> {
+pub fn styled_lane_panel(
+    lane: &LaneBoard,
+    tasks: &[graph::GraphTask],
+    color: Color,
+) -> Vec<Line> {
+    let mine = || tasks.iter().filter(move |task| in_lane(task, &lane.lane));
     let mut rows = vec![
         Line::styled(format!("lane {}", lane.lane), Style::fg(color).and_bold()),
         Line::new(),
         Line::styled("DONE", Style::bold()),
     ];
-    for task in &lane.tasks {
-        if task.state == gear_model::TaskState::Done {
-            rows.push(Line::styled(
-                format!(
-                    "  ● {} {:<30} {}/{}m",
-                    task.id,
-                    task.title.chars().take(30).collect::<String>(),
-                    task.actual_min.unwrap_or(0),
-                    task.est_min.unwrap_or(0)
-                ),
-                Style::fg(Color::Ok),
-            ));
-        }
+    for task in mine().filter(|task| task.stage == graph::Stage::Merged) {
+        let rounds = if task.rounds > 1 {
+            format!(" {}r", task.rounds)
+        } else {
+            String::new()
+        };
+        rows.push(Line::styled(
+            format!(
+                "  {} {} {:<30} {}/{}m{}",
+                task.stage.symbol(),
+                task.id,
+                task.title.chars().take(30).collect::<String>(),
+                task.actual_min.unwrap_or(0),
+                task.est_min.unwrap_or(0),
+                rounds
+            ),
+            Style::fg(task.stage.color()),
+        ));
     }
     rows.push(Line::new());
     rows.push(Line::styled("NOW", Style::bold()));
-    for task in &lane.tasks {
-        let stage = match task.state {
-            gear_model::TaskState::Running => graph::Stage::Working,
-            gear_model::TaskState::Verifying => graph::Stage::Review,
-            _ => continue,
-        };
+    for task in mine().filter(|task| task.stage.is_open()) {
         // The stage says what the task does now, in the prototype's words.
-        let words = graph::Stage::words(&graph::GraphTask {
-            id: task.id.clone(),
-            lane: lane.lane.clone(),
-            stage,
-            moved_to: None,
-            title: task.title.clone(),
-            est_min: task.est_min,
-            actual_min: task.actual_min,
-            rounds: 0,
-            deps: Vec::new(),
-            finished: None,
-        });
         rows.push(Line::styled(
             format!(
                 "  {} {} {:<30} {}",
-                stage.symbol(),
+                task.stage.symbol(),
                 task.id,
                 task.title.chars().take(30).collect::<String>(),
-                words
+                graph::Stage::words(task)
             ),
-            Style::fg(stage.color()),
+            Style::fg(task.stage.color()),
         ));
     }
     rows.push(Line::new());
     rows.push(Line::styled("LEFT, in order", Style::bold()));
     let mut left = 0;
     let mut minutes = 0;
-    for task in &lane.tasks {
-        // The tasks that run or wait for their review are in NOW: the panel
-        // shows them once (the prototype's LEFT lists the queued work only).
-        if task.state.is_terminal()
-            || matches!(
-                task.state,
-                gear_model::TaskState::Running | gear_model::TaskState::Verifying
-            )
-        {
-            continue;
-        }
+    for task in mine().filter(|task| matches!(task.stage, graph::Stage::Deps | graph::Stage::Queued))
+    {
         left += 1;
         minutes += task.est_min.unwrap_or(0);
+        let needs = if task.deps.is_empty() {
+            String::new()
+        } else {
+            format!("  needs {}", task.deps.join(","))
+        };
         rows.push(Line::plain(format!(
-            "  ○ {} {:<30} {}m",
+            "  ○ {} {:<30} {}m{}",
             task.id,
             task.title.chars().take(30).collect::<String>(),
-            task.est_min.unwrap_or(0)
+            task.est_min.unwrap_or(0),
+            needs
         )));
     }
     rows.push(Line::styled(

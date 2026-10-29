@@ -271,8 +271,8 @@ fn stage_of(tx: &Tx<'_>, project: &str, task: &gear_store::TaskRow) -> GearResul
     let attempts = tx.attempts_of_task(project, &task.id)?;
     let current = attempts
         .iter()
-        .filter(|attempt| attempt.state != AttemptState::Abandoned)
-        .max_by_key(|attempt| attempt.n);
+        .max_by_key(|attempt| attempt.n)
+        .filter(|attempt| attempt.state != AttemptState::Abandoned);
     if let Some(a) = current {
         // The newest attempt came back rejected: the rework waits for the lane.
         let newer = attempts.iter().any(|other| other.n > a.n);

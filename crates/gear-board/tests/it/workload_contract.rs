@@ -128,6 +128,38 @@ fn attempt(
     Ok(())
 }
 
+/// An open attempt of the fixture, on the step it is: the state the stage
+/// rules read (T-346).
+fn open_attempt(
+    tx: &gear_store::Tx<'_>,
+    task: &str,
+    state: AttemptState,
+    started: i64,
+) -> gear_model::GearResult<()> {
+    tx.insert_attempt(&AttemptRow {
+        project: "p".into(),
+        task: task.into(),
+        n: 1,
+        seat: "p:deck".into(),
+        generation: 1,
+        contract_version: 1,
+        adopted_version: 1,
+        pending_update: None,
+        state,
+        candidate: None,
+        report: None,
+        safe_point: None,
+        started,
+        updated: started,
+        session_ref: None,
+        session_cli: None,
+        session_action: None,
+        sent_at: None,
+    })?;
+    tx.set_attempt_time("p", task, 1, gear_store::AttemptStep::Started, started)?;
+    Ok(())
+}
+
 #[test]
 fn the_slower_lane_sets_the_finish_and_is_named() {
     let mut store = world();
@@ -189,7 +221,7 @@ fn the_lane_panel_shows_what_it_did_and_what_is_left() {
     let mut store = world();
     let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
     let lane = board.projects[0].lanes.iter().find(|lane| lane.lane == "deck").unwrap();
-    let panel = lane_panel(lane);
+    let panel = lane_panel(lane, &board.projects[0].graph);
     let text = panel.join("\n");
     assert!(text.contains("lane deck"), "{text}");
     assert!(text.contains("DONE"), "{text}");
@@ -249,13 +281,15 @@ fn the_lane_panel_shows_the_running_and_the_queued_work_once() {
             let mut running = tx.get_task("p", "T-4")?.unwrap();
             running.state = TaskState::Running;
             tx.update_task(&running)?;
+            open_attempt(tx, "T-4", AttemptState::Started, now_seconds())?;
             task(tx, "T-5", "deck", 5, TaskState::Verifying, Some(20))?;
+            open_attempt(tx, "T-5", AttemptState::Submitted, now_seconds())?;
             task(tx, "T-6", "deck", 6, TaskState::Ready, Some(15))
         })
         .unwrap();
     let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
     let lane = board.projects[0].lanes.iter().find(|lane| lane.lane == "deck").unwrap();
-    let text = lane_panel(lane).join("\n");
+    let text = lane_panel(lane, &board.projects[0].graph).join("\n");
     // The running and the reviewing task are in NOW, once each.
     assert_eq!(text.matches("T-4").count(), 1, "{text}");
     assert_eq!(text.matches("T-5").count(), 1, "{text}");

@@ -4,6 +4,7 @@
 //! The fixture is the prototype's fake data: the tasks of the lanes, their
 //! dependencies, the rounds and the merges.
 
+use gear_board::frame::lane_panel;
 use gear_board::graph::{lines, panel, tasks, GraphTask, Stage};
 use gear_board::style::Color;
 use gear_model::{AttemptState, MsgKind, MsgState, OpKind, OpState, SeatRole, TaskState};
@@ -749,6 +750,67 @@ fn each_stage_comes_from_a_fact_of_the_store() {
         assert_eq!(found, stage, "{task}");
         assert_eq!(said, words, "{task}");
     }
+}
+
+/// F2 of the T-346 review: a newest attempt that was abandoned counts as no
+/// attempt — it does not resurrect the older one.
+#[test]
+fn an_abandoned_newest_attempt_counts_as_no_attempt() {
+    let mut store = stage_world();
+    let mut abandoned = store
+        .read(|tx| tx.attempts_of_task("p", "T-21"))
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("T-21 has its attempt");
+    abandoned.n = 2;
+    abandoned.state = AttemptState::Abandoned;
+    store.write(|tx| tx.insert_attempt(&abandoned)).unwrap();
+    let (stage, words) = stage_and_words(&mut store, "T-21");
+    assert_eq!(stage, Stage::Queued, "the abandoned attempt is no attempt");
+    assert_eq!(words, "queued");
+}
+
+/// F1 of the T-346 review: the lane panel shows each task in the stage the
+/// graph gave it, not one of five words repeated (the prototype's
+/// `lane_panel`).
+#[test]
+fn the_lane_panel_shows_each_task_in_its_stage() {
+    let mut store = stage_world();
+    let board = gear_board::build(
+        &mut store,
+        &gear_board::Options { project: Some("p".into()), ..Default::default() },
+        T0,
+    )
+    .unwrap();
+    let lane = board.projects[0]
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "hull")
+        .expect("the hull lane");
+    let text = lane_panel(lane, &board.projects[0].graph).join("\n");
+    let row = |task: &str| -> String {
+        text.lines()
+            .find(|line| line.contains(&format!(" {task} ")))
+            .unwrap_or_else(|| panic!("no row for {task} in\n{text}"))
+            .to_string()
+    };
+    // Handed and Review are told apart: the same `◎` but not the same words.
+    assert!(row("T-29").starts_with("  ◎ T-29 "), "{text}");
+    assert!(row("T-29").ends_with("handed in, waits for a reviewer"), "{text}");
+    assert!(row("T-30").starts_with("  ◎ T-30 "), "{text}");
+    assert!(row("T-30").ends_with("in review"), "{text}");
+    // A failed merge is not a merge that runs.
+    assert!(row("T-27").starts_with("  ✗ T-27 "), "{text}");
+    assert!(row("T-27").ends_with("merge failed, waits for the captain"), "{text}");
+    // The rework says which round it is, and a question is not work.
+    assert!(row("T-25").starts_with("  ↺ T-25 "), "{text}");
+    assert!(row("T-25").ends_with("reworking (round 2)"), "{text}");
+    assert!(row("T-22").starts_with("  ◉ T-22 "), "{text}");
+    assert!(row("T-22").ends_with("waits for the captain's answer"), "{text}");
+    // The queued work lists what it waits for.
+    assert!(row("T-20").contains("needs T-1"), "{text}");
+    assert!(text.contains("left: 2 tasks, 40m of estimates"), "{text}");
 }
 
 #[test]

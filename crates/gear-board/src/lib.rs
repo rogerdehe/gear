@@ -1625,7 +1625,11 @@ fn open_panel(
     let Some(project) = board.projects.first() else { return Ok(None) };
     match tab {
         frame::Tab::Now => Ok(project.lanes.get(selected).map(|lane| {
-            frame::styled_lane_panel(lane, frame::lane_color_of(project, &lane.lane))
+            frame::styled_lane_panel(
+                lane,
+                &project.graph,
+                frame::lane_color_of(project, &lane.lane),
+            )
         })),
         frame::Tab::Tasks => {
             let Some(task) = project.graph.get(selected) else { return Ok(None) };
