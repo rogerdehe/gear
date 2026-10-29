@@ -91,3 +91,6 @@
 
 ## Codex 0.165 startup dialogs stop reviewers
 - 2026-10-29 M5 (another project): after `/new` Codex asks "Where should the new conversation run? 1. Use current Git worktree / 2. Create new Git worktree", and on a resume from another directory it asks which working directory to use; Herdr reports both as done/idle, so the engine waits on a reviewer that never starts. GEAR's codex profile should recognise both screens as blocked and answer them (current worktree; the seat's own directory), or start Codex so they never show.
+
+## A reviewer resumes another seat's direction-check conversation
+- 2026-10-29 M5 (the other project, after T-423 shipped: review-2 for T-226 resumed the direction-check conversation review-1 had run, and Codex locked it, "This conversation is open in another app"; O-2609 sat submitted 45 min). T-423 compares only each live agent's current session, but a Codex process keeps the writer lock of every conversation it opened (seen as `$CODEX_HOME/thread-writer-locks/<id>.lock` held by the other seat's process), so a conversation another seat ran earlier still passes the check. Root fix: a review round resumes an earlier round's conversation only when the same seat ran it (V1 as written); any other seat starts fresh.
