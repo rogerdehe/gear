@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=740 -->
+<!-- gear-plan project=gear base=742 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -120,6 +120,7 @@ eta: 16h
 - 2026-10-29 04:00 note: resuming after the user's stop: every accepted attempt is merged or queued as rework (T-297, T-370); the lanes merge origin/dev and push while still held, so the no-push clock starts fresh, then are released; hull/t412 resolves the github_contract.rs conflict with T-409, T-297's rework resolves merge.rs with the branch sweep; mast/t345 (T-345 done) and mast/t367 (T-367 moved to hull) are deleted
 - station M-5461: move 900 min in; superseded by M-5463 an hour later, read after the user's stop (same action)
 - station M-5463: move 980 min in, past the 960 min eta, 43 tasks (1200 min) left; hull 505 min, mast 695 min: the S1 release T-366 waits on T-297's rework, so T-297 runs next on hull and T-370's rework next on mast, before new work; each lane merges dev and pushes before its hold ends
+- 2026-10-29 04:20 config: `[timing] handin_base_window_min` 30 -> 120: every task runs past 30 min, so each hand-in re-merged a moving dev and re-ran its suite (friction F-141, F-144, F-153, F-164); the merge gate still runs the full suite on the real tip | why: speed, past the eta | else: lanes keep paying a re-merge per hand-in
 
 # Queue
 
