@@ -169,6 +169,9 @@ eta: 21h
 - 2026-10-29 08:00 release: v0.5.1 (station S2) published: T-367's merge 6d8d3a0a merged into main as 0974d950, tagged v0.5.1, GitHub release from docs/releases/v0.5.1.md | why: done clause (5)
 
 
+# Verdicts
+- T-351 attempt=1 1 7b4b5274 contract= candidate= fail estimate=10 rework="The review passed; the merge conflicts in crates/gear-board/src/lib.rs with T-335 (merged: ProjectBoard.goal_changes). Merge origin/dev into mast/t351, keep both sides (T-335's goal_changes and your moved_out on ProjectBoard), run make check CRATE=gear-board, push and hand in. Then merge the fixed mast/t351 into mast/t353 before you hand T-353 in, so T-353 does not carry the same conflict."
+
 # Queue
 
 ## T-412 [now] lane=hull milestone=M5 required
