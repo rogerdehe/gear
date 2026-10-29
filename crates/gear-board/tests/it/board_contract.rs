@@ -1151,12 +1151,90 @@ fn the_tab_row_has_the_four_views_of_the_user() {
     assert_eq!(canvas.style_at(1, 39), Style::fg(Color::Dim));
 }
 
+/// T-353: the goal box says what the quality bar blocks, and a bar with a key
+/// the board knows is named by that key, however the plan wrote the rest.
+#[test]
+fn the_goal_box_says_what_the_quality_bar_blocks() {
+    use gear_board::frame::{self, Tab};
+    use gear_board::style::{Color, Style};
+
+    let mut store = world_with_a_voyage();
+    store
+        .write(|tx| {
+            tx.upsert_voyage(&gear_store::VoyageRow {
+                project: "p".into(),
+                milestone: "M4".into(),
+                title: "one seat model, a voyage the user can review".into(),
+                done: Some("a rework resumes its session".into()),
+                bar: Some("STRICT: a severe issue waits for the captain".into()),
+                eta: Some("12h".into()),
+                departure: Some(now_seconds() - 3600),
+                departure_tasks: Some(4),
+                departure_estimate_min: Some(160),
+                updated: T0,
+            })
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let board = build(&mut store, &options(), now_seconds()).unwrap();
+    let screen = crate::screen(Tab::Now, 0, (160, 40));
+    let canvas = frame::canvas(&board, &screen, None);
+    let text = canvas.text();
+
+    let line = "Quality bar: STRICT — severe issues block a task; medium ones are the captain's call";
+    let row = text
+        .lines()
+        .position(|text| text.contains(line))
+        .unwrap_or_else(|| panic!("the box holds {line:?}:\n{text}"));
+    // The bar is locked in the box with the goal: yellow, and not bold.
+    let x = text.lines().nth(row).unwrap_or_default().find(line).unwrap_or(0);
+    assert_eq!(canvas.style_at(x, row), Style::fg(Color::Warn), "{text}");
+    // That row is inside the box: it opens and closes with the box's borders.
+    let row_text = text.lines().nth(row).unwrap_or_default();
+    assert!(row_text.trim_start().starts_with("║ "), "{row_text:?}");
+    assert!(row_text.contains(" ║"), "{row_text:?}");
+}
+
+/// T-353: a click on the tab row picks the tab the layout draws there. The
+/// click counts from 1, as the terminal does, and the layout counts from 0.
+#[test]
+fn the_tab_row_of_the_layout_answers_a_click() {
+    use gear_board::frame::Tab;
+
+    let mut store = world_with_a_voyage();
+    let size = (100, 30);
+    let head = head_of(&mut store, size);
+    // The fourth tab (Log), in the middle of its columns.
+    let (first, last, tab) = *head
+        .tabs
+        .iter()
+        .find(|(_, _, tab)| *tab == Tab::Log)
+        .expect("the Log tab is on the row");
+    assert_eq!(tab, Tab::Log);
+    let events = vec![Event::Mouse {
+        button: 0,
+        x: ((first + last) / 2 + 1) as u16,
+        y: head.tab_row as u16 + 1,
+    }];
+    let frame = run_events(&mut store, events, size);
+
+    assert!(
+        frame.contains("DECISIONS MADE"),
+        "the click opened the Log view: {frame}"
+    );
+}
+
 /// T-156: the new board in a pty of 80x24. The frame and the first view
 /// come from the store, the keys move between the views, a click picks a view
 /// and a row, and `Enter` opens the panel of the selected row.
 #[test]
 fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     let mut store = world_with_a_voyage();
+    // The head of the board on the pty's 80x24 screen (T-353): the tab row and
+    // the view's first row are the layout's.
+    let head = head_of(&mut store, (80, 24));
+    let pick_row = head.top + 2;
     let opts = Options {
         project: Some("p".into()),
         refresh: Duration::from_millis(50),
@@ -1204,14 +1282,15 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     press(pty.master, b"\x1b[D");
     let _frame = frames.next("LANES", Duration::from_secs(5));
 
-    // A click on the Graph tab, where it is drawn, moves to the graph.
-    let tab = column_of(&frame, 3, "2 Tasks") + 2;
-    press(pty.master, format!("\x1b[<0;{tab};4M").as_bytes());
+    // A click on the Graph tab, where it is drawn, moves to the graph. The
+    // click counts from 1: the tab's first column plus one.
+    let tab = column_of(&frame, head.tab_row, "2 Tasks") + 1;
+    press(pty.master, format!("\x1b[<0;{tab};{row}M", row = head.tab_row + 1).as_bytes());
     let _frame = frames.next("○ not started", Duration::from_secs(5));
 
     // A click on the Now tab, where it is drawn, comes back to the lanes.
-    let now = column_of(&frame, 3, "1 Now") + 2;
-    press(pty.master, format!("\x1b[<0;{now};4M").as_bytes());
+    let now = column_of(&frame, head.tab_row, "1 Now") + 1;
+    press(pty.master, format!("\x1b[<0;{now};{row}M", row = head.tab_row + 1).as_bytes());
     let _frame = frames.next("LANES", Duration::from_secs(5));
 
     // A click on the first row of the first view picks that row, and `Enter`
@@ -1220,7 +1299,7 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     // the selection is moved off it first, so the click is a change.
     press(pty.master, b"j");
     let _frame = frames.next("› runtime", Duration::from_secs(5));
-    press(pty.master, b"\x1b[<0;1;7M");
+    press(pty.master, format!("\x1b[<0;1;{pick_row}M").as_bytes());
     let _frame = frames.next("› data", Duration::from_secs(5));
     press(pty.master, b"\r");
     let frame = frames.next("lane data", Duration::from_secs(5));
@@ -1293,24 +1372,23 @@ fn a_board_without_a_project_shows_them_one_at_a_time() {
         let _ = left.send(result.is_ok());
     });
 
-    // The first frame shows the first project and says how many there are:
-    // the title starts with the project and ends with the key's sentence.
+    // The first frame shows the first project: its name is the first row's.
     let mut frames = Frames { master: pty.master, buffer: String::new() };
     let frame = frames.next("LANES", Duration::from_secs(5));
     let title = plain(frame.lines().next().unwrap_or_default());
-    assert!(title.starts_with("GEAR · a · p: next of 2 projects"), "{title}");
+    assert!(title.trim_start().starts_with("GEAR · a "), "{title}");
 
     // `p` shows the second project.
     press(pty.master, b"p");
     let frame = frames.next("GEAR · b", Duration::from_secs(5));
     let title = plain(frame.lines().next().unwrap_or_default());
-    assert!(title.starts_with("GEAR · b · p: next of 2 projects"), "{title}");
+    assert!(title.trim_start().starts_with("GEAR · b "), "{title}");
 
     // `p` on the last project comes back to the first.
     press(pty.master, b"p");
     let frame = frames.next("GEAR · a", Duration::from_secs(5));
     let title = plain(frame.lines().next().unwrap_or_default());
-    assert!(title.starts_with("GEAR · a · p: next of 2 projects"), "{title}");
+    assert!(title.trim_start().starts_with("GEAR · a "), "{title}");
 
     press(pty.master, b"q");
     assert!(
@@ -1333,7 +1411,7 @@ fn a_board_printed_once_promises_no_project_key() {
     gear_board::run(&mut store, &opts, &mut out, None).expect("the printed board");
     let text = String::from_utf8_lossy(&out).into_owned();
     let title = plain(text.lines().next().unwrap_or_default());
-    assert!(title.starts_with("GEAR · a"), "the first project prints: {title}");
+    assert!(title.trim_start().starts_with("GEAR · a "), "the first project prints: {title}");
     assert!(!title.contains("next of"), "a printed board promises no key: {title}");
 
     // The JSON is the whole board, unchanged: the switch is only the text's
@@ -1347,7 +1425,8 @@ fn a_board_printed_once_promises_no_project_key() {
 }
 
 /// T-317: a board of one project has no suffix to explain, and neither does
-/// a board opened with `--project`.
+/// a board opened with `--project`. T-353's first row names the shown project
+/// and nothing else.
 #[test]
 fn a_board_of_one_project_has_no_project_key() {
     let mut store = world();
@@ -1363,7 +1442,7 @@ fn a_board_of_one_project_has_no_project_key() {
         None,
     );
     let title = plain(text.lines().next().unwrap_or_default());
-    assert!(title.starts_with("GEAR · p"), "{title}");
+    assert!(title.trim_start().starts_with("GEAR · p "), "{title}");
     assert!(!title.contains("next of"), "{title}");
 
     // Even with more projects in the store, `--project` names the one shown.
@@ -1377,7 +1456,7 @@ fn a_board_of_one_project_has_no_project_key() {
         None,
     );
     let title = plain(text.lines().next().unwrap_or_default());
-    assert!(title.starts_with("GEAR · p"), "{title}");
+    assert!(title.trim_start().starts_with("GEAR · p "), "{title}");
     assert!(!title.contains("next of"), "{title}");
 }
 
@@ -1464,6 +1543,8 @@ fn world_with_a_long_graph() -> Store {
 #[test]
 fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     let mut store = world_with_a_long_graph();
+    // The head of the board on the pty's 80x24 screen (T-353).
+    let head = head_of(&mut store, (80, 24));
     let opts = Options {
         project: Some("p".into()),
         // A longer refresh: the board redraws on the keys, not every 50 ms
@@ -1489,7 +1570,7 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     // keeps both borders and the footer's row (F3). The first lane is the one
     // the board shows as picked, and a click that picks it again writes no
     // frame (T-403): `Enter` opens it from there.
-    press(pty.master, b"\x1b[<0;1;7M");
+    press(pty.master, format!("\x1b[<0;1;{pick}M", pick = head.top + 2).as_bytes());
     assert!(
         frames.quiet(Duration::from_millis(300)),
         "a click on the picked row writes no frame"
@@ -1512,8 +1593,8 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     // testing expects). The frame that closed the panel is the one on the
     // screen, and a frame that reads like the last one written is not written
     // again (T-403).
-    let tab = column_of(&frame, 3, "2 Tasks") + 2;
-    press(pty.master, format!("\x1b[<0;{tab};4M").as_bytes());
+    let tab = column_of(&frame, head.tab_row, "2 Tasks") + 1;
+    press(pty.master, format!("\x1b[<0;{tab};{row}M", row = head.tab_row + 1).as_bytes());
     let _frame = frames.next("dev", Duration::from_secs(5));
 
     // Repeated `Down` walks to the last task and keeps it visible (F8). Every

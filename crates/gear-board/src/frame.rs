@@ -1,5 +1,6 @@
-//! The frame of the new board (design §8.1): the title, the time and tasks
-//! bars, the four tabs, the views and the overlay panel.
+//! The frame of the new board (design §8.1): the head (the voyages, the shown
+//! voyage and the goal box with its quality bar), the four tabs, the views and
+//! the overlay panel.
 //!
 //! The prototype of `gear/voyages/M4/board` is the contract for the layout, the
 //! views, the keys and the wording; the data comes from the store.
