@@ -55,7 +55,10 @@ fn lane_messages(s: &mut Store, task: &str) -> Vec<gear_store::MessageRow> {
     s.read(|tx| tx.thread_messages("p", &format!("{task}:cancel"))).unwrap()
 }
 
-const CANCEL_T1: &str = "## T-1 [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n\n## T-2 [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: T-1\n";
+const CANCEL_T1: &str = "## T-1 [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n\n## T-2 [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
+
+/// The same plan, with T-2 still waiting on T-1 (T-428: refused).
+const CANCEL_T1_WITH_DEPS: &str = "## T-1 [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n\n## T-2 [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: T-1\n";
 
 /// The task the lane is working on is cancelled: its attempt is abandoned —
 /// the seat is free — and the lane gets one line telling it to stop.
@@ -172,6 +175,126 @@ fn a_finished_task_cannot_be_cancelled_and_an_idle_one_gets_no_line() {
     let error = apply(&mut s, &env, Some(&fp), None, &parse(bad).unwrap(), bad, "v3", T0 + 20).unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat);
     assert!(error.detail.contains("T-1"), "{}", error.detail);
+}
+
+// ---- T-428: a plan never leaves a task depending on a cancelled one ------
+
+/// A plan that cancels T-1 while T-2 depends on it is refused with one line
+/// naming the pair, and nothing is applied.
+#[test]
+fn a_plan_that_cancels_a_dep_is_refused_and_names_the_pair() {
+    let mut s = world();
+
+    let error = run(&mut s, CANCEL_T1_WITH_DEPS, 1, "v2").unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::BadFormat);
+    assert_eq!(
+        error.detail,
+        "T-2 depends on cancelled T-1: drop or replace that dependency"
+    );
+    assert_eq!(state(&mut s, "T-1"), TaskState::Ready, "nothing was cancelled");
+    assert_eq!(state(&mut s, "T-2"), TaskState::Ready);
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 1, "the plan did not apply");
+}
+
+/// A dep that is already cancelled in the store is refused the same way: the
+/// plan may not leave a live task waiting for it.
+#[test]
+fn a_live_task_newly_depending_on_an_already_cancelled_task_is_refused() {
+    let mut s = world();
+    run(&mut s, CANCEL_T1, 1, "v2").unwrap();
+    assert_eq!(state(&mut s, "T-1"), TaskState::Cancelled);
+
+    let error = run(
+        &mut s,
+        "## T-2 [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: T-1\n",
+        2,
+        "v3",
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::BadFormat);
+    assert_eq!(
+        error.detail,
+        "T-2 depends on cancelled T-1: drop or replace that dependency"
+    );
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 2, "the plan did not apply");
+    let deps = s.read(|tx| tx.get_task("p", "T-2")).unwrap().unwrap().deps;
+    assert!(deps.is_empty(), "the dep was not written: {deps:?}");
+}
+
+/// Dropping the dependency lets the cancel through.
+#[test]
+fn dropping_the_dependency_lets_the_cancel_apply() {
+    let mut s = world();
+
+    let result = run(&mut s, CANCEL_T1, 1, "v2").unwrap();
+
+    assert_eq!(result.cancelled, vec!["T-1".to_string()]);
+    assert_eq!(state(&mut s, "T-1"), TaskState::Cancelled);
+    let deps = s.read(|tx| tx.get_task("p", "T-2")).unwrap().unwrap().deps;
+    assert!(deps.is_empty(), "the dep was dropped: {deps:?}");
+}
+
+/// A finished task's old dependency on a cancelled one is not refused: it is
+/// not waiting for anything any more.
+#[test]
+fn a_done_task_keeping_a_cancelled_dep_is_not_refused() {
+    let mut s = world();
+    s.write(|tx| {
+        let mut dep = tx.get_task("p", "T-1")?.unwrap();
+        dep.state = TaskState::Cancelled;
+        tx.update_task(&dep)?;
+        let mut done = tx.get_task("p", "T-2")?.unwrap();
+        done.deps = vec!["T-1".to_string()];
+        done.state = TaskState::Done;
+        tx.update_task(&done)
+    })
+    .unwrap();
+
+    let result = run(
+        &mut s,
+        "## T-2 [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: T-1\n",
+        1,
+        "v2",
+    )
+    .unwrap();
+
+    assert_eq!(result.version, 2);
+    assert_eq!(state(&mut s, "T-2"), TaskState::Done);
+}
+
+/// One line per pair: two live tasks waiting on the cancelled one are both
+/// named in the one refusal.
+#[test]
+fn every_pair_gets_its_own_line() {
+    let mut s = world();
+    run(
+        &mut s,
+        "## NEW [must] lane=heat\ngoal: C\naccept: c\nestimate: 30\ndeps: T-1\n",
+        1,
+        "v2",
+    )
+    .unwrap();
+
+    let error = run(
+        &mut s,
+        "## T-1 [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n\n## T-2 [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: T-1\n\n## T-3 [must] lane=heat\ngoal: C\naccept: c\nestimate: 30\ndeps: T-1\n",
+        2,
+        "v3",
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::BadFormat);
+    let lines: Vec<&str> = error.detail.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "T-2 depends on cancelled T-1: drop or replace that dependency",
+            "T-3 depends on cancelled T-1: drop or replace that dependency",
+        ]
+    );
+    assert_eq!(state(&mut s, "T-1"), TaskState::Ready, "nothing was applied");
 }
 
 // ---- T-112: a done task whose merge was given up can be cancelled ----------
