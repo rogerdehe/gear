@@ -7,6 +7,10 @@
 //! Slice 1 (messaging loop): identity, mail::{send, reply, select_batch}, home.
 //! Slice 2 adds plan/tasks/verdicts.
 
+/// Scratch directories of the unit tests, removed when the test is done (T-412).
+#[cfg(test)]
+pub(crate) mod testtmp;
+
 pub mod admin;
 pub mod base;
 pub mod captain;

@@ -3461,6 +3461,50 @@ fn print_skill(topic: &str) -> GearResult<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A fresh scratch directory under the temp directory, unique to this test
+    /// and this name, removed when the test is done (T-412): a passing run
+    /// leaves nothing behind. The same name in one test is the same directory.
+    pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
+        use std::cell::{Cell, RefCell};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static THREADS: AtomicU64 = AtomicU64::new(0);
+
+        /// The directories one test made, removed when that test is done.
+        struct Made {
+            /// The number of this thread, given at its first scratch directory.
+            thread: Cell<Option<u64>>,
+            /// The directories it made, by name.
+            dirs: RefCell<Vec<(String, std::path::PathBuf)>>,
+        }
+
+        impl Drop for Made {
+            fn drop(&mut self) {
+                for (_, dir) in self.dirs.borrow().iter() {
+                    std::fs::remove_dir_all(dir).ok();
+                }
+            }
+        }
+
+        thread_local! {
+            static MADE: Made = const { Made { thread: Cell::new(None), dirs: RefCell::new(Vec::new()) } };
+        }
+
+        MADE.with(|made| {
+            if let Some((_, dir)) = made.dirs.borrow().iter().find(|(named, _)| named == name) {
+                return dir.clone();
+            }
+            let thread = made.thread.get().unwrap_or_else(|| {
+                let thread = THREADS.fetch_add(1, Ordering::Relaxed);
+                made.thread.set(Some(thread));
+                thread
+            });
+            let dir = std::env::temp_dir().join(format!("{name}-{}-{thread}", std::process::id()));
+            std::fs::remove_dir_all(&dir).ok();
+            std::fs::create_dir_all(&dir).expect("a scratch directory");
+            made.dirs.borrow_mut().push((name.to_string(), dir.clone()));
+            dir
+        })
+    }
     #[test]
     fn help_lists_every_skill_topic() {
         use clap::CommandFactory;
@@ -3794,12 +3838,7 @@ mod tests {
 
     /// Write `text` to a unique temp file and return its path.
     fn write_draft(text: &str) -> std::path::PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let path = std::env::temp_dir()
-            .join(format!("gear-draft-{}-{nanos}.md", std::process::id()));
+        let path = scratch("gear-draft").join("draft.md");
         std::fs::write(&path, text).unwrap();
         path
     }
@@ -5280,10 +5319,7 @@ path="api"
     /// A pi session log with one assistant record: the usage a report counts
     /// (T-207).
     fn pi_log(name: &str, at: i64) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "gear-t207-{name}-{}.jsonl",
-            std::process::id()
-        ));
+        let path = scratch("gear-t207").join(format!("{name}.jsonl"));
         let record = serde_json::json!({
             "type": "message",
             "timestamp": at,
@@ -6859,11 +6895,7 @@ path="api"
 
     /// A unique directory for a lock file.
     fn lock_dir(tag: &str) -> std::path::PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        std::env::temp_dir().join(format!("gear-lock-{}-{tag}-{nanos}", std::process::id()))
+        scratch(&format!("gear-lock-{tag}"))
     }
 
     #[test]
@@ -7022,9 +7054,7 @@ path="api"
     #[test]
     fn a_changed_binary_on_disk_is_told_once_over_two_ticks() {
         let (mut store, mut herdr) = world();
-        let dir = std::env::temp_dir().join(format!("gear-binary-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch("gear-binary");
         let binary = dir.join("gear");
         std::fs::write(&binary, b"the old build").unwrap();
         let mut watch = BinaryWatch::at_start(binary.clone());
@@ -7190,9 +7220,7 @@ path="api"
 
     #[test]
     fn projects_in_reads_the_store_read_only() {
-        let dir = std::env::temp_dir().join(format!("gear-stop-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch("gear-stop");
         let db = dir.join("gear.db");
         let mut store = Store::open(&db).unwrap();
         store
@@ -7209,7 +7237,7 @@ path="api"
 
     #[test]
     fn projects_in_says_nothing_for_an_unreadable_store() {
-        let missing = std::env::temp_dir().join(format!("gear-stop-missing-{}/gear.db", std::process::id()));
+        let missing = scratch("gear-stop-missing").join("gear.db");
         assert_eq!(projects_in(&missing), None, "the stop goes on without a notice");
     }
 
@@ -7446,7 +7474,7 @@ path="api"
     fn show_carries_the_projects_standard() {
         let (mut store, mut herdr) = world();
         seed_task(&mut store, "T-1", Some("heat"));
-        let dir = std::env::temp_dir().join(format!("gear-standard-{}", std::process::id()));
+        let dir = scratch("gear-standard");
         std::fs::create_dir_all(dir.join("gear")).expect("the checkout");
         std::fs::write(
             dir.join("gear/standard.md"),
@@ -7603,8 +7631,7 @@ mod default_store_tests {
 
     #[test]
     fn each_herdr_session_gets_its_own_store_unless_one_is_registered() {
-        let home = std::env::temp_dir().join(format!("gear-default-store-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
+        let home = crate::tests::scratch("gear-default-store");
         let sock = |name: &str| home.join(".config/herdr/sessions").join(name).join("herdr.sock").to_string_lossy().to_string();
         let shared = home.join(".local/state/gear/gear.db");
         assert_eq!(default_store_in(&home, None), shared, "no Herdr: the shared store");

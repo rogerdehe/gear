@@ -2321,7 +2321,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 
     /// An engine that knows the codex profile.
     fn cfg() -> EngineCfg {
-        let mut cfg = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
+        let mut cfg = EngineCfg { db_path: crate::testtmp::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
         for kind in ["codex", "opencode", "claude"] {
             cfg.profiles
                 .insert(kind.to_string(), gear_herdr::builtin(kind).unwrap());
@@ -3546,9 +3546,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 
     #[test]
     fn direct_checkout_stashes_dirty_worktrees_and_reports_them() {
-        let root = std::env::temp_dir().join(format!("gear-review-direct-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::testtmp::temp("gear-review-direct");
         sh(&root, "git init -q --bare origin.git && git init -q -b dev work");
         let work = root.join("work");
         std::fs::write(work.join("readme"), "base").unwrap();
@@ -3587,9 +3585,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 
     #[test]
     fn real_git_checkout_uses_the_submitted_commit() {
-        let root = std::env::temp_dir().join(format!("gear-review-clean-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::testtmp::temp("gear-review-clean");
         sh(&root, "git init -q --bare origin.git && git init -q -b dev work");
         let work = root.join("work");
         std::fs::write(work.join("readme"), "base").unwrap();

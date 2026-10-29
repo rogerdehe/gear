@@ -8,10 +8,7 @@ use std::process::Command;
 /// A scratch home: the version writes nothing, and this is where "nothing" is
 /// looked for.
 fn scratch_home(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("gear-version-{}-{tag}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).expect("a scratch home");
-    dir
+    crate::scratch::temp(&format!("gear-version-{tag}"))
 }
 
 /// A `gear` call that cannot reach the real store (T-41).
