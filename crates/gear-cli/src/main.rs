@@ -6782,6 +6782,24 @@ path="api"
         assert!(line.contains("build=") && !line.contains("build=\n"), "{line}");
     }
 
+    /// T-398 (rework F1): the embedded sha is the commit this binary was built
+    /// from. build.rs reruns when the branch's ref moves, so a rebuild after a
+    /// commit on the same branch cannot keep the preceding commit's sha.
+    #[test]
+    fn the_build_sha_is_the_commit_this_binary_was_built_from() {
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .output();
+        // No git, or no repository: the binary says it was built without one.
+        let head = head.ok().filter(|out| out.status.success()).map(|out| {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        });
+        match head {
+            Some(head) => assert_eq!(env!("GEAR_BUILD_SHA"), head),
+            None => assert_eq!(env!("GEAR_BUILD_SHA"), "unknown"),
+        }
+    }
+
     /// T-398: a binary replaced on disk under a running engine is told once —
     /// one engine-log line and one captain item per project, not one a tick.
     #[test]
