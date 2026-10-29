@@ -65,6 +65,9 @@ pub struct ApplyResult {
 ///    seat) in draft order, in the same transaction — any error aborts the whole
 ///    apply; settled lines are listed in `settled`;
 /// 5. validation, nothing written on failure (`BadFormat`, detail names the task/line):
+///    - a departed voyage's goal (`title`, `done:`, `bar:` and stations) is
+///      locked: an apply that changes it is refused with `GoalLocked` and
+///      writes nothing (T-331); `eta:` is not locked;
 ///    - an existing id must exist; a `NEW` block needs `lane`, `goal`, `accept`
 ///      and `estimate` (the planned time in minutes, T-38);
 ///    - every dep names an existing task or a task of this draft; no cycle;

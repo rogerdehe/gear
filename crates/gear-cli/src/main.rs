@@ -3926,8 +3926,8 @@ mod tests {
             other => panic!("not a plan apply: {other:?}"),
         }
 
-        // The flag is set on the draft before the apply: M2 departs with the
-        // first block, so its eta moves only with the confirmation.
+        // T-331: M2 departs with its first block, and the eta of a departed
+        // voyage is not locked, so the change applies without the flag.
         let (mut store, mut herdr) = world();
         let path = write_draft(&plan_draft_with_milestone());
         run_plan(
@@ -3948,7 +3948,7 @@ mod tests {
             "base=1",
         );
         let path = write_draft(&changed);
-        let err = run_plan(
+        run_plan(
             &mut store,
             &env("captain", CAP_PANE),
             &mut herdr,
@@ -3960,9 +3960,14 @@ mod tests {
             false,
             false,
         )
-        .unwrap_err();
-        assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
-        assert!(err.detail.contains("milestone M2: eta changed after departure"), "{}", err.detail);
+        .unwrap();
+        assert_eq!(
+            store.read(|tx| tx.get_voyage("p", "M2")).unwrap().unwrap().eta.as_deref(),
+            Some("2h")
+        );
+        // The flag still reaches the draft and an apply carrying it runs.
+        let confirmed = changed.replace("eta: 2h", "eta: 3h").replace("base=1", "base=2");
+        let path = write_draft(&confirmed);
         run_plan(
             &mut store,
             &env("captain", CAP_PANE),
@@ -3978,7 +3983,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             store.read(|tx| tx.get_voyage("p", "M2")).unwrap().unwrap().eta.as_deref(),
-            Some("2h")
+            Some("3h")
         );
     }
 
