@@ -12,15 +12,24 @@ const RECOVERED_REASON: &str = "engine restarted before the call finished";
 
 /// The probe lines this process wrote and no one has drained yet (T-407).
 ///
-/// The engine has no log writer of its own: `gear run` sends its stderr into
-/// `engine.log` (as it does for the store's slow-write line), so [`probe`]
-/// writes the line there, and keeps it here for a test to read. A caller that
-/// never drains (a library test) does not grow for ever.
+/// The engine has no log writer of its own: [`take_probe_log`] hands the lines
+/// to `gear-cli`, which writes them into its tick log beside the release lines
+/// (T-398), so they carry the same stamp. A test reads them with
+/// [`probe_log`] instead, which does not drain: two tests running side by side
+/// would take each other's lines, and each test reads its own by a seat or
+/// task id no other test uses. A caller that never drains does not grow for
+/// ever.
 static PROBE_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// The probe lines this process wrote, oldest first (T-407): a test reads the
-/// one it caused by its own seat or task, which is why nothing drains them
-/// (two tests running side by side would take each other's lines).
+/// The probe lines written since the last call, oldest first: the engine
+/// writes them into its log (T-407).
+pub fn take_probe_log() -> Vec<String> {
+    let mut log = PROBE_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    std::mem::take(&mut *log)
+}
+
+/// The probe lines this process wrote, oldest first, without draining them
+/// (T-407): what a test reads.
 pub fn probe_log() -> Vec<String> {
     PROBE_LOG.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
@@ -38,10 +47,9 @@ fn probe_line(op: &str, subject: &str, step: &str, ms: i64, total: i64) -> Strin
 }
 
 /// Write one probe line into the engine log and keep it for the tests
-/// (T-407).
+/// (T-407): the engine drains it into its tick log every tick.
 pub(crate) fn probe(op: &str, subject: &str, step: &str, ms: i64, total: i64) {
     let line = probe_line(op, subject, step, ms, total);
-    eprintln!("{line}");
     let mut log = PROBE_LOG.lock().unwrap_or_else(|e| e.into_inner());
     if log.len() >= 1024 {
         log.remove(0);
