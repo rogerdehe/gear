@@ -65,7 +65,7 @@ fn a_configured_profile_onboards_its_lane() {
     std::env::set_var("HOME", home.path());
 
     let mut s = Store::open_in_memory().unwrap();
-    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, CONFIG,Some(crate::skill_home()), T0).unwrap();
+    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, CONFIG,Some(crate::skill_home()), None, T0).unwrap();
     let mut herdr = FakeHerdr::new();
 
     let active = onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap();

@@ -282,6 +282,11 @@ enum AdminOp {
         /// CLIs, so it never happens unless asked for.
         #[arg(long, requires = "check")]
         models: bool,
+        /// The user's own words for a change to the staffing of a departed
+        /// voyage (T-392): `quota`, `lanes`, `temps` or `models` may only
+        /// change mid-voyage once the user was asked.
+        #[arg(long)]
+        user: Option<String>,
     },
     /// Print what this machine offers, for the captain's kickoff proposal.
     Kickoff,
@@ -411,8 +416,8 @@ fn run(cli: Cli) -> GearResult<()> {
         },
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Friction(c)) => cmd_friction(c, cli.json),
-        Some(Cmd::Admin { op: AdminOp::Init { config, check, models } }) => {
-            cmd_admin_init(&config, check, models, cli.json)
+        Some(Cmd::Admin { op: AdminOp::Init { config, check, models, user } }) => {
+            cmd_admin_init(&config, check, models, user.as_deref(), cli.json)
         }
         Some(Cmd::Admin { op: AdminOp::Kickoff }) => cmd_admin_kickoff(cli.json),
         Some(Cmd::Admin { op: AdminOp::InstallSkill { agent } }) => {
@@ -712,8 +717,12 @@ fn cmd_admin_init(
     config: &std::path::Path,
     check_only: bool,
     with_models: bool,
+    user: Option<&str>,
     json: bool,
 ) -> GearResult<()> {
+    // T-392 (rework F1): words that are blank once trimmed are no words —
+    // neither the check nor the init takes `--user ""` for an agreement.
+    let user = user.map(str::trim).filter(|words| !words.is_empty());
     // T-261: the lane list — `(name, kind, model)` — with the model being the
     // lane's first `models` entry, else the role chain's first, else "-".
     let lane_list = |parsed: &gear_app::config::ProjectConfig| -> Vec<(String, String, String)> {
@@ -884,6 +893,14 @@ fn cmd_admin_init(
         {
             return Err(GearError::new(gear_model::ErrorCode::BadFormat, problem));
         }
+        // T-392: a departed voyage's staffing does not change without the
+        // user's words. The check reports the same refusal a real init would
+        // write, and writes nothing itself.
+        if user.is_none() {
+            if let Some(problem) = staffing_refusal_of(&parsed)? {
+                return Err(problem);
+            }
+        }
         let lanes = parsed.lanes.len();
         let reviewers = parsed.quota.temps;
         // T-315: only when asked for — this runs the CLIs.
@@ -983,6 +1000,7 @@ fn cmd_admin_init(
         herdr_ref,
         &ancestors,
         home.as_deref(),
+        user,
         now_ts(),
     )?;
     // T-321: remember which file this config was applied from, so the home
@@ -1119,6 +1137,47 @@ fn other_projects() -> GearResult<Option<Vec<(String, String, i64)>>> {
             Ok(others)
         })
         .map(Some)
+}
+
+/// The staffing refusal `admin init --check` reports for a registered project
+/// whose departed voyage is under way and whose config changes `quota`,
+/// `lanes`, `temps` or `models` (T-392), or `None` when nothing is locked. It
+/// reads the same store `other_projects` does, with the same path rule,
+/// read-only.
+fn staffing_refusal_of(parsed: &gear_app::config::ProjectConfig) -> GearResult<Option<GearError>> {
+    let path = match std::env::var_os(gear_model::ctx::ENV_DB) {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            let Some(home) = std::env::var_os("HOME") else {
+                return Ok(None);
+            };
+            let socket = std::env::var("HERDR_SOCKET_PATH").ok();
+            default_store_in(&std::path::PathBuf::from(home), socket.as_deref())
+        }
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut store = gear_store::Store::open_read_only(&path)?;
+    store.read(|tx| {
+        let Some(row) = tx.get_project(&parsed.project.id)? else {
+            return Ok(None);
+        };
+        let Ok(stored) = gear_app::config::parse(&row.config_toml) else {
+            return Ok(None);
+        };
+        let changes = gear_app::admin::staffing_changes(&stored, parsed);
+        if !gear_app::admin::staffing_changed(&stored, parsed) {
+            return Ok(None);
+        }
+        let Some(voyage) = gear_app::admin::staffing_voyage(tx, &parsed.project.id)? else {
+            return Ok(None);
+        };
+        Ok(Some(GearError::new(
+            gear_model::ErrorCode::StaffLocked,
+            gear_app::admin::staffing_refusal(&voyage, &changes),
+        )))
+    })
 }
 
 /// The lane names this project's seats hold as `Retired` (T-304), for the lane

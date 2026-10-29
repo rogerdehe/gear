@@ -315,6 +315,7 @@ fn check_cmd(
     ctx: Option<&str>,
     admin: bool,
     json: bool,
+    user: Option<&str>,
 ) -> Output {
     for agent in gear_app::skill::SkillAgent::ALL {
         gear_app::skill::install(*agent, home).expect("install the skill");
@@ -322,6 +323,10 @@ fn check_cmd(
     let mut args = vec!["admin", "init", "--check"];
     if json {
         args.push("--json");
+    }
+    if let Some(words) = user {
+        args.push("--user");
+        args.push(words);
     }
     args.push(config.to_str().expect("a utf-8 path"));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_gear"));
@@ -410,13 +415,13 @@ fn check_validates_a_config_and_opens_no_store() {
 
     // No GEAR_ADMIN=1: a check needs nobody's consent, because it changes
     // nothing.
-    let o = check_cmd(&dir, &db, &path, None, false, false);
+    let o = check_cmd(&dir, &db, &path, None, false, false, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(headline(&o), "config ok: project p, 1 lanes, 1 reviewers");
     assert!(!db.exists(), "no store was opened");
 
     // The JSON form names the same three facts.
-    let o = check_cmd(&dir, &db, &path, None, false, true);
+    let o = check_cmd(&dir, &db, &path, None, false, true, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let parsed: serde_json::Value = serde_json::from_str(stdout(&o).trim()).expect("json");
     assert_eq!(parsed["ok"], serde_json::json!(true));
@@ -427,7 +432,7 @@ fn check_validates_a_config_and_opens_no_store() {
 
     // A seat's pane may check too: no caller check, so no store is read to
     // prove who is asking.
-    let o = check_cmd(&dir, &db, &path, Some("other:heat:1"), false, false);
+    let o = check_cmd(&dir, &db, &path, Some("other:heat:1"), false, false, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert!(!db.exists(), "still no store");
 }
@@ -487,7 +492,7 @@ fn check_reports_the_issues_init_reports() {
     .expect("the config");
     let db = dir.join("gear.db");
 
-    let o = check_cmd(&dir, &db, &path, None, false, false);
+    let o = check_cmd(&dir, &db, &path, None, false, false, None);
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     let checked = stderr(&o);
     assert!(checked.contains("ERROR BAD_FORMAT"), "{checked}");
@@ -532,7 +537,7 @@ fn check_refuses_a_second_project_on_the_same_repo() {
     let db = dir.join("gear.db");
     // With no store yet there is nothing to collide with, and the check says
     // what it skipped.
-    let o = check_cmd(&dir, &db, &config_for(&dir, "p", &repo), None, false, false);
+    let o = check_cmd(&dir, &db, &config_for(&dir, "p", &repo), None, false, false, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(stderr(&o).trim(), "cross-project check skipped: no store");
     assert!(!db.exists(), "a check creates no store");
@@ -543,7 +548,7 @@ fn check_refuses_a_second_project_on_the_same_repo() {
 
     // `q` on the same repository with the default templates is refused,
     // naming `p` and the repository.
-    let o = check_cmd(&dir, &db, &config_for(&dir, "q", &repo), None, false, false);
+    let o = check_cmd(&dir, &db, &config_for(&dir, "q", &repo), None, false, false, None);
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     let err = stderr(&o);
     assert!(err.starts_with("ERROR BAD_FORMAT: "), "{err}");
@@ -553,7 +558,7 @@ fn check_refuses_a_second_project_on_the_same_repo() {
     assert_eq!(std::fs::metadata(&db).expect("the store").len(), before, "a check writes nothing");
 
     // On another repository the same config passes.
-    let o = check_cmd(&dir, &db, &config_for(&dir, "q", &elsewhere), None, false, false);
+    let o = check_cmd(&dir, &db, &config_for(&dir, "q", &elsewhere), None, false, false, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(headline(&o), "config ok: project q, 0 lanes, 0 reviewers");
 }
@@ -648,7 +653,7 @@ fn check_names_every_lane_and_the_reviewers_with_their_models() {
     let path = config_two_lanes(&dir, &repo);
     let db = dir.join("gear.db");
 
-    let o = check_cmd(&dir, &db, &path, None, false, false);
+    let o = check_cmd(&dir, &db, &path, None, false, false, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(
         stdout(&o),
@@ -669,7 +674,7 @@ fn check_json_carries_the_lane_list_and_review_model() {
     let path = config_two_lanes(&dir, &repo);
     let db = dir.join("gear.db");
 
-    let o = check_cmd(&dir, &db, &path, None, false, true);
+    let o = check_cmd(&dir, &db, &path, None, false, true, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let parsed: serde_json::Value = serde_json::from_str(stdout(&o).trim()).expect("json");
     assert_eq!(
@@ -705,7 +710,7 @@ fn check_says_none_without_temps_and_dashes_without_models() {
     .expect("the config");
     let db = dir.join("gear.db");
 
-    let o = check_cmd(&dir, &db, &path, None, false, false);
+    let o = check_cmd(&dir, &db, &path, None, false, false, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(
         stdout(&o),
@@ -714,7 +719,7 @@ fn check_says_none_without_temps_and_dashes_without_models() {
          \x20 reviewers: none\n"
     );
 
-    let o = check_cmd(&dir, &db, &path, None, false, true);
+    let o = check_cmd(&dir, &db, &path, None, false, true, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let parsed: serde_json::Value = serde_json::from_str(stdout(&o).trim()).expect("json");
     assert_eq!(
@@ -1071,7 +1076,7 @@ fn check_refuses_more_lanes_than_the_quota_allows() {
     .expect("the config");
     let db = dir.join("gear.db");
 
-    let o = check_cmd(&dir, &db, &path, None, false, false);
+    let o = check_cmd(&dir, &db, &path, None, false, false, None);
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     let checked = stderr(&o);
     assert!(checked.contains("ERROR BAD_FORMAT"), "{checked}");
@@ -1137,6 +1142,128 @@ fn a_changed_seat_branch_prints_the_worktree_it_leaves_behind() {
     assert_eq!(config_version(&db), 2);
 }
 
+/// A config for project `p` with `temps` reviewers and one lane (T-392).
+fn staffing_config(repo: &Path, temps: u32) -> String {
+    format!(
+        "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\
+         \n[quota]\nlanes = 3\ntemps = {temps}\n\
+         \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+         \n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\n\
+         kind = \"codex\"\nprofile = \"codex\"\n\
+         \n[temps]\nkind = \"codex\"\nprofile = \"codex\"\n\
+         \n[models]\nlanes = [\"gpt-6.1-sol\"]\nreview = [\"deepseek/deepseek-flash\"]\n\
+         on_quota = {{ lanes = \"wait\", review = \"wait\" }}\n\
+         \n[conventions]\ngate = \"make test\"\n",
+        repo = serde_json::json!(repo.to_string_lossy()).to_string()
+    )
+}
+
+/// T-392: `admin init --check` reports the staffing refusal of a departed
+/// voyage — the same text a real init writes — and writes nothing.
+#[test]
+fn check_reports_a_staffing_change_of_a_departed_voyage() {
+    const T0: i64 = 1_800_000_000;
+    let dir = scratch("staff-locked");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let db = dir.join("gear.db");
+    // The registered project: voyage M1 departed, one task still open.
+    {
+        let mut store = Store::open(&db).expect("the store");
+        store
+            .write(|tx| {
+                tx.insert_project(&gear_store::ProjectRow {
+                    id: "p".to_string(),
+                    herdr_session: "sess".to_string(),
+                    config_toml: staffing_config(&repo, 6),
+                    config_version: 1,
+                    quota_lanes: 3,
+                    quota_temps: 6,
+                    quota_includes_captain: false,
+                    plan_version: 1,
+                    created: T0,
+                })?;
+                tx.upsert_voyage(&gear_store::VoyageRow {
+                    project: "p".to_string(),
+                    milestone: "M1".to_string(),
+                    title: "the M1 station".to_string(),
+                    done: Some("users install it".to_string()),
+                    bar: Some("STABLE".to_string()),
+                    eta: Some("8h".to_string()),
+                    departure: Some(T0),
+                    departure_tasks: Some(1),
+                    departure_estimate_min: Some(30),
+                    updated: T0,
+                })?;
+                tx.insert_task(&gear_store::TaskRow {
+                    project: "p".to_string(),
+                    id: "T-1".to_string(),
+                    rank: 0,
+                    state: gear_model::TaskState::Ready,
+                    priority: "must".to_string(),
+                    lane: Some("heat".to_string()),
+                    milestone: Some("M1".to_string()),
+                    required: true,
+                    contract_version: 1,
+                    deps: Vec::new(),
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(30),
+                    issue: None,
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    updated: T0,
+                })
+            })
+            .expect("the world");
+    }
+
+    // The config now asks for 3 reviewers instead of the 6 agreed at kickoff.
+    let changed = dir.join("gear.toml");
+    std::fs::write(&changed, staffing_config(&repo, 3)).expect("the config");
+    let o = check_cmd(&dir, &db, &changed, None, false, false, None);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.contains("STAFF_LOCKED"), "{err}");
+    assert!(err.contains("quota.temps: 6 → 3"), "{err}");
+    assert!(
+        err.contains("the staffing of voyage M1 was agreed at its kickoff"),
+        "{err}"
+    );
+    assert_eq!(config_version(&db), 1, "the check wrote nothing");
+
+    // Rework F1: `--user` with blank words is still no agreement, so the check
+    // refuses as it does without the flag...
+    for blank in ["", "   "] {
+        let o = check_cmd(&dir, &db, &changed, None, false, false, Some(blank));
+        assert_eq!(o.status.code(), Some(1), "for {blank:?}: {}", stderr(&o));
+        assert!(
+            stderr(&o).contains("STAFF_LOCKED"),
+            "for {blank:?}: {}",
+            stderr(&o)
+        );
+    }
+    assert_eq!(config_version(&db), 1, "the checks wrote nothing");
+
+    // ...and the user's own words make it the change they agreed to.
+    let o = check_cmd(
+        &dir,
+        &db,
+        &changed,
+        None,
+        false,
+        false,
+        Some("lower the reviewers to three, I said so"),
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(headline(&o), "config ok: project p, 1 lanes, 3 reviewers");
+    assert_eq!(config_version(&db), 1, "a check writes nothing");
+}
+
 /// A config for project `p` on `repo` whose gate is `gate` — the one line the
 /// change-list tests rewrite (T-388).
 fn config_with_gate(dir: &Path, repo: &Path, gate: &str) -> PathBuf {
@@ -1172,7 +1299,7 @@ fn check_shows_what_a_re_init_would_change() {
 
     // The file changes one line: the check names it, the old one and the new.
     let path = config_with_gate(&dir, &repo, "make gate");
-    let o = check_cmd(&dir, &db, &path, None, false, false);
+    let o = check_cmd(&dir, &db, &path, None, false, false, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(
         stdout(&o),
@@ -1186,7 +1313,7 @@ fn check_shows_what_a_re_init_would_change() {
     assert_eq!(config_version(&db), 1, "the registration stands");
 
     // The JSON form carries the same lines.
-    let o = check_cmd(&dir, &db, &path, None, false, true);
+    let o = check_cmd(&dir, &db, &path, None, false, true, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let parsed: serde_json::Value = serde_json::from_str(stdout(&o).trim()).expect("json");
     assert_eq!(
@@ -1207,7 +1334,7 @@ fn check_says_no_change_for_the_registered_config() {
     let o = init(&dir, &db, &path, None, true);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
 
-    let o = check_cmd(&dir, &db, &path, None, false, false);
+    let o = check_cmd(&dir, &db, &path, None, false, false, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(
         stdout(&o),
@@ -1216,7 +1343,7 @@ fn check_says_no_change_for_the_registered_config() {
          \x20 reviewers: none\n"
     );
 
-    let o = check_cmd(&dir, &db, &path, None, false, true);
+    let o = check_cmd(&dir, &db, &path, None, false, true, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let parsed: serde_json::Value = serde_json::from_str(stdout(&o).trim()).expect("json");
     assert_eq!(parsed["changes"], serde_json::json!([]));
@@ -1236,13 +1363,13 @@ fn check_says_nothing_of_a_change_for_a_first_registration() {
 
     // No store yet: no change line, and an empty list in the JSON form.
     let path = config_with_gate(&dir, &repo, "make test");
-    let o = check_cmd(&dir, &db, &path, None, false, false);
+    let o = check_cmd(&dir, &db, &path, None, false, false, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(
         stdout(&o),
         "config ok: project p, 0 lanes, 0 reviewers\n  reviewers: none\n"
     );
-    let o = check_cmd(&dir, &db, &path, None, false, true);
+    let o = check_cmd(&dir, &db, &path, None, false, true, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let parsed: serde_json::Value = serde_json::from_str(stdout(&o).trim()).expect("json");
     assert_eq!(parsed["changes"], serde_json::json!([]));
@@ -1251,7 +1378,7 @@ fn check_says_nothing_of_a_change_for_a_first_registration() {
     // registered config of its own id.
     let o = init(&dir, &db, &path, None, true);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    let o = check_cmd(&dir, &db, &config_for(&dir, "q", &elsewhere), None, false, false);
+    let o = check_cmd(&dir, &db, &config_for(&dir, "q", &elsewhere), None, false, false, None);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(
         stdout(&o),
