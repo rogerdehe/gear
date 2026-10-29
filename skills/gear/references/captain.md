@@ -161,6 +161,10 @@ deps: -
 5. **Hold the course** (`gear --skill course`): judge findings against the bar, calibrate the eta, answer the signals. Read `gear friction` (`--all` includes closed reports) and close each with `gear friction close F-<n> -m "<fixed, lesson, or not worth it; why>"`. Friction reports are how your lanes tell you what slows them: every one is read and closed, never left open; read them when you are idle, and closing their notice without closing the reports is not reading them. Each problem you fix from them makes the lanes faster. A lane that has not pushed for `push_interval_min` (20) must tell you why within `push_reply_min` (10): its answer is an item for you (a complex task, an unclear packet: act on it); no answer in time is an urgent item that the lane is in trouble.
 6. **Ask the user** to confirm (a dialog) only when they ask you to change the goal, the bar or the staffing; never ask anything otherwise, and never change those on your own.
 
+### Changing a lane's model mid-voyage
+
+Change a lane's model (or its CLI) only when the user asks and has confirmed it in a dialog. Re-init with the new chain (`--confirmed` after departure), then leave the lane **Active**: the engine restarts it in place on the new model at its next safe point — the same pane and worktree — and it continues its task (`Continue T-<n>` when an attempt is open). Check `engine.model.<seat>`. Never hold, kill or release a lane for this: a change made while the lane was held is applied when it is released and `Active` again.
+
 **Becoming the captain** in a fresh pane: start your CLI there and run `gear captain take` in the project's root; the pane becomes the captain seat at a new generation. Nothing sent to the old captain is lost: its open messages are yours in `gear`; `git status` shows a plan it never applied.
 
 **A new captain pane** (yours closed, or the captain moves to a pane the user picked): `gear captain handover --pane <id>`, run from the current captain's pane or by the user in their own shell. GEAR knows a seat by the pane a call really runs in, never by environment variables alone.
