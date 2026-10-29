@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=678 -->
+<!-- gear-plan project=gear base=679 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -86,6 +86,7 @@ eta: 16h
 - station M-5012: keep course 540 min in, 86 done; by throughput about 330 min on hull and 345 on mast; merges run one at a time with the whole suite (about 6 min each), so 51 merges need about 306 of the 420 min left: the merge queue is the next limit to watch; load is down from 140 to 21
 - station M-5029: keep course 549 min in, 87 done; same reading as M-5012 (the span sum until T-390 merges; by throughput a finish near 875 min)
 - 2026-10-29 10:50 hand-fix: another project's user had its engine stopped and every gear call restarted it; on the user's order the captain commented out that session's line in ~/.config/gear/targets.tsv (backup kept), so fn ensure_engine starts nothing for it, then stopped its engine; T-394 makes `gear admin stop --hold` the supported way | why: the user's stop must stick | else: the engine returns seconds after each stop
+- station M-5068: keep course 569 min in, 90 done; by throughput mast is now the slow lane (1560 estimated min done at 0.36, 975 left: about 356 min, a finish near 925 of 960) and hull has 425 left at 0.65 (about 275); T-385 and T-387, which touch only hull's crates, move back to hull (about 25 wall min off mast)
 - 2026-10-29 09:45 hand-fix: another project's review seats restarted in a loop (844 temp starts for about fifty reviews): the idle sweep releases a Standby reviewer that still holds its pending review; T-391 fixes it, and that captain lowered `[quota] temps` from 6 to 3 until the fix is in the shared binary | why: each restart costs a login shell and a codex launch on the shared machine | else: the loop runs until the voyage ends
 - ★ 2026-10-29 09:20 estimate: the 24 h eta proposal is withdrawn; the eta stays 16 h and a short clock is answered by working faster, never by moving the eta (user: "如果每次时间不够了，就往后推一个工作，就他妈会无限延期！") | why: the forecast was wrong, not the lanes: crates/gear-board/src/voyage.rs measures a lane by the sum of its tasks' start-to-merge spans, but review and merge run beside the lane's next task, so the same minutes count twice; measured by throughput (estimate done per lane wall minute since departure) hull runs 0.65 (550 min left → about 357) and mast 0.32 (895 left → about 290), a finish near 845 min of 960; T-390 fixes the forecast, T-385 moves to mast to even the lanes | else: the station alarms keep pushing the eta out
 # Queue
@@ -824,9 +825,9 @@ goal: [v0.5.0 S1] The board does no work while nothing changes (user, 2026-10-29
 accept: Board tests with a counting store wrapper or a test hook: with no store change and no key, ten refresh periods build the board once; a write to the store makes the next refresh rebuild; a key press redraws without rebuilding; after 60 s it rebuilds once. A gear-store test for `data_version` changing after a write from another connection. Run only `make check CRATE=gear-store` and `make check CRATE=gear-board`; the merge gate runs `make gate`.
 estimate: 30
 
-## T-385 [must] lane=mast milestone=M5 required
+## T-385 [must] lane=hull milestone=M5 required
 goal: [v0.5.0 S1] The store reuses its prepared statements, so a tick or a board frame does not re-parse every query (sampling of the engine and the board, 2026-10-29: after waiting, the largest cost is SQLite parsing — sqlite3RunParser and sqlite3GetToken — because crates/gear-store/src/lib.rs calls `self.tx.prepare(…)` on every query). Change crates/gear-store/src/lib.rs only, no other design: every `prepare(` on the connection or transaction becomes `prepare_cached(` (rusqlite's statement cache), and the connection's cache capacity is set to 256 where the connection is opened (`set_prepared_statement_cache_capacity`). No query text or result changes. The code change is in crates/gear-store/src/lib.rs only.
-accept: (Moved to mast for balance, 2026-10-29: crates/gear-store/src/lib.rs is an allowed edit for mast.) `grep -c "\.prepare(" crates/gear-store/src/lib.rs` prints 0 outside test code; the existing store tests pass unchanged. Run only `make check CRATE=gear-store`; the merge gate runs `make gate`.
+accept: `grep -c "\.prepare(" crates/gear-store/src/lib.rs` prints 0 outside test code; the existing store tests pass unchanged. Run only `make check CRATE=gear-store`; the merge gate runs `make gate`.
 mechanical: a call-for-call rename of prepare to prepare_cached plus one capacity line; the existing store suite proves it
 estimate: 20
 
@@ -836,7 +837,7 @@ accept: Engine tests: `branch_tips` on a fixture repo returns each remote branch
 deps: T-380, T-292
 estimate: 40
 
-## T-387 [must] lane=mast milestone=M5 required
+## T-387 [must] lane=hull milestone=M5 required
 goal: [v0.5.0 S1] A voyage whose `eta:` is not a duration does not depart (user, 2026-10-29: "他如果写错了规格，就不允许他起航…你给他兜什么底"; another project's eta began "8h, hard. M0 was given one hour…" and went on for five sentences, crates/gear-app/src/station.rs fn eta_seconds could not read it, so its board said "the voyage's time is unknown" and no eta station ever fired). Change, no other design: (1) crates/gear-app/src/plan.rs fn record_voyages refuses, with nothing written, a milestone block whose `eta:` is not wholly a duration (fn eta_seconds returns None: one or more `<number><unit>` groups and nothing else) with `bad(…, "milestone <M>: eta must be a duration GEAR measures the voyage against, e.g. `eta: 8h` or `eta: 1d 4h`; reasons go in # Decisions; got \"<the first 40 characters>\"")`; this holds for every block, departed or not, so a voyage with such an eta cannot depart and a plan that carries one cannot be applied (fn eta_seconds is made `pub(crate)` or moved where both use it); (2) skills/gear/references/captain.md, where `eta:` is described: "a duration (`8h`, `1d 4h`) and nothing else: apply refuses any other text, since the board, the stations and the forecast measure against it" (an allowed edit). fn eta_seconds itself stays strict. The code change is in plan.rs, station.rs and captain.md only; tests go where the crates keep them.
 accept: Plan tests: a block with `eta: 8h` or `eta: 1d 4h` applies; `eta: 8h, hard` and `eta: do it properly` are refused with the text and nothing is written (no task, no voyage, no departure). Existing fixtures that use a style word as eta change to a duration. Run only `make check CRATE=gear-app`; the merge gate runs `make gate`.
 estimate: 20
