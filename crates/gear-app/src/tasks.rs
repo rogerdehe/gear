@@ -293,7 +293,8 @@ pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_ve
         return Err(GearError::new(
             ErrorCode::BadFormat,
             format!(
-                "{task}: candidate {candidate} already failed on attempt {}: rework it and hand in a different candidate",
+                "{task}: candidate {candidate} already failed on attempt {}: rework it and hand in a \
+                 different candidate (commit your rework and hand in its sha: git rev-parse HEAD)",
                 failed.n
             ),
         ));
