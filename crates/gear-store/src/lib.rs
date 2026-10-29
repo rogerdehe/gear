@@ -887,6 +887,20 @@ fn set_version(tx: &rusqlite::Transaction<'_>, version: i64) -> GearResult<()> {
 impl<'s> Tx<'s> {
     // ---- infrastructure
 
+    /// SQLite's `PRAGMA data_version` (T-384): a number that moves when
+    /// **another** connection commits a write to the database, and stays put
+    /// for this connection's own writes (SQLite's documented behaviour). One
+    /// cheap query is all it costs, so a reader that shows the database can ask
+    /// it every second and rebuild only when it moved.
+    ///
+    /// The numbers are only comparable with the numbers of the same
+    /// connection: a caller keeps the last one it read and compares.
+    pub fn data_version(&self) -> GearResult<i64> {
+        self.tx
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .map_err(map_sqlite)
+    }
+
     /// Next id for `kind` in `project`: `T-1`, `T-2`, …; kinds: T M R V O. Never reused.
     pub fn next_id(&self, project: &str, kind: char) -> GearResult<String> {
         let kind = kind.to_string();
