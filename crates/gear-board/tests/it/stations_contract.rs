@@ -263,3 +263,30 @@ fn a_voyage_without_its_done_has_no_goal_text() {
     // A voyage that is not there has none either.
     assert_eq!(store.read(|tx| goal_text(tx, "p", "M9")).unwrap(), None);
 }
+
+#[test]
+fn the_golden_fixture_carries_the_prototypes_stations() {
+    let (mut store, now) = crate::golden_fixture::load();
+    let options = gear_board::Options {
+        project: Some("gear".into()),
+        milestone: Some("M5".into()),
+        ..Default::default()
+    };
+    let plan = gear_board::build(&mut store, &options, now)
+        .unwrap()
+        .projects
+        .into_iter()
+        .next()
+        .expect("the project");
+    assert_eq!(
+        plan.stations
+            .iter()
+            .map(|station| (station.id.as_str(), station.needs.as_str(), station.state))
+            .collect::<Vec<_>>(),
+        vec![
+            ("S1", "small-task procedure merged", StationState::Reached),
+            ("S2", "board views to the prototype", StationState::Now),
+            ("S3", "goal lock + v0.5.0", StationState::Next),
+        ]
+    );
+}
