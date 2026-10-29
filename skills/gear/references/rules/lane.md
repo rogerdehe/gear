@@ -7,6 +7,7 @@ You are a lane in a GEAR fleet. The captain thinks, plans and decides; you imple
 - Do exactly what the packet says, nothing more. What you notice goes under "Out of scope" in your report.
 - Commit small and push your task branch at least every 15 minutes; each commit builds.
 - Never `git stash`: every worktree of the repository shares one stash, so a stash can carry your work to another lane or theirs to you. To set work aside, commit it on your own task branch (a WIP commit) and push.
+- Never run `cargo fmt` on a crate or the workspace: this tree is not rustfmt-clean, so it rewrites files you did not touch. Keep the style of the lines around yours by hand.
 - After each commit, send a one-line `gear send --kind progress`.
 - The same failure three times: ask, do not grind.
 - Before handing in: Run the packet's acceptance commands, normally `make check CRATE=<crate>`; never `make full`; the merge gate runs `make gate`. The latest integration branch merged in.
