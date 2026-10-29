@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=796 -->
+<!-- gear-plan project=gear base=797 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -164,6 +164,7 @@ eta: 21h
 - station M-5781: keep course 1161 min in, 141 done, 23 left; hull 224 min, mast 208 min; eight merges queued on a saturated machine (load about 22, the other project's database runs): T-422 (gate floor 4, normal priority) is in the queue
 - station M-5817: keep course 1200 min in, 141 done, 23 left; projected 1424 min: the merge queue and a store whose writes take 1-1.5 s each (123 MB, an engine tick every 30 s) are the waits; the machine's load is back to about 7
 - station M-5850: move 1215 min in, 144 done, 20 left; hull 224 min, mast 172 min: T-386 (review.rs, quiet.rs, lib.rs; after T-380, which is mast's and passed) moves to mast, branching from mast/t380, about 184 and 212 min
+- 2026-10-29 08:00 release: v0.5.1 (station S2) published: T-367's merge 6d8d3a0a merged into main as 0974d950, tagged v0.5.1, GitHub release from docs/releases/v0.5.1.md | why: done clause (5)
 
 
 # Queue
