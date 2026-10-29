@@ -132,11 +132,18 @@ pub const FOOTER: &str = "←→ / Tab / 1-4 / click: views · click a voyage ·
 /// Every cell has a style (the prototype's colours, bold, reverse video);
 /// [`Canvas::text`] is the screen as plain text and [`Canvas::ansi`] the
 /// screen as the terminal shows it.
+///
+/// A wide glyph (the prototype's ⛵, ⚓ and ⏳) takes two cells: the glyph and a
+/// continuation, a space the terminal does not draw again. The continuation is
+/// marked, so the cells keep the prototype's columns and [`Canvas::row_text`]
+/// leaves the mark's cell out of its text: the terminal's columns are the
+/// canvas's (T-353, review F1).
 pub struct Canvas {
     width: usize,
     height: usize,
     cells: Vec<char>,
     styles: Vec<Style>,
+    continuation: Vec<bool>,
 }
 
 impl Canvas {
@@ -149,6 +156,7 @@ impl Canvas {
             height,
             cells: vec![' '; width * height],
             styles: vec![Style::PLAIN; width * height],
+            continuation: vec![false; width * height],
         }
     }
 
@@ -173,6 +181,7 @@ impl Canvas {
             }
             self.cells[y * self.width + column] = character;
             self.styles[y * self.width + column] = style;
+            self.continuation[y * self.width + column] = false;
         }
     }
 
@@ -190,7 +199,43 @@ impl Canvas {
             }
             self.cells[y * self.width + column] = character;
             self.styles[y * self.width + column] = style;
+            self.continuation[y * self.width + column] = false;
         }
+    }
+
+    /// Write a text that may hold a wide glyph (the prototype's ⛵, ⚓ and ⏳).
+    ///
+    /// The glyph takes two cells, the second its continuation: a space with
+    /// the same style, marked so that the text does not print it again. It
+    /// returns the number of cells the text took.
+    pub fn put_wide(&mut self, x: usize, y: usize, text: &str, style: Style) -> usize {
+        if y >= self.height {
+            return 0;
+        }
+        let last = self.width - 1;
+        let mut column = x;
+        for character in text.chars() {
+            if column >= last {
+                break;
+            }
+            self.cells[y * self.width + column] = character;
+            self.styles[y * self.width + column] = style;
+            self.continuation[y * self.width + column] = false;
+            column += 1;
+            if is_wide(character) && column < last {
+                self.cells[y * self.width + column] = ' ';
+                self.styles[y * self.width + column] = style;
+                self.continuation[y * self.width + column] = true;
+                column += 1;
+            }
+        }
+        column - x
+    }
+
+    /// Is the cell the continuation of a wide glyph? The terminal draws that
+    /// column as part of the glyph, so the text leaves its cell out.
+    pub fn is_continuation(&self, x: usize, y: usize) -> bool {
+        x < self.width && y < self.height && self.continuation[y * self.width + x]
     }
 
     /// Copy `count` rows of another canvas: its row `src` to this canvas's
@@ -205,6 +250,8 @@ impl Canvas {
             for column in 0..columns {
                 self.cells[target * self.width + column] = from.cells[source * from.width + column];
                 self.styles[target * self.width + column] = from.styles[source * from.width + column];
+                self.continuation[target * self.width + column] =
+                    from.continuation[source * from.width + column];
             }
         }
     }
@@ -298,7 +345,16 @@ impl Canvas {
             while column < end && effective(column) == style {
                 column += 1;
             }
-            let text: String = cells[start..column].iter().collect();
+            // A continuation cell is the second column of a wide glyph, which
+            // the terminal already draws: its space is left out of the text, so
+            // the terminal's columns are the canvas's (T-353, review F1).
+            let text: String = (start..column)
+                .filter(|column| !self.continuation[row * self.width + column])
+                .map(|column| cells[column])
+                .collect();
+            if text.is_empty() {
+                continue;
+            }
             let sgr = style.sgr(codes.unwrap_or(false));
             if sgr.is_empty() {
                 out.push_str(&text);
@@ -423,7 +479,7 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
             let label = format!(" {} {} ", entry.milestone, mark);
             // The prototype draws a wide mark in two cells; the label's own
             // length is its characters, as the prototype counts them.
-            let cells = put_wide(canvas, x, 0, &label, voyage_style(voyage, entry));
+            let cells = canvas.put_wide(x, 0, &label, voyage_style(voyage, entry));
             voyages.push((x, x + cells - 1, entry.milestone.clone()));
             x += label.chars().count() + 1;
         }
@@ -454,7 +510,7 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
     if let Some(voyage) = voyage {
         let state = if voyage.sailing { "⛵ sailing" } else { "⚓ landed" };
         let line = format!("{}: {} · {}", voyage.milestone, voyage.title, state);
-        put_wide(canvas, 1, 1, &line, Style::bold());
+        canvas.put_wide(1, 1, &line, Style::bold());
     }
 
     // The goal box: the voyage's done sentence, word-wrapped, and the quality
@@ -535,22 +591,6 @@ fn voyage_style(shown: Option<&VoyageEntry>, entry: &VoyageEntry) -> Style {
     } else {
         Style::fg(Color::Dim)
     }
-}
-
-/// Put a text that may hold a wide glyph (the prototype's ⛵ and ⚓, and ⏳):
-/// the glyph takes two cells, the second its continuation, a space with the
-/// same style. It returns the number of cells the text took.
-fn put_wide(canvas: &mut Canvas, x: usize, y: usize, text: &str, style: Style) -> usize {
-    let mut cells = String::with_capacity(text.len() + 2);
-    for character in text.chars() {
-        cells.push(character);
-        if is_wide(character) {
-            cells.push(' ');
-        }
-    }
-    let width = cells.chars().count();
-    canvas.put_styled(x, y, &cells, style);
-    width
 }
 
 /// Is the character a wide one (East Asian wide or fullwidth), the way the
@@ -1441,5 +1481,37 @@ pub fn reason_word(reason: &IdleReason) -> &'static str {
         IdleReason::DepWait { .. } => "dep wait",
         IdleReason::Undelivered { .. } => "undelivered",
         IdleReason::NoWork => "no work",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wide_glyph_takes_two_cells_and_its_continuation_is_not_printed() {
+        // T-353 (review F1): the canvas keeps the prototype's columns — the
+        // glyph and its continuation — and the text leaves the continuation
+        // out, so a terminal draws the same columns.
+        let mut canvas = Canvas::new(20, 8);
+        let taken = canvas.put_wide(1, 0, " M5 ⛵ ", Style::fg(Color::Warn));
+
+        // The prototype's label: six characters, and the glyph's second cell.
+        assert_eq!(taken, 7, "the cells the label took");
+        assert_eq!(canvas.char_at(1, 0), ' ');
+        assert_eq!(canvas.char_at(5, 0), '⛵');
+        assert!(canvas.is_continuation(6, 0), "the glyph's second cell");
+        assert_eq!(canvas.char_at(6, 0), ' ', "a space in the cell (the golden planes)");
+        assert_eq!(canvas.style_at(6, 0), Style::fg(Color::Warn), "in the label's style");
+        assert!(!canvas.is_continuation(7, 0), "the label's last space is its own");
+        // An ordinary text after the label keeps the trailing spaces printed.
+        canvas.put(8, 0, "x");
+        let line = canvas.text().lines().next().unwrap_or_default().to_string();
+        assert_eq!(line, "  M5 ⛵ x", "the continuation cell prints nothing");
+        let columns: usize = line
+            .chars()
+            .map(|character| if matches!(character, '⛵' | '⚓') { 2 } else { 1 })
+            .sum();
+        assert_eq!(columns, 9, "nine cells, nine terminal columns: {line:?}");
     }
 }

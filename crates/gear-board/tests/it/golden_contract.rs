@@ -242,6 +242,99 @@ fn render(tab: Tab, detail: bool) -> Planes {
     gold::planes(&canvas(&board, &screen, None))
 }
 
+/// A line without the terminal's escape sequences.
+fn plain_line(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' {
+            // A control sequence (`ESC [`, its parameters, its final letter)
+            // or a two-character escape: neither prints anything.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for character in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&character) {
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+            continue;
+        }
+        out.push(character);
+    }
+    out
+}
+
+/// The terminal columns a text takes: the wide glyphs of the board's head (⛵
+/// and ⚓, one glyph in two columns) take two, everything else one.
+fn terminal_columns(text: &str) -> usize {
+    text.chars()
+        .map(|character| if matches!(character, '⛵' | '⚓') { 2 } else { 1 })
+        .sum()
+}
+
+/// The terminal column a text starts at in a line.
+fn column_of(line: &str, needle: &str) -> usize {
+    let at = line
+        .find(needle)
+        .unwrap_or_else(|| panic!("no {needle:?} in {line:?}"));
+    terminal_columns(&line[..at])
+}
+
+/// The first row of the golden fixture's frame as the terminal shows it.
+fn head_row(board: &gear_board::Board, size: (usize, usize)) -> String {
+    let screen = gear_board::frame::Screen { tab: Tab::Now, selected: 0, detail: false, size };
+    let ansi = canvas(board, &screen, None).ansi(true);
+    plain_line(ansi.lines().next().unwrap_or_default())
+}
+
+/// T-353 (review F1): the terminal's columns are the canvas's. A wide glyph
+/// (⛵, ⚓) fills two columns, and its continuation cell — a space the canvas
+/// keeps so that the golden planes match the prototype — is not printed again.
+/// The clock of row 0 sits at column 152 and the second voyage's label starts
+/// at column 20; with one more voyage the row is still cut at the terminal's
+/// edge.
+#[test]
+fn a_wide_glyph_fills_two_columns_and_its_continuation_is_not_printed() {
+    use gear_board::EngineState;
+
+    let (mut store, now) = crate::golden_fixture::load();
+    let mut board = gear_board::build(
+        &mut store,
+        &gear_board::Options { project: Some("gear".into()), ..Default::default() },
+        now,
+    )
+    .unwrap();
+    board.engine = EngineState::Running;
+    let size = (160, 48);
+
+    let row = head_row(&board, size);
+    assert_eq!(column_of(&row, "14:32"), 152, "the clock's column: {row:?}");
+    assert_eq!(column_of(&row, "M4.2"), 20, "the second voyage's column: {row:?}");
+    assert!(terminal_columns(&row) <= 160, "the row fits the terminal: {row:?}");
+    assert!(row.contains(" M5 ⛵  "), "the first label keeps its spaces: {row:?}");
+
+    // One more voyage, newest first: the row is cut at the terminal's edge, it
+    // never grows past it.
+    let extra = {
+        let project = &mut board.projects[0];
+        let mut extra = project.voyage_list.last().cloned().expect("a voyage of the fixture");
+        extra.milestone = "M3".into();
+        project.voyage_list.push(extra.clone());
+        extra
+    };
+    assert_eq!(extra.milestone, "M3");
+    let row = head_row(&board, size);
+    assert!(row.contains(" M3 ⚓ "), "the fourth label is drawn: {row:?}");
+    assert!(
+        terminal_columns(&row) <= 160,
+        "the row is {} columns wide: {row:?}",
+        terminal_columns(&row)
+    );
+}
+
 /// One plane of golden files: `name.txt`, `name.col` or `name.rev`, split on
 /// `\n` with a last empty piece dropped.
 fn plane(name: &str, ext: &str) -> Vec<String> {
