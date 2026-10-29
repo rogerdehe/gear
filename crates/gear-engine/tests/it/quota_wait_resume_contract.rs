@@ -12,14 +12,9 @@
 //! "Continue T-1: your quota is back.", the binding still holds the session
 //! from before the park, and nothing restarted or closed the agent.
 //!
-//! The project names one `[[quota.sources]]` whose key file does not exist:
-//! `read_source` reads the key **before** it calls the provider, so the failed
-//! key read is the source that cannot be read, and no network is touched. That
-//! is the unreadable-source park for `quota_reset_h` hours — the park that
-//! writes the wait the reset wakes in place (T-295 asked for no source at all,
-//! but a project without one takes the `on_quota = wait` policy park, which
-//! restarts a pi lane at the reset instead of resuming its session; the captain
-//! was asked and this fixture is the default of that question).
+//! The project has no `[[quota.sources]]`: `sources_of` reads only the
+//! config, so no reader runs and nothing touches the network. The park is the
+//! unreadable-source park for `quota_reset_h` hours.
 
 use gear_engine::{tick, EngineCfg, TickReport};
 use gear_herdr::fake::{Call, FakeHerdr};
@@ -40,11 +35,9 @@ const QUOTA_SCREEN: &str =
     "429: {\"message\":\"You exceeded your current quota\",\"type\":\"insufficient_quota\"}";
 /// The screen when the provider has reset.
 const RESET_SCREEN: &str = "  Ask anything…";
-/// The source whose key is not there: the key read fails before any call.
-const MISSING_KEY_FILE: &str = "/nonexistent/gear-t295/auth.json";
 
-/// One pi lane, one model, `on_quota` waits and one hour to resume. One
-/// source, with a key file that does not exist (the unreadable-source park).
+/// One pi lane, one model, `on_quota` waits and one hour to resume. No
+/// `[[quota.sources]]`.
 fn config() -> String {
     format!(
         r#"
@@ -73,12 +66,6 @@ profile = "pi"
 lanes = ["{MODEL}"]
 on_quota = {{ lanes = "wait" }}
 quota_reset_h = 1
-
-[[quota.sources]]
-provider = "tokenrhythm"
-reader = "minimax"
-key_file = "{MISSING_KEY_FILE}"
-key_path = "tokenrhythm.key"
 "#
     )
 }
