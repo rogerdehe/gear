@@ -11,8 +11,8 @@ use gear_app::home;
 use gear_app::identity::Fingerprint;
 use gear_app::plan::apply;
 use gear_app::Env;
-use gear_model::{ErrorCode, GearCtx, MsgKind, MsgState, OpKind, OpState, SeatRole, TaskState, Ts};
-use gear_store::{testing, NewMessage, NewOp, Store, TaskRow};
+use gear_model::{AttemptState, ErrorCode, GearCtx, MsgKind, MsgState, OpKind, OpState, SeatRole, TaskState, Ts};
+use gear_store::{testing, AttemptRow, NewMessage, NewOp, Store, TaskRow};
 
 const NOW: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
@@ -352,6 +352,28 @@ fn the_captain_home_starts_with_the_snapshot_before_the_inbox() {
                  issue: None,updated: NOW,
             })?;
         }
+        // The attempt behind T-1's Running state: the snapshot names the
+        // task's stage in the graph's words (T-347).
+        tx.insert_attempt(&AttemptRow {
+            project: "p".into(),
+            task: "T-1".into(),
+            n: 1,
+            seat: "p:heat".into(),
+            generation: 1,
+            contract_version: 1,
+            adopted_version: 1,
+            pending_update: None,
+            state: AttemptState::Started,
+            candidate: None,
+            report: None,
+            safe_point: None,
+            started: NOW,
+            updated: NOW,
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
+        })?;
         Ok(())
     })
     .unwrap();
@@ -377,7 +399,7 @@ fn the_captain_home_starts_with_the_snapshot_before_the_inbox() {
         "{}",
         home.text
     );
-    assert!(home.text.contains("heat · agent working · T-1 in progress · 1 queued"), "{}", home.text);
+    assert!(home.text.contains("heat · agent working · T-1 working · 1 queued"), "{}", home.text);
     assert!(home.text.contains("runtime · agent idle · no current task · 2 queued"), "{}", home.text);
     assert!(
         home.text.contains("deliveries not confirmed: 0 · temps 0 running · 0 starting · 0 blocked (0 of 2)"),

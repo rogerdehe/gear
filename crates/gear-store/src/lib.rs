@@ -574,6 +574,14 @@ pub struct VoyageRow {
     pub updated: Ts,
 }
 
+/// One station of a voyage (M5 S3): its id as the plan names it (`S1`, `S2`,
+/// …) and what reaching it needs, in the user's words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoyageStation {
+    pub id: String,
+    pub needs: String,
+}
+
 /// One applied plan version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanRow {
@@ -878,6 +886,20 @@ fn set_version(tx: &rusqlite::Transaction<'_>, version: i64) -> GearResult<()> {
 
 impl<'s> Tx<'s> {
     // ---- infrastructure
+
+    /// SQLite's `PRAGMA data_version` (T-384): a number that moves when
+    /// **another** connection commits a write to the database, and stays put
+    /// for this connection's own writes (SQLite's documented behaviour). One
+    /// cheap query is all it costs, so a reader that shows the database can ask
+    /// it every second and rebuild only when it moved.
+    ///
+    /// The numbers are only comparable with the numbers of the same
+    /// connection: a caller keeps the last one it read and compares.
+    pub fn data_version(&self) -> GearResult<i64> {
+        self.tx
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .map_err(map_sqlite)
+    }
 
     /// Next id for `kind` in `project`: `T-1`, `T-2`, …; kinds: T M R V O. Never reused.
     pub fn next_id(&self, project: &str, kind: char) -> GearResult<String> {
@@ -3203,6 +3225,74 @@ impl<'s> Tx<'s> {
         };
         let budget = (median * 1.5).ceil() as i64;
         Ok(budget.max(10))
+    }
+
+    // ---- stations (M5 S3)
+
+    /// Write the voyage's stations, in plan order.
+    ///
+    /// They are kept in `meta` under `voyage-stations:<project>:<milestone>`,
+    /// one `<id>: <needs>` line per station, joined by "\n". An empty list
+    /// writes "".
+    pub fn set_voyage_stations(
+        &self,
+        project: &str,
+        milestone: &str,
+        stations: &[VoyageStation],
+    ) -> GearResult<()> {
+        let text = stations
+            .iter()
+            .map(|station| format!("{}: {}", station.id, station.needs))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.set_meta(&format!("voyage-stations:{project}:{milestone}"), &text)
+    }
+
+    /// The voyage's stations, in plan order. A missing or empty value is an
+    /// empty list; each line is split at its first `": "`.
+    pub fn voyage_stations(
+        &self,
+        project: &str,
+        milestone: &str,
+    ) -> GearResult<Vec<VoyageStation>> {
+        let raw = self
+            .get_meta(&format!("voyage-stations:{project}:{milestone}"))?
+            .unwrap_or_default();
+        if raw.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(raw
+            .lines()
+            .filter_map(|line| {
+                let (id, needs) = line.split_once(": ")?;
+                Some(VoyageStation {
+                    id: id.to_string(),
+                    needs: needs.to_string(),
+                })
+            })
+            .collect())
+    }
+
+    /// Write the station a task belongs to, under
+    /// `task-station:<project>:<task>`; `None` writes "".
+    pub fn set_task_station(
+        &self,
+        project: &str,
+        task: &str,
+        station: Option<&str>,
+    ) -> GearResult<()> {
+        self.set_meta(
+            &format!("task-station:{project}:{task}"),
+            station.unwrap_or(""),
+        )
+    }
+
+    /// The station a task belongs to; a missing or empty value is `None`.
+    pub fn task_station(&self, project: &str, task: &str) -> GearResult<Option<String>> {
+        let raw = self
+            .get_meta(&format!("task-station:{project}:{task}"))?
+            .unwrap_or_default();
+        Ok((!raw.is_empty()).then_some(raw))
     }
 }
 

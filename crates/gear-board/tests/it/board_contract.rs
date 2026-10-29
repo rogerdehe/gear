@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use gear_board::{build, render, run_with, to_json, EngineState, Event, Keys, Options, View};
-use gear_model::{MsgKind, MsgState, SeatRole, TaskState};
-use gear_store::{testing, ContractRow, NewMessage, Store, TaskRow};
+use gear_model::{AttemptState, MsgKind, MsgState, SeatRole, TaskState};
+use gear_store::{testing, AttemptRow, ContractRow, NewMessage, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
 
@@ -49,6 +49,33 @@ fn world() -> Store {
                      issue: None,updated: T0,
                 })?;
             }
+            // The attempts behind the states: the lane lines read the stage the
+            // graph gives the task, not its state word (T-347).
+            for (task, lane, state) in [
+                ("T-2", "runtime", AttemptState::Started),
+                ("T-3", "data", AttemptState::Submitted),
+            ] {
+                tx.insert_attempt(&AttemptRow {
+                    project: "p".into(),
+                    task: task.into(),
+                    n: 1,
+                    seat: format!("p:{lane}"),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                })?;
+            }
             Ok(())
         })
         .unwrap();
@@ -69,12 +96,120 @@ fn the_board_shows_the_totals_and_every_lane_queue() {
     assert!(text.contains("Totals: 4 tasks · 1 done · 1 in progress · 1 waiting"), "{text}");
     // The lanes come in seat order, their tasks in queue order.
     assert!(
-        text.contains("Lane data · agent unknown · T-3 waiting · 0 queued · rework 0/0 · no task yet\n  T-1 done\n  T-3 waiting"),
+        text.contains("Lane data · agent unknown · T-3 handed in, waits for a reviewer · 0 queued · rework 0/1 · no task yet\n  T-1 done\n  T-3 waiting"),
         "{text}"
     );
     assert!(
-        text.contains("Lane runtime · agent unknown · T-2 in progress · 1 queued · rework 0/0 · no task yet\n  T-2 in progress\n  T-4 queued"),
+        text.contains("Lane runtime · agent unknown · T-2 working · 1 queued · rework 0/0 · no task yet\n  T-2 in progress\n  T-4 queued"),
         "{text}"
+    );
+}
+
+/// T-347: the lane line names the task's stage in the words of the board's
+/// views, so the board and the captain's home page never disagree.
+#[test]
+fn the_lane_line_names_the_stage_in_the_words_of_the_graph() {
+    let mut store = world();
+    let board = store.read(|tx| gear_board::project(tx, "p", T0 + 60)).unwrap();
+    let line = |name: &str| {
+        let lane = board.lanes.iter().find(|lane| lane.lane == name).expect("the lane");
+        gear_board::lane_line(lane)
+    };
+    // A lane working on attempt 1.
+    assert_eq!(line("runtime"), "runtime · agent unknown · T-2 working · 1 queued");
+    // A lane whose task waits for a reviewer: the stage says so, not "waiting".
+    assert_eq!(
+        line("data"),
+        "data · agent unknown · T-3 handed in, waits for a reviewer · 0 queued"
+    );
+    // The lane's line and the graph's task panel say the same words.
+    let data = board.lanes.iter().find(|lane| lane.lane == "data").unwrap();
+    let task = data.tasks.iter().find(|task| task.id == "T-3").unwrap();
+    assert_eq!(task.stage, gear_board::graph::Stage::Handed);
+    assert_eq!(task.stage_words, "handed in, waits for a reviewer");
+}
+
+/// T-347, F1 of the review of attempt 1: a cancelled task is not the lane's
+/// current task. Cancelling keeps the terminal attempt, so a task cancelled
+/// after a failed verdict still has a rejected last attempt and the classifier
+/// still calls its stage open; the graph leaves such a task out, and the lane
+/// line names the lane's next open task instead.
+#[test]
+fn a_cancelled_task_is_not_the_current_task_of_its_lane() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            for (id, rank, state) in
+                [("T-1", 1, TaskState::Cancelled), ("T-2", 2, TaskState::Running)]
+            {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: Some("M5".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+            }
+            // The cancelled task keeps its rejected attempt; the running one
+            // is on its first attempt, started.
+            for (task, state) in
+                [("T-1", AttemptState::Rejected), ("T-2", AttemptState::Started)]
+            {
+                tx.insert_attempt(&AttemptRow {
+                    project: "p".into(),
+                    task: task.into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let board = store.read(|tx| gear_board::project(tx, "p", T0 + 60)).unwrap();
+    let lane = board.lanes.iter().find(|lane| lane.lane == "heat").unwrap();
+    // The cancelled task is in the lane model and its stage reads open...
+    let cancelled = lane.tasks.iter().find(|task| task.id == "T-1").unwrap();
+    assert_eq!(cancelled.state, TaskState::Cancelled);
+    assert_eq!(cancelled.stage, gear_board::graph::Stage::SentBack);
+    // ...and the lane's current task is the next open one, not it.
+    assert_eq!(gear_board::lane_line(lane), "heat · agent unknown · T-2 working · 0 queued");
+    // The graph leaves the cancelled task out, so the lane line and the views
+    // agree on what the lane works on.
+    assert!(
+        board.graph.iter().all(|task| task.id != "T-1"),
+        "the graph does not draw a cancelled task"
     );
 }
 
@@ -269,7 +404,7 @@ fn a_task_in_review_is_shown_as_in_review() {
     let text = render(&build(&mut store, &options(), T0).unwrap(), View::Lanes);
 
     assert!(
-        text.contains("Lane data · agent unknown · T-3 waiting · 0 queued · rework 0/0 · no task yet\n  T-1 done\n  T-3 waiting\n  T-5 in review"),
+        text.contains("Lane data · agent unknown · T-3 handed in, waits for a reviewer · 0 queued · rework 0/1 · no task yet\n  T-1 done\n  T-3 waiting\n  T-5 in review"),
         "{text}"
     );
     // A task in review is not done and not running: the totals say so.
@@ -535,7 +670,7 @@ fn agent_state_is_reported_independently_of_task_state() {
         let agents = herdr.agents().unwrap();
         let board = gear_board::build_with_agents(&mut store, &options(), T0, Some(&agents)).unwrap();
         let text = render(&board, View::Lanes);
-        assert!(text.contains(&format!("Lane runtime · agent {word} · T-2 in progress · 1 queued")), "{text}");
+        assert!(text.contains(&format!("Lane runtime · agent {word} · T-2 working · 1 queued")), "{text}");
         let doc: serde_json::Value = serde_json::from_str(&to_json(&board).unwrap()).unwrap();
         assert_eq!(doc["projects"][0]["lanes"][1]["agent_state"], word);
     }
@@ -547,14 +682,14 @@ fn failed_observation_and_a_missing_or_replaced_agent_are_distinct() {
     use gear_herdr::{fake::FakeHerdr, AgentStatus, HerdrRead};
     let mut store = world();
     let board = gear_board::build_with_agents(&mut store, &options(), T0, None).unwrap();
-    assert!(render(&board, View::Lanes).contains("runtime · agent unknown · T-2 in progress"));
+    assert!(render(&board, View::Lanes).contains("runtime · agent unknown · T-2 working"));
     let board = gear_board::build_with_agents(&mut store, &options(), T0, Some(&[])).unwrap();
-    assert!(render(&board, View::Lanes).contains("runtime · agent missing · T-2 in progress"));
+    assert!(render(&board, View::Lanes).contains("runtime · agent missing · T-2 working"));
     let mut herdr = FakeHerdr::new();
     herdr.add_agent("w1:p3", "claude", AgentStatus::Working);
     let agents = herdr.agents().unwrap();
     let board = gear_board::build_with_agents(&mut store, &options(), T0, Some(&agents)).unwrap();
-    assert!(render(&board, View::Lanes).contains("runtime · agent unknown · T-2 in progress"));
+    assert!(render(&board, View::Lanes).contains("runtime · agent unknown · T-2 working"));
 }
 
 #[test]
