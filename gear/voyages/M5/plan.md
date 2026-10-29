@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=761 -->
+<!-- gear-plan project=gear base=762 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -136,6 +136,7 @@ eta: 21h
 - station M-5597: keep course 1039 min in, 129 done, 33 left; reviews remain the wait
 - 2026-10-29 05:03 staff: mast runs dry (M-5608): its board chain is serial, so each review of a link leaves it idle; T-376 and T-380 (crates/gear-engine/src/review.rs only, which hull does not touch before T-386) move to mast after T-350, their files allowed edits for mast | why: never-stop | else: mast idles at each board review
 - 2026-10-29 05:05 staff: mast is the long lane (the serial board chain) and hull has room: T-361 (the git graph's rows, crates/gear-board/src/graph.rs only; its dep on T-360 was lane order, not data) moves to hull after T-413, so T-362 finds its rows ready | why: the chain is the voyage's critical path | else: 45 min more on mast
+- station M-5617: keep course 1050 min in, 132 done, 30 left; hull 281 min and mast 290 min, balanced after the moves; projected 80 min past the eta, the board chain's length is with the user
 
 
 # Queue
