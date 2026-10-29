@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=859 -->
+<!-- gear-plan project=gear base=860 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -193,6 +193,7 @@ eta: 21h
 - station M-6323: keep course 1575 min in, 173 done, 1 left: T-369 (v0.5.3, the last release) on mast; the shared engine runs v0.5.2 plus T-425 since 13:54/13:55; nothing is cut (done clause 1)
 - 2026-10-29 14:06 note: voyage report (gear report voyage): all 174 tasks done, 26h30m against the 21 h eta (16 h at departure, moved to 21 h by the user), pace 0.69x; scope grew from 135 min at departure to 4520 min (the whole voyage was decomposed after departure, then 30-odd engine fixes for both projects); 49 rework rounds; hull worked 20h54m and sat idle 5h35m, mast worked 18h40m and sat idle 6h33m (mostly the user's two-hour stop and the end of the voyage); no quota stop; slowest against estimate T-367 (458/15 min, the v0.5.1 release), T-297, T-370; releases v0.5.0, v0.5.1, v0.5.2 published, v0.5.3 after T-369's merge; lessons 23-33 in lessons.md; open for landing: the user's view-by-view board check (done clause 4)
 - 2026-10-29 14:14 release: v0.5.3 (station S4, the last of M5) published: T-369's merge baaaa329 merged into main as 71cf0015, tagged v0.5.3, GitHub release from docs/releases/v0.5.3.md | why: done clause (5)
+- station M-6333: keep course 1590 min in, 174 done, 0 left; v0.5.3 published; landing (M-6332) waits for the user's view-by-view board check and his review of the voyage report
 - 2026-10-29 08:00 release: v0.5.1 (station S2) published: T-367's merge 6d8d3a0a merged into main as 0974d950, tagged v0.5.1, GitHub release from docs/releases/v0.5.1.md | why: done clause (5)
 
 
