@@ -98,6 +98,10 @@ pub fn apply(
     // before the write transaction (the store is never held while a subprocess
     // runs) and only for the done tasks this draft cancels.
     let cancellable = cancellable_done_tasks(store, draft)?;
+    // T-92 F1: a remerge of a candidate that is already on the integration
+    // branch has nothing to queue. Also a git question, asked here for the
+    // same reason: the store is never held while a subprocess runs.
+    let already_merged = remerges_already_merged(store, draft)?;
     // The verdicts that name the merge that landed their work are checked
     // before anything is written (git runs outside the store transaction).
     require_integrated_by(store, draft)?;
@@ -138,6 +142,7 @@ pub fn apply(
                 draft,
                 text,
                 &cancellable,
+                &already_merged,
                 agents,
                 now,
             )?;
@@ -177,6 +182,7 @@ fn apply_queue(
     draft: &Draft,
     text: &str,
     cancellable: &BTreeSet<String>,
+    already_merged: &BTreeSet<String>,
     agents: Option<&[gear_herdr::AgentInfo]>,
     now: Ts,
 ) -> GearResult<ApplyResult> {
@@ -500,6 +506,7 @@ fn apply_queue(
                     .ok_or_else(|| bad(item.line, format!("task {id} does not exist")))?;
                 task.rank = rank;
                 task.priority = priority_str(item.priority).to_string();
+                let old_lane = task.lane.clone();
                 task.lane = item.lane.clone();
                 task.milestone = item.milestone.clone();
                 task.required = item.required;
@@ -554,10 +561,90 @@ fn apply_queue(
                         // the failed merge and the push refusal are history,
                         // and the captain's own decision is the answer. The
                         // failed op itself stays as history; no op is created.
-                        resolved.extend(resolve_merge_items(tx, project, id, now)?);
+                        resolved.extend(resolve_merge_items(
+                            tx,
+                            project,
+                            id,
+                            "cancelled by the captain",
+                            now,
+                        )?);
                     }
                     Some("ready") => task.state = TaskState::Ready,
                     _ => {}
+                }
+                // A task moved to another lane takes its work with it (T-311):
+                // the old lane's attempts close, so its seat is free and it
+                // stops working on a task that is not its own any more. The
+                // rule is keyed on the attempts, not on the state — a rework
+                // attempt is opened while the task is Ready. A task with no
+                // attempt in progress only changes its lane.
+                if let (Some(new_lane), Some(old_lane)) = (item.lane.as_deref(), old_lane.as_deref()) {
+                    let moving = new_lane != old_lane
+                        && !matches!(item.state.as_deref(), Some("cancelled"));
+                    if moving {
+                        let attempts = tx.attempts_of_task(project, id)?;
+                        // A handed-in attempt is under review: its verdict
+                        // belongs to the lane that did the work, so the move
+                        // waits for it.
+                        if let Some(handed_in) = attempts
+                            .iter()
+                            .find(|attempt| attempt.state == AttemptState::Submitted)
+                        {
+                            return Err(bad(
+                                item.line,
+                                format!(
+                                    "{id} is handed in (attempt {}) and under review: change its lane after the verdict",
+                                    handed_in.n
+                                ),
+                            ));
+                        }
+                        // The seats to clear the wait pause of, read before
+                        // the attempts are closed.
+                        let seats: Vec<String> = attempts
+                            .iter()
+                            .filter(|attempt| attempt.state.occupies_seat())
+                            .map(|attempt| attempt.seat.clone())
+                            .collect();
+                        let closed = abandon_open_attempts(tx, project, id, now)?;
+                        if closed {
+                            clear_wait(tx, project, &mut task, &seats, now)?;
+                            task.state = TaskState::Ready;
+                            let old_seat = format!("{project}:{old_lane}");
+                            if tx.get_seat(&old_seat)?.is_some() {
+                                tx.insert_message(&NewMessage {
+                                    meta: None,
+                                    project: project.to_string(),
+                                    thread: format!("{id}:moved"),
+                                    task: Some(id.clone()),
+                                    attempt: None,
+                                    sender: by_seat.to_string(),
+                                    sender_gen: by_gen,
+                                    recipient: old_seat,
+                                    kind: MsgKind::Instruction,
+                                    urgent: false,
+                                    body: format!(
+                                        "{id} moved to lane {new_lane}; stop work on it, nothing to hand in"
+                                    ),
+                                    reply_to: None,
+                                    needs_ack: false,
+                                    state: MsgState::Open,
+                                    created: now,
+                                })?;
+                            }
+                        }
+                        let moved = format!("{id} moved {old_lane} → {new_lane}");
+                        record_gear_decision(
+                            tx,
+                            project,
+                            &voyage,
+                            applied_version,
+                            "staff",
+                            &moved,
+                            None,
+                            &moved,
+                            now,
+                        )?;
+                    }
                 }
                 task.updated = now;
 
@@ -595,15 +682,14 @@ fn apply_queue(
                         };
                         tx.insert_contract(&next)?;
                         task.contract_version = version;
-                        if task.wait_on.take().is_some() {
-                            task.wait_cond = None;
-                            let pauses = tx.pauses_of_project(project)?;
-                            let seats: std::collections::BTreeSet<_> = tx.attempts_of_task(project, id)?.into_iter().filter(|a| matches!(a.state, AttemptState::Started | AttemptState::Stopped)).map(|a| a.seat).collect();
-                            for seat in seats {
-                                if pauses.iter().any(|p| p.seat == seat && p.kind == "wait" && p.end_at.is_none()) {
-                                    tx.close_pause(project, &seat, "wait", now)?;
-                                }
-                            }
+                        if task.wait_on.is_some() {
+                            let seats: Vec<String> = tx
+                                .attempts_of_task(project, id)?
+                                .into_iter()
+                                .filter(|a| matches!(a.state, AttemptState::Started | AttemptState::Stopped))
+                                .map(|a| a.seat)
+                                .collect();
+                            clear_wait(tx, project, &mut task, &seats, now)?;
                         }
                         contract_changed.push((id.clone(), version));
 
@@ -653,7 +739,19 @@ fn apply_queue(
     for item in &draft.staff {
         if matches!(item, StaffItem::Rebind { .. } | StaffItem::RebindCancel { .. }) { continue; }
         if let StaffItem::Remerge { task, .. } = item {
-            remerge(tx, project, task, staff_line(item), now)?;
+            // T-92 F1: a candidate that is already on the integration branch
+            // needs no new merge op; the remerge only settles its failed-merge
+            // item and says so.
+            if let Some(note) = remerge(
+                tx,
+                project,
+                task,
+                staff_line(item),
+                now,
+                already_merged.contains(task),
+            )? {
+                warnings.push(note);
+            }
             // The decision log (design §7.4): a staff line is a decision.
             record_gear_decision(
                 tx,
@@ -1090,6 +1188,69 @@ fn cancellable_done_tasks(store: &mut Store, draft: &Draft) -> GearResult<BTreeS
     Ok(cancellable)
 }
 
+/// The remerge lines of this draft whose accepted candidate is already on the
+/// integration branch (T-92 F1): a candidate that landed by another way — a
+/// hand merge, another task that carried it — has nothing left to merge, and
+/// its open `merge-failed:<task>` item would otherwise stay open forever.
+///
+/// A git failure does not put a task in the set: the remerge then runs as
+/// before and the engine's merge confirms the already-merged candidate itself.
+fn remerges_already_merged(
+    store: &mut Store,
+    draft: &Draft,
+) -> GearResult<BTreeSet<String>> {
+    let wanted: Vec<&String> = draft
+        .staff
+        .iter()
+        .filter_map(|item| match item {
+            StaffItem::Remerge { task, .. } => Some(task),
+            _ => None,
+        })
+        .collect();
+    if wanted.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let project = draft.project.clone();
+    let (rows, text) = store.read(|tx| {
+        let mut rows: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+        for id in &wanted {
+            let Some(task) = tx.get_task(&project, id)? else {
+                continue; // the remerge names a missing task
+            };
+            let candidate = tx
+                .attempts_of_task(&project, id)?
+                .into_iter()
+                .rev()
+                .find(|attempt| attempt.state == AttemptState::Accepted)
+                .and_then(|attempt| attempt.candidate);
+            rows.push((id.to_string(), task.lane.clone(), candidate));
+        }
+        let text = tx
+            .get_project(&project)?
+            .map(|row| row.config_toml)
+            .unwrap_or_default();
+        Ok((rows, text))
+    })?;
+    // A store written before a config was stored has nothing to ask git with,
+    // and text that does not parse is not a gate here.
+    if text.trim().is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let Ok(config) = crate::config::parse(&text) else {
+        return Ok(BTreeSet::new());
+    };
+    let mut already = BTreeSet::new();
+    for (id, lane, candidate) in rows {
+        let Some(candidate) = candidate else {
+            continue; // the remerge names the missing attempt
+        };
+        if matches!(on_integration(&config, lane.as_deref(), &candidate), Ok(true)) {
+            already.insert(id);
+        }
+    }
+    Ok(already)
+}
+
 /// Whether `candidate` is on the repo's integration branch at the project's
 /// remote (T-112, T-257: `[conventions].remote`). The branch is fetched first:
 /// a local tracking ref may be stale, and the answer must be about the remote
@@ -1157,13 +1318,16 @@ fn on_integration(
     }
 }
 
-/// Close the open merge items of a cancelled task (T-112): its failed merge and
-/// its push refusal are history, resolved "cancelled by the captain". Returns
-/// the message ids that were closed.
+/// Close the open merge items of a task (T-112: a cancelled task; T-92 F1: a
+/// remerge of an already-merged candidate): its failed merge and its push
+/// refusal are history. `result` is the line the captain reads — "cancelled by
+/// the captain" or "the candidate <sha> is already on the integration branch".
+/// Returns the message ids that were closed.
 fn resolve_merge_items(
     tx: &Tx<'_>,
     project: &str,
     task: &str,
+    result: &str,
     now: Ts,
 ) -> GearResult<Vec<String>> {
     let mut resolved = Vec::new();
@@ -1188,7 +1352,7 @@ fn resolve_merge_items(
                 project,
                 &message.id,
                 gear_model::MsgState::Resolved,
-                Some("cancelled by the captain"),
+                Some(result),
                 None,
                 None,
                 now,
@@ -1782,13 +1946,19 @@ fn project_config(
 /// Only a task whose **last merge op failed** can be retried: a merge that is
 /// still in flight is not queued twice, and a task that is merged has nothing
 /// to do. Anything else is refused with the reason, like every plan line.
+///
+/// `already` is the answer of `remerges_already_merged` (T-92 F1): when the
+/// accepted candidate is on the integration branch already, no op is queued —
+/// the task's open `merge-failed:<task>` and `push:<task>` items are resolved
+/// and the line the captain reads is returned, so the apply warns.
 fn remerge(
     tx: &gear_store::Tx<'_>,
     project: &str,
     task_id: &str,
     line: usize,
     now: Ts,
-) -> GearResult<()> {
+    already: bool,
+) -> GearResult<Option<String>> {
     let task = tx.get_task(project, task_id)?.ok_or_else(|| {
         bad(line, format!("no task {task_id} in this project"))
     })?;
@@ -1861,6 +2031,22 @@ fn remerge(
     // The same payload the engine writes when a review passes: the lane's
     // branch (a hint for closing it, named by the project's template — T-252),
     // the accepted candidate and the review branch.
+    if already {
+        // T-92 F1: the work landed by another way. The merge is not queued
+        // again; the failed-merge item is answered with the candidate's sha.
+        resolve_merge_items(
+            tx,
+            project,
+            task_id,
+            &format!(
+                "the candidate {candidate} is already on the integration branch"
+            ),
+            now,
+        )?;
+        return Ok(Some(format!(
+            "remerge {task_id}: {candidate} is already on the integration branch: no merge queued, its failed-merge item resolved"
+        )));
+    }
     let lane = task.lane.clone().unwrap_or_default();
     let conventions = project_config(tx, project)?
         .map(|config| config.conventions)
@@ -1892,7 +2078,7 @@ fn remerge(
         }),
         created: now,
     })?;
-    Ok(())
+    Ok(None)
 }
 
 fn priority_str(priority: Priority) -> &'static str {
@@ -2887,40 +3073,7 @@ fn cancel_task(
     by_gen: i64,
     now: Ts,
 ) -> GearResult<()> {
-    let mut closed = false;
-    for mut attempt in tx.attempts_of_task(project, &task.id)? {
-        if attempt.state.is_terminal() {
-            continue;
-        }
-        if !AttemptState::can_transition(attempt.state, AttemptState::Abandoned) {
-            // The model keeps UNKNOWN from Abandoned directly — the engine
-            // never guesses an outcome. A cancelled task does not guess
-            // either: it stops the attempt first, then abandons it, so the
-            // lane is not left busy with a task nobody wants (T-93).
-            if attempt.state == AttemptState::Unknown
-                && AttemptState::can_transition(AttemptState::Unknown, AttemptState::Stopped)
-                && AttemptState::can_transition(AttemptState::Stopped, AttemptState::Abandoned)
-            {
-                attempt.state = AttemptState::Stopped;
-                attempt.updated = now;
-                tx.update_attempt(&attempt)?;
-            } else {
-                return Err(GearError::new(
-                    ErrorCode::BadTransition,
-                    format!(
-                        "attempt {} of task {} is {}, it cannot be abandoned",
-                        attempt.n,
-                        task.id,
-                        attempt.state.as_str()
-                    ),
-                ));
-            }
-        }
-        attempt.state = AttemptState::Abandoned;
-        attempt.updated = now;
-        tx.update_attempt(&attempt)?;
-        closed = true;
-    }
+    let closed = abandon_open_attempts(tx, project, &task.id, now)?;
     // The lane that was working on it hears why, in one line.
     let Some(lane) = task.lane.as_deref() else {
         return Ok(());
@@ -2944,6 +3097,76 @@ fn cancel_task(
             state: MsgState::Open,
             created: now,
         })?;
+    }
+    Ok(())
+}
+
+/// Close every open attempt of a task (T-93, T-311): a cancelled task and a
+/// task that moves to another lane both finish with their attempts abandoned,
+/// so the seat is free for the next task. Returns whether one was closed.
+fn abandon_open_attempts(
+    tx: &Tx<'_>,
+    project: &str,
+    task_id: &str,
+    now: Ts,
+) -> GearResult<bool> {
+    let mut closed = false;
+    for mut attempt in tx.attempts_of_task(project, task_id)? {
+        if attempt.state.is_terminal() {
+            continue;
+        }
+        if !AttemptState::can_transition(attempt.state, AttemptState::Abandoned) {
+            // The model keeps UNKNOWN from Abandoned directly — the engine
+            // never guesses an outcome. A cancelled task does not guess
+            // either: it stops the attempt first, then abandons it, so the
+            // lane is not left busy with a task nobody wants (T-93).
+            if attempt.state == AttemptState::Unknown
+                && AttemptState::can_transition(AttemptState::Unknown, AttemptState::Stopped)
+                && AttemptState::can_transition(AttemptState::Stopped, AttemptState::Abandoned)
+            {
+                attempt.state = AttemptState::Stopped;
+                attempt.updated = now;
+                tx.update_attempt(&attempt)?;
+            } else {
+                return Err(GearError::new(
+                    ErrorCode::BadTransition,
+                    format!(
+                        "attempt {} of task {} is {}, it cannot be abandoned",
+                        attempt.n,
+                        task_id,
+                        attempt.state.as_str()
+                    ),
+                ));
+            }
+        }
+        attempt.state = AttemptState::Abandoned;
+        attempt.updated = now;
+        tx.update_attempt(&attempt)?;
+        closed = true;
+    }
+    Ok(closed)
+}
+
+/// Clear a task's wait: the wait and its condition go, and the wait pause of
+/// every seat that was working on the task closes. The plan does it for a
+/// contract change (T-8) and for a task moved to another lane (T-311); the
+/// seats are the attempts' ones, read before the attempts are closed.
+fn clear_wait(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &mut TaskRow,
+    seats: &[String],
+    now: Ts,
+) -> GearResult<()> {
+    if task.wait_on.take().is_none() {
+        return Ok(());
+    }
+    task.wait_cond = None;
+    let pauses = tx.pauses_of_project(project)?;
+    for seat in seats {
+        if pauses.iter().any(|p| p.seat == *seat && p.kind == "wait" && p.end_at.is_none()) {
+            tx.close_pause(project, seat, "wait", now)?;
+        }
     }
     Ok(())
 }
