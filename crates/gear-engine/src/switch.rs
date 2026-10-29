@@ -170,7 +170,7 @@ pub(crate) fn plan_target(
         if config.models.switch.contains_key(model) {
             continue;
         }
-        if let Some(labels) = crate::opencode::derived_labels(herdr, model, None, directory.as_deref()) {
+        if let Ok(Some(labels)) = crate::opencode::derived_labels(herdr, model, None, directory.as_deref()) {
             if labels.bar == to {
                 return Ok(Some((model.to_string(), labels)));
             }
@@ -450,13 +450,24 @@ pub fn ensure_model(
             let directory = store
                 .read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(&seat.id)))?;
             match crate::opencode::derived_labels(herdr, model, None, directory.as_deref()) {
-                Some(labels) => {
+                Ok(Some(labels)) => {
                     derived = labels;
                     &derived
                 }
-                None => {
+                Ok(None) => {
                     return Ok(ModelGate::Failed(format!(
                         "no [models.switch.\"{model}\"] labels (picker, bar) and {model} is not in OpenCode's model list: the agent cannot be put on the chain's model"
+                    )))
+                }
+                // T-307: an unreadable catalogue (a failed call, a reply that
+                // is not a list, an empty list not loaded yet, a provider with
+                // no display name) says nothing about the model. A Waiting
+                // gate would keep a start pending with nothing to end it, so
+                // the seat is flagged with a text that does not send the
+                // captain after a model id that is right.
+                Err(reason) => {
+                    return Ok(ModelGate::Failed(format!(
+                        "OpenCode's model list could not be read ({reason}), so {model} could not be checked; it is not known to be absent: name [models.switch.\"{model}\"] labels (picker, bar), or check `opencode models`"
                     )))
                 }
             }
@@ -781,6 +792,27 @@ mod tests {
         }
     }
 
+    /// A config with no `[models.switch]` entry for the model under test, so
+    /// the labels come from OpenCode's catalogue (T-94).
+    fn chain_config() -> gear_app::config::ProjectConfig {
+        gear_app::config::parse(
+            r#"
+[project]
+id = "p"
+repo = "/repo"
+herdr_session = "sess"
+[quota]
+lanes = 1
+temps = 0
+[captain]
+pane = "unused"
+kind = "claude"
+profile = "claude"
+"#,
+        )
+        .unwrap()
+    }
+
     fn idle() -> SeatObs {
         SeatObs {
             seat: gear_store::SeatRow {
@@ -1028,6 +1060,66 @@ mod tests {
 
         assert_eq!(run(&mut s, &mut herdr, T0), SwitchOutcome::Failed);
         assert!(pending(&mut s, "p:heat").unwrap().is_none());
+    }
+
+    /// T-307: a catalogue that cannot be read is flagged as unreadable, never
+    /// as "the model is not in the list" — that text sends the captain after a
+    /// model id that is right.
+    #[test]
+    fn an_unreadable_catalogue_is_not_reported_as_an_absent_model() {
+        let mut s = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.api_replies.push_back(Err("service unavailable".into()));
+
+        let seat = idle().seat;
+        let profile = gear_herdr::builtin("opencode").unwrap();
+        let gate = ensure_model(
+            &mut s,
+            &mut herdr,
+            &seat,
+            &profile,
+            &chain_config(),
+            "minimax-cn/MiniMax-M3.1-Flash",
+            T0,
+        )
+        .unwrap();
+        let ModelGate::Failed(reason) = gate else { panic!("unreadable catalogue must fail: {gate:?}") };
+        assert!(reason.contains("could not be read"), "{reason}");
+        assert!(reason.contains("service unavailable"), "{reason}");
+        assert!(
+            !reason.contains("is not in OpenCode's model list"),
+            "an unreadable list is not an absent model: {reason}"
+        );
+    }
+
+    /// T-307: an empty catalogue is "not loaded yet"; a Waiting gate would keep
+    /// the start pending with nothing to end it, so it fails with that reason.
+    #[test]
+    fn an_empty_catalogue_says_it_is_not_loaded_yet() {
+        let mut s = world();
+        let mut herdr = FakeHerdr::new();
+        herdr
+            .api_replies
+            .push_back(Ok(serde_json::json!({"data": []})));
+
+        let seat = idle().seat;
+        let profile = gear_herdr::builtin("opencode").unwrap();
+        let gate = ensure_model(
+            &mut s,
+            &mut herdr,
+            &seat,
+            &profile,
+            &chain_config(),
+            "minimax-cn/MiniMax-M3.1-Flash",
+            T0,
+        )
+        .unwrap();
+        let ModelGate::Failed(reason) = gate else { panic!("an empty catalogue must fail: {gate:?}") };
+        assert!(reason.contains("the model list is not loaded yet"), "{reason}");
+        assert!(
+            !reason.contains("is not in OpenCode's model list"),
+            "an empty list is not an absent model: {reason}"
+        );
     }
 
     #[test]
