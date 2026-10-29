@@ -318,6 +318,140 @@ fn a_departed_voyage_changes_only_with_the_users_confirmation() {
     assert_eq!(s.read(|tx| tx.decisions_of("p", "M1")).unwrap().len(), decisions.len());
 }
 
+/// T-331: the `title` and the stations of a departed voyage are guarded like
+/// `done:`, `bar:` and `eta:` (T-410): refused without the user's confirmation,
+/// applied with it and recorded as a starred decision.
+#[test]
+fn a_departed_voyages_title_and_stations_need_the_users_confirmation() {
+    let mut s = world();
+    let departure = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: delivery v0.1.0\n\
+                     done: users install v0.1.0 without Rust\n\
+                     bar: block only loop breaks and data loss; log the rest\n\
+                     eta: 8h\n\
+                     station S1: the board matches the prototype\n\
+                     station S2: released as v0.5.0\n\
+                     # Queue\n\
+                     ## NEW [must] lane=heat milestone=M1\n\
+                     goal: A\naccept: a\nestimate: 30\ndeps: -\n\n\
+                     ## NEW [should] lane=heat milestone=M1\n\
+                     goal: B\naccept: b\nestimate: 30\ndeps: -\n";
+    run(&mut s, &departure, "r1", NOW).unwrap();
+    let old_stations = "S1: the board matches the prototype; S2: released as v0.5.0";
+
+    // The title alone, refused: nothing of the apply is written.
+    let retitled = departure.replace("delivery v0.1.0", "delivery v0.2.0").replace("base=0", "base=1");
+    let err = run(&mut s, &retitled, "r-title", NOW + 10).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        err.detail.contains(
+            "milestone M1: title changed after departure (stored \"delivery v0.1.0\", got \"delivery v0.2.0\")"
+        ),
+        "{}",
+        err.detail
+    );
+    assert!(
+        err.detail.contains(
+            "the goal, the bar and the eta change only when the user asks; confirm it with them, then apply again with --confirmed"
+        ),
+        "{}",
+        err.detail
+    );
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 1);
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(voyage.title, "delivery v0.1.0");
+    assert_eq!(s.read(|tx| tx.tasks_of_project("p")).unwrap().len(), 2);
+    assert_eq!(s.read(|tx| tx.voyage_stations("p", "M1")).unwrap().len(), 2);
+
+    // The stations alone (S2's needs changed), refused as well.
+    let moved = departure.replace("released as v0.5.0", "released as v0.6.0").replace("base=0", "base=1");
+    let err = run(&mut s, &moved, "r-stations", NOW + 20).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    let truncated: String = old_stations.chars().take(40).collect();
+    assert!(
+        err.detail.contains(&format!("milestone M1: stations changed after departure (stored \"{truncated}\"")),
+        "{}",
+        err.detail
+    );
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 1);
+    let stations = s.read(|tx| tx.voyage_stations("p", "M1")).unwrap();
+    assert_eq!(stations[1].needs, "released as v0.5.0", "{stations:?}");
+
+    // The user asked for both and confirmed it: the change applies and each
+    // field becomes a starred decision of kind `user`.
+    let asked = departure
+        .replace("delivery v0.1.0", "delivery v0.2.0")
+        .replace("released as v0.5.0", "released as v0.6.0")
+        .replace("base=0", "base=1");
+    run_confirmed(&mut s, &asked, "r-confirmed", NOW + 100).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(voyage.title, "delivery v0.2.0");
+    let stations = s.read(|tx| tx.voyage_stations("p", "M1")).unwrap();
+    assert_eq!(
+        stations.iter().map(|s| s.needs.as_str()).collect::<Vec<_>>(),
+        ["the board matches the prototype", "released as v0.6.0"]
+    );
+    let decisions = s.read(|tx| tx.decisions_of("p", "M1")).unwrap();
+    let confirmed: Vec<_> = decisions.iter().filter(|d| d.kind == "user").collect();
+    assert_eq!(confirmed.len(), 2, "{decisions:?}");
+    for (decision, what) in confirmed.iter().zip([
+        "title of M1 changed from \"delivery v0.1.0\" to \"delivery v0.2.0\"".to_string(),
+        format!(
+            "stations of M1 changed from \"{old_stations}\" to \"S1: the board matches the prototype; S2: released as v0.6.0\""
+        ),
+    ]) {
+        assert!(decision.star, "the confirmation is starred: {decision:?}");
+        assert_eq!(decision.what, what);
+        assert_eq!(decision.why.as_deref(), Some("confirmed by the user"));
+        assert_eq!(
+            decision.line.as_deref(),
+            Some(format!("{what} | why: confirmed by the user").as_str())
+        );
+    }
+}
+
+/// T-331: a departed voyage with no stations stored gets its first list
+/// without the user's confirmation; changing it afterwards needs it.
+#[test]
+fn a_departed_voyage_without_stations_gets_its_first_list() {
+    let mut s = world();
+    run(&mut s, &plan(0, FULL), "r1", NOW).unwrap();
+    assert!(s.read(|tx| tx.voyage_stations("p", "M1")).unwrap().is_empty());
+
+    let with = |base: i64, needs: &str| {
+        plan(base, FULL).replace(
+            "# Queue",
+            &format!("station S1: {needs}\n# Queue"),
+        )
+    };
+    run(&mut s, &with(1, "the first station"), "r2", NOW + 10).unwrap();
+    let stations = s.read(|tx| tx.voyage_stations("p", "M1")).unwrap();
+    assert_eq!(
+        stations.iter().map(|s| (s.id.as_str(), s.needs.as_str())).collect::<Vec<_>>(),
+        [("S1", "the first station")],
+        "the first list needs no confirmation"
+    );
+    assert!(
+        s.read(|tx| tx.decisions_of("p", "M1")).unwrap().is_empty(),
+        "no confirmation, no decision"
+    );
+
+    // The unchanged list applies again, and still records nothing.
+    run(&mut s, &with(2, "the first station"), "r3", NOW + 20).unwrap();
+    assert!(s.read(|tx| tx.decisions_of("p", "M1")).unwrap().is_empty());
+
+    // Now the list is stored: changing it needs the confirmation.
+    let err = run(&mut s, &with(3, "the second station"), "r4", NOW + 30).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        err.detail.contains("milestone M1: stations changed after departure (stored \"S1: the first station\", got \"S1: the second station\")"),
+        "{}",
+        err.detail
+    );
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 3, "nothing written");
+    let stations = s.read(|tx| tx.voyage_stations("p", "M1")).unwrap();
+    assert_eq!(stations[0].needs, "the first station", "{stations:?}");
+}
+
 /// T-410: a milestone that has not departed yet changes its words freely.
 #[test]
 fn a_voyage_that_has_not_departed_changes_without_confirmation() {
@@ -861,4 +995,24 @@ fn a_block_without_station_clears_the_tasks_station() {
     assert_eq!(s.read(|tx| tx.task_station("p", "T-1")).unwrap(), None);
     let block = s.read(|tx| gear_app::plan::show(tx, "p", "T-1")).unwrap();
     assert!(!block.contains("station="), "{block}");
+}
+
+/// T-331: the guard compares trimmed text, so a whitespace-only difference is
+/// no change and the apply goes through without the confirmation.
+#[test]
+fn a_whitespace_only_difference_is_no_change() {
+    let mut s = world();
+    run(&mut s, &plan(0, FULL), "r1", NOW).unwrap();
+    let text = plan(
+        1,
+        "  done:   users install v0.1.0 without Rust  \nbar: block only loop breaks and data loss; log the rest\neta: 8h\nstation S1:   the first station  \n",
+    );
+    run(&mut s, &text, "r2", NOW + 10).unwrap();
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 2);
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!((voyage.title.as_str(), voyage.done.as_deref()), ("delivery v0.1.0", Some("users install v0.1.0 without Rust")));
+    let stations = s.read(|tx| tx.voyage_stations("p", "M1")).unwrap();
+    assert_eq!(stations[0].id, "S1", "{stations:?}");
+    assert_eq!(stations[0].needs, "the first station", "{stations:?}");
+    assert!(s.read(|tx| tx.decisions_of("p", "M1")).unwrap().is_empty());
 }
