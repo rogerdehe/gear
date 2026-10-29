@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=736 -->
+<!-- gear-plan project=gear base=737 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -115,6 +115,7 @@ eta: 16h
 - station M-5422: keep course 840 min in; hull 348 min and mast 257 min against 120 left; T-409, T-401 and T-402 move to mast, which fills the board chain's review waits with them
 - 2026-10-29 08:00 staff: mast sat idle about 40 min holding T-367 after reporting it blocked on T-366 (the engine kept the attempt open, so no next task came); T-367 moves to hull, which closes mast's attempt; it starts after T-366 merges. The blocked report not freeing the lane goes to the M6 backlog
 - station M-5449: keep course 874 min in, 117 done; hull 326 min, mast 306 min against 86 left. Friction reports reach a captain only when it is idle, so a busy captain never reads them (ours: 35 open; another project's: 59): a new task at hull's front makes them ring while busy and list each report
+- ★ 2026-10-29 09:00 hand-fix: on the user's order the captain wrote the branch sweep itself and released v0.4.12: a cancelled task's branches are deleted on the remote, and a task branch older than `[conventions] branch_max_age_min` (120) or more open-voyage task branches than lanes × `branch_max_per_lane` (3) is named to the captain (merged on dev as 167a85b3 with two engine tests); the voyage is held by the user meanwhile
 
 # Queue
 
