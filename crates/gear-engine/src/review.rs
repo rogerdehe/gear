@@ -1351,10 +1351,20 @@ fn start_reviewer(
         park(store, &seat.id, "the seat's worktree path is unknown", now)?;
         return Ok(Started::NotYet);
     };
+    // T-420 (F1 of the review of attempt 2): the checkout the reviewer runs in
+    // is the seat's worktree, and release looks for the scratch directory
+    // through it (`<worktree>/.gear/tmp` when the project names none). The path
+    // is refreshed on every start, so a reopened checkout is the one released.
+    store.write(|tx| tx.set_meta(&crate::onboard::worktree_path_key(&seat.id), &path))?;
     if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &config.conventions.remote, &branch, task, now)? { return Ok(Started::NotYet) }
 
     if occupant.is_none() {
-        let mut env_command = format!("export GEAR_CTX={}:{}:{}; export GEAR_DB={}", config.project.id, seat.name, generation, cfg.db_path);
+        // T-420: the reviewer's temp files go in its own scratch directory,
+        // the same line every other seat gets.
+        let mut env_command = match crate::onboard::tmpdir_prefix(&config.conventions, &config.project.id, &seat.name, Some(&path)) {
+            Some(prefix) => format!("{prefix}export GEAR_CTX={}:{}:{}; export GEAR_DB={}", config.project.id, seat.name, generation, cfg.db_path),
+            None => format!("export GEAR_CTX={}:{}:{}; export GEAR_DB={}", config.project.id, seat.name, generation, cfg.db_path),
+        };
         if let Some(start) = model.and_then(|model| model_start(kind, model)) {
             if !start.env.is_empty() { env_command = format!("{env_command}; {}", start.env); }
         }
@@ -4333,6 +4343,104 @@ review = [
             1,
             "the export is set once: {commands:?}"
         );
+    }
+
+    /// T-420: a reviewer's temp files go in its own scratch directory, as a
+    /// lane's do — the environment line it runs names it as `TMPDIR`.
+    #[test]
+    fn a_reviewers_environment_names_its_own_scratch_dir() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        let export = pane_runs(&herdr, "wt1:p1")
+            .into_iter()
+            .find(|command| command.contains("export GEAR_CTX="))
+            .expect("the environment line");
+        let scratch = "/fake-worktrees/p-review-1/.gear/tmp";
+        assert!(
+            export.starts_with(&format!("mkdir -p '{scratch}'; export TMPDIR='{scratch}'; ")),
+            "{export}"
+        );
+    }
+
+    /// T-420 (F1 of the review of attempt 2): a reviewer's start records the
+    /// checkout it runs in where release looks for the scratch directory, so a
+    /// released reviewer leaves no `<worktree>/.gear/tmp` behind.
+    #[test]
+    fn a_released_reviewer_leaves_no_scratch_in_its_worktree() {
+        // A reviewer that comes back to its checkout: the first job recorded
+        // the path, the second start reopens it and names its scratch.
+        let worktree = crate::testtmp::temp("gear-reviewer-scratch").join("p-review-1");
+        let scratch = worktree.join(".gear").join("tmp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join("probe"), "x").unwrap();
+
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        let pane = "wt1:p1";
+        herdr.add_shell(pane);
+        store
+            .write(|tx| {
+                tx.insert_seat(&SeatRow {
+                    id: "p:review-1".into(),
+                    project: "p".into(),
+                    role: SeatRole::Temp,
+                    name: "review-1".into(),
+                    profile: "codex".into(),
+                    generation: 1,
+                    state: SeatState::Starting,
+                    state_since: T0,
+                    state_reason: Some("onboarding".into()),
+                    task_id: Some("T-1".into()),
+                })?;
+                tx.insert_binding(&BindingRow {
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    session: "sess".into(),
+                    pane_id: pane.into(),
+                    kind: "codex".into(),
+                    session_ref: None,
+                    status: BindingStatus::Pending,
+                    handover_id: None,
+                    created: T0,
+                })?;
+                tx.set_meta(&path_key("p:review-1"), &worktree.to_string_lossy())
+            })
+            .unwrap();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+
+        // The environment line names the checkout's own scratch, and the start
+        // recorded that checkout as the seat's worktree.
+        let export = pane_runs(&herdr, pane)
+            .into_iter()
+            .find(|command| command.contains("export GEAR_CTX="))
+            .expect("the environment line");
+        let path = worktree.to_string_lossy().into_owned();
+        assert!(
+            export.starts_with(&format!("mkdir -p '{path}/.gear/tmp'; export TMPDIR='{path}/.gear/tmp'; ")),
+            "{export}"
+        );
+        let recorded = store
+            .read(|tx| tx.get_meta(&crate::onboard::worktree_path_key("p:review-1")))
+            .unwrap();
+        assert_eq!(recorded.as_deref(), Some(path.as_str()), "release finds the reviewer's worktree");
+
+        // The reviewer leaves, then the seat is free: the scratch goes with it.
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().expect("the reviewer seat");
+        assert!(
+            !crate::release::release_one(&mut store, &mut herdr, "p", &seat, None, T0 + 30, "test").unwrap(),
+            "the agent leaves first"
+        );
+        assert!(scratch.is_dir(), "the scratch goes with the seat, not before it");
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().expect("the reviewer seat");
+        assert!(
+            crate::release::release_one(&mut store, &mut herdr, "p", &seat, None, T0 + 40, "test").unwrap(),
+            "the seat is free"
+        );
+        assert!(!scratch.exists(), "the released reviewer's scratch directory is gone");
     }
 
     #[test]

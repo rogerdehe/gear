@@ -248,9 +248,14 @@ fn a_merged_task_is_green_in_the_graph() {
     let at = line.text.chars().position(|c| c == '◉').unwrap();
     assert_eq!(line.styles[at], Style::fg(Color::Warn).and_bold());
     assert_eq!(lines[0].styles[2], Style::fg(Color::Ok).and_bold());
-    // The terminal gets it as SGR codes: bold green.
+    // The terminal gets the git graph in the same colours: the merge `●` at
+    // dev's column is bold green and the working task's `◉` bold yellow
+    // (T-362). The selected row is lit in one colour (README change 13), so
+    // each is checked on the frame that does not light it.
+    let ansi = canvas(&board, &crate::screen(Tab::Tasks, 1, (160, 40)), None).ansi(true);
+    assert!(ansi.contains("\u{1b}[1;32m●\u{1b}[0m"), "{ansi:?}");
     let ansi = canvas(&board, &crate::screen(Tab::Tasks, 0, (160, 40)), None).ansi(true);
-    assert!(ansi.contains("\u{1b}[1;32m✓\u{1b}[0m"), "{ansi:?}");
+    assert!(ansi.contains("\u{1b}[1;33m◉\u{1b}[0m"), "{ansi:?}");
 }
 
 #[test]
@@ -307,23 +312,27 @@ fn the_board_draws_in_colour_unless_told_not_to() {
     }
 }
 
+/// A long lane name never moves the text columns of a view: the text after
+/// the drawing starts at the same column on every row, whatever the names are.
+/// The Tasks view's lane heads are six cells apart as the prototype writes them
+/// (T-362), so a long name there runs into the next head as it does in the
+/// prototype; the text column after the drawing still holds.
 #[test]
-fn a_long_lane_name_never_runs_into_the_next_column() {
+fn a_long_lane_name_never_moves_the_text_columns() {
     let board = board();
     let size = (200, 40);
 
-    // Graph: the lane name is followed by a space before the goal, and the
-    // goal starts at the same column on every row.
+    // Tasks: the text after the drawing starts at the same column on every
+    // row, whatever the lane names are. The heads name the lanes six cells
+    // apart as the prototype writes them, so the long name is cut by the next
+    // head (T-362).
     let graph = frame(&board, &crate::screen(Tab::Tasks, 0, size), None);
-    assert!(graph.contains("rewrite Give internal/dbtest"), "{graph}");
     let long = line_with(&graph, " T-2 ");
     let short = line_with(&graph, " T-1 ");
-    assert_eq!(column(long, "rewrite"), column(short, "hull"), "{graph}");
-    let goal = column(long, "Give internal");
-    assert!(column(short, "merged") > goal, "{graph}");
-    // The heads of the lane columns do not overwrite each other.
+    assert_eq!(column(long, "T-2 "), column(short, "T-1 "), "{graph}");
+    assert_eq!(column(long, "Give internal"), column(short, "T-1 ") + 7, "{graph}");
     let head = line_with(&graph, "dev");
-    assert!(head.contains("hull") && head.contains("rewrite"), "{head:?}");
+    assert!(head.contains("rewrit") && head.contains("hull"), "{head:?}");
 
     // Now: the middle column starts at the same place for both lanes.
     let now = frame(&board, &crate::screen(Tab::Now, 0, size), None);
