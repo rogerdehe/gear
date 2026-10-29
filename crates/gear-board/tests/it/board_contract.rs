@@ -1220,7 +1220,7 @@ fn the_tab_row_of_the_layout_answers_a_click() {
     let frame = run_events(&mut store, events, size);
 
     assert!(
-        frame.contains("DECISIONS MADE"),
+        frame.contains("ALL DECISIONS"),
         "the click opened the Log view: {frame}"
     );
 }
