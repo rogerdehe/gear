@@ -74,6 +74,10 @@ pub struct Plan {
     pub phase: Phase,
     /// How many ticks the current phase has waited.
     pub waited: i64,
+    /// When the current phase began, and when the restart began (T-407): the
+    /// durable times its probe lines are measured from.
+    pub at: Ts,
+    pub started: Ts,
     /// Original CLI and same-CLI session, retained across engine restarts.
     pub old_cli: String,
     pub resume: Option<String>,
@@ -140,6 +144,8 @@ pub fn pending(store: &mut Store, seat_id: &str) -> GearResult<Option<Plan>> {
             .get("waited")
             .and_then(|value| value.as_i64())
             .unwrap_or(0),
+        at: record.get("at").and_then(|value| value.as_i64()).unwrap_or(0),
+        started: record.get("started").and_then(|value| value.as_i64()).unwrap_or(0),
     }))
 }
 
@@ -248,6 +254,8 @@ pub(crate) fn advance(
                 generation: 0,
                 phase: Phase::Stop,
                 waited: 0,
+                at: now,
+                started: now,
             };
             set_pending(store, &seat.id, &plan)?;
             plan
@@ -277,6 +285,8 @@ pub(crate) fn advance(
         }
     }
     loop {
+        let before = plan.phase;
+        let began = plan.at;
         match plan.phase {
             Phase::Stop => {
                 if !stop(store, herdr, profiles, seat, &mut plan, now)? {
@@ -294,8 +304,27 @@ pub(crate) fn advance(
                 }
             }
             Phase::Finish => {
-                return finish(store, herdr, profiles, project, seat, &plan, now);
+                let finished = finish(store, herdr, profiles, project, seat, &plan, now)?;
+                // T-407: the last phase's own line, with the whole restart's
+                // time in it — once it is done, not while it waits.
+                if finished.is_some() {
+                    crate::ops::probe(
+                        "restart",
+                        &seat.id,
+                        Phase::Finish.as_str(),
+                        now.saturating_sub(plan.at).saturating_mul(1000),
+                        now.saturating_sub(plan.started).saturating_mul(1000),
+                    );
+                }
+                return Ok(finished);
             }
+        }
+        // T-407: a phase that ended here is one line of the engine log, from
+        // the durable time it began with (the phase itself moved `at` on).
+        if plan.phase != before {
+            let step_ms = now.saturating_sub(began).saturating_mul(1000);
+            let total = now.saturating_sub(plan.started).saturating_mul(1000);
+            crate::ops::probe("restart", &seat.id, before.as_str(), step_ms, total);
         }
     }
 }
@@ -341,6 +370,7 @@ fn stop(
             // The agent is already gone: the next CLI may start.
             plan.phase = Phase::Start;
             plan.waited = 0;
+            plan.at = now;
             set_pending(store, &seat.id, plan)?;
             return Ok(true);
         }
@@ -418,6 +448,7 @@ fn stop(
     }
     plan.phase = Phase::Exit;
     plan.waited = 0;
+    plan.at = now;
     set_pending(store, &seat.id, plan)?;
     Ok(false)
 }
@@ -441,6 +472,7 @@ fn exit(
             // The pane is a shell again: the next CLI may start.
             plan.phase = Phase::Start;
             plan.waited = 0;
+            plan.at = now;
             set_pending(store, &seat.id, plan)?;
             Ok(true)
         }
@@ -505,6 +537,7 @@ fn start(
         Ok(Some(info)) if info.agent.as_deref() == Some(plan.cli.as_str()) => {
             plan.phase = Phase::Finish;
             plan.waited = 0;
+            plan.at = now;
             set_pending(store, &seat.id, plan)?;
             return Ok(true);
         }
@@ -616,6 +649,7 @@ fn start(
         Outcome::Ok(_) => {
             plan.phase = Phase::Finish;
             plan.waited = 0;
+            plan.at = now;
             set_pending(store, &seat.id, plan)?;
             Ok(true)
         }
@@ -1020,6 +1054,8 @@ fn set_pending(store: &mut Store, seat_id: &str, plan: &Plan) -> GearResult<()> 
         "args": plan.args,
         "generation": plan.generation,
         "waited": plan.waited,
+        "at": plan.at,
+        "started": plan.started,
         "old_cli": plan.old_cli,
         "resume": plan.resume,
         "resume_required": plan.resume_required,
@@ -1441,7 +1477,7 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
         let mut plan = Plan { model:"provider/new".into(), cli:"opencode".into(), args:vec![], generation:0,
             phase:Phase::Start, waited:0, old_cli:"opencode".into(), resume:Some("old-session".into()),
-            resume_required:true, profile_name:Some("opencode".into()) };
+            resume_required:true, profile_name:Some("opencode".into()), at:T, started:T };
         herdr.exit_agent(PANE);
         assert!(start(&mut store, &mut herdr, &cfg, &cfg.profiles, &seat, &mut plan, T+1).unwrap());
         let args = herdr.calls.iter().find_map(|c| if let Call::AgentStart { args, .. } = c { Some(args) } else { None }).unwrap();
@@ -1484,7 +1520,7 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         herdr.exit_agent(PANE);
         let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
         let mut plan = Plan { model:"new-model".into(), cli:"codex".into(), args:vec![], generation:0,
-            phase:Phase::Start, waited:0, old_cli:"pi".into(), resume:None, resume_required:false, profile_name:Some("codex".into()) };
+            phase:Phase::Start, waited:0, old_cli:"pi".into(), resume:None, resume_required:false, profile_name:Some("codex".into()), at:T, started:T };
         assert!(start(&mut store, &mut herdr, &cfg, &cfg.profiles, &seat, &mut plan, T+3).unwrap());
         herdr.set_agent_session(PANE, codex.to_str().unwrap());
         let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();

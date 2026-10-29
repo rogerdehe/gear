@@ -50,7 +50,7 @@ use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gear_app::config::{ProjectConfig, Repo};
 use gear_herdr::{HerdrAct, Outcome};
@@ -167,6 +167,38 @@ fn wall_time() -> Ts {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as Ts
+}
+
+/// The steps of one merge attempt, each one line of the engine log (T-407):
+/// `fetch`, `merge`, `gate`, `push`, `close`.
+///
+/// A merge is one worker's run, so the times are the worker's own clock: an
+/// engine that dies in the middle re-runs the merge from its first step, and
+/// the next attempt logs its steps again.
+struct Probe {
+    task: String,
+    attempt_started: Instant,
+    step_started: Instant,
+}
+
+impl Probe {
+    fn new(task: &str) -> Probe {
+        let now = Instant::now();
+        Probe { task: task.to_string(), attempt_started: now, step_started: now }
+    }
+
+    /// The step that ends here, with the attempt's time so far.
+    fn step(&mut self, name: &str) {
+        let now = Instant::now();
+        crate::ops::probe(
+            "merge",
+            &self.task,
+            name,
+            now.duration_since(self.step_started).as_millis() as i64,
+            now.duration_since(self.attempt_started).as_millis() as i64,
+        );
+        self.step_started = now;
+    }
 }
 
 /// Queue, launch or collect a merge without waiting for git or the gate.
@@ -1695,6 +1727,8 @@ fn merge_one_locked(
         .and_then(|review| review.as_str())
         .map(str::to_string)
         .unwrap_or_else(|| review_fallback.to_string());
+    // T-407: this attempt's steps, each one line of the engine log.
+    let mut probe = Probe::new(&task);
 
     // 1. a clean base: the remote integration branch, whatever an interrupted
     //    earlier run left behind.
@@ -1703,11 +1737,14 @@ fn merge_one_locked(
     //    would not bring it in. A fetch that fails may clear (the network,
     //    the remote): it is retried.
     if let Err(reason) = git(dir, &["fetch", "--prune", remote_name, &format!("+refs/heads/*:refs/remotes/{remote_name}/*")]) {
+        probe.step("fetch");
         return Step::Failed(Failed::clear(format!("fetch {remote_name}: {reason}")));
     }
     if let Err(reason) = git(dir, &["reset", "--hard", &format!("{remote_name}/{integration}")]) {
+        probe.step("fetch");
         return Step::Failed(Failed::stuck(format!("reset to {remote_name}/{integration}: {reason}")));
     }
+    probe.step("fetch");
 
     // 2. the approved candidate, by commit. P0: what merges is the commit the
     //    review approved, never what a branch points at now. The branch the
@@ -1849,6 +1886,7 @@ fn merge_one_locked(
             // Abort and leave the worktree exactly at the integration branch.
             let _ = git(dir, &["merge", "--abort"]);
             let _ = git(dir, &["reset", "--hard", &format!("{remote_name}/{integration}")]);
+            probe.step("merge");
             return Step::Failed(Failed::stuck(format!("conflict merging {pinned}: {reason}")));
         }
     }
@@ -1857,8 +1895,10 @@ fn merge_one_locked(
     //    conflict (a file committed with markers in it).
     if git(dir, &["grep", "-n", "-e", "^<<<<<<<", "-e", "^>>>>>>>"]).is_ok() {
         let _ = git(dir, &["reset", "--hard", &format!("{remote_name}/{integration}")]);
+        probe.step("merge");
         return Step::Failed(Failed::stuck("conflict markers in the merged tree"));
     }
+    probe.step("merge");
 
     // 8. the gate, before anything is pushed: the gate of the repo the work
     //    is in (T-53).
@@ -1901,18 +1941,22 @@ fn merge_one_locked(
             reason.push('\n');
         }
         reason.push_str(&tail);
+        probe.step("gate");
         return Step::Failed(if status == 126 || status == 127 {
             Failed::clear(reason)
         } else {
             Failed::stuck(reason)
         });
     }
+    probe.step("gate");
 
     // 9. PR mode (design §11.2 step 2): the integration branch is not pushed.
     //    The review's commits go onto the pull request's head, and the pull
     //    request is what lands the task.
     if let Some(pr) = pr {
-        return pr_head(dir, &git, &sha, &review_ref, has_review, pr, remote, commit);
+        let step = pr_head(dir, &git, &sha, &review_ref, has_review, pr, remote, commit);
+        probe.step("push");
+        return step;
     }
 
     // 9b. push, then close the branches the merge consumed.
@@ -1920,6 +1964,7 @@ fn merge_one_locked(
     // captain or another merge pushed meanwhile) is a race, not a failure: the
     // merge starts again from the new tip.
     if let Err(reason) = remote.push(dir, &integration) {
+        probe.step("push");
         if reason.contains("non-fast-forward") || reason.contains("fetch first") || reason.contains("cannot lock ref") {
             return Step::Failed(Failed::clear(format!("{RACE}{reason}")));
         }
@@ -1927,7 +1972,9 @@ fn merge_one_locked(
         // hook that rejects the push once (F1 of the T-61 review).
         return Step::Failed(Failed::clear(format!("push failed: {reason}")));
     }
+    probe.step("push");
     let (closed, left) = close_branches(dir, repo, &branch, &review, remote, &pushed);
+    probe.step("close");
 
     let head = git(dir, &["log", "-1", "--oneline"]).unwrap_or_default();
     let mut line = format!("merged {task} into {integration}: {head}");
