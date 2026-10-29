@@ -14,6 +14,7 @@
 //! on a terminal; `gear-cli` calls it from the `gear board` subcommand.
 
 mod deps;
+pub mod forecast;
 pub mod frame;
 pub mod golden;
 pub mod graph;
@@ -225,6 +226,10 @@ pub struct ProjectBoard {
     /// The stations of the measured voyage, in plan order, with their
     /// progress (T-334); empty without a measured voyage.
     pub stations: Vec<stations::StationProgress>,
+    /// Each lane's queue played forward (T-349), in the order of `lanes`: when
+    /// the lane ends and how long it sits idle. Empty when no measured voyage
+    /// has open work.
+    pub forecast: Vec<forecast::LaneEnd>,
 }
 
 /// One delivery the engine has not confirmed yet (T-271).
@@ -406,6 +411,9 @@ pub struct TaskBoard {
     pub cache_read: Option<i64>,
     /// The cost of the task's rounds, when it is known (§4.4).
     pub cost_usd: Option<f64>,
+    /// The tasks it depends on (T-349): the board's forecast waits for them to
+    /// merge before the task can start.
+    pub deps: Vec<String>,
 }
 
 /// The captain's inbox: how many items wait, and how long the oldest has.
@@ -583,6 +591,7 @@ pub fn project_with_agents(
             tokens: tokens_of(tx, project, &task.id)?,
             cache_read: cache_read_of(tx, project, &task.id)?,
             cost_usd: cost_of(tx, project, &task.id)?,
+            deps: task.deps.clone(),
         };
         match lanes.iter_mut().find(|lane| lane.lane == name) {
             Some(lane) => lane.tasks.push(line),
@@ -796,6 +805,34 @@ pub fn project_with_agents(
         Some(voyage) => stations::progress(tx, project, &voyage.milestone)?,
         None => Vec::new(),
     };
+    // Each lane's queue played forward (T-349): the measured voyage's forecast,
+    // while it has open work. The jobs come from the lanes, which are in plan
+    // order; the graph's order is for drawing and is not the queue's.
+    let forecast = match &workload {
+        Some(voyage)
+            if lanes
+                .iter()
+                .any(|lane| lane.tasks.iter().any(|task| !task.state.is_terminal())) =>
+        {
+            let jobs: Vec<forecast::Job> = lanes
+                .iter()
+                .flat_map(|lane| {
+                    lane.tasks.iter().map(|task| forecast::Job {
+                        id: task.id.clone(),
+                        lane: lane.lane.clone(),
+                        stage: task.stage,
+                        est_min: task.est_min.unwrap_or(0),
+                        actual_min: task.actual_min.unwrap_or(0),
+                        deps: task.deps.clone(),
+                    })
+                })
+                .collect();
+            let names: Vec<String> = lanes.iter().map(|lane| lane.lane.clone()).collect();
+            let review_merge = forecast::review_merge_min(tx, project, &voyage.milestone)?;
+            forecast::forecast(&jobs, &names, review_merge)
+        }
+        _ => Vec::new(),
+    };
     Ok(ProjectBoard {
         voyages,
         workload,
@@ -820,6 +857,7 @@ pub fn project_with_agents(
         unconfirmed_deliveries,
         unconfirmed,
         stations,
+        forecast,
     })
 }
 
