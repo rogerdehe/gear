@@ -85,6 +85,12 @@ const AGENT_GONE_LIMIT: u32 = 3;
 /// Herdr may report its agent a moment late (as `START_GRACE_S` above).
 const STANDBY_AGENT_GONE_S: i64 = 60;
 
+/// How long a `Starting` reviewer whose pane holds no agent keeps its temp
+/// slot before its failed start is released (T-418): a start that takes longer
+/// than this — an agent that is up but not yet reported, a clone, a build —
+/// still gets its chance, and no review waits longer for a slot than it must.
+const START_FAILED_S: i64 = 180;
+
 /// What the release step did in one tick.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReleaseReport {
@@ -326,6 +332,36 @@ pub fn release_finished_reviews(
             // waits for a slot and a seat a human has to look at is left
             // alone.
             SeatState::Starting => {
+                // T-418: a reviewer whose start failed. Its pane holds no
+                // agent — the CLI died at its start ("No saved session
+                // found") — so no review will ever come from it, while the
+                // seat keeps its temp slot and other reviews wait for one
+                // (2026-10-29: review-11 sat Starting 30 min, two reviews
+                // waited for a slot). It leaves as a cancelled start does
+                // (`release_one`, caller `start-failed`): its review goes back
+                // to `start_reviews`, which starts it again on a free seat.
+                //
+                // A pane that cannot be read is an observation failure, not
+                // an absence (design/08, T-264): such a seat keeps its slot.
+                if let Some((pane, last_line)) = failed_start(store, herdr, &seat, now)? {
+                    match release_one(
+                        store,
+                        herdr,
+                        project,
+                        &seat,
+                        seat.task_id.as_deref(),
+                        now,
+                        "start-failed",
+                    ) {
+                        Ok(true) => {
+                            report.released.push(seat.id.clone());
+                            tell_start_failed(store, project, &seat, &pane, &last_line, now)?;
+                        }
+                        Ok(false) => {}
+                        Err(_) => report.failed.push(seat.id.clone()),
+                    }
+                    continue;
+                }
                 let Some(task) = pending.or_else(|| seat.task_id.clone()) else {
                     continue;
                 };
@@ -569,6 +605,91 @@ fn under_review(
     })
 }
 
+/// Whether a `Starting` reviewer's start has failed (T-418): its binding is
+/// still `Pending` and older than [`START_FAILED_S`], and its pane holds no
+/// agent — the start never took. `Some((pane, last line))` = it has, and the
+/// release names the pane and its last line to the captain.
+///
+/// A pane that cannot be read is an observation failure, not an absence
+/// (design/08, T-264): `Err` keeps the seat, and so does an agent that is
+/// there (the start is slow, not failed).
+fn failed_start(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &SeatRow,
+    now: Ts,
+) -> GearResult<Option<(String, String)>> {
+    let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
+    let Some(binding) = binding.filter(|binding| binding.status == BindingStatus::Pending) else {
+        return Ok(None);
+    };
+    if now - binding.created <= START_FAILED_S {
+        return Ok(None);
+    }
+    match herdr.agent_get(&binding.pane_id) {
+        Ok(None) => {}
+        Ok(Some(_)) | Err(_) => return Ok(None),
+    }
+    // The pane is read before it is closed: the captain is told what its CLI
+    // said. A tail that cannot be read names nothing rather than keeping the
+    // seat.
+    let tail = herdr.read_tail(&binding.pane_id, 16).unwrap_or_default();
+    let last_line = tail
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    Ok(Some((binding.pane_id, last_line)))
+}
+
+/// Tell the captain that a reviewer was released because its start failed
+/// (T-418): the seat and the last line of its pane say what to look at. One
+/// message per release — the seat is `Released`, so the rule cannot fire again
+/// for it.
+fn tell_start_failed(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    pane: &str,
+    last_line: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let Some(captain) = store.read(|tx| tx.captain_of(project))? else {
+        return Ok(());
+    };
+    let line = if last_line.is_empty() {
+        "(nothing on its screen)"
+    } else {
+        last_line
+    };
+    let task = seat.task_id.clone();
+    store.write(|tx| {
+        tx.insert_message(&gear_store::NewMessage {
+            meta: None,
+            project: project.to_string(),
+            thread: format!("review:start-failed:{}", seat.id),
+            task,
+            attempt: None,
+            sender: "engine".to_string(),
+            sender_gen: 0,
+            recipient: captain.id.clone(),
+            kind: gear_model::MsgKind::System,
+            urgent: false,
+            body: format!(
+                "reviewer {} ({}) was released: its start failed. The last line of its pane {pane}: {line}",
+                seat.name, seat.id
+            ),
+            reply_to: None,
+            needs_ack: false,
+            state: gear_model::MsgState::Info,
+            created: now,
+        })
+    })?;
+    Ok(())
+}
+
 /// Release one reviewer. `Ok(false)` = nothing to do (it is waiting for its
 /// worktree to go), `Err` = the step failed and a human should look.
 ///
@@ -615,6 +736,43 @@ fn release_seat(
     ending_its_review: bool,
 ) -> Result<bool, String> {
     let pane = binding_pane(store, seat)?;
+
+    // T-418: a reviewer whose start failed is released as a cancelled start is
+    // (design §3.6, B03-05): its pane holds no agent, so closing it ends the
+    // shell the start left behind, and its binding, its task and the review it
+    // was started for end in one write — a seat left with its reservation
+    // behind would be started again on itself (T-399). `release_finished_reviews`
+    // decides *when* a start has failed; here it pays out.
+    if seat.state == SeatState::Starting {
+        if let Some(pane) = bound_pane(store, seat)?.as_deref() {
+            // A pane that is already gone is fine; a refused close does not
+            // keep the seat (T-264).
+            match herdr.pane_close(pane) {
+                Outcome::Ok(()) | Outcome::Refused { .. } | Outcome::Uncertain { .. } => {}
+            }
+        }
+        let reason = "its start failed";
+        store
+            .write(|tx| {
+                if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
+                    if binding.status != BindingStatus::Void {
+                        tx.set_binding_status(&seat.id, seat.generation, BindingStatus::Void)?;
+                    }
+                }
+                tx.clear_seat_task(&seat.id)?;
+                tx.set_meta(&format!("engine.review_pending.{}", seat.id), "")?;
+                require_transition(
+                    SeatState::can_transition(SeatRole::Temp, seat.state, SeatState::Released),
+                    "seat",
+                    seat.state.as_str(),
+                    SeatState::Released.as_str(),
+                )?;
+                tx.set_seat_state(&seat.id, SeatState::Released, Some(reason), now)
+            })
+            .map_err(|e| e.detail)?;
+        log_release(release_line(seat, seat.state, reason, caller));
+        return Ok(true);
+    }
 
     // 1. the agent leaves, once: its pane is closed. Exit keys differ per
     //    agent and fail quietly (codex needs two ctrl+c, grok only `/exit`,
@@ -1726,6 +1884,123 @@ profile = "codex"
         assert_eq!(op.state, OpState::Void, "the op it sent is voided too");
         let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
         assert_eq!(binding.status, BindingStatus::Void, "its binding ends");
+    }
+
+    /// A reviewer that is still starting, whose binding is `Pending` and old
+    /// and whose pane holds no agent (T-418): its start failed.
+    fn failed_start_world(pane: &str) -> (Store, FakeHerdr) {
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell(pane);
+        herdr.set_screen(pane, "$ codex resume\nNo saved session found");
+        let mut store = world(TaskState::Verifying, pane, "codex");
+        store
+            .write(|tx| {
+                tx.insert_seat(&SeatRow {
+                    id: "p:captain".into(),
+                    project: "p".into(),
+                    role: SeatRole::Captain,
+                    name: "captain".into(),
+                    profile: "claude".into(),
+                    generation: 1,
+                    state: SeatState::Active,
+                    state_since: T0,
+                    state_reason: None,
+                    task_id: None,
+                })?;
+                tx.set_seat_state("p:r-1", SeatState::Starting, Some("starting"), T0)?;
+                // The start in flight opened a pending binding on the pane.
+                tx.set_binding_status("p:r-1", 1, BindingStatus::Pending)?;
+                tx.set_meta("engine.review_pending.p:r-1", "T-1")
+            })
+            .unwrap();
+        // The review it was started for is still under review: nothing but
+        // the failed start may release the seat.
+        handed_in(&mut store, "T-1");
+        (store, herdr)
+    }
+
+    /// T-418: a reviewer whose start failed never holds a temp slot: its
+    /// pending binding is 200 s old and its pane holds no agent, so it is
+    /// released — binding void, task cleared, the review it was started for
+    /// cleared in the same write — so the review starts again on a free seat,
+    /// and the captain is told the seat and its pane's last line.
+    #[test]
+    fn a_reviewer_whose_start_failed_is_released() {
+        let (mut store, mut herdr) = failed_start_world("w2:p2");
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 200).unwrap();
+
+        assert_eq!(report.released, vec!["p:r-1".to_string()], "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Released, "the seat is free");
+        assert_eq!(seat.task_id, None, "its task is cleared");
+        assert_eq!(exits(&herdr), 1, "its pane is closed");
+        let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Void, "its binding ends");
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap().as_deref(),
+            Some(""),
+            "the review goes back to start_reviews"
+        );
+        let told = store
+            .read(|tx| tx.thread_messages("p", "review:start-failed:p:r-1"))
+            .unwrap();
+        assert_eq!(told.len(), 1, "one message for the captain");
+        assert_eq!(told[0].state, gear_model::MsgState::Info);
+        assert!(told[0].body.contains("r-1"), "{}", told[0].body);
+        assert!(
+            told[0].body.contains("No saved session found"),
+            "the pane's last line is named: {}",
+            told[0].body
+        );
+    }
+
+    /// The same seat inside the grace is left alone: its start still has its
+    /// chance.
+    #[test]
+    fn a_starting_reviewer_inside_the_grace_is_left_starting() {
+        let (mut store, mut herdr) = failed_start_world("w2:p2");
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 100).unwrap();
+
+        assert!(report.released.is_empty(), "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Starting, "it goes on");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
+        assert!(store
+            .read(|tx| tx.thread_messages("p", "review:start-failed:p:r-1"))
+            .unwrap()
+            .is_empty());
+    }
+
+    /// The same seat with an agent in its pane is left alone: a slow start is
+    /// not a failed one.
+    #[test]
+    fn a_starting_reviewer_with_an_agent_is_left_starting() {
+        let (mut store, mut herdr) = failed_start_world("w2:p2");
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 200).unwrap();
+
+        assert!(report.released.is_empty(), "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Starting, "it goes on");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
+    }
+
+    /// A pane that cannot be read is an observation failure, not an absence
+    /// (design/08, T-264): the seat keeps its slot.
+    #[test]
+    fn a_starting_reviewer_whose_pane_cannot_be_read_is_left_starting() {
+        let (mut store, mut herdr) = failed_start_world("w2:p2");
+        herdr.observe_fails = true;
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 200).unwrap();
+
+        assert!(report.released.is_empty(), "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Starting, "it goes on");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
     }
 
     #[test]

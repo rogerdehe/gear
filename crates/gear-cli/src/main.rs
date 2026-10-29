@@ -285,11 +285,12 @@ enum AdminOp {
         /// CLIs, so it never happens unless asked for.
         #[arg(long, requires = "check")]
         models: bool,
-        /// The user's own words for a change to the staffing of a departed
-        /// voyage (T-392): `quota`, `lanes`, `temps` or `models` may only
-        /// change mid-voyage once the user was asked.
+        /// The user asked for this staffing change and confirmed it
+        /// (T-401): a mid-voyage change to the staffing of a departed voyage
+        /// applies only on their confirmation, and GEAR stores no words of
+        /// theirs.
         #[arg(long)]
-        user: Option<String>,
+        confirmed: bool,
     },
     /// Print what this machine offers, for the captain's kickoff proposal.
     Kickoff,
@@ -419,8 +420,8 @@ fn run(cli: Cli) -> GearResult<()> {
         },
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Friction(c)) => cmd_friction(c, cli.json),
-        Some(Cmd::Admin { op: AdminOp::Init { config, check, models, user } }) => {
-            cmd_admin_init(&config, check, models, user.as_deref(), cli.json)
+        Some(Cmd::Admin { op: AdminOp::Init { config, check, models, confirmed } }) => {
+            cmd_admin_init(&config, check, models, confirmed, cli.json)
         }
         Some(Cmd::Admin { op: AdminOp::Kickoff }) => cmd_admin_kickoff(cli.json),
         Some(Cmd::Admin { op: AdminOp::InstallSkill { agent } }) => {
@@ -716,16 +717,17 @@ fn refuse_first_registration_by_an_agent(env: &gear_app::Env) -> GearResult<()> 
 /// lists and warns, on stderr, about a configured model id that is not among
 /// them — a warning, not a refusal, and never without `--models`, since asking
 /// runs the CLIs.
+///
+/// With `--confirmed` (T-401) the user's confirmation of a staffing change to
+/// a departed voyage is carried; without it such a change is refused
+/// (T-392), in the check as well, and GEAR stores no words of theirs.
 fn cmd_admin_init(
     config: &std::path::Path,
     check_only: bool,
     with_models: bool,
-    user: Option<&str>,
+    confirmed: bool,
     json: bool,
 ) -> GearResult<()> {
-    // T-392 (rework F1): words that are blank once trimmed are no words —
-    // neither the check nor the init takes `--user ""` for an agreement.
-    let user = user.map(str::trim).filter(|words| !words.is_empty());
     // T-261: the lane list — `(name, kind, model)` — with the model being the
     // lane's first `models` entry, else the role chain's first, else "-".
     let lane_list = |parsed: &gear_app::config::ProjectConfig| -> Vec<(String, String, String)> {
@@ -896,10 +898,10 @@ fn cmd_admin_init(
         {
             return Err(GearError::new(gear_model::ErrorCode::BadFormat, problem));
         }
-        // T-392: a departed voyage's staffing does not change without the
-        // user's words. The check reports the same refusal a real init would
-        // write, and writes nothing itself.
-        if user.is_none() {
+        // T-392: a departed voyage's staffing changes only on the user's
+        // confirmation (T-401). The check reports the same refusal a real
+        // init would write, and writes nothing itself.
+        if !confirmed {
             if let Some(problem) = staffing_refusal_of(&parsed)? {
                 return Err(problem);
             }
@@ -1003,7 +1005,7 @@ fn cmd_admin_init(
         herdr_ref,
         &ancestors,
         home.as_deref(),
-        user,
+        confirmed,
         now_ts(),
     )?;
     // T-321: remember which file this config was applied from, so the home

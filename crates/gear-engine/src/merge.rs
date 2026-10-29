@@ -2245,7 +2245,9 @@ fn close_branches(
     }
     // The task's own branch whose tip moved past the candidate (a push after
     // the hand-in): when every commit of it is on the merged integration
-    // branch it is closed too; otherwise it holds work nobody reviewed or
+    // branch it is closed too; when its commits past the candidate write
+    // nothing but reports it is closed as well (a lane often pushes its report
+    // after the hand-in, T-402); otherwise it holds work nobody reviewed or
     // merged, so it stays and the captain is told (another project,
     // 2026-10-29: a branch left behind without a word).
     let task_ref = format!("{}/{task_branch}", remote.name);
@@ -2255,15 +2257,31 @@ fn close_branches(
                 closed.push(task_branch.to_string());
             }
         } else {
-            let ahead = git(dir, &["log", "--oneline", &format!("HEAD..{task_ref}")]).unwrap_or_default();
-            let commits: Vec<&str> = ahead.lines().filter(|line| !line.trim().is_empty()).collect();
-            left.push(format!(
-                "{task_branch} (commits after the approved candidate, not merged: {})",
-                commits.join("; ")
-            ));
+            let changed = git(dir, &["diff", "--name-only", &format!("HEAD...{task_ref}")]).unwrap_or_default();
+            let files: Vec<&str> =
+                changed.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+            if !files.is_empty() && files.iter().all(|file| is_report_path(file)) {
+                if delete_remote(dir, task_branch, remote) {
+                    closed.push(task_branch.to_string());
+                }
+            } else {
+                let ahead = git(dir, &["log", "--oneline", &format!("HEAD..{task_ref}")]).unwrap_or_default();
+                let commits: Vec<&str> = ahead.lines().filter(|line| !line.trim().is_empty()).collect();
+                left.push(format!(
+                    "{task_branch} (commits after the approved candidate, not merged: {})",
+                    commits.join("; ")
+                ));
+            }
         }
     }
     (closed, left)
+}
+
+/// A file a lane writes its report to: it lies in a `reports/` directory, a
+/// path segment `/reports/` (T-402). Commits past the approved candidate that
+/// change nothing but such files hold no work the review did not see.
+fn is_report_path(path: &str) -> bool {
+    path.contains("/reports/")
 }
 
 /// A branch of a task: the task's own branch, or that branch with a suffix
@@ -6799,10 +6817,50 @@ gate = "{project_gate}"
         assert!(log.contains("review"), "{log}");
         assert!(!log.contains("sneaky"), "the unreviewed commit is not on dev: {log}");
         assert!(scratch.dev_has_task_commit());
-        // The branch holds more than the candidate: it is not closed.
+        // The branch holds more than the candidate: it is not closed, and the
+        // commit it holds is named (T-402: only reports there close it).
         let branches = scratch.origin_branches();
         assert!(branches.contains("heat/t5"), "{branches}");
         assert!(!branches.contains("review/t5"), "{branches}");
+        assert!(
+            line.contains("commits after the approved candidate, not merged:") && line.contains("sneaky"),
+            "{line}"
+        );
+    }
+
+    /// T-402: lanes often push their report after the hand-in. A task branch
+    /// whose only commits past the candidate write reports holds no work the
+    /// review did not see: it is closed with the others, and the captain is
+    /// not rung for it.
+    #[test]
+    fn a_branch_whose_only_commits_past_the_candidate_are_reports_is_closed() {
+        let scratch = Scratch::new("report-extra");
+        let candidate = scratch.head_of("heat/t5");
+        let (mut store, mut herdr, cfg) = queued_merge_candidate(&scratch, "true", &candidate);
+        // The lane pushes its report after the hand-in.
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && mkdir -p gear/voyages/M1/reports \
+             && echo report > gear/voyages/M1/reports/T-5.md && git add -A \
+             && git -c user.email=a@b -c user.name=a commit -qm report",
+        );
+        publish(&scratch.work, "heat/t5");
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let merged = wait_merge(&mut store, &mut herdr, &cfg);
+        assert_eq!(merged.len(), 1, "the candidate merged");
+        // The branch is gone …
+        let result = op_result(&mut store, "O-1");
+        assert!(result.contains("closed on origin: "), "{result}");
+        assert!(!result.contains("left on"), "{result}");
+        let branches = scratch.origin_branches();
+        assert!(!branches.contains("heat/t5"), "{branches}");
+        assert!(!branches.contains("review/t5"), "{branches}");
+        // … and the captain was not rung about it.
+        let items = store
+            .read(|tx| tx.messages_from_since("p", "p:captain", 0))
+            .unwrap();
+        assert!(items.is_empty(), "{:?}", items.iter().map(|item| &item.body).collect::<Vec<_>>());
     }
 
     /// T-61: the approved commit merges, wherever it is. The branch the lane
