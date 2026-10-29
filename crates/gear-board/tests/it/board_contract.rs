@@ -1571,19 +1571,22 @@ fn a_long_graph_draws_its_last_task() {
     assert!(text.contains("T-17"), "the last task is drawn: {text}");
 }
 
-/// Keys that send the given events, then `q`, on an 80x12 screen.
-struct Events(Vec<Event>);
+/// Keys that send the given events, then `q`, on a screen of the given size.
+struct Events {
+    events: Vec<Event>,
+    size: (usize, usize),
+}
 
 impl Keys for Events {
     fn next_event(&mut self, _timeout: Duration) -> Option<Event> {
-        if self.0.is_empty() {
+        if self.events.is_empty() {
             return Some(Event::Key('q'));
         }
-        Some(self.0.remove(0))
+        Some(self.events.remove(0))
     }
 
     fn size(&self) -> (usize, usize) {
-        (80, 12)
+        self.size
     }
 }
 
@@ -1631,7 +1634,7 @@ fn a_view_scrolls_to_its_selected_pick_and_a_click_keeps_it() {
         ..Options::default()
     };
     let mut out: Vec<u8> = Vec::new();
-    run_with(&mut store, &opts, &mut out, &mut Events(events), None).unwrap();
+    run_with(&mut store, &opts, &mut out, &mut Events { events, size: (80, 12) }, None).unwrap();
 
     let frame = last_frame(&out);
     let rows: Vec<&str> = frame.lines().collect();
@@ -1673,7 +1676,7 @@ fn a_click_on_the_top_row_of_a_scrolled_view_picks_the_task_there() {
         ..Options::default()
     };
     let mut out: Vec<u8> = Vec::new();
-    run_with(&mut store, &opts, &mut out, &mut Events(events), None).unwrap();
+    run_with(&mut store, &opts, &mut out, &mut Events { events, size: (80, 12) }, None).unwrap();
 
     let frame_text = last_frame(&out);
     let rows: Vec<&str> = frame_text.lines().collect();
@@ -1810,3 +1813,241 @@ fn a_reading_half_an_hour_old_says_its_age() {
     let frame = now_frame(&mut store, T0);
     assert!(frame.contains("(read 45 min ago)"), "{frame}");
 }
+
+// ---- T-411: the wheel and the page keys scroll a long view
+
+/// A hundred tasks on one lane: a view no viewport shows whole, so what the
+/// wheel and the page keys do to the selection is visible on the frame.
+fn world_with_a_hundred_tasks() -> Store {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            for n in 1..=100 {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: format!("T-{n:02}"),
+                    rank: n as i64,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("data".into()),
+                    milestone: Some("M4".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// The board's last frame over the given events, on a screen of a given size.
+fn run_events(store: &mut Store, events: Vec<Event>, size: (usize, usize)) -> String {
+    let out = run_events_output(store, events, size);
+    last_frame(out.as_bytes())
+}
+
+/// Everything the board wrote over the given events: every frame, in order.
+fn run_events_output(store: &mut Store, events: Vec<Event>, size: (usize, usize)) -> String {
+    let opts = Options {
+        project: Some("p".into()),
+        color: false,
+        refresh: Duration::from_millis(1),
+        ..Options::default()
+    };
+    let mut out: Vec<u8> = Vec::new();
+    run_with(store, &opts, &mut out, &mut Events { events, size }, None).unwrap();
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// T-411: ten notches of the wheel move the selection three picks each, the
+/// wheel stops at the first pick, and a page key moves a screenful with the
+/// viewport.
+#[test]
+fn the_wheel_and_the_page_keys_move_the_selection_over_a_long_view() {
+    use gear_board::frame;
+    let mut store = world_with_a_hundred_tasks();
+    let size = (80, 40);
+
+    // Ten notches down from the first pick: pick 30, drawn on its own row and
+    // lit (the viewport has not moved yet).
+    let mut events = vec![Event::Key('2')];
+    events.extend((0..10).map(|_| Event::Mouse { button: 65, x: 1, y: 7 }));
+    let frame = run_events(&mut store, events, size);
+    let rows: Vec<&str> = frame.lines().collect();
+    let row = frame::FIRST_ROW + 30;
+    assert!(
+        rows.get(row).unwrap_or(&"").contains("T-31"),
+        "the thirtieth pick's row holds T-31: {frame}"
+    );
+    assert!(
+        rows.get(row).unwrap_or(&"").contains("\u{1b}[7m"),
+        "the wheel's pick is the lit row: {frame}"
+    );
+
+    // The wheel up at the first pick stays there.
+    let mut events = vec![Event::Key('2')];
+    events.extend((0..10).map(|_| Event::Mouse { button: 64, x: 1, y: 7 }));
+    let frame = run_events(&mut store, events, size);
+    let rows: Vec<&str> = frame.lines().collect();
+    assert!(
+        rows.get(frame::FIRST_ROW).unwrap_or(&"").contains("T-01"),
+        "the wheel up stays at the first pick: {frame}"
+    );
+    assert!(
+        rows.get(frame::FIRST_ROW).unwrap_or(&"").contains("\u{1b}[7m"),
+        "the first pick is the lit row: {frame}"
+    );
+
+    // A page down from the first pick: the view shows the rows (40 - 7 = 33),
+    // so the pick one screen down is the 34th task, and the viewport followed
+    // it: the heading's row scrolled away and the first pick's row is drawn on
+    // the view's first row.
+    let frame = run_events(&mut store, vec![Event::Key('2'), Event::PageDown], size);
+    let rows: Vec<&str> = frame.lines().collect();
+    let lit = frame::FIRST_ROW + 33 - 2;
+    assert!(
+        rows.get(lit).unwrap_or(&"").contains("T-34"),
+        "the page down picks the task one screen down: {frame}"
+    );
+    assert!(
+        rows.get(lit).unwrap_or(&"").contains("\u{1b}[7m"),
+        "the page key's pick is the lit row: {frame}"
+    );
+    assert!(
+        rows.get(frame::VIEW_ROW).unwrap_or(&"").contains("T-02"),
+        "the viewport moved with the selection: {frame}"
+    );
+    assert!(
+        !rows.get(frame::VIEW_ROW).unwrap_or(&"").contains("dev"),
+        "the heading scrolled away: {frame}"
+    );
+
+    // A page up comes back to the first pick.
+    let frame = run_events(
+        &mut store,
+        vec![Event::Key('2'), Event::PageDown, Event::PageUp],
+        size,
+    );
+    let rows: Vec<&str> = frame.lines().collect();
+    assert!(
+        rows.get(frame::FIRST_ROW).unwrap_or(&"").contains("T-01"),
+        "the page up comes back to the first pick: {frame}"
+    );
+    assert!(
+        rows.get(frame::VIEW_ROW).unwrap_or(&"").contains("dev"),
+        "the heading is back: {frame}"
+    );
+}
+
+/// T-411: a wheel notch is never a click. It closes a panel as an arrow does
+/// and opens none, and a notch where the tabs are drawn switches no view.
+#[test]
+fn a_wheel_notch_is_never_a_click() {
+    use gear_board::frame;
+    let mut store = world_with_a_hundred_tasks();
+    let size = (80, 40);
+
+    // `Enter` opens the panel of the first task; the next notch closes it as
+    // an arrow would, and no panel is opened in its place. The panel is drawn
+    // on the frame before the notch, so its absence after it says something
+    // (the panel's frame is not the last one: the key that closes it is read
+    // after it).
+    let opened = run_events_output(&mut store, vec![Event::Key('2'), Event::Key('\r')], size);
+    assert!(opened.contains("ROUNDS"), "`Enter` opens the panel: {opened}");
+    let frame = run_events(
+        &mut store,
+        vec![Event::Key('2'), Event::Key('\r'), Event::Mouse { button: 65, x: 1, y: 7 }],
+        size,
+    );
+    let rows: Vec<&str> = frame.lines().collect();
+    assert!(!frame.contains("ROUNDS"), "the wheel opens no panel: {frame}");
+    assert!(
+        rows.get(frame::FIRST_ROW).unwrap_or(&"").contains("T-01"),
+        "the notch that closed the panel moved nothing: {frame}"
+    );
+
+    // A notch on the tab row is not a click on the tab under it: the view
+    // stays the task view and the selection moves three picks.
+    let frame = run_events(
+        &mut store,
+        vec![Event::Key('2'), Event::Mouse { button: 65, x: 1, y: 4 }],
+        size,
+    );
+    let rows: Vec<&str> = frame.lines().collect();
+    let row = frame::FIRST_ROW + 3;
+    assert!(
+        rows.get(row).unwrap_or(&"").contains("T-04"),
+        "a notch on the tab row scrolls instead of switching the view: {frame}"
+    );
+    assert!(
+        rows.get(row).unwrap_or(&"").contains("\u{1b}[7m"),
+        "the notch's pick is the lit row: {frame}"
+    );
+}
+
+/// T-411: the page keys arrive as `[5~` and `[6~`, and the wheel's SGR
+/// sequence is still a mouse event with its own button.
+#[test]
+fn the_page_keys_parse_and_the_wheel_is_still_a_mouse() {
+    let pty = Pty::open();
+    let slave = pty.slave;
+    let (ready, is_ready) = std::sync::mpsc::channel();
+    let (left, events) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        // Raw mode is on once `Terminal::on` returns: only then do the bytes
+        // come one at a time instead of waiting for a newline.
+        let mut keys = gear_board::Terminal::on(slave);
+        let _ = ready.send(());
+        for _ in 0..5 {
+            if left.send(keys.next_event(Duration::from_secs(5))).is_err() {
+                break;
+            }
+        }
+    });
+    is_ready.recv_timeout(Duration::from_secs(5)).expect("the terminal is in raw mode");
+    press(pty.master, b"\x1b[5~");
+    press(pty.master, b"\x1b[6~");
+    press(pty.master, b"\x1b[<64;10;20M");
+    press(pty.master, b"\x1b[<65;10;20M");
+    press(pty.master, b"\x1b[<0;1;7M");
+
+    let read = |events: &std::sync::mpsc::Receiver<Option<Event>>| {
+        events.recv_timeout(Duration::from_secs(5)).unwrap_or(None)
+    };
+    assert_eq!(read(&events), Some(Event::PageUp), "`[5~` is the page up");
+    assert_eq!(read(&events), Some(Event::PageDown), "`[6~` is the page down");
+    assert_eq!(
+        read(&events),
+        Some(Event::Mouse { button: 64, x: 10, y: 20 }),
+        "the wheel up is still a mouse"
+    );
+    assert_eq!(
+        read(&events),
+        Some(Event::Mouse { button: 65, x: 10, y: 20 }),
+        "the wheel down is still a mouse"
+    );
+    assert_eq!(
+        read(&events),
+        Some(Event::Mouse { button: 0, x: 1, y: 7 }),
+        "the left click keeps its button"
+    );
+    reader.join().ok();
+}
+
+
