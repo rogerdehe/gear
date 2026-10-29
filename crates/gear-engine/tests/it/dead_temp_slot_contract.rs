@@ -52,7 +52,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 "#;
 
 fn cfg() -> EngineCfg {
-    let mut cfg = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
+    let mut cfg = EngineCfg { db_path: crate::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
     cfg.review_git = std::sync::Arc::new(crate::FakeReviewGit);
     for kind in ["codex", "opencode", "claude"] {
         cfg.profiles
