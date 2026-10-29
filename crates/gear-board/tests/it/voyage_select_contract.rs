@@ -280,6 +280,57 @@ fn the_board_built_for_a_landed_voyage_keeps_its_data() {
     assert_eq!(whats, vec!["the old lane lands with M1"], "the decisions of M1: {whats:?}");
 }
 
+/// T-353: the first row lists every voyage, the landed ones with ⚓ and the
+/// sailing ones with ⛵, and the shown voyage's label is lit (README change 1).
+#[test]
+fn the_head_lists_every_voyage_and_lights_the_shown_one() {
+    use gear_board::frame::{self, Tab};
+    use gear_board::style::{Color, Style};
+
+    let mut store = world();
+    let board = gear_board::build(
+        &mut store,
+        &Options { project: Some("p".into()), milestone: None, ..Default::default() },
+        NOW,
+    )
+    .unwrap();
+    let size = (160, 40);
+    let screen = crate::screen(Tab::Now, 0, size);
+    let canvas = frame::canvas(&board, &screen, None);
+    let text = canvas.text();
+    let head = frame::layout(&board, &screen);
+
+    // The two voyages, newest first: M2 sails, M1 landed.
+    let labels: Vec<&str> = head.voyages.iter().map(|(_, _, milestone)| milestone.as_str()).collect();
+    assert_eq!(labels, vec!["M2", "M1"], "the labels of the first row: {labels:?}");
+    let row = text.lines().next().unwrap_or_default();
+    let m2 = row.find("M2").unwrap_or_else(|| panic!("M2's label: {row:?}"));
+    let m1 = row.find("M1").unwrap_or_else(|| panic!("M1's label: {row:?}"));
+    assert!(m2 < m1, "the newest voyage is the first label: {row:?}");
+    assert!(row[m2..].starts_with("M2 ⛵"), "a sailing voyage carries ⛵: {row:?}");
+    assert!(row[m1..].starts_with("M1 ⚓"), "a landed voyage carries ⚓: {row:?}");
+
+    // The shown voyage's label is in reverse video and bold; the landed one
+    // is dim. Each range holds its label's cells, the mark and its
+    // continuation included.
+    for (first, last, milestone) in &head.voyages {
+        let shown = milestone == "M2";
+        let style = canvas.style_at(*first, 0);
+        assert_eq!(style.reverse, shown, "the label of {milestone} on row 0: {text}");
+        assert_eq!(style.bold, shown, "the label of {milestone} on row 0: {text}");
+        assert_eq!(style.fg, if shown { None } else { Some(Color::Dim) }, "{text}");
+        let cells: String = (*first..=*last).map(|column| canvas.char_at(column, 0)).collect();
+        let mark = if shown { '⛵' } else { '⚓' };
+        assert!(cells.contains(mark), "the cells of {milestone} hold {mark}: {cells:?}");
+    }
+    // The label of the landed voyage is dim, as the prototype draws it.
+    let (first, _, _) = head.voyages[1];
+    assert_eq!(
+        canvas.style_at(first, 0),
+        Style { fg: Some(Color::Dim), bold: false, reverse: false }
+    );
+}
+
 /// T-351: a task that left the voyage is named by the voyage it left, and
 /// counted nowhere: it carries the milestone of the voyage it moved to.
 #[test]

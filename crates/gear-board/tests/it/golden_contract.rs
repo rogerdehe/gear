@@ -130,15 +130,6 @@ struct Pending {
 const PENDING: &[Pending] = &[
     // (5) The rows the queued tasks build. Row 47 (the footer) is compared
     // from the start: T-341 drew it.
-    Pending { frame: "now-folded", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-    Pending { frame: "now-open", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-    Pending { frame: "tasks-folded", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-    Pending { frame: "tasks-open", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-    Pending { frame: "cost-folded", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-    Pending { frame: "cost-open", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-    Pending { frame: "log-folded", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-    Pending { frame: "log-open", rows: (0, 6), cols: (0, 159), swap: None, by: "T-353" },
-
     Pending { frame: "now-folded", rows: (7, 9), cols: (0, 159), swap: None, by: "T-354" },
     Pending { frame: "tasks-folded", rows: (7, 9), cols: (0, 159), swap: None, by: "T-354" },
     Pending { frame: "cost-folded", rows: (7, 9), cols: (0, 159), swap: None, by: "T-354" },
@@ -255,6 +246,143 @@ fn render(tab: Tab, detail: bool) -> Planes {
     board.engine = EngineState::Running;
     let screen = Screen { tab, selected: 0, detail, opened: Vec::new(), size: (160, 48) };
     gold::planes(&canvas(&board, &screen, None))
+}
+
+/// A line without the terminal's escape sequences.
+fn plain_line(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' {
+            // A control sequence (`ESC [`, its parameters, its final letter)
+            // or a two-character escape: neither prints anything.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for character in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&character) {
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+            continue;
+        }
+        out.push(character);
+    }
+    out
+}
+
+/// The terminal columns a text takes: the wide glyphs of the board's head (⛵
+/// and ⚓, one glyph in two columns) take two, everything else one.
+fn terminal_columns(text: &str) -> usize {
+    text.chars()
+        .map(|character| if matches!(character, '⛵' | '⚓') { 2 } else { 1 })
+        .sum()
+}
+
+/// The terminal column a text starts at in a line.
+fn column_of(line: &str, needle: &str) -> usize {
+    let at = line
+        .find(needle)
+        .unwrap_or_else(|| panic!("no {needle:?} in {line:?}"));
+    terminal_columns(&line[..at])
+}
+
+/// The first row of the golden fixture's frame as the terminal shows it.
+fn head_row(board: &gear_board::Board, size: (usize, usize)) -> String {
+    let ansi = canvas(board, &crate::screen(Tab::Now, 0, size), None).ansi(true);
+    plain_line(ansi.lines().next().unwrap_or_default())
+}
+
+/// T-353 (review F1): the terminal's columns are the canvas's. A wide glyph
+/// (⛵, ⚓) fills two columns, and its continuation cell — a space the canvas
+/// keeps so that the golden planes match the prototype — is not printed again.
+/// The clock of row 0 sits at column 152 and the second voyage's label starts
+/// at column 20; with one more voyage the row is still cut at the terminal's
+/// edge.
+#[test]
+fn a_wide_glyph_fills_two_columns_and_its_continuation_is_not_printed() {
+    use gear_board::EngineState;
+
+    let (mut store, now) = crate::golden_fixture::load();
+    let mut board = gear_board::build(
+        &mut store,
+        &gear_board::Options { project: Some("gear".into()), ..Default::default() },
+        now,
+    )
+    .unwrap();
+    board.engine = EngineState::Running;
+    let size = (160, 48);
+
+    let row = head_row(&board, size);
+    assert_eq!(column_of(&row, "14:32"), 152, "the clock's column: {row:?}");
+    assert_eq!(column_of(&row, "M4.2"), 20, "the second voyage's column: {row:?}");
+    assert!(terminal_columns(&row) <= 160, "the row fits the terminal: {row:?}");
+    assert!(row.contains(" M5 ⛵  "), "the first label keeps its spaces: {row:?}");
+
+    // One more voyage, newest first: the row is cut at the terminal's edge, it
+    // never grows past it.
+    let extra = {
+        let project = &mut board.projects[0];
+        let mut extra = project.voyage_list.last().cloned().expect("a voyage of the fixture");
+        extra.milestone = "M3".into();
+        project.voyage_list.push(extra.clone());
+        extra
+    };
+    assert_eq!(extra.milestone, "M3");
+    let row = head_row(&board, size);
+    assert!(row.contains(" M3 ⚓ "), "the fourth label is drawn: {row:?}");
+    assert!(
+        terminal_columns(&row) <= 160,
+        "the row is {} columns wide: {row:?}",
+        terminal_columns(&row)
+    );
+}
+
+/// T-353 (review F3): a write that lands on a wide glyph's continuation
+/// blanks the glyph, so the glyph is never half overwritten. Eight voyages on an
+/// 80-column terminal put the labels under the clock: the clock still starts at
+/// column `W - 8` and the row is still 80 cells wide.
+#[test]
+fn a_write_over_a_wide_glyph_blanks_it_and_keeps_the_clock_its_column() {
+    use gear_board::EngineState;
+
+    let (mut store, now) = crate::golden_fixture::load();
+    let mut board = gear_board::build(
+        &mut store,
+        &gear_board::Options { project: Some("gear".into()), ..Default::default() },
+        now,
+    )
+    .unwrap();
+    board.engine = EngineState::Running;
+    // Five more voyages, as the review reproduces it: their labels run into the
+    // clock's columns.
+    {
+        let project = &mut board.projects[0];
+        let last = project.voyage_list.last().cloned().expect("a voyage of the fixture");
+        for milestone in ["M3.9", "M3.8", "M3.7", "M3.6x", "M3.5"] {
+            let mut extra = last.clone();
+            extra.milestone = milestone.into();
+            project.voyage_list.push(extra);
+        }
+    }
+
+    let row = head_row(&board, (80, 48));
+    assert_eq!(column_of(&row, "14:32"), 72, "the clock's column (W - 8): {row:?}");
+    assert!(
+        terminal_columns(&row) <= 80,
+        "the row is {} columns wide: {row:?}",
+        terminal_columns(&row)
+    );
+    // The glyph the clock landed on is blanked, not half printed: no wide glyph
+    // sits in front of the clock's first digit.
+    let at = row.find("14:32").unwrap_or(0);
+    let before = &row[..at];
+    assert!(
+        !before.ends_with('⛵') && !before.ends_with('⚓'),
+        "no wide glyph in front of the clock: {row:?}"
+    );
 }
 
 /// One plane of golden files: `name.txt`, `name.col` or `name.rev`, split on
