@@ -34,6 +34,9 @@ pub enum ErrorCode {
     /// A round passed its budget and the hand-in carries no friction report
     /// (design §6.2).
     FrictionRequired,
+    /// A departed voyage's staffing (`quota`, `lanes`, `temps`, `models`) may
+    /// not change at a re-init without the user's own words (T-392).
+    StaffLocked,
 }
 
 impl ErrorCode {
@@ -53,6 +56,7 @@ impl ErrorCode {
             ErrorCode::Unconfirmed => "UNCONFIRMED",
             ErrorCode::EngineDown => "ENGINE_DOWN",
             ErrorCode::FrictionRequired => "FRICTION_REQUIRED",
+            ErrorCode::StaffLocked => "STAFF_LOCKED",
         }
     }
 
