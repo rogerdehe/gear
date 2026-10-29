@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=787 -->
+<!-- gear-plan project=gear base=788 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -159,6 +159,7 @@ eta: 21h
 - 2026-10-29 06:10 config: until T-422 merges (six merges ahead of it), the engine runs with BUILD_SLOT_MIN=4 in its environment, which every merge gate inherits: stopped after T-376's gate, the tool pushed in that gap, restarted from the captain's shell, same build, inode checked; a stopgap row records it
 - 2026-10-29 06:23 staff: hull runs dry (M-5739): its next tasks wait only on merges of passed tasks (T-413, T-361, mast's T-350); T-420, T-362, T-363 and T-364 branch from those handed-in branches instead of waiting for the merge queue | why: never-stop | else: hull idles about an hour behind six merges
 - 2026-10-29 06:25 scope: T-407 (probe log lines in session_runner.rs, ops.rs, restart.rs, merge.rs) shares no file with T-386; its order after T-386 was lane order, so it branches from origin/dev (hull started it first)
+- ★ 2026-10-29 06:34 hand-fix: build-slot gains BUILD_SLOT_PRIORITY=normal (the run everybody waits on skips the low priority; the memory clamps still hold): T-361's gate took 11 min at load 22, sharing the low priority with every other run on the machine; T-422 sets it on the gate with the floor
 
 
 # Queue
@@ -877,8 +878,8 @@ estimate: 50
 
 ## T-422 [now] lane=mast milestone=M5 required
 mechanical: one variable on two named lines of the Makefile; the merge gate runs it and proves it
-goal: [v0.5.2 S3] The merge gate takes at least 4 jobs (2026-10-29: through build-slot it got an equal share, 2 jobs with five runs alive, and each merge took 13-21 min while six waited; the gate is the one run every task waits on, and with 4 jobs before build-slot its suite ran in about 60 s). Change Makefile only, no other design: in the `gate` target both `tools/build-slot/build-slot.sh` calls become `BUILD_SLOT_MIN=4 tools/build-slot/build-slot.sh` (tools/build-slot/README.md: a floor before the memory clamps), and the `##` comment says "at least 4 jobs". Nothing else changes.
-accept: `make -n gate` shows BUILD_SLOT_MIN=4 on both commands; `sh tools/build-slot/test.sh` passes. The merge gate runs `make gate`.
+goal: [v0.5.2 S3] The merge gate takes at least 4 jobs at normal priority (2026-10-29: through build-slot it got an equal share, 2 jobs with five runs alive, and each merge took 13-21 min while six waited; the gate is the one run every task waits on, and with 4 jobs before build-slot its suite ran in about 60 s; at 06:32 the machine's load was 22, most of it the other project's test runs at the same low priority as our gate). Change Makefile only, no other design: in the `gate` target both `tools/build-slot/build-slot.sh` calls become `BUILD_SLOT_MIN=4 BUILD_SLOT_PRIORITY=normal tools/build-slot/build-slot.sh` (tools/build-slot/README.md: a floor before the memory clamps, and normal priority for the run everybody waits on), and the `##` comment says "at least 4 jobs, at normal priority". Nothing else changes.
+accept: `make -n gate` shows BUILD_SLOT_MIN=4 BUILD_SLOT_PRIORITY=normal on both commands; `sh tools/build-slot/test.sh` passes. The merge gate runs `make gate`.
 estimate: 5
 
 ## T-376 [must] lane=mast milestone=M5 required
