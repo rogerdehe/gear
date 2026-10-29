@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=846 -->
+<!-- gear-plan project=gear base=847 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -1048,9 +1048,9 @@ accept: A board test: a voyage with a goal-change record shows the red line unde
 deps: T-364, T-335
 estimate: 20
 
-## T-365 [must] lane=mast milestone=M5 required
+## T-365 [must] lane=hull milestone=M5 required
 goal: [v0.5.3 S4] The board's README says which task built each change, so the plan's self-check that every agreed change has its task is one table (M5 backlog, how the board is built to its prototype, step 2). Change gear/voyages/M5/board/README.md only, no other design: after the "Four views" section add "## Change → task" with a two-column table, one row per README change 1-15 and per Four-views element, in this order, the tasks as the plan names them (T-numbers): 1 every voyage: d-voyages-model, d-header-top, d-voyage-keys · 2 the goal boxed: d-header-top, d-goal-changed · 3 every header row says what it is: d-stations-model, d-header-fold, d-header-open · 4 time against the plan: d-forecast, d-header-fold, d-header-open · 5 the full width: d-header-fold, d-header-open, d-now-table, d-tasks-rows · 6 tasks of this voyage only: d-voyages-model, d-moved, d-header-fold, d-header-open, d-now-table · 7 task stages in words: d-stages-model, d-stages-words · 8 Tasks as a git graph: d-tasks-rows, d-tasks-draw · 9 workload folded into Now: d-tabs4, d-forecast, d-now-table · 10 Log summary: d-log · 11 Cost by lane: d-cost · 12 clicks: d-tabbar, d-voyage-keys · 13 whole-row selection: d0-export, d-view-paint · 14 folded header: d-header-fold, d-header-open · 15 framed tabs: d-tabbar · Four views / Now table: d-now-table · TO HANDLE and quota: d-now-handle · golden frames: T-276, d0-export, d0-planes, d0-fixture-core, d0-fixture-rest, d0-golden. (The captain replaces each label by its T-number when applying.)
-accept: The README holds the table with every row above and each label replaced by a T-number of the plan. No cargo run is needed; the merge gate runs `make gate`.
+accept: (Moved to hull for balance at M-6214: the file this task names is an allowed edit for hull.) The README holds the table with every row above and each label replaced by a T-number of the plan. No cargo run is needed; the merge gate runs `make gate`.
 deps: T-358
 estimate: 10
 
