@@ -10,14 +10,17 @@
 #
 # N, the jobs for this run:
 #   cores    hw.ncpu / nproc
-#   load     the 1-minute load average, rounded up
+#   load     the 1-minute load average, shown in the line only: it counts
+#            every busy thread (agents, editors, other work), lags a burst by
+#            a minute, and already includes the builds counted in running, so
+#            dividing by it starved every build on a busy machine to 1 job
 #   running  the build-slot.sh runs alive on the machine, this one included,
 #            the larger of two samples 400 ms apart, so runs that start in the
 #            same second all see each other. Every project on the machine must
 #            run its heavy commands through a file named build-slot.sh for them
 #            to count one another.
 #   free     free memory in percent (kern.memorystatus_level / MemAvailable)
-#   N = max(1, min(cores - load, cores / running)); at most 2 when free memory
+#   N = max(1, cores / running); at most 2 when free memory
 #   is under 25 %, 1 when under 15 %.
 #
 # Exported to the command:
@@ -88,10 +91,7 @@ else
 fi
 
 jobs=$(awk -v c="$cores" -v l="${load:-0}" -v r="$running" -v f="${free:-100}" 'BEGIN {
-    up = int(l); if (up < l) up++
-    n = c - up
-    share = int(c / r)
-    if (share < n) n = share
+    n = int(c / r)
     if (f < 25 && n > 2) n = 2
     if (f < 15) n = 1
     if (n < 1) n = 1

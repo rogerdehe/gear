@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=770 -->
+<!-- gear-plan project=gear base=771 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -143,6 +143,7 @@ eta: 21h
 - 2026-10-29 05:20 scope: T-361's review is right and the captain's answer to hull (M-5627, rank order as the prototype) was wrong: waiting tasks are drawn last-to-run on top, as the README's newest-on-top and the 14:00 decision say; T-361 goes back for it, and T-362 brings the prototype and its Tasks golden frames to the same order
 - 2026-10-29 05:22 scope: T-331 (written before T-410) would lock done and bar for good and free the eta, against the user's rule that T-410 enforces (they change when the user asks and confirms); mast asked (M-5648, M-5651); T-331 v3 only adds title and stations to T-410's confirmed guard, estimate 45 -> 20
 - station M-5671: keep course 1073 min in, 135 done, 28 left; hull 303 min, mast 211 min, but hull's other tasks wait on T-350 and T-361, which are merging, so T-336 and T-337 stay on hull as the work it can start now (moved to mast and back within a minute); the merges free hull's board views next
+- ★ 2026-10-29 05:44 hand-fix: build-slot starved every build to 1 job on this busy machine (load 15-30 from agents and the other project; T-350's merge gate ran the whole suite on 1 thread for 15 min): the load term is dropped, N = cores / running with the memory clamps (the other captain had called the 1-minute load the wrong instrument); the captain's own tool, fixed at the source, sent to the other project
 
 
 # Queue

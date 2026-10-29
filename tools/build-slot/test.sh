@@ -13,10 +13,10 @@ expect() {
     else echo "FAIL load $2 running $3 free $4: want $1, got $got"; fail=1; fi
 }
 expect "10 10 10 1" 0 1 60
-expect "6 6 6 1"    3.2 1 60
+expect "10 10 10 1"  3.2 1 60
 expect "1 1 1 10"   0 8 60
 expect "3 3 3 3"    0 3 60
-expect "1 1 1 10"   12 1 60
+expect "10 10 10 1"  12 1 60
 expect "2 2 2 5"    0 1 20
 expect "1 1 1 10"   0 1 10
 
