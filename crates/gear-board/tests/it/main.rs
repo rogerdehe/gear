@@ -15,6 +15,7 @@ mod stations_contract;
 mod workload_contract;
 mod colour_contract;
 mod voyage_scope_contract;
+mod voyage_select_contract;
 
 /// The screen state a test draws: a tab, a selected row and a size.
 pub fn screen(
