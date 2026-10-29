@@ -1047,6 +1047,11 @@ pub(crate) fn reconcile_config(
     let version = store.read(|tx|tx.get_project(project))?.map(|p|p.config_version).unwrap_or(0);
     let seats = store.read(|tx|tx.seats_of_project(project))?;
     for seat in seats {
+        // A seat that is not Active or Standby (Held, Parked, Queued, …) is out
+        // of reconciliation: its stored `engine.restart_config` stays as it is,
+        // so a change made meanwhile is still stored as a change when the seat
+        // comes back, and the comparison below runs then like for any other
+        // seat (T-400).
         if seat.role != gear_model::SeatRole::Lane || !matches!(seat.state, SeatState::Active | SeatState::Standby) { continue }
         if pending(store, &seat.id)?.is_some() || crate::switch::pending(store, &seat.id)?.is_some() { continue }
         let Some(lane) = config.lanes.iter().find(|lane|lane.name == seat.name) else { continue };
@@ -1087,7 +1092,7 @@ pub(crate) fn reconcile_config(
 mod config_change_tests {
     use super::*;
     use gear_herdr::fake::{Call, FakeHerdr};
-    use gear_model::{SeatRole, TaskState};
+    use gear_model::{AttemptState, SeatRole, TaskState};
     use gear_store::{testing, ContractRow, NewRound, RoundKey, TaskRow};
     const T: i64 = 1_800_000_000;
     const PANE: &str = "w1:p2";
@@ -1252,6 +1257,48 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         assert!(pending(&mut store,"p:heat").unwrap().is_none());
         let ops=store.read(|tx|tx.ops_of_seat_kind("p:heat",OpKind::Deliver)).unwrap();
         assert!(ops.iter().any(|op|op.payload["text"].as_str().is_some_and(|text|text.contains("Continue T-1"))),"{ops:?}");
+    }
+    #[test]
+    fn re_init_with_an_open_attempt_restarts_on_the_new_model_and_continues() {
+        // T-400: a re-init that changes the lane's model while its attempt is
+        // Started restarts the lane on the new model and hands the attempt
+        // back with its Continue line.
+        let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap(),false);
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T).unwrap();
+        assert_eq!(store.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().state,AttemptState::Started);
+        change(&mut store,"pi","new-model");
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+1).unwrap();
+        herdr.exit_agent(PANE); advance_pending(&mut store,&mut herdr,&cfg,T+2);
+        let args=herdr.calls.iter().find_map(|c|if let Call::AgentStart {args,..}=c {Some(args)} else {None}).unwrap();
+        assert!(args.windows(2).any(|w|w==["--model","new-model"]),"{args:?}");
+        assert_eq!(store.read(|tx|tx.get_meta(&model_meta_key("p:heat"))).unwrap().as_deref(),Some("new-model"));
+        let ops=store.read(|tx|tx.ops_of_seat_kind("p:heat",OpKind::Deliver)).unwrap();
+        assert!(ops.iter().any(|op|op.payload["text"].as_str().is_some_and(|text|text.contains("Continue T-1"))),"{ops:?}");
+    }
+    #[test]
+    fn model_change_made_while_the_lane_was_held_is_applied_on_release() {
+        // T-400: a hold takes the lane out of reconciliation, so the change
+        // waits; the release puts the seat back in and the comparison with the
+        // registered chain runs as for any other seat.
+        let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap(),false);
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T).unwrap();
+        let seeded=store.read(|tx|tx.get_meta("engine.restart_config.p:heat")).unwrap();
+        assert!(seeded.is_some());
+        store.write(|tx|tx.set_seat_state("p:heat",SeatState::Held,Some("hold: the user asked"),T)).unwrap();
+        change(&mut store,"pi","new-model");
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+1).unwrap();
+        assert!(pending(&mut store,"p:heat").unwrap().is_none(),"a held lane is not restarted");
+        assert_eq!(store.read(|tx|tx.get_meta("engine.restart_config.p:heat")).unwrap(),seeded,"the hold keeps the stored configuration untouched");
+        assert!(!herdr.calls.iter().any(|c|matches!(c,Call::Prompt {..}|Call::AgentStart {..}|Call::SendKeys {..})));
+        // Released with its agent still alive: the seat is Active again.
+        store.write(|tx|tx.set_seat_state("p:heat",SeatState::Active,Some("released by the captain: its agent continues"),T+2)).unwrap();
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+2).unwrap();
+        assert!(pending(&mut store,"p:heat").unwrap().is_some(),"the change made while held is applied on release");
+        advance_pending(&mut store,&mut herdr,&cfg,T+3);
+        herdr.exit_agent(PANE); advance_pending(&mut store,&mut herdr,&cfg,T+4);
+        let args=herdr.calls.iter().find_map(|c|if let Call::AgentStart {args,..}=c {Some(args)} else {None}).unwrap();
+        assert!(args.windows(2).any(|w|w==["--model","new-model"]),"{args:?}");
+        assert_eq!(store.read(|tx|tx.get_meta(&model_meta_key("p:heat"))).unwrap().as_deref(),Some("new-model"));
     }
     #[test]
     fn removing_the_model_chain_restarts_without_a_model_flag() {
