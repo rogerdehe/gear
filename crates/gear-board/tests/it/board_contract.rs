@@ -538,13 +538,18 @@ struct Pty {
 
 impl Pty {
     fn open() -> Pty {
+        Pty::open_size(80, 24)
+    }
+
+    /// A pty whose screen is `cols` by `rows` cells.
+    fn open_size(cols: u16, rows: u16) -> Pty {
         let mut master: libc::c_int = -1;
         let mut slave: libc::c_int = -1;
         // The window size of the pty: the board draws on the terminal's
         // screen, and the test wants a small one (80x24).
         let mut window: libc::winsize = unsafe { std::mem::zeroed() };
-        window.ws_col = 80;
-        window.ws_row = 24;
+        window.ws_col = cols;
+        window.ws_row = rows;
         // SAFETY: both pointers are valid; the termios is null, so the pty
         // gets the default settings, and the window size is the one above.
         // (`null_mut` fits the `*const` parameters of the other unix flavours
@@ -1120,7 +1125,7 @@ fn the_tab_row_has_the_four_views_of_the_user() {
     // The labels of the row, in order, and the keys 1 to 4.
     assert_eq!(
         Tab::all().map(|tab| tab.label()),
-        [" 1 Now ", " 2 Tasks ", " 3 Cost ", " 4 Log "]
+        ["  1 Now  ", "  2 Tasks  ", "  3 Cost  ", "  4 Log  "]
     );
     // The fifth view has no key: key 5 changes nothing.
     assert_eq!(Tab::of_number(5), None);
@@ -1130,16 +1135,22 @@ fn the_tab_row_has_the_four_views_of_the_user() {
 
     let mut store = world();
     let board = build(&mut store, &options(), T0 + 60).unwrap();
-    // The tab row holds the four labels; the last one ends the row (T-353:
-    // the layout says which row that is).
+    // The tab row holds the four labels, framed by the bar's rules (T-356):
+    // the top rule on the row above, the bottom rule on the row under.
     let screen = crate::screen(Tab::Now, 0, (160, 40));
     let layout = frame::layout(&board, &screen);
     let text = frame::frame(&board, &screen, None);
     let row = text.lines().nth(layout.tab_row).unwrap_or_default();
-    for label in [" 1 Now ", " 2 Tasks ", " 3 Cost "] {
+    for label in ["  1 Now  ", "  2 Tasks  ", "  3 Cost  ", "  4 Log  "] {
         assert!(row.contains(label), "{label:?} is not in {row:?}");
     }
-    assert!(row.trim_end().ends_with(" 4 Log"), "{row:?}");
+    assert!(row.trim_end().ends_with('│'), "the bar closes at the edge: {row:?}");
+    let above = text.lines().nth(layout.tab_row - 1).unwrap_or_default();
+    assert!(above.trim().starts_with('╭'), "the bar's top rule: {above:?}");
+    assert!(above.trim_end().ends_with('╮'), "the bar's top rule: {above:?}");
+    let under = text.lines().nth(layout.tab_row + 1).unwrap_or_default();
+    assert!(under.trim().starts_with('╰'), "the bar's bottom rule: {under:?}");
+    assert!(under.trim_end().ends_with('╯'), "the bar's bottom rule: {under:?}");
     // No view draws a burn-up any more (the chart is removed).
     for tab in Tab::all() {
         let text = frame::frame(&board, &crate::screen(tab, 0, (160, 40)), None);
@@ -1227,22 +1238,112 @@ fn the_tab_row_of_the_layout_answers_a_click() {
     );
 }
 
-/// T-156: the new board in a pty of 80x24. The frame and the first view
+/// T-356: the tab bar is one row, and a click on it picks the tab it draws.
+/// Column 15 of the terminal (counted from 1) is inside the Tasks tab, whose
+/// columns run from its rule to the rule after its label. `d` unfolds the
+/// header, the bar moves down with it, and a click on the bar's new row picks
+/// the tab as well.
+#[test]
+fn a_click_on_column_15_of_the_tab_bar_picks_the_tasks_tab_in_both_headers() {
+    use gear_board::frame::{self, Tab};
+
+    let mut store = world_with_a_voyage();
+    let size = (120, 48);
+    let folded = head_of(&mut store, size);
+    assert_eq!(folded.top, folded.tab_row + 3, "the view starts three rows under the tabs");
+    // Column 15 of the terminal is the screen's column 14, inside the Tasks
+    // tab: the tab's own columns and the rule after its label.
+    let (first, last, tab) = *folded
+        .tabs
+        .iter()
+        .find(|(_, _, tab)| *tab == Tab::Tasks)
+        .expect("the Tasks tab is on the row");
+    assert_eq!(tab, Tab::Tasks);
+    assert!(
+        (first..=last).contains(&14),
+        "column 15 is inside the Tasks tab: columns {first} to {last}"
+    );
+    // The range opens with a rule: the separator that ends the tab before, so
+    // a click between two labels picks the one on its right.
+    let canvas = frame::canvas(
+        &build(
+            &mut store,
+            &Options { project: Some("p".into()), ..Options::default() },
+            now_seconds(),
+        )
+        .unwrap(),
+        &crate::screen(Tab::Now, 0, size),
+        None,
+    );
+    assert_eq!(canvas.char_at(first, folded.tab_row), '│', "the range starts on the rule");
+    assert_eq!(canvas.char_at(first + 1, folded.tab_row), ' ', "the label follows the rule");
+
+    let events = vec![Event::Mouse { button: 0, x: 15, y: folded.tab_row as u16 + 1 }];
+    let frame = run_events(&mut store, events, size);
+    assert!(
+        frame.contains("merged into dev"),
+        "the click on column 15 opened the Tasks view: {frame}"
+    );
+
+    // `d` unfolds the header: the bar and its row move down with it, and a
+    // click on the new row picks the tab too.
+    let board = build(
+        &mut store,
+        &Options { project: Some("p".into()), ..Options::default() },
+        now_seconds(),
+    )
+    .unwrap();
+    let opened = frame::layout(
+        &board,
+        &frame::Screen {
+            tab: Tab::Now,
+            selected: 0,
+            detail: true,
+            opened: Vec::new(),
+            size,
+        },
+    );
+    assert!(
+        opened.tab_row > folded.tab_row,
+        "the unfolded header pushes the tab bar down: {} then {}",
+        folded.tab_row,
+        opened.tab_row
+    );
+    let events = vec![
+        Event::Key('d'),
+        Event::Mouse { button: 0, x: 15, y: opened.tab_row as u16 + 1 },
+    ];
+    let frame = run_events(&mut store, events, size);
+    assert!(
+        frame.contains("merged into dev"),
+        "the click on the unfolded bar opened the Tasks view: {frame}"
+    );
+    assert!(
+        frame.contains("d: fold"),
+        "the header stayed unfolded: {frame}"
+    );
+}
+
+/// T-156: the new board in a pty of 80x28. The frame and the first view
 /// come from the store, the keys move between the views, a click picks a view
 /// and a row, and `Enter` opens the panel of the selected row.
+///
+/// The screen is four rows taller than the 80x24 it took before the tab bar
+/// (T-356): the bar's rules and the spacer took rows of their own, and the
+/// lane's panel under the view needs the rows it drew before.
 #[test]
 fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     let mut store = world_with_a_voyage();
-    // The head of the board on the pty's 80x24 screen (T-353): the tab row and
+    // The head of the board on the pty's 80x28 screen (T-353): the tab row and
     // the view's first row are the layout's.
-    let head = head_of(&mut store, (80, 24));
+    let head = head_of(&mut store, (80, 28));
     let pick_row = head.top + 2;
     let opts = Options {
         project: Some("p".into()),
         refresh: Duration::from_millis(50),
         ..Options::default()
     };
-    let pty = Pty::open();
+    let pty = Pty::open_size(80, 28);
     let slave = pty.slave;
     let (left, done) = std::sync::mpsc::channel();
 
@@ -1707,8 +1808,10 @@ fn a_view_scrolls_to_its_selected_pick_and_a_click_keeps_it() {
     .unwrap();
     // The last of the seventeen picks is T-01, the last task to run (the
     // waiting tasks hang newest first, T-361 and T-362): the view scrolled to
-    // it, and the heading scrolled away with the rows above it.
-    let size = (80, 12);
+    // it, and the heading scrolled away with the rows above it. The tab bar
+    // takes three rows (T-356), so the screen is one row taller than the 12 it
+    // took with the tabs on a single row.
+    let size = (80, 13);
     let tab_row = frame::layout(&board, &crate::screen(Tab::Tasks, 16, size)).tab_row;
     let canvas = frame::canvas(&board, &crate::screen(Tab::Tasks, 16, size), None);
     let text = canvas.text();
@@ -1716,7 +1819,7 @@ fn a_view_scrolls_to_its_selected_pick_and_a_click_keeps_it() {
     assert!(!text.contains("T-17"), "the view scrolled past the first pick: {text}");
     // Its row is the last row the view owns, and it is the lit one: the view
     // stops on the row above the legend (T-362).
-    let row = 8;
+    let row = 9;
     assert!(text.lines().nth(row).unwrap_or_default().contains("T-01"), "{text}");
     assert!(canvas.style_at(1, row).reverse, "the selected row is lit: {text}");
 
@@ -1726,7 +1829,7 @@ fn a_view_scrolls_to_its_selected_pick_and_a_click_keeps_it() {
     for _ in 0..16 {
         events.push(Event::Key('j'));
     }
-    events.push(Event::Mouse { button: 0, x: 1, y: 9 });
+    events.push(Event::Mouse { button: 0, x: 1, y: 10 });
     let opts = Options {
         project: Some("p".into()),
         color: false,
@@ -1734,7 +1837,7 @@ fn a_view_scrolls_to_its_selected_pick_and_a_click_keeps_it() {
         ..Options::default()
     };
     let mut out: Vec<u8> = Vec::new();
-    run_with(&mut store, &opts, &mut out, &mut Events { events, size: (80, 12) }, None).unwrap();
+    run_with(&mut store, &opts, &mut out, &mut Events { events, size }, None).unwrap();
 
     let frame = last_frame(&out);
     let rows: Vec<&str> = frame.lines().collect();
@@ -1769,10 +1872,10 @@ fn a_click_on_the_top_row_of_a_scrolled_view_picks_the_task_there() {
     use gear_board::frame;
     let (mut store, _now) = crate::golden_fixture::load();
     // The view's first row is the view's: scrolled to T-262 (the ninth pick),
-    // it holds T-268's row. The head takes thirteen rows (T-354's three rows),
-    // so the screen is four rows taller than the 12 it took with the fixed
-    // header: the view keeps its four rows.
-    let size = (160, 20);
+    // it holds T-268's row. The head takes fourteen rows (T-354's three rows
+    // and the tab bar's three, T-356), so the screen is five rows taller than
+    // the 12 it took with the fixed header: the view keeps its four rows.
+    let size = (160, 21);
     let board = build(
         &mut store,
         &Options { project: Some("gear".into()), ..Options::default() },

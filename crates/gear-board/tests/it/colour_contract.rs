@@ -281,7 +281,10 @@ fn no_color_draws_no_colour_code() {
                 "{tab:?}: a code that is not bold or reverse: {code:?}"
             );
         }
-        assert!(plain.contains("\u{1b}[7m"), "the open tab stays in reverse video");
+        assert!(
+            plain.contains("\u{1b}[1;7m"),
+            "the open tab stays in reverse video, bold (T-356): {plain:?}"
+        );
     }
     // The plain frame carries no code at all, and neither does the JSON.
     assert!(!frame(&board, &crate::screen(Tab::Now, 0, (160, 40)), None).contains('\u{1b}'));
