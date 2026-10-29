@@ -2308,8 +2308,13 @@ fn run_plan(
         .iter()
         .map(gear_app::plan::staff_line)
         .collect();
-    let rewritten =
-        gear_app::draft::rewrite_applied(&text, result.version, &result.created, &used_staff);
+    let rewritten = gear_app::draft::rewrite_applied(
+        &text,
+        result.version,
+        &result.created,
+        &used_staff,
+        &result.milestone_blocks,
+    );
     write_in_place(path, &rewritten).map_err(|e| {
         GearError::new(
             gear_model::ErrorCode::BadFormat,

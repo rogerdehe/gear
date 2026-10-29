@@ -36,6 +36,10 @@ pub struct ApplyResult {
     /// cancelled done task, resolved "cancelled by the captain".
     #[serde(default)]
     pub resolved: Vec<String>,
+    /// The `# Milestone` blocks this apply wrote back into the plan file from
+    /// the store (T-333), in the order their milestones are first named.
+    #[serde(default)]
+    pub milestone_blocks: Vec<String>,
     /// What the captain should know about this apply (design §7.2: a decision
     /// line that is not structured is logged as a note).
     #[serde(default)]
@@ -431,6 +435,23 @@ fn apply_queue(
         return Err(GearError::new(
             ErrorCode::BadFormat,
             format!("the dependencies form a cycle through {cycle}"),
+        ));
+    }
+
+    // The `# Milestone` blocks the draft owes the file (T-333): a task sails on
+    // a voyage the file describes, so a milestone the plan names and does not
+    // describe gets its block back from the store — or the apply is refused.
+    let milestone_blocks = crate::goal::missing_blocks(tx, project, draft)?;
+    for block in &milestone_blocks {
+        let header = block.lines().next().unwrap_or_default();
+        let id = header
+            .trim_start_matches("# Milestone ")
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(':');
+        warnings.push(format!(
+            "the # Milestone {id} block was written back into the plan file from the store"
         ));
     }
 
@@ -1064,6 +1085,7 @@ fn apply_queue(
         staffed,
         cancelled,
         resolved,
+        milestone_blocks,
     })
 }
 
