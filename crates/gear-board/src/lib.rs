@@ -2179,7 +2179,7 @@ pub fn run_with(
                         panel = None;
                         break;
                     }
-                    panel = open_panel(board, store, screen.tab, screen.selected)?;
+                    panel = open_panel(board, store, screen.tab, screen.selected, screen.size.0)?;
                     break;
                 }
                 Event::Mouse { button: 0, x, y } => {
@@ -2201,7 +2201,7 @@ pub fn run_with(
                         // The view's first row is a row of the view (T-342's
                         // rework): scrolling can put a pick there.
                         let row = y.saturating_sub(1) as usize;
-                        let last = screen.size.1.saturating_sub(2);
+                        let last = frame::view_bottom(screen.tab, screen.size.1);
                         if row >= frame::VIEW_ROW && row < last {
                             // The rows above the viewport are scrolled away:
                             // the clicked row is the one the frame drew.
@@ -2209,7 +2209,7 @@ pub fn run_with(
                                 &picks,
                                 screen.selected,
                                 frame::VIEW_ROW,
-                                screen.size.1,
+                                last,
                             );
                             // A click selects the pick drawn on that row; a
                             // row without a pick selects nothing.
@@ -2243,6 +2243,7 @@ fn open_panel(
     store: &mut Store,
     tab: frame::Tab,
     selected: usize,
+    width: usize,
 ) -> GearResult<Option<Vec<style::Line>>> {
     let Some(project) = board.projects.first() else { return Ok(None) };
     match tab {
@@ -2254,8 +2255,10 @@ fn open_panel(
             )
         })),
         frame::Tab::Tasks => {
-            let Some(task) = project.graph.get(selected) else { return Ok(None) };
-            let rows = store.read(|tx| graph::styled_panel(tx, &project.project, &task.id, now_ts()))?;
+            // The task of the selected pick: the row the graph draws for it.
+            let picks = frame::task_picks(project, board.now, width);
+            let Some(task) = picks.get(selected) else { return Ok(None) };
+            let rows = store.read(|tx| graph::styled_panel(tx, &project.project, task, now_ts()))?;
             Ok(Some(rows))
         }
         frame::Tab::Cost => {

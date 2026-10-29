@@ -191,12 +191,28 @@ pub struct TickReport {
     pub parallel_failed: Vec<String>,
     /// The rounds that ended or learned a session this tick (design §4.1).
     pub rounds: crate::rounds::RoundReport,
+    /// The steps of this tick that took over 200 ms, as `<step>: <ms> ms`
+    /// (T-386): a tick that costs is named, so a step that grows is seen
+    /// before it makes the engine late.
+    pub slow: Vec<String>,
 }
 
 /// One line of [`TickReport::project_failed`]: `<project>: <code>: <detail>`
 /// (T-243).
 fn project_error(project: &str, error: &gear_model::GearError) -> String {
     format!("{project}: {}: {}", error.code, error.detail)
+}
+
+/// The time past which a tick step is named in [`TickReport::slow`] (T-386).
+const SLOW_STEP_MS: u128 = 200;
+
+/// Name a tick step that took longer than the budget (T-386):
+/// `<step>: <ms> ms`, printed with the rest of the report.
+fn note_slow(report: &mut TickReport, step: &str, started: std::time::Instant) {
+    let ms = started.elapsed().as_millis();
+    if ms > SLOW_STEP_MS {
+        report.slow.push(format!("{step}: {ms} ms"));
+    }
 }
 
 /// Run one engine tick over every project in the store.
@@ -206,17 +222,24 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     // Settle recorded lane rebinds before onboarding or dispatch sees config.
     // T-243: a project whose step fails is reported and the other projects go
     // on; one bad project never stops the tick.
+    // T-386: every step of the tick is timed, and one over 200 ms is named.
+    let step = std::time::Instant::now();
     for project in store.read(|tx| tx.project_ids())? {
         if let Err(error) = gear_app::plan::reconcile_rebinds(store, &project) {
             report.project_failed.push(project_error(&project, &error));
         }
     }
+    note_slow(&mut report, "reconcile rebinds", step);
 
+    let step = std::time::Instant::now();
     rebind::tick(store, herdr, cfg, now)?;
+    note_slow(&mut report, "rebind", step);
 
     // 0. onboard: every queued lane gets its worktree, pane and agent. A seat
     //    that fails a step is parked in NeedsCheck, never retried blindly.
+    let step = std::time::Instant::now();
     report.onboarded = onboard::onboard_queued(store, herdr, cfg, now)?;
+    note_slow(&mut report, "onboard", step);
 
     // 0b. settle: a review verdict that arrived settles its task without the
     //     captain (T-13) — before the dispatch below, so a pass frees the
@@ -224,14 +247,19 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     //     Settlement needs no Herdr, so it runs even
     //     when the observation fails.
     if cfg.auto_settle {
+        let step = std::time::Instant::now();
         let (settled, settle_failed) = settle_reviews(store, now)?;
         report.settled = settled;
         report.settle_failed = settle_failed;
+        note_slow(&mut report, "settle reviews", step);
     }
 
     // Reconcile waits before dispatch and stall decisions in this tick.
+    let step = std::time::Instant::now();
     waits::tick(store, herdr, cfg, now)?;
+    note_slow(&mut report, "waits", step);
     let projects = store.read(|tx| tx.project_ids())?;
+    let step = std::time::Instant::now();
     for project in &projects {
         match parallel::check(store, project, now) {
             Ok(checked) => {
@@ -241,24 +269,30 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             Err(error) => report.project_failed.push(project_error(project, &error)),
         }
     }
+    note_slow(&mut report, "parallel check", step);
     // The GitHub side of a project in GitHub mode (T-91): every call is an op,
     // so an outage queues them and never stops the tick.
+    let step = std::time::Instant::now();
     for project in &projects {
         if let Err(error) = gear_forge::sync(store, project, now) {
             report.project_failed.push(project_error(project, &error));
         }
     }
+    note_slow(&mut report, "forge sync", step);
     // Station facts need no Herdr observation. Enqueue them before deciding
     // doorbells, including when a previous outage delayed a checkpoint.
+    let step = std::time::Instant::now();
     for project in &projects {
         match store.write(|tx| gear_app::station::checkpoints(tx, project, now)) {
             Ok(ids) => report.stations.extend(ids.into_iter().map(|id| format!("{project}:{id}"))),
             Err(error) => report.project_failed.push(project_error(project, &error)),
         }
     }
+    note_slow(&mut report, "stations", step);
 
     // 1. observe: one agents() call for the whole session. If it fails, every
     //    project is marked and nothing at all is decided this tick.
+    let step = std::time::Instant::now();
     let Ok(agents) = observe::snapshot(herdr) else {
         // No evidence of continuous work across a failed observation.
         for project in &projects {
@@ -267,12 +301,14 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.observe_failed = projects;
         return Ok(report);
     };
+    note_slow(&mut report, "observe", step);
 
     // 0c. names (T-134): Herdr clears an agent's name when it re-detects the
     //     occupant, and a prompt to an unnamed agent is refused. Read every
     //     agent's name once, then give each seat its name back before anything
     //     is delivered this tick. A failed read is not an observation failure:
     //     the deliveries below still make sure of the name they prompt.
+    let step = std::time::Instant::now();
     let names = match names::read(herdr) {
         Ok(names) => names,
         Err(error) => {
@@ -280,8 +316,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             std::collections::BTreeMap::new()
         }
     };
+    note_slow(&mut report, "names", step);
 
     let mut reviewer_nudge_flags = Vec::new();
+    // T-386: one read of a repository's branch tips per tick, shared by the
+    // push clock and the review step.
+    let mut tips_by_repo = review::RepoTips::new();
     let mut missing_seats = std::collections::BTreeSet::new();
     let mut present_seats = Vec::new();
     let mut observed_seats = Vec::new();
@@ -295,10 +335,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         //     <seat>`, 17 §2/§3). A name another pane holds is reported to the
         //     captain once, never stolen.
         if !names.is_empty() {
+            let step = std::time::Instant::now();
             let restored = names::restore(store, herdr, &project, &names, now)?;
             report.renamed.extend(restored.renamed);
             report.name_taken.extend(restored.taken);
             report.name_failed.extend(restored.failed);
+            note_slow(report, "names restore", step);
         }
 
         // Seat observations (reads screen tails; no write transaction is held).
@@ -308,6 +350,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         // step instead); a profile block the engine cannot read is this
         // project's failure this tick (T-243), reported in
         // `report.project_failed`, never the tick's.
+        let step = std::time::Instant::now();
         let profiles = match gear_app::config::latest(store, &project) {
             Ok(config) => gear_app::config::profile_table(&cfg.profiles, &config)?,
             Err(_) => cfg.profiles.clone(),
@@ -325,51 +368,68 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         // (T-97): the binding follows what the pane reports, so a delivery that
         // was never confirmed can be sent again without a store edit.
         observe::record_sessions(store, &observed)?;
+        note_slow(report, "observe seats", step);
         // A park whose time has come ends (T-190): the lane the captain
         // parked until a time that has passed works again.
+        let step = std::time::Instant::now();
         let ended = store.write(|tx| {
             gear_app::plan::end_parked_lanes(tx, &project, Some(&agents), now)
         })?;
         report.park_ended.extend(ended);
         report.busy_lanes.extend(store.write(|tx| busy::check(tx, &project, &observed, now))?);
+        note_slow(report, "park end and busy", step);
         // T-288: a lane still busy with no task five minutes on is interrupted,
         // so its next packet can go. A lane that is helping is never touched.
+        let step = std::time::Instant::now();
         for pane in store.write(|tx| busy::due_interrupts(tx, &project, &observed, now))? {
             let _ = herdr.send_keys(&pane, &["esc".into()]);
         }
+        note_slow(report, "busy interrupt", step);
         // A seat blocked by a dialog for minutes reaches the captain (lesson
         // 7b): the agent waits on a dialog nobody sees.
+        let step = std::time::Instant::now();
         report
             .blocked
             .extend(store.write(|tx| blocked::check(tx, &project, &observed, now))?);
+        note_slow(report, "blocked", step);
         // A lane refused by its own guardrails (pi: @aliou/pi-guardrails) goes
         // on with the refusal in its transcript; the captain is told (T-113).
+        let step = std::time::Instant::now();
         report
             .guardrails
             .extend(store.write(|tx| guardrails::check(tx, &project, &observed, now))?);
+        note_slow(report, "guardrails", step);
 
         // T-75: a seat whose provider is in a back-off waits for the provider.
         // It is not stuck, so no stall item is raised for it, and the captain's
         // home page shows it as a back-off.
+        let step = std::time::Instant::now();
         let waiting = stall::waiting_for_provider(&profiles, &observed);
         store.write(|tx| tx.set_seats_in_backoff(&project, &waiting))?;
         report.backoff.extend(waiting);
+        note_slow(report, "backoff", step);
 
+        let step = std::time::Instant::now();
         captain_quota::update(store, herdr, &profiles, &project, &observed, now)?;
+        note_slow(report, "captain quota", step);
 
         // T-209: when an active attempt's agent exited but its bound pane is
         // still a shell, restart it once in place before treating the absence
         // as a stall. Pending starts continue through the same durable restart
         // machine on later ticks.
+        let step = std::time::Instant::now();
         let restarted = restart_missing_jobs(store, herdr, cfg, &profiles, &project, &observed, now)?;
         missing_seats.retain(|seat| !restarted.contains(seat));
         report.flagged.retain(|seat| !restarted.contains(seat));
+        note_slow(report, "restart missing jobs", step);
 
         // A seat that holds work and has produced nothing for ten minutes
         // reaches the captain (T-227): one alert per round. Its seats stay
         // out of report.flagged: that path sends a second, generic stall
         // alert (review round 1, F1).
+        let step = std::time::Instant::now();
         let _ = silent::tick(store, &project, &observed, &profiles, now)?;
+        note_slow(report, "silent", step);
 
         // 1a. a lane or reviewer whose agent is gone from its pane (it exited,
         //     the pane was closed) reaches the captain at once (L-56): the
@@ -386,20 +446,29 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
 
         // Configuration changes take effect through the same durable in-place
         // restart machinery before quota and dispatch act on the lane.
+        let step = std::time::Instant::now();
         restart::reconcile_config(store, herdr, cfg, &profiles, &project, now)?;
+        note_slow(report, "restart config", step);
 
         // 1b. quota: a lane on a provider limit switches model or parks
         //     (design/01 `[models].on_quota`). It runs before the confirm, so a
         //     lane that is on quota does not have its delivery budget spent.
+        let step = std::time::Instant::now();
         let quota = quota::apply_quota_policy(store, herdr, cfg, &profiles, &project, &observed, now)?;
         report.quota.extend(quota.events);
+        note_slow(report, "quota", step);
 
         // The loop guard acts on the observed working session before dispatch;
         // its message also resets the ordinary push reminder clock.
-        quiet::loops(store, herdr, &project, &observed, now)?;
-        store.write(|tx| quiet::tick(tx, &project, now))?;
+        // T-386: its branch read is one `for-each-ref` per repository, timed
+        // with the push clock it serves.
+        let step = std::time::Instant::now();
+        quiet::loops(store, herdr, cfg, &mut tips_by_repo, &project, &observed, now)?;
+        store.write(|tx| quiet::tick(tx, cfg, &mut tips_by_repo, &project, now))?;
+        note_slow(report, "quiet", step);
 
         // 2. confirm: settle Submitted/Unknown doorbells from view evidence.
+        let step = std::time::Instant::now();
         let delivery_grace = gear_app::config::latest(store, &project)
             .map(|config| i64::from(config.timing.delivery_grace_s))
             .unwrap_or(cfg.delivery_grace_s);
@@ -424,23 +493,31 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         )?;
         report.confirmed.extend(confirmed);
         report.flagged.extend(flagged);
+        note_slow(report, "confirm", step);
 
         // 2a. a delivery whose text sits unsent in its lane's input box gets
         //     its Enter back (T-371): the lane is idle, the packet was typed,
         //     and only the key that submits it was lost.
+        let step = std::time::Instant::now();
         report
             .resubmitted
             .extend(ops::resubmit_unsent(store, herdr, &project, now)?);
+        note_slow(report, "resubmit", step);
 
         // 2b. a late check-in (design §10.3): a view that shows the attempt
         //     after its delivery op failed confirms the attempt anyway and
         //     closes the stall item.
+        let step = std::time::Instant::now();
         report.late_confirmed.extend(ops::confirm_late_views(store, &project, now)?);
+        note_slow(report, "late confirm", step);
 
+        let step = std::time::Instant::now();
         attention::promote(store, &project, now)?;
+        note_slow(report, "attention", step);
 
         // 3. dispatch: per lane seat a view and a decision, read-only with this
         //    tick's observations …
+        let step = std::time::Instant::now();
         let dispatch_cfg = dispatch::DispatchCfg {
             cooldown_s: cfg.cooldown_s,
             ..Default::default()
@@ -461,70 +538,90 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let prepared = dispatch::prepare_dispatch(store, herdr, cfg, &project, &planned, now)?;
         let deliveries = store.write(|tx| dispatch::intend_dispatch(tx, &project, &prepared, now))?;
         report.intended.extend(deliveries.into_iter().map(|op| op.id));
+        note_slow(report, "dispatch", step);
 
         // 6. feed: a lane running dry gets one item in the captain's inbox,
         //    before it stops (never-stop). Idempotent per lane and tick.
+        let step = std::time::Instant::now();
         report.feed.extend(
             feed::keep_lanes_fed(store, &project, now)?
                 .into_iter()
                 .map(|change| format!("{}:{}", change.lane, change.action)),
         );
+        note_slow(report, "feed", step);
 
         // 6a. a reviewer seat that runs no reviewer frees its slot (B02-04):
         //     a dead temp seat is released before the reviews start, so the
         //     count of temps in use never passes the quota and the next
         //     review can take the seat.
+        let step = std::time::Instant::now();
         report.dead_temps.extend(release::release_dead_temps(store, herdr, &project, now)?);
+        note_slow(report, "dead temps", step);
 
         // 6c. every lane in the tail while required work remains: one item in
         //     the captain's inbox, so the warnings a captain turned off do not
         //     go forgotten (B02-08).
+        let step = std::time::Instant::now();
         report.tail.extend(
             tailed::watch(store, &project, now)?
                 .map(|change| format!("all-tail:{}", change.as_str())),
         );
+        note_slow(report, "tail", step);
 
         // 6d. the friction ring (design §6.4): an idle captain hears about
         //     the open friction reports — one item on the thread `friction`,
         //     at most once per 30 min, updated by a new report and closed
         //     when every report it lists is closed.
+        let step = std::time::Instant::now();
         report.friction.extend(
             friction::ring(store, &project, now)?
                 .map(|change| format!("friction:{}", change.as_str())),
         );
+        note_slow(report, "friction", step);
 
         // 7. review: a lane handed a result in → a temp reviewer starts. The
         //    lane is not blocked; the reviewer is a seat of its own.
-        let reviews = review::start_reviews(store, herdr, cfg, &profiles, &project, now)?;
+        // T-386: the step reads every repository's branch tips once, so its
+        // cost no longer grows with the started attempts.
+        let step = std::time::Instant::now();
+        let reviews = review::start_reviews_with_tips(store, herdr, cfg, &profiles, &mut tips_by_repo, &project, now)?;
         report.reviewers.extend(reviews.started);
         // A mechanical hand-in settles itself (T-273): reported the way a
         // review's own settlement is, so one failed settlement is visible and
         // still never stops the tick.
         report.settled.extend(reviews.settled);
         report.settle_failed.extend(reviews.settle_failed);
+        note_slow(report, "review", step);
 
         // 7b. a reviewer that stopped before its verdict is told to go on
         //     (L-53); past its nudge budget it is flagged for the captain.
+        let step = std::time::Instant::now();
         let (_nudged, stuck) =
             review::nudge_stopped_reviewers(store, &project, &observed, cfg.cooldown_s, now)?;
         for seat in stuck {
             reviewer_nudge_flags.push((project.clone(), seat));
         }
+        note_slow(report, "reviewer nudge", step);
 
         // 7c. a lane that stopped on a server error goes on by itself
         //     (T-206): its agent is idle with an attempt in flight.
+        let step = std::time::Instant::now();
         let (nudged_lanes, stuck_lanes) = lane_nudge::nudge_stopped_lanes(store, &project, &observed, now)?;
         report.lane_nudged.extend(nudged_lanes);
         for seat in stuck_lanes {
             report.flagged.push(seat);
         }
+        note_slow(report, "lane nudge", step);
 
         // 8. release: a reviewer whose task left review frees its slot (T-17).
+        let step = std::time::Instant::now();
         let releases = release::release_finished_reviews(store, herdr, &project, now)?;
         report.released.extend(releases.released);
+        note_slow(report, "release", step);
 
         // 8a. retire: a Retiring lane that is idle at a safe point says
         //     goodbye, closes its pane and becomes Retired (T-65).
+        let step = std::time::Instant::now();
         report.released.extend(release::retire_finished_lanes(
             store,
             herdr,
@@ -533,20 +630,26 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             &profiles,
             now,
         )?);
+        note_slow(report, "retire", step);
 
         // 9. decide (pure): who should be rung now. This comes after every
         //    delivery of the tick: a seat that is being handed work is not
         //    rung in the same tick (T-71) — on T-61 both went into the
         //    reviewer's pane in one second and the packet was swallowed. The
         //    delivery holds the seat's slot, so the doorbell waits.
+        let step = std::time::Instant::now();
         let inputs = store.read(|tx| doorbell_inputs(tx, &project, &observed, now))?;
         let actions = doorbell::decide(&inputs, cfg.cooldown_s, now);
+        note_slow(report, "doorbell decide", step);
 
         // 10. intend: fix the doorbell actions as Intended ops in one transaction.
+        let step = std::time::Instant::now();
         let intended = store.write(|tx| ops::intend_doorbells(tx, &actions, now))?;
         report.intended.extend(intended.into_iter().map(|op| op.id));
+        note_slow(report, "doorbell intend", step);
 
         // 11. execute: re-check each op, call Herdr, record the outcome.
+        let step = std::time::Instant::now();
         quiet::prepare_pending_deliveries(store, herdr, cfg, &project, now)?;
         let executed = ops::execute_intended(store, herdr, &project, now)?;
         store.write(|tx| {
@@ -565,33 +668,46 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             Ok(())
         })?;
         report.executed.extend(executed);
+        note_slow(report, "execute", step);
 
         // 12. merge: collect a finished background merge or launch the next
         //     one. Git and the gate run beside the tick (T-36).
+        let step = std::time::Instant::now();
         for merged in merge::merge_passed(store, herdr, cfg, &project, now)? {
             report.merged.push(format!("{} @ {}", merged.task, merged.branch));
         }
+        note_slow(report, "merge", step);
         Ok(())
     };
     for project in projects {
+        let step = std::time::Instant::now();
         if let Err(error) = one_project(store, &mut report, &project) {
             report.project_failed.push(project_error(&project, &error));
         }
+        note_slow(&mut report, &format!("project {project}"), step);
     }
     // 13. the rounds bookkeeping of every project (design §4.1): the session of
     //     a seat joins its open round, and a round ends at the next round on
     //     its seat or at the seat's release. The overrun question (§5.2) and
     //     the declared waits (§5.3) tick with it; both are empty until their
     //     own tasks land.
+    let step = std::time::Instant::now();
     report.rounds = rounds::tick(store, herdr, cfg, now)?;
+    note_slow(&mut report, "rounds", step);
+    let step = std::time::Instant::now();
     waits::tick(store, herdr, cfg, now)?;
+    note_slow(&mut report, "waits after", step);
+    let step = std::time::Instant::now();
     overrun::tick(store, herdr, cfg, now)?;
+    note_slow(&mut report, "overrun", step);
+    let step = std::time::Instant::now();
     for (project, seat) in reviewer_nudge_flags {
         if store.read(|tx| review::nudge_flag_current(tx, &project, &seat, now))?
             && !report.flagged.contains(&seat) {
             report.flagged.push(seat);
         }
     }
+    note_slow(&mut report, "reviewer nudge flags", step);
     // 10. every flagged seat reaches its captain (L-52): a flag that only goes
     //     to the log leaves a lane standing still with nobody knowing.
     // A failed delivery remains a live fact until its retry is cleared or
@@ -1183,6 +1299,93 @@ review=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high
             assert_eq!(items.len(),1,"{role:?}: {items:?}");
             assert!(items[0].body.contains("its agent is gone from its pane"),"{role:?}: {}",items[0].body);
             assert!(!items[0].body.contains("exited again after the engine restarted it once"),"{role:?}: {}",items[0].body);
+        }
+    }
+}
+
+/// T-386: a tick step that takes over 200 ms is named in the report.
+#[cfg(test)]
+mod t386_tick_tests {
+    use super::*;
+    use gear_herdr::fake::FakeHerdr;
+    use gear_model::{AttemptState, SeatRole, TaskState};
+    use gear_store::{testing, AttemptRow, ContractRow, TaskRow};
+
+    const NOW: Ts = 1_900_000_200;
+    const CONFIG: &str = r#"
+[project]
+id="p"
+herdr_session="sess"
+repo="/repo"
+[quota]
+lanes=1
+temps=1
+[captain]
+pane="w1:p9"
+kind="claude"
+profile="claude"
+[[lanes]]
+name="heat"
+duty="everything"
+owns=["src/"]
+kind="codex"
+profile="codex"
+[temps]
+kind="codex"
+profile="codex"
+[models]
+lanes=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high"]}]
+review=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high"]}]
+"#;
+
+    /// A git that takes 250 ms per call: a step that reads a repository is
+    /// past the 200 ms budget.
+    #[derive(Debug)]
+    struct SlowReviewGit;
+    impl review::ReviewGit for SlowReviewGit {
+        fn run(&self, _path: &str, _args: &[&str]) -> Result<String, String> {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn a_step_over_the_budget_is_named_in_the_report() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.write(|tx| {
+            let mut project = testing::seed_project(tx, "p", "sess", NOW)?;
+            project.config_toml = CONFIG.into();
+            tx.update_project(&project)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p1", "codex", NOW)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p9", "claude", NOW)?;
+            tx.insert_task(&TaskRow {project:"p".into(),id:"T-1".into(),rank:1,state:TaskState::Ready,priority:"must".into(),lane:Some("heat".into()),milestone:None,required:false,contract_version:1,deps:vec![],followup_of:None,wait_on:None,wait_cond:None,rework_note:None,estimate_min:None,issue:None,updated:NOW,repo:None,base:None,gate:None,rework_estimate_min:None})?;
+            tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"accept".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:NOW, mechanical: None})?;
+            tx.insert_attempt(&AttemptRow {project:"p".into(),task:"T-1".into(),n:1,seat:"p:heat".into(),generation:1,contract_version:1,adopted_version:1,pending_update:None,state:AttemptState::Started,candidate:None,report:None,safe_point:None,started:NOW,updated:NOW,session_ref:None,session_cli:Some("codex".into()),session_action:None,sent_at:Some(NOW)})?;
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.state = TaskState::Running;
+            tx.update_task(&task)
+        }).unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w1:p1");
+        herdr.add_shell("w1:p9");
+        let mut cfg = EngineCfg::default();
+        cfg.db_path = crate::testtmp::temp("t386").join("t386.db").to_string_lossy().into_owned();
+        cfg.review_git = std::sync::Arc::new(SlowReviewGit);
+        for kind in ["codex", "claude"] {
+            cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+        let report = tick(&mut store, &mut herdr, &cfg, NOW + 1).unwrap();
+        // The step that read the branch tips (the push clock, then the review
+        // step, both through the one slow git) passed the budget.
+        let line = report.slow.iter().find(|line| line.starts_with("quiet: ") || line.starts_with("review: "))
+            .unwrap_or_else(|| panic!("a step over the budget is named: {report:?}"));
+        let (step, ms) = line.rsplit_once(": ").expect(line);
+        assert!(!step.is_empty(), "{line}");
+        assert!(ms.trim_end_matches(" ms").parse::<u128>().is_ok_and(|ms| ms > 200), "{line}");
+        // Every line names a step and its time in milliseconds.
+        for line in &report.slow {
+            assert!(line.ends_with(" ms"), "{line}");
+            assert!(line.rsplit_once(": ").is_some_and(|(step, _)| !step.is_empty()), "{line}");
         }
     }
 }
