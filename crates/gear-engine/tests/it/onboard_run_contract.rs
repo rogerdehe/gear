@@ -38,7 +38,7 @@ gate = "make test"
 "#;
 
 fn cfg() -> EngineCfg {
-    let mut c = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
+    let mut c = EngineCfg { db_path: crate::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
     c.profiles.insert("opencode".into(), builtin("opencode").unwrap());
     c
 }
@@ -257,15 +257,7 @@ on_quota = { lanes = "wait", review = "wait" }
 gate = "make test"
 "#;
     // The grok trust store lives under HOME: give it a scratch one.
-    let home = std::env::temp_dir().join(format!(
-        "gear-grok-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos()
-    ));
-    std::fs::create_dir_all(&home).unwrap();
+    let home = crate::temp("gear-grok");
     // HOME is process-wide: no other test may onboard a grok lane (or set
     // HOME) in this window.
     let _home = crate::HOME_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());

@@ -1110,7 +1110,7 @@ repo = "web"
 
     /// An engine that knows the opencode profile.
     fn cfg() -> crate::EngineCfg {
-        let mut cfg = crate::EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
+        let mut cfg = crate::EngineCfg { db_path: crate::testtmp::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
         cfg.profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
         cfg
     }
@@ -1842,16 +1842,7 @@ repo = "web"
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         // A real repo with a linked worktree for the lane.
-        let root = std::env::temp_dir().join(format!(
-            "gear-onboard-hooks-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::testtmp::temp("gear-onboard-hooks");
         sh(&root, "git init -q -b dev work");
         let work = root.join("work");
         std::fs::write(work.join("README.md"), "dev\n").unwrap();

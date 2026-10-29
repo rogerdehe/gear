@@ -46,7 +46,7 @@ gate = "make test"
 "#;
 
 fn cfg() -> EngineCfg {
-    let mut c = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
+    let mut c = EngineCfg { db_path: crate::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
     // The built-ins only: grok comes from the project config.
     for (name, profile) in gear_herdr::builtins() {
         c.profiles.insert(name, profile);

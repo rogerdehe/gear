@@ -1,21 +1,24 @@
 //! The friction ring (design §6.4): the captain hears about the open friction
-//! reports when it has nothing else to do.
+//! reports even while it is busy.
 //!
 //! A lane or a reviewer that was slowed down writes a friction report at its
 //! hand-in (`--friction`, design §6.1). The captain reads them with `gear
 //! friction` and closes them one by one (§6.4). Nobody tells the captain that
-//! a report arrived: it finds out when it has no actionable item — one item on
-//! the thread `friction`, naming the open reports.
+//! a report arrived: the engine opens one item on the thread `friction`,
+//! naming the open reports.
 //!
-//! The rules (design §6.4):
-//! - the captain is idle when it has no actionable item (`actionable_for` is
-//!   empty); only then does the ring open;
-//! - one item per project, at most once per 30 minutes;
+//! The rules (design §6.4, T-416):
+//! - the ring does not wait for an idle captain: a captain on a long voyage
+//!   always has an actionable item, and the reports kept waiting;
+//! - one item per project, at most once per 30 minutes since the last ring;
 //! - a new report while the item is open updates its list;
-//! - the item closes itself when every report it lists is closed.
+//! - the item closes itself when every report it lists is closed;
+//! - an item resolved by the captain while any report it named is still open
+//!   counts as rung, not as handled: the next ring after the cooldown names
+//!   the reports still open again.
 
 use gear_model::{GearResult, MsgKind, MsgState, Ts};
-use gear_store::{NewMessage, Store, Tx};
+use gear_store::{FrictionRow, NewMessage, Store, Tx};
 
 /// The thread the friction item lives in (one item per project).
 const THREAD: &str = "friction";
@@ -23,6 +26,12 @@ const THREAD: &str = "friction";
 /// The smallest gap between two rings (design §6.4: never more than once per
 /// 30 min).
 const COOLDOWN_S: i64 = 30 * 60;
+
+/// How many reports one item names before it says how many are left out.
+const MAX_LISTED: usize = 10;
+
+/// How much of a report's body the item quotes.
+const SNIPPET_CHARS: usize = 160;
 
 /// What the ring did in one tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,11 +62,6 @@ struct State {
     at: Option<Ts>,
     /// The id of the item the engine opened.
     item: Option<String>,
-    /// The reports an item has already named (design §6.4: the ring rings
-    /// again when a **new** report arrives — a report the captain has not
-    /// been told about yet). It outlives the item, so a captain who resolved
-    /// the item does not get the same reports again.
-    listed: Vec<String>,
 }
 
 fn state_key(project: &str) -> String {
@@ -75,11 +79,12 @@ fn ring_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
         return Ok(None); // no captain: nobody to tell
     };
     let state = read_state(tx, project)?;
-    let open: Vec<String> = tx
-        .open_frictions(project)?
-        .into_iter()
-        .map(|report| report.id)
-        .collect();
+    // Newest first (design §6.4, T-416): the store lists them oldest first,
+    // by creation and then by the (lexicographic) id.
+    let mut open = tx.open_frictions(project)?;
+    open.sort_by(|a, b| {
+        (b.created, id_no(&b.id)).cmp(&(a.created, id_no(&a.id)))
+    });
 
     // The item the engine opened, while it is still open.
     let item = match state.item.as_deref() {
@@ -102,7 +107,7 @@ fn ring_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
                 None,
                 now,
             )?;
-            write_state(tx, project, &State { at: state.at, item: None, listed: state.listed })?;
+            write_state(tx, project, &State { at: state.at, item: None })?;
             return Ok(Some(Change::Closed));
         }
         // A report arrived while the item was open: its list changes.
@@ -111,29 +116,18 @@ fn ring_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
         if changed {
             tx.update_message_body(project, &item.id, &body)?;
         }
-        // The reports the item names are the ones the captain has heard of.
-        let listed = with_listed(&state.listed, &open);
-        if listed != state.listed {
-            write_state(tx, project, &State { at: state.at, item: state.item, listed })?;
-        }
         return Ok(if changed { Some(Change::Updated) } else { None });
     }
 
-    // No item is open. A ring needs reports to name and an idle captain: it
-    // has no actionable item (design §6.4).
+    // No item is open. The ring needs reports to name (design §6.4); it does
+    // **not** wait for an idle captain: a captain on a long voyage always has
+    // an actionable item, and the reports were never rung (T-416).
     if open.is_empty() {
         return Ok(None);
     }
-    // A ring needs a report the captain has not been told about yet: it rings
-    // again when a **new** report arrives, not for the same ones again
-    // (design §6.4).
-    if !open.iter().any(|id| !state.listed.contains(id)) {
-        return Ok(None);
-    }
-    if !tx.actionable_for(project, &captain.id, now)?.is_empty() {
-        return Ok(None); // the captain has work of its own
-    }
-    // At most once per 30 min (design §6.4).
+    // At most once per 30 min since the last ring (design §6.4). An item the
+    // captain resolved while its reports were still open counts as rung, not
+    // as handled: the next ring names the reports still open again (T-416).
     if let Some(at) = state.at {
         if now - at < COOLDOWN_S {
             return Ok(None);
@@ -162,35 +156,46 @@ fn ring_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
     write_state(
         tx,
         project,
-        &State {
-            at: Some(now),
-            item: Some(message.id),
-            listed: with_listed(&state.listed, &open),
-        },
+        &State { at: Some(now), item: Some(message.id) },
     )?;
     Ok(Some(Change::Opened))
 }
 
-/// The reports an item has named: the ones it already named, plus the ones it
-/// names now.
-fn with_listed(listed: &[String], open: &[String]) -> Vec<String> {
-    let mut listed = listed.to_vec();
-    for id in open {
-        if !listed.contains(id) {
-            listed.push(id.clone());
-        }
-    }
-    listed
-}
-
-/// The item's text (design §6.4): how many reports wait and which ones.
-fn body(open: &[String]) -> String {
+/// The item's text (design §6.4): how many reports wait and which ones, each
+/// as `F-<n> <task> <role>: <the start of its body>`, newest first, at most
+/// [`MAX_LISTED`] of them (T-416).
+fn body(open: &[FrictionRow]) -> String {
     let count = open.len();
     let word = if count == 1 { "report" } else { "reports" };
-    format!(
-        "{count} friction {word}: {}. Run gear friction.",
-        open.join(" ")
-    )
+    let mut text = format!("{count} friction {word}:");
+    for report in open.iter().take(MAX_LISTED) {
+        text.push('\n');
+        text.push_str(&report.id);
+        text.push(' ');
+        text.push_str(&report.task);
+        text.push(' ');
+        text.push_str(&report.role);
+        text.push_str(": ");
+        text.push_str(&snippet(&report.body));
+    }
+    text.push('\n');
+    if count > MAX_LISTED {
+        text.push_str(&format!("and {} more: run gear friction", count - MAX_LISTED));
+    } else {
+        text.push_str("run gear friction");
+    }
+    text
+}
+
+/// The number of a report's id (`F-<n>`): the newest-first order breaks ties
+/// within a second by it (T-416).
+fn id_no(id: &str) -> i64 {
+    id.trim_start_matches("F-").parse().unwrap_or(0)
+}
+
+/// The first [`SNIPPET_CHARS`] characters of a report's body (T-416).
+fn snippet(body: &str) -> String {
+    body.chars().take(SNIPPET_CHARS).collect()
 }
 
 /// The ring's state, as it is kept in the project's meta.
@@ -207,16 +212,6 @@ fn read_state(tx: &Tx<'_>, project: &str) -> GearResult<State> {
             .get("item")
             .and_then(|item| item.as_str())
             .map(|item| item.to_string()),
-        listed: value
-            .get("listed")
-            .and_then(|listed| listed.as_array())
-            .map(|listed| {
-                listed
-                    .iter()
-                    .filter_map(|id| id.as_str().map(|id| id.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default(),
     })
 }
 
@@ -225,7 +220,6 @@ fn write_state(tx: &Tx<'_>, project: &str, state: &State) -> GearResult<()> {
     let value = serde_json::json!({
         "at": state.at,
         "item": state.item,
-        "listed": state.listed,
     });
     tx.set_meta(&state_key(project), &value.to_string())
 }

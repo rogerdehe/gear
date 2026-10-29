@@ -9,10 +9,7 @@ use gear_store::Store;
 
 /// A scratch directory, unique per tag and process.
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("gear-init-{}-{tag}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).expect("a scratch directory");
-    dir
+    crate::scratch::temp(&format!("gear-init-{tag}"))
 }
 
 /// A config for project `p`, whose repository is `repo`.
