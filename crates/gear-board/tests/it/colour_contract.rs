@@ -361,12 +361,13 @@ fn a_long_lane_name_never_moves_the_text_columns() {
     assert!(long.contains("T-2 rewrite unread"), "{decisions}");
     assert_eq!(column(long, "unread"), column(short, "unread"), "{decisions}");
 
-    // Time & tokens: the estimates line up under their heading.
-    let tokens = frame(&board, &crate::screen(Tab::Cost, 0, size), None);
-    let long = line_with(&tokens, " T-2 ");
-    let short = line_with(&tokens, " T-1 ");
-    assert!(long.contains("rewrite "), "{tokens}");
-    assert_eq!(column(long, "30m"), column(short, "40m"), "{tokens}");
-    let heading = line_with(&tokens, "task   lane");
-    assert_eq!(column(heading, "est"), column(long, "30m"), "{tokens}");
+    // Cost: the lane names are padded to one width, so the estimates line up
+    // under their heading whichever lane the row names.
+    let cost = frame(&board, &crate::screen(Tab::Cost, 0, size), None);
+    let long = line_with(&cost, "rewrite");
+    let short = line_with(&cost, "hull");
+    assert!(long.contains("▸ rewrite"), "{cost}");
+    assert_eq!(column(long, "30m"), column(short, "40m"), "{cost}");
+    let heading = line_with(&cost, "lane / task");
+    assert_eq!(column(heading, "est"), column(long, "30m"), "{cost}");
 }

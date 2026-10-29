@@ -428,44 +428,131 @@ fn a_log_without_a_starred_decision_reads_nothing() {
 }
 
 #[test]
-fn the_time_and_tokens_view_shows_the_work_of_every_task() {
+fn the_cost_view_shows_a_lane_with_the_development_and_the_review_apart() {
     let mut store = world();
     let board = board(&mut store);
     let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
-    assert!(text.contains("task"), "the columns: {text}");
-    assert!(text.contains("tokens"), "the columns: {text}");
-    // The row of the task: its estimate, its actual time, the ratio, the
-    // rounds, the tokens and the cost.
-    assert!(text.contains("T-1"), "{text}");
-    assert!(text.contains("hull"), "{text}");
-    assert!(text.contains("40m"), "the estimate: {text}");
-    assert!(text.contains("44m"), "the actual time: {text}");
-    assert!(text.contains("1.1x"), "the ratio: {text}");
+    assert!(text.contains("lane / task"), "the columns: {text}");
+    assert!(text.contains("dev tokens"), "the columns: {text}");
+    assert!(text.contains("review tokens"), "the columns: {text}");
+    // The row of the lane: one lane of the view, closed.
+    let row = text
+        .lines()
+        .find(|line| line.contains("hull"))
+        .expect("the row of the lane");
+    assert!(row.contains("▸ hull"), "the lane is closed: {row}");
+    assert!(row.contains("   40m    44m"), "the estimate and the actual time: {row}");
+    assert!(row.contains("  1.1x"), "the ratio: {row}");
+    assert!(row.contains("512k"), "the development tokens: {row}");
+    assert!(row.contains("    0.31"), "the development cost: {row}");
+    // The task has no review round: nothing counts for it, and the total says
+    // that part is unknown.
+    assert!(row.contains("0k"), "no review round counted tokens: {row}");
     assert!(
-        !text.contains("812k"),
-        "the cache reads are not fresh tokens: {text}"
-    );
-    assert!(text.contains("512k"), "the fresh tokens: {text}");
-    assert!(text.contains("300k"), "the cache reads are shown apart: {text}");
-    assert!(text.contains("$  0.31"), "the cost: {text}");
-    // And the total of the voyage so far.
-    assert!(
-        text.contains("so far: 0.5M tokens, 0.3M cache reads, $0.31"),
+        text.contains("this voyage: 0.5M tokens (development 0.5M, review 0.0M), $0.31"),
         "{text}"
     );
+    assert!(text.contains("(known so far; 1 unknown)"), "{text}");
 }
 
 #[test]
-fn the_time_and_tokens_view_opens_the_task_panel_of_its_row() {
+fn enter_opens_a_lane_and_closes_it() {
     let mut store = world();
+    let opts = Options {
+        project: Some("p".into()),
+        color: false,
+        refresh: Duration::from_millis(1),
+        ..Options::default()
+    };
+
+    let mut out: Vec<u8> = Vec::new();
+    run_with(&mut store, &opts, &mut out, &mut Presses(vec!['3', '\r']), None).unwrap();
+    let frame = last_frame(&out);
+    // The selected lane is open and its task is under it.
+    assert!(frame.contains("▾ hull"), "Enter opens the lane: {frame}");
+    assert!(frame.contains("T-1"), "the lane's task is under it: {frame}");
+
+    let mut out: Vec<u8> = Vec::new();
+    run_with(&mut store, &opts, &mut out, &mut Presses(vec!['3', '\r', '\r']), None).unwrap();
+    let frame = last_frame(&out);
+    // A second Enter closes it again.
+    assert!(frame.contains("▸ hull"), "Enter closes the lane: {frame}");
+    assert!(!frame.contains("T-1"), "the lane's task is hidden: {frame}");
+}
+
+/// T-363: the development round and the review round of a task are counted
+/// apart, on the lane's row and on the task's own.
+#[test]
+fn a_task_shows_its_development_and_its_review_tokens() {
+    let mut store = world();
+    let departure = now_seconds() - 3600;
+    store
+        .write(|tx| {
+            // The development round of T-1: 1 000 000 fresh tokens.
+            let dev = RoundKey {
+                project: "p".into(),
+                task: "T-1".into(),
+                attempt: 1,
+                role: "dev".into(),
+            };
+            tx.set_round_tokens(
+                &dev,
+                &RoundTokens {
+                    input: Some(1_000_000),
+                    output: Some(0),
+                    cache_read: Some(0),
+                    cache_write: Some(0),
+                    reasoning: None,
+                    cost_usd: Some(0.4),
+                    cost_source: "agent".into(),
+                },
+                departure + 44 * 60,
+            )?;
+            // And its review round: 200 000.
+            let review = RoundKey {
+                project: "p".into(),
+                task: "T-1".into(),
+                attempt: 1,
+                role: "review".into(),
+            };
+            tx.insert_round(&gear_store::NewRound {
+                key: review.clone(),
+                seat: "p:review-1".into(),
+                generation: 1,
+                cli: "codex".into(),
+                model: None,
+                start_at: departure + 44 * 60,
+            })?;
+            tx.set_round_tokens(
+                &review,
+                &RoundTokens {
+                    input: Some(200_000),
+                    output: Some(0),
+                    cache_read: Some(0),
+                    cache_write: Some(0),
+                    reasoning: None,
+                    cost_usd: Some(0.1),
+                    cost_source: "agent".into(),
+                },
+                departure + 50 * 60,
+            )
+        })
+        .unwrap();
+
     let board = board(&mut store);
-    // The rows of the view are the tasks that ran; the panel of the selected
-    // one is its rounds with their tokens.
-    let tasks = gear_board::frame::token_tasks(&board.projects[0]);
-    assert_eq!(tasks.len(), 1, "{tasks:?}");
-    assert_eq!(tasks[0].0, "hull");
-    assert_eq!(tasks[0].1.id, "T-1");
+    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
+    let row = text.lines().find(|line| line.contains("hull")).expect("the row of the lane");
+    assert!(row.contains("1000k"), "the development tokens: {row}");
+    assert!(row.contains("200k"), "the review tokens: {row}");
+
+    // The task's own row, under the opened lane, has its two sides as well.
+    let mut screen = crate::screen(Tab::Cost, 0, (120, 40));
+    screen.opened = vec!["hull".into()];
+    let text = frame(&board, &screen, None);
+    let row = text.lines().find(|line| line.contains("T-1")).expect("the row of the task");
+    assert!(row.contains("1000k"), "the task's development tokens: {row}");
+    assert!(row.contains("200k"), "the task's review tokens: {row}");
 }
 
 /// F2: the reason of a decision stands on its own line, so it is readable on
@@ -519,7 +606,8 @@ fn the_decisions_are_the_ones_of_the_voyage_the_board_measures() {
 }
 
 /// F4: the rounds of a task are the rows of the rounds table: a dev round and
-/// a review round are two rounds of one attempt.
+/// a review round are two rounds of one attempt. The Cost view counts the
+/// attempt once (its `rounds`); the rounds table's count stays a model fact.
 #[test]
 fn the_rounds_of_a_task_are_the_rows_of_the_rounds_table() {
     let mut store = world();
@@ -557,85 +645,34 @@ fn the_rounds_of_a_task_are_the_rows_of_the_rounds_table() {
         })
         .unwrap();
     let board = board(&mut store);
-    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
-    // The row of the task: two rounds now.
-    assert!(text.contains("T-1"), "{text}");
-    let row = text
-        .lines()
-        .find(|line| line.contains("T-1"))
-        .expect("the row of the task");
-    assert!(row.contains("  2"), "the rounds of the rounds table: {row}");
+    let task = board.projects[0]
+        .lanes
+        .iter()
+        .flat_map(|lane| lane.tasks.iter())
+        .find(|task| task.id == "T-1")
+        .expect("the task T-1");
+    assert_eq!(task.rounds, 1, "one attempt");
+    assert_eq!(task.stored_rounds, 2, "a dev round and a review round");
 }
 
-/// F5: the tokens and the cost that were never counted are unknown, not zero.
+/// F5: a part the rounds never counted is unknown, not a measured zero. The
+/// view counts it as zero in its sums and names it once in the voyage's line,
+/// so a sum is never shown as a total that hides an unknown part.
 #[test]
-fn the_unknown_usage_is_not_shown_as_zero() {
+fn an_unknown_usage_counts_as_zero_and_the_total_names_it() {
     let mut store = world();
-    // A task whose round counted nothing: the fields are there, the numbers
-    // are zero.
+    // The dev round of T-1 counted nothing (a measured zero) and was never
+    // priced; there is no review round, so the review side is unknown.
+    let departure = now_seconds() - 3600;
     store
         .write(|tx| {
             let key = RoundKey {
                 project: "p".into(),
-                task: "T-2".into(),
+                task: "T-1".into(),
                 attempt: 1,
                 role: "dev".into(),
             };
-            tx.insert_task(&TaskRow {
-                repo: None,
-                base: None,
-                gate: None,
-                rework_estimate_min: None,
-                project: "p".into(),
-                id: "T-2".into(),
-                rank: 2,
-                state: TaskState::Done,
-                priority: "must".into(),
-                lane: Some("hull".into()),
-                milestone: Some("M4".into()),
-                required: false,
-                contract_version: 1,
-                deps: vec![],
-                followup_of: None,
-                wait_on: None,
-                wait_cond: None,
-                rework_note: None,
-                estimate_min: Some(20),
-                issue: None,
-                updated: NOW,
-            })?;
-            tx.insert_attempt(&AttemptRow {
-                session_ref: None,
-                session_cli: None,
-                session_action: None,
-                sent_at: None,
-                project: "p".into(),
-                task: "T-2".into(),
-                n: 1,
-                seat: "p:hull".into(),
-                generation: 1,
-                contract_version: 1,
-                adopted_version: 1,
-                pending_update: None,
-                state: AttemptState::Accepted,
-                candidate: Some("def5678".into()),
-                report: None,
-                safe_point: None,
-                started: NOW,
-                updated: NOW,
-            })?;
-            tx.set_attempt_time("p", "T-2", 1, AttemptStep::Started, NOW)?;
-            tx.set_attempt_time("p", "T-2", 1, AttemptStep::Merged, NOW)?;
-            // The round counted nothing: a measured zero.
-            tx.insert_round(&gear_store::NewRound {
-                key: key.clone(),
-                seat: "p:hull".into(),
-                generation: 1,
-                cli: "pi".into(),
-                model: None,
-                start_at: NOW,
-            })?;
             tx.set_round_tokens(
                 &key,
                 &RoundTokens {
@@ -647,7 +684,7 @@ fn the_unknown_usage_is_not_shown_as_zero() {
                     cost_usd: None,
                     cost_source: "none".into(),
                 },
-                NOW,
+                departure + 44 * 60,
             )
         })
         .unwrap();
@@ -656,19 +693,19 @@ fn the_unknown_usage_is_not_shown_as_zero() {
 
     let row = text
         .lines()
-        .find(|line| line.contains("T-2"))
-        .expect("the row of the task");
+        .find(|line| line.contains("hull"))
+        .expect("the row of the lane");
     assert!(row.contains("0k"), "a measured zero is a zero: {row}");
-    assert!(row.contains("?"), "the cost was never priced: {row}");
-    assert!(
-        text.contains("known so far"),
-        "the total names what it does not know: {text}"
-    );
+    assert!(!row.contains('?'), "no cell is drawn as unknown: {row}");
+    // No round was priced: the total names the missing prices, not a dollar
+    // sum, and the unknown review side is named.
+    assert!(text.contains("no prices set"), "{text}");
+    assert!(text.contains("(known so far; 1 unknown)"), "{text}");
 }
 
 /// F5 of the T-166 review: a sum that hides an unknown part is not a total.
-/// A measured dev round plus a review round that counted nothing shows `?`
-/// for the tokens and for the cost, and the footer says it is known so far.
+/// A measured dev round plus a review round that counted nothing leaves the
+/// development sum whole, counts the review side as unknown, and says so.
 #[test]
 fn an_unmeasured_round_hides_no_part_of_the_sum() {
     let mut store = world();
@@ -696,28 +733,18 @@ fn an_unmeasured_round_hides_no_part_of_the_sum() {
 
     let row = text
         .lines()
-        .find(|line| line.contains("T-1"))
-        .expect("the row of the task");
-    assert!(row.contains("?"), "the tokens are unknown: {row}");
-    assert!(row.contains("      ?"), "the cost is unknown: {row}");
+        .find(|line| line.contains("hull"))
+        .expect("the row of the lane");
+    assert!(row.contains("512k"), "the development sum is whole: {row}");
     assert!(
-        !row.contains("812k"),
-        "a partial sum is not shown as a total: {row}"
-    );
-    assert!(
-        !row.contains("0.31"),
-        "a partial price is not shown as a total: {row}"
-    );
-    assert!(
-        text.contains("known so far"),
+        text.contains("(known so far; 1 unknown)"),
         "the total names what it does not know: {text}"
     );
 }
 
 /// F5 of the T-166 review: a review round that counted its tokens but was
-/// never priced leaves the tokens whole and the cost unknown. No row of the
-/// view then has a cost, so the cost column says nothing and the total names
-/// the missing prices once (the user, 2026-10-28).
+/// never priced leaves the tokens whole and the price unknown. The total sums
+/// the prices it knows and says it is known so far.
 #[test]
 fn an_unpriced_round_hides_no_part_of_the_sum() {
     let mut store = world();
@@ -759,30 +786,21 @@ fn an_unpriced_round_hides_no_part_of_the_sum() {
 
     let row = text
         .lines()
-        .find(|line| line.contains("T-1"))
-        .expect("the row of the task");
-    assert!(row.contains("534k"), "the tokens are whole: {row}");
+        .find(|line| line.contains("hull"))
+        .expect("the row of the lane");
+    assert!(row.contains("22k"), "the review tokens are whole: {row}");
+    assert!(text.contains("$0.31"), "the price that is known: {text}");
     assert!(
-        !row.contains("0.31"),
-        "a partial price is not shown as a total: {row}"
-    );
-    // No row of the view has a cost: the cost column says nothing, and the
-    // total names the missing prices once instead of a dollar sum.
-    let total = text
-        .lines()
-        .find(|line| line.contains("so far:"))
-        .expect("the total line");
-    assert!(
-        total.ends_with("no prices set"),
-        "the total names the missing prices: {total}"
+        text.contains("(known so far; 1 unknown)"),
+        "the total names the price it does not know: {text}"
     );
 }
 
 /// The user, 2026-10-28: a task that re-reads its context for twenty minutes
-/// shows millions of cache reads. They are counted apart from the fresh
-/// tokens, so the tokens say how much the work wrote, not how much it read.
+/// shows millions of cache reads. They are not added to the fresh tokens the
+/// Cost view counts.
 #[test]
-fn the_cache_reads_are_shown_apart_from_the_fresh_tokens() {
+fn the_cache_reads_are_not_added_to_the_fresh_tokens() {
     let mut store = world();
     let departure = now_seconds() - 3600;
     store
@@ -814,25 +832,19 @@ fn the_cache_reads_are_shown_apart_from_the_fresh_tokens() {
 
     let row = text
         .lines()
-        .find(|line| line.contains("T-1"))
-        .expect("the row of the task");
+        .find(|line| line.contains("hull"))
+        .expect("the row of the lane");
     assert!(row.contains("1k"), "the fresh tokens: {row}");
     assert!(
         !row.contains("2001k"),
         "the cache reads are not added to the fresh tokens: {row}"
     );
-    assert!(row.contains("2000k"), "the cache reads: {row}");
-    assert!(
-        text.contains("so far: 0.0M tokens, 2.0M cache reads, $0.31"),
-        "the total names both and keeps the price: {text}"
-    );
 }
 
-/// The user, 2026-10-28: a project without `[prices]` priced no round, so
-/// every cost cell said `?` and the total summed a dollar that does not
-/// exist. The cost column now says nothing; the total says it once.
+/// The user, 2026-10-28: a project without `[prices]` priced no round, so the
+/// Cost view sums no dollar at all; the total names the missing prices once.
 #[test]
-fn a_view_without_prices_says_so_once_and_shows_no_cost_cell() {
+fn a_view_without_prices_names_the_missing_prices_once() {
     let mut store = world();
     let departure = now_seconds() - 3600;
     store
@@ -864,27 +876,22 @@ fn a_view_without_prices_says_so_once_and_shows_no_cost_cell() {
 
     let row = text
         .lines()
-        .find(|line| line.contains("T-1"))
-        .expect("the row of the task");
-    assert!(
-        !row.contains('?'),
-        "nothing is unknown in the cost column without prices: {row}"
-    );
-    assert!(!row.contains('$'), "the cost column shows nothing: {row}");
+        .find(|line| line.contains("hull"))
+        .expect("the row of the lane");
+    assert!(!row.contains('?'), "nothing is drawn as unknown: {row}");
     let total = text
         .lines()
-        .find(|line| line.contains("so far:"))
+        .find(|line| line.contains("this voyage:"))
         .expect("the total line");
     assert!(
-        total.ends_with("no prices set"),
-        "the total ends with the missing prices: {total}"
+        total.contains("no prices set"),
+        "the total names the missing prices: {total}"
     );
     assert_eq!(
         total.matches("no prices set").count(),
         1,
         "said once: {total}"
     );
-    assert!(!total.contains("unknown"), "nothing is unknown: {total}");
 }
 
 /// The machine-readable board carries the fresh tokens and the cache reads
