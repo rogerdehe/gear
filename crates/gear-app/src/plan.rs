@@ -36,6 +36,10 @@ pub struct ApplyResult {
     /// cancelled done task, resolved "cancelled by the captain".
     #[serde(default)]
     pub resolved: Vec<String>,
+    /// The `# Milestone` blocks this apply wrote back into the plan file from
+    /// the store (T-333), in the order their milestones are first named.
+    #[serde(default)]
+    pub milestone_blocks: Vec<String>,
     /// What the captain should know about this apply (design §7.2: a decision
     /// line that is not structured is logged as a note).
     #[serde(default)]
@@ -431,6 +435,23 @@ fn apply_queue(
         return Err(GearError::new(
             ErrorCode::BadFormat,
             format!("the dependencies form a cycle through {cycle}"),
+        ));
+    }
+
+    // The `# Milestone` blocks the draft owes the file (T-333): a task sails on
+    // a voyage the file describes, so a milestone the plan names and does not
+    // describe gets its block back from the store — or the apply is refused.
+    let milestone_blocks = crate::goal::missing_blocks(tx, project, draft)?;
+    for block in &milestone_blocks {
+        let header = block.lines().next().unwrap_or_default();
+        let id = header
+            .trim_start_matches("# Milestone ")
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(':');
+        warnings.push(format!(
+            "the # Milestone {id} block was written back into the plan file from the store"
         ));
     }
 
@@ -1064,6 +1085,7 @@ fn apply_queue(
         staffed,
         cancelled,
         resolved,
+        milestone_blocks,
     })
 }
 
@@ -3359,11 +3381,12 @@ fn why_naming(decisions: &[crate::decision::Decision], task: &str) -> Option<Str
 /// eta reads as prose is refused with nothing written (T-387), for every
 /// block, departed or not — such a voyage cannot depart either.
 ///
-/// A departed voyage's `done:`, `bar:` and `eta:` change only when the user
-/// asked for it and confirmed it (T-410): without `--confirmed` the whole
-/// apply is refused with nothing written, and with it the change applies and
-/// a starred decision of kind `user` records it. A voyage that had not
-/// departed before this apply states its words freely.
+/// A departed voyage's `title`, `done:`, `bar:`, `eta:` and stations change
+/// only when the user asked for it and confirmed it (T-410, T-331): without
+/// `--confirmed` the whole apply is refused with nothing written, and with it
+/// the change applies and a starred decision of kind `user` records it. A
+/// voyage that had not departed before this apply states its words freely; a
+/// departed voyage with no stations yet gets its first list freely too.
 fn record_voyages(
     tx: &Tx<'_>,
     project: &str,
@@ -3395,19 +3418,34 @@ fn record_voyages(
                 ));
             }
         }
-        // T-410: a departed voyage's goal, bar and eta change only when the
-        // user asked for it and confirmed it. No field is exempt: a voyage
-        // that departed with no words gets them only with the confirmation.
+        // T-410 (T-331: title and stations too): a departed voyage's goal, bar,
+        // eta and stations change only when the user asked for it and
+        // confirmed it. No stored field is exempt: a voyage that departed with
+        // no words gets them only with the confirmation. The one exception is
+        // the first station list of a voyage that has none yet.
         if departed.contains(id) {
             let stored = tx.get_voyage(project, id)?;
             let stored = stored.as_ref();
-            for (field, old, new) in [
-                ("done", stored.and_then(|v| v.done.as_deref()), &done),
-                ("bar", stored.and_then(|v| v.bar.as_deref()), &bar),
-                ("eta", stored.and_then(|v| v.eta.as_deref()), &eta),
-            ] {
+            let stored_stations = tx.voyage_stations(project, id)?;
+            let mut fields: Vec<(&str, Option<&str>, Option<&str>)> = vec![
+                ("done", stored.and_then(|v| v.done.as_deref()), done.as_deref()),
+                ("bar", stored.and_then(|v| v.bar.as_deref()), bar.as_deref()),
+                ("eta", stored.and_then(|v| v.eta.as_deref()), eta.as_deref()),
+                ("title", stored.map(|v| v.title.as_str()), Some(title)),
+            ];
+            let old_stations;
+            let new_stations;
+            if !stored_stations.is_empty() {
+                let block_stations = crate::draft::milestone_stations(body).map_err(|e| {
+                    GearError::new(ErrorCode::BadFormat, format!("milestone {id}: {e}"))
+                })?;
+                old_stations = joined_stations(&stored_stations);
+                new_stations = joined_stations(&block_stations);
+                fields.push(("stations", Some(&old_stations), Some(&new_stations)));
+            }
+            for (field, old, new) in fields {
                 let old = old.unwrap_or("").trim();
-                let new = new.as_deref().unwrap_or("").trim();
+                let new = new.unwrap_or("").trim();
                 if old == new {
                     continue;
                 }
@@ -3461,6 +3499,16 @@ fn record_voyages(
         tx.set_voyage_stations(project, id, &stations)?;
     }
     Ok(())
+}
+
+/// The stations of a block as one text for the confirmation guard and its
+/// decision (T-331): `<id>: <needs>`, joined by `"; "`.
+fn joined_stations(stations: &[gear_store::VoyageStation]) -> String {
+    stations
+        .iter()
+        .map(|station| format!("{}: {}", station.id, station.needs))
+        .collect::<Vec<String>>()
+        .join("; ")
 }
 
 /// The station each task belongs to (M5 S3): a queue block's `station=<id>` is

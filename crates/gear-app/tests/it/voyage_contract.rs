@@ -318,6 +318,140 @@ fn a_departed_voyage_changes_only_with_the_users_confirmation() {
     assert_eq!(s.read(|tx| tx.decisions_of("p", "M1")).unwrap().len(), decisions.len());
 }
 
+/// T-331: the `title` and the stations of a departed voyage are guarded like
+/// `done:`, `bar:` and `eta:` (T-410): refused without the user's confirmation,
+/// applied with it and recorded as a starred decision.
+#[test]
+fn a_departed_voyages_title_and_stations_need_the_users_confirmation() {
+    let mut s = world();
+    let departure = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: delivery v0.1.0\n\
+                     done: users install v0.1.0 without Rust\n\
+                     bar: block only loop breaks and data loss; log the rest\n\
+                     eta: 8h\n\
+                     station S1: the board matches the prototype\n\
+                     station S2: released as v0.5.0\n\
+                     # Queue\n\
+                     ## NEW [must] lane=heat milestone=M1\n\
+                     goal: A\naccept: a\nestimate: 30\ndeps: -\n\n\
+                     ## NEW [should] lane=heat milestone=M1\n\
+                     goal: B\naccept: b\nestimate: 30\ndeps: -\n";
+    run(&mut s, &departure, "r1", NOW).unwrap();
+    let old_stations = "S1: the board matches the prototype; S2: released as v0.5.0";
+
+    // The title alone, refused: nothing of the apply is written.
+    let retitled = departure.replace("delivery v0.1.0", "delivery v0.2.0").replace("base=0", "base=1");
+    let err = run(&mut s, &retitled, "r-title", NOW + 10).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        err.detail.contains(
+            "milestone M1: title changed after departure (stored \"delivery v0.1.0\", got \"delivery v0.2.0\")"
+        ),
+        "{}",
+        err.detail
+    );
+    assert!(
+        err.detail.contains(
+            "the goal, the bar and the eta change only when the user asks; confirm it with them, then apply again with --confirmed"
+        ),
+        "{}",
+        err.detail
+    );
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 1);
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(voyage.title, "delivery v0.1.0");
+    assert_eq!(s.read(|tx| tx.tasks_of_project("p")).unwrap().len(), 2);
+    assert_eq!(s.read(|tx| tx.voyage_stations("p", "M1")).unwrap().len(), 2);
+
+    // The stations alone (S2's needs changed), refused as well.
+    let moved = departure.replace("released as v0.5.0", "released as v0.6.0").replace("base=0", "base=1");
+    let err = run(&mut s, &moved, "r-stations", NOW + 20).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    let truncated: String = old_stations.chars().take(40).collect();
+    assert!(
+        err.detail.contains(&format!("milestone M1: stations changed after departure (stored \"{truncated}\"")),
+        "{}",
+        err.detail
+    );
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 1);
+    let stations = s.read(|tx| tx.voyage_stations("p", "M1")).unwrap();
+    assert_eq!(stations[1].needs, "released as v0.5.0", "{stations:?}");
+
+    // The user asked for both and confirmed it: the change applies and each
+    // field becomes a starred decision of kind `user`.
+    let asked = departure
+        .replace("delivery v0.1.0", "delivery v0.2.0")
+        .replace("released as v0.5.0", "released as v0.6.0")
+        .replace("base=0", "base=1");
+    run_confirmed(&mut s, &asked, "r-confirmed", NOW + 100).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(voyage.title, "delivery v0.2.0");
+    let stations = s.read(|tx| tx.voyage_stations("p", "M1")).unwrap();
+    assert_eq!(
+        stations.iter().map(|s| s.needs.as_str()).collect::<Vec<_>>(),
+        ["the board matches the prototype", "released as v0.6.0"]
+    );
+    let decisions = s.read(|tx| tx.decisions_of("p", "M1")).unwrap();
+    let confirmed: Vec<_> = decisions.iter().filter(|d| d.kind == "user").collect();
+    assert_eq!(confirmed.len(), 2, "{decisions:?}");
+    for (decision, what) in confirmed.iter().zip([
+        "title of M1 changed from \"delivery v0.1.0\" to \"delivery v0.2.0\"".to_string(),
+        format!(
+            "stations of M1 changed from \"{old_stations}\" to \"S1: the board matches the prototype; S2: released as v0.6.0\""
+        ),
+    ]) {
+        assert!(decision.star, "the confirmation is starred: {decision:?}");
+        assert_eq!(decision.what, what);
+        assert_eq!(decision.why.as_deref(), Some("confirmed by the user"));
+        assert_eq!(
+            decision.line.as_deref(),
+            Some(format!("{what} | why: confirmed by the user").as_str())
+        );
+    }
+}
+
+/// T-331: a departed voyage with no stations stored gets its first list
+/// without the user's confirmation; changing it afterwards needs it.
+#[test]
+fn a_departed_voyage_without_stations_gets_its_first_list() {
+    let mut s = world();
+    run(&mut s, &plan(0, FULL), "r1", NOW).unwrap();
+    assert!(s.read(|tx| tx.voyage_stations("p", "M1")).unwrap().is_empty());
+
+    let with = |base: i64, needs: &str| {
+        plan(base, FULL).replace(
+            "# Queue",
+            &format!("station S1: {needs}\n# Queue"),
+        )
+    };
+    run(&mut s, &with(1, "the first station"), "r2", NOW + 10).unwrap();
+    let stations = s.read(|tx| tx.voyage_stations("p", "M1")).unwrap();
+    assert_eq!(
+        stations.iter().map(|s| (s.id.as_str(), s.needs.as_str())).collect::<Vec<_>>(),
+        [("S1", "the first station")],
+        "the first list needs no confirmation"
+    );
+    assert!(
+        s.read(|tx| tx.decisions_of("p", "M1")).unwrap().is_empty(),
+        "no confirmation, no decision"
+    );
+
+    // The unchanged list applies again, and still records nothing.
+    run(&mut s, &with(2, "the first station"), "r3", NOW + 20).unwrap();
+    assert!(s.read(|tx| tx.decisions_of("p", "M1")).unwrap().is_empty());
+
+    // Now the list is stored: changing it needs the confirmation.
+    let err = run(&mut s, &with(3, "the second station"), "r4", NOW + 30).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        err.detail.contains("milestone M1: stations changed after departure (stored \"S1: the first station\", got \"S1: the second station\")"),
+        "{}",
+        err.detail
+    );
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 3, "nothing written");
+    let stations = s.read(|tx| tx.voyage_stations("p", "M1")).unwrap();
+    assert_eq!(stations[0].needs, "the first station", "{stations:?}");
+}
+
 /// T-410: a milestone that has not departed yet changes its words freely.
 #[test]
 fn a_voyage_that_has_not_departed_changes_without_confirmation() {
@@ -347,21 +481,30 @@ fn a_voyage_that_has_not_departed_changes_without_confirmation() {
 #[test]
 fn an_untouched_old_milestone_keeps_applying() {
     let mut s = world();
-    // A plan with tasks on M1 but no milestone block: no voyage is created and
-    // nothing is rejected — old plans keep applying (grandfathered).
-    let text = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    // A first plan with the block and one task on M1: the words are stored and
+    // the voyage departs.
+    let text = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, text, "r1", NOW).unwrap();
     let tasks = s.read(|tx| tx.tasks_of_project("p")).unwrap();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].milestone.as_deref(), Some("M1"));
     assert_eq!(tasks[0].state, TaskState::Ready);
-    // The departure is recorded (the tasks exist); the words wait for a block.
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(1)));
-    assert_eq!((voyage.done, voyage.bar, voyage.eta), (None, None, None));
+    assert_eq!(voyage.done.as_deref(), Some("users install it"));
     let packet = s.read(|tx| render_task_packet(tx, "p", "T-1")).unwrap();
     assert!(packet.contains("Voyage M1"), "{packet}");
-    assert!(packet.contains("not described yet"), "{packet}");
+
+    // A later plan that adds a task to M1 and does not repeat the block keeps
+    // applying (grandfathered): the words are the store's, and the file gets
+    // the block back (T-333).
+    let more = "<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
+    let result = run(&mut s, more, "r2", NOW + 10).unwrap();
+    assert_eq!(result.created, vec!["T-2".to_string()]);
+    assert_eq!(result.milestone_blocks.len(), 1, "{:?}", result.milestone_blocks);
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(1)));
+    assert_eq!(voyage.done.as_deref(), Some("users install it"));
 }
 
 /// R1 (review): a milestone whose block was applied earlier departs when its
@@ -370,26 +513,88 @@ fn an_untouched_old_milestone_keeps_applying() {
 #[test]
 fn the_departure_is_the_first_task_creation_even_without_the_block() {
     let mut s = world();
-    // base 0: the block only, no tasks.
-    let block_only = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n";
-    run(&mut s, block_only, "r1", NOW).unwrap();
-    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
-    assert_eq!((voyage.departure, voyage.departure_tasks), (None, None), "no task yet: no departure");
+    // base 0: only the queue, one task on M1, and no M1 block — refused, and
+    // nothing is written (T-333): a task sails on a voyage the file describes,
+    // and the store has no words for M1.
+    let first_task = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    let err = run(&mut s, first_task, "r1-bare", NOW).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        err.detail.contains(
+            "the plan names milestone M1 (NEW) but has no `# Milestone M1: <title>` block with its done:, bar: and eta: lines (T-22)"
+        ),
+        "{}",
+        err.detail
+    );
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 0, "nothing was written");
 
-    // base 1: only the queue, one task on M1 — the milestone departs now.
-    let first_task = "<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
-    run(&mut s, first_task, "r2", NOW + 10).unwrap();
+    // base 0 with the block: the milestone departs with its first task.
+    let with_block = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    run(&mut s, with_block, "r1", NOW).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
-    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW + 10), Some(1)));
+    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(1)));
     assert!(s.read(|tx| render_task_packet(tx, "p", "T-1")).unwrap().contains("with 1 tasks"));
 
-    // base 2: the block again plus a second task — the words update (the user
+    // base 1: the block again plus a second task — the words update (the user
     // asked for the change and confirmed it, T-410), the departure stays.
-    let more = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: release v2\ndone: users install v2\nbar: keep it simple\neta: 9h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
-    run_confirmed(&mut s, more, "r3", NOW + 20).unwrap();
+    let more = "<!-- gear-plan project=p base=1 -->\n# Milestone M1: release v2\ndone: users install v2\nbar: keep it simple\neta: 9h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
+    run_confirmed(&mut s, more, "r2", NOW + 20).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
-    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW + 10), Some(1)));
+    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(1)));
     assert_eq!(voyage.done.as_deref(), Some("users install v2"));
+}
+
+/// T-333: the block of a milestone the draft names but does not describe comes
+/// back from the store, with its station lines, and the captain is told.
+#[test]
+fn the_words_the_store_keeps_are_written_back_into_the_file() {
+    let mut s = world();
+    // base 0: the block, one station and one task on M1.
+    let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\nstation S1: install and log in\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    run(&mut s, first, "r1", NOW).unwrap();
+
+    // base 1: a queue that names M1 and says nothing about it. The words are in
+    // the store, so the apply carries them back into the file.
+    let queue_only = "<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
+    let result = run(&mut s, queue_only, "r2", NOW + 10).unwrap();
+    assert_eq!(
+        result.milestone_blocks,
+        vec![
+            "# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\nstation S1: install and log in\n"
+                .to_string()
+        ]
+    );
+    assert!(
+        result
+            .warnings
+            .contains(&"the # Milestone M1 block was written back into the plan file from the store".to_string()),
+        "{:?}",
+        result.warnings
+    );
+    // The words of the voyage are unchanged: the file only got its block back.
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(voyage.done.as_deref(), Some("users install it"));
+    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(1)));
+}
+
+/// T-333: a cancelled queue line names no task of the milestone any more, so a
+/// milestone only cancelled tasks name needs no block.
+#[test]
+fn a_cancelled_task_of_a_milestone_without_words_needs_no_block() {
+    let mut s = world();
+    // T-1 is created on M0, whose words are never written: the plan has no M0
+    // block and the store keeps none.
+    let first = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M0\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    let err = run(&mut s, first, "r1", NOW).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    // A plan that cancels the task names its milestone but describes nothing:
+    // a cancellation needs no voyage words (T-333).
+    let with_block = "<!-- gear-plan project=p base=0 -->\n# Milestone M0: base\ndone: it stands\nbar: it holds\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M0\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    run(&mut s, with_block, "r1-with", NOW).unwrap();
+    let cancel = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-1 [must] lane=heat milestone=M0\ngoal: A\naccept: a\ndeps: -\nstate: cancelled\n";
+    let result = run(&mut s, cancel, "r2", NOW + 10).unwrap();
+    assert!(result.milestone_blocks.is_empty(), "{:?}", result.milestone_blocks);
+    assert_eq!(result.cancelled, vec!["T-1".to_string()]);
 }
 
 /// R2 (review): a grandfathered milestone whose block arrives later keeps the
@@ -397,8 +602,9 @@ fn the_departure_is_the_first_task_creation_even_without_the_block() {
 #[test]
 fn editing_a_grandfathered_milestone_keeps_its_historical_departure() {
     let mut s = world();
-    // T-1 is created on M1 with no block at all.
-    let first = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    // T-1 is created on M1 with the block: the departure is fixed then (T-333:
+    // a plan that names a milestone carries its block).
+    let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it early\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, first, "r1", NOW).unwrap();
     // Much later the block arrives together with T-2: the words of a voyage
     // that departed without them come with the user's confirmation (T-410),
@@ -407,7 +613,7 @@ fn editing_a_grandfathered_milestone_keeps_its_historical_departure() {
     let err = run(&mut s, block, "r2-bare", NOW + 100).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
-        err.detail.contains("milestone M1: done changed after departure (stored \"\", got \"users install it\")"),
+        err.detail.contains("milestone M1: done changed after departure (stored \"users install it early\", got \"users install it\")"),
         "{}",
         err.detail
     );
@@ -688,7 +894,7 @@ fn an_emptied_milestone_loses_its_departure_and_a_reused_id_starts_again() {
     );
 
     // The trial is moved to M0: M1 loses every task and with them its departure.
-    let moved = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-1 [must] lane=heat milestone=M0\n## T-2 [should] lane=heat milestone=M0\n";
+    let moved = "<!-- gear-plan project=p base=1 -->\n# Milestone M0: the trial\ndone: the trial runs\nbar: it holds\neta: 4h\n# Queue\n## T-1 [must] lane=heat milestone=M0\n## T-2 [should] lane=heat milestone=M0\n";
     run(&mut s, moved, "r2", NOW + 100).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
@@ -861,6 +1067,26 @@ fn a_block_without_station_clears_the_tasks_station() {
     assert_eq!(s.read(|tx| tx.task_station("p", "T-1")).unwrap(), None);
     let block = s.read(|tx| gear_app::plan::show(tx, "p", "T-1")).unwrap();
     assert!(!block.contains("station="), "{block}");
+}
+
+/// T-331: the guard compares trimmed text, so a whitespace-only difference is
+/// no change and the apply goes through without the confirmation.
+#[test]
+fn a_whitespace_only_difference_is_no_change() {
+    let mut s = world();
+    run(&mut s, &plan(0, FULL), "r1", NOW).unwrap();
+    let text = plan(
+        1,
+        "  done:   users install v0.1.0 without Rust  \nbar: block only loop breaks and data loss; log the rest\neta: 8h\nstation S1:   the first station  \n",
+    );
+    run(&mut s, &text, "r2", NOW + 10).unwrap();
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 2);
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!((voyage.title.as_str(), voyage.done.as_deref()), ("delivery v0.1.0", Some("users install v0.1.0 without Rust")));
+    let stations = s.read(|tx| tx.voyage_stations("p", "M1")).unwrap();
+    assert_eq!(stations[0].id, "S1", "{stations:?}");
+    assert_eq!(stations[0].needs, "the first station", "{stations:?}");
+    assert!(s.read(|tx| tx.decisions_of("p", "M1")).unwrap().is_empty());
 }
 
 /// T-336: the captain's home page carries the voyage's goal, its bar and how

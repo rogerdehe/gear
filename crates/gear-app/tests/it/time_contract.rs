@@ -50,7 +50,14 @@ fn apply(s: &mut Store, text: &str, rid: &str) -> gear_model::GearResult<plan::A
 
 /// The plan: one new task of the voyage M2, planned for 60 minutes.
 fn plan_text(base: i64, queue: &str) -> String {
-    format!("<!-- gear-plan project=p base={base} -->\n# Queue\n{queue}")
+    // The voyage M2 the task sails on carries its block (T-333); a queue that
+    // names no milestone needs none.
+    let block = if queue.contains("milestone=") {
+        "# Milestone M2: delivery\ndone: it ships\nbar: it holds\neta: 8h\n\n"
+    } else {
+        ""
+    };
+    format!("<!-- gear-plan project=p base={base} -->\n{block}# Queue\n{queue}")
 }
 
 const NEW_TASK: &str =
