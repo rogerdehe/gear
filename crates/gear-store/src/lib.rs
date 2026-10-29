@@ -13,14 +13,26 @@ use gear_model::{
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod migrate;
 
 pub const SCHEMA_SQL: &str = include_str!("schema.sql");
 pub use migrate::{OLDEST_VERSION, SCHEMA_VERSION, STEPS};
-/// SQLite busy timeout for every connection.
-pub const BUSY_TIMEOUT_MS: u64 = 5_000;
+/// SQLite busy timeout for every connection. A caller waits for the store
+/// rather than failing with `Locked` (T-379, F-129): a `gear` call queues
+/// behind a slow writer instead of giving up after five seconds.
+pub const BUSY_TIMEOUT_MS: u64 = 30_000;
+
+/// A write that holds the store longer than this prints one line to stderr,
+/// naming the caller that held it (T-379). The engine's stderr is its log.
+pub const SLOW_WRITE_MS: u64 = 1_000;
+
+/// The line [`Store::write`] prints when it held the store over
+/// [`SLOW_WRITE_MS`]: the elapsed time and the caller's location.
+pub fn slow_write_line(ms: u128, caller: &'static std::panic::Location<'static>) -> String {
+    format!("gear-store: a write held the store for {ms} ms ({caller})")
+}
 
 /// The budget of a round whose task has no estimate (§5.1). The design
 /// names the estimate for a dev round and the measured median for a review
@@ -681,22 +693,37 @@ impl Store {
 
     /// Run `f` inside `BEGIN IMMEDIATE`. Commit on `Ok`, roll back on `Err`.
     /// Lock timeout maps to `ErrorCode::Locked` with nothing written.
+    ///
+    /// The time from `BEGIN IMMEDIATE` to the commit or rollback is measured:
+    /// a write over [`SLOW_WRITE_MS`] prints one line to stderr naming the
+    /// caller ([`slow_write_line`]), so a writer that held the store shows.
+    ///
+    /// The clock starts **after** the transaction is acquired (F1 of the
+    /// T-379 review): a caller that queued for the lock is waiting, not
+    /// holding the store, and the line must not blame it for the wait.
+    #[track_caller]
     pub fn write<T>(&mut self, f: impl FnOnce(&Tx<'_>) -> GearResult<T>) -> GearResult<T> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_sqlite)?;
+        let started = Instant::now();
         let tx = Tx { tx };
-        match f(&tx) {
-            Ok(value) => {
-                tx.tx.commit().map_err(map_sqlite)?;
-                Ok(value)
-            }
+        let result = match f(&tx) {
+            Ok(value) => tx.tx.commit().map_err(map_sqlite).map(|()| value),
             Err(e) => {
                 drop(tx); // rolls back, nothing written
                 Err(e)
             }
+        };
+        let elapsed = started.elapsed();
+        if elapsed.as_millis() > u128::from(SLOW_WRITE_MS) {
+            eprintln!(
+                "{}",
+                slow_write_line(elapsed.as_millis(), std::panic::Location::caller())
+            );
         }
+        result
     }
 
     /// Run `f` in a deferred (read) transaction for a consistent snapshot.
