@@ -11,7 +11,7 @@ use gear_engine::release::{release_dead_temps, release_finished_reviews};
 use gear_engine::review::start_reviews;
 use gear_engine::EngineCfg;
 use gear_herdr::fake::{Call, FakeHerdr};
-use gear_model::{SeatRole, SeatState, TaskState};
+use gear_model::{MsgKind, MsgState, SeatRole, SeatState, TaskState};
 use gear_store::testing;
 use gear_store::{BindingStatus, ContractRow, ProjectRow, Store, TaskRow};
 
@@ -322,8 +322,22 @@ fn a_stuck_checkout_is_not_restarted_by_a_recovered_seat() {
     assert_eq!(seat.state, SeatState::Unknown, "{:?}", seat.state_reason);
     let submissions = checkout_submissions(&herdr, "review/t1");
     assert_eq!(submissions, 0, "failure occurred before checkout");
+    // The captain is told once, as information (T-370): the stuck review waits,
+    // and the lane is not blocked, so nothing rings and no item is held.
+    let told = store.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap();
+    let stuck: Vec<_> = told
+        .iter()
+        .filter(|message| message.body.contains("injected Git failure"))
+        .collect();
+    assert_eq!(stuck.len(), 1, "the captain is told once: {told:?}");
+    assert_eq!(stuck[0].recipient, "p:captain");
+    assert_eq!(stuck[0].kind, MsgKind::System);
+    assert_eq!(stuck[0].state, MsgState::Info);
     let items = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 40)).unwrap();
-    assert_eq!(items.iter().filter(|m| m.body.contains("injected Git failure")).count(), 1);
+    assert!(
+        !items.iter().any(|message| message.body.contains("injected Git failure")),
+        "nothing rings the captain: {items:?}"
+    );
 
     // The dead seat is recovered (B02-04): its slot frees, but the stuck
     // attempt is not handed to it again — no fourth try for T-1.
