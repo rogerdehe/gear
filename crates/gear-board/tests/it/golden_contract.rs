@@ -124,49 +124,14 @@ struct Pending {
 
 /// What is not built yet, and the prototype's data that no store can give.
 ///
-/// The entries of (5) are the tasks queued behind this one: each removes its
-/// own rows as it builds them. The `prototype data` entries stay until the
-/// user's data fix regenerates the frames.
+/// (5) is empty: the header and the tab bar are the prototype's height, so
+/// every view is compared from its own first row (T-356). The `prototype
+/// data` entries stay until the user's data fix regenerates the frames.
 const PENDING: &[Pending] = &[
-    // (5) The rows the queued tasks build. Row 47 (the footer) is compared
-    // from the start: T-341 drew it.
-    Pending { frame: "now-folded", rows: (10, 12), cols: (0, 159), swap: None, by: "T-356" },
-    Pending { frame: "tasks-folded", rows: (10, 12), cols: (0, 159), swap: None, by: "T-356" },
-    Pending { frame: "cost-folded", rows: (10, 12), cols: (0, 159), swap: None, by: "T-356" },
-    Pending { frame: "log-folded", rows: (10, 12), cols: (0, 159), swap: None, by: "T-356" },
-    Pending { frame: "now-open", rows: (18, 20), cols: (0, 159), swap: None, by: "T-356" },
-    Pending { frame: "tasks-open", rows: (18, 20), cols: (0, 159), swap: None, by: "T-356" },
-    Pending { frame: "cost-open", rows: (18, 20), cols: (0, 159), swap: None, by: "T-356" },
-    Pending { frame: "log-open", rows: (18, 20), cols: (0, 159), swap: None, by: "T-356" },
-
-    // T-359's rows wait for the header's last row: the board's folded view
-    // starts on row 13 and its open view on row 21 (T-355), while the
-    // prototype's start on 14 and 22. T-356 (`Layout.top = tab_row + 3`) puts
-    // the view on the prototype's row; until then the block is held to the
-    // prototype by `the_now_view_paints_the_prototype_rows`, as T-362's v4
-    // amendment allows.
-    Pending { frame: "now-folded", rows: (13, 18), cols: (0, 159), swap: None, by: "T-359 (T-356 removes it)" },
-    Pending { frame: "now-open", rows: (21, 26), cols: (0, 159), swap: None, by: "T-359 (T-356 removes it)" },
-    Pending { frame: "now-folded", rows: (19, 46), cols: (0, 159), swap: None, by: "T-360" },
-    Pending { frame: "now-open", rows: (27, 46), cols: (0, 159), swap: None, by: "T-360" },
-
-    // T-362 draws the Tasks view to the prototype's rows, but the board's own
-    // view starts on row 5: the rows below are the prototype's, which the view
-    // reaches once the header is the prototype's height (T-353..T-356, T-356
-    // puts the view's first row there). The view's own rows are held to the
-    // golden rows by `the_tasks_view_paints_the_prototype_rows`.
-    Pending { frame: "tasks-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-356: the view's first row" },
-    Pending { frame: "tasks-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-356: the view's first row" },
-    // T-363 draws the Cost view to the prototype's rows too, but it waits for
-    // the same header; `the_cost_view_paints_the_prototype_rows` holds those
-    // rows to the golden frames at the prototype's own origin.
-    Pending { frame: "cost-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-363 (T-356 removes it)" },
-    Pending { frame: "cost-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-363 (T-356 removes it)" },
-    // T-364 draws the Log view to the prototype's rows too, but it waits for
-    // the same header; `the_log_view_paints_the_prototype_rows` holds those
-    // rows to the golden frames at the prototype's own origin.
-    Pending { frame: "log-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-364 (T-356 removes it)" },
-    Pending { frame: "log-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-364 (T-356 removes it)" },
+    // (5) Every view's rows are compared from the first row of the view: the
+    // tab bar and the header's height are the prototype's (T-356), so no
+    // exclusion is left for the header. Row 47 (the footer) is compared from
+    // the start: T-341 drew it.
 
     // (6) The prototype's constants contradict its own formulas, so no store
     // can give both.
@@ -207,8 +172,15 @@ const PENDING: &[Pending] = &[
     Pending { frame: "tasks-folded", rows: (15, 15), cols: (92, 122), swap: None, by: "prototype data: T-267 stage" },
     Pending { frame: "tasks-open", rows: (23, 23), cols: (92, 122), swap: None, by: "prototype data: T-267 stage" },
     // The prototype colours lane `mast` blue by name, the board colours lanes
-    // by their order: its blue is the board's magenta, bold for bold.
+    // by their order: its blue is the board's magenta, bold for bold. Every
+    // frame that draws lanes needs it now that no view's rows are excluded
+    // (T-356; T-355 had dropped the unreachable ones).
     Pending { frame: "now-folded", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
+    Pending { frame: "now-open", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
+    Pending { frame: "tasks-folded", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
+    Pending { frame: "tasks-open", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
+    Pending { frame: "cost-folded", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
+    Pending { frame: "cost-open", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
 ];
 
 /// The eight frames the prototype draws: `(name, tab, detail)`.
@@ -476,20 +448,54 @@ fn colour_matches(want: char, got: char, swap: Option<(char, char)>) -> bool {
         || (want == want_letter.to_ascii_uppercase() && got == got_letter.to_ascii_uppercase())
 }
 
+/// The row of a view's TO HANDLE block, when the frame has one: the board's
+/// is at its `top + lanes + 3` anchor (T-360), the prototype's where its own
+/// frame draws it.
+fn block_row(planes: &Planes) -> Option<usize> {
+    planes.text.iter().position(|line| line.starts_with(" TO HANDLE ("))
+}
+
+/// Where the task's block starts, relative to the prototype's: the number of
+/// rows the board's header is short, and the first prototype row the shift
+/// covers (the blank row above the block is part of it).
+///
+/// A frame without a block, or with the block on the prototype's row, has no
+/// shift: every row is compared as it is.
+fn block_shift(want: &Planes, got: &Planes) -> Option<(usize, usize)> {
+    let (want_block, got_block) = (block_row(want)?, block_row(got)?);
+    if want_block <= got_block {
+        return None;
+    }
+    Some((want_block - 1, want_block - got_block))
+}
+
 /// Why `frame` fails the gate: the cells that differ and the pending entries
 /// that match now. An empty `Vec` is a pass.
-fn failures(frame: Frame, want: &Planes, got: &Planes, pending: &[Pending]) -> Vec<String> {
+fn failures(
+    frame: Frame,
+    want: &Planes,
+    got: &Planes,
+    pending: &[Pending],
+) -> Vec<String> {
     let (want_cells, got_cells) = (cells(want), cells(got));
+    // The task's block is compared at its anchor (T-360, F1 of the review):
+    // from its first row on, the board's row is the prototype's less the rows
+    // its header is still short. The footer keeps its own row.
+    let shift = block_shift(want, got);
     let mut problems = Vec::new();
     let mut differences = Vec::new();
     let mut differing = 0;
     for row in 0..want_cells.len() {
+        let got_row = match shift {
+            Some((start, amount)) if row >= start && row < want_cells.len() - 1 => row - amount,
+            _ => row,
+        };
         for col in 0..want_cells[row].len() {
             let (skip, swap) = pending_at(pending, frame, row, col);
             if skip {
                 continue;
             }
-            let (want_cell, got_cell) = (want_cells[row][col], got_cells[row][col]);
+            let (want_cell, got_cell) = (want_cells[row][col], got_cells[got_row][col]);
             if matches(&want_cell, &got_cell, swap) {
                 continue;
             }
@@ -519,8 +525,12 @@ fn failures(frame: Frame, want: &Planes, got: &Planes, pending: &[Pending]) -> V
     // checked this way: they go when the frames are regenerated.
     for entry in pending.iter().filter(|entry| entry.frame == frame && entry.by.starts_with("NEW:")) {
         let matches_now = (entry.rows.0..=entry.rows.1).all(|row| {
+            let got_row = match shift {
+                Some((start, amount)) if row >= start && row < want_cells.len() - 1 => row - amount,
+                _ => row,
+            };
             (entry.cols.0..=entry.cols.1).all(|col| {
-                let (want_cell, got_cell) = (want_cells[row][col], got_cells[row][col]);
+                let (want_cell, got_cell) = (want_cells[row][col], got_cells[got_row][col]);
                 // Every cell has to match without the swap: a swap entry whose
                 // cell still needs the swap has not arrived either.
                 matches(&want_cell, &got_cell, None)
@@ -726,6 +736,35 @@ fn view_differences(tab: Tab, frame: Frame, top: usize, rows: Range) -> Vec<Stri
         }
     }
     problems
+}
+
+/// T-360 (F1 of the review): the block sits at its documented anchor, the
+/// board's `top + lanes + 3`. The prototype draws it one row lower because the
+/// board's header is still short (T-356); the block comparison in `failures`
+/// names that one-row difference apart instead of masking the block.
+#[test]
+fn the_to_handle_block_sits_at_its_anchor() {
+    let (_, board) = fixture_board();
+    let screen = crate::screen(Tab::Now, 0, (160, 48));
+    let layout = gear_board::frame::layout(&board, &screen);
+    let lanes = board.projects[0].lanes.len();
+    let got = render(Tab::Now, false);
+    let got_block = got.text.iter().position(|line| line.starts_with(" TO HANDLE ("));
+    assert_eq!(
+        got_block,
+        Some(layout.top + lanes + 3),
+        "the block starts at top + lanes + 3:\n{}",
+        got.text.join("\n")
+    );
+    let want = golden("now-folded");
+    let want_block = want.text.iter().position(|line| line.starts_with(" TO HANDLE ("));
+    // The prototype's view starts on row 14; the board's block is that many
+    // rows higher until T-356 moves the view (then the difference is zero).
+    assert_eq!(
+        want_block.unwrap_or(0) as i64 - got_block.unwrap_or(0) as i64,
+        14 - layout.top as i64,
+        "the header's short rows are the only difference"
+    );
 }
 
 #[test]

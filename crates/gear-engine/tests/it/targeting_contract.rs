@@ -144,6 +144,20 @@ fn a_prompt_to_a_pane_with_only_a_shell_fails_as_agent_gone() {
         herdr.prompts_to(LANE_PANE)
     );
     assert!(herdr.prompt_targets().is_empty(), "no prompt at all");
+    // F2 of the T-407 review: a delivery that fails while it is aimed logs its
+    // own `failed` and `done` lines, as a confirmed one logs its own.
+    let log: Vec<String> = gear_engine::ops::probe_log()
+        .into_iter()
+        .filter(|line| line.starts_with("probe deliver T-1 "))
+        .collect();
+    assert!(
+        log.contains(&"probe deliver T-1 failed 10000 total=10000".to_string()),
+        "the failed delivery is logged: {log:?}"
+    );
+    assert!(
+        log.contains(&"probe deliver T-1 done 10000 total=10000".to_string()),
+        "the failed delivery has its completion line: {log:?}"
+    );
 }
 
 /// T-149: a pane that hosts a foreign agent is not the seat's agent either.

@@ -5,9 +5,62 @@ use gear_model::state::require_transition;
 use gear_model::{AttemptState, ErrorCode, GearError, GearResult, MsgKind, OpKind, OpState, SeatRole, SeatState, Ts};
 use gear_store::{BindingStatus, NewOp, OpRow, Store, Tx};
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 /// Reason stored with an op that the engine found Executing after a restart.
 const RECOVERED_REASON: &str = "engine restarted before the call finished";
+
+/// The probe lines this process wrote and no one has drained yet (T-407).
+///
+/// The engine has no log writer of its own: [`take_probe_log`] hands the lines
+/// to `gear-cli`, which writes them into its tick log beside the release lines
+/// (T-398), so they carry the same stamp. A test reads them with
+/// [`probe_log`] instead, which does not drain: two tests running side by side
+/// would take each other's lines, and each test reads its own by a seat or
+/// task id no other test uses. A caller that never drains does not grow for
+/// ever.
+static PROBE_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The probe lines written since the last call, oldest first: the engine
+/// writes them into its log (T-407).
+pub fn take_probe_log() -> Vec<String> {
+    let mut log = PROBE_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    std::mem::take(&mut *log)
+}
+
+/// The probe lines this process wrote, oldest first, without draining them
+/// (T-407): what a test reads.
+pub fn probe_log() -> Vec<String> {
+    PROBE_LOG.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// One line of the engine log for a finished multi-step operation and for
+/// every step of one (T-407): `<op> <seat or task> <step> <ms> total=<ms>`.
+///
+/// `total` is the operation's time so far, so the last line of an operation
+/// carries its whole duration. The times come from the durable state the
+/// module keeps (`step_at`, the op's times), so an engine restart in the
+/// middle still logs the right durations — except in a merge, which is one
+/// worker's run and starts its steps again when it is retried.
+fn probe_line(op: &str, subject: &str, step: &str, ms: i64, total: i64) -> String {
+    format!("probe {op} {subject} {step} {ms} total={total}")
+}
+
+/// Write one probe line into the engine log and keep it for the tests
+/// (T-407): the engine drains it into its tick log every tick.
+pub(crate) fn probe(op: &str, subject: &str, step: &str, ms: i64, total: i64) {
+    let line = probe_line(op, subject, step, ms, total);
+    let mut log = PROBE_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    if log.len() >= 1024 {
+        log.remove(0);
+    }
+    log.push(line);
+}
+
+/// The milliseconds of `seconds`, never negative (T-407).
+fn ms(seconds: Ts) -> i64 {
+    seconds.saturating_mul(1000)
+}
 
 /// Result stored on a doorbell typed by the sender itself (T-130).
 const SENT_BY_SENDER: &str = "typed by the sender";
@@ -394,6 +447,30 @@ pub fn execute_intended(
                 state.as_str(),
             )?;
             tx.set_op_state(project, item.id(), state, result.as_deref(), now)?;
+            // T-407: a delivery that was typed is a finished step in the
+            // engine log, and so is the Enter that follows it. `herdr prompt`
+            // types the text and sends the Enter in one call, so the typed
+            // step runs from the op's intent to now and the Enter's own step
+            // is the same instant (0 ms) — its boundary is logged all the same.
+            // A delivery that fails while it is aimed (the agent is gone, or
+            // Herdr refuses it) finishes at once: its own `failed` and `done`
+            // lines, from the op's durable intent, as a confirmed one's (F2 of
+            // the T-407 review).
+            if let (Prepared::Run { probe: Some((task, created)), .. }, _) = (item, state) {
+                match state {
+                    OpState::Submitted => {
+                        let typed = ms(now.saturating_sub(*created));
+                        probe("deliver", task, "typed", typed, typed);
+                        probe("deliver", task, "enter", 0, typed);
+                    }
+                    OpState::Failed => {
+                        let total = ms(now.saturating_sub(*created));
+                        probe("deliver", task, "failed", total, total);
+                        probe("deliver", task, "done", total, total);
+                    }
+                    _ => {}
+                }
+            }
             results.push((item.id().to_string(), state.as_str().to_string()));
         }
         Ok(results)
@@ -414,6 +491,10 @@ enum Prepared {
         /// T-241: cut the agent's working turn (esc) before the text is
         /// aimed, so an urgent doorbell is not queued as steering.
         interrupt: bool,
+        /// T-407: what the probe line of a delivery names — its task and the
+        /// time it was intended, which its steps are measured from. `None`
+        /// for a doorbell, whose one step is not a delivery.
+        probe: Option<(String, Ts)>,
     },
     /// The op waits: it stays Intended and the next tick looks again (a
     /// delivery for a seat that is blocked, T-68).
@@ -512,6 +593,9 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
         PromptPolicy::Doorbell { working, unknown }
     };
     Ok(Prepared::Run {
+        probe: (op.kind == OpKind::Deliver).then(|| {
+            (op.task.clone().unwrap_or_else(|| "-".to_string()), op.created)
+        }),
         // T-241: an urgent doorbell for a lane or a reviewer cuts the working
         // turn first (never the captain: its turn is not cut). Deliveries and
         // every other op never interrupt.
@@ -812,6 +896,20 @@ pub fn confirm_pending_with(
                         format!("view {}/{} @ {view_ts}", op.seat, op.generation)
                     };
                     tx.set_op_state(project, &op.id, OpState::Confirmed, Some(&evidence), now)?;
+                    // T-407: a delivery's last step, from its typing (`op`
+                    // is still the row read before this update, so `updated`
+                    // is when the text was typed) and from its intent.
+                    if op.kind == OpKind::Deliver {
+                        let total = ms(now.saturating_sub(op.created));
+                        probe(
+                            "deliver",
+                            op.task.as_deref().unwrap_or("-"),
+                            "confirmed",
+                            ms(now.saturating_sub(op.updated)),
+                            total,
+                        );
+                        probe("deliver", op.task.as_deref().unwrap_or("-"), "done", total, total);
+                    }
                     if review_delivery {
                         supersede_older_review_deliveries(tx, project, &op, now)?;
                     }
@@ -894,6 +992,18 @@ pub fn confirm_pending_with(
                         )),
                         now,
                     )?;
+                    // T-407: the delivery's last step, as for a confirmed
+                    // one: from its typing (`op.updated`) and its intent, and
+                    // the operation's own completion line after it.
+                    let total = ms(now.saturating_sub(op.created));
+                    probe(
+                        "deliver",
+                        op.task.as_deref().unwrap_or("-"),
+                        "failed",
+                        ms(now.saturating_sub(op.updated)),
+                        total,
+                    );
+                    probe("deliver", op.task.as_deref().unwrap_or("-"), "done", total, total);
                     tx.set_meta(&crate::delivery::sent_key(&op.id), "")?;
                     crate::delivery::record(
                         tx,
@@ -1069,12 +1179,22 @@ pub fn resubmit_unsent(
                 continue;
             };
             let Some(needle) = unsent_needle(text) else { continue };
-            out.push((op.id.clone(), binding.pane_id.clone(), needle, text.to_string()));
+            out.push((
+                op.id.clone(),
+                binding.pane_id.clone(),
+                needle,
+                text.to_string(),
+                // T-407: what the step's probe line names, and the times it
+                // is measured from — the op's task and its own times.
+                op.task.clone().unwrap_or_else(|| "-".to_string()),
+                op.created,
+                op.updated,
+            ));
         }
         Ok(out)
     })?;
     let mut sent = Vec::new();
-    for (op_id, pane, needle, text) in candidates {
+    for (op_id, pane, needle, text, task, created, typed_at) in candidates {
         // Only an agent that has nothing better to do left the text unsent.
         let Ok(Some(agent)) = herdr.agent_get(&pane) else { continue };
         if !matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done) {
@@ -1088,6 +1208,8 @@ pub fn resubmit_unsent(
                 continue;
             }
             store.write(|tx| tx.set_meta(&retype_key(&op_id), &now.to_string()))?;
+            // T-407: the text typed again is the delivery's `typed` step.
+            probe("deliver", &task, "typed", ms(now.saturating_sub(created)), ms(now.saturating_sub(created)));
             sent.push(op_id);
             continue;
         }
@@ -1096,6 +1218,9 @@ pub fn resubmit_unsent(
             continue;
         }
         store.write(|tx| tx.set_meta(&resubmit_key(&op_id), &now.to_string()))?;
+        // T-407: the Enter the delivery lost is its own step, measured from
+        // the typing it waited behind.
+        probe("deliver", &task, "enter", ms(now.saturating_sub(typed_at)), ms(now.saturating_sub(created)));
         sent.push(op_id);
     }
     Ok(sent)

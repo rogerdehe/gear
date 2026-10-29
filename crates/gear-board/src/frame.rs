@@ -11,8 +11,8 @@
 
 use crate::graph;
 use crate::idle::IdleReason;
-use crate::style::{lane_color, lane_width, Color, Line, Style};
-use crate::{Board, LaneBoard, ProjectBoard, TaskBoard, VoyageEntry};
+use crate::style::{lane_color, Color, Line, Style};
+use crate::{Board, LaneBoard, ProjectBoard, QuotaReading, QuotaWindow, TaskBoard, VoyageEntry};
 
 /// The four views of the board: the tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,9 +48,10 @@ impl Tab {
         }
     }
 
-    /// The label of the tab on the tab row: ` 1 Now `.
+    /// The label of the tab on the tab row: `  1 Now  `, two spaces on each
+    /// side of the key and the title (T-356).
     pub fn label(self) -> String {
-        format!(" {} {} ", self.number(), self.title())
+        format!("  {} {}  ", self.number(), self.title())
     }
 
     /// The tab of a number (the keys 1 to 4).
@@ -482,10 +483,10 @@ pub fn offset_of(picks: &[usize], selected: usize, top: usize, last: usize) -> u
 /// voyage of the project with the shown one lit, the second row names the
 /// shown voyage, and the third starts the goal box with its quality bar.
 ///
-/// The tabs follow the box directly, and the view's heading comes two rows
-/// after the tab row (its own row and the spacer under the tabs). Every text
-/// is put at the prototype's column and cut at the edge, as
-/// [`Canvas::put_styled`] cuts it.
+/// The tabs follow the box directly, framed by a rule above them and one under
+/// them (T-356), and the view's heading comes three rows after the tab row
+/// (the bottom rule, the spacer under the bar). Every text is put at the
+/// prototype's column and cut at the edge, as [`Canvas::put_styled`] cuts it.
 ///
 /// It returns the layout it drew ([`Layout`]), which is what the clicks and
 /// the view need.
@@ -589,6 +590,20 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
         row += 1;
     }
 
+    // The latest goal change, when the user agreed to one: a red line under
+    // the box with when, before and after (T-358, README change 2).
+    if let Some((time, before, after)) = project.and_then(|project| project.goal_changed.as_ref()) {
+        let line = format!(
+            "{:<14}{}: {} \u{2192} {} (the user agreed; Decisions shows both)",
+            "Goal changed",
+            clock_of(time),
+            before,
+            after
+        );
+        canvas.put_styled(1, row, &line, Style::fg(Color::Bad).and_bold());
+        row += 1;
+    }
+
     // The header's rows under the box (README changes 3, 4, 6 and 14): folded,
     // three rows with the goal check, the milestone the voyage is on, the time
     // against the plan and the tasks (T-354); unfolded with `d`, one row per
@@ -602,24 +617,48 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
         };
     }
 
-    // The tab row follows after one blank row: the tab bar draws its frame
-    // around it (T-356), so the blank row is where its top rule goes.
+    // The tab row follows after one blank row, and the blank row is where the
+    // tab bar's top rule goes: the bar is framed (T-356), its bottom rule
+    // under the tabs and one blank row under that, so the view's heading is
+    // three rows below the tabs. A tab is its key and its title between two
+    // spaces, a rule between it and the next, and the clicked columns are the
+    // tab's own and the rule after it, as the prototype's are.
     let tab_row = row + 1;
+    let width = canvas.width;
+    let accent = Style::fg(Color::Acc);
+    canvas.put_styled(
+        1,
+        tab_row - 1,
+        &format!("╭{}╮", "─".repeat(width.saturating_sub(4))),
+        accent,
+    );
     let mut tabs = Vec::new();
     let mut x = 1;
     for tab in Tab::all() {
         let label = tab.label();
-        if tab == screen.tab {
-            canvas.put(x, tab_row, &label);
-            canvas.reverse(tab_row, x, label.chars().count());
+        let count = label.chars().count();
+        canvas.put_styled(x, tab_row, "│", accent);
+        // The shown tab is lit: the accent colour, bold, in reverse video; a
+        // tab that is not shown is bold alone, as the prototype draws it.
+        let style = if tab == screen.tab {
+            Style::fg(Color::Acc).and_bold().reversed_if(true)
         } else {
-            canvas.put_styled(x, tab_row, &label, Style::fg(Color::Dim));
-        }
-        tabs.push((x, x + label.chars().count() - 1, tab));
-        x += label.chars().count() + 1;
+            Style::bold()
+        };
+        canvas.put_styled(x + 1, tab_row, &label, style);
+        tabs.push((x, x + count, tab));
+        x += count + 1;
     }
+    canvas.put_styled(x, tab_row, "│", accent);
+    canvas.put_styled(width.saturating_sub(2), tab_row, "│", accent);
+    canvas.put_styled(
+        1,
+        tab_row + 1,
+        &format!("╰{}╯", "─".repeat(width.saturating_sub(4))),
+        accent,
+    );
 
-    Layout { top: tab_row + 2, tab_row, tabs, voyages }
+    Layout { top: tab_row + 3, tab_row, tabs, voyages }
 }
 
 /// The numbers the header's time and tasks rows read (T-354), all in
@@ -1564,7 +1603,6 @@ fn view_now(
 
     let mut picks = Vec::new();
     let mut row = top + 1;
-    let width = lane_width(lane_order(project), 5, 0);
     let mut ends: Vec<(usize, i64)> = Vec::new();
     for (index, lane) in project.lanes.iter().enumerate() {
         let picked = index == screen.selected;
@@ -1686,69 +1724,125 @@ fn view_now(
     }
     // The rest follows two rows below the balance line (T-360's block starts
     // there).
+    // The rest starts two rows below the balance line (T-359, T-360): the
+    // items to handle, then the quota on one line, then the overlaps.
     row = top + project.lanes.len() + 3;
-    let mut rest = Vec::new();
-    // The overlaps with the integration branch (T-188): information lines.
-    // They never wait for the captain.
-    if !project.overlaps.is_empty() {
-        rest.push(Line::new());
-        for overlap in &project.overlaps {
-            rest.push(Line::plain(crate::overlap_line(overlap)));
-        }
+    // The items to handle: what needs a look, a lane that will sit idle, and a
+    // task that waits on someone — each with who acts.
+    let mut items: Vec<(&str, String, Style)> = Vec::new();
+    for text in needs_a_look(project) {
+        items.push(("⚠", text, Style::fg(Color::Warn)));
     }
-    let looks = needs_a_look(project);
-    rest.push(Line::styled(
-        format!("NEEDS A LOOK ({})", looks.len()),
-        Style::fg(Color::Warn).and_bold(),
-    ));
-    for (task, lane, kind, why) in &looks {
-        rest.push(
-            Line::styled(format!("  {task} {lane:<width$} {kind:<14} "), Style::fg(Color::Warn))
-                .push(why.clone(), Style::PLAIN),
-        );
-    }
-    rest.push(Line::new());
-    rest.push(Line::styled("QUOTA", Style::bold()));
-    for reading in &project.quota {
-        // A reading older than half an hour says its age (T-383).
-        let stale = now - reading.read_at;
-        let stale = (stale > 30 * 60).then(|| format!("  (read {} min ago)", stale / 60));
-        for window in &reading.windows {
-            // A reset today is a clock time; a later one carries its day.
-            let reset = window
-                .resets_at
-                .map(|reset| {
-                    if reset - now <= 24 * 3600 {
-                        crate::idle::clock(reset)
-                    } else {
-                        crate::idle::day_clock(reset)
-                    }
-                })
-                .unwrap_or_else(|| "-".into());
-            rest.push(Line::styled(
+    for lane in &project.forecast {
+        for (gap, dep) in &lane.waits {
+            if *gap < 20 {
+                continue;
+            }
+            let queue = project.lanes.iter().find(|board| board.lane == lane.lane);
+            // The lane's first task in plan order that depends on the blocker.
+            let next = queue.and_then(|board| {
+                board
+                    .tasks
+                    .iter()
+                    .filter(|task| task.deps.iter().any(|id| id == dep))
+                    .min_by_key(|task| (task.rank, task.id.as_str()))
+            });
+            let owner = project
+                .lanes
+                .iter()
+                .find(|board| board.tasks.iter().any(|task| &task.id == dep));
+            let (Some(next), Some(owner)) = (next, owner) else {
+                continue;
+            };
+            items.push((
+                "⚠",
                 format!(
-                    "  {:<12}{:<6}{} {:>3}% used  resets {reset}{}",
-                    reading.provider,
-                    window.name,
-                    bar(window.used_percent as i64, 100, 14),
-                    window.used_percent.round() as i64,
-                    stale.as_deref().unwrap_or("")
+                    "{} will sit idle ~{}: its next task {} waits for {dep} ({}) — captain: \
+                     give {} work it can start now, or move {dep} to {}",
+                    lane.lane,
+                    hm(*gap),
+                    next.id,
+                    owner.lane,
+                    lane.lane,
+                    lane.lane
                 ),
-                Style::fg(quota_color(window.used_percent)),
+                Style::fg(Color::Bad),
             ));
         }
     }
-    rest.push(Line::new());
-    rest.push(Line::styled("DONE SENTENCE", Style::bold()));
-    // The store keeps the clauses of the done sentence, not whether each one
-    // is met: every clause is an open one (the prototype's grey `·`).
-    let done = project.voyages.first().and_then(|voyage| voyage.done.as_deref());
-    for clause in crate::done_clauses(done) {
-        rest.push(Line::styled(format!("  · {clause}"), Style::fg(Color::Dim)));
+    for text in &project.waiting_on {
+        items.push(("⏳", text.clone(), Style::PLAIN));
     }
-    for line in &rest {
-        canvas.put_line(0, row, line);
+    let heading = format!("TO HANDLE ({})", items.len());
+    let heading_style = if items.is_empty() {
+        Style::bold()
+    } else {
+        Style::fg(Color::Warn).and_bold()
+    };
+    canvas.put_styled(1, row, &heading, heading_style);
+    row += 1;
+    if items.is_empty() {
+        canvas.put_styled(3, row, "nothing", Style::fg(Color::Dim));
         row += 1;
+    } else {
+        for (mark, text, style) in &items {
+            // The mark and the space after it carry its colour; the hourglass
+            // is a wide character, so its two continuation cells come first and
+            // the text starts one cell later, as a terminal draws it.
+            let lead = if *mark == "⏳" { format!("{mark}  ") } else { format!("{mark} ") };
+            canvas.put_styled(3, row, &lead, *style);
+            canvas.put_styled(3 + lead.chars().count(), row, text, *style);
+            row += 1;
+        }
+    }
+    row += 1;
+    // The quota on one line, a window after a window (T-360).
+    canvas.put_styled(1, row, "Quota", Style::bold());
+    let mut windows: Vec<(&QuotaReading, &QuotaWindow)> = project
+        .quota
+        .iter()
+        .flat_map(|reading| reading.windows.iter().map(move |window| (reading, window)))
+        .collect();
+    // The window that resets first comes first; a window without a reset
+    // comes last. The provider's name settles a tie.
+    windows.sort_by(|(left, left_window), (right, right_window)| {
+        let reset = |window: &QuotaWindow| window.resets_at.unwrap_or(i64::MAX);
+        reset(left_window)
+            .cmp(&reset(right_window))
+            .then_with(|| left.provider.cmp(&right.provider))
+            .then_with(|| left_window.name.cmp(&right_window.name))
+    });
+    if windows.is_empty() {
+        canvas.put_styled(9, row, "none read yet", Style::fg(Color::Dim));
+    } else {
+        let mut x = 9;
+        for (reading, window) in &windows {
+            // A reset within a day is a clock time; a later one carries its
+            // day.
+            let reset = match window.resets_at {
+                Some(reset) if reset - now < 86_400 => crate::idle::clock(reset),
+                Some(reset) => crate::idle::month_day(reset),
+                None => "-".to_string(),
+            };
+            let text = format!(
+                "{} {} {}% · resets {reset}",
+                reading.provider,
+                window.name,
+                window.used_percent.round() as i64
+            );
+            canvas.put_styled(x, row, &text, Style::fg(quota_color(window.used_percent)));
+            x += text.chars().count() + 5;
+        }
+    }
+    row += 1;
+    // The overlaps with the integration branch (T-188): information lines.
+    // They never wait for the captain.
+    if !project.overlaps.is_empty() {
+        row += 1;
+        for overlap in &project.overlaps {
+            canvas.put_styled(1, row, &crate::overlap_line(overlap), Style::PLAIN);
+            row += 1;
+        }
     }
     picks
 }
@@ -1808,60 +1902,36 @@ fn idle_reason_text(project: &ProjectBoard, lane: &LaneBoard, landed: bool) -> (
     )
 }
 
-/// The things the captain should look at: a task over its estimate, a task
-/// that was reworked, and a lane that has much more work left than the idle
-/// ones beside it.
-fn needs_a_look(project: &ProjectBoard) -> Vec<(String, String, String, String)> {
-    let mut looks = Vec::new();
-    for lane in &project.lanes {
-        for task in &lane.tasks {
-            if let (Some(actual), Some(estimate)) = (task.actual_min, task.est_min) {
-                if estimate > 0 && actual > estimate {
-                    looks.push((
-                        task.id.clone(),
-                        lane.lane.clone(),
-                        "over estimate".into(),
-                        format!("{actual}/{estimate}m"),
-                    ));
-                }
-            }
-            if task.rounds > 1 {
-                looks.push((
-                    task.id.clone(),
-                    lane.lane.clone(),
-                    "rework".into(),
-                    format!("{} rounds", task.rounds),
-                ));
-            }
-        }
-    }
-    // A lane with much more work left than the idle ones beside it.
-    let idle: Vec<&LaneBoard> = project
+/// The things the captain should look at: a shown task that is still open and
+/// either took more than one round or ran past its estimate, in plan order.
+/// A merged task is history: the Time & tokens view keeps it (T-360).
+fn needs_a_look(project: &ProjectBoard) -> Vec<String> {
+    // The plan's order, not the lanes' grouping: the tasks flattened and
+    // sorted by rank, then id, as the store ranks them (F2 of the review).
+    let mut tasks: Vec<(&str, &TaskBoard)> = project
         .lanes
         .iter()
-        .filter(|lane| lane.idle.is_some())
+        .flat_map(|lane| lane.tasks.iter().map(move |task| (lane.lane.as_str(), task)))
         .collect();
-    if let Some(busy) = project.lanes.iter().max_by_key(|lane| lane.left_min) {
-        if busy.left_min > 0 && !idle.iter().any(|lane| lane.lane == busy.lane) {
-            let others: Vec<String> = idle
-                .iter()
-                .map(|lane| format!("{} {}m", lane.lane, lane.left_min))
-                .collect();
-            looks.push((
-                "-".into(),
-                busy.lane.clone(),
-                "overloaded".into(),
-                format!(
-                    "{} has {} tasks ({}m) left, {}",
-                    busy.lane,
-                    busy.left_count,
-                    busy.left_min,
-                    if others.is_empty() {
-                        "the others are idle".to_string()
-                    } else {
-                        others.join(", ")
-                    }
-                ),
+    tasks.sort_by(|(_, left), (_, right)| {
+        left.rank.cmp(&right.rank).then_with(|| left.id.cmp(&right.id))
+    });
+    let mut looks = Vec::new();
+    for (lane, task) in tasks {
+        if !task.stage.is_open() {
+            continue;
+        }
+        let actual = task.actual_min.unwrap_or(0);
+        let estimate = task.est_min.unwrap_or(0);
+        if task.rounds > 1 {
+            looks.push(format!(
+                "{} {lane} round {}, {actual}/{estimate}m: the captain scopes what is left",
+                task.id, task.rounds
+            ));
+        } else if actual > estimate {
+            looks.push(format!(
+                "{} {lane} {actual}/{estimate}m, past its estimate: the captain scopes what is left",
+                task.id
             ));
         }
     }

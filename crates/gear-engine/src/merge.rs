@@ -169,6 +169,144 @@ fn wall_time() -> Ts {
         .as_secs() as Ts
 }
 
+/// The wall clock in milliseconds: the unit of the probe lines (T-407).
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+/// The steps of one merge attempt, each one line of the engine log (T-407):
+/// `fetch`, `merge`, `gate`, `push`, `close`.
+///
+/// A step's **begin** and its end are both written into the merge op's meta as
+/// they happen (`engine.merge_probe.<op id>`), and every stamp is the wall
+/// clock: a step that an engine restart interrupts keeps its durable begin, so
+/// the attempt that runs after the restart measures it from the time it really
+/// started — its clock is not restarted. The whole always runs from the op's
+/// durable intent (`created`).
+struct Probe {
+    task: String,
+    started_ms: i64,
+    /// The steps of the op, oldest first: (step, begin_ms, end_ms).
+    kept: Vec<(String, i64, Option<i64>)>,
+    /// Where `kept` is durable: `None` when the engine has no store path (a
+    /// library test), which keeps the probe working without a store.
+    store: Option<(gear_store::Store, String)>,
+}
+
+impl Probe {
+    /// `created` is the merge op's durable intent (whole seconds); `db_path`
+    /// and `op_id` name the op's meta record.
+    fn new(task: &str, created: Ts, db_path: &str, op_id: &str) -> Probe {
+        let now = now_ms();
+        let mut store = if db_path.is_empty() {
+            None
+        } else {
+            gear_store::Store::open(std::path::Path::new(db_path))
+                .ok()
+                .map(|store| (store, probe_key(op_id)))
+        };
+        let mut kept = Vec::new();
+        if let Some((store, key)) = store.as_mut() {
+            kept = read_steps(store, key);
+        }
+        Probe {
+            task: task.to_string(),
+            started_ms: if created > 0 { created.saturating_mul(1000) } else { now },
+            kept,
+            store,
+        }
+    }
+
+    /// The durable record, as it stands.
+    fn save(&mut self) {
+        let Probe { kept, store, .. } = self;
+        if let Some((store, key)) = store.as_mut() {
+            write_steps(store, key, kept);
+        }
+    }
+
+    /// A step begins: a step this op already began (an engine restart in the
+    /// middle of it) keeps that durable beginning; every other one starts now.
+    /// A retry of a step that already ended gets a new boundary, or it would
+    /// carry the first attempt's time (F1 of the T-407 review).
+    fn begin(&mut self, name: &str) {
+        if self.kept.iter().any(|(step, _, end)| step == name && end.is_none()) {
+            return;
+        }
+        self.kept.push((name.to_string(), now_ms(), None));
+        self.save();
+    }
+
+    /// The merge's own completion line (T-407), as a session action's `done`:
+    /// the whole operation, from the op's durable intent.
+    fn done(&mut self) {
+        let total = now_ms().saturating_sub(self.started_ms);
+        crate::ops::probe("merge", &self.task, "done", total, total);
+    }
+
+    /// The step that ends here, with the operation's time so far: its own time
+    /// runs from its durable beginning.
+    fn step(&mut self, name: &str) {
+        let now = now_ms();
+        let begin = match self.kept.iter().position(|(step, _, end)| step == name && end.is_none()) {
+            Some(at) => {
+                let begin = self.kept[at].1;
+                self.kept[at].2 = Some(now);
+                begin
+            }
+            None => {
+                // A step that ended without a beginning (a path that logged
+                // it before the restart): it is measured from now.
+                self.kept.push((name.to_string(), now, Some(now)));
+                now
+            }
+        };
+        self.save();
+        crate::ops::probe(
+            "merge",
+            &self.task,
+            name,
+            now.saturating_sub(begin),
+            now.saturating_sub(self.started_ms),
+        );
+    }
+}
+
+/// Where a merge op's step boundaries are kept (T-407).
+fn probe_key(op_id: &str) -> String {
+    format!("engine.merge_probe.{op_id}")
+}
+
+/// The step boundaries recorded for an op, oldest first: (step, begin, end).
+fn read_steps(store: &mut gear_store::Store, key: &str) -> Vec<(String, i64, Option<i64>)> {
+    let Ok(Some(raw)) = store.read(|tx| tx.get_meta(key)) else {
+        return Vec::new();
+    };
+    let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let step = row.get(0)?.as_str()?.to_string();
+            let begin = row.get(1)?.as_i64()?;
+            Some((step, begin, row.get(2).and_then(serde_json::Value::as_i64)))
+        })
+        .collect()
+}
+
+/// Record the step boundaries of an op (T-407). A failing store write changes
+/// nothing the merge does: the lines are still in the log.
+fn write_steps(store: &mut gear_store::Store, key: &str, steps: &[(String, i64, Option<i64>)]) {
+    let rows: Vec<serde_json::Value> = steps
+        .iter()
+        .map(|(step, begin, end)| serde_json::json!([step, begin, end]))
+        .collect();
+    store.write(|tx| tx.set_meta(key, &serde_json::json!(rows).to_string())).ok();
+}
+
 /// Queue, launch or collect a merge without waiting for git or the gate.
 pub fn merge_passed(
     store: &mut Store,
@@ -448,6 +586,7 @@ pub fn merge_passed(
         let progress = cfg.merges.progress.clone();
         let pr = pr.clone();
         let fallback = review_fallback.clone();
+        let db_path = cfg.db_path.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("merge-{project}-{}", repo.name))
             .spawn(move || {
@@ -469,6 +608,7 @@ pub fn merge_passed(
                         pr.as_ref(),
                         &fallback,
                         &commit,
+                        &db_path,
                     ) {
                         Step::Merged(lines) => Report::Merged(lines),
                         Step::Pr { pr, head } => Report::Pr { pr, head },
@@ -674,14 +814,27 @@ fn merge_with_retries(
     pr: Option<&PrTarget>,
     review_fallback: &str,
     commit: &str,
+    db_path: &str,
 ) -> Step {
     let mut attempt = 0;
     loop {
-        match merge_one_locked(worktree, repo, op, lock, others, remote, pr, review_fallback, commit) {
-            Step::Merged(lines) => return Step::Merged(lines),
-            Step::Pr { pr, head } => return Step::Pr { pr, head },
+        // T-407: each attempt logs its steps from the op's durable intent, and
+        // keeps their boundaries in the op's meta.
+        let mut probe = Probe::new(op.task.as_deref().unwrap_or("-"), op.created, db_path, &op.id);
+        match merge_one_locked(worktree, repo, op, lock, others, remote, pr, review_fallback, commit, &mut probe) {
+            Step::Merged(lines) => {
+                probe.done();
+                return Step::Merged(lines);
+            }
+            Step::Pr { pr, head } => {
+                probe.done();
+                return Step::Pr { pr, head };
+            }
             Step::Waiting(tasks) => return Step::Waiting(tasks),
-            Step::Raced(reason) => return Step::Raced(reason),
+            Step::Raced(reason) => {
+                probe.done();
+                return Step::Raced(reason);
+            }
             Step::Failed(mut failed) => {
                 if failed.blocker != Blocker::Clear || attempt >= MERGE_RETRIES {
                     if attempt > 0 {
@@ -696,8 +849,10 @@ fn merge_with_retries(
                     // failure is not that — it can be a stale local lock —
                     // and PR mode keeps its Failed end (T-280 §3).
                     if pr.is_none() && lost_the_race(&failed.reason) {
+                        probe.done();
                         return Step::Raced(failed.reason);
                     }
+                    probe.done();
                     return Step::Failed(failed);
                 }
                 attempt += 1;
@@ -1606,6 +1761,18 @@ fn merge_one(
     repo: &Repo,
     op: &OpRow,
 ) -> Result<String, Failed> {
+    merge_one_with_db(worktree, repo, op, "")
+}
+
+/// [`merge_one`] on an engine store whose path the probe can keep the step
+/// boundaries in (T-407).
+#[cfg(test)]
+fn merge_one_with_db(
+    worktree: &gear_herdr::Worktree,
+    repo: &Repo,
+    op: &OpRow,
+    db_path: &str,
+) -> Result<String, Failed> {
     // T-107: the tests' runner moves the refs from the remote's own side, so
     // no engine test runs `git push`.
     let review = {
@@ -1618,7 +1785,8 @@ fn merge_one(
         gear_model::commit::MERGE_MESSAGE,
         &[("task", op.task.as_deref().unwrap_or_default())],
     );
-    step_result(merge_one_locked(
+    let mut probe = Probe::new(op.task.as_deref().unwrap_or("-"), op.created, db_path, &op.id);
+    let step = merge_one_locked(
         worktree,
         repo,
         op,
@@ -1629,7 +1797,13 @@ fn merge_one(
         None,
         &review,
         &commit,
-    ))
+        &mut probe,
+    );
+    // T-407: the operation's own completion line, as the retry loop writes it.
+    if !matches!(step, Step::Waiting(_)) {
+        probe.done();
+    }
+    step_result(step)
 }
 
 #[cfg(test)]
@@ -1677,6 +1851,7 @@ fn merge_one_locked(
     pr: Option<&PrTarget>,
     review_fallback: &str,
     commit: &str,
+    probe: &mut Probe,
 ) -> Step {
     let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(lock));
     let dir = Path::new(&worktree.path);
@@ -1702,13 +1877,18 @@ fn merge_one_locked(
     //    may sit on any of them (T-61), and a clone that restricts its refspec
     //    would not bring it in. A fetch that fails may clear (the network,
     //    the remote): it is retried.
+    probe.begin("fetch");
     if let Err(reason) = git(dir, &["fetch", "--prune", remote_name, &format!("+refs/heads/*:refs/remotes/{remote_name}/*")]) {
+        probe.step("fetch");
         return Step::Failed(Failed::clear(format!("fetch {remote_name}: {reason}")));
     }
     if let Err(reason) = git(dir, &["reset", "--hard", &format!("{remote_name}/{integration}")]) {
+        probe.step("fetch");
         return Step::Failed(Failed::stuck(format!("reset to {remote_name}/{integration}: {reason}")));
     }
+    probe.step("fetch");
 
+    probe.begin("merge");
     // 2. the approved candidate, by commit. P0: what merges is the commit the
     //    review approved, never what a branch points at now. The branch the
     //    lane named may hold it, hold more than it, or be gone (T-61).
@@ -1849,6 +2029,7 @@ fn merge_one_locked(
             // Abort and leave the worktree exactly at the integration branch.
             let _ = git(dir, &["merge", "--abort"]);
             let _ = git(dir, &["reset", "--hard", &format!("{remote_name}/{integration}")]);
+            probe.step("merge");
             return Step::Failed(Failed::stuck(format!("conflict merging {pinned}: {reason}")));
         }
     }
@@ -1857,11 +2038,14 @@ fn merge_one_locked(
     //    conflict (a file committed with markers in it).
     if git(dir, &["grep", "-n", "-e", "^<<<<<<<", "-e", "^>>>>>>>"]).is_ok() {
         let _ = git(dir, &["reset", "--hard", &format!("{remote_name}/{integration}")]);
+        probe.step("merge");
         return Step::Failed(Failed::stuck("conflict markers in the merged tree"));
     }
+    probe.step("merge");
 
     // 8. the gate, before anything is pushed: the gate of the repo the work
     //    is in (T-53).
+    probe.begin("gate");
     let gate = repo.gate.clone();
     // The empty lock file is inherited as stdin (normally /dev/null for a
     // gate). Keeping the same open file description in the subprocess means
@@ -1901,18 +2085,23 @@ fn merge_one_locked(
             reason.push('\n');
         }
         reason.push_str(&tail);
+        probe.step("gate");
         return Step::Failed(if status == 126 || status == 127 {
             Failed::clear(reason)
         } else {
             Failed::stuck(reason)
         });
     }
+    probe.step("gate");
 
     // 9. PR mode (design §11.2 step 2): the integration branch is not pushed.
     //    The review's commits go onto the pull request's head, and the pull
     //    request is what lands the task.
+    probe.begin("push");
     if let Some(pr) = pr {
-        return pr_head(dir, &git, &sha, &review_ref, has_review, pr, remote, commit);
+        let step = pr_head(dir, &git, &sha, &review_ref, has_review, pr, remote, commit);
+        probe.step("push");
+        return step;
     }
 
     // 9b. push, then close the branches the merge consumed.
@@ -1920,6 +2109,7 @@ fn merge_one_locked(
     // captain or another merge pushed meanwhile) is a race, not a failure: the
     // merge starts again from the new tip.
     if let Err(reason) = remote.push(dir, &integration) {
+        probe.step("push");
         if reason.contains("non-fast-forward") || reason.contains("fetch first") || reason.contains("cannot lock ref") {
             return Step::Failed(Failed::clear(format!("{RACE}{reason}")));
         }
@@ -1927,7 +2117,10 @@ fn merge_one_locked(
         // hook that rejects the push once (F1 of the T-61 review).
         return Step::Failed(Failed::clear(format!("push failed: {reason}")));
     }
+    probe.step("push");
+    probe.begin("close");
     let (closed, left) = close_branches(dir, repo, &branch, &review, remote, &pushed);
+    probe.step("close");
 
     let head = git(dir, &["log", "-1", "--oneline"]).unwrap_or_default();
     let mut line = format!("merged {task} into {integration}: {head}");
@@ -5682,6 +5875,7 @@ gate = "{gate}"
             None,
             &review,
             &commit,
+            "",
         ))
     }
 
@@ -6514,6 +6708,110 @@ gate = "{project_gate}"
         let branches = &state.branches;
         assert!(!branches.contains("heat/t5"), "{branches}");
         assert!(!branches.contains("review/t5"), "{branches}");
+    }
+
+    /// T-407: a merge writes one line per step — fetch, merge, gate, push,
+    /// close — each with its own time and the attempt's time so far, so a
+    /// slow step is found from the engine log.
+    #[test]
+    fn a_merge_logs_its_five_steps_in_the_engine_log() {
+        let scratch = Scratch::new("merge-probe");
+        let worktree = scratch.merge_worktree();
+        // A task of its own, so no other test's merge lines mix in.
+        let mut op = op(&scratch.head_of("heat/t5"));
+        op.task = Some("T-9071".into());
+
+        let line = merge_one(&worktree, &repo("true"), &op).unwrap();
+
+        assert!(line.contains("merged T-9071 into dev"), "{line}");
+        let log: Vec<String> = crate::ops::probe_log()
+            .into_iter()
+            .filter(|line| line.starts_with("probe merge T-9071 "))
+            .collect();
+        let steps: Vec<&str> = log.iter().map(|line| line.split_whitespace().nth(3).unwrap()).collect();
+        assert_eq!(steps, ["fetch", "merge", "gate", "push", "close", "done"], "{log:?}");
+        // Every line carries the step's time and the whole attempt's so far.
+        for line in &log {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 6, "{line}");
+            assert!(fields[4].parse::<u64>().is_ok(), "the step's ms: {line}");
+            assert!(fields[5].starts_with("total=") && fields[5][6..].parse::<u64>().is_ok(), "{line}");
+        }
+    }
+
+    /// T-407: a step the engine restart interrupts keeps its durable
+    /// beginning, so the attempt that runs after the restart measures it from
+    /// the time it really started and not from its own first key.
+    #[test]
+    fn a_step_interrupted_by_a_restart_is_measured_from_its_durable_beginning() {
+        let scratch = Scratch::new("merge-probe-restart");
+        let worktree = scratch.merge_worktree();
+        let mut op = op(&scratch.head_of("heat/t5"));
+        // A task of its own, so the other probe test's lines never mix in.
+        op.task = Some("T-9072".into());
+        // The engine died in the fetch a minute ago: the op's meta says so.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("gear.db").to_string_lossy().into_owned();
+        let mut store = gear_store::Store::open(std::path::Path::new(&db)).unwrap();
+        let began = now_ms() - 60_000;
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    &probe_key("O-1"),
+                    &serde_json::json!([["fetch", began, null]]).to_string(),
+                )
+            })
+            .unwrap();
+        drop(store);
+
+        let line = merge_one_with_db(&worktree, &repo("true"), &op, &db).unwrap();
+
+        assert!(line.contains("merged T-9072 into dev"), "{line}");
+        let fetch = crate::ops::probe_log()
+            .into_iter()
+            .find(|line| line.starts_with("probe merge T-9072 fetch "))
+            .expect("the fetch is logged");
+        let ms: i64 = fetch.split_whitespace().nth(4).unwrap().parse().unwrap();
+        assert!(ms >= 60_000, "the fetch runs from its durable beginning: {fetch}");
+        // The recovered record keeps that beginning, and now the step's end.
+        let mut store = gear_store::Store::open(std::path::Path::new(&db)).unwrap();
+        let kept = read_steps(&mut store, &probe_key("O-1"));
+        assert_eq!(kept[0].0, "fetch");
+        assert_eq!(kept[0].1, began, "the beginning is the durable one");
+        assert!(kept[0].2.is_some(), "and the step has its end now: {kept:?}");
+    }
+
+    /// F1 of the T-407 review: a retry starts a new boundary for a step
+    /// whose earlier boundary ended, so each attempt's step time is its own —
+    /// not the time since the first attempt's fetch began.
+    #[test]
+    fn a_retried_step_logs_its_own_time() {
+        // The durable record of an earlier attempt: fetch began at 1000 ms and
+        // ended at 1200 ms (the reviewer's numbers). The retry reopens it.
+        let mut probe = Probe {
+            task: "T-9073".into(),
+            started_ms: 500,
+            kept: vec![("fetch".into(), 1000, Some(1200))],
+            store: None,
+        };
+        probe.begin("fetch");
+        let retry = probe
+            .kept
+            .iter()
+            .find(|(step, begin, end)| step == "fetch" && end.is_none() && *begin > 1200)
+            .unwrap_or_else(|| panic!("the retry has its own boundary: {:?}", probe.kept));
+        assert!(retry.1 > 1200, "the retry starts now, not at the ended boundary");
+        probe.step("fetch");
+        let line = crate::ops::probe_log()
+            .into_iter()
+            .find(|line| line.starts_with("probe merge T-9073 fetch "))
+            .expect("the retry's fetch line");
+        let ms: i64 = line.split_whitespace().nth(4).unwrap().parse().unwrap();
+        // Its own time (a few milliseconds), not the 1000 ms between the first
+        // attempt's beginning and now.
+        assert!((0..5_000).contains(&ms), "the retry's fetch reads its own time: {line}");
+        // The earlier attempt keeps its completed boundary.
+        assert_eq!(probe.kept.iter().filter(|(step, _, _)| step == "fetch").count(), 2);
     }
 
     /// T-296: with the default template the merge commits read exactly as they
