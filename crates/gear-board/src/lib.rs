@@ -233,6 +233,10 @@ pub struct ProjectBoard {
     /// The captain's decisions of this voyage (§7.1): the log the board
     /// shows in its fourth view.
     pub decisions: Vec<DecisionBoard>,
+    /// The confirmed goal changes of the measured voyage (T-335): the user's
+    /// decisions on its `done`, `bar` and `eta`, oldest first; empty without
+    /// a measured voyage. The S4 header draws them red.
+    pub goal_changes: Vec<GoalChangeBoard>,
     /// The friction reports the agents left (§6.1), open and closed.
     pub frictions: Vec<FrictionBoard>,
     /// The tasks that overlap the integration branch of their repo (T-188):
@@ -319,6 +323,21 @@ pub struct DecisionBoard {
     pub why: Option<String>,
     /// The decision is worth a look at the landing (§7.2).
     pub star: bool,
+}
+
+/// One confirmed goal change of the measured voyage (T-335).
+///
+/// T-410 records each confirmed change of a departed voyage's `done`, `bar`
+/// or `eta` (T-331 its title and stations) as a starred decision of kind
+/// `user` with source `gear`; the S4 header draws them red.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalChangeBoard {
+    /// When the decision was taken.
+    pub at: String,
+    /// What changed: `<field> of <M> changed from "<old>" to "<new>"`.
+    pub what: String,
+    /// Why it changed.
+    pub why: Option<String>,
 }
 
 /// One friction report of an agent, as the board shows it (§6.1).
@@ -947,6 +966,12 @@ pub fn project_for(
     )?;
     // The tasks that left the shown voyage (T-351): its `move` decisions.
     let moved_out = moved_out_of(&decisions);
+    // The confirmed goal changes are the measured voyage's own (T-335).
+    let goal_changes = goal_changes_of(
+        tx,
+        project,
+        workload.as_ref().map(|voyage| voyage.milestone.as_str()),
+    )?;
     // The friction reports are the ones of the measured voyage too (T-263).
     let frictions = frictions_of(
         tx,
@@ -1001,6 +1026,7 @@ pub fn project_for(
         graph_lanes,
         quota: quota_readings(tx, project)?,
         decisions,
+        goal_changes,
         frictions,
         // The overlaps with the integration branch (T-188): information
         // lines, never items that wait for the captain.
@@ -1484,6 +1510,28 @@ fn moved_out_of(decisions: &[DecisionBoard]) -> Vec<(String, String)> {
             Some((task.to_string(), to.to_string()))
         })
         .collect()
+}
+
+/// The confirmed goal changes of the voyage (T-335): the decisions of kind
+/// `user` with source `gear` (T-410, T-331), oldest first.
+fn goal_changes_of(
+    tx: &Tx<'_>,
+    project: &str,
+    voyage: Option<&str>,
+) -> GearResult<Vec<GoalChangeBoard>> {
+    let Some(voyage) = voyage else {
+        return Ok(Vec::new());
+    };
+    Ok(tx
+        .decisions_of(project, voyage)?
+        .into_iter()
+        .filter(|decision| decision.kind == "user" && decision.source == "gear")
+        .map(|decision| GoalChangeBoard {
+            at: decision.at,
+            what: decision.what,
+            why: decision.why,
+        })
+        .collect())
 }
 
 /// The friction reports of the voyage, as the board shows them (§6.1): the
