@@ -20,12 +20,14 @@ other.
 | reading | from |
 |---|---|
 | cores | `sysctl -n hw.ncpu` / `nproc` |
-| load | the 1-minute load average, rounded up |
+| load | the 1-minute load average, shown in the line only (it counts every busy thread, lags a burst by a minute, and already includes the builds counted in running) |
 | running | the `build-slot.sh` runs alive on the machine, this one included; the larger of two samples 400 ms apart, so runs started in the same second see each other |
 | free memory | `kern.memorystatus_level` / `MemAvailable` over `MemTotal`, in percent |
 
-`N = max(1, min(cores - load, cores / running))`, then at most 2 when free
-memory is under 25 % and 1 when under 15 %.
+`N = max(1, cores / running)`, then at most 2 when free memory is under 25 %
+and 1 when under 15 %. CPU contention only slows every run (and the low
+priority keeps the machine usable); memory is what can take a machine down,
+so the memory readings are the hard limits.
 
 ## What the command gets
 
