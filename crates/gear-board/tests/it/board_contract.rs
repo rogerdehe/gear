@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use gear_board::{build, render, run_with, to_json, EngineState, Event, Keys, Options, View};
 use gear_model::{AttemptState, MsgKind, MsgState, SeatRole, TaskState};
-use gear_store::{testing, AttemptRow, ContractRow, NewMessage, Store, TaskRow};
+use gear_store::{
+    testing, AttemptRow, AttemptStep, ContractRow, NewMessage, NewRound, RoundKey, Store, TaskRow,
+};
 
 const T0: i64 = 1_800_000_000;
 
@@ -333,6 +335,103 @@ fn the_board_is_json() {
     assert_eq!(doc["projects"][0]["totals"]["tasks"], 4);
     assert_eq!(doc["projects"][0]["lanes"][0]["lane"], "data");
     assert_eq!(doc["projects"][0]["lanes"][0]["tasks"][0]["state"], "done");
+}
+
+#[test]
+fn a_task_is_measured_by_the_time_its_lane_worked_on_it() {
+    // T-348: the actual minutes of a task are the `active_s` of its dev and
+    // rework rounds, not the clock since its delivery (T-241 showed "working
+    // 89/25m" where the rework took 17 minutes).
+    let mut store = Store::open_in_memory().unwrap();
+    let now = T0 + 3 * 3600;
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p1", "pi", T0)?;
+            for (id, rank) in [("T-1", 1), ("T-2", 2)] {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state: TaskState::Running,
+                    priority: "must".into(),
+                    lane: Some("data".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+                // Both were delivered three hours ago.
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: id.into(),
+                    n: 1,
+                    seat: "p:data".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Started,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })?;
+                tx.set_attempt_time("p", id, 1, AttemptStep::Started, T0)?;
+            }
+            // T-1 worked for 25 minutes and then reworked it for 10.
+            for (attempt, role, active_s) in [(1, "dev", 1500), (2, "rework", 600)] {
+                let key = RoundKey {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt,
+                    role: role.into(),
+                };
+                tx.insert_round(&NewRound {
+                    key: key.clone(),
+                    seat: "p:data".into(),
+                    generation: 1,
+                    cli: "pi".into(),
+                    model: None,
+                    start_at: T0,
+                })?;
+                tx.set_round_active(&key, active_s)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let board = build(&mut store, &options(), now).unwrap();
+    let tasks = &board.projects[0].lanes[0].tasks;
+    let worked = tasks.iter().find(|task| task.id == "T-1").unwrap();
+    assert_eq!(worked.actual_min, Some(35), "the work time of the two rounds");
+    // A task without a dev or rework round keeps its span.
+    let span = tasks.iter().find(|task| task.id == "T-2").unwrap();
+    assert_eq!(span.actual_min, Some(180), "the span of a task with no round");
+
+    let graph = store
+        .read(|tx| gear_board::graph::tasks(tx, "p", now))
+        .unwrap();
+    let worked = graph.iter().find(|task| task.id == "T-1").unwrap();
+    assert_eq!(worked.actual_min, Some(35), "the same work time in the graph");
+    let span = graph.iter().find(|task| task.id == "T-2").unwrap();
+    assert_eq!(span.actual_min, Some(180), "the same span in the graph");
 }
 
 /// Keys that say `q` after the given number of timeouts.
