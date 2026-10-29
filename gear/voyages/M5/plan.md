@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=764 -->
+<!-- gear-plan project=gear base=765 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -867,7 +867,7 @@ estimate: 15
 
 ## T-420 [now] lane=mast milestone=M5 required
 followup-of: T-413
-goal: [v0.5.1 S2] Every seat GEAR starts gets its own TMPDIR, not only a lane's first start (T-413 sets it in crates/gear-engine/src/onboard.rs for a lane's onboard; its review found the other start paths keep the system temp directory). Change, no other design: the scratch directory and the `mkdir -p <scratch>; export TMPDIR=<scratch>;` prefix T-413 builds in onboard.rs are taken into one shared function (in onboard.rs, `pub(crate)`), and the two other places that build a seat's environment line use it: crates/gear-engine/src/review.rs, where a reviewer's `env_command` is built (fn start_reviewer, near `export GEAR_CTX=` at about line 1301), and crates/gear-engine/src/restart.rs fn env_command (a restart and a model-switch resume); release removes the directory as T-413 does. The code change is in onboard.rs, review.rs and restart.rs only; tests go where the crate keeps them.
+goal: [v0.5.1 S2] Every seat GEAR starts gets its own TMPDIR, not only a lane's first start (T-413 sets it in crates/gear-engine/src/onboard.rs for a lane's onboard; its review found the other start paths keep the system temp directory). Change, no other design: the scratch directory and the shell-quoted `mkdir -p <scratch>; export TMPDIR=<scratch>;` prefix T-413 builds in onboard.rs are taken into one shared function (in onboard.rs, `pub(crate)`), and the two other places that build a seat's environment line use it: crates/gear-engine/src/review.rs, where a reviewer's `env_command` is built (fn start_reviewer, near `export GEAR_CTX=` at about line 1301), and crates/gear-engine/src/restart.rs fn env_command (a restart and a model-switch resume); release removes the directory as T-413 does. The code change is in onboard.rs, review.rs and restart.rs only; tests go where the crate keeps them.
 accept: Engine tests: a reviewer's start and a lane's restart each run an env line with `export TMPDIR=` naming the seat's own scratch directory; the existing onboard test still passes. Run only `make check CRATE=gear-engine TESTS='test(/onboard|restart|review::/)'`; the merge gate runs `make gate`.
 estimate: 20
 
