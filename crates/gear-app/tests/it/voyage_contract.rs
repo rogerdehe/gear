@@ -97,6 +97,72 @@ fn a_milestone_without_its_three_fields_is_rejected() {
     assert!(s.read(|tx| tx.tasks_of_project("p")).unwrap().is_empty());
 }
 
+/// T-387: the `eta:` is a duration GEAR measures the voyage against, and
+/// nothing else. A block whose eta reads as prose is refused with nothing
+/// written — for a new voyage and for an edit of one that already departed.
+#[test]
+fn an_eta_that_is_not_a_duration_is_refused() {
+    let mut s = world();
+    // Durations apply: one group, then several.
+    run(&mut s, &plan(0, "done: users install it\nbar: keep it simple\neta: 8h\n"), "r1", NOW).unwrap();
+    run(
+        &mut s,
+        &plan(1, "done: users install it\nbar: keep it simple\neta: 1d 4h\n"),
+        "r2",
+        NOW + 10,
+    )
+    .unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap().eta.as_deref(),
+        Some("1d 4h")
+    );
+
+    // Prose and a style word after a duration are refused, and the stored
+    // voyage keeps the eta it had.
+    for (n, eta) in ["8h, hard", "do it properly"].into_iter().enumerate() {
+        // A refused apply leaves the plan version where it was.
+        let base = s.read(|tx| tx.plan_version("p")).unwrap();
+        let text = plan(base, &format!("done: users install it\nbar: keep it simple\neta: {eta}\n"));
+        let err = run(&mut s, &text, &format!("r-bad-{n}"), NOW + 20 + n as i64).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadFormat, "{eta}");
+        assert!(
+            err.detail.contains(
+                "milestone M1: eta must be a duration GEAR measures the voyage against, e.g. `eta: 8h` or `eta: 1d 4h`; reasons go in # Decisions"
+            ),
+            "{}",
+            err.detail
+        );
+        assert!(err.detail.contains(&format!("got \"{eta}\"")), "{}", err.detail);
+    }
+    assert_eq!(
+        s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap().eta.as_deref(),
+        Some("1d 4h")
+    );
+
+    // A fresh plan carrying such an eta writes nothing: no voyage, no task, no
+    // departure — the voyage cannot depart.
+    let mut fresh = world();
+    for (n, eta) in ["8h, hard", "do it properly"].into_iter().enumerate() {
+        let text = plan(0, &format!("done: users install it\nbar: keep it simple\neta: {eta}\n"));
+        let err = run(&mut fresh, &text, &format!("r-fresh-{n}"), NOW).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadFormat, "{eta}");
+        assert!(fresh.read(|tx| tx.get_voyage("p", "M1")).unwrap().is_none(), "{eta}");
+        assert!(fresh.read(|tx| tx.tasks_of_project("p")).unwrap().is_empty(), "{eta}");
+    }
+    assert_eq!(fresh.read(|tx| tx.plan_version("p")).unwrap(), 0);
+
+    // The refusal shows the first 40 characters of what it got, no more.
+    let long = "do it properly and carefully, this one is long";
+    let text = plan(0, &format!("done: users install it\nbar: keep it simple\neta: {long}\n"));
+    let err = run(&mut fresh, &text, "r-long", NOW).unwrap_err();
+    assert!(
+        err.detail.contains(&format!("got \"{}\"", long.chars().take(40).collect::<String>())),
+        "{}",
+        err.detail
+    );
+    assert!(!err.detail.contains("is long"), "{}", err.detail);
+}
+
 #[test]
 fn a_voyage_is_stored_with_its_departure_and_shown() {
     let mut s = world();

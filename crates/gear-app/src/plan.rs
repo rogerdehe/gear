@@ -3302,6 +3302,11 @@ fn why_naming(decisions: &[crate::decision::Decision], task: &str) -> Option<Str
 /// The departure is fixed when the milestone gets its first task: the time of
 /// that apply (the tasks it creates are created then) and how many tasks the
 /// milestone holds. Later applies update the words but never move it.
+///
+/// The `eta:` must read as a duration (`8h`, `1d 4h`) and nothing else: the
+/// board, the stations and the forecast measure against it, so a block whose
+/// eta reads as prose is refused with nothing written (T-387), for every
+/// block, departed or not — such a voyage cannot depart either.
 fn record_voyages(tx: &Tx<'_>, project: &str, draft: &crate::draft::Draft, now: Ts) -> GearResult<()> {
     for (header, body) in &draft.milestones {
         let (id, title) = crate::draft::milestone_parts(header);
@@ -3312,6 +3317,17 @@ fn record_voyages(tx: &Tx<'_>, project: &str, draft: &crate::draft::Draft, now: 
                     ErrorCode::BadFormat,
                     format!(
                         "milestone {id} needs a `{field}:` line: done, bar and eta make a voyage (T-22)"
+                    ),
+                ));
+            }
+        }
+        if let Some(eta) = eta.as_deref() {
+            if crate::station::eta_seconds(eta).is_none() {
+                let got: String = eta.chars().take(40).collect();
+                return Err(bad(
+                    0,
+                    format!(
+                        "milestone {id}: eta must be a duration GEAR measures the voyage against, e.g. `eta: 8h` or `eta: 1d 4h`; reasons go in # Decisions; got \"{got}\""
                     ),
                 ));
             }
