@@ -159,8 +159,8 @@ remote = "upstream"
 /// The engine knows the profiles the project uses.
 fn cfg() -> EngineCfg {
     let mut cfg = EngineCfg {
-        db_path: std::env::temp_dir()
-            .join(format!("gear-engine-tests-{}/gear.db", std::process::id()))
+        db_path: crate::temp("gear-engine-tests")
+            .join("gear.db")
             .to_string_lossy()
             .into_owned(),
         // T-107: the merge's remote runner moves refs from the remote's own
