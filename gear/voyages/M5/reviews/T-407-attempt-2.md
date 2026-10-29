@@ -1,6 +1,6 @@
 # Review of T-407
 
-Status: running
+Status: done
 Verdict: pass
 Reviewed: review/t407 @ 7d9e6b322ddc602d89d695436af5d4d1122defd7   Reviewer: gear:review-9 (pi, deepseek-v4-pro-0813)   Round: 2
 Contract: v5
