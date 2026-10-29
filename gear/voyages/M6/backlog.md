@@ -30,3 +30,5 @@
 - Branch cleanup gaps (another project, 2026-10-29): a cancelled task's branch is never deleted, and a merged task's branch is kept when its tip moved past the merged candidate (one more push after the merge).
 
 - A captain's coverage report (another project, 2026-10-29): accepted attempts whose candidate is not an ancestor of the integration branch, and failing cases that no task names (83 of 159 reds there were named by no packet, found only when a reviewer hit a package check that could not pass).
+
+- Slash commands typed into an agent (`/new`, `/resume`, `/compact`) go in one character at a time and are slow; type them in one go, and handle the dialogs some CLIs open after them (codex asks whether to work in the current worktree or a new one).
