@@ -95,7 +95,7 @@ fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool> {
         state["next_active"] = json!(next);
     }
     state["budget"] = json!(budget);
-    let asked_at = state.get("asked_at").and_then(Value::as_i64);
+    let asked_at = state.get("asked_at").and_then(Value::as_i64).filter(|_| !settled);
     let mut changed = false;
     if let Some(asked) = asked_at {
         let last_id = state["answer_id"].as_str().and_then(|id| id.trim_start_matches("M-").parse::<u64>().ok()).unwrap_or(0);
@@ -363,6 +363,34 @@ mod tests {
         assert_eq!(items.len(),1);
         assert_eq!(items[0].state,MsgState::Resolved);
         assert_eq!(items[0].resolved,Some(T+2500));
+    }
+
+    #[test]
+    fn a_queued_answer_after_settlement_writes_no_overrun_item() {
+        let mut s = submitted();
+        s.write(|tx| {
+            testing::seed_temp_seat(tx,"p","review-1","T-1","w1:p3","codex",T)?;
+            tx.insert_round(&NewRound { key:RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:"review".into()},seat:"p:review-1".into(),generation:1,cli:"codex".into(),model:None,start_at:T })
+        }).unwrap();
+        // The round asks at its budget (30 min).
+        tick_at(&mut s,1800);
+        assert_eq!(messages(&mut s,"overrun-question:T-1:1:review").len(),1);
+        // The reviewer's answer is queued at T+1801 and the captain settles the
+        // attempt at T+1802, before the next tick can process the answer.
+        s.write(|tx| {
+            tx.insert_message(&NewMessage {project:"p".into(),thread:"T-1:1".into(),task:Some("T-1".into()),attempt:Some(1),sender:"p:review-1".into(),sender_gen:1,recipient:"p:captain".into(),kind:MsgKind::Progress,urgent:false,body:"review update".into(),reply_to:None,needs_ack:false,state:MsgState::Info,created:T+1801,meta:Some(json!({"left":0,"blocker":"none"}).to_string())})?;
+            gear_app::tasks::settle(tx, &gear_app::tasks::Verdict { project:"p".into(), task:"T-1".into(), attempt:1, contract_version:1, candidate:"abc1234".into(), pass:false, evidence:None, rework:Some("the rows drift right".into()), integrated_by:None, by_seat:"p:captain".into() }, T+1802)
+        }).unwrap();
+        // The settlement already stopped the round: the queued answer writes no
+        // item on this tick or any later one (F1 of the T-381 review).
+        for at in [1803, 1804, 6000, 9000] {
+            tick_at(&mut s, at);
+            assert!(messages(&mut s,"overrun:T-1:review").is_empty(), "no item after the settlement, tick {at}");
+        }
+        // The round's question is closed by the settlement, as before.
+        let questions=messages(&mut s,"overrun-question:T-1:1:review");
+        assert_eq!(questions.len(),1);
+        assert_eq!(questions[0].state,MsgState::Resolved);
     }
 
 }
