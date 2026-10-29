@@ -1564,10 +1564,14 @@ pub fn run_with(
                 Ok(mut board) => {
                     // The frame draws the shown project: the project the board
                     // was opened with is the only one then, and every other
-                    // project is one `p` away.
-                    if opts.project.is_none() && board.projects.len() > 1 {
+                    // project is one `p` away. `shown` is the index into the
+                    // project list, kept as one (T-384 rework, F1): a rebuild
+                    // against another count starts from it, so a cycle back to
+                    // the first project stays there.
+                    if opts.project.is_none() && !board.projects.is_empty() {
                         let count = board.projects.len();
-                        board.projects.rotate_left(shown % count);
+                        shown %= count;
+                        board.projects.rotate_left(shown);
                     }
                     kept = Some(board);
                     kept_version = version;
@@ -1663,8 +1667,16 @@ pub fn run_with(
                     // without building the board again.
                     shown += 1;
                     if let Some(board) = kept.as_mut() {
-                        if board.projects.len() > 1 {
+                        let count = board.projects.len();
+                        if count > 1 {
                             board.projects.rotate_left(1);
+                        }
+                        // `shown` names the project shown, not the presses
+                        // since the board opened (T-384 rework, F1): kept
+                        // unnormalized, a full cycle would move the board to
+                        // another project when the count grows.
+                        if count > 0 {
+                            shown %= count;
                         }
                     }
                     screen.selected = 0;

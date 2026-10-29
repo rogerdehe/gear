@@ -284,3 +284,74 @@ fn a_changed_agent_list_builds_the_board_again() {
     assert_eq!(herdr.asks, 2);
     assert_eq!(hook::builds(), 2, "the agent list moved: the board was built again");
 }
+
+/// The keys of a board with no project named: `p` twice — one full cycle over
+/// two projects — then a third project registered from a second connection,
+/// then `q`. The registration waits out the refresh period so the board sees
+/// it on the next frame (T-384 rework, F1).
+struct Registers {
+    path: PathBuf,
+    call: usize,
+}
+
+impl Keys for Registers {
+    fn next_event(&mut self, timeout: Duration) -> Option<Event> {
+        self.call += 1;
+        match self.call {
+            1 | 2 => Some(Event::Key('p')),
+            3 => {
+                let mut other = Store::open(&self.path).unwrap();
+                other
+                    .write(|tx| testing::seed_project(tx, "c", "sess", T0))
+                    .unwrap();
+                std::thread::sleep(timeout);
+                None
+            }
+            _ => Some(Event::Key('q')),
+        }
+    }
+
+    fn size(&self) -> (usize, usize) {
+        (100, 30)
+    }
+}
+
+/// T-384 (review F1): two `p` presses with two projects show the first one
+/// again, and a third project registered behind the board's back leaves it
+/// there — the cycle counts the projects shown, not the presses made.
+#[test]
+fn a_project_registered_later_does_not_move_the_shown_one() {
+    hook::reset();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gear.db");
+    let mut store = Store::open(&path).unwrap();
+    store
+        .write(|tx| {
+            for (project, pane) in [("a", "w1:p1"), ("b", "w1:p2")] {
+                testing::seed_project(tx, project, "sess", T0)?;
+                testing::seed_active_seat(
+                    tx, project, "data", SeatRole::Lane, pane, "opencode", T0,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let mut out: Vec<u8> = Vec::new();
+    let mut keys = Registers { path, call: 0 };
+    let opts = Options { project: None, color: false, refresh: Duration::from_millis(2), ..Options::default() };
+    run_with(&mut store, &opts, &mut out, &mut keys, None).unwrap();
+
+    assert_eq!(hook::builds(), 2, "the first frame, and one rebuild for the new project");
+    let drawn = frames(&out);
+    // The title row of a frame, up to the clock at its end.
+    let names = |frame: &str, project: &str, count: usize| {
+        let title = frame.lines().next().unwrap_or_default();
+        title.contains(&format!("GEAR · {project} · p: next of {count} projects"))
+    };
+    // a, b, and a again — two presses over two projects complete the cycle.
+    assert!(names(&drawn[1], "b", 2), "the second project: {drawn:?}");
+    assert!(names(&drawn[2], "a", 2), "the cycle is back at the first: {drawn:?}");
+    // The registration rebuilds once, and the board still shows `a`.
+    assert!(names(drawn.last().unwrap(), "a", 3), "still the first project: {drawn:?}");
+}
