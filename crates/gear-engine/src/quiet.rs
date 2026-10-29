@@ -30,7 +30,7 @@ fn loop_attempt(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Option<AttemptRow>> {
     Ok(tx.in_progress_attempts_of_seat(&seat.id)?.into_iter().next())
 }
 
-fn last_push(tx: &Tx<'_>, seat: &SeatRow, attempt: &AttemptRow) -> GearResult<(String, Ts)> {
+fn last_push(tx: &Tx<'_>, cfg: &crate::EngineCfg, tips: &mut crate::review::RepoTips, seat: &SeatRow, attempt: &AttemptRow) -> GearResult<(String, Ts)> {
     // The branch is the project's own (T-253): the template it names the task
     // branch with, `{lane}/t{n}` when it says nothing.
     let conventions = crate::dispatch::conventions(tx, &seat.project);
@@ -44,11 +44,11 @@ fn last_push(tx: &Tx<'_>, seat: &SeatRow, attempt: &AttemptRow) -> GearResult<(S
     let repo = task.and_then(|t| t.repo).or_else(|| project
         .and_then(|p| gear_app::config::parse(&p.config_toml).ok())
         .map(|c| c.repo_of_lane(&seat.name).path));
-    let pushed = repo.and_then(|repo| std::process::Command::new("git")
-        .args(["-C", &repo, "log", "-1", "--format=%ct", &format!("refs/remotes/{remote}/{branch}"), "--"])
-        .output().ok()).filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| s.trim().parse::<Ts>().ok());
+    let pushed = repo.and_then(|repo| {
+        // T-386: the branch's tip comes from one `for-each-ref` per repository
+        // and tick, not from a `git log` per lane.
+        crate::review::repo_tips(tips, cfg, &repo, remote).get(&branch).map(|(_, at)| *at)
+    });
     Ok((branch, pushed.unwrap_or(start).max(start)))
 }
 
@@ -148,7 +148,7 @@ pub fn thinks(store: &mut Store, project: &str, observed: &[SeatObs], now: Ts) -
 /// the captain why within `push_reply_min` (10). Its answer goes to the
 /// captain as an item to read, and the clock restarts at the end of the
 /// window; no answer in time is an urgent item to the captain.
-pub fn tick(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
+pub fn tick(tx: &Tx<'_>, cfg: &crate::EngineCfg, tips: &mut crate::review::RepoTips, project: &str, now: Ts) -> GearResult<()> {
     let conventions = crate::dispatch::conventions(tx, project);
     let interval = i64::from(conventions.push_interval_min.max(1)) * 60;
     let reply = i64::from(conventions.push_reply_min.max(1)) * 60;
@@ -164,7 +164,7 @@ pub fn tick(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
             }
             continue
         };
-        let (branch, push) = last_push(tx, &seat, &attempt)?;
+        let (branch, push) = last_push(tx, cfg, tips, &seat, &attempt)?;
         let base = tx.get_meta(&base_key(&seat.id))?.and_then(|s| s.parse::<Ts>().ok()).unwrap_or(0);
         let asked = tx.get_meta(&reply_key(&seat.id))?.filter(|s| !s.is_empty()).and_then(|s| s.parse::<Ts>().ok());
         if let Some(asked) = asked {
@@ -203,7 +203,7 @@ pub fn tick(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
 
 /// Reserve the interruption before using Herdr: a crash or uncertain response
 /// cannot send repeated escapes. Unreadable session files are not evidence.
-pub fn loops(store: &mut Store, herdr: &mut dyn HerdrAct, project: &str, observed: &[SeatObs], now: Ts) -> GearResult<()> {
+pub fn loops(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &crate::EngineCfg, tips: &mut crate::review::RepoTips, project: &str, observed: &[SeatObs], now: Ts) -> GearResult<()> {
     for obs in observed.iter().filter(|o| o.presence == Presence::Present && o.status == Some(AgentStatus::Working)) {
         let candidate = store.read(|tx| {
             let Some(seat) = tx.get_seat(&obs.seat.id)? else { return Ok(None) };
@@ -216,7 +216,7 @@ pub fn loops(store: &mut Store, herdr: &mut dyn HerdrAct, project: &str, observe
             if modified.is_none_or(|t| now.saturating_sub(t) < LOOP_INTERVAL) { return Ok(None) }
             let last = tx.get_meta(&loop_key(&seat.id))?.and_then(|s| s.parse::<Ts>().ok());
             if last.is_some_and(|t| now.saturating_sub(t) < LOOP_INTERVAL) { return Ok(None) }
-            let (branch, pushed) = last_push(tx, &seat, &attempt)?;
+            let (branch, pushed) = last_push(tx, cfg, tips, &seat, &attempt)?;
             Ok(Some((seat, attempt, binding, branch, now.saturating_sub(pushed) / 60)))
         })?;
         let Some((seat, attempt, binding, branch, minutes)) = candidate else { continue };
@@ -280,6 +280,19 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
     const T: i64 = 1_800_000_000;
     const PANE: &str = "w1:p2";
+
+    /// The engine's own git (T-386: the push clock reads the branch tips
+    /// through it). These tests read real repositories.
+    fn cfg() -> crate::EngineCfg { crate::EngineCfg::default() }
+
+    /// One read of the branch tips for this step (a tick shares one map, T-386).
+    fn tick(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
+        super::tick(tx, &cfg(), &mut crate::review::RepoTips::new(), project, now)
+    }
+
+    fn loops(store: &mut Store, herdr: &mut dyn HerdrAct, project: &str, observed: &[SeatObs], now: Ts) -> GearResult<()> {
+        super::loops(store, herdr, &cfg(), &mut crate::review::RepoTips::new(), project, observed, now)
+    }
 
     fn world(repo: &str) -> Store {
         let mut s = Store::open_in_memory().unwrap();
