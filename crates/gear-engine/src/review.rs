@@ -686,11 +686,19 @@ struct ReviewTask {
 }
 
 /// The tasks of the project whose attempt was handed in and that no temp seat
-/// is bound to yet.
+/// is bound to yet, the oldest hand-in first.
+///
+/// T-427: the list used to follow the plan rank (`tx.tasks_of_project`), so a
+/// task that stands early in the plan but was handed in last took a free seat
+/// while older hand-ins waited — the user read that as last in, first served
+/// (the other project's T-166/T-168 before T-169/T-170/T-209). The hand-in
+/// time decides now; an attempt with no hand-in time goes after those that
+/// have one, and the plan rank, then the task id, break a tie.
 fn tasks_to_review(store: &mut Store, project: &str) -> GearResult<Vec<ReviewTask>> {
     store.read(|tx| {
         let seats = tx.seats_of_project(project)?;
-        let mut wanted = Vec::new();
+        // (hand-in time, plan rank, task id, job), ordered at the end.
+        let mut wanted: Vec<(Option<Ts>, i64, ReviewTask)> = Vec::new();
         for task in tx.tasks_of_project(project)? {
             // The lane handed a result in: the task is Verifying and its
             // attempt is Submitted with a candidate.
@@ -732,15 +740,26 @@ fn tasks_to_review(store: &mut Store, project: &str) -> GearResult<Vec<ReviewTas
             if already_reviewing {
                 continue;
             }
-            wanted.push(ReviewTask {
-                task: task.id.clone(),
-                attempt: attempt.n,
-                writer: attempt.seat.clone(),
-                lane: task.lane.clone().unwrap_or_default(),
-                candidate,
-            });
+            let handed_in = tx.attempt_times(project, &task.id, attempt.n)?.handed_in;
+            wanted.push((
+                handed_in,
+                task.rank,
+                ReviewTask {
+                    task: task.id.clone(),
+                    attempt: attempt.n,
+                    writer: attempt.seat.clone(),
+                    lane: task.lane.clone().unwrap_or_default(),
+                    candidate,
+                },
+            ));
         }
-        Ok(wanted)
+        wanted.sort_by(|a, b| {
+            a.0.is_none().cmp(&b.0.is_none())
+                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.task.cmp(&b.2.task))
+        });
+        Ok(wanted.into_iter().map(|(_, _, job)| job).collect())
     })
 }
 
@@ -2531,7 +2550,7 @@ mod tests {
     use super::*;
     use gear_herdr::fake::{Call, FakeHerdr};
     use gear_model::{OpState, TaskState};
-    use gear_store::{testing, BindingRow, BindingStatus, ContractRow, ProjectRow, TaskRow};
+    use gear_store::{testing, AttemptRow, BindingRow, BindingStatus, ContractRow, ProjectRow, TaskRow};
 
     const T0: i64 = 1_800_000_000;
 
@@ -6267,6 +6286,141 @@ profile = "opencode"
             vec!["p:review-1".to_string()],
             "the verdict of the rework parks the seat"
         );
+    }
+
+    /// A second hand-in beside the fixture's `T-1` (handed in at `T0`): the
+    /// task is `Verifying` with a `Submitted` attempt, handed in at `at`
+    /// (`None`: the attempt has no recorded hand-in time — a legacy row).
+    fn another_hand_in(store: &mut Store, task: &str, rank: i64, at: Option<Ts>) {
+        store
+            .write(|tx| {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: task.into(),
+                    rank,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: task.into(),
+                    version: 1,
+                    goal: "the goal".into(),
+                    accept: "the accept criteria".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0,
+                    mechanical: None,
+                })?;
+                match at {
+                    Some(at) => {
+                        gear_app::tasks::start_attempt(tx, "p", task, "p:heat", 1, at)?;
+                        gear_app::tasks::on_delivery_confirmed(tx, "p", task, 1, at)?;
+                        gear_app::tasks::submit_result(
+                            tx,
+                            "p",
+                            task,
+                            1,
+                            1,
+                            "def5678",
+                            "ops/reports/T-2.md",
+                            at,
+                        )?;
+                    }
+                    None => {
+                        tx.insert_attempt(&AttemptRow {
+                            session_ref: None,
+                            session_cli: None,
+                            session_action: None,
+                            sent_at: None,
+                            project: "p".into(),
+                            task: task.into(),
+                            n: 1,
+                            seat: "p:heat".into(),
+                            generation: 1,
+                            contract_version: 1,
+                            adopted_version: 1,
+                            pending_update: None,
+                            state: AttemptState::Submitted,
+                            candidate: Some("def5678".into()),
+                            report: None,
+                            safe_point: None,
+                            started: T0,
+                            updated: T0,
+                        })?;
+                        let mut row = tx.get_task("p", task)?.unwrap();
+                        row.state = TaskState::Verifying;
+                        tx.update_task(&row)?;
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// The task the one free reviewer seat served in a tick: the seat's job.
+    fn served(store: &mut Store) -> String {
+        let mut herdr = FakeHerdr::new();
+        let report = start_reviews(store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 100).unwrap();
+        assert_eq!(report.started.len(), 1, "one free seat, one review starts: {report:?}");
+        let seat = store.read(|tx| tx.get_seat(&report.started[0])).unwrap().unwrap();
+        let task = seat.task_id.clone().expect("the started reviewer is bound to its hand-in");
+        assert_eq!(report.waiting, vec![other(&task)], "the other hand-in waits: {report:?}");
+        task
+    }
+
+    /// The task of `T-1`/`T-2` that is not `task`.
+    fn other(task: &str) -> String {
+        if task == "T-1" { "T-2".to_string() } else { "T-1".to_string() }
+    }
+
+    /// T-427: the seat goes to the oldest hand-in, not to the task that stands
+    /// earliest in the plan — `T-2` stands later than `T-1` and was handed in
+    /// first (the other project's T-169 waited behind T-166).
+    #[test]
+    fn the_oldest_hand_in_takes_the_free_seat() {
+        let mut store = world(CONFIG);
+        another_hand_in(&mut store, "T-2", 2, Some(T0 - 60));
+        assert_eq!(served(&mut store), "T-2", "the older hand-in is served first");
+    }
+
+    /// T-427: two hand-ins at the same time fall back to the plan order.
+    #[test]
+    fn equal_hand_in_times_fall_back_to_the_plan() {
+        let mut store = world(CONFIG);
+        another_hand_in(&mut store, "T-2", 2, Some(T0));
+        assert_eq!(served(&mut store), "T-1", "the plan order breaks the tie");
+    }
+
+    /// T-427: an attempt without a hand-in time goes after those that have
+    /// one, whatever its rank.
+    #[test]
+    fn an_attempt_without_a_hand_in_time_loses() {
+        let mut store = world(CONFIG);
+        {
+            let mut row = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+            row.rank = 2;
+            store.write(|tx| tx.update_task(&row)).unwrap();
+        }
+        another_hand_in(&mut store, "T-2", 1, None);
+        assert_eq!(served(&mut store), "T-1", "the recorded hand-in comes first");
     }
 
 }

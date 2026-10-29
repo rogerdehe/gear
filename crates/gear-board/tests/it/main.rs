@@ -7,6 +7,7 @@ mod forecast_contract;
 mod golden_contract;
 mod golden_fixture;
 mod graph_contract;
+mod header_contract;
 mod idle_contract;
 mod measures_contract;
 mod overlaps_contract;

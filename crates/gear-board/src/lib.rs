@@ -237,6 +237,10 @@ pub struct ProjectBoard {
     /// decisions on its `done`, `bar` and `eta`, oldest first; empty without
     /// a measured voyage. The S4 header draws them red.
     pub goal_changes: Vec<GoalChangeBoard>,
+    /// The goal check of the shown voyage (T-354): each clause of the goal and
+    /// whether it is met. The plan's clauses when the store has them, else the
+    /// clauses of the voyage's done sentence, every one unmet.
+    pub goal_check: Vec<(bool, String)>,
     /// The friction reports the agents left (§6.1), open and closed.
     pub frictions: Vec<FrictionBoard>,
     /// The tasks that overlap the integration branch of their repo (T-188):
@@ -997,6 +1001,12 @@ pub fn project_for(
         project,
         workload.as_ref().map(|voyage| voyage.milestone.as_str()),
     )?;
+    // The goal check of the shown voyage (T-354): the plan's own clauses, else
+    // the clauses of its done sentence, unmet.
+    let goal_check = match shown.as_ref() {
+        Some(entry) => goal_check_of(tx, project, &entry.milestone, entry.done.as_deref())?,
+        None => Vec::new(),
+    };
     // The friction reports are the ones of the measured voyage too (T-263).
     let frictions = frictions_of(
         tx,
@@ -1052,6 +1062,7 @@ pub fn project_for(
         quota: quota_readings(tx, project)?,
         decisions,
         goal_changes,
+        goal_check,
         frictions,
         // The overlaps with the integration branch (T-188): information
         // lines, never items that wait for the captain.
@@ -1617,6 +1628,48 @@ fn goal_changes_of(
         .collect())
 }
 
+/// The goal check of a voyage (T-354): the meta `goal-check:<project>:<milestone>`
+/// holds the plan's clauses as a JSON array of `{"met": bool, "text": str}`.
+/// Without it the clauses of the voyage's done sentence stand in, every one
+/// unmet: the store that keeps no check knows of no clause that is met.
+fn goal_check_of(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+    done: Option<&str>,
+) -> GearResult<Vec<(bool, String)>> {
+    if let Some(raw) = tx.get_meta(&format!("goal-check:{project}:{milestone}"))? {
+        if let Some(check) = parse_goal_check(&raw) {
+            return Ok(check);
+        }
+    }
+    Ok(done_clauses(done).into_iter().map(|text| (false, text)).collect())
+}
+
+/// The clauses of a goal check written in the meta: a JSON array of
+/// `{"met": bool, "text": str}`. `None` when the text is not one.
+fn parse_goal_check(raw: &str) -> Option<Vec<(bool, String)>> {
+    let clauses: Vec<serde_json::Value> = serde_json::from_str(raw).ok()?;
+    let mut check = Vec::with_capacity(clauses.len());
+    for clause in clauses {
+        let met = clause.get("met")?.as_bool()?;
+        let text = clause.get("text")?.as_str()?.to_string();
+        check.push((met, text));
+    }
+    Some(check)
+}
+
+/// The clauses of a done sentence: split on `;`, trimmed, empty ones left out.
+pub(crate) fn done_clauses(done: Option<&str>) -> Vec<String> {
+    let Some(done) = done else {
+        return Vec::new();
+    };
+    done.split(';')
+        .map(|clause| clause.trim().to_string())
+        .filter(|clause| !clause.is_empty())
+        .collect()
+}
+
 /// The friction reports of the voyage, as the board shows them (§6.1): the
 /// open ones and the closed ones, oldest first.
 ///
@@ -2168,6 +2221,13 @@ pub fn run_with(
                         }
                     }
                     screen.selected = 0;
+                    panel = None;
+                    break;
+                }
+                // The `d` key unfolds the header and folds it again (T-354):
+                // the tab and the selection stay where they were.
+                Event::Key('d') | Event::Key('D') => {
+                    screen.detail = !screen.detail;
                     panel = None;
                     break;
                 }

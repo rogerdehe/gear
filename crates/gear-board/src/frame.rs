@@ -589,9 +589,22 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
         row += 1;
     }
 
-    // The tab row follows the box directly: the four tabs, the open one in
-    // reverse video, the others dim.
-    let tab_row = row;
+    // The header's rows under the box (README changes 3, 4, 6 and 14): folded,
+    // three rows with the goal check, the milestone the voyage is on, the time
+    // against the plan and the tasks (T-354); unfolded with `d`, one row per
+    // clause and per station, the time and the tasks with their legends
+    // (T-355).
+    if let Some(project) = project {
+        row = if screen.detail {
+            unfolded_rows(canvas, board, project, row)
+        } else {
+            folded_rows(canvas, board, project, row)
+        };
+    }
+
+    // The tab row follows after one blank row: the tab bar draws its frame
+    // around it (T-356), so the blank row is where its top rule goes.
+    let tab_row = row + 1;
     let mut tabs = Vec::new();
     let mut x = 1;
     for tab in Tab::all() {
@@ -607,6 +620,400 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
     }
 
     Layout { top: tab_row + 2, tab_row, tabs, voyages }
+}
+
+/// The numbers the header's time and tasks rows read (T-354), all in
+/// minutes.
+#[derive(Clone, Copy)]
+struct HeaderNumbers {
+    /// The time the voyage used: from its departure to now while it sails, to
+    /// its merge once it landed.
+    used: i64,
+    /// The plan's eta.
+    eta: i64,
+    /// The end the lane forecast expects: the slowest lane's end after what is
+    /// used.
+    expected: i64,
+    /// The voyage still sails.
+    sailing: bool,
+    /// The plan's eta less the expected end (sailing) or the used time
+    /// (landed): never negative when the voyage is ahead of its plan.
+    diff: i64,
+    /// The voyage's tasks: the cancelled ones are not work.
+    tasks: usize,
+    /// The tasks merged, in progress and not started.
+    merged: usize,
+    going: usize,
+    waiting: usize,
+}
+
+/// The header's numbers, all in minutes: the time used, the plan's eta and the
+/// end the lane forecast expects (T-354).
+fn header_numbers(board: &Board, project: &ProjectBoard) -> HeaderNumbers {
+    let voyage = project.shown.as_ref();
+    let used = match voyage {
+        Some(voyage) => {
+            let departure = voyage.departure.unwrap_or(board.now);
+            // A landed voyage's time is the flight from departure to its
+            // merge; the one with no merge on record is measured against now.
+            let end = if voyage.sailing {
+                board.now
+            } else {
+                voyage.ended.unwrap_or(board.now)
+            };
+            (end - departure).max(0) / 60
+        }
+        None => 0,
+    };
+    let eta = project
+        .workload
+        .as_ref()
+        .and_then(|voyage| voyage.eta.as_deref())
+        .map(duration_minutes)
+        .unwrap_or(0);
+    let expected = project
+        .forecast
+        .iter()
+        .map(|end| end.end_min)
+        .max()
+        .map(|end| used + end)
+        .unwrap_or(used);
+    let sailing = voyage.is_some_and(|voyage| voyage.sailing);
+    let diff = if sailing { eta - expected } else { eta - used };
+
+    // The tasks of the shown voyage: the cancelled ones are not work, the
+    // merged ones, the waiting ones and the rest make the three parts.
+    let mut tasks = 0usize;
+    let mut merged = 0usize;
+    let mut waiting = 0usize;
+    for task in project.lanes.iter().flat_map(|lane| lane.tasks.iter()) {
+        if task.state == gear_model::TaskState::Cancelled {
+            continue;
+        }
+        tasks += 1;
+        match task.stage {
+            graph::Stage::Merged => merged += 1,
+            graph::Stage::Deps | graph::Stage::Queued => waiting += 1,
+            _ => {}
+        }
+    }
+    let going = tasks.saturating_sub(merged + waiting);
+
+    HeaderNumbers { used, eta, expected, sailing, diff, tasks, merged, going, waiting }
+}
+
+/// The time bar of `n` cells (the prototype's `bar`, T-354): the cells used,
+/// then the plan's end and, while the voyage sails, the expected finish.
+fn time_bar(n: usize, numbers: &HeaderNumbers) -> String {
+    let HeaderNumbers { used, eta, expected, sailing, .. } = *numbers;
+    let span = eta.max(expected).max(used).max(1) as usize;
+    let filled = (((used.max(0) as f64) / span as f64) * n as f64)
+        .round_ties_even()
+        .max(0.0) as usize;
+    let mut cells: Vec<char> = std::iter::repeat('░').take(n).collect();
+    for cell in cells.iter_mut().take(filled.min(n)) {
+        *cell = '█';
+    }
+    cells[((eta.max(0) as usize * n) / span).min(n - 1)] = '│';
+    if sailing {
+        cells[((expected.max(0) as usize * n) / span).min(n - 1)] = '◆';
+    }
+    cells.into_iter().collect()
+}
+
+/// The folded header's three rows, from the row after the goal box: the goal
+/// check and the milestone, the time against the plan and the tasks, and the
+/// key that unfolds them (T-354; README changes 3, 4, 6 and 14).
+///
+/// Every text is put at the prototype's column, a later put over an earlier
+/// one, as the prototype paints: the time's words run into the tasks' column
+/// on a narrow terminal. It returns the row after the three rows.
+fn folded_rows(
+    canvas: &mut Canvas,
+    board: &Board,
+    project: &ProjectBoard,
+    mut row: usize,
+) -> usize {
+    let width = canvas.width;
+    let numbers = header_numbers(board, project);
+    let HeaderNumbers { used, eta, expected, sailing, diff, tasks, merged, going, waiting } =
+        numbers;
+
+    // The folded header's bar: the prototype's shorter one.
+    let n = (width.saturating_sub(60) / 2).clamp(20, 40);
+    let bar = time_bar(n, &numbers);
+    let a = merged * n / tasks.max(1);
+    let b = going * n / tasks.max(1);
+
+    let mx = (width / 2 + 10).max(90);
+    let time_style = if diff >= 0 { Style::fg(Color::Ok) } else { Style::fg(Color::Bad) };
+
+    // Row 1: the goal check and the milestone the voyage is on.
+    canvas.put_styled(1, row, "Goal check", Style::bold());
+    let met = project.goal_check.iter().filter(|(met, _)| *met).count();
+    let all = project.goal_check.len();
+    canvas.put_styled(
+        15,
+        row,
+        &format!("{met} of {all} met"),
+        Style::fg(if met == all { Color::Ok } else { Color::Bad }),
+    );
+    if let Some((_, first)) = project.goal_check.iter().find(|(met, _)| !*met) {
+        canvas.put_styled(30, row, &format!("next: {first}"), Style::fg(Color::Bad));
+    }
+    canvas.put_styled(mx, row, "Milestone", Style::bold());
+    if project.stations.is_empty() {
+        canvas.put_styled(mx + 11, row, "none set", Style::fg(Color::Dim));
+    } else {
+        let reached = project
+            .stations
+            .iter()
+            .filter(|station| station.state == crate::stations::StationState::Reached)
+            .count();
+        let now = match project
+            .stations
+            .iter()
+            .find(|station| station.state == crate::stations::StationState::Now)
+        {
+            Some(station) => format!(
+                "▶ {} {} ({reached} of {} reached)",
+                station.id,
+                station.needs,
+                project.stations.len()
+            ),
+            None => format!("✔ all {} reached", project.stations.len()),
+        };
+        canvas.put_styled(mx + 11, row, &now, Style::bold());
+    }
+    row += 1;
+
+    // Row 2: the time against the plan and the tasks, in their three parts.
+    canvas.put_styled(1, row, "Time", Style::bold());
+    canvas.put_styled(15, row, &bar, time_style);
+    let short = if sailing {
+        if diff >= 0 {
+            format!("expected {} of {}, {} ahead", hm(expected), hm(eta), hm(diff))
+        } else {
+            format!("expected {} of {}, {} behind", hm(expected), hm(eta), hm(-diff))
+        }
+    } else if diff >= 0 {
+        format!("took {} of {}, {} under", hm(used), hm(eta), hm(diff))
+    } else {
+        format!("took {} of {}, {} over", hm(used), hm(eta), hm(-diff))
+    };
+    canvas.put_styled(16 + n, row, &short, time_style);
+    canvas.put_styled(mx, row, "Tasks", Style::bold());
+    canvas.put_styled(mx + 11, row, &"█".repeat(a), Style::fg(Color::Ok));
+    canvas.put_styled(mx + 11 + a, row, &"▓".repeat(b), Style::fg(Color::Warn));
+    canvas.put_styled(mx + 11 + a + b, row, &"░".repeat(n - a - b), Style::fg(Color::Dim));
+    canvas.put_styled(
+        mx + 12 + n,
+        row,
+        &format!("{merged}/{tasks} merged · {going} going · {waiting} waiting"),
+        Style::PLAIN,
+    );
+    row += 1;
+
+    // Row 3: the key that unfolds the header.
+    canvas.put_styled(
+        1,
+        row,
+        "d: unfold the goal check, milestones, time and tasks",
+        Style::fg(Color::Dim),
+    );
+    row + 1
+}
+
+/// The unfolded header's rows, from the row after the goal box: every clause of
+/// the goal check, every station of the voyage, the time against the plan and
+/// the tasks with their legends, and the key that folds them again (T-355;
+/// README changes 3, 4, 6 and 14).
+///
+/// The bar is the prototype's wider one; the labels sit at column 1 and every
+/// row's text at 15, as the prototype paints them. It returns the row after the
+/// last one.
+fn unfolded_rows(
+    canvas: &mut Canvas,
+    board: &Board,
+    project: &ProjectBoard,
+    mut row: usize,
+) -> usize {
+    let width = canvas.width;
+    let numbers = header_numbers(board, project);
+    let HeaderNumbers { used, eta, expected, sailing, diff, tasks, merged, going, waiting } =
+        numbers;
+
+    // The unfolded header's bar: the prototype's wider one.
+    let n = width.saturating_sub(95).clamp(20, 50);
+    let bar = time_bar(n, &numbers);
+    let a = merged * n / tasks.max(1);
+    let b = going * n / tasks.max(1);
+    let time_style = if diff >= 0 { Style::fg(Color::Ok) } else { Style::fg(Color::Bad) };
+
+    // The goal check: every clause of the voyage's goal, met or not yet.
+    canvas.put_styled(1, row, "Goal check", Style::bold());
+    for (met, clause) in &project.goal_check {
+        let (mark, style) = if *met {
+            ('✔', Style::fg(Color::Ok))
+        } else {
+            ('✗', Style::fg(Color::Bad))
+        };
+        canvas.put_styled(15, row, &format!("{mark} {clause}"), style);
+        row += 1;
+    }
+
+    // The milestones: every station of the voyage, how far it is and when the
+    // plan has it (T-355 v3). A reached station has the merge that reached it;
+    // a station ahead sits between the time used and the projected finish, by
+    // the minutes it has left.
+    canvas.put_styled(1, row, "Milestones", Style::bold());
+    let projected = project
+        .workload
+        .as_ref()
+        .and_then(|voyage| voyage.projected_min);
+    let left_all: i64 = project.stations.iter().map(|station| station.left_min).sum();
+    let mut left_upto = 0i64;
+    for station in &project.stations {
+        left_upto += station.left_min;
+        let what = format!("{} {}", station.id, station.needs);
+        let planned = projected
+            .filter(|_| left_all > 0)
+            .map(|projected| used + ((projected - used) * left_upto).div_euclid(left_all));
+        let (text, style) = match (station.state, station.reached_at_min, planned) {
+            (crate::stations::StationState::Reached, Some(at), _) => {
+                (format!("✔ {what} — reached at {}", hm(at)), Style::fg(Color::Ok))
+            }
+            (crate::stations::StationState::Reached, None, _) => {
+                (format!("✔ {what} — reached"), Style::fg(Color::Ok))
+            }
+            (crate::stations::StationState::Now, _, Some(at)) => {
+                (format!("▶ {what} — now, planned by {}", hm(at)), Style::bold())
+            }
+            (crate::stations::StationState::Now, _, None) => {
+                (format!("▶ {what} — now"), Style::bold())
+            }
+            (_, _, Some(at)) => {
+                (format!("· {what} — planned by {}", hm(at)), Style::fg(Color::Dim))
+            }
+            (_, _, None) => (format!("· {what}"), Style::fg(Color::Dim)),
+        };
+        canvas.put_styled(15, row, &text, style);
+        row += 1;
+    }
+
+    // The time against the plan in words, and the key of the bar's marks.
+    canvas.put_styled(1, row, "Time", Style::bold());
+    canvas.put_styled(15, row, &bar, time_style);
+    let slow = project
+        .forecast
+        .iter()
+        .max_by_key(|end| end.end_min)
+        .map(|end| end.lane.clone())
+        .unwrap_or_default();
+    let when = if sailing {
+        if diff >= 0 {
+            format!(
+                "used {} · planned {} · expected {} (slowest lane: {slow}), {} ahead of plan",
+                hm(used),
+                hm(eta),
+                hm(expected),
+                hm(diff)
+            )
+        } else {
+            format!(
+                "used {} · planned {} · expected {} (slowest lane: {slow}), {} behind plan",
+                hm(used),
+                hm(eta),
+                hm(expected),
+                hm(-diff)
+            )
+        }
+    } else if diff >= 0 {
+        format!("took {} · planned {} · {} under plan", hm(used), hm(eta), hm(diff))
+    } else {
+        format!("took {} · planned {} · {} over plan", hm(used), hm(eta), hm(-diff))
+    };
+    canvas.put_styled(17 + n, row, &when, Style::bold());
+    row += 1;
+    canvas.put_styled(
+        15,
+        row,
+        "█ used   ◆ expected finish   │ planned end",
+        Style::fg(Color::Dim),
+    );
+    row += 1;
+
+    // The tasks of the voyage in three parts, the ones that moved out named
+    // apart, and the key of the bar's marks.
+    canvas.put_styled(1, row, "Tasks", Style::bold());
+    canvas.put_styled(15, row, &"█".repeat(a), Style::fg(Color::Ok));
+    canvas.put_styled(15 + a, row, &"▓".repeat(b), Style::fg(Color::Warn));
+    canvas.put_styled(15 + a + b, row, &"░".repeat(n - a - b), Style::fg(Color::Dim));
+    let mut words = format!(
+        "{merged} of {tasks} merged · {going} in progress · {waiting} not started"
+    );
+    if !project.moved_out.is_empty() {
+        let moved: Vec<&str> = project.moved_out.iter().map(|(task, _)| task.as_str()).collect();
+        words.push_str(&format!(" · moved out: {}", moved.join(", ")));
+    }
+    canvas.put_styled(17 + n, row, &words, Style::bold());
+    row += 1;
+    canvas.put_styled(
+        15,
+        row,
+        "█ merged   ▓ in progress   ░ not started",
+        Style::fg(Color::Dim),
+    );
+    row += 1;
+
+    // The key that folds the header again, at the prototype's column.
+    canvas.put_styled(
+        width.saturating_sub(20),
+        row,
+        "d: fold",
+        Style::fg(Color::Dim),
+    );
+    row + 1
+}
+
+/// Minutes as the header reads them: always the hours, the minutes in two
+/// digits (`0h25m`; T-354). The board's other texts keep [`hours`].
+fn hm(minutes: i64) -> String {
+    format!("{}h{:02}m", minutes / 60, minutes % 60)
+}
+
+/// The minutes of a voyage's eta, as the plan writes it (`8h`, `1d 4h`,
+/// `90m`): the units of `eta_seconds` in `gear-app`. An eta the board cannot
+/// read is no time at all.
+fn duration_minutes(text: &str) -> i64 {
+    let mut rest = text.trim();
+    let mut seconds = 0.0;
+    while !rest.is_empty() {
+        let end = rest
+            .find(|character: char| !character.is_ascii_digit() && character != '.')
+            .unwrap_or(rest.len());
+        let Ok(number) = rest[..end].parse::<f64>() else {
+            return 0;
+        };
+        rest = rest[end..].trim_start();
+        let end = rest
+            .find(|character: char| !character.is_ascii_alphabetic())
+            .unwrap_or(rest.len());
+        let factor = match rest[..end].to_ascii_lowercase().as_str() {
+            "d" | "day" | "days" => 86_400.0,
+            "h" | "hr" | "hrs" | "hour" | "hours" => 3_600.0,
+            "m" | "min" | "mins" | "minute" | "minutes" => 60.0,
+            "s" | "sec" | "secs" | "second" | "seconds" => 1.0,
+            _ => return 0,
+        };
+        seconds += number * factor;
+        rest = rest[end..].trim_start();
+    }
+    if seconds.is_finite() && seconds > 0.0 {
+        (seconds / 60.0).ceil() as i64
+    } else {
+        0
+    }
 }
 
 /// The layout of the head of the board, drawn on a scratch canvas: the rows
@@ -1252,7 +1659,8 @@ fn view_now(
     rest.push(Line::styled("DONE SENTENCE", Style::bold()));
     // The store keeps the clauses of the done sentence, not whether each one
     // is met: every clause is an open one (the prototype's grey `·`).
-    for clause in done_clauses(project) {
+    let done = project.voyages.first().and_then(|voyage| voyage.done.as_deref());
+    for clause in crate::done_clauses(done) {
         rest.push(Line::styled(format!("  · {clause}"), Style::fg(Color::Dim)));
     }
     for line in &rest {
@@ -1333,20 +1741,6 @@ fn needs_a_look(project: &ProjectBoard) -> Vec<(String, String, String, String)>
         }
     }
     looks
-}
-
-/// The clauses of the done sentence of the voyage.
-fn done_clauses(project: &ProjectBoard) -> Vec<String> {
-    let Some(voyage) = project.voyages.first() else {
-        return Vec::new();
-    };
-    let Some(done) = voyage.done.as_deref() else {
-        return Vec::new();
-    };
-    done.split(';')
-        .map(|clause| clause.trim().to_string())
-        .filter(|clause| !clause.is_empty())
-        .collect()
 }
 
 /// Draw the panel over the frame: a box at the right of the screen, as the
@@ -1591,4 +1985,21 @@ mod tests {
         assert_eq!(canvas.style_at(5, 0), Style::fg(Color::Warn));
         assert_eq!(canvas.text().lines().next().unwrap_or_default(), " M5 y");
     }
+
+    #[test]
+    fn an_eta_reads_in_minutes_and_the_header_reads_it_back_in_hours() {
+        // T-354: the plan's units, as `eta_seconds` in gear-app reads them.
+        assert_eq!(duration_minutes("8h"), 480);
+        assert_eq!(duration_minutes("1d 4h"), 1_680);
+        assert_eq!(duration_minutes("90m"), 90);
+        assert_eq!(duration_minutes("2.5 hours"), 150);
+        // An eta the board cannot read is no time at all.
+        assert_eq!(duration_minutes(""), 0);
+        assert_eq!(duration_minutes("soon"), 0);
+        // The folded header always reads the hours, the minutes in two digits.
+        assert_eq!(hm(0), "0h00m");
+        assert_eq!(hm(25), "0h25m");
+        assert_eq!(hm(346), "5h46m");
+    }
 }
+
