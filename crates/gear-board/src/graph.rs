@@ -11,8 +11,7 @@
 //! what it depends on and what needs it.
 
 use gear_model::{
-    AttemptState, GearResult, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState, TaskState,
-    Ts,
+    AttemptState, GearResult, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState, TaskState, Ts,
 };
 use gear_store::{AttemptRow, AttemptTimes, OpRow, Tx};
 
@@ -45,21 +44,9 @@ impl History {
 
     /// When the task started, when it was handed in and when it was merged.
     fn span(&self) -> (Option<Ts>, Option<Ts>, Option<Ts>) {
-        let start = self
-            .times
-            .iter()
-            .filter_map(|(_, times)| times.started)
-            .min();
-        let handed_in = self
-            .times
-            .iter()
-            .filter_map(|(_, times)| times.handed_in)
-            .max();
-        let merged = self
-            .times
-            .iter()
-            .filter_map(|(_, times)| times.merged)
-            .max();
+        let start = self.times.iter().filter_map(|(_, times)| times.started).min();
+        let handed_in = self.times.iter().filter_map(|(_, times)| times.handed_in).max();
+        let merged = self.times.iter().filter_map(|(_, times)| times.merged).max();
         (start, handed_in, merged)
     }
 }
@@ -153,11 +140,7 @@ impl Stage {
         match task.stage {
             Stage::Deps => format!(
                 "waits for {} to merge",
-                if task.deps.is_empty() {
-                    "-".to_string()
-                } else {
-                    task.deps.join(", ")
-                }
+                if task.deps.is_empty() { "-".to_string() } else { task.deps.join(", ") }
             ),
             Stage::Queued => "queued".to_string(),
             Stage::Delivered => "delivered, not started".to_string(),
@@ -269,9 +252,7 @@ pub fn lanes(tx: &Tx<'_>, project: &str) -> GearResult<Vec<String>> {
     Ok(tx
         .seats_of_project(project)?
         .into_iter()
-        .filter(|seat| {
-            seat.role == gear_model::SeatRole::Lane && seat.state != gear_model::SeatState::Retired
-        })
+        .filter(|seat| seat.role == gear_model::SeatRole::Lane && seat.state != gear_model::SeatState::Retired)
         .map(|seat| seat.name)
         .collect())
 }
@@ -306,15 +287,13 @@ fn stage_of(tx: &Tx<'_>, project: &str, task: &gear_store::TaskRow) -> GearResul
             if passed {
                 // An accepted task waits for its merge: the merge op says
                 // where it is.
-                return Ok(
-                    match newest_merge_op(tx, project, &task.id)?.map(|op| op.state) {
-                        Some(OpState::Failed) => Stage::MergeFailed,
-                        Some(OpState::Executing | OpState::Submitted | OpState::Unknown) => {
-                            Stage::Merging
-                        }
-                        _ => Stage::Passed,
-                    },
-                );
+                return Ok(match newest_merge_op(tx, project, &task.id)?.map(|op| op.state) {
+                    Some(OpState::Failed) => Stage::MergeFailed,
+                    Some(OpState::Executing | OpState::Submitted | OpState::Unknown) => {
+                        Stage::Merging
+                    }
+                    _ => Stage::Passed,
+                });
             }
             if tx.get_review_verdict(project, &task.id, a.n)?.is_some() {
                 // The reviewer handed its verdict in: the captain decides.
@@ -329,28 +308,20 @@ fn stage_of(tx: &Tx<'_>, project: &str, task: &gear_store::TaskRow) -> GearResul
                 // A reviewer holds the task.
                 return Ok(Stage::Review);
             }
-            let quota_temps = tx
-                .get_project(project)?
-                .map(|row| row.quota_temps)
-                .unwrap_or(0);
+            let quota_temps = tx.get_project(project)?.map(|row| row.quota_temps).unwrap_or(0);
             if quota_temps == 0 {
                 // No reviewer can come: the captain decides.
                 return Ok(Stage::Verdict);
             }
             return Ok(Stage::Handed);
         }
-        if matches!(
-            a.state,
-            AttemptState::Started | AttemptState::Stopped | AttemptState::Unknown
-        ) {
-            let asked = tx
-                .messages_from_since(project, &a.seat, a.started)?
-                .iter()
-                .any(|msg| {
-                    msg.kind == MsgKind::Question
-                        && msg.state == MsgState::Open
-                        && msg.task.as_deref() == Some(task.id.as_str())
-                });
+        if matches!(a.state, AttemptState::Started | AttemptState::Stopped | AttemptState::Unknown)
+        {
+            let asked = tx.messages_from_since(project, &a.seat, a.started)?.iter().any(|msg| {
+                msg.kind == MsgKind::Question
+                    && msg.state == MsgState::Open
+                    && msg.task.as_deref() == Some(task.id.as_str())
+            });
             if asked {
                 return Ok(Stage::Asking);
             }
@@ -360,10 +331,7 @@ fn stage_of(tx: &Tx<'_>, project: &str, task: &gear_store::TaskRow) -> GearResul
             return Ok(Stage::SentBack);
         }
         if a.n > 1
-            && matches!(
-                a.state,
-                AttemptState::Started | AttemptState::Stopped | AttemptState::Unknown
-            )
+            && matches!(a.state, AttemptState::Started | AttemptState::Stopped | AttemptState::Unknown)
         {
             return Ok(Stage::Rework);
         }
@@ -439,10 +407,7 @@ fn actual_of(history: &History, now: Ts) -> (Option<i64>, Option<Ts>) {
 /// `selected` is the row the user has on: its dependencies and the tasks that
 /// wait for it are marked.
 pub fn lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usize>) -> Vec<String> {
-    styled_lines(tasks, lanes, selected)
-        .into_iter()
-        .map(|line| line.text)
-        .collect()
+    styled_lines(tasks, lanes, selected).into_iter().map(|line| line.text).collect()
 }
 
 /// The colour of a stage (the prototype's STAGE_COL).
@@ -482,14 +447,7 @@ impl Columns {
         let lane_x = id_x + id_w;
         // The goal: 35 columns, then a space before the info.
         let info_x = lane_x + lane_w + 36;
-        Columns {
-            step,
-            id_x,
-            lane_x,
-            lane_w,
-            info_x,
-            mark_x: info_x + 33,
-        }
+        Columns { step, id_x, lane_x, lane_w, info_x, mark_x: info_x + 33 }
     }
 
     /// The column of a lane: the first lane at 14, every next one a step
@@ -534,16 +492,8 @@ pub fn styled_lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usiz
                 | Stage::MergeFailed
         );
         if in_review {
-            row.put(
-                9,
-                task.stage.symbol(),
-                Style::fg(task.stage.color()).and_bold(),
-            );
-            row.put(
-                10,
-                &"─".repeat(x.saturating_sub(10)),
-                Style::fg(task.stage.color()),
-            );
+            row.put(9, task.stage.symbol(), Style::fg(task.stage.color()).and_bold());
+            row.put(10, &"─".repeat(x.saturating_sub(10)), Style::fg(task.stage.color()));
         }
         // A lane's line runs while the lane still has tasks below this row.
         for (lane_index, lane) in lanes.iter().enumerate() {
@@ -551,11 +501,7 @@ pub fn styled_lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usiz
                 row.put(columns.lane(lane_index) + 1, "│", lane_style(lane));
             }
         }
-        row.put(
-            x,
-            task.stage.symbol(),
-            Style::fg(task.stage.color()).and_bold(),
-        );
+        row.put(x, task.stage.symbol(), Style::fg(task.stage.color()).and_bold());
         if task.stage == Stage::Merged {
             // The task was merged into dev: the line of the merge.
             row.put(3, "●", Style::fg(Color::Ok).and_bold());
@@ -568,19 +514,10 @@ pub fn styled_lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usiz
                 }
             }
         }
-        row.put(
-            columns.id_x,
-            &task.id,
-            lane_style(&task.lane).reversed_if(picked),
-        );
+        row.put(columns.id_x, &task.id, lane_style(&task.lane).reversed_if(picked));
         row.put(
             columns.lane_x,
-            &format!(
-                "{:<w$}{:<35}",
-                task.lane,
-                cut(&task.title, 34),
-                w = columns.lane_w
-            ),
+            &format!("{:<w$}{:<35}", task.lane, cut(&task.title, 34), w = columns.lane_w),
             Style::PLAIN.reversed_if(picked),
         );
         let info_style = match task.stage {
@@ -628,26 +565,15 @@ pub fn styled_lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usiz
 /// The index of a lane in the columns; a lane that is not a column (a task of
 /// a lane that is retired) goes to the last column.
 fn lane_index(lanes: &[String], lane: &str) -> usize {
-    lanes
-        .iter()
-        .position(|name| name == lane)
-        .unwrap_or(lanes.len().saturating_sub(1))
+    lanes.iter().position(|name| name == lane).unwrap_or(lanes.len().saturating_sub(1))
 }
 
 /// The text of the info column: what happened to the task.
 fn info(task: &GraphTask) -> String {
     let estimate = task.est_min.unwrap_or(0);
     let actual = task.actual_min.unwrap_or(0);
-    let time = if actual > 0 {
-        format!("{actual}/{estimate}m")
-    } else {
-        format!("{estimate}m")
-    };
-    let rounds = if task.rounds > 1 {
-        format!(" · {} rounds", task.rounds)
-    } else {
-        String::new()
-    };
+    let time = if actual > 0 { format!("{actual}/{estimate}m") } else { format!("{estimate}m") };
+    let rounds = if task.rounds > 1 { format!(" · {} rounds", task.rounds) } else { String::new() };
     match task.stage {
         Stage::Merged => {
             let merged = match task.finished {
@@ -677,10 +603,7 @@ fn info(task: &GraphTask) -> String {
 /// The task panel: the rounds of the task, what it depends on, what needs
 /// it.
 pub fn panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResult<Vec<String>> {
-    Ok(styled_panel(tx, project, task, now)?
-        .into_iter()
-        .map(|line| line.text)
-        .collect())
+    Ok(styled_panel(tx, project, task, now)?.into_iter().map(|line| line.text).collect())
 }
 
 /// The colour of a task's state in a panel: the stage colours of the graph.
@@ -696,9 +619,7 @@ fn state_color(state: TaskState) -> Color {
 /// The task panel, in the prototype's colours.
 pub fn styled_panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResult<Vec<Line>> {
     let Some(row) = tx.get_task(project, task)? else {
-        return Ok(vec![Line::plain(format!(
-            "{task} is not a task of {project}"
-        ))]);
+        return Ok(vec![Line::plain(format!("{task} is not a task of {project}"))]);
     };
     let history = History::of(tx, project, task)?;
     let order = lanes(tx, project)?;
@@ -731,11 +652,7 @@ pub fn styled_panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResu
     let over = estimate > 0 && actual > estimate;
     lines.push(Line::styled(
         format!("estimate {estimate}m · actual {actual}m"),
-        if over {
-            Style::fg(Color::Warn)
-        } else {
-            Style::PLAIN
-        },
+        if over { Style::fg(Color::Warn) } else { Style::PLAIN },
     ));
     lines.push(Line::new());
     lines.push(Line::styled("ROUNDS", Style::bold()));
@@ -787,11 +704,8 @@ pub fn styled_panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResu
                 format!("{}", attempt.n)
             )));
             if let Some(verdict) = tx.get_review_verdict(project, task, attempt.n)? {
-                let (outcome, color) = if verdict.passed {
-                    ("pass", Color::Ok)
-                } else {
-                    ("fail: rework", Color::Warn)
-                };
+                let (outcome, color) =
+                    if verdict.passed { ("pass", Color::Ok) } else { ("fail: rework", Color::Warn) };
                 lines.push(
                     Line::plain(format!(
                         "  review {:<7} {:<6}          ",
@@ -842,10 +756,7 @@ pub fn styled_panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResu
 /// One line of the "depends on" list.
 fn dependency_line(tx: &Tx<'_>, project: &str, dep: &str) -> GearResult<Line> {
     let Some(row) = tx.get_task(project, dep)? else {
-        return Ok(Line::styled(
-            format!("  {dep} (unknown)"),
-            Style::fg(Color::Dim),
-        ));
+        return Ok(Line::styled(format!("  {dep} (unknown)"), Style::fg(Color::Dim)));
     };
     Ok(Line::styled(
         format!(
@@ -861,8 +772,7 @@ fn dependency_line(tx: &Tx<'_>, project: &str, dep: &str) -> GearResult<Line> {
 
 /// The goal of a task (its title).
 fn goal_of(tx: &Tx<'_>, project: &str, task: &gear_store::TaskRow) -> GearResult<String> {
-    Ok(tx
-        .get_contract(project, &task.id, task.contract_version)?
+    Ok(tx.get_contract(project, &task.id, task.contract_version)?
         .map(|contract| contract.goal)
         .unwrap_or_default())
 }
@@ -901,9 +811,7 @@ struct Row {
 
 impl Row {
     fn new(width: usize) -> Row {
-        Row {
-            cells: vec![(' ', Style::PLAIN); width],
-        }
+        Row { cells: vec![(' ', Style::PLAIN); width] }
     }
 
     /// Write a text at a column, in a style.

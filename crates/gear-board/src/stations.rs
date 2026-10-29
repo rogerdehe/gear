@@ -46,7 +46,11 @@ pub struct StationProgress {
 ///
 /// The voyage's scope is its tasks whose state is not Draft, Cancelled or
 /// Failed (the rule of `crates/gear-app/src/station.rs`).
-pub fn progress(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<Vec<StationProgress>> {
+pub fn progress(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+) -> GearResult<Vec<StationProgress>> {
     let stations = stations_of(tx, project, milestone)?;
     if stations.is_empty() {
         return Ok(Vec::new());
@@ -128,7 +132,11 @@ pub fn course(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<String>
 /// The one text every captain output uses: the voyage's goal, its bar and
 /// where the voyage stands. None when the voyage is missing or its `done` is
 /// empty.
-pub fn goal_text(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<Option<String>> {
+pub fn goal_text(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+) -> GearResult<Option<String>> {
     let Some(voyage) = tx.get_voyage(project, milestone)? else {
         return Ok(None);
     };
@@ -184,7 +192,11 @@ fn left_in_voyage(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<usi
 /// `voyage-stations:<project>:<milestone>` holds one `<id>: <needs>` line per
 /// station. The store function is used once it lands; the key and its format
 /// are its own.
-fn stations_of(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<Vec<(String, String)>> {
+fn stations_of(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+) -> GearResult<Vec<(String, String)>> {
     let raw = tx
         .get_meta(&format!("voyage-stations:{project}:{milestone}"))?
         .unwrap_or_default();
