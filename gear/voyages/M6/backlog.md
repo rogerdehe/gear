@@ -81,3 +81,6 @@
 
 ## A delivery marked submitted never reaches the composer
 - 2026-10-29 M5 (both projects): our hull showed "Continue T-425" typed with no Enter; the other project's review-2 and review-3 sat at empty Codex composers with their direction-check deliveries recorded as submitted, until the captain nudged them to run `gear`. The engine should confirm a delivery by the agent turning busy and resubmit within a bounded time, not wait for the stall item.
+
+## False stall items on a delivery into a busy lane
+- 2026-10-29 M5 (both projects, about ten today: our M-6054, M-6089, M-6121, M-6144; the other project's M-2782, M-2797, M-2809): right after a hand-in the engine delivers the next task while the lane is still ending its turn. The confirmation looks for the agent turning busy, which a busy agent never does, so the window ends unconfirmed, crates/gear-engine/src/ops.rs (about line 947) flags the seat, and the item says "delivery … 0 min, no check-in this generation"; it resolves itself once the lane reads the queued text. A delivery into a working agent should be confirmed by the attempt's first check-in (or the agent's next idle-to-busy turn) within a bounded window before any item opens.
