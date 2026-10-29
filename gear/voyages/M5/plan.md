@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=807 -->
+<!-- gear-plan project=gear base=808 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -167,6 +167,7 @@ eta: 21h
 - station M-5905: keep course 1260 min in (the eta), 146 done, 18 left; hull 194 min, mast 159 min. The merge queue is down to two since T-422 gave the gate its floor and normal priority; the reworks are small (10-15 min each) and go first; the board chains branch from their passed links; the slowest remaining step is review time on a machine whose code-signature scans cost about two cores (the user's setting)
 - station M-5916: keep course 1266 min in, 147 done, 17 left; hull 220 min and mast 225 min by the queue, balanced; T-351 passed and merges next, so mast's header chain goes on from it
 - 2026-10-29 08:57 scope: one lane order for every per-lane view: the board model orders its lanes by each lane's first task in plan order (the prototype's order); T-363 does it in lib.rs where the model is built (hull's question M-5935), so Now, Cost and the lane colours follow it, as Tasks already does
+- station M-5952: keep course 1288 min in, 150 done, 14 left; hull 130 min, mast 145 min, balanced; projected 1433 min; T-363 merging, T-351 next, mast reworks T-353 on top of the fixed t351
 - 2026-10-29 08:00 release: v0.5.1 (station S2) published: T-367's merge 6d8d3a0a merged into main as 0974d950, tagged v0.5.1, GitHub release from docs/releases/v0.5.1.md | why: done clause (5)
 
 
