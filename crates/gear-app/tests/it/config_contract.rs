@@ -65,6 +65,8 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             staging: "".into(),
             review_max_rounds: 3,
             max_task_min: 60,
+            branch_max_age_min: 120,
+            branch_max_per_lane: 3,
             // T-255: `gate` has no default; the fixture names one.
             gate: "make test".into(),
             task_branch: "{lane}/t{n}".into(),

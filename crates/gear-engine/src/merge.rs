@@ -235,6 +235,11 @@ pub fn merge_passed(
     //     queue step, so a merge that was just queued is a merge in flight.
     tell_captain_lost(store, project, &config, now)?;
 
+    // 1c. the task branches on the remote (the branch sweep): a cancelled
+    //     task's branches are deleted, and a branch older than the project's
+    //     `branch_max_age_min` is named to the captain.
+    sweep_branches(store, cfg, project, &config, now)?;
+
     // A worker survives between ticks. Collect only a completed result;
     // never join a running thread. One worker per repo (T-53): the workers of
     // the repos of a project are collected one after the other.
@@ -2403,6 +2408,275 @@ fn tell_captain(
     })
 }
 
+/// How often the branch sweep asks the remote for its branches: it is a
+/// network call, so not on every tick.
+const BRANCH_SWEEP_EVERY_S: i64 = 600;
+
+/// When the branch sweep last asked the remote of a project.
+fn branch_sweep_key(project: &str) -> String {
+    format!("engine.branch_sweep.{project}")
+}
+
+/// When the captain was last told about a branch that is too old: told again
+/// only after another `branch_max_age_min`.
+fn branch_told_key(project: &str, branch: &str) -> String {
+    format!("engine.branch_told.{project}.{branch}")
+}
+
+/// A branch on the remote that belongs to a task of the project: the task's
+/// own branch (or a suffixed one) or its review branch.
+#[derive(Debug, Clone)]
+struct TaskBranch {
+    name: String,
+    sha: String,
+    task: String,
+    state: TaskState,
+    /// When the task's first attempt started: the branch is that old.
+    since: Option<Ts>,
+    /// A review branch (the reviewers'), not a branch a lane cut.
+    review: bool,
+    /// The task's voyage is still sailing: one of its tasks is not terminal.
+    open_voyage: bool,
+}
+
+/// When the captain was last told that the open voyages hold too many task
+/// branches, and how many: told again when the count grows, or after another
+/// `branch_max_age_min`.
+fn branch_count_told_key(project: &str) -> String {
+    format!("engine.branch_count_told.{project}")
+}
+
+/// The branch sweep: a branch of a voyage is meant to be merged within the
+/// project's `branch_max_age_min` (120 by default). A branch of a cancelled
+/// task is deleted on the remote, since nothing will merge it (the captain is
+/// told its commit, so it can be restored); a branch older than the limit is
+/// named to the captain, who decides what to do with its task.
+fn sweep_branches(
+    store: &mut Store,
+    cfg: &EngineCfg,
+    project: &str,
+    config: &ProjectConfig,
+    now: Ts,
+) -> GearResult<()> {
+    let last = store
+        .read(|tx| tx.get_meta(&branch_sweep_key(project)))?
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    if now - last < BRANCH_SWEEP_EVERY_S {
+        return Ok(());
+    }
+    store.write(|tx| tx.set_meta(&branch_sweep_key(project), &now.to_string()))?;
+    let tasks = store.read(|tx| tx.tasks_of_project(project))?;
+    let mut repos: Vec<Repo> = Vec::new();
+    for task in &tasks {
+        let repo = config.repo_of_task(task);
+        if !repos.iter().any(|known| known.path == repo.path) {
+            repos.push(repo);
+        }
+    }
+    let remote = Target::of(config, cfg.remote.as_ref());
+    for repo in repos {
+        let dir = Path::new(&repo.path);
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(heads) = git(dir, &["ls-remote", "--heads", remote.name]) else {
+            continue;
+        };
+        let found = task_branches(store, project, config, &tasks, &repo, &heads)?;
+        sweep_in(store, project, config, dir, remote, found, now)?;
+    }
+    Ok(())
+}
+
+/// The branches of `heads` (the output of `git ls-remote --heads`) that
+/// belong to a task of `repo`.
+fn task_branches(
+    store: &mut Store,
+    project: &str,
+    config: &ProjectConfig,
+    tasks: &[gear_store::TaskRow],
+    repo: &Repo,
+    heads: &str,
+) -> GearResult<Vec<TaskBranch>> {
+    let mut names: Vec<(String, String, &gear_store::TaskRow)> = Vec::new();
+    for task in tasks {
+        let Some(lane) = task.lane.as_deref() else { continue };
+        if config.repo_of_task(task).path != repo.path {
+            continue;
+        }
+        names.push((
+            branch_of(&config.conventions.task_branch, project, lane, &task.id),
+            review_branch(&config.conventions.review_branch, project, lane, &task.id),
+            task,
+        ));
+    }
+    let mut open = std::collections::HashSet::new();
+    for task in tasks {
+        if let Some(milestone) = task.milestone.as_deref() {
+            if !task.state.is_terminal() {
+                open.insert(milestone.to_string());
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for line in heads.lines() {
+        let Some((sha, name)) = line.split_once('\t') else { continue };
+        let Some(name) = name.trim().strip_prefix("refs/heads/") else { continue };
+        let Some((_, review, task)) = names
+            .iter()
+            .find(|(own, review, _)| is_task_branch(name, own) || is_task_branch(name, review))
+        else {
+            continue;
+        };
+        let is_review = is_task_branch(name, review);
+        let open_voyage = task.milestone.as_deref().is_some_and(|milestone| open.contains(milestone));
+        let since = store
+            .read(|tx| tx.attempts_of_task(project, &task.id))?
+            .iter()
+            .map(|attempt| attempt.started)
+            .min();
+        found.push(TaskBranch {
+            name: name.to_string(),
+            sha: sha.trim().to_string(),
+            task: task.id.clone(),
+            state: task.state,
+            since,
+            review: is_review,
+            open_voyage,
+        });
+    }
+    Ok(found)
+}
+
+/// Delete the branches of cancelled tasks and name the branches older than
+/// the project's limit, in one item to the captain.
+fn sweep_in(
+    store: &mut Store,
+    project: &str,
+    config: &ProjectConfig,
+    dir: &Path,
+    remote: Target<'_>,
+    found: Vec<TaskBranch>,
+    now: Ts,
+) -> GearResult<()> {
+    let limit = i64::from(config.conventions.branch_max_age_min.max(1)) * 60;
+    // The open voyages' task branches (not the reviewers'), oldest first.
+    let mut live: Vec<&TaskBranch> = found
+        .iter()
+        .filter(|branch| branch.open_voyage && !branch.review && branch.state != TaskState::Cancelled)
+        .collect();
+    live.sort_by_key(|branch| branch.since.unwrap_or(now));
+    let cap = config.lanes.len().max(1) * config.conventions.branch_max_per_lane.max(1) as usize;
+    let mut crowded: Vec<String> = Vec::new();
+    if live.len() > cap {
+        let key = branch_count_told_key(project);
+        let told = store.read(|tx| tx.get_meta(&key))?;
+        let (count, at) = told
+            .as_deref()
+            .and_then(|value| value.split_once(':'))
+            .and_then(|(count, at)| Some((count.parse::<usize>().ok()?, at.parse::<i64>().ok()?)))
+            .unwrap_or((0, 0));
+        if live.len() > count || now - at >= limit {
+            store.write(|tx| tx.set_meta(&key, &format!("{}:{now}", live.len())))?;
+            crowded = live
+                .iter()
+                .map(|branch| {
+                    let age = branch.since.map(|since| (now - since) / 60).unwrap_or(0);
+                    format!("{} ({}, {:?}, open {age} min)", branch.name, branch.task, branch.state)
+                })
+                .collect();
+        }
+    }
+    let mut deleted = Vec::new();
+    let mut old = Vec::new();
+    for branch in found {
+        let short = &branch.sha[..branch.sha.len().min(10)];
+        if branch.state == TaskState::Cancelled {
+            if remote.delete(dir, &branch.name) {
+                deleted.push(format!("{} at {short} ({}, cancelled)", branch.name, branch.task));
+            }
+            continue;
+        }
+        let Some(since) = branch.since else { continue };
+        let age = now - since;
+        if age < limit {
+            continue;
+        }
+        let key = branch_told_key(project, &branch.name);
+        let told = store.read(|tx| tx.get_meta(&key))?.and_then(|value| value.parse::<i64>().ok());
+        if told.is_some_and(|at| now - at < limit) {
+            continue;
+        }
+        store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
+        old.push(format!(
+            "{} ({}, {:?}, open {} min, tip {short})",
+            branch.name,
+            branch.task,
+            branch.state,
+            age / 60
+        ));
+    }
+    if deleted.is_empty() && old.is_empty() && crowded.is_empty() {
+        return Ok(());
+    }
+    let mut body = String::new();
+    if !crowded.is_empty() {
+        body.push_str(&format!(
+            "{} task branches of the open voyage(s) are on the remote, over the limit of {cap} ({} lanes × `[conventions] branch_max_per_lane` {}): work is piling up unmerged and branches rot. Clean up: get the oldest reviewed and merged, finish the reworks before new work, cancel what will not land. Oldest first:\n",
+            crowded.len(),
+            config.lanes.len().max(1),
+            config.conventions.branch_max_per_lane.max(1)
+        ));
+        for line in &crowded {
+            body.push_str(&format!("- {line}\n"));
+        }
+    }
+    if !old.is_empty() {
+        body.push_str(&format!(
+            "{} branch(es) open longer than {} min (`[conventions] branch_max_age_min`): a branch of a voyage is meant to merge within that time, so its task is stuck. For each, find why and act: get it reviewed and merged, send it back with a smaller rework, or cancel the task.\n",
+            old.len(),
+            limit / 60
+        ));
+        for line in &old {
+            body.push_str(&format!("- {line}\n"));
+        }
+    }
+    if !deleted.is_empty() {
+        body.push_str(&format!(
+            "{} branch(es) of cancelled tasks deleted on {} (restore one with `git push {} <commit>:refs/heads/<branch>`):\n",
+            deleted.len(),
+            remote.name,
+            remote.name
+        ));
+        for line in &deleted {
+            body.push_str(&format!("- {line}\n"));
+        }
+    }
+    let urgent = !old.is_empty() || !crowded.is_empty();
+    store.write(|tx| {
+        let Some(captain) = tx.captain_of(project)? else { return Ok(()) };
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: project.to_string(),
+            thread: format!("branches:{now}"),
+            task: None,
+            attempt: None,
+            sender: captain.id.clone(),
+            sender_gen: 1,
+            recipient: captain.id,
+            kind: MsgKind::System,
+            urgent,
+            body: body.trim_end().to_string(),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+        Ok(())
+    })
+}
+
 /// The thread of the item that says the merge of a task waits for another one
 /// (T-62). One item per waiting merge: the captain is told once, not every
 /// tick.
@@ -4403,6 +4677,121 @@ gate = "{gate}"
             })
             .unwrap();
         store
+    }
+
+    /// The branch sweep: a cancelled task's branches are deleted on the
+    /// remote, a branch older than `branch_max_age_min` is named to the
+    /// captain once per limit, and a young branch is left alone.
+    #[test]
+    fn the_branch_sweep_deletes_cancelled_branches_and_names_old_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(root.path(), &format!("git init -q --bare {}", origin.display()));
+        sh(root.path(), &format!("git init -q -b dev {}", work.display()));
+        sh(&work, "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base");
+        sh(&work, &format!("git remote add origin {}", origin.display()));
+        for branch in ["dev", "heat/t5", "review/t5", "heat/t6", "heat/t7"] {
+            sh(&work, &format!("git push -q origin HEAD:refs/heads/{branch}"));
+        }
+        // T-5 is cancelled; T-6 started three hours ago; T-7 ten minutes ago.
+        let mut store = world(TaskState::Cancelled);
+        store
+            .write(|tx| {
+                for (id, started) in [("T-6", 0), ("T-7", 3 * 3600 - 600)] {
+                    let mut task = tx.get_task("p", "T-5")?.unwrap();
+                    task.id = id.into();
+                    task.state = TaskState::Ready;
+                    tx.insert_task(&task)?;
+                    gear_app::tasks::start_attempt(tx, "p", id, "p:heat", 1, started)?;
+                    // Sent back: the seat is free for the next task.
+                    let mut attempt = tx.get_attempt("p", id, 1)?.unwrap();
+                    attempt.state = gear_model::AttemptState::Rejected;
+                    tx.update_attempt(&attempt)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let config = gear_app::config::parse(&config_text_in("true", &work)).unwrap();
+        let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
+        let repo = config.repo_of_task(&tasks[0]);
+        let now = 3 * 3600;
+        let heads = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        let found = task_branches(&mut store, "p", &config, &tasks, &repo, &heads).unwrap();
+        let remote = Target { name: "origin", runner: &GitRemote };
+        sweep_in(&mut store, "p", &config, &work, remote, found, now).unwrap();
+
+        let left = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        assert!(!left.contains("heat/t5") && !left.contains("review/t5"), "cancelled branches deleted: {left}");
+        assert!(left.contains("heat/t6") && left.contains("heat/t7") && left.contains("refs/heads/dev"), "{left}");
+        let items = store.read(|tx| tx.actionable_for("p", "p:captain", now)).unwrap();
+        let body: Vec<&str> = items.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(items.len(), 1, "{body:?}");
+        assert!(items[0].urgent, "an old branch is urgent");
+        assert!(body[0].contains("heat/t6 (T-6") && body[0].contains("open 180 min"), "{}", body[0]);
+        assert!(!body[0].contains("heat/t7"), "a young branch is not named: {}", body[0]);
+        assert!(body[0].contains("heat/t5 at") && body[0].contains("review/t5 at"), "{}", body[0]);
+
+        // Ten minutes later the same old branch is not named again.
+        let heads = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        let found = task_branches(&mut store, "p", &config, &tasks, &repo, &heads).unwrap();
+        sweep_in(&mut store, "p", &config, &work, remote, found, now + 600).unwrap();
+        let items = store.read(|tx| tx.actionable_for("p", "p:captain", now + 600)).unwrap();
+        assert_eq!(items.len(), 1, "told once per limit");
+    }
+
+    /// The branch sweep counts the open voyage's task branches: more than
+    /// lanes × `branch_max_per_lane` (1 × 3 here) is named to the captain,
+    /// review branches and other voyages' branches are not counted.
+    #[test]
+    fn the_branch_sweep_names_too_many_open_branches() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(root.path(), &format!("git init -q --bare {}", origin.display()));
+        sh(root.path(), &format!("git init -q -b dev {}", work.display()));
+        sh(&work, "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base");
+        sh(&work, &format!("git remote add origin {}", origin.display()));
+        let now = 3600;
+        let mut store = world(TaskState::Done);
+        store
+            .write(|tx| {
+                for (id, milestone) in [("T-6", "M1"), ("T-7", "M1"), ("T-8", "M1"), ("T-9", "M0")] {
+                    let mut task = tx.get_task("p", "T-5")?.unwrap();
+                    task.id = id.into();
+                    task.state = TaskState::Ready;
+                    task.milestone = Some(milestone.into());
+                    tx.insert_task(&task)?;
+                    gear_app::tasks::start_attempt(tx, "p", id, "p:heat", 1, now - 60)?;
+                    let mut attempt = tx.get_attempt("p", id, 1)?.unwrap();
+                    attempt.state = gear_model::AttemptState::Rejected;
+                    tx.update_attempt(&attempt)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        for branch in ["heat/t6", "heat/t7", "heat/t8", "review/t6", "review/t7", "heat/t9"] {
+            sh(&work, &format!("git push -q origin HEAD:refs/heads/{branch}"));
+        }
+        let config = gear_app::config::parse(&config_text_in("true", &work)).unwrap();
+        let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
+        let repo = config.repo_of_task(&tasks[0]);
+        let remote = Target { name: "origin", runner: &GitRemote };
+        let sweep = |store: &mut Store, at: Ts| {
+            let heads = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+            let found = task_branches(store, "p", &config, &tasks, &repo, &heads).unwrap();
+            sweep_in(store, "p", &config, &work, remote, found, at).unwrap();
+        };
+        // Three task branches of M1 (and M0's T-9, also open): four, over 3.
+        sweep(&mut store, now);
+        let items = store.read(|tx| tx.actionable_for("p", "p:captain", now)).unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        let body = &items[0].body;
+        assert!(body.contains("4 task branches") && body.contains("limit of 3"), "{body}");
+        assert!(!body.contains("review/t6"), "review branches are not counted: {body}");
+        // The same count a minute later is not told again.
+        sweep(&mut store, now + 60);
+        assert_eq!(store.read(|tx| tx.actionable_for("p", "p:captain", now + 60)).unwrap().len(), 1);
     }
 
     /// The project config of a repo in pull-request mode (design §11.1).

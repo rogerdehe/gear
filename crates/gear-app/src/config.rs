@@ -368,6 +368,17 @@ pub struct TempsSection {
 /// hand-in is reviewed.
 pub const MAX_TASK_MIN: u32 = 60;
 
+/// The default age, in minutes, past which a task's branch on the remote is
+/// named to the captain: a branch of a voyage is meant to be merged (or its
+/// task cancelled) within this time; one that lives longer means its work is
+/// stuck, and the captain decides what to do.
+pub const BRANCH_MAX_AGE_MIN: u32 = 120;
+
+/// The default number of task branches each lane may hold on the remote at
+/// once: two hand-ins out and one sent back. More than lanes × this means
+/// branches rot, and the captain is told to clean up.
+pub const BRANCH_MAX_PER_LANE: u32 = 3;
+
 /// Defaults: integration "dev", release "main", staging "" (none), review_max_rounds 3,
 /// max_task_min 60, the branches GEAR itself uses (T-252), gate "" (none: a
 /// project names its own gate, T-255).
@@ -382,6 +393,12 @@ pub struct Conventions {
     /// estimate is over it is refused, so the captain cuts the work into
     /// tasks each with its own test cycle. Default 60.
     pub max_task_min: u32,
+    /// A task's branch on the remote older than this many minutes is named to
+    /// the captain (the branch sweep in the engine). Default 120.
+    pub branch_max_age_min: u32,
+    /// The open voyages' task branches on the remote may number at most
+    /// lanes × this; more are named to the captain. Default 3.
+    pub branch_max_per_lane: u32,
     /// What the engine runs in its integration worktree after a merge, before
     /// it pushes (T-12). No default (T-255): GEAR cannot know another stack's
     /// build + test command, so the project names its own — a `[[repos]]`
@@ -427,6 +444,8 @@ impl Default for Conventions {
             staging: String::new(),
             review_max_rounds: 3,
             max_task_min: MAX_TASK_MIN,
+            branch_max_age_min: BRANCH_MAX_AGE_MIN,
+            branch_max_per_lane: BRANCH_MAX_PER_LANE,
             gate: String::new(),
             task_branch: gear_model::branch::TASK_BRANCH.to_string(),
             review_branch: gear_model::branch::REVIEW_BRANCH.to_string(),
@@ -882,6 +901,18 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         issues.push(issue(
             "conventions.max_task_min",
             format!("must be at least one minute (the default is {MAX_TASK_MIN})"),
+        ));
+    }
+    if cfg.conventions.branch_max_age_min == 0 {
+        issues.push(issue(
+            "conventions.branch_max_age_min",
+            format!("must be at least one minute (the default is {BRANCH_MAX_AGE_MIN})"),
+        ));
+    }
+    if cfg.conventions.branch_max_per_lane == 0 {
+        issues.push(issue(
+            "conventions.branch_max_per_lane",
+            format!("must be at least one (the default is {BRANCH_MAX_PER_LANE})"),
         ));
     }
     for (model, price) in &cfg.prices {

@@ -113,9 +113,13 @@ integration = "dev"     # the integration branch
 release = "main"        # the release branch
 gate = "make test"      # the project's own build + test, run before every merge; no default
 max_task_min = 60       # no task is planned longer than this; a plan that asks for more is refused
+branch_max_age_min = 120  # a task branch older than this is named to the captain
+branch_max_per_lane = 3   # more than lanes × this open-voyage task branches is named to the captain
 ```
 
 `max_task_min` (default 60) caps a task's `estimate:`: a lane works unattended and is reviewed only at its hand-in, so a task of hours is a stretch nobody checks and one wrong turn costs all of it — bigger work is cut into tasks of at most `max_task_min`, each with its own test cycle (`gear --skill decompose` §1 rule 5). A rework estimate (`estimate=` on a fail verdict) is not capped.
+
+The engine sweeps the remote every 10 minutes. A cancelled task's branches are deleted (the captain is told each commit, so one can be restored). A task branch older than `branch_max_age_min` (default 120), or more task branches of the open voyages than lanes × `branch_max_per_lane` (default 3: two hand-ins out and one sent back), is named to the captain in one urgent item: a voyage's branch is meant to merge within that time, so its work is stuck and the captain decides — get it reviewed and merged, finish the rework first, or cancel the task.
 
 `[conventions] task_branch` (default `{lane}/t{n}`) and `review_branch` (default `review/t{n}`) name the branches; `{project}`, `{lane}`, `{n}` are filled in, e.g. `task_branch = "{project}/{lane}/t{n}"`. `seat_branch` (default `{project}/{seat}`) names the branch of each seat's own worktree, and of the merge worktree as seat `merge`, so Herdr names the worktree `<project>-<seat>`.
 
