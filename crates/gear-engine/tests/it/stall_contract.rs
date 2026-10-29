@@ -1,8 +1,11 @@
 //! Contract (L-52): a flagged lane reaches the captain's inbox, once.
 
 use gear_engine::stall::{alert, alert_fact};
-use gear_model::{AttemptState, MsgState, OpKind, OpState, SeatRole, TaskState};
-use gear_store::{testing, AttemptRow, NewOp, Store, TaskRow, ViewRecord};
+use gear_engine::{tick, EngineCfg};
+use gear_herdr::fake::FakeHerdr;
+use gear_herdr::{AgentStatus, HerdrAct};
+use gear_model::{AttemptState, MsgKind, MsgState, OpKind, OpState, SeatRole, TaskState};
+use gear_store::{testing, AttemptRow, NewMessage, NewOp, Store, TaskRow, ViewRecord};
 
 const T0: i64 = 1_800_000_000;
 
@@ -107,4 +110,74 @@ fn a_lane_with_nothing_says_no_task_and_no_check_in() {
     s.write(|tx| alert_fact(tx, "p:heat", T0 + 10, "a delivery was not confirmed")).unwrap();
     let body = body(&mut s);
     assert!(body.contains("About: no task; no check-in this generation"), "{body}");
+}
+
+/// A project whose lane the engine flags: a doorbell it never looks at, so the
+/// check budget (1) runs out on the first tick. The captain has asked the lane
+/// for something and it has not answered.
+fn flagged_world() -> (Store, FakeHerdr, EngineCfg) {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "pi", T0)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "pi", T0)?;
+            tx.insert_message(&NewMessage {
+                meta: None, project: "p".into(), thread: "hull:175".into(), task: None,
+                attempt: None, sender: "p:captain".into(), sender_gen: 1,
+                recipient: "p:heat".into(), kind: MsgKind::Instruction, urgent: false,
+                body: "please look at the merge".into(), reply_to: None, needs_ack: false,
+                state: MsgState::Open, created: T0,
+            })?;
+            let op = tx.insert_op(&NewOp {
+                project: "p".into(), seat: "p:heat".into(), generation: 1,
+                kind: OpKind::Doorbell, task: None, attempt: None, ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({"text": "GEAR: 1 item(s) waiting for you", "covers": ["M-1"]}),
+                created: T0 + 1,
+            })?;
+            tx.set_op_state("p", &op.id, OpState::Executing, None, T0 + 1)?;
+            tx.set_op_state("p", &op.id, OpState::Submitted, None, T0 + 2)
+        })
+        .unwrap();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent("w1:p1", "pi", AgentStatus::Idle);
+    herdr.add_agent("w1:p2", "pi", AgentStatus::Idle);
+    let cfg = EngineCfg {
+        profiles: gear_herdr::builtins(),
+        doorbell_check_budget: 1,
+        ..Default::default()
+    };
+    (store, herdr, cfg)
+}
+
+/// T-324: a flagged lane that helps on an unanswered captain instruction is
+/// busy on purpose: no stall item while its agent is present.
+#[test]
+fn a_flagged_helping_lane_whose_agent_is_present_gets_no_stall_item() {
+    let (mut store, mut herdr, cfg) = flagged_world();
+    let report = tick(&mut store, &mut herdr, &cfg, T0 + 10).unwrap();
+    assert!(
+        report.flagged.iter().any(|seat| seat == "p:heat"),
+        "the doorbell budget flags the lane: {:?}",
+        report.flagged
+    );
+    assert!(
+        captain_items(&mut store).is_empty(),
+        "a helping lane is not stuck: {:?}",
+        captain_items(&mut store)
+    );
+}
+
+/// T-324: a missing agent ("its agent is gone from its pane") is still
+/// alerted, whatever the lane was helping with.
+#[test]
+fn a_flagged_helping_lane_whose_agent_is_missing_still_gets_the_stall_item() {
+    let (mut store, mut herdr, cfg) = flagged_world();
+    let _ = herdr.pane_close("w1:p2");
+    tick(&mut store, &mut herdr, &cfg, T0 + 10).unwrap();
+    let items = captain_items(&mut store);
+    assert_eq!(items.len(), 1, "{items:?}");
+    let body = body(&mut store);
+    assert!(body.contains("its agent is gone from its pane"), "{body}");
 }
