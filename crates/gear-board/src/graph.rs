@@ -137,10 +137,17 @@ impl Stage {
 
     /// What the stage says of the task, in words (the prototype's STAGE).
     pub fn words(task: &GraphTask) -> String {
-        match task.stage {
+        Stage::words_of(task.stage, &task.deps, task.rounds, task.moved_to.as_deref())
+    }
+
+    /// The words of a stage from the facts it needs, without a [`GraphTask`]:
+    /// the board's lanes and the captain's home page say the same words as the
+    /// graph (T-347).
+    pub fn words_of(stage: Stage, deps: &[String], rounds: usize, moved_to: Option<&str>) -> String {
+        match stage {
             Stage::Deps => format!(
                 "waits for {} to merge",
-                if task.deps.is_empty() { "-".to_string() } else { task.deps.join(", ") }
+                if deps.is_empty() { "-".to_string() } else { deps.join(", ") }
             ),
             Stage::Queued => "queued".to_string(),
             Stage::Delivered => "delivered, not started".to_string(),
@@ -150,13 +157,13 @@ impl Stage {
             Stage::Review => "in review".to_string(),
             Stage::Verdict => "waits for the captain's verdict".to_string(),
             Stage::SentBack => "sent back, rework queued".to_string(),
-            Stage::Rework => format!("reworking (round {})", task.rounds),
+            Stage::Rework => format!("reworking (round {rounds})"),
             Stage::Passed => "passed, waits to merge".to_string(),
             Stage::Merging => "merging (gate running)".to_string(),
             Stage::MergeFailed => "merge failed, waits for the captain".to_string(),
             Stage::Merged => "merged".to_string(),
             Stage::Failed => "failed (rounds used up)".to_string(),
-            Stage::Moved => format!("moved to {}", task.moved_to.as_deref().unwrap_or("-")),
+            Stage::Moved => format!("moved to {}", moved_to.unwrap_or("-")),
         }
     }
 }
@@ -258,8 +265,10 @@ pub fn lanes(tx: &Tx<'_>, project: &str) -> GearResult<Vec<String>> {
 }
 
 /// The stage of a task, from the facts the store already has: the first rule
-/// that holds decides.
-fn stage_of(tx: &Tx<'_>, project: &str, task: &gear_store::TaskRow) -> GearResult<Stage> {
+/// that holds decides. The board's lane lines read the same stage (T-347).
+pub(crate) fn stage_of(
+    tx: &Tx<'_>, project: &str, task: &gear_store::TaskRow,
+) -> GearResult<Stage> {
     // Done and failed are endings of the task itself.
     match task.state {
         TaskState::Done => return Ok(Stage::Merged),
