@@ -2522,7 +2522,7 @@ fn tell_captain_lost(
                 }
             }
         }
-        let mut silent: Vec<(String, i64, String, Option<String>)> = Vec::new();
+        let mut silent: Vec<(String, i64, String, Repo)> = Vec::new();
         for task in tx.tasks_of_project(project)? {
             // Only a done task is settled: the others may still be handed in.
             if task.state != TaskState::Done {
@@ -2561,15 +2561,16 @@ fn tell_captain_lost(
             if tx.get_meta(&merge_lost_landed_key(project, &task.id, latest.n))?.is_some() {
                 continue;
             }
-            silent.push((task.id, latest.n, candidate, task.lane));
+            // F1 of the T-397 review: the task's own snapshot says where its
+            // work lands — a task keeps the repo and the base it was created
+            // against even when its lane moves (design, `repo_of_task`), and
+            // merge execution asks the same question (see `repo_of_op`).
+            let repo = config.repo_of_task(&task);
+            silent.push((task.id, latest.n, candidate, repo));
         }
         Ok(silent)
     })?;
-    for (task, attempt, candidate, lane) in silent {
-        let repo = match lane.as_deref() {
-            Some(lane) => config.repo_of_lane(lane),
-            None => config.root_repo(),
-        };
+    for (task, attempt, candidate, repo) in silent {
         // The candidate's own repo answers, from its remote-tracking ref: no
         // fetch on the tick's path. A ref that lags can only answer "not
         // merged", and the remerge the item names settles that (it fetches).
@@ -3594,6 +3595,48 @@ mod tests {
             .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
             .unwrap();
         assert!(items.is_empty(), "a merged attempt is not lost: {items:?}");
+    }
+
+    /// F1 of the T-397 review: the ancestor check asks the repo and the base
+    /// the *task* was created against, not its lane's current ones. A
+    /// completed task keeps its snapshot, so a candidate that is already on
+    /// the task's saved base — which differs from the project's current
+    /// integration branch — is not lost.
+    #[test]
+    fn a_candidate_on_the_tasks_saved_base_is_not_named_lost() {
+        let scratch = Scratch::new("merge-lost-saved-base");
+        // The accepted work is already on the base the task was cut from, and
+        // the project integrates on `dev`, which does not hold it.
+        let candidate = scratch.head_of("heat/t5");
+        sh(
+            &scratch.work,
+            &format!("git update-ref refs/remotes/origin/old-dev {candidate}"),
+        );
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)?;
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.repo = Some(scratch.work.display().to_string());
+                task.base = Some("old-dev".into());
+                tx.update_task(&task)
+            })
+            .unwrap();
+        lost_task(&mut store, &candidate, OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert!(
+            items.is_empty(),
+            "the work is on the task's own base, not the lane's: {items:?}"
+        );
     }
 
     /// T-397: a candidate that is already an ancestor of the integration branch
