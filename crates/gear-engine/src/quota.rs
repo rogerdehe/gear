@@ -46,12 +46,12 @@
 //! Every source is read every 5 min and its last reading is kept in the meta
 //! `quota.reading.<provider>` (§9.1); a reading older than 15 min is stale.
 
-use gear_app::config::{ModelEntry, ProjectConfig, QuotaPolicy};
-use gear_herdr::{HerdrAct, Profile, ScreenFlag};
+use gear_app::config::{ModelEntry, ProjectConfig, QuotaPolicy, WaitPolicy};
+use gear_herdr::{HerdrAct, Outcome, Profile, ScreenFlag};
 use gear_model::{
     ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState, Ts,
 };
-use gear_store::{NewMessage, NewOp, RoundKey, SeatRow, Store, Tx};
+use gear_store::{BindingStatus, NewMessage, NewOp, RoundKey, SeatRow, Store, Tx};
 use gear_usage::{QuotaReader, Reading};
 
 use crate::model::model_meta_key;
@@ -155,6 +155,13 @@ pub fn apply_quota_policy_with(
         // reviewer is never parked (its role has no Parked state, T-115), so
         // this is the lane's path.
         if seat.state == SeatState::Parked {
+            // T-326: with `on_wait = "release"` a lane parked on a long wait
+            // does not hold its agent: the agent exits until the reset, and its
+            // pane, worktree and session are kept.
+            if let Some(line) = release_for_wait(store, herdr, project, &config, profile, seat, now)? {
+                report.events.push(line);
+                continue;
+            }
             // §9.2: a wait the source decided (a spent window, a provider
             // error, an unreadable source) ends at its own time: the seat
             // continues in the same session.
@@ -740,6 +747,108 @@ pub(crate) fn flag_and_alert(
 fn parked_until(store: &mut Store, seat: &str) -> GearResult<Option<Ts>> {
     Ok(meta_get(store, &meta_key("resume", seat))?
         .and_then(|value| value.parse::<Ts>().ok()))
+}
+
+/// The shortest wait that justifies releasing a lane's agent (T-326): 15 min.
+const RELEASE_MIN_WAIT_S: i64 = 900;
+
+/// Release a lane's agent for a long wait (`[models].on_wait = "release"`,
+/// T-326): the agent exits until the reset, so it uses nothing, while its
+/// pane, worktree and session are kept — the comeback starts the same CLI in
+/// the same pane and resumes the session in it ([`crate::restart`]).
+///
+/// The seat stays `Parked` and its binding stays `Active`: nothing but the
+/// agent changes. `Some(line)` means the exit went out (or may have gone out);
+/// `None` means this seat is not released this tick.
+///
+/// Only a **long** wait is released, and only a wait that would be resumed:
+/// - the project asks for it (`on_wait = release`), and only a lane — a
+///   captain or a reviewer keeps its agent;
+/// - a quota or unreadable park (a wait that pauses the round, §5.4) or a
+///   policy park's deadline, ending at least [`RELEASE_MIN_WAIT_S`] from now.
+///   The 5-min provider-error wait is never released;
+/// - the release happens once: the meta `wait_released` marks it;
+/// - the CLI can resume the conversation afterwards (`resume_args` and a
+///   session Herdr reports), else the agent waits out the quota in its pane;
+/// - the seat's binding is `Active` and its pane holds an agent — a pane that
+///   is already a shell has nothing to release.
+fn release_for_wait(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    config: &ProjectConfig,
+    profile: &Profile,
+    seat: &SeatRow,
+    now: Ts,
+) -> GearResult<Option<String>> {
+    if config.models.on_wait != WaitPolicy::Release {
+        return Ok(None);
+    }
+    if seat.role != SeatRole::Lane {
+        return Ok(None);
+    }
+    let key = meta_key("wait_released", &seat.id);
+    if meta_get(store, &key)?.is_some_and(|value| !value.trim().is_empty()) {
+        return Ok(None);
+    }
+    // The wait the seat is in: a quota or unreadable park carries a wait that
+    // pauses the round; a policy park only has its deadline.
+    let until = match load_wait(store, &seat.id)? {
+        Some(wait) if wait.pause => wait.until,
+        _ => match parked_until(store, &seat.id)? {
+            Some(until) => until,
+            None => return Ok(None),
+        },
+    };
+    if until < now + RELEASE_MIN_WAIT_S {
+        return Ok(None);
+    }
+    // A CLI whose session cannot be resumed keeps its agent: after the exit
+    // the seat could not come back to the same conversation.
+    if profile.resume_args.is_none() || !profile.session_ref {
+        return Ok(Some(format!(
+            "{}: kept through the wait: its CLI cannot resume a session",
+            seat.id
+        )));
+    }
+    let Some(binding) = store.read(|tx| tx.get_binding(&seat.id, seat.generation))? else {
+        return Ok(None);
+    };
+    if binding.status != BindingStatus::Active {
+        return Ok(None);
+    }
+    let pane = binding.pane_id.clone();
+    if !matches!(herdr.agent_get(&pane), Ok(Some(_))) {
+        return Ok(None);
+    }
+    // The exit goes the way the stop phase of a restart sends it (T-134): the
+    // agent's name first, the command as a prompt or the profile's keys.
+    crate::names::ensure(herdr, &pane, &crate::names::desired(seat));
+    let sent = match &profile.exit_command {
+        Some(command) => match crate::names::live_name(herdr, &pane) {
+            Some(name) => herdr.prompt(&name, command),
+            // Without a name there is no agent to address: the command is
+            // withheld rather than typed into a shell.
+            None => Outcome::Refused {
+                code: "agent_not_ready".into(),
+                message: format!("the agent of pane {pane} has no name"),
+            },
+        },
+        None => herdr.send_keys(&pane, &profile.exit_keys),
+    };
+    match sent {
+        // The exit went out (or may have gone out): it is never sent twice.
+        Outcome::Ok(()) | Outcome::Uncertain { .. } => {}
+        // Nothing was executed: the next tick tries again.
+        Outcome::Refused { .. } => return Ok(None),
+    }
+    meta_set(store, &key, "1")?;
+    let line = format!(
+        "{}: released for the wait until {until} (on_wait = release): its agent exited; its pane, worktree and session are kept",
+        seat.id
+    );
+    tell_captain(store, project, seat, &line, now)?;
+    Ok(Some(line))
 }
 
 /// The seats of `project` whose screen shows a provider limit right now: the
@@ -1840,6 +1949,12 @@ mod tests {
 
     /// A project with one opencode lane on a two-model chain.
     fn config(chain: &str, policy: &str) -> String {
+        config_full(chain, policy, "keep", 5)
+    }
+
+    /// The same project with `[models].on_wait` and `quota_reset_h` given
+    /// (T-326).
+    fn config_full(chain: &str, policy: &str, on_wait: &str, reset_h: u32) -> String {
         format!(
             r#"
 [project]
@@ -1866,7 +1981,8 @@ profile = "opencode"
 [models]
 lanes = [{chain}]
 on_quota = {{ lanes = "{policy}" }}
-quota_reset_h = 5
+on_wait = "{on_wait}"
+quota_reset_h = {reset_h}
 "#
         )
     }
@@ -1965,9 +2081,37 @@ quota_reset_h = 5
 
     /// One quota tick of the policy, with the lane's observation this tick.
     fn tick_quota(store: &mut Store, herdr: &mut FakeHerdr, quota: bool, now: Ts) -> QuotaReport {
+        let cfg = cfg();
+        tick_quota_with(store, herdr, &cfg, quota, now)
+    }
+
+    /// One quota tick of the policy with the profiles given (T-326).
+    fn tick_quota_with(
+        store: &mut Store,
+        herdr: &mut FakeHerdr,
+        cfg: &EngineCfg,
+        quota: bool,
+        now: Ts,
+    ) -> QuotaReport {
         let seat = lane_seat(store);
         let obs = observed(&seat, quota);
-        apply_quota_policy(store, herdr, &cfg(), &cfg().profiles, "p", &obs, now).unwrap()
+        apply_quota_policy(store, herdr, cfg, &cfg.profiles, "p", &obs, now).unwrap()
+    }
+
+    /// The engine's profiles with the lane's CLI able to resume a session
+    /// (T-326): the builtin opencode profile has the resume args but Herdr
+    /// does not report its session, so the test profile reports it. With
+    /// `resumable` false the resume args are gone instead: the CLI cannot
+    /// come back to the conversation.
+    fn cfg_resumable(resumable: bool) -> EngineCfg {
+        let mut cfg = cfg();
+        let mut profile = cfg.profiles.get("opencode").unwrap().clone();
+        profile.session_ref = true;
+        if !resumable {
+            profile.resume_args = None;
+        }
+        cfg.profiles.insert("opencode".into(), profile);
+        cfg
     }
 
     /// A world with an opencode agent in PANE that shows the quota screen.
@@ -3028,7 +3172,17 @@ quota_reset_h = 5
     /// A project whose lane runs on a provider with a source (§9.1) and whose
     /// round is open (the clock of §5.1).
     fn source_world(key_file: &std::path::Path) -> Store {
-        let mut text = config(r#""minimax-cn/MiniMax-M3.1-Flash""#, "fallback");
+        source_world_on_wait(key_file, "keep")
+    }
+
+    /// The same project with `[models].on_wait` given (T-326).
+    fn source_world_on_wait(key_file: &std::path::Path, on_wait: &str) -> Store {
+        let mut text = config_full(
+            r#""minimax-cn/MiniMax-M3.1-Flash""#,
+            "fallback",
+            on_wait,
+            5,
+        );
         text.push_str(&format!(
             "\n[[quota.sources]]\nprovider = \"minimax-cn\"\nreader = \"minimax\"\nkey_file = \"{}\"\nkey_path = \"minimax-cn.key\"\n",
             key_file.display()
@@ -3084,9 +3238,24 @@ quota_reset_h = 5
         error: bool,
         now: Ts,
     ) -> QuotaReport {
+        let cfg = cfg();
+        tick_source_with(store, herdr, api, &cfg, quota, error, now)
+    }
+
+    /// One tick of the quota step with the fake reader and the profiles given
+    /// (T-326).
+    fn tick_source_with(
+        store: &mut Store,
+        herdr: &mut FakeHerdr,
+        api: &FakeQuota,
+        cfg: &EngineCfg,
+        quota: bool,
+        error: bool,
+        now: Ts,
+    ) -> QuotaReport {
         let seat = lane_seat(store);
         let obs = observed_flags(&seat, quota, error);
-        apply_quota_policy_with(store, herdr, &cfg(), &cfg().profiles, "p", &obs, now, api).unwrap()
+        apply_quota_policy_with(store, herdr, cfg, &cfg.profiles, "p", &obs, now, api).unwrap()
     }
 
     /// A reading of a provider: one window with so much used.
@@ -3172,6 +3341,185 @@ quota_reset_h = 5
             .unwrap()
             .unwrap();
         assert_eq!(round.paused_s, until - (T0 + 20), "the clock paused for the park");
+    }
+
+    /// T-326: `on_wait = "release"` — a lane parked on a long wait has its
+    /// agent exit once; its pane, worktree and session are kept, the seat stays
+    /// parked and the captain hears about it.
+    #[test]
+    fn on_wait_release_exits_the_agent_of_a_long_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path());
+        let mut store = source_world_on_wait(&key, "release");
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        let api = FakeQuota::reading(reading_with(100.0, Some(T0 + 1800)));
+        let cfg = cfg_resumable(true);
+
+        // The park of the spent window, as in
+        // `a_spent_window_parks_the_lane_until_the_reset`.
+        tick_source_with(&mut store, &mut herdr, &api, &cfg, true, false, T0 + 10);
+        tick_source_with(&mut store, &mut herdr, &api, &cfg, true, false, T0 + 20);
+        assert_eq!(lane_seat(&mut store).state, SeatState::Parked);
+        let wait = load_wait(&mut store, "p:heat").unwrap().unwrap();
+        assert!(wait.pause, "a quota park pauses the round: {wait:?}");
+        let until = T0 + 1800 + 60;
+        assert_eq!(wait.until, until);
+        assert!(exits(&herdr).is_empty(), "the park is not a release: {:?}", herdr.calls);
+
+        // The next tick: the agent exits through the profile's exit keys, once.
+        let report = tick_source_with(&mut store, &mut herdr, &api, &cfg, false, false, T0 + 30);
+        assert_eq!(exits(&herdr), vec![vec!["ctrl+c".to_string()]], "{:?}", herdr.calls);
+        assert_eq!(report.events.len(), 1, "{:?}", report.events);
+        assert!(
+            report.events[0].contains(&format!("released for the wait until {until}")),
+            "{:?}",
+            report.events
+        );
+        // The release is marked, and the captain gets its line.
+        assert_eq!(
+            meta_get(&mut store, &meta_key("wait_released", "p:heat"))
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+        let said = captain_messages(&mut store);
+        assert!(
+            said.iter().any(|message| message
+                .body
+                .contains(&format!("released for the wait until {until}"))
+                && message.body.contains("its pane, worktree and session are kept")),
+            "{said:?}"
+        );
+        // The seat stays parked and its binding active: only the agent went.
+        assert_eq!(lane_seat(&mut store).state, SeatState::Parked);
+        let binding = store.read(|tx| tx.get_binding("p:heat", 1)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Active);
+
+        // A third tick sends nothing more.
+        let report = tick_source_with(&mut store, &mut herdr, &api, &cfg, false, false, T0 + 40);
+        assert_eq!(exits(&herdr).len(), 1, "one release: {:?}", herdr.calls);
+        assert!(report.events.is_empty(), "{:?}", report.events);
+        assert_eq!(lane_seat(&mut store).state, SeatState::Parked);
+    }
+
+    /// T-326: with `on_wait = "keep"` (the default) nothing is sent: the park
+    /// is exactly as before.
+    #[test]
+    fn on_wait_keep_leaves_the_agent_in_its_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path());
+        let mut store = source_world(&key);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        let api = FakeQuota::reading(reading_with(100.0, Some(T0 + 1800)));
+        let cfg = cfg_resumable(true);
+
+        tick_source_with(&mut store, &mut herdr, &api, &cfg, true, false, T0 + 10);
+        tick_source_with(&mut store, &mut herdr, &api, &cfg, true, false, T0 + 20);
+        let report = tick_source_with(&mut store, &mut herdr, &api, &cfg, false, false, T0 + 30);
+
+        assert!(exits(&herdr).is_empty(), "the agent stays: {:?}", herdr.calls);
+        assert!(report.events.is_empty(), "{:?}", report.events);
+        assert!(
+            meta_get(&mut store, &meta_key("wait_released", "p:heat"))
+                .unwrap()
+                .is_none(),
+            "nothing is marked"
+        );
+        assert_eq!(lane_seat(&mut store).state, SeatState::Parked);
+    }
+
+    /// T-326: a wait that ends in 10 min is not worth an exit: the agent waits
+    /// it out.
+    #[test]
+    fn a_short_wait_is_not_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path());
+        let mut store = source_world_on_wait(&key, "release");
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        let api = FakeQuota::reading(reading_with(100.0, Some(T0 + 600)));
+        let cfg = cfg_resumable(true);
+
+        tick_source_with(&mut store, &mut herdr, &api, &cfg, true, false, T0 + 10);
+        tick_source_with(&mut store, &mut herdr, &api, &cfg, true, false, T0 + 20);
+        assert_eq!(lane_seat(&mut store).state, SeatState::Parked);
+        // `until` is T0 + 660, 630 s from this tick: under the 900 s bar.
+        let report = tick_source_with(&mut store, &mut herdr, &api, &cfg, false, false, T0 + 30);
+
+        assert!(exits(&herdr).is_empty(), "not released: {:?}", herdr.calls);
+        assert!(report.events.is_empty(), "{:?}", report.events);
+        assert!(
+            meta_get(&mut store, &meta_key("wait_released", "p:heat"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// T-326: a policy park (no source) is released too: its deadline is the
+    /// wait.
+    #[test]
+    fn a_policy_park_is_released() {
+        let mut store = world(&config_full(
+            r#""minimax-cn/MiniMax-M3.1-Flash""#,
+            "fallback",
+            "release",
+            2,
+        ));
+        let mut herdr = herdr_with_quota();
+        let cfg = cfg_resumable(true);
+
+        tick_quota_with(&mut store, &mut herdr, &cfg, true, T0 + 10);
+        tick_quota_with(&mut store, &mut herdr, &cfg, true, T0 + 20);
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Parked);
+        let until = T0 + 20 + 2 * 3600;
+        assert_eq!(parked_until(&mut store, "p:heat").unwrap(), Some(until));
+        assert!(
+            load_wait(&mut store, "p:heat").unwrap().is_none(),
+            "a fallback park has only its deadline"
+        );
+
+        let report = tick_quota_with(&mut store, &mut herdr, &cfg, false, T0 + 30);
+        assert_eq!(exits(&herdr), vec![vec!["ctrl+c".to_string()]], "{:?}", herdr.calls);
+        assert!(
+            report.events.iter().any(|line| line.contains(&format!("until {until}"))),
+            "{:?}",
+            report.events
+        );
+        assert_eq!(lane_seat(&mut store).state, SeatState::Parked);
+    }
+
+    /// T-326: a CLI whose session cannot be resumed keeps its agent — after the
+    /// exit the seat could not come back to the same conversation.
+    #[test]
+    fn a_profile_without_resume_args_keeps_its_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path());
+        let mut store = source_world_on_wait(&key, "release");
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        let api = FakeQuota::reading(reading_with(100.0, Some(T0 + 1800)));
+        let cfg = cfg_resumable(false);
+
+        tick_source_with(&mut store, &mut herdr, &api, &cfg, true, false, T0 + 10);
+        tick_source_with(&mut store, &mut herdr, &api, &cfg, true, false, T0 + 20);
+        let report = tick_source_with(&mut store, &mut herdr, &api, &cfg, false, false, T0 + 30);
+
+        assert!(exits(&herdr).is_empty(), "kept: {:?}", herdr.calls);
+        assert!(
+            report.events.iter().any(|line| line
+                == "p:heat: kept through the wait: its CLI cannot resume a session"),
+            "{:?}",
+            report.events
+        );
+        assert!(
+            meta_get(&mut store, &meta_key("wait_released", "p:heat"))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(lane_seat(&mut store).state, SeatState::Parked);
     }
 
     /// §9.2: quota is left — a rate limit or an error, not a quota stop. The
