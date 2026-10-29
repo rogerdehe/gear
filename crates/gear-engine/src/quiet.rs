@@ -5,7 +5,6 @@ use gear_model::{AttemptState, GearResult, MsgKind, MsgState, SeatRole, SeatStat
 use gear_store::{AttemptRow, NewMessage, SeatRow, Store, Tx};
 use std::hash::{Hash, Hasher};
 
-const PUSH_INTERVAL: i64 = 20 * 60;
 const LOOP_INTERVAL: i64 = 10 * 60;
 const THINK_INTERVAL: i64 = 15 * 60;
 fn ask_key(seat: &str) -> String { format!("engine.quiet.{seat}") }
@@ -53,13 +52,35 @@ fn last_push(tx: &Tx<'_>, seat: &SeatRow, attempt: &AttemptRow) -> GearResult<(S
     Ok((branch, pushed.unwrap_or(start).max(start)))
 }
 
-fn notify(tx: &Tx<'_>, seat: &SeatRow, attempt: &AttemptRow, branch: &str, minutes: i64, now: Ts) -> GearResult<()> {
-    let body = format!("No push to {branch} for {minutes} min. If anything in your task is unclear, send gear send --kind question now with your default; otherwise commit and push what builds.");
+/// The time the lane was asked why it has not pushed, while its answer is due.
+fn reply_key(seat: &str) -> String { format!("engine.quiet.reply.{seat}") }
+/// Where the no-push clock restarts after a question was settled: the end of
+/// the answer window, so a lane that explained itself gets another full
+/// interval before it is asked again.
+fn base_key(seat: &str) -> String { format!("engine.quiet.base.{seat}") }
+
+/// Ask a lane that has not pushed for `minutes` to tell the captain why,
+/// within `reply` minutes.
+fn notify(tx: &Tx<'_>, seat: &SeatRow, attempt: &AttemptRow, branch: &str, minutes: i64, reply: i64, now: Ts) -> GearResult<()> {
+    let body = format!(
+        "No push to {branch} for {minutes} min. Within {reply} min, tell the captain why: gear send --kind question --task {task} --attempt {n} \"no push for {minutes} min: <the reason: the task is complex because ..., or the packet is unclear: ..., or ...>\". Then commit and push what builds.",
+        task = attempt.task,
+        n = attempt.n,
+    );
     tx.insert_message(&NewMessage { project: seat.project.clone(), thread: format!("quiet-lane:{}", seat.id), task: Some(attempt.task.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0, recipient: seat.id.clone(), kind: MsgKind::Instruction, urgent: true, body, reply_to: None, needs_ack: false, state: MsgState::Open, created: now, meta: None })?;
-    if let Some(captain) = tx.captain_of(&seat.project)? {
-        tx.insert_message(&NewMessage { project: seat.project.clone(), thread: format!("quiet:{}", seat.id), task: Some(attempt.task.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0, recipient: captain.id, kind: MsgKind::System, urgent: false, body: format!("lane {}: task {} has not pushed to {branch} for {minutes} min", seat.name, attempt.task), reply_to: None, needs_ack: false, state: MsgState::Info, created: now, meta: None })?;
-    }
+    tx.set_meta(&reply_key(&seat.id), &now.to_string())?;
     tx.set_meta(&ask_key(&seat.id), &now.to_string())
+}
+
+/// Tell the captain that a lane neither pushed nor explained why in time.
+fn alarm(tx: &Tx<'_>, seat: &SeatRow, attempt: &AttemptRow, branch: &str, minutes: i64, reply: i64, now: Ts) -> GearResult<()> {
+    let Some(captain) = tx.captain_of(&seat.project)? else { return Ok(()) };
+    let body = format!(
+        "lane {}: task {}: no push to {branch} for {minutes} min, and no word to the captain within {reply} min of being asked why. This lane is in trouble: look at its pane and act (answer its question, cut the task, or restart it).",
+        seat.name, attempt.task
+    );
+    tx.insert_message(&NewMessage { project: seat.project.clone(), thread: format!("quiet:{}", seat.id), task: Some(attempt.task.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0, recipient: captain.id, kind: MsgKind::System, urgent: true, body, reply_to: None, needs_ack: false, state: MsgState::Open, created: now, meta: None })?;
+    Ok(())
 }
 
 /// The worktree's fingerprint: its HEAD, its dirty set and its diff. A git
@@ -122,14 +143,50 @@ pub fn thinks(store: &mut Store, project: &str, observed: &[SeatObs], now: Ts) -
     Ok(())
 }
 
-/// A 20-minute push clock, persisted per seat across engine restarts.
+/// The no-push clock, persisted per seat across engine restarts: a lane that
+/// has not pushed for `[conventions] push_interval_min` (20) is asked to tell
+/// the captain why within `push_reply_min` (10). Its answer goes to the
+/// captain as an item to read, and the clock restarts at the end of the
+/// window; no answer in time is an urgent item to the captain.
 pub fn tick(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
+    let conventions = crate::dispatch::conventions(tx, project);
+    let interval = i64::from(conventions.push_interval_min.max(1)) * 60;
+    let reply = i64::from(conventions.push_reply_min.max(1)) * 60;
+    let captain = tx.captain_of(project)?.map(|seat| seat.id);
     for seat in tx.seats_of_project(project)? {
         let Some(attempt) = eligible(tx, &seat)? else { continue };
         let (branch, push) = last_push(tx, &seat, &attempt)?;
-        let last = tx.get_meta(&ask_key(&seat.id))?.and_then(|s| s.parse::<Ts>().ok());
-        if now.saturating_sub(push) > PUSH_INTERVAL && last.is_none_or(|t| now.saturating_sub(t) >= PUSH_INTERVAL) {
-            notify(tx, &seat, &attempt, &branch, now.saturating_sub(push) / 60, now)?;
+        let base = tx.get_meta(&base_key(&seat.id))?.and_then(|s| s.parse::<Ts>().ok()).unwrap_or(0);
+        let asked = tx.get_meta(&reply_key(&seat.id))?.filter(|s| !s.is_empty()).and_then(|s| s.parse::<Ts>().ok());
+        if let Some(asked) = asked {
+            let settle = |tx: &Tx<'_>| -> GearResult<()> {
+                tx.set_meta(&reply_key(&seat.id), "")?;
+                tx.set_meta(&base_key(&seat.id), &(asked + reply).to_string())
+            };
+            if push > asked {
+                settle(tx)?;
+                continue;
+            }
+            let answers: Vec<_> = tx.messages_from_since(project, &seat.id, asked)?
+                .into_iter()
+                .filter(|m| captain.as_deref() == Some(m.recipient.as_str()))
+                .collect();
+            if !answers.is_empty() {
+                // The answer is the captain's to read, whatever kind it was sent as.
+                for answer in answers.iter().filter(|m| m.state == MsgState::Info) {
+                    tx.update_message_state(project, &answer.id, MsgState::Open, None, None, None, now)?;
+                }
+                settle(tx)?;
+                continue;
+            }
+            if now - asked >= reply {
+                alarm(tx, &seat, &attempt, &branch, now.saturating_sub(push) / 60, reply / 60, now)?;
+                settle(tx)?;
+            }
+            continue;
+        }
+        if now.saturating_sub(push.max(base)) > interval {
+            notify(tx, &seat, &attempt, &branch, now.saturating_sub(push) / 60, reply / 60, now)?;
         }
     }
     Ok(())
@@ -176,7 +233,10 @@ pub fn loops(store: &mut Store, herdr: &mut dyn HerdrAct, project: &str, observe
             if !already_compacting { store.write(|tx| tx.set_meta(&compact_key(&seat.id), ""))?; }
             continue;
         }
-        store.write(|tx| notify(tx, &seat, &attempt, &branch, minutes, now))?;
+        store.write(|tx| {
+            let reply = i64::from(crate::dispatch::conventions(tx, project).push_reply_min.max(1));
+            notify(tx, &seat, &attempt, &branch, minutes, reply, now)
+        })?;
     }
     thinks(store, project, observed, now)
 }
@@ -240,8 +300,7 @@ mod tests {
         s.read(|tx| tx.thread_messages("p", thread)).unwrap()
     }
 
-    #[test]
-    fn push_clock_reminds_once_and_a_newer_push_resets_it() {
+    fn repo_with_commit() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         git(dir.path(), &["init", "-q"], None);
         git(dir.path(), &["config", "user.email", "test@example.invalid"], None);
@@ -249,20 +308,86 @@ mod tests {
         std::fs::write(dir.path().join("file"), "x").unwrap();
         git(dir.path(), &["add", "file"], None);
         git(dir.path(), &["commit", "-qm", "one"], Some("@1800001200 +0000"));
+        dir
+    }
+
+    /// The lane's own word to the captain, as `gear send` writes it.
+    fn lane_says(s: &mut Store, kind: MsgKind, state: MsgState, at: Ts) {
+        s.write(|tx| tx.insert_message(&NewMessage { project: "p".into(), thread: "T-1:q".into(), task: Some("T-1".into()), attempt: Some(1), sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(), kind, urgent: false, body: "no push: the task is complex".into(), reply_to: None, needs_ack: false, state, created: at, meta: None }).map(|_| ())).unwrap();
+    }
+
+    /// 20 min without a push: the lane is asked once to tell the captain why
+    /// within 10 min; its answer becomes the captain's item; the clock then
+    /// restarts at the end of the window, so the next question comes at 50.
+    #[test]
+    fn a_quiet_lane_is_asked_why_and_its_answer_restarts_the_clock() {
+        let dir = repo_with_commit();
         let mut s = world(dir.path().to_str().unwrap());
-        s.write(|tx| tick(tx, "p", T+1260)).unwrap();
+        s.write(|tx| tick(tx, "p", T + 1199)).unwrap();
+        assert!(messages(&mut s, "quiet-lane:p:heat").is_empty(), "not before 20 min");
+        s.write(|tx| tick(tx, "p", T + 1201)).unwrap();
         let lane = messages(&mut s, "quiet-lane:p:heat");
-        let captain = messages(&mut s, "quiet:p:heat");
-        assert_eq!(lane.len(), 1); assert!(lane[0].urgent);
-        assert_eq!(lane[0].body, "No push to heat/t1 for 21 min. If anything in your task is unclear, send gear send --kind question now with your default; otherwise commit and push what builds.");
-        assert_eq!(captain.len(), 1); assert_eq!(captain[0].state, MsgState::Info);
-        s.write(|tx| tick(tx, "p", T+1261)).unwrap();
+        assert_eq!(lane.len(), 1);
+        assert!(lane[0].urgent);
+        assert!(lane[0].body.starts_with("No push to heat/t1 for 20 min. Within 10 min, tell the captain why: gear send --kind question --task T-1 --attempt 1"), "{}", lane[0].body);
+        assert!(messages(&mut s, "quiet:p:heat").is_empty(), "the captain hears the lane's answer, not a notice");
+        s.write(|tx| tick(tx, "p", T + 1260)).unwrap();
+        assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 1, "asked once");
+        // The lane answers as progress (an info kind): it becomes an item.
+        lane_says(&mut s, MsgKind::Progress, MsgState::Info, T + 1500);
+        s.write(|tx| tick(tx, "p", T + 1510)).unwrap();
+        let items = s.read(|tx| tx.actionable_for("p", "p:captain", T + 1510)).unwrap();
+        assert!(items.iter().any(|m| m.body == "no push: the task is complex"), "{items:?}");
+        // Asked at 20, window to 30: the next question is after 50.
+        s.write(|tx| tick(tx, "p", T + 1201 + 600 + 1200)).unwrap();
         assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 1);
+        s.write(|tx| tick(tx, "p", T + 1201 + 600 + 1201)).unwrap();
+        assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 2, "asked again after 50 min");
+        assert!(messages(&mut s, "quiet:p:heat").is_empty(), "no alarm: the lane answered");
+    }
+
+    /// No answer within the window: the captain gets an urgent item that the
+    /// lane is in trouble; a push, instead, settles the question.
+    #[test]
+    fn a_quiet_lane_that_does_not_answer_is_reported_and_a_push_settles_it() {
+        let dir = repo_with_commit();
+        let mut s = world(dir.path().to_str().unwrap());
+        s.write(|tx| tick(tx, "p", T + 1201)).unwrap();
+        s.write(|tx| tick(tx, "p", T + 1201 + 599)).unwrap();
+        assert!(messages(&mut s, "quiet:p:heat").is_empty(), "not before the window ends");
+        s.write(|tx| tick(tx, "p", T + 1201 + 600)).unwrap();
+        let captain = messages(&mut s, "quiet:p:heat");
+        assert_eq!(captain.len(), 1);
+        assert!(captain[0].urgent && captain[0].state == MsgState::Open);
+        assert!(captain[0].body.contains("no word to the captain within 10 min"), "{}", captain[0].body);
+        s.write(|tx| tick(tx, "p", T + 1201 + 660)).unwrap();
+        assert_eq!(messages(&mut s, "quiet:p:heat").len(), 1, "told once");
+
+        let mut s = world(dir.path().to_str().unwrap());
+        s.write(|tx| tick(tx, "p", T + 1201)).unwrap();
         git(dir.path(), &["update-ref", "refs/remotes/origin/heat/t1", "HEAD"], None);
-        s.write(|tx| tick(tx, "p", T+2400)).unwrap();
-        assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 1, "a push resets the clock");
-        s.write(|tx| tick(tx, "p", T+2460)).unwrap();
-        assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 2);
+        // The commit is dated T+1200 (before the question): a later push resets.
+        git(dir.path(), &["commit", "-q", "--allow-empty", "-m", "two"], Some("@1800001400 +0000"));
+        git(dir.path(), &["update-ref", "refs/remotes/origin/heat/t1", "HEAD"], None);
+        s.write(|tx| tick(tx, "p", T + 1201 + 700)).unwrap();
+        assert!(messages(&mut s, "quiet:p:heat").is_empty(), "a push settles the question");
+    }
+
+    /// The two times are the project's: 15 and 5 here.
+    #[test]
+    fn the_push_clock_follows_the_project_settings() {
+        let dir = repo_with_commit();
+        let mut s = world(dir.path().to_str().unwrap());
+        s.write(|tx| {
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/repo\"\n\n[quota]\nlanes = 1\ntemps = 0\n\n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\nkind = \"pi\"\nprofile = \"pi\"\n\n[conventions]\ngate = \"true\"\npush_interval_min = 15\npush_reply_min = 5\n".into();
+            assert_eq!(gear_app::config::parse(&project.config_toml).map(|c| c.conventions.push_interval_min).ok(), Some(15), "{}", project.config_toml);
+            tx.update_project(&project)
+        }).unwrap();
+        s.write(|tx| tick(tx, "p", T + 901)).unwrap();
+        assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 1, "asked after 15 min");
+        s.write(|tx| tick(tx, "p", T + 901 + 300)).unwrap();
+        assert_eq!(messages(&mut s, "quiet:p:heat").len(), 1, "reported after 5 more");
     }
 
     #[test]
@@ -321,7 +446,8 @@ mod tests {
         s.write(|tx| tick(tx, "p", T+1260)).unwrap();
         s.write(|tx| tick(tx, "p", T+1261)).unwrap();
         assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 1);
-        assert_eq!(messages(&mut s, "quiet:p:heat").len(), 1);
+        // The captain hears the lane's answer, or the alarm when none comes.
+        assert_eq!(messages(&mut s, "quiet:p:heat").len(), 0);
 
         let mut s = restarted();
         let mut h = FakeHerdr::new();
@@ -332,7 +458,7 @@ mod tests {
         loops(&mut s, &mut h, "p", &[obs], T+761).unwrap();
         assert_eq!(h.calls.iter().filter(|c| matches!(c, Call::SendKeys {pane, keys} if pane == PANE && keys == &["esc"])).count(), 1);
         assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 1);
-        assert_eq!(messages(&mut s, "quiet:p:heat").len(), 1);
+        assert_eq!(messages(&mut s, "quiet:p:heat").len(), 0, "the captain hears the answer or the alarm");
     }
 
     #[test]
@@ -347,7 +473,7 @@ mod tests {
         loops(&mut s, &mut h, "p", &[obs.clone()], T+100+660).unwrap();
         assert_eq!(h.calls.iter().filter(|c| matches!(c, Call::SendKeys {pane, keys} if pane == PANE && keys == &["esc"])).count(), 1);
         assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 1);
-        assert_eq!(messages(&mut s, "quiet:p:heat").len(), 1);
+        assert_eq!(messages(&mut s, "quiet:p:heat").len(), 0, "the captain hears the answer or the alarm");
         assert_eq!(s.read(|tx| tx.get_meta(&compact_key("p:heat"))).unwrap().as_deref(), Some("pending"));
         loops(&mut s, &mut h, "p", &[obs], T+100+661).unwrap();
         assert_eq!(h.calls.iter().filter(|c| matches!(c, Call::SendKeys {keys, ..} if keys == &["esc"])).count(), 1);

@@ -7,6 +7,7 @@ You are a lane in a GEAR fleet. The captain thinks, plans and decides; you imple
 - Scratch copies, probes and temp files go under your worktree's target/tmp, never in /tmp or the system temp directory; delete them when the task is handed in.
 - Do exactly what the packet says, nothing more. What you notice goes under "Out of scope" in your report.
 - Commit small and push your task branch at least every 15 minutes; each commit builds.
+- When GEAR says you have not pushed for 20 minutes, tell the captain why within 10 minutes (`gear send --kind question` with the reason: the task is complex, the packet is unclear, ...), then push what builds. No answer in time is reported to the captain as a lane in trouble.
 - Never `git stash`: every worktree of the repository shares one stash, so a stash can carry your work to another lane or theirs to you. To set work aside, commit it on your own task branch (a WIP commit) and push.
 - Never run `cargo fmt` on a crate or the workspace: this tree is not rustfmt-clean, so it rewrites files you did not touch. Keep the style of the lines around yours by hand.
 - After each commit, send a one-line `gear send --kind progress`.

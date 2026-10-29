@@ -197,6 +197,9 @@ enum PlanOp {
         next: Option<String>,
         #[arg(long = "request-id")]
         request_id: Option<String>,
+        /// The user asked for this goal, bar or eta change and confirmed it.
+        #[arg(long)]
+        confirmed: bool,
     },
     /// Print one task's block as it would stand in the plan file (design §8.3).
     Show {
@@ -399,8 +402,8 @@ fn run(cli: Cli) -> GearResult<()> {
         Some(Cmd::Send(c)) => cmd_send(c, cli.json),
         Some(Cmd::Reply(c)) => cmd_reply(c, cli.json),
         Some(Cmd::Plan { op }) => match op {
-            PlanOp::Apply { path, keep, next, request_id } => {
-                cmd_plan(path, keep, next, request_id, cli.json)
+            PlanOp::Apply { path, keep, next, request_id, confirmed } => {
+                cmd_plan(path, keep, next, request_id, confirmed, cli.json)
             }
             PlanOp::Show { task } => cmd_plan_show(&task),
             PlanOp::Check {} => cmd_plan_check(cli.json),
@@ -1988,6 +1991,7 @@ fn cmd_plan(
     keep: Option<String>,
     next: Option<String>,
     request_id: Option<String>,
+    confirmed: bool,
     json: bool,
 ) -> GearResult<()> {
     let env = env_from_process()?;
@@ -2005,6 +2009,7 @@ fn cmd_plan(
         &request_id,
         now_ts(),
         json,
+        confirmed,
     )?;
     println!("{out}");
     Ok(())
@@ -2203,6 +2208,9 @@ fn planned_issues(
 
 /// `gear plan apply` body, over injected state: read the draft, parse it and
 /// apply it as the captain (design/05).
+///
+/// T-410: `--confirmed` marks the draft as a change to a departed voyage's
+/// goal, bar or eta that the user asked for and confirmed.
 fn run_plan(
     store: &mut gear_store::Store,
     env: &gear_app::Env,
@@ -2213,6 +2221,7 @@ fn run_plan(
     request_id: &str,
     now: i64,
     json: bool,
+    confirmed: bool,
 ) -> GearResult<String> {
     if keep.is_some() || next.is_some() {
         return Err(GearError::new(
@@ -2232,7 +2241,8 @@ fn run_plan(
             format!("cannot read {}: {e}", path.display()),
         )
     })?;
-    let draft = gear_app::draft::parse(&text)?;
+    let mut draft = gear_app::draft::parse(&text)?;
+    draft.confirmed = confirmed;
     let fp = observe_identity(store, env, herdr)?;
     // T-133 (review F1): a `- release` of a **lane** must know whether the
     // lane's agent is really in its pane, and only the session can say so. The
@@ -3882,6 +3892,7 @@ mod tests {
             "r-plan",
             T0 + 1,
             false,
+            false,
         )
         .unwrap();
 
@@ -3891,6 +3902,82 @@ mod tests {
         assert!(!out.contains("warning:"), "{out}");
         let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
         assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["T-1"]);
+    }
+
+    // T-410: `gear plan apply --confirmed` parses, and the flag reaches the
+    // draft the apply reads: without it a departed voyage's eta change is
+    // refused, with it the change applies.
+    #[test]
+    fn plan_apply_takes_the_confirmed_flag() {
+        let cli =
+            Cli::try_parse_from(["gear", "plan", "apply", "--confirmed", "plan.md"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Plan { op: PlanOp::Apply { path, confirmed, .. } }) => {
+                assert!(confirmed);
+                assert_eq!(path.as_deref(), Some(std::path::Path::new("plan.md")));
+            }
+            other => panic!("not a plan apply: {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["gear", "plan", "apply", "plan.md"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Plan { op: PlanOp::Apply { confirmed, .. } }) => assert!(!confirmed),
+            other => panic!("not a plan apply: {other:?}"),
+        }
+
+        // The flag is set on the draft before the apply: M2 departs with the
+        // first block, so its eta moves only with the confirmation.
+        let (mut store, mut herdr) = world();
+        let path = write_draft(&plan_draft_with_milestone());
+        run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 1,
+            false,
+            false,
+        )
+        .unwrap();
+        let changed = plan_draft_with_milestone().replace("eta: 1h", "eta: 2h").replace(
+            "base=0",
+            "base=1",
+        );
+        let path = write_draft(&changed);
+        let err = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-changed",
+            T0 + 2,
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
+        assert!(err.detail.contains("milestone M2: eta changed after departure"), "{}", err.detail);
+        run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-confirmed",
+            T0 + 3,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            store.read(|tx| tx.get_voyage("p", "M2")).unwrap().unwrap().eta.as_deref(),
+            Some("2h")
+        );
     }
 
     // T-299: after an apply the captain is told how to commit the plan, in the
@@ -3911,6 +3998,7 @@ mod tests {
             "plan-commit",
             T0 + 1,
             false,
+            false,
         )
         .unwrap();
         assert!(out.ends_with("commit the plan as: M2: {what}"), "{out}");
@@ -3929,6 +4017,7 @@ mod tests {
             "plan-commit",
             T0 + 1,
             false,
+            false,
         )
         .unwrap();
         assert!(out.ends_with("commit the plan as: PROJ-1 M2 {what}"), "{out}");
@@ -3946,6 +4035,7 @@ mod tests {
             "plan-commit",
             T0 + 1,
             true,
+            false,
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -3964,6 +4054,7 @@ mod tests {
             "plan-commit",
             T0 + 1,
             true,
+            false,
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -3979,6 +4070,7 @@ mod tests {
             None,
             "plan-commit-2",
             T0 + 2,
+            false,
             false,
         )
         .unwrap();
@@ -4078,6 +4170,7 @@ mod tests {
             "r-plan",
             T0 + 10,
             false,
+            false,
         )
         .unwrap();
 
@@ -4103,6 +4196,7 @@ mod tests {
             None,
             "r-plan",
             T0 + 10,
+            false,
             false,
         )
         .unwrap();
@@ -4135,6 +4229,7 @@ mod tests {
             None,
             "r-plan",
             T0 + 2,
+            false,
             false,
         )
         .unwrap();
@@ -4278,6 +4373,7 @@ mod tests {
             "r-plan",
             T0 + 1,
             false,
+            false,
         )
         .unwrap();
 
@@ -4309,6 +4405,7 @@ mod tests {
             None,
             "r-plan",
             T0 + 1,
+            false,
             false,
         )
         .unwrap();
@@ -4354,7 +4451,8 @@ path="api"
             tx.update_project(&project)
         }).unwrap();
         let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind heat repo=api owns=[src/, tests/]\n");
-        let out = run_plan(&mut store, &env("captain", CAP_PANE), &mut herdr, Some(&path), None, None, "rebind", T0+1, false).unwrap();
+        let out = run_plan(&mut store, &env("captain", CAP_PANE), &mut herdr, Some(&path), None, None, "rebind", T0+1, false, false,
+        ).unwrap();
         assert!(out.contains("rebind heat: repo root → api, owns [src/] → [src/, tests/]: waits for T-1"), "{out}");
     }
 
@@ -4377,6 +4475,7 @@ path="api"
             "r-plan",
             T0 + 1,
             true,
+            false,
         )
         .unwrap();
 
@@ -4427,6 +4526,7 @@ path="api"
             None,
             "r-plan",
             T0 + 1,
+            false,
             false,
         )
         .unwrap();
@@ -4713,6 +4813,7 @@ path="api"
             "r-plan",
             T0 + 1,
             false,
+            false,
         )
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
@@ -4740,6 +4841,7 @@ path="api"
             None,
             "r-plan",
             T0 + 1,
+            false,
             false,
         )
         .unwrap();
@@ -4773,6 +4875,7 @@ path="api"
             "r-plan",
             T0 + 1,
             false,
+            false,
         )
         .unwrap();
 
@@ -4785,6 +4888,7 @@ path="api"
             None,
             "r-plan-2",
             T0 + 2,
+            false,
             false,
         )
         .unwrap();
@@ -4818,6 +4922,7 @@ path="api"
             "r-plan",
             T0 + 1,
             false,
+            false,
         )
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
@@ -4838,6 +4943,7 @@ path="api"
             Some("+10m".into()),
             "r-plan",
             T0 + 1,
+            false,
             false,
         )
         .unwrap_err();
@@ -7576,6 +7682,7 @@ path="api"
             "hold-1",
             T0 + 1,
             false,
+            false,
         )
         .unwrap();
         assert_eq!(lane_state(&mut store), gear_model::SeatState::Held);
@@ -7598,6 +7705,7 @@ path="api"
             "release-1",
             T0 + 2,
             false,
+            false,
         )
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
@@ -7616,6 +7724,7 @@ path="api"
             None,
             "release-2",
             T0 + 3,
+            false,
             false,
         )
         .unwrap();
