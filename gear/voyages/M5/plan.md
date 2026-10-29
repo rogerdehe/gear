@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=844 -->
+<!-- gear-plan project=gear base=856 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -185,6 +185,11 @@ eta: 21h
 - station M-6139: keep course 1431 min in, 162 done, 12 left; hull 91 min, mast 93 min, balanced; projected 1524 min; T-425 rework round 3 near hand-in, T-429 in review, mast takes T-432 and T-431 next; nothing is cut (done clause 1)
 - station M-6150: keep course 1440 min in, 162 done, 12 left; hull 91 min, mast 93 min, balanced; review-11 hit the T-432 stall (Standby, reserved for T-425, stuck in a conversation switch with no agent), so it is released and T-425's review starts on a fresh seat; nothing is cut (done clause 1)
 - station M-6168: keep course 1450 min in, 165 done, 9 left; hull 82 min, mast 65 min; T-425 and T-431 merged, T-432 in review, then the shared engine is rebuilt; nothing is cut (done clause 1)
+- station M-6202: keep course 1477 min in, 168 done, 6 left; hull 66 min, mast 25 min; the shared engine runs T-429, T-431 and T-432 since 12:10/12:15; T-356 back to mast for its golden_contract.rs conflict with T-360, which gives idle mast its next step; nothing is cut (done clause 1)
+- station M-6230: keep course 1500 min in, 168 done, 6 left; hull 62 min, mast 34 min; T-358 merged on its remerge, T-356 and T-407 in review, hull reworks T-425's conflict, mast takes T-368 (v0.5.2) next; nothing is cut (done clause 1)
+- station M-6265: keep course 1515 min in, 171 done, 3 left (T-365 in review, T-368 v0.5.2 working, T-369 last); nothing is cut (done clause 1)
+- station M-6316: keep course 1560 min in, 172 done, 2 left: T-425 in review, T-369 (v0.5.3, the last) after it; v0.5.2 is published when T-368's merge lands; nothing is cut (done clause 1)
+- 2026-10-29 13:44 release: v0.5.2 (station S3) published: T-368's merge 505e3fd4 merged into main as 206c76ff, tagged v0.5.2, GitHub release from docs/releases/v0.5.2.md | why: done clause (5)
 - 2026-10-29 08:00 release: v0.5.1 (station S2) published: T-367's merge 6d8d3a0a merged into main as 0974d950, tagged v0.5.1, GitHub release from docs/releases/v0.5.1.md | why: done clause (5)
 
 
@@ -1047,9 +1052,9 @@ accept: A board test: a voyage with a goal-change record shows the red line unde
 deps: T-364, T-335
 estimate: 20
 
-## T-365 [must] lane=mast milestone=M5 required
+## T-365 [must] lane=hull milestone=M5 required
 goal: [v0.5.3 S4] The board's README says which task built each change, so the plan's self-check that every agreed change has its task is one table (M5 backlog, how the board is built to its prototype, step 2). Change gear/voyages/M5/board/README.md only, no other design: after the "Four views" section add "## Change → task" with a two-column table, one row per README change 1-15 and per Four-views element, in this order, the tasks as the plan names them (T-numbers): 1 every voyage: d-voyages-model, d-header-top, d-voyage-keys · 2 the goal boxed: d-header-top, d-goal-changed · 3 every header row says what it is: d-stations-model, d-header-fold, d-header-open · 4 time against the plan: d-forecast, d-header-fold, d-header-open · 5 the full width: d-header-fold, d-header-open, d-now-table, d-tasks-rows · 6 tasks of this voyage only: d-voyages-model, d-moved, d-header-fold, d-header-open, d-now-table · 7 task stages in words: d-stages-model, d-stages-words · 8 Tasks as a git graph: d-tasks-rows, d-tasks-draw · 9 workload folded into Now: d-tabs4, d-forecast, d-now-table · 10 Log summary: d-log · 11 Cost by lane: d-cost · 12 clicks: d-tabbar, d-voyage-keys · 13 whole-row selection: d0-export, d-view-paint · 14 folded header: d-header-fold, d-header-open · 15 framed tabs: d-tabbar · Four views / Now table: d-now-table · TO HANDLE and quota: d-now-handle · golden frames: T-276, d0-export, d0-planes, d0-fixture-core, d0-fixture-rest, d0-golden. (The captain replaces each label by its T-number when applying.)
-accept: The README holds the table with every row above and each label replaced by a T-number of the plan. No cargo run is needed; the merge gate runs `make gate`.
+accept: (Moved to hull for balance at M-6214: the file this task names is an allowed edit for hull.) The README holds the table with every row above and each label replaced by a T-number of the plan. No cargo run is needed; the merge gate runs `make gate`.
 deps: T-358
 estimate: 10
 
@@ -1059,16 +1064,16 @@ accept: `cargo build --release -p gear-cli` then `target/release/gear --version`
 deps: T-366, T-272, T-273, T-275, T-323, T-324, T-325, T-326, T-327, T-328, T-338
 estimate: 15
 
-## T-368 [must] lane=hull milestone=M5 required
+## T-368 [must] lane=mast milestone=M5 required
 goal: [v0.5.2 S3] Release v0.5.2, station S3 of M5. Change, no other design: (1) the version is 0.5.2 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.5.2.md, in the form of docs/releases/v0.4.10.md: one line per task merged on origin/dev since v0.5.1 when you hand in (run git log origin/dev --grep='^merge(T-' just before: this station's tasks and those v0.5.1's notes deferred here), its T-number and what it changed for a user, from its goal; one line naming the M5 tasks not merged then, which go in v0.5.3's notes; then "Skill": the captain's release review text, which the captain writes into this contract before the task starts ("Nothing outside the tasks above." when it changed nothing). The captain's text: "The skill changed only through T-424 (reviewers follow the reviews waiting: no standby reviewer is released while a hand-in waits) and T-430 (the eta is among the changes a captain confirms with the user); the release review found nothing else that recurs for other captains.". The captain merges dev into main, tags v0.5.2 and publishes the release; this task does not. The code change is in these files only.
-accept: (Moved to hull for balance at M-6182: the files this task names are allowed edits for hull.) `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.5.2"; docs/releases/v0.5.2.md lists every task merged on origin/dev since v0.5.1 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.5.2"; docs/releases/v0.5.2.md lists every task merged on origin/dev since v0.5.1 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
 deps: T-367, T-329, T-330, T-331, T-333, T-334, T-335, T-336, T-337
 estimate: 15
 
 ## T-369 [must] lane=mast milestone=M5 required
-goal: [v0.5.3 S4] Release v0.5.3, station S4 of M5. Change, no other design: (1) the version is 0.5.3 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.5.3.md, in the form of docs/releases/v0.4.10.md: one line per task merged on origin/dev since v0.5.2 when you hand in (run git log origin/dev --grep='^merge(T-' just before: this station's tasks and those v0.5.2's notes deferred here), its T-number and what it changed for a user, from its goal; every M5 task is merged by then (this is the voyage's last release); then "Skill": the captain's release review text, which the captain writes into this contract before the task starts ("Nothing outside the tasks above." when it changed nothing). The captain merges dev into main, tags v0.5.3 and publishes the release; this task does not. The code change is in these files only.
+goal: [v0.5.3 S4] Release v0.5.3, station S4 of M5. Change, no other design: (1) the version is 0.5.3 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.5.3.md, in the form of docs/releases/v0.4.10.md: one line per task merged on origin/dev since v0.5.2 when you start your final check (run git log origin/dev --grep='^merge(T-' then; do not merge origin/dev again for later merges, the next release lists them: this station's tasks and those v0.5.2's notes deferred here), its T-number and what it changed for a user, from its goal; every M5 task is merged by then (this is the voyage's last release); then "Skill": the captain's release review text, which the captain writes into this contract before the task starts ("Nothing outside the tasks above." when it changed nothing). The captain merges dev into main, tags v0.5.3 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.5.3"; docs/releases/v0.5.3.md lists every task merged on origin/dev since v0.5.2 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-368, T-276, T-339, T-340, T-341, T-342, T-343, T-344, T-345, T-346, T-347, T-348, T-349, T-350, T-351, T-352, T-353, T-354, T-355, T-356, T-357, T-358, T-359, T-360, T-361, T-362, T-363, T-364, T-365
+deps: T-368, T-276, T-339, T-340, T-341, T-342, T-343, T-344, T-345, T-346, T-347, T-348, T-349, T-350, T-351, T-352, T-353, T-354, T-355, T-356, T-357, T-358, T-359, T-360, T-361, T-362, T-363, T-364, T-365, T-425
 estimate: 15
 
 ## T-372 [must] lane=mast milestone=M5 required
