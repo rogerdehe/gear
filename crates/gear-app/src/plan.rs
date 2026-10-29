@@ -533,6 +533,23 @@ fn apply_queue(
                 task.priority = priority_str(item.priority).to_string();
                 let old_lane = task.lane.clone();
                 task.lane = item.lane.clone();
+                // A task moved to another voyage is recorded in the voyage it
+                // leaves, so that voyage's board can name it (T-351).
+                if let (Some(old), Some(new)) = (&task.milestone, &item.milestone) {
+                    if old != new {
+                        record_gear_decision(
+                            tx,
+                            project,
+                            old,
+                            applied_version,
+                            "move",
+                            &format!("{id} moved to {new}"),
+                            None,
+                            &format!("move|{id}|{old}|{new}"),
+                            now,
+                        )?;
+                    }
+                }
                 task.milestone = item.milestone.clone();
                 task.required = item.required;
                 task.deps = item.deps.clone();

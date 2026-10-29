@@ -167,6 +167,31 @@ fn attempt(
     Ok(())
 }
 
+/// The line the engine writes when a task leaves a voyage (T-351).
+fn moved(
+    tx: &gear_store::Tx<'_>,
+    task: &str,
+    old: &str,
+    new: &str,
+) -> gear_model::GearResult<()> {
+    tx.insert_decision_if_new(&NewDecision {
+        project: "p".into(),
+        key: format!("move|{task}|{old}|{new}"),
+        voyage: old.into(),
+        at: "2026-10-27 11:40".into(),
+        kind: "move".into(),
+        what: format!("{task} moved to {new}"),
+        why: None,
+        alt: None,
+        changes: None,
+        star: false,
+        source: "gear".into(),
+        line: None,
+        plan_version: None,
+    })?;
+    Ok(())
+}
+
 fn board(store: &mut Store, milestone: Option<&str>) -> ProjectBoard {
     let options = Options {
         project: Some("p".into()),
@@ -253,6 +278,44 @@ fn the_board_built_for_a_landed_voyage_keeps_its_data() {
     // The decisions are M1's only.
     let whats: Vec<&str> = plan.decisions.iter().map(|d| d.what.as_str()).collect();
     assert_eq!(whats, vec!["the old lane lands with M1"], "the decisions of M1: {whats:?}");
+}
+
+/// T-351: a task that left the voyage is named by the voyage it left, and
+/// counted nowhere: it carries the milestone of the voyage it moved to.
+#[test]
+fn a_task_that_left_the_voyage_is_named_but_not_counted() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            // T-1 was M1's; it left for M2 and carries M2's milestone now.
+            let mut task = tx.get_task("p", "T-1")?.expect("the task");
+            task.milestone = Some("M2".into());
+            tx.update_task(&task)?;
+            moved(tx, "T-1", "M1", "M2")
+        })
+        .unwrap();
+
+    let m1 = board(&mut store, Some("M1"));
+    assert_eq!(m1.moved_out, vec![("T-1".to_string(), "M2".to_string())]);
+    // Its lanes' tasks — the rows the Cost view reads (T-363) — its graph and
+    // its totals leave it out.
+    let listed: Vec<&str> = m1
+        .lanes
+        .iter()
+        .flat_map(|lane| lane.tasks.iter())
+        .map(|task| task.id.as_str())
+        .collect();
+    assert!(!listed.contains(&"T-1"), "a moved task is M2's now: {listed:?}");
+    let graphed: Vec<&str> = m1.graph.iter().map(|task| task.id.as_str()).collect();
+    assert!(!graphed.contains(&"T-1"), "a moved task is M2's now: {graphed:?}");
+    let lane = m1.lanes.iter().find(|lane| lane.lane == "old").expect("the lane");
+    let ids: Vec<&str> = lane.tasks.iter().map(|task| task.id.as_str()).collect();
+    assert!(!ids.contains(&"T-1"), "a moved task is M2's now: {ids:?}");
+    assert_eq!(m1.totals.tasks, 0, "M1 has no task left: {:?}", m1.totals);
+
+    // The voyage it joined records no move, so it names nothing as moved out.
+    let m2 = board(&mut store, Some("M2"));
+    assert!(m2.moved_out.is_empty(), "{:?}", m2.moved_out);
 }
 
 /// The text of the graph row a task's branch leaves `dev` on: the fork row's
