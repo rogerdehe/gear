@@ -913,7 +913,7 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
 
     // The right arrow moves to the graph.
     press(pty.master, b"\x1b[C");
-    let frame = frames.next("○ queued", Duration::from_secs(5));
+    let frame = frames.next("○ not started", Duration::from_secs(5));
     assert!(frame.contains("dev"), "{frame}");
     assert!(frame.contains("rev"), "{frame}");
 
@@ -924,7 +924,7 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     // A click on the Graph tab, where it is drawn, moves to the graph.
     let tab = column_of(&frame, 3, "2 Tasks") + 2;
     press(pty.master, format!("\x1b[<0;{tab};4M").as_bytes());
-    let _frame = frames.next("○ queued", Duration::from_secs(5));
+    let _frame = frames.next("○ not started", Duration::from_secs(5));
 
     // A click on the Now tab, where it is drawn, comes back to the lanes.
     let now = column_of(&frame, 3, "1 Now") + 2;
