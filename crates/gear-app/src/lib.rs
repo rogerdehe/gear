@@ -19,6 +19,7 @@ pub mod decision;
 pub mod draft;
 pub mod friction;
 pub mod github;
+pub mod goal;
 pub mod home;
 pub mod identity;
 pub mod kickoff;
