@@ -1,11 +1,11 @@
-<!-- gear-plan project=gear base=745 -->
+<!-- gear-plan project=gear base=746 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
 # Milestone M5: a complete version that never stops
 done: (1) every M5 task merged; (2) the voyage never stops: while some lane has a task it can start, no lane sits idle; (3) every hand fix the captain makes during M5 is either turned into an M5 task and merged, or, only when it needs a sweeping change, written into gear/voyages/M6/backlog.md; (4) the board matches the prototype in gear/voyages/M5/board/: every view passes its golden-frame test and the user has checked it view by view; (5) released at each station, the last as v0.5.x
 bar: DELIVERABLE: an error in normal use blocks the task; edge cases outside normal use are logged
-eta: 16h
+eta: 21h
 
 # Decisions
 - 2026-10-28 22:30 scope: every item of gear/voyages/M5/backlog.md is taken, except the ones moved to gear/voyages/M6/backlog.md with their reasons (the machine health watch, endless thinking and the eight items the captain would drop); the "Not GEAR's to do" items are dropped | why: user | else: a smaller M5
@@ -123,6 +123,7 @@ eta: 16h
 - 2026-10-29 04:02 config: `[timing] handin_base_window_min` 30 -> 120: every task runs past 30 min, so each hand-in re-merged a moving dev and re-ran its suite (friction F-141, F-144, F-153, F-164); the merge gate still runs the full suite on the real tip | why: speed, past the eta | else: lanes keep paying a re-merge per hand-in
 - 2026-10-29 04:07 hand-fix: CODEX_HOME moved to the data disk (the disk emergency) left Codex seats blocked: the Herdr state hook at its new path needed trust (review-9 sat at the dialog, its packets lost; trusted once, a doorbell resent) and review-11's session, written to the old home after the copy, could not resume (newer sessions copied over; review-11's failed start left to the engine); machine setup, not GEAR code, so no task; the old ~/.codex stays until `herdr integration install codex` points the hook at the new home
 - 2026-10-29 04:09 hand-fix: review-11 sat Starting 30 min with no task and its codex resume failed in its pane ("No saved session found"); nothing in the engine revisits a Starting temp with no task, so it held one of the two temp slots while T-412's and T-297's reviews waited; the captain set it released in the store, voided its pending binding and closed its pane; a new hull task makes the engine release such a seat
+- 2026-10-29 04:16 estimate: eta 16h -> 21h on the user's own word and his confirmation in a dialog: the user's two-hour stop and the work it left behind; about 4 h 20 min left from 999 min in | why: user | else: the eta stays passed
 
 
 # Queue
