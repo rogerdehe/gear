@@ -725,7 +725,12 @@ fn view_decisions(
     }
     // The full list: every decision is a pick, its reason is not.
     row += 1;
-    canvas.put_styled(1, row, &format!("ALL DECISIONS ({})", project.decisions.len()), Style::bold());
+    canvas.put_styled(
+        1,
+        row,
+        &format!("ALL DECISIONS ({})", project.decisions.len()),
+        Style::bold(),
+    );
     let mut picks = Vec::new();
     for (index, decision) in project.decisions.iter().enumerate() {
         row += 1;
