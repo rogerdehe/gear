@@ -256,10 +256,9 @@ pub fn release_finished_reviews(
                     Ok(None) => {}
                     Ok(Some(_)) | Err(_) => continue,
                 }
-                // The review it waited for is not handed to a dead seat: with
-                // the key gone, the normal pass starts it on a free seat.
-                store.write(|tx| tx.set_meta(&pending_key, ""))?;
-                match release_one(store, herdr, project, &seat, None, now) {
+                // `release_one_ending_its_review` clears the reservation the
+                // seat leaves behind, in the same write as its transition.
+                match release_one_ending_its_review(store, herdr, project, &seat, now) {
                     Ok(true) => report.released.push(seat.id.clone()),
                     Ok(false) => {}
                     Err(_) => report.failed.push(seat.id.clone()),
@@ -525,6 +524,33 @@ pub(crate) fn release_one(
     task: Option<&str>,
     now: Ts,
 ) -> Result<bool, String> {
+    release_seat(store, herdr, project, seat, task, now, false)
+}
+
+/// The release of a `Standby` reviewer whose agent is gone (T-399): the review
+/// it was started for ends with it, so the reservation is cleared in the same
+/// write as the seat's transition (see `release_seat`).
+fn release_one_ending_its_review(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    seat: &SeatRow,
+    now: Ts,
+) -> Result<bool, String> {
+    release_seat(store, herdr, project, seat, None, now, true)
+}
+
+/// The steps of one release, shared by `release_one` and the release that ends
+/// the seat's review with it (`ending_its_review`).
+fn release_seat(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    seat: &SeatRow,
+    task: Option<&str>,
+    now: Ts,
+    ending_its_review: bool,
+) -> Result<bool, String> {
     let pane = binding_pane(store, seat)?;
 
     // 1. the agent leaves, once: its pane is closed. Exit keys differ per
@@ -565,6 +591,17 @@ pub(crate) fn release_one(
         store
             .write(|tx| {
                 tx.clear_seat_task(&seat.id)?;
+                // T-399: a review that ends with its seat is cleared in the
+                // same write as the transition — never in a write of its own,
+                // which a refused `pane_close` above would leave behind as a
+                // seat holding its slot with its reservation already gone.
+                // With the key gone, `start_reviews` starts that review again
+                // on a free seat. A seat released with its agent alive keeps
+                // its reservation: it is released to move, and the next job on
+                // it is the very review it waits for.
+                if ending_its_review {
+                    tx.set_meta(&format!("engine.review_pending.{}", seat.id), "")?;
+                }
                 tx.set_seat_state(&seat.id, SeatState::Releasing, Some(reason), now)
             })
             .map_err(|e| e.detail)?;
@@ -2182,6 +2219,34 @@ profile = "codex"
         let pending = store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap();
         assert_eq!(pending.as_deref(), Some("T-1"), "its review is kept");
         assert_eq!(exits(&herdr), 0, "its pane stays open");
+    }
+
+    /// T-399 (review F1): the reservation of a seat on its way out is cleared
+    /// in the same write as its transition. A refused pane close keeps the
+    /// seat, and its review, whole: it is not left holding a slot with the
+    /// review already taken from it.
+    #[test]
+    fn a_refused_close_keeps_a_standby_reservation_until_the_release_commits() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        standby_for_a_pending_review(&mut store, T0);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w2:p2");
+        herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "busy".into() });
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 120).unwrap();
+
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Standby, "the seat stays while its close is refused");
+        let pending = store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap();
+        assert_eq!(pending.as_deref(), Some("T-1"), "its review is not taken from it yet");
+
+        // The close works on the next tick: the transition and the clearing of
+        // the reservation land together.
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 140).unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Releasing, "the seat leaves");
+        let pending = store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap();
+        assert_eq!(pending.as_deref(), Some(""), "its review leaves with it");
     }
 
     /// T-259: a reviewer parked in NeedsCheck with no task and no agent in its
