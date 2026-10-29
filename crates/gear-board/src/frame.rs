@@ -180,9 +180,11 @@ impl Canvas {
             if column >= last {
                 break;
             }
-            self.cells[y * self.width + column] = character;
-            self.styles[y * self.width + column] = style;
-            self.continuation[y * self.width + column] = false;
+            let cell = y * self.width + column;
+            self.clear_wide_at(cell);
+            self.cells[cell] = character;
+            self.styles[cell] = style;
+            self.continuation[cell] = false;
         }
     }
 
@@ -198,9 +200,11 @@ impl Canvas {
             if column >= last {
                 break;
             }
-            self.cells[y * self.width + column] = character;
-            self.styles[y * self.width + column] = style;
-            self.continuation[y * self.width + column] = false;
+            let cell = y * self.width + column;
+            self.clear_wide_at(cell);
+            self.cells[cell] = character;
+            self.styles[cell] = style;
+            self.continuation[cell] = false;
         }
     }
 
@@ -219,18 +223,49 @@ impl Canvas {
             if column >= last {
                 break;
             }
-            self.cells[y * self.width + column] = character;
-            self.styles[y * self.width + column] = style;
-            self.continuation[y * self.width + column] = false;
+            let cell = y * self.width + column;
+            self.clear_wide_at(cell);
+            self.cells[cell] = character;
+            self.styles[cell] = style;
+            self.continuation[cell] = false;
             column += 1;
             if is_wide(character) && column < last {
-                self.cells[y * self.width + column] = ' ';
-                self.styles[y * self.width + column] = style;
-                self.continuation[y * self.width + column] = true;
+                let cell = y * self.width + column;
+                self.clear_wide_at(cell);
+                self.cells[cell] = ' ';
+                self.styles[cell] = style;
+                self.continuation[cell] = true;
                 column += 1;
             }
         }
         column - x
+    }
+
+    /// A write lands on one cell, but a wide glyph is drawn in two: overwriting
+    /// half of one would leave the other half to the terminal, which draws the
+    /// glyph over the write and shifts every column after it (T-353, review
+    /// F3). So the other half is blanked first, as the prototype's export
+    /// blanks it.
+    ///
+    /// A write onto a glyph's continuation blanks the glyph's leading cell; a
+    /// write onto a leading cell clears its continuation, which stays a space
+    /// in the glyph's style. Either way the glyph is never half overwritten.
+    fn clear_wide_at(&mut self, cell: usize) {
+        let same_row = |cell: usize| cell / self.width;
+        if self.continuation[cell] {
+            // This cell is the second half: blank the leading one.
+            if cell > 0 && same_row(cell - 1) == same_row(cell) {
+                self.cells[cell - 1] = ' ';
+                self.continuation[cell - 1] = false;
+            }
+            self.continuation[cell] = false;
+        } else if is_wide(self.cells[cell]) {
+            // This cell is the first half: its continuation is no longer one.
+            let next = cell + 1;
+            if next < self.cells.len() && same_row(next) == same_row(cell) {
+                self.continuation[next] = false;
+            }
+        }
     }
 
     /// Is the cell the continuation of a wide glyph? The terminal draws that
@@ -1542,5 +1577,32 @@ mod tests {
             .map(|character| if matches!(character, '⛵' | '⚓') { 2 } else { 1 })
             .sum();
         assert_eq!(columns, 9, "nine cells, nine terminal columns: {line:?}");
+    }
+
+    #[test]
+    fn a_write_over_half_of_a_wide_glyph_blanks_the_other_half() {
+        // T-353 (review F3): the terminal draws a glyph in two columns, so a
+        // half-overwritten glyph would shift the columns after it.
+        let mut canvas = Canvas::new(20, 8);
+        canvas.put_wide(1, 0, "M5 ⛵", Style::fg(Color::Warn));
+
+        // A write onto the continuation blanks the glyph's leading cell.
+        assert_eq!(canvas.char_at(4, 0), '⛵');
+        assert!(canvas.is_continuation(5, 0));
+        canvas.put(5, 0, "x");
+        assert_eq!(canvas.char_at(4, 0), ' ', "the glyph's first half is blank");
+        assert!(!canvas.is_continuation(4, 0));
+        assert_eq!(canvas.char_at(5, 0), 'x', "the write is where it landed");
+        assert_eq!(canvas.text().lines().next().unwrap_or_default(), " M5  x");
+
+        // A write onto a leading cell clears its continuation: the second half
+        // stays a space in the glyph's style.
+        let mut canvas = Canvas::new(20, 8);
+        canvas.put_wide(1, 0, "M5 ⛵", Style::fg(Color::Warn));
+        canvas.put(4, 0, "y");
+        assert!(!canvas.is_continuation(5, 0), "the glyph has no second half any more");
+        assert_eq!(canvas.char_at(5, 0), ' ');
+        assert_eq!(canvas.style_at(5, 0), Style::fg(Color::Warn));
+        assert_eq!(canvas.text().lines().next().unwrap_or_default(), " M5 y");
     }
 }

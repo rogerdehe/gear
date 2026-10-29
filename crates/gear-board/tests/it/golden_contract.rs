@@ -337,6 +337,51 @@ fn a_wide_glyph_fills_two_columns_and_its_continuation_is_not_printed() {
     );
 }
 
+/// T-353 (review F3): a write that lands on a wide glyph's continuation
+/// blanks the glyph, so the glyph is never half overwritten. Eight voyages on an
+/// 80-column terminal put the labels under the clock: the clock still starts at
+/// column `W - 8` and the row is still 80 cells wide.
+#[test]
+fn a_write_over_a_wide_glyph_blanks_it_and_keeps_the_clock_its_column() {
+    use gear_board::EngineState;
+
+    let (mut store, now) = crate::golden_fixture::load();
+    let mut board = gear_board::build(
+        &mut store,
+        &gear_board::Options { project: Some("gear".into()), ..Default::default() },
+        now,
+    )
+    .unwrap();
+    board.engine = EngineState::Running;
+    // Five more voyages, as the review reproduces it: their labels run into the
+    // clock's columns.
+    {
+        let project = &mut board.projects[0];
+        let last = project.voyage_list.last().cloned().expect("a voyage of the fixture");
+        for milestone in ["M3.9", "M3.8", "M3.7", "M3.6x", "M3.5"] {
+            let mut extra = last.clone();
+            extra.milestone = milestone.into();
+            project.voyage_list.push(extra);
+        }
+    }
+
+    let row = head_row(&board, (80, 48));
+    assert_eq!(column_of(&row, "14:32"), 72, "the clock's column (W - 8): {row:?}");
+    assert!(
+        terminal_columns(&row) <= 80,
+        "the row is {} columns wide: {row:?}",
+        terminal_columns(&row)
+    );
+    // The glyph the clock landed on is blanked, not half printed: no wide glyph
+    // sits in front of the clock's first digit.
+    let at = row.find("14:32").unwrap_or(0);
+    let before = &row[..at];
+    assert!(
+        !before.ends_with('⛵') && !before.ends_with('⚓'),
+        "no wide glyph in front of the clock: {row:?}"
+    );
+}
+
 /// One plane of golden files: `name.txt`, `name.col` or `name.rev`, split on
 /// `\n` with a last empty piece dropped.
 fn plane(name: &str, ext: &str) -> Vec<String> {
