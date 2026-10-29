@@ -710,6 +710,9 @@ fn cmd_admin_init(
     user: Option<&str>,
     json: bool,
 ) -> GearResult<()> {
+    // T-392 (rework F1): words that are blank once trimmed are no words —
+    // neither the check nor the init takes `--user ""` for an agreement.
+    let user = user.map(str::trim).filter(|words| !words.is_empty());
     // T-261: the lane list — `(name, kind, model)` — with the model being the
     // lane's first `models` entry, else the role chain's first, else "-".
     let lane_list = |parsed: &gear_app::config::ProjectConfig| -> Vec<(String, String, String)> {
@@ -1079,7 +1082,7 @@ fn staffing_refusal_of(parsed: &gear_app::config::ProjectConfig) -> GearResult<O
             return Ok(None);
         };
         let changes = gear_app::admin::staffing_changes(&stored, parsed);
-        if changes.is_empty() {
+        if !gear_app::admin::staffing_changed(&stored, parsed) {
             return Ok(None);
         }
         let Some(voyage) = gear_app::admin::staffing_voyage(tx, &parsed.project.id)? else {

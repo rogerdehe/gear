@@ -763,12 +763,17 @@ fn re_register(
 
     // T-392: the staffing of a departed voyage is agreed at its kickoff, like
     // the goal (T-331). A change to it needs the user's own words, and the
-    // refusal writes nothing.
-    let staff_changes = match config::parse(&project.config_toml) {
-        Ok(stored) => staffing_changes(&stored, config),
-        Err(_) => Vec::new(),
+    // refusal writes nothing. Words that are blank once trimmed are no words
+    // (rework F1): `--user ""` never stands for an agreement.
+    let user = user.map(str::trim).filter(|words| !words.is_empty());
+    let (staff_changes, staff_changed) = match config::parse(&project.config_toml) {
+        Ok(stored) => (
+            staffing_changes(&stored, config),
+            staffing_changed(&stored, config),
+        ),
+        Err(_) => (Vec::new(), false),
     };
-    let locked_voyage = if staff_changes.is_empty() {
+    let locked_voyage = if !staff_changed {
         None
     } else {
         staffing_voyage(tx, &project_id)?
@@ -922,6 +927,19 @@ pub fn staffing_voyage(tx: &Tx<'_>, project: &str) -> GearResult<Option<String>>
     Ok((!milestone.is_empty()).then_some(milestone))
 }
 
+/// Whether the staffing differs between the stored config and the new one
+/// (T-392): `quota`, `lanes`, `temps` and `models` compared as whole sections,
+/// so anything in them — a reordered `[[lanes]]` included — counts.
+///
+/// [`staffing_changes`] explains a difference field by field; it never decides
+/// whether there is one.
+pub fn staffing_changed(old: &config::ProjectConfig, new: &config::ProjectConfig) -> bool {
+    old.quota != new.quota
+        || old.lanes != new.lanes
+        || old.temps != new.temps
+        || old.models != new.models
+}
+
 /// The staff fields that differ between the stored config and the new one
 /// (T-392), each as `section.key: old → new`, over `quota`, `lanes`, `temps`
 /// and `models`.
@@ -953,6 +971,7 @@ pub fn staffing_changes(old: &config::ProjectConfig, new: &config::ProjectConfig
 
     // [[lanes]] — a lane both configs name is compared field by field; a lane
     // only one of them names is one change, with its staff as the value.
+    let lanes_before = changes.len();
     let mut names: Vec<&str> = old.lanes.iter().map(|lane| lane.name.as_str()).collect();
     for lane in &new.lanes {
         if !names.contains(&lane.name.as_str()) {
@@ -1007,6 +1026,16 @@ pub fn staffing_changes(old: &config::ProjectConfig, new: &config::ProjectConfig
             (None, Some(b)) => changes.push(changed_field(&key, "none", &lane_text(b))),
             (None, None) => {}
         }
+    }
+    // The sections differ but no lane field does: the lanes are in another
+    // order. The order is the staffing too (it is the order the board shows
+    // and the lane list prints), so it is named as the one change.
+    if old.lanes != new.lanes && changes.len() == lanes_before {
+        changes.push(changed_field(
+            "lanes",
+            &lane_order_text(&old.lanes),
+            &lane_order_text(&new.lanes),
+        ));
     }
 
     // [temps]
@@ -1093,6 +1122,14 @@ fn changed_field(key: &str, old: &str, new: &str) -> String {
     format!("{key}: {old} → {new}")
 }
 
+/// The lanes in config order, as one value: the order is staffing too.
+fn lane_order_text(lanes: &[config::LaneSection]) -> String {
+    if lanes.is_empty() {
+        return "none".to_string();
+    }
+    lanes.iter().map(|lane| lane.name.as_str()).collect::<Vec<_>>().join(", ")
+}
+
 /// A lane as one value, for a lane that only one of the two configs names.
 fn lane_text(lane: &config::LaneSection) -> String {
     let mut text = format!(
@@ -1121,9 +1158,25 @@ fn chain_text(chain: &[config::ModelEntry]) -> String {
     }
     chain
         .iter()
-        .map(|entry| entry.describe())
+        .map(entry_text)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// One model entry as one value, for a changed-field message (T-392 rework
+/// F2): the model and its CLI, then the arguments it starts with and its
+/// context window when the entry names them — so a reasoning effort that
+/// changed reads `medium → high`, not the same entry twice.
+fn entry_text(entry: &config::ModelEntry) -> String {
+    let mut text = entry.describe();
+    let args = entry.args();
+    if !args.is_empty() {
+        text.push_str(&format!(" args [{}]", args.join(" ")));
+    }
+    if let Some(k) = entry.context_window_k() {
+        text.push_str(&format!(" context_window_k {k}"));
+    }
+    text
 }
 
 /// The quota sources as one value.
