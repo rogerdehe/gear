@@ -381,6 +381,11 @@ pub struct DownSeat {
 pub struct TaskBoard {
     pub id: String,
     pub state: TaskState,
+    /// The task's stage in the graph, and its words (T-347): the lane lines of
+    /// the board and of the captain's home page name the stage in the same
+    /// words as the board's views.
+    pub stage: graph::Stage,
+    pub stage_words: String,
     /// The goal of the task (its title in the frame).
     pub title: String,
     /// The estimate of the task in minutes.
@@ -557,16 +562,23 @@ pub fn project_with_agents(
         if retired.contains(name.as_str()) {
             continue;
         }
+        let rounds = tx.attempts_of_task(project, &task.id)?.len();
+        // The stage the graph gives this task, and its words (T-347): one
+        // reading for the views and the lane lines.
+        let stage = graph::stage_of(tx, project, task)?;
+        let stage_words = graph::Stage::words_of(stage, &task.deps, rounds, None);
         let line = TaskBoard {
             id: task.id.clone(),
             state: task.state,
+            stage,
+            stage_words,
             title: tx
                 .get_contract(project, &task.id, task.contract_version)?
                 .map(|contract| contract.goal)
                 .unwrap_or_default(),
             est_min: task.estimate_min,
             actual_min: actual_min_of(tx, project, &task.id, now)?,
-            rounds: tx.attempts_of_task(project, &task.id)?.len(),
+            rounds,
             stored_rounds: tx.rounds_of_task(project, &task.id)?.len(),
             tokens: tokens_of(tx, project, &task.id)?,
             cache_read: cache_read_of(tx, project, &task.id)?,
@@ -987,11 +999,20 @@ fn observed_agent_state(
 }
 
 /// Shared snapshot/board wording: agent state and task state have separate labels.
+///
+/// The current task is the first task of the lane that is on its way between
+/// its delivery and its merge, named in the stage words the board's views use
+/// (T-347). A cancelled task is never the lane's current task, even when its
+/// last attempt was rejected and the classifier still calls that stage open
+/// (F1 of the review): the graph leaves a cancelled task out, so the lane line
+/// names the lane's next open task instead.
 pub fn lane_line(lane: &LaneBoard) -> String {
-    let current = lane.tasks.iter().find(|task| task.state == TaskState::Running)
-        .or_else(|| lane.tasks.iter().find(|task| task.state == TaskState::Waiting))
-        .or_else(|| lane.tasks.iter().find(|task| task.state == TaskState::Verifying));
-    let current = current.map(|task| format!("{} {}", task.id, state_word(task.state)))
+    let current = lane
+        .tasks
+        .iter()
+        .filter(|task| task.state != TaskState::Cancelled)
+        .find(|task| task.stage.is_open());
+    let current = current.map(|task| format!("{} {}", task.id, task.stage_words))
         .unwrap_or_else(|| match &lane.helping {
             // A lane that helps says what it helps on (T-323).
             Some(helping) => helping.clone(),
