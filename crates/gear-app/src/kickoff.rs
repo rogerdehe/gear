@@ -615,6 +615,7 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
             policy(&lanes),
             policy(&review)
         ),
+        "on_wait = \"keep\"              # \"release\": a lane parked on a quota wait exits until the reset; its worktree and session are kept".to_string(),
         "quota_reset_h = 5".to_string(),
         String::new(),
         "[conventions]".to_string(),
