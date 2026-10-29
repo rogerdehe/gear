@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=720 -->
+<!-- gear-plan project=gear base=721 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -108,6 +108,7 @@ eta: 16h
 - station M-5309: keep course 720 min in; hull 268 min and mast 269 min are level after M-5296; T-398 goes back for F1 (a stale build SHA after a commit on the same branch is an error in normal use)
 - 2026-10-29 05:15 hand-fix: review-11 (generation 325, no session id recorded) came up inside review-9's Codex conversation, so Codex refused it ("open in another app") and four T-392 review deliveries sat unconfirmed; the captain forked the conversation and typed the latest delivery in again by hand (what T-404 automates); the cause (how a new codex seat picks its session) goes to the M6 backlog
 - 2026-10-29 05:40 scope: each station release waits for the one before (T-367 after T-366, T-368 after T-367, T-369 after T-368), so v0.5.1 is never cut before v0.5.0 (M-5376)
+- station M-5384: keep course 780 min in, 114 done; hull 290 min and mast 247 min against 180 left; reviews queue on two temp seats (T-349, T-392, T-398, T-404 each waited for a seat); the T-404 build goes out now
 
 # Queue
 
