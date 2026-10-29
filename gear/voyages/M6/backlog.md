@@ -42,3 +42,6 @@
 
 ## Lost-merge cleanup behind the old filters
 - 2026-10-29 M5 (T-408 review F1): the scan drops a task with a merge in flight or an open merge-failed item before the finished-voyage / gone-candidate check, so its open merge-lost item stays open in that case. Check the skip rule first for tasks with an open merge-lost item, then apply the old filters for new items.
+
+## A repeated confirmed goal/bar/eta change records no second decision
+- 2026-10-29 M5 (T-410 review F1): the decision key in plan.rs record_voyages holds only project, milestone, field and the old and new text, so the same confirmed transition a second time in one voyage is skipped by insert_decision_if_new. Add the plan version to the key and a test with three confirmed transitions.
