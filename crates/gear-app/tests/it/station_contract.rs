@@ -219,7 +219,14 @@ fn invalid_station_decisions_and_mixed_replies_are_atomic() {
 
 #[test]
 fn unknown_eta_keeps_task_stations_and_unknown_measurements_honest() {
-    let mut store = world("soon", 5);
+    // T-387: `apply` refuses a prose eta, so the seed is a duration and the
+    // prose is written the way a row older than T-387 carries it.
+    let mut store = world("4h", 5);
+    store.write(|tx| {
+        let mut voyage = tx.get_voyage("p", "M2")?.unwrap();
+        voyage.eta = Some("soon".into());
+        tx.upsert_voyage(&voyage)
+    }).unwrap();
     // An unknown eta rings no eta station; the course station (row B10) does
     // not need one: the voyage time is known.
     let ids = check(&mut store, 3600);
