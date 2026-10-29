@@ -113,6 +113,13 @@ fn expand_home(path: &str) -> std::path::PathBuf {
     }
 }
 
+/// A path as one shell word: single-quoted, with an embedded `'` escaped, so a
+/// scratch directory with a space or an apostrophe still reaches `mkdir` and
+/// `TMPDIR` whole (F1 of the T-413 review).
+fn shell_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\'', r"'\''"))
+}
+
 /// The worktree default scratch (T-413) lives in `<worktree>/.gear/tmp`, so the
 /// repository ignores `.gear/`: the line is appended once to the common dir's
 /// `info/exclude`, which every worktree of the repository shares. A path that
@@ -605,7 +612,9 @@ fn onboard_seat(
     //    pi, codex, claude, cargo and the OS temp API all read `TMPDIR` — lands
     //    there and never in the system temp directory.
     if let Some(scratch) = scratch_dir(&config.conventions, &seat.project, &seat.name, Some(&created.path)) {
-        plan.env_command = format!("mkdir -p {scratch}; export TMPDIR={scratch}; {}", plan.env_command);
+        let scratch = shell_quote(&scratch);
+        plan.env_command =
+            format!("mkdir -p {scratch}; export TMPDIR={scratch}; {}", plan.env_command);
         if config.conventions.scratch_dir.as_deref().map(str::trim).unwrap_or("").is_empty() {
             exclude_gear_dir(&created.path);
         }
@@ -1773,7 +1782,7 @@ repo = "web"
             env.contains(r#"OPENCODE_CONFIG_CONTENT='{"model":"minimax-cn/MiniMax-M3.1-Flash"}'"#),
             "the environment line must carry the lane's model: {env}"
         );
-        assert!(env.starts_with(&format!("mkdir -p /fake-worktrees/toy-heat/.gear/tmp; export TMPDIR=/fake-worktrees/toy-heat/.gear/tmp; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path)), "{env}");
+        assert!(env.starts_with(&format!("mkdir -p '/fake-worktrees/toy-heat/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path)), "{env}");
         // The model is only read by a process that inherits the pane's
         // environment, so the agent gets a private server.
         assert!(!start_args(&herdr).contains(&"--standalone".to_string()), "no --standalone (L-56): {:?}", start_args(&herdr));
@@ -1883,7 +1892,7 @@ repo = "web"
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
         assert_eq!(active, vec!["toy:heat".to_string()]);
-        assert_eq!(env_line(&herdr), format!("mkdir -p /fake-worktrees/toy-heat/.gear/tmp; export TMPDIR=/fake-worktrees/toy-heat/.gear/tmp; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path));
+        assert_eq!(env_line(&herdr), format!("mkdir -p '/fake-worktrees/toy-heat/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path));
         assert_eq!(start_args(&herdr), vec!["--auto".to_string()]);
     }
 
@@ -2026,7 +2035,7 @@ repo = "web"
         let scratch = worktree.join(".gear").join("tmp");
         assert!(
             env_line(&herdr).starts_with(&format!(
-                "mkdir -p {}; export TMPDIR={}; export GEAR_CTX=toy:heat:1; export GEAR_DB={}",
+                "mkdir -p '{}'; export TMPDIR='{}'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}",
                 scratch.display(),
                 scratch.display(),
                 cfg().db_path
@@ -2067,7 +2076,7 @@ repo = "web"
         let own = scratch.join("toy").join("heat");
         assert!(
             env_line(&herdr).starts_with(&format!(
-                "mkdir -p {}; export TMPDIR={}; export GEAR_CTX=toy:heat:1; export GEAR_DB={}",
+                "mkdir -p '{}'; export TMPDIR='{}'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}",
                 own.display(),
                 own.display(),
                 cfg().db_path
@@ -2075,5 +2084,34 @@ repo = "web"
             "{}",
             env_line(&herdr)
         );
+    }
+
+    /// T-413 (F1 of its review): a `scratch_dir` is a configurable path, so a
+    /// space or an apostrophe in it is normal use: the line quotes the path,
+    /// `sh` makes the very directory and `TMPDIR` names it whole.
+    #[test]
+    fn a_scratch_dir_with_a_space_and_an_apostrophe_is_run_as_it_is() {
+        let parent = crate::testtmp::temp("gear-onboard-scratch-quoted").join("scratch parent's");
+        let config_toml =
+            format!("{CONFIG}\n[conventions]\nscratch_dir = \"{}\"\n", parent.display());
+        let mut store = world(&config_toml);
+        let mut herdr = FakeHerdr::new();
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        assert_eq!(active, vec!["toy:heat".to_string()]);
+        let own = parent.join("toy").join("heat");
+        let line = env_line(&herdr);
+        assert!(line.contains('\''), "the path is quoted: {line}");
+        // The seat's shell runs the line: the directory is made and `TMPDIR`
+        // holds the path whole, not the part before the space.
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("{line}; printf '%s' \"$TMPDIR\""))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{line}: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), own.to_string_lossy(), "{line}");
+        assert!(own.is_dir(), "{line}");
     }
 }

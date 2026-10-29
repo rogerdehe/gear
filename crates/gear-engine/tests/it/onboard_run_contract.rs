@@ -57,7 +57,7 @@ fn queued_lane_gets_worktree_env_and_agent() {
     assert!(herdr.worktree_branches().contains(&"toy/heat"));
     let scratch = "/fake-worktrees/toy-heat/.gear/tmp";
     assert!(herdr.calls.iter().any(|c| matches!(c, Call::PaneRun { command, .. }
-        if command == &format!("mkdir -p {scratch}; export TMPDIR={scratch}; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path))), "{:?}", herdr.calls);
+        if command == &format!("mkdir -p '{scratch}'; export TMPDIR='{scratch}'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path))), "{:?}", herdr.calls);
     assert!(herdr.calls.iter().any(|c| matches!(c, Call::AgentStart { name, kind, args, .. }
         if name == "toy-heat" && kind == "opencode" && args == &vec!["--auto".to_string()])), "{:?}", herdr.calls);
     // the captain is bound at init (T-63), not onboarded by the engine
