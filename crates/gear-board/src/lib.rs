@@ -780,6 +780,18 @@ pub fn project_for(
             }),
         }
     }
+    // One lane order for every view that has a row or a column per lane
+    // (T-363, the captain's decision for Tasks made once for all): the lanes
+    // by their first task in plan order, a lane with no task after them in its
+    // present (seat) order. It is the prototype's order, and the lane colours
+    // follow it. The sort is stable, so the lanes without a task keep their
+    // order.
+    lanes.sort_by_key(|lane| {
+        tasks
+            .iter()
+            .position(|task| lane_of(task) == lane.lane)
+            .unwrap_or(usize::MAX)
+    });
     // Every registered lane stays in the model, even with nothing queued: an
     // empty lane is exactly what the captain has to see to refill it (the
     // review of T-9).

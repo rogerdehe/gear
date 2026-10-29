@@ -169,10 +169,10 @@ const PENDING: &[Pending] = &[
     Pending { frame: "tasks-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-356: the view's first row" },
     Pending { frame: "tasks-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-356: the view's first row" },
     // T-363 draws the Cost view to the prototype's rows too, but it waits for
-    // the same header; its lane order is the board's own (seat order), which
-    // is a separate gap named in the T-363 report.
-    Pending { frame: "cost-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-363 (after T-353 to T-356)" },
-    Pending { frame: "cost-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-363 (after T-353 to T-356)" },
+    // the same header; `the_cost_view_paints_the_prototype_rows` holds those
+    // rows to the golden frames at the prototype's own origin.
+    Pending { frame: "cost-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-363 (T-356 removes it)" },
+    Pending { frame: "cost-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-363 (T-356 removes it)" },
     Pending { frame: "log-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-364" },
     Pending { frame: "log-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-364" },
 
@@ -544,16 +544,16 @@ fn fixture_board() -> (Store, gear_board::Board) {
 }
 
 /// The cell differences of `frame`'s rows `rows` between the prototype and the
-/// Tasks view painted on top of `top` (the row the prototype's view starts on).
+/// view `tab` painted on top of `top` (the row the prototype's view starts on).
 ///
 /// The lane colour swap of the golden gate is allowed: the prototype colours a
 /// lane by its name, the board by its place.
-fn view_differences(frame: Frame, top: usize, rows: Range) -> Vec<String> {
+fn view_differences(tab: Tab, frame: Frame, top: usize, rows: Range) -> Vec<String> {
     let (_, board) = fixture_board();
     let mut canvas = gear_board::frame::Canvas::new(160, 48);
     let screen =
         gear_board::frame::Screen {
-            tab: Tab::Tasks,
+            tab,
             selected: 0,
             detail: false,
             opened: Vec::new(),
@@ -600,8 +600,22 @@ fn the_tasks_view_paints_the_prototype_rows() {
     // The prototype's folded header ends on row 13 and its view starts on row
     // 14; the open header ends on row 21 and its view on row 22 (its
     // `TOP[0]`). The view is the same in both frames.
-    let folded = view_differences("tasks-folded", 14, (14, 44));
+    let folded = view_differences(Tab::Tasks, "tasks-folded", 14, (14, 44));
     assert!(folded.is_empty(), "\n{}", folded.join("\n"));
-    let open = view_differences("tasks-open", 22, (22, 44));
+    let open = view_differences(Tab::Tasks, "tasks-open", 22, (22, 44));
+    assert!(open.is_empty(), "\n{}", open.join("\n"));
+}
+
+/// T-363: the Cost view paints the prototype's rows from the row the
+/// prototype's view starts on, so its columns and colours are held to the
+/// golden frames even while the board's own header is still four rows.
+#[test]
+fn the_cost_view_paints_the_prototype_rows() {
+    // The prototype's folded header ends on row 13 and its view starts on row
+    // 14; the open header ends on row 21 and its view on row 22 (its
+    // `TOP[0]`). The view is the same in both frames.
+    let folded = view_differences(Tab::Cost, "cost-folded", 14, (14, 44));
+    assert!(folded.is_empty(), "\n{}", folded.join("\n"));
+    let open = view_differences(Tab::Cost, "cost-open", 22, (22, 44));
     assert!(open.is_empty(), "\n{}", open.join("\n"));
 }
