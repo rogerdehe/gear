@@ -297,8 +297,14 @@ fn a_task_that_left_the_voyage_is_named_but_not_counted() {
 
     let m1 = board(&mut store, Some("M1"));
     assert_eq!(m1.moved_out, vec![("T-1".to_string(), "M2".to_string())]);
-    // Its task list, its lane, its graph and its totals leave it out.
-    let listed: Vec<&str> = token_tasks(&m1).iter().map(|(_, task)| task.id.as_str()).collect();
+    // Its lanes' tasks — the rows the Cost view reads (T-363) — its graph and
+    // its totals leave it out.
+    let listed: Vec<&str> = m1
+        .lanes
+        .iter()
+        .flat_map(|lane| lane.tasks.iter())
+        .map(|task| task.id.as_str())
+        .collect();
     assert!(!listed.contains(&"T-1"), "a moved task is M2's now: {listed:?}");
     let graphed: Vec<&str> = m1.graph.iter().map(|task| task.id.as_str()).collect();
     assert!(!graphed.contains(&"T-1"), "a moved task is M2's now: {graphed:?}");
