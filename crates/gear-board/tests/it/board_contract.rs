@@ -2164,6 +2164,140 @@ fn run_events_output(store: &mut Store, events: Vec<Event>, size: (usize, usize)
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// A project with two voyages (T-357): M1 landed, its one task merged, and M2
+/// sailing on a task that is still open, so the board's measured voyage is M2.
+fn world_with_two_voyages() -> Store {
+    let now = now_seconds();
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", now)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", now)?;
+            testing::seed_active_seat(tx, "p", "old", SeatRole::Lane, "w1:p2", "pi", now)?;
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p3", "pi", now)?;
+            for (milestone, departure) in [("M1", now - 7200), ("M2", now - 3600)] {
+                tx.upsert_voyage(&VoyageRow {
+                    project: "p".into(),
+                    milestone: milestone.into(),
+                    title: format!("voyage {milestone}"),
+                    done: Some("it is delivered".into()),
+                    bar: None,
+                    eta: Some("8h".into()),
+                    departure: Some(departure),
+                    departure_tasks: Some(1),
+                    departure_estimate_min: Some(30),
+                    updated: departure,
+                })?;
+            }
+            for (id, rank, milestone, lane, state) in [
+                ("T-1", 1, "M1", "old", TaskState::Done),
+                ("T-2", 2, "M2", "hull", TaskState::Ready),
+            ] {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state,
+                    priority: "must".into(),
+                    lane: Some(lane.into()),
+                    milestone: Some(milestone.into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                     issue: None,updated: now,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// The rows a frame draws in reverse video, the first row's voyage labels and
+/// the tab row left out: the pick the view has selected.
+fn lit_picks(frame: &str, tab_row: usize) -> Vec<usize> {
+    frame
+        .lines()
+        .enumerate()
+        .filter(|(row, line)| *row != 0 && *row != tab_row && line.contains("\u{1b}[7m"))
+        .map(|(row, _)| row)
+        .collect()
+}
+
+/// T-357: `[` and `]` pick the voyage the whole board shows — the list is
+/// newest first, so `[` goes one entry older and `]` one newer, and the ends
+/// stay where they are — and a click on a label on the first row picks that
+/// voyage (README changes 1 and 12).
+#[test]
+fn the_voyage_keys_and_a_click_on_a_label_pick_the_shown_voyage() {
+    use gear_board::frame::{self, Tab};
+
+    let size = (160, 40);
+    let mut store = world_with_two_voyages();
+    // Where the labels sit on the first row: the board opens on the measured
+    // voyage, the sailing M2, and its list is newest first.
+    let board = build(&mut store, &options(), now_seconds()).unwrap();
+    let head = frame::layout(&board, &crate::screen(Tab::Now, 0, size));
+    let labels: Vec<&str> =
+        head.voyages.iter().map(|(_, _, milestone)| milestone.as_str()).collect();
+    assert_eq!(labels, vec!["M2", "M1"], "the labels of the first row: {labels:?}");
+    let (first, _, _) = head.voyages[1];
+    assert!(!head.tabs.is_empty(), "the tab row is drawn below the labels");
+
+    // The first frame shows the measured voyage, M2.
+    let opened = run_events_output(&mut store, vec![], size);
+    let opened = last_frame(opened.as_bytes());
+    assert!(opened.lines().nth(1).unwrap_or_default().contains("M2:"), "{opened}");
+
+    // `[` goes one entry older: the whole board shows the landed M1, and its
+    // label on the first row is the lit one.
+    let older = run_events_output(&mut store, vec![Event::Key('[')], size);
+    let older = last_frame(older.as_bytes());
+    let rows: Vec<&str> = older.lines().collect();
+    assert!(rows[1].contains("M1: voyage M1 · ⚓ landed"), "row 1 of the older voyage: {older}");
+    assert!(!rows[1].contains("M2:"), "the board shows M1 only: {older}");
+    assert!(rows[0].contains("\u{1b}[1;7m M1 ⚓"), "the M1 label is lit: {older:?}");
+
+    // `[` again: the oldest voyage stays the oldest.
+    let oldest = run_events_output(&mut store, vec![Event::Key('['), Event::Key('[')], size);
+    let oldest = last_frame(oldest.as_bytes());
+    assert!(oldest.lines().nth(1).unwrap_or_default().contains("M1:"), "{oldest}");
+
+    // `]` goes one entry newer: M2 is shown again.
+    let newer = run_events_output(&mut store, vec![Event::Key('['), Event::Key(']')], size);
+    let newer = last_frame(newer.as_bytes());
+    assert!(newer.lines().nth(1).unwrap_or_default().contains("M2:"), "{newer}");
+
+    // A click on the first column of the M1 label picks M1, and the pick starts
+    // the selection over: two `Down` keys had selected the second lane, and the
+    // clicked frame draws the first row the board of M1 draws at selection 0.
+    let click = Event::Mouse { button: 0, x: (first + 1) as u16, y: 1 };
+    let clicked = run_events_output(&mut store, vec![Event::Key('j'), Event::Key('j'), click], size);
+    let clicked = last_frame(clicked.as_bytes());
+    assert!(clicked.lines().nth(1).unwrap_or_default().contains("M1:"), "{clicked}");
+    let m1 = build(
+        &mut store,
+        &Options { project: Some("p".into()), milestone: Some("M1".into()), ..Options::default() },
+        now_seconds(),
+    )
+    .unwrap();
+    let expected = frame::canvas(&m1, &crate::screen(Tab::Now, 0, size), None).ansi(false);
+    assert_eq!(
+        lit_picks(&clicked, head.tab_row),
+        lit_picks(&expected, head.tab_row),
+        "the pick starts the selection over: {clicked}"
+    );
+}
+
 /// T-411: ten notches of the wheel move the selection three picks each, the
 /// wheel stops at the first pick, and a page key moves a screenful with the
 /// viewport.
