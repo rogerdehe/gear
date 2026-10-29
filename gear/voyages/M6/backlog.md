@@ -94,3 +94,6 @@
 
 ## A reviewer resumes another seat's direction-check conversation
 - 2026-10-29 M5 (the other project, after T-423 shipped: review-2 for T-226 resumed the direction-check conversation review-1 had run, and Codex locked it, "This conversation is open in another app"; O-2609 sat submitted 45 min). T-423 compares only each live agent's current session, but a Codex process keeps the writer lock of every conversation it opened (seen as `$CODEX_HOME/thread-writer-locks/<id>.lock` held by the other seat's process), so a conversation another seat ran earlier still passes the check. Root fix: a review round resumes an earlier round's conversation only when the same seat ran it (V1 as written); any other seat starts fresh.
+
+## An accepted review whose branch never reached the remote
+- 2026-10-29 M5 (the other project, T-265, M-3539): the verdict was accepted, then the merge refused because origin/<project>/review/t265 did not exist; the reviewer's push had not landed and nothing checked it. The engine should confirm the review branch on the remote when it records the verdict (or push the seat's local branch itself) before the task is accepted.
