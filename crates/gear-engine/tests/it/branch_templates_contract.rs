@@ -185,7 +185,7 @@ fn world(config: &str) -> Store {
         &Env { ctx: None, pane_id: None, admin: true },
         config,
         Some(crate::skill_home()),
-        None,
+        false,
         T0,
     )
     .unwrap();
