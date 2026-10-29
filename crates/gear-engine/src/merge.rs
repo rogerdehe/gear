@@ -5547,15 +5547,53 @@ gate = "{gate}"
 
     /// Block until the gate writes its byte into the fifo.
     fn await_fifo(path: &Path) {
+        await_fifo_within(path, WAIT);
+    }
+
+    /// Block until the gate writes its byte into the fifo, but no longer than
+    /// `bound`: a worker that died before its gate opened the other end would
+    /// otherwise block the suite for ever (T-297).
+    fn await_fifo_within(path: &Path, bound: std::time::Duration) {
         use std::io::Read;
-        let mut file = fs::File::open(path).unwrap();
-        let mut byte = [0u8; 1];
-        file.read_exact(&mut byte).unwrap();
+        let (done, wait) = std::sync::mpsc::channel();
+        let fifo = path.to_path_buf();
+        std::thread::spawn(move || {
+            let mut file = fs::File::open(&fifo).unwrap();
+            let mut byte = [0u8; 1];
+            file.read_exact(&mut byte).unwrap();
+            let _ = done.send(());
+        });
+        wait.recv_timeout(bound).unwrap_or_else(|_| {
+            panic!(
+                "fifo handshake on {} did not happen within 60 s \
+                 (the merge worker never reached its gate)",
+                path.display()
+            )
+        });
     }
 
     /// Let a gate that reads the fifo go on.
     fn release_fifo(path: &Path) {
-        fs::write(path, "go\n").unwrap();
+        release_fifo_within(path, WAIT);
+    }
+
+    /// Let a gate that reads the fifo go on, but no longer than `bound`: the
+    /// write blocks until the gate opens its end, so a worker that died before
+    /// that would otherwise block the suite for ever (T-297).
+    fn release_fifo_within(path: &Path, bound: std::time::Duration) {
+        let (done, wait) = std::sync::mpsc::channel();
+        let fifo = path.to_path_buf();
+        std::thread::spawn(move || {
+            fs::write(&fifo, "go\n").unwrap();
+            let _ = done.send(());
+        });
+        wait.recv_timeout(bound).unwrap_or_else(|_| {
+            panic!(
+                "fifo handshake on {} did not happen within 60 s \
+                 (the merge worker never reached its gate)",
+                path.display()
+            )
+        });
     }
 
     /// A gate that holds the first merge inside it: it says it started on
@@ -7408,6 +7446,15 @@ fn a_pushed_head_is_reused_after_a_restart() {
         serde_json::from_str(&result_of(&mut store, &id)).unwrap();
     assert_eq!(result["head"], older.as_str(), "the head on the branch is reused: {result}");
     assert_eq!(scratch.head_of("heat/t5"), older, "nothing was pushed");
+}
+
+#[test]
+#[should_panic(expected = "did not happen within")]
+fn a_fifo_handshake_that_never_happens_gives_up_instead_of_hanging() {
+    let scratch = Scratch::new("fifo-bound");
+    // Nobody opens the other end of this fifo: the await gives up at its bound.
+    let running = fifo(&scratch.root, "nobody-running");
+    await_fifo_within(&running, std::time::Duration::from_secs(1));
 }
 
 /// T-395: a merge that lost its push race (Unknown) is not starved by newer
