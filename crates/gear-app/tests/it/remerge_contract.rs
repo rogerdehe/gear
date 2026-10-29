@@ -170,6 +170,67 @@ fn a_remerge_names_the_projects_review_branch() {
     assert_eq!(op.payload["candidate"], "c1");
     assert_eq!(op.payload["branch"], "heat/t1");
     assert_eq!(op.payload["remerge"], true);
+    // T-405: a captain's pass is a reviewed merge, so it keeps its review
+    // branch and the op says nothing about being mechanical.
+    assert_eq!(
+        op.payload.get("mechanical"),
+        None,
+        "a reviewed merge carries no mechanical flag"
+    );
+}
+
+/// Task T-1 on lane `heat`, its attempt 1 settled by the **engine** as a
+/// mechanical hand-in (T-273): the pass verdict whose note starts
+/// `mechanical:`. Such a task never had a reviewer, so it never has a review
+/// branch (T-405).
+fn mechanically_accepted_task(s: &mut Store) {
+    run(
+        s,
+        "# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
+        "v1",
+        T0,
+    )
+    .unwrap();
+    s.write(|tx| {
+        gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 1)?;
+        gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0 + 1)?;
+        gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, "c1", "report", T0 + 2)
+    })
+    .unwrap();
+    s.write(|tx| {
+        let verdict = gear_app::tasks::Verdict {
+            project: "p".into(),
+            task: "T-1".into(),
+            attempt: 1,
+            contract_version: 1,
+            candidate: "c1".into(),
+            pass: true,
+            evidence: Some("mechanical: the task is a rename".into()),
+            rework: None,
+            integrated_by: None,
+            by_seat: "engine".into(),
+        };
+        gear_app::tasks::settle(tx, &verdict, T0 + 3)
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_remerge_of_a_mechanical_task_queues_no_review_branch() {
+    // T-405: a mechanical task has no reviewer and therefore no review
+    // branch; the retried merge says so, so it does not fail looking for one.
+    let mut s = world(None);
+    mechanically_accepted_task(&mut s);
+    failed_merge(&mut s, T0 + 10);
+    run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap();
+    let op = queued_merge(&mut s);
+    assert_eq!(
+        op.payload["mechanical"],
+        serde_json::json!(true),
+        "the merge of a mechanically settled attempt needs no review branch"
+    );
+    assert_eq!(op.payload["candidate"], "c1");
+    assert_eq!(op.attempt, Some(1), "the accepted attempt is retried");
 }
 
 #[test]
