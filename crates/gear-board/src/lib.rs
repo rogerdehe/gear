@@ -251,6 +251,11 @@ pub struct ProjectBoard {
     /// The voyage the board measures and shows (T-350): the one it was built
     /// for.
     pub shown: Option<VoyageEntry>,
+    /// The tasks that left the shown voyage for another (T-351), as (task, the
+    /// voyage it moved to), in the order the voyage recorded them. A moved task
+    /// carries the new voyage's milestone, so the shown voyage counts it
+    /// nowhere.
+    pub moved_out: Vec<(String, String)>,
 }
 
 /// One voyage of the project, as the board names it (T-350).
@@ -936,6 +941,8 @@ pub fn project_for(
         project,
         workload.as_ref().map(|voyage| voyage.milestone.as_str()),
     )?;
+    // The tasks that left the shown voyage (T-351): its `move` decisions.
+    let moved_out = moved_out_of(&decisions);
     // The friction reports are the ones of the measured voyage too (T-263).
     let frictions = frictions_of(
         tx,
@@ -1002,6 +1009,7 @@ pub fn project_for(
         forecast,
         voyage_list,
         shown,
+        moved_out,
     })
 }
 
@@ -1458,6 +1466,20 @@ fn decisions_of(tx: &Tx<'_>, project: &str, voyage: Option<&str>) -> GearResult<
             star: decision.star,
         })
         .collect())
+}
+
+/// The tasks that left the shown voyage for another (T-351): the voyage's
+/// decisions of kind `move`, whose text is "<id> moved to <milestone>", in the
+/// order they were recorded.
+fn moved_out_of(decisions: &[DecisionBoard]) -> Vec<(String, String)> {
+    decisions
+        .iter()
+        .filter(|decision| decision.kind == "move")
+        .filter_map(|decision| {
+            let (task, to) = decision.what.split_once(" moved to ")?;
+            Some((task.to_string(), to.to_string()))
+        })
+        .collect()
 }
 
 /// The friction reports of the voyage, as the board shows them (§6.1): the
