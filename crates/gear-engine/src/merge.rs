@@ -2491,6 +2491,71 @@ fn merge_lost_landed_key(project: &str, task: &str, attempt: i64) -> String {
     format!("engine.merge_lost_landed.{project}.{task}.{attempt}")
 }
 
+/// The word that closes a lost-merge item whose task the scan no longer
+/// checks (T-408).
+const LOST_SKIPPED: &str =
+    "no longer checked: its voyage is finished or its candidate is gone";
+
+/// The accepted attempt the lost-merge scan looks at (T-397, T-408): what it
+/// needs to name the work, and why it may leave it alone.
+struct Lost {
+    task: String,
+    attempt: i64,
+    candidate: String,
+    repo: Repo,
+    /// The word about this attempt was given already (T-397): the item is not
+    /// opened again, and only the T-408 skips can still close it.
+    told: bool,
+    /// The task's voyage still has a task that is not terminal (T-408).
+    voyage: bool,
+}
+
+/// Is the task's voyage open (T-408)? A voyage is its milestone, and it is open
+/// while one of its tasks is not terminal. A task of no milestone has no
+/// voyage to be finished.
+fn voyage_open(open: &std::collections::HashSet<String>, task: &gear_store::TaskRow) -> bool {
+    task.milestone
+        .as_deref()
+        .is_none_or(|milestone| open.contains(milestone))
+}
+
+/// Does the task's repository still hold the candidate (T-408)?
+///
+/// `git cat-file -e <sha>^{commit}` answers: `Some(false)` — the repository no
+/// longer has the commit, and the item would name work that nobody can remerge.
+/// `None` — there is no repository to ask, and the scan does not skip work on a
+/// question git could not put (a repo path that is not there is the project's
+/// trouble, not evidence that the commit is gone).
+fn candidate_held(repo: &Repo, candidate: &str) -> Option<bool> {
+    let dir = Path::new(&repo.path);
+    if !dir.is_dir() {
+        return None;
+    }
+    Some(git(dir, &["cat-file", "-e", &format!("{candidate}^{{commit}}")]).is_ok())
+}
+
+/// Close the lost-merge item of a task the scan no longer checks (T-408): the
+/// captain can no longer act on it.
+fn resolve_lost(store: &mut Store, project: &str, task: &str, now: Ts) -> GearResult<()> {
+    store.write(|tx| {
+        let thread = lost_thread(task);
+        for item in tx.thread_messages(project, &thread)? {
+            if item.state == MsgState::Open {
+                tx.update_message_state(
+                    project,
+                    &item.id,
+                    MsgState::Resolved,
+                    Some(LOST_SKIPPED),
+                    None,
+                    None,
+                    now,
+                )?;
+            }
+        }
+        Ok(())
+    })
+}
+
 /// Name the accepted attempts that nothing will merge (T-397): a Done task
 /// whose latest accepted attempt has a candidate and no merge time, with no
 /// merge op queued or running and no open `merge-failed` item — the work sat
@@ -2498,6 +2563,11 @@ fn merge_lost_landed_key(project: &str, task: &str, attempt: i64) -> String {
 ///
 /// One item per attempt, and a candidate that is already an ancestor of the
 /// integration branch is left alone: the engine names only what is lost.
+///
+/// A task is looked at only while its voyage is open, and only while its repo
+/// still holds the candidate (T-408): a finished voyage settled its lost merges
+/// with it, and a candidate that is no longer an object in the repository
+/// cannot be remerged. An open item about such a task closes with that word.
 fn tell_captain_lost(
     store: &mut Store,
     project: &str,
@@ -2506,7 +2576,7 @@ fn tell_captain_lost(
 ) -> GearResult<()> {
     // One scan of the ops and one of the tasks per tick, like the merge keys of
     // the queue step: a project with no lost task pays two reads.
-    let silent = store.read(|tx| {
+    let lost = store.read(|tx| {
         let mut in_flight = std::collections::HashSet::new();
         for state in [
             OpState::Intended,
@@ -2522,8 +2592,19 @@ fn tell_captain_lost(
                 }
             }
         }
-        let mut silent: Vec<(String, i64, String, Repo)> = Vec::new();
-        for task in tx.tasks_of_project(project)? {
+        let tasks = tx.tasks_of_project(project)?;
+        // T-408: a voyage is its milestone, and it is open while one of its
+        // tasks is not terminal.
+        let mut open_voyages = std::collections::HashSet::new();
+        for task in &tasks {
+            if let Some(milestone) = task.milestone.as_deref() {
+                if !task.state.is_terminal() {
+                    open_voyages.insert(milestone.to_string());
+                }
+            }
+        }
+        let mut lost: Vec<Lost> = Vec::new();
+        for task in &tasks {
             // Only a done task is settled: the others may still be handed in.
             if task.state != TaskState::Done {
                 continue;
@@ -2555,22 +2636,39 @@ fn tell_captain_lost(
                 continue;
             }
             // Told and settled already: a resolved item does not come back.
-            if tx.get_meta(&merge_lost_told_key(project, &task.id, latest.n))?.is_some() {
-                continue;
-            }
-            if tx.get_meta(&merge_lost_landed_key(project, &task.id, latest.n))?.is_some() {
-                continue;
-            }
+            // Such a task is still carried, so the T-408 skips can close an
+            // item that is still open.
+            let told = tx.get_meta(&merge_lost_told_key(project, &task.id, latest.n))?.is_some()
+                || tx.get_meta(&merge_lost_landed_key(project, &task.id, latest.n))?.is_some();
             // F1 of the T-397 review: the task's own snapshot says where its
             // work lands — a task keeps the repo and the base it was created
             // against even when its lane moves (design, `repo_of_task`), and
             // merge execution asks the same question (see `repo_of_op`).
-            let repo = config.repo_of_task(&task);
-            silent.push((task.id, latest.n, candidate, repo));
+            let repo = config.repo_of_task(task);
+            lost.push(Lost {
+                task: task.id.clone(),
+                attempt: latest.n,
+                candidate,
+                repo,
+                told,
+                voyage: voyage_open(&open_voyages, task),
+            });
         }
-        Ok(silent)
+        Ok(lost)
     })?;
-    for (task, attempt, candidate, repo) in silent {
+    for Lost { task, attempt, candidate, repo, told, voyage } in lost {
+        // T-408: a lost merge of a finished voyage was settled with the voyage,
+        // and a candidate the repository no longer holds is work that cannot be
+        // remerged. Either way the task is not checked, and an item still open
+        // about it is closed with that word.
+        let skip = !voyage || matches!(candidate_held(&repo, &candidate), Some(false));
+        if skip {
+            resolve_lost(store, project, &task, now)?;
+            continue;
+        }
+        if told {
+            continue;
+        }
         // The candidate's own repo answers, from its remote-tracking ref: no
         // fetch on the tick's path. A ref that lags can only answer "not
         // merged", and the remerge the item names settles that (it fetches).
@@ -3670,6 +3768,117 @@ mod tests {
                 .is_some(),
             "the ancestor answer is kept"
         );
+    }
+
+    /// T-408: a task of a voyage whose tasks are all terminal is not checked —
+    /// a finished voyage settled its lost merges with it (M1's T-13 was one of
+    /// the 34 items T-397 opened the day it went live).
+    #[test]
+    fn a_task_of_a_finished_voyage_is_not_named_lost() {
+        let mut store = world(TaskState::Ready);
+        // T-5 is the only task of M1, and it is Done: the voyage is finished.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.milestone = Some("M1".into());
+                tx.update_task(&task)
+            })
+            .unwrap();
+        lost_task(&mut store, "abc1234", OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert!(
+            items.is_empty(),
+            "a finished voyage is not checked: {items:?}"
+        );
+    }
+
+    /// T-408: a candidate the task's repository no longer holds is skipped —
+    /// the item would name work that nobody can remerge (M1's T-13 named
+    /// 6e555b1, which is no longer an object in the repository).
+    #[test]
+    fn a_candidate_the_repository_no_longer_holds_is_not_named_lost() {
+        let scratch = Scratch::new("merge-lost-gone");
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        // A commit the clone does not have: `git cat-file -e` does not find it.
+        lost_task(&mut store, "6e555b1", OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert!(
+            items.is_empty(),
+            "a candidate the repo does not hold is not named: {items:?}"
+        );
+        assert!(
+            store
+                .read(|tx| tx.get_meta(&merge_lost_landed_key("p", "T-5", 1)))
+                .unwrap()
+                .is_none(),
+            "a candidate that is gone did not land"
+        );
+    }
+
+    /// T-408: an item that is still open about a task the scan now skips closes
+    /// with the word that says why.
+    #[test]
+    fn an_open_lost_item_of_a_skipped_task_is_resolved() {
+        let scratch = Scratch::new("merge-lost-skipped");
+        let candidate = scratch.local_head_of("heat/t5");
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        lost_task(&mut store, &candidate, OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+
+        // The voyage is open and the repo holds the candidate: the work is named.
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "the lost work was not named: {items:?}");
+        assert_eq!(items[0].state, MsgState::Open);
+
+        // The voyage finishes: T-5 is its only task and it is done.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.milestone = Some("M1".into());
+                tx.update_task(&task)
+            })
+            .unwrap();
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 21).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "a second item was opened: {items:?}");
+        assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
+        assert_eq!(items[0].result.as_deref(), Some(LOST_SKIPPED));
     }
 
     #[test]
