@@ -85,6 +85,24 @@ const AGENT_GONE_LIMIT: u32 = 3;
 /// Herdr may report its agent a moment late (as `START_GRACE_S` above).
 const STANDBY_AGENT_GONE_S: i64 = 60;
 
+/// T-426: whether the seat is in the middle of a session switch of its own
+/// generation. `session_runner` types the profile's `exit_command` and starts
+/// the agent again with the session (`wait_exit`, `start_resume`,
+/// `fallback_exit`, `fallback_enter`, `fallback_wait_exit`, `start_fallback`),
+/// so the pane holds no agent between the two while the switch is on its way
+/// — not an absence to release the seat for. A step that is `done` or
+/// `failed`, or one of an older generation, says nothing about this one.
+fn a_session_switch_is_in_flight(store: &mut Store, seat: &SeatRow) -> GearResult<bool> {
+    let Some(raw) = store.read(|tx| tx.get_meta(&format!("engine.session_step.{}", seat.id)))? else {
+        return Ok(false);
+    };
+    let Some(state) = serde_json::from_str::<serde_json::Value>(&raw).ok() else { return Ok(false) };
+    if state["generation"].as_i64() != Some(seat.generation) {
+        return Ok(false);
+    }
+    Ok(!matches!(state["step"].as_str(), Some("done") | Some("failed")))
+}
+
 /// How long a `Starting` reviewer whose pane holds no agent keeps its temp
 /// slot before its failed start is released (T-418): a start that takes longer
 /// than this — an agent that is up but not yet reported, a clone, a build —
@@ -310,6 +328,13 @@ pub fn release_finished_reviews(
                         continue;
                     }
                 };
+                // T-426: a seat that quit its agent to resume an earlier
+                // conversation has no agent for a moment by design: its
+                // session step says the switch is still in flight, so the
+                // seat keeps its slot until the step is `done` or `failed`.
+                if a_session_switch_is_in_flight(store, &seat)? {
+                    continue;
+                }
                 // A seat that just got its verdict may be handed the next
                 // review on the next tick: it waits for this one.
                 if now - seat.state_since <= STANDBY_AGENT_GONE_S {
@@ -2755,6 +2780,85 @@ profile = "codex"
         let pending = store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap();
         assert_eq!(pending.as_deref(), Some("T-1"), "its review is kept");
         assert_eq!(exits(&herdr), 0, "its pane stays open");
+    }
+
+    /// T-426: a `Standby` reviewer that quit its agent to resume an earlier
+    /// conversation has no agent in its pane for a moment by design
+    /// (`session_runner`: `wait_exit`, `start_resume`, the fallback steps).
+    /// Its session step says the switch is still in flight, so the seat keeps
+    /// its slot and its review instead of being released as `agent-gone` and
+    /// started cold again.
+    #[test]
+    fn a_standby_reviewer_switching_its_session_is_not_released() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        standby_for_a_pending_review(&mut store, T0);
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    "engine.session_step.p:r-1",
+                    &serde_json::json!({"round":"p:T-1:1:review", "generation":1, "action":"resume", "step":"wait_exit", "step_at":T0, "target":"wanted"}).to_string(),
+                )
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        // The agent is gone while the switch is under way: the pane is a shell.
+        herdr.add_shell("w2:p2");
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 120).unwrap();
+
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Standby, "the switch is not an absence");
+        let pending = store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap();
+        assert_eq!(pending.as_deref(), Some("T-1"), "its review is kept");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
+    }
+
+    /// T-426: a session step that is `done` says the switch is over: the seat
+    /// with no agent is released as before.
+    #[test]
+    fn a_standby_reviewer_whose_session_step_is_done_is_released() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        standby_for_a_pending_review(&mut store, T0);
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    "engine.session_step.p:r-1",
+                    &serde_json::json!({"round":"p:T-1:1:review", "generation":1, "action":"resume", "step":"done", "step_at":T0, "target":"wanted"}).to_string(),
+                )
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w2:p2");
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 120).unwrap();
+
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Releasing, "the dead seat is on its way out");
+        assert_eq!(exits(&herdr), 1, "its pane is closed");
+    }
+
+    /// T-426: a session step of an older generation says nothing about this
+    /// one: the seat with no agent is released as before.
+    #[test]
+    fn a_standby_reviewer_whose_session_step_is_of_an_older_generation_is_released() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        standby_for_a_pending_review(&mut store, T0);
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    "engine.session_step.p:r-1",
+                    &serde_json::json!({"round":"p:T-1:1:review", "generation":0, "action":"resume", "step":"wait_exit", "step_at":T0, "target":"wanted"}).to_string(),
+                )
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w2:p2");
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 120).unwrap();
+
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Releasing, "a step of another generation is no switch");
+        assert_eq!(exits(&herdr), 1, "its pane is closed");
     }
 
     /// T-399: a reviewer that has been in `Standby` for less than a minute is
