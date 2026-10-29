@@ -368,8 +368,19 @@ pub fn apply_quota_policy_with(
                 report.events.push(line);
             }
             None => {
+                // T-309: the limit line on the screen often states when the
+                // quota comes back. Without a quota source the park ends at
+                // that reset plus a minute when the screen states one, else
+                // after `quota_reset_h` hours as before.
                 let hours = i64::from(config.models.quota_reset_h.max(1));
-                let until = now + hours * 3600;
+                let from_screen = obs
+                    .screen
+                    .as_deref()
+                    .and_then(|screen| gear_usage::reset_from_text(screen, now));
+                let (until, reset) = match from_screen {
+                    Some(reset) => (reset + 60, "reset read from the screen"),
+                    None => (now + hours * 3600, "no reset on the screen: quota_reset_h"),
+                };
                 park(store, seat, current.as_deref(), until, now)?;
                 // T-295 v2: a `wait`-policy park writes a wait, so the reset
                 // takes `wake_from_source` and continues the lane in its own
@@ -394,7 +405,7 @@ pub fn apply_quota_policy_with(
                     store.write(|tx| write_wait(tx, &seat.id, &wait))?;
                 }
                 let line = format!(
-                    "{}: parked until {until} (provider limit, {})",
+                    "{}: parked until {until} (provider limit, {}, {reset})",
                     seat.id,
                     match policy {
                         QuotaPolicy::Wait => "policy wait",
@@ -2239,6 +2250,21 @@ quota_reset_h = {reset_h}
         }
     }
 
+    /// One quota tick of the policy, with the screen the agent shows this
+    /// tick (T-309).
+    fn tick_quota_screen(
+        store: &mut Store,
+        herdr: &mut FakeHerdr,
+        quota: bool,
+        screen: &str,
+        now: Ts,
+    ) -> QuotaReport {
+        let seat = lane_seat(store);
+        let mut obs = observed(&seat, quota);
+        obs[0].screen = Some(screen.to_string());
+        apply_quota_policy(store, herdr, &cfg(), &cfg().profiles, "p", &obs, now).unwrap()
+    }
+
     /// A world with an opencode agent in PANE that shows the quota screen.
     fn herdr_with_quota() -> FakeHerdr {
         let mut herdr = FakeHerdr::new();
@@ -2346,6 +2372,77 @@ quota_reset_h = {reset_h}
         assert!(report.events[0].contains("policy wait"), "{:?}", report.events);
         let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Parked);
+        assert!(exits(&herdr).is_empty(), "waited, not restarted");
+    }
+
+    /// T-309: a lane parked without a quota source wakes at the reset its
+    /// screen states, plus a minute — not after `quota_reset_h` hours.
+    #[test]
+    fn the_policy_parks_until_the_reset_the_screen_states() {
+        let mut store = world(&config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
+            "wait",
+        ));
+        let mut herdr = herdr_with_quota();
+        let screen = "  Error: Token Plan ... (2056)\n  Usage limit reached. Try again in 2h 13m.";
+
+        tick_quota_screen(&mut store, &mut herdr, true, screen, T0 + 10);
+        let report = tick_quota_screen(&mut store, &mut herdr, true, screen, T0 + 20);
+
+        assert_eq!(report.events.len(), 1, "{:?}", report.events);
+        let until = T0 + 20 + 7_980 + 60;
+        assert!(report.events[0].contains("policy wait"), "{:?}", report.events);
+        assert!(
+            report.events[0].contains("reset read from the screen"),
+            "{:?}",
+            report.events
+        );
+        assert!(
+            report.events[0].contains(&until.to_string()),
+            "{:?}",
+            report.events
+        );
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Parked);
+        assert!(
+            seat.state_reason
+                .unwrap_or_default()
+                .contains(&until.to_string())
+        );
+        assert!(exits(&herdr).is_empty(), "waited, not restarted");
+    }
+
+    /// T-309: a screen without a reset keeps the configured hours.
+    #[test]
+    fn the_policy_parks_for_the_configured_hours_without_a_reset() {
+        let mut store = world(&config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
+            "wait",
+        ));
+        let mut herdr = herdr_with_quota();
+
+        tick_quota_screen(&mut store, &mut herdr, true, QUOTA_SCREEN, T0 + 10);
+        let report = tick_quota_screen(&mut store, &mut herdr, true, QUOTA_SCREEN, T0 + 20);
+
+        assert_eq!(report.events.len(), 1, "{:?}", report.events);
+        let until = T0 + 20 + 5 * 3600;
+        assert!(
+            report.events[0].contains("no reset on the screen"),
+            "{:?}",
+            report.events
+        );
+        assert!(
+            report.events[0].contains(&until.to_string()),
+            "{:?}",
+            report.events
+        );
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Parked);
+        assert!(
+            seat.state_reason
+                .unwrap_or_default()
+                .contains(&until.to_string())
+        );
         assert!(exits(&herdr).is_empty(), "waited, not restarted");
     }
 
