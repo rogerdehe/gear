@@ -345,6 +345,28 @@ pub fn apply_quota_policy_with(
                 let hours = i64::from(config.models.quota_reset_h.max(1));
                 let until = now + hours * 3600;
                 park(store, seat, current.as_deref(), until, now)?;
+                // T-295 v2: a `wait`-policy park writes a wait, so the reset
+                // takes `wake_from_source` and continues the lane in its own
+                // session. A `fallback` chain-exhausted park keeps its reset
+                // restart back to the original model (T-33/T-35), and
+                // `change_model` stays for a seat that has no wait.
+                if policy == QuotaPolicy::Wait {
+                    let task = open_attempt(store, &seat.id)?.map(|(task, _)| task);
+                    let provider = current
+                        .as_deref()
+                        .map(|model| model.split('/').next().unwrap_or(model).to_string())
+                        .unwrap_or_default();
+                    let wait = Wait {
+                        kind: "policy".to_string(),
+                        until,
+                        started_at: now,
+                        provider,
+                        window: String::new(),
+                        task,
+                        pause: true,
+                    };
+                    store.write(|tx| write_wait(tx, &seat.id, &wait))?;
+                }
                 let line = format!(
                     "{}: parked until {until} (provider limit, {})",
                     seat.id,
