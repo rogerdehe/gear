@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, SeatState, TaskState, Ts};
-use gear_store::{BindingStatus, RoundRow, SeatRow, Store, Tx};
+use gear_store::{BindingStatus, RoundRow, SeatRow, Store, TaskRow, Tx};
 
 use crate::frame::Tab;
 use crate::idle::IdleReason;
@@ -113,6 +113,15 @@ pub mod hook {
 /// The lane name of a task that belongs to no lane.
 const UNASSIGNED: &str = "unassigned";
 
+/// What a lane of a landed voyage reads (T-350): the voyage keeps its data,
+/// and its lanes are retired at the landing.
+const RETIRED_AT_THE_LANDING: &str = "retired at the landing";
+
+/// The lane a task names, or the placeholder of an unassigned task.
+fn lane_of(task: &TaskRow) -> String {
+    task.lane.clone().unwrap_or_else(|| UNASSIGNED.to_string())
+}
+
 /// The one warning line the board may print.
 const ENGINE_DOWN: &str = "! engine down — the next gear call starts it";
 
@@ -144,6 +153,8 @@ impl View {
 pub struct Options {
     /// The project to show; `None` shows every project in the store.
     pub project: Option<String>,
+    /// The voyage to show; `None` shows the voyage measured today (T-350).
+    pub milestone: Option<String>,
     /// The database path. The engine's lock file sits next to it, so the
     /// board can tell whether the engine is down.
     pub db: Option<PathBuf>,
@@ -163,6 +174,7 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             project: None,
+            milestone: None,
             db: None,
             json: false,
             view: View::Lanes,
@@ -221,6 +233,18 @@ pub struct ProjectBoard {
     /// The captain's decisions of this voyage (§7.1): the log the board
     /// shows in its fourth view.
     pub decisions: Vec<DecisionBoard>,
+    /// The confirmed goal changes of the measured voyage (T-335): the user's
+    /// decisions on its `done`, `bar` and `eta`, oldest first; empty without
+    /// a measured voyage. The S4 header draws them red.
+    pub goal_changes: Vec<GoalChangeBoard>,
+    /// The latest confirmed goal change of the shown voyage (T-358), as
+    /// (time, before, after): the S4 header draws it red under the goal box.
+    /// `None` while the voyage's goal never changed.
+    pub goal_changed: Option<(String, String, String)>,
+    /// The goal check of the shown voyage (T-354): each clause of the goal and
+    /// whether it is met. The plan's clauses when the store has them, else the
+    /// clauses of the voyage's done sentence, every one unmet.
+    pub goal_check: Vec<(bool, String)>,
     /// The friction reports the agents left (§6.1), open and closed.
     pub frictions: Vec<FrictionBoard>,
     /// The tasks that overlap the integration branch of their repo (T-188):
@@ -233,6 +257,41 @@ pub struct ProjectBoard {
     /// the lane ends and how long it sits idle. Empty when no measured voyage
     /// has open work.
     pub forecast: Vec<forecast::LaneEnd>,
+    /// What the shown tasks wait on, in plan order (T-360): a task in review
+    /// names the reviewer and how long it has held it, a task that waits for
+    /// the captain names what he owes. The board's Now view lists them as items
+    /// to handle, each with who acts.
+    pub waiting_on: Vec<String>,
+    /// Every voyage of the project that departed, newest departure first
+    /// (T-350): the board can be built for any of them.
+    pub voyage_list: Vec<VoyageEntry>,
+    /// The voyage the board measures and shows (T-350): the one it was built
+    /// for.
+    pub shown: Option<VoyageEntry>,
+    /// The tasks that left the shown voyage for another (T-351), as (task, the
+    /// voyage it moved to), in the order the voyage recorded them. A moved task
+    /// carries the new voyage's milestone, so the shown voyage counts it
+    /// nowhere.
+    pub moved_out: Vec<(String, String)>,
+}
+
+/// One voyage of the project, as the board names it (T-350).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoyageEntry {
+    /// The milestone id the plan uses (`M1`, `M2`, …).
+    pub milestone: String,
+    pub title: String,
+    /// The voyage's `done` sentence: the goal the board boxes (T-353).
+    pub done: Option<String>,
+    /// The voyage's quality bar, as the plan wrote it (T-353).
+    pub bar: Option<String>,
+    /// Some task of the voyage is not settled: it is still sailing.
+    pub sailing: bool,
+    /// When the voyage departed; `None` while it has no task.
+    pub departure: Option<Ts>,
+    /// When a landed voyage was merged in: the latest merge of its tasks.
+    /// `None` while it sails, or when no attempt of it was merged.
+    pub ended: Option<Ts>,
 }
 
 /// One delivery the engine has not confirmed yet (T-271).
@@ -277,6 +336,21 @@ pub struct DecisionBoard {
     pub why: Option<String>,
     /// The decision is worth a look at the landing (§7.2).
     pub star: bool,
+}
+
+/// One confirmed goal change of the measured voyage (T-335).
+///
+/// T-410 records each confirmed change of a departed voyage's `done`, `bar`
+/// or `eta` (T-331 its title and stations) as a starred decision of kind
+/// `user` with source `gear`; the S4 header draws them red.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalChangeBoard {
+    /// When the decision was taken.
+    pub at: String,
+    /// What changed: `<field> of <M> changed from "<old>" to "<new>"`.
+    pub what: String,
+    /// Why it changed.
+    pub why: Option<String>,
 }
 
 /// One friction report of an agent, as the board shows it (§6.1).
@@ -388,6 +462,9 @@ pub struct DownSeat {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskBoard {
     pub id: String,
+    /// The queue position in the plan, ascending (the store's rank): the Now
+    /// view's items to handle follow the plan, not the lanes' grouping (T-360).
+    pub rank: i64,
     pub state: TaskState,
     /// The task's stage in the graph, and its words (T-347): the lane lines of
     /// the board and of the captain's home page name the stage in the same
@@ -414,6 +491,15 @@ pub struct TaskBoard {
     pub cache_read: Option<i64>,
     /// The cost of the task's rounds, when it is known (§4.4).
     pub cost_usd: Option<f64>,
+    /// The fresh tokens of the task's development rounds (T-363): the `dev`
+    /// and `rework` rounds, apart from the review rounds.
+    pub dev_tokens: Option<i64>,
+    /// The fresh tokens of the task's review rounds (T-363).
+    pub review_tokens: Option<i64>,
+    /// The cost of the task's development rounds (T-363).
+    pub dev_cost: Option<f64>,
+    /// The cost of the task's review rounds (T-363).
+    pub review_cost: Option<f64>,
     /// The tasks it depends on (T-349): the board's forecast waits for them to
     /// merge before the task can start.
     pub deps: Vec<String>,
@@ -495,7 +581,18 @@ pub fn build_with_agents(
             Some(id) => vec![id.clone()],
             None => tx.project_ids()?,
         };
-        ids.iter().map(|id| project_with_agents(tx, id, now, agents)).collect()
+        ids.iter()
+            .map(|id| {
+                // The board shows one voyage only (README change 6): the one
+                // named, else the measured one, so a task of another voyage
+                // never reaches it (T-350).
+                let milestone = match &opts.milestone {
+                    Some(milestone) => Some(milestone.clone()),
+                    None => workload_voyage(tx, id, now)?.map(|voyage| voyage.milestone),
+                };
+                project_for(tx, id, now, agents, milestone.as_deref())
+            })
+            .collect()
     })?;
     Ok(Board { engine, now, projects })
 }
@@ -507,29 +604,75 @@ pub fn project(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> 
 }
 
 /// The shared project model with an optional read-only Herdr snapshot.
+///
+/// `None` keeps the choice the captain home page makes: the voyage measured
+/// today, with its tasks and every open task of the project (T-246). The board
+/// names a voyage instead and shows that voyage only (T-350).
 pub fn project_with_agents(
     tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[AgentInfo]>,
+) -> GearResult<ProjectBoard> {
+    project_for(tx, project, now, agents, None)
+}
+
+/// The plan of one project for one voyage (T-350): `milestone` names the
+/// voyage to show, `None` measures the voyage of today.
+pub fn project_for(
+    tx: &Tx<'_>,
+    project: &str,
+    now: Ts,
+    agents: Option<&[AgentInfo]>,
+    milestone: Option<&str>,
 ) -> GearResult<ProjectBoard> {
     let row = tx.get_project(project)?.ok_or_else(|| {
         GearError::new(ErrorCode::NoTarget, format!("project {project} is not registered"))
     })?;
     let seats = tx.seats_of_project(project)?;
-    let tasks = tx.tasks_of_project(project)?;
-    // The voyage the board measures: the active one, else the latest departed
-    // one (F5 of the T-166 review). The board shows that voyage and nothing
-    // that landed before it (T-246): a task of an older voyage is history —
-    // unless it still waits for work, which is a decision the captain owes.
-    let workload = workload_voyage(tx, project, now)?;
-    let tasks: Vec<_> = match &workload {
-        Some(voyage) => tasks
+    let all_tasks = tx.tasks_of_project(project)?;
+    // The voyage the board measures: the one named, else the active one, else
+    // the latest departed one (F5 of the T-166 review).
+    let workload = match milestone {
+        Some(milestone) => voyage::reports_including_finished(tx, project, now)?
             .into_iter()
-            .filter(|task| {
-                !task.state.is_terminal()
-                    || task.milestone.as_deref() == Some(voyage.milestone.as_str())
-            })
-            .collect(),
-        None => tasks,
+            .find(|report| report.milestone == milestone),
+        None => workload_voyage(tx, project, now)?,
     };
+    // The tasks the board shows. A named voyage shows its own tasks and no
+    // task of another voyage (T-350). A cancelled task stays in its lane's
+    // queue — it was cut, not deleted — and the totals leave it out (T-415).
+    // Without a name, the home page keeps today's rule: the measured voyage's
+    // tasks and every open task of the project (T-246).
+    let tasks: Vec<_> = match milestone {
+        Some(shown) => all_tasks
+            .iter()
+            .filter(|task| task.milestone.as_deref() == Some(shown))
+            .cloned()
+            .collect(),
+        None => match &workload {
+            Some(voyage) => all_tasks
+                .iter()
+                .filter(|task| {
+                    !task.state.is_terminal()
+                        || task.milestone.as_deref() == Some(voyage.milestone.as_str())
+                })
+                .cloned()
+                .collect(),
+            None => all_tasks.clone(),
+        },
+    };
+    // Every voyage of the project, and the measured one as a row (T-350).
+    let entries = voyage_entries(tx, project, &all_tasks)?;
+    let shown = match &workload {
+        Some(voyage) => entries.iter().find(|entry| entry.milestone == voyage.milestone).cloned(),
+        None => None,
+    };
+    // A landed voyage keeps its data: its lanes are retired at the landing.
+    let landed = shown.as_ref().is_some_and(|entry| !entry.sailing);
+    let mut voyage_list: Vec<VoyageEntry> = entries
+        .into_iter()
+        .filter(|entry| entry.departure.is_some())
+        .collect();
+    // The newest departure is the voyage the captain has just sent out.
+    voyage_list.sort_by(|left, right| right.departure.cmp(&left.departure));
     // The seats whose provider is in a back-off (T-75): the engine recorded
     // the wait, and the board says so instead of "working".
     let backoff = tx.seats_in_backoff(project)?;
@@ -540,20 +683,60 @@ pub fn project_with_agents(
         .filter(|seat| seat.role == SeatRole::Lane && seat.state == SeatState::Retired)
         .map(|seat| seat.name.as_str()).collect();
     let mut lanes = Vec::new();
-    for seat in seats.iter().filter(|seat| seat.role == SeatRole::Lane && seat.state != SeatState::Retired) {
-        lanes.push(LaneBoard {
-            lane: seat.name.clone(),
-            agent_state: observed_agent_state(tx, seat, agents, &backoff)?,
-            tasks: Vec::new(),
-            rework: Rework::default(),
-            down: down_seat(seat),
-            idle: None,
-            idle_text: None,
-            helping: None,
-            done_count: 0,
-            left_count: 0,
-            left_min: 0,
-        });
+    if landed {
+        // A landed voyage keeps its data (T-350): the lanes of its tasks,
+        // retired ones included, in seat order, a lane with no seat after
+        // them. Every one of them retired at the landing.
+        let mut names: Vec<String> = Vec::new();
+        for seat in seats.iter().filter(|seat| seat.role == SeatRole::Lane) {
+            if !names.contains(&seat.name)
+                && tasks.iter().any(|task| lane_of(task) == seat.name)
+            {
+                names.push(seat.name.clone());
+            }
+        }
+        for task in &tasks {
+            let name = lane_of(task);
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        for name in names {
+            let seat = seats.iter().find(|seat| seat.name == name);
+            let agent_state = match seat {
+                Some(seat) => observed_agent_state(tx, seat, agents, &backoff)?,
+                None => "unknown",
+            };
+            lanes.push(LaneBoard {
+                lane: name,
+                agent_state,
+                tasks: Vec::new(),
+                rework: Rework::default(),
+                down: seat.and_then(down_seat),
+                idle: None,
+                idle_text: Some(RETIRED_AT_THE_LANDING.into()),
+                helping: None,
+                done_count: 0,
+                left_count: 0,
+                left_min: 0,
+            });
+        }
+    } else {
+        for seat in seats.iter().filter(|seat| seat.role == SeatRole::Lane && seat.state != SeatState::Retired) {
+            lanes.push(LaneBoard {
+                lane: seat.name.clone(),
+                agent_state: observed_agent_state(tx, seat, agents, &backoff)?,
+                tasks: Vec::new(),
+                rework: Rework::default(),
+                down: down_seat(seat),
+                idle: None,
+                idle_text: None,
+                helping: None,
+                done_count: 0,
+                left_count: 0,
+                left_min: 0,
+            });
+        }
     }
 
     let mut totals = Totals::default();
@@ -574,8 +757,8 @@ pub fn project_with_agents(
                 _ => {}
             }
         }
-        let name = task.lane.clone().unwrap_or_else(|| UNASSIGNED.to_string());
-        if retired.contains(name.as_str()) {
+        let name = lane_of(task);
+        if !landed && retired.contains(name.as_str()) {
             continue;
         }
         let rounds = tx.attempts_of_task(project, &task.id)?.len();
@@ -585,6 +768,7 @@ pub fn project_with_agents(
         let stage_words = graph::Stage::words_of(stage, &task.deps, rounds, None);
         let line = TaskBoard {
             id: task.id.clone(),
+            rank: task.rank,
             state: task.state,
             stage,
             stage_words,
@@ -599,6 +783,10 @@ pub fn project_with_agents(
             tokens: tokens_of(tx, project, &task.id)?,
             cache_read: cache_read_of(tx, project, &task.id)?,
             cost_usd: cost_of(tx, project, &task.id)?,
+            dev_tokens: side_tokens_of(tx, project, &task.id, Side::Development)?,
+            review_tokens: side_tokens_of(tx, project, &task.id, Side::Review)?,
+            dev_cost: side_cost_of(tx, project, &task.id, Side::Development)?,
+            review_cost: side_cost_of(tx, project, &task.id, Side::Review)?,
             deps: task.deps.clone(),
         };
         match lanes.iter_mut().find(|lane| lane.lane == name) {
@@ -618,6 +806,18 @@ pub fn project_with_agents(
             }),
         }
     }
+    // One lane order for every view that has a row or a column per lane
+    // (T-363, the captain's decision for Tasks made once for all): the lanes
+    // by their first task in plan order, a lane with no task after them in its
+    // present (seat) order. It is the prototype's order, and the lane colours
+    // follow it. The sort is stable, so the lanes without a task keep their
+    // order.
+    lanes.sort_by_key(|lane| {
+        tasks
+            .iter()
+            .position(|task| lane_of(task) == lane.lane)
+            .unwrap_or(usize::MAX)
+    });
     // Every registered lane stays in the model, even with nothing queued: an
     // empty lane is exactly what the captain has to see to refill it (the
     // review of T-9).
@@ -680,13 +880,17 @@ pub fn project_with_agents(
     // Why each lane is idle (design §8.2), what it helps on (T-323) and what
     // it has left.
     for lane in &mut lanes {
-        let reason = idle::idle_reason(tx, project, &lane.lane, now)?;
-        lane.idle_text = reason.as_ref().map(|reason| idle::describe(reason, tx, project));
-        lane.idle = reason;
-        lane.helping = match tx.get_seat(&format!("{project}:{}", lane.lane))? {
-            Some(seat) => idle::helping(tx, project, &seat, now)?.map(|help| help.text()),
-            None => None,
-        };
+        // A lane of a landed voyage retired at the landing (T-350): the words
+        // stay those of the landing, not an idle reason of today.
+        if !landed {
+            let reason = idle::idle_reason(tx, project, &lane.lane, now)?;
+            lane.idle_text = reason.as_ref().map(|reason| idle::describe(reason, tx, project));
+            lane.idle = reason;
+            lane.helping = match tx.get_seat(&format!("{project}:{}", lane.lane))? {
+                Some(seat) => idle::helping(tx, project, &seat, now)?.map(|help| help.text()),
+                None => None,
+            };
+        }
         lane.done_count = lane
             .tasks
             .iter()
@@ -706,11 +910,11 @@ pub fn project_with_agents(
     }
 
     // The work as a graph (design §8.1), of the tasks the board shows (T-246).
-    let shown: std::collections::BTreeSet<&str> =
+    let graphed: std::collections::BTreeSet<&str> =
         tasks.iter().map(|task| task.id.as_str()).collect();
     let graph: Vec<graph::GraphTask> = graph::tasks(tx, project, now)?
         .into_iter()
-        .filter(|task| shown.contains(task.id.as_str()))
+        .filter(|task| graphed.contains(task.id.as_str()))
         .collect();
     let graph_lanes = graph::lanes(tx, project)?;
 
@@ -795,6 +999,58 @@ pub fn project_with_agents(
         right.age_s.cmp(&left.age_s).then_with(|| left.op.cmp(&right.op))
     });
 
+    // What the shown tasks wait on, in plan order (T-360): the Now view lists
+    // it under the lanes, each item with who acts. A task in review names the
+    // reviewer holding it and how long it has held it; a task that waits for
+    // the captain names what he owes.
+    let mut ordered: Vec<(&str, &TaskBoard)> = Vec::new();
+    for lane in &lanes {
+        for task in &lane.tasks {
+            ordered.push((lane.lane.as_str(), task));
+        }
+    }
+    ordered.sort_by(|(_, left), (_, right)| {
+        left.rank.cmp(&right.rank).then_with(|| left.id.cmp(&right.id))
+    });
+    let mut waiting_on = Vec::new();
+    for (lane, task) in ordered {
+        match task.stage {
+            graph::Stage::Review => {
+                let holder = temps_seats.iter().find(|seat| {
+                    seat.state == SeatState::Active
+                        && seat.task_id.as_deref() == Some(task.id.as_str())
+                });
+                let name = holder.map(|seat| seat.name.as_str()).unwrap_or("-");
+                // The reviewer's open round is when it took the task up; a
+                // seat without one counts from its state.
+                let since = match holder {
+                    Some(seat) => match tx.open_round_of_seat(&seat.id)? {
+                        Some(round) => round.start_at,
+                        None => seat.state_since,
+                    },
+                    None => now,
+                };
+                waiting_on.push(format!(
+                    "{} in review by {name}, {} min in",
+                    task.id,
+                    (now - since).max(0) / 60
+                ));
+            }
+            graph::Stage::Asking => waiting_on.push(format!(
+                "{} {lane} waits for the captain's answer",
+                task.id
+            )),
+            graph::Stage::Verdict => {
+                waiting_on.push(format!("{} waits for the captain's verdict", task.id))
+            }
+            graph::Stage::MergeFailed => waiting_on.push(format!(
+                "{} merge failed, waits for the captain",
+                task.id
+            )),
+            _ => {}
+        }
+    }
+
     let voyages = voyage::reports(tx, project, now)?;
     // The decisions belong to the voyage the board measures (F3).
     let decisions = decisions_of(
@@ -802,6 +1058,22 @@ pub fn project_with_agents(
         project,
         workload.as_ref().map(|voyage| voyage.milestone.as_str()),
     )?;
+    // The tasks that left the shown voyage (T-351): its `move` decisions.
+    let moved_out = moved_out_of(&decisions);
+    // The confirmed goal changes are the measured voyage's own (T-335).
+    let goal_changes = goal_changes_of(
+        tx,
+        project,
+        workload.as_ref().map(|voyage| voyage.milestone.as_str()),
+    )?;
+    // The latest of them is the line under the goal box (T-358).
+    let goal_changed = goal_changed_of(&goal_changes);
+    // The goal check of the shown voyage (T-354): the plan's own clauses, else
+    // the clauses of its done sentence, unmet.
+    let goal_check = match shown.as_ref() {
+        Some(entry) => goal_check_of(tx, project, &entry.milestone, entry.done.as_deref())?,
+        None => Vec::new(),
+    };
     // The friction reports are the ones of the measured voyage too (T-263).
     let frictions = frictions_of(
         tx,
@@ -856,6 +1128,9 @@ pub fn project_with_agents(
         graph_lanes,
         quota: quota_readings(tx, project)?,
         decisions,
+        goal_changes,
+        goal_changed,
+        goal_check,
         frictions,
         // The overlaps with the integration branch (T-188): information
         // lines, never items that wait for the captain.
@@ -866,6 +1141,10 @@ pub fn project_with_agents(
         unconfirmed,
         stations,
         forecast,
+        waiting_on,
+        voyage_list,
+        shown,
+        moved_out,
     })
 }
 
@@ -1254,8 +1533,15 @@ fn actual_min_of(
 /// so a sum is never a total that hides an unknown part (F5).
 fn tokens_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> {
     let rounds = tx.rounds_of_task(project, task)?;
+    Ok(tokens_of_rounds(rounds.iter()))
+}
+
+/// The fresh tokens of the rounds a filter keeps: the body of [`tokens_of`].
+fn tokens_of_rounds<'a>(rounds: impl Iterator<Item = &'a RoundRow>) -> Option<i64> {
     let mut total = 0;
-    for round in &rounds {
+    let mut any = false;
+    for round in rounds {
+        any = true;
         // The fields' presence says what was counted: a round that counted
         // nothing is a measured zero, not an unknown (F5). A round that has
         // none of the four counted fields counted nothing at all: the sum
@@ -1266,11 +1552,41 @@ fn tokens_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> 
             && round.cache_read.is_none()
             && round.cache_write.is_none()
         {
-            return Ok(None);
+            return None;
         }
         total += round.input.unwrap_or(0) + round.output.unwrap_or(0) + round.cache_write.unwrap_or(0);
     }
-    Ok((!rounds.is_empty()).then_some(total))
+    any.then_some(total)
+}
+
+/// The side of the work a round counts for (T-363): a rework is development.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Development,
+    Review,
+}
+
+/// The side a round's role counts for, when it counts for one.
+fn side_of(role: &str) -> Option<Side> {
+    match role {
+        "dev" | "rework" => Some(Side::Development),
+        "review" => Some(Side::Review),
+        _ => None,
+    }
+}
+
+/// The fresh tokens of one side of the task's work (T-363): the rules of
+/// [`tokens_of`] over its development rounds or its review rounds only.
+fn side_tokens_of(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    side: Side,
+) -> GearResult<Option<i64>> {
+    let rounds = tx.rounds_of_task(project, task)?;
+    Ok(tokens_of_rounds(
+        rounds.iter().filter(|round| side_of(&round.role) == Some(side)),
+    ))
 }
 
 /// The cache reads of a task's rounds (§4.3), counted apart from the fresh
@@ -1294,16 +1610,37 @@ fn cache_read_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i6
 /// so a sum is never a total that hides an unknown part (F5).
 fn cost_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<f64>> {
     let rounds = tx.rounds_of_task(project, task)?;
+    Ok(cost_of_rounds(rounds.iter()))
+}
+
+/// The cost of the rounds a filter keeps: the body of [`cost_of`].
+fn cost_of_rounds<'a>(rounds: impl Iterator<Item = &'a RoundRow>) -> Option<f64> {
     let mut total = 0.0;
-    for round in &rounds {
+    let mut any = false;
+    for round in rounds {
+        any = true;
         // A round that was never priced is unknown, not a price of zero:
         // the sum that hides it is not a total (F5 of the T-166 review).
         let Some(cost) = round.cost_usd else {
-            return Ok(None);
+            return None;
         };
         total += cost;
     }
-    Ok((!rounds.is_empty()).then_some(total))
+    any.then_some(total)
+}
+
+/// The cost of one side of the task's work (T-363): the rules of [`cost_of`]
+/// over its development rounds or its review rounds only.
+fn side_cost_of(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    side: Side,
+) -> GearResult<Option<f64>> {
+    let rounds = tx.rounds_of_task(project, task)?;
+    Ok(cost_of_rounds(
+        rounds.iter().filter(|round| side_of(&round.role) == Some(side)),
+    ))
 }
 
 /// The captain's decisions of the voyage, as the board shows them (§7.1).
@@ -1322,6 +1659,96 @@ fn decisions_of(tx: &Tx<'_>, project: &str, voyage: Option<&str>) -> GearResult<
             star: decision.star,
         })
         .collect())
+}
+
+/// The tasks that left the shown voyage for another (T-351): the voyage's
+/// decisions of kind `move`, whose text is "<id> moved to <milestone>", in the
+/// order they were recorded.
+fn moved_out_of(decisions: &[DecisionBoard]) -> Vec<(String, String)> {
+    decisions
+        .iter()
+        .filter(|decision| decision.kind == "move")
+        .filter_map(|decision| {
+            let (task, to) = decision.what.split_once(" moved to ")?;
+            Some((task.to_string(), to.to_string()))
+        })
+        .collect()
+}
+
+/// The confirmed goal changes of the voyage (T-335): the decisions of kind
+/// `user` with source `gear` (T-410, T-331), oldest first.
+fn goal_changes_of(
+    tx: &Tx<'_>,
+    project: &str,
+    voyage: Option<&str>,
+) -> GearResult<Vec<GoalChangeBoard>> {
+    let Some(voyage) = voyage else {
+        return Ok(Vec::new());
+    };
+    Ok(tx
+        .decisions_of(project, voyage)?
+        .into_iter()
+        .filter(|decision| decision.kind == "user" && decision.source == "gear")
+        .map(|decision| GoalChangeBoard {
+            at: decision.at,
+            what: decision.what,
+            why: decision.why,
+        })
+        .collect())
+}
+
+/// The latest confirmed goal change of the voyage (T-358), as (time, before,
+/// after): its words come from the decision T-410 (C6) records,
+/// `<field> of <M> changed from "<old>" to "<new>"`. `None` without a goal
+/// change, or when its words are not that record's.
+fn goal_changed_of(changes: &[GoalChangeBoard]) -> Option<(String, String, String)> {
+    let change = changes.last()?;
+    let (_, rest) = change.what.split_once(" changed from \"")?;
+    let (before, rest) = rest.split_once("\" to \"")?;
+    let (after, _) = rest.split_once('"')?;
+    Some((change.at.clone(), before.to_string(), after.to_string()))
+}
+
+/// The goal check of a voyage (T-354): the meta `goal-check:<project>:<milestone>`
+/// holds the plan's clauses as a JSON array of `{"met": bool, "text": str}`.
+/// Without it the clauses of the voyage's done sentence stand in, every one
+/// unmet: the store that keeps no check knows of no clause that is met.
+fn goal_check_of(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+    done: Option<&str>,
+) -> GearResult<Vec<(bool, String)>> {
+    if let Some(raw) = tx.get_meta(&format!("goal-check:{project}:{milestone}"))? {
+        if let Some(check) = parse_goal_check(&raw) {
+            return Ok(check);
+        }
+    }
+    Ok(done_clauses(done).into_iter().map(|text| (false, text)).collect())
+}
+
+/// The clauses of a goal check written in the meta: a JSON array of
+/// `{"met": bool, "text": str}`. `None` when the text is not one.
+fn parse_goal_check(raw: &str) -> Option<Vec<(bool, String)>> {
+    let clauses: Vec<serde_json::Value> = serde_json::from_str(raw).ok()?;
+    let mut check = Vec::with_capacity(clauses.len());
+    for clause in clauses {
+        let met = clause.get("met")?.as_bool()?;
+        let text = clause.get("text")?.as_str()?.to_string();
+        check.push((met, text));
+    }
+    Some(check)
+}
+
+/// The clauses of a done sentence: split on `;`, trimmed, empty ones left out.
+pub(crate) fn done_clauses(done: Option<&str>) -> Vec<String> {
+    let Some(done) = done else {
+        return Vec::new();
+    };
+    done.split(';')
+        .map(|clause| clause.trim().to_string())
+        .filter(|clause| !clause.is_empty())
+        .collect()
 }
 
 /// The friction reports of the voyage, as the board shows them (§6.1): the
@@ -1361,6 +1788,49 @@ fn frictions_of(
         });
     }
     Ok(frictions)
+}
+
+/// One row per voyage of the project (T-350): its milestone, its title,
+/// whether it still sails, and — once landed — when its last task was merged.
+fn voyage_entries(
+    tx: &Tx<'_>,
+    project: &str,
+    tasks: &[TaskRow],
+) -> GearResult<Vec<VoyageEntry>> {
+    let mut entries = Vec::new();
+    for voyage in tx.voyages_of_project(project)? {
+        let of_voyage = || {
+            tasks
+                .iter()
+                .filter(|task| task.milestone.as_deref() == Some(voyage.milestone.as_str()))
+        };
+        // Sailing while some task of it is not settled: a done, failed or
+        // cancelled task is no work left.
+        let sailing = of_voyage().any(|task| {
+            !matches!(task.state, TaskState::Done | TaskState::Failed | TaskState::Cancelled)
+        });
+        // A landed voyage ended at the last merge of its tasks.
+        let mut ended: Option<Ts> = None;
+        if !sailing {
+            for task in of_voyage() {
+                for (_, times) in tx.attempt_times_of_task(project, &task.id)? {
+                    if let Some(merged) = times.merged {
+                        ended = Some(ended.map_or(merged, |last| last.max(merged)));
+                    }
+                }
+            }
+        }
+        entries.push(VoyageEntry {
+            milestone: voyage.milestone,
+            title: voyage.title,
+            done: voyage.done,
+            bar: voyage.bar,
+            sailing,
+            departure: voyage.departure,
+            ended,
+        });
+    }
+    Ok(entries)
 }
 
 fn workload_voyage(
@@ -1641,6 +2111,7 @@ pub fn run_with(
         tab: tab_of(opts.view),
         selected: 0,
         detail: false,
+        opened: Vec::new(),
         size: keys.size(),
     };
     let mut panel: Option<Vec<style::Line>> = None;
@@ -1649,6 +2120,10 @@ pub fn run_with(
     // walks through them.
     let mut shown = 0usize;
     let mut first = true;
+    // The voyage the whole board shows (T-357): the one the options name, else
+    // the measured one. `[`, `]` and a click on a label pick another, and every
+    // frame is built with the pick.
+    let mut milestone: Option<String> = opts.milestone.clone();
     // The board that was built last, and what it was built from (T-384). The
     // whole board is kept: a refresh that finds nothing changed redraws it
     // instead of building it again, and a key that only moves the selection,
@@ -1687,7 +2162,8 @@ pub fn run_with(
             || version != kept_version
             || at.duration_since(built_at) >= hook::stale_after();
         if stale {
-            match build_with_agents(store, opts, now_ts(), agents.as_deref()) {
+            let shown_opts = Options { milestone: milestone.clone(), ..opts.clone() };
+            match build_with_agents(store, &shown_opts, now_ts(), agents.as_deref()) {
                 Ok(mut board) => {
                     // The frame draws the shown project: the project the board
                     // was opened with is the only one then, and every other
@@ -1734,10 +2210,17 @@ pub fn run_with(
         // The selection moves over the rows the view paints as picks, and
         // never leaves them (F4): a view that shrank, or a key pressed at its
         // end, does not lose the selection.
+        // The head of the board says where the tabs and the view are (T-353):
+        // the box of the goal and the rows of the header grow and shrink with
+        // the voyage's words.
+        let layout = {
+            let board = kept.as_ref().expect("the board was just built or kept");
+            frame::layout(board, &screen)
+        };
         let mut tall = frame::Canvas::new(screen.size.0, 1000);
         let picks = {
             let board = kept.as_ref().expect("the board was just built or kept");
-            frame::view(board, &screen, &mut tall, frame::VIEW_ROW)
+            frame::view(board, &screen, &mut tall, layout.top)
         };
         screen.selected = screen.selected.min(picks.len().saturating_sub(1));
         let text = {
@@ -1757,7 +2240,7 @@ pub fn run_with(
         // The picks one page holds (T-411): the rows of the view the screen
         // shows, the header and the footer's rows taken out, and never less
         // than one.
-        let page = screen.size.1.saturating_sub(frame::VIEW_ROW + 2).max(1);
+        let page = screen.size.1.saturating_sub(layout.top + 2).max(1);
         loop {
             let now = std::time::Instant::now();
             if now >= deadline {
@@ -1827,6 +2310,42 @@ pub fn run_with(
                     panel = None;
                     break;
                 }
+                // `[` and `]` pick the voyage the whole board shows (T-357):
+                // the list is newest first, so `[` goes one entry older and `]`
+                // one newer, and the oldest and the newest voyage stay where
+                // they are.
+                Event::Key(character @ ('[' | ']')) => {
+                    let picked = kept.as_ref().and_then(|board| {
+                        let project = board.projects.first()?;
+                        let shown = project.shown.as_ref()?.milestone.as_str();
+                        let index = project
+                            .voyage_list
+                            .iter()
+                            .position(|entry| entry.milestone == shown)?;
+                        let next = if character == '[' {
+                            (index + 1).min(project.voyage_list.len() - 1)
+                        } else {
+                            index.saturating_sub(1)
+                        };
+                        project.voyage_list.get(next).map(|entry| entry.milestone.clone())
+                    });
+                    if let Some(picked) = picked {
+                        milestone = Some(picked);
+                        screen.selected = 0;
+                        panel = None;
+                        // The kept board shows another voyage: the next frame
+                        // is built for the pick.
+                        kept = None;
+                        break;
+                    }
+                }
+                // The `d` key unfolds the header and folds it again (T-354):
+                // the tab and the selection stay where they were.
+                Event::Key('d') | Event::Key('D') => {
+                    screen.detail = !screen.detail;
+                    panel = None;
+                    break;
+                }
                 Event::Up | Event::Key('k') => {
                     screen.selected = screen.selected.saturating_sub(1);
                     panel = None;
@@ -1865,16 +2384,59 @@ pub fn run_with(
                 }
                 Event::Key('\r') | Event::Key('\n') => {
                     let board = kept.as_ref().expect("the board was just built or kept");
-                    panel = open_panel(board, store, screen.tab, screen.selected)?;
+                    // The Cost view opens a lane's tasks instead of a panel
+                    // (T-363): `Enter` on a lane shows them under it, and on
+                    // the same lane hides them again.
+                    if screen.tab == frame::Tab::Cost {
+                        if let Some(lane) =
+                            board.projects.first().and_then(|p| p.lanes.get(screen.selected))
+                        {
+                            match screen.opened.iter().position(|open| *open == lane.lane) {
+                                Some(index) => {
+                                    screen.opened.remove(index);
+                                }
+                                None => screen.opened.push(lane.lane.clone()),
+                            }
+                        }
+                        panel = None;
+                        break;
+                    }
+                    panel = open_panel(board, store, screen.tab, screen.selected, screen.size.0)?;
                     break;
                 }
                 Event::Mouse { button: 0, x, y } => {
                     // A click on the tab row picks a view; a click on a row of
                     // the view picks that row. The rows are the ones the
                     // frame draws: the tabs on their own row, the data below
-                    // the heading.
-                    if y == frame::TAB_ROW as u16 + 1 {
-                        if let Some(picked) = frame::tab_at(x) {
+                    // the heading. A click at the terminal's (x, y), counted
+                    // from 1, is the screen's column x - 1 and row y - 1
+                    // (T-353).
+                    let column = x.saturating_sub(1) as usize;
+                    let row = y.saturating_sub(1) as usize;
+                    if row == 0 {
+                        // A click on a voyage's label on the first row picks
+                        // that voyage (T-357): the whole board shows it.
+                        let picked = layout
+                            .voyages
+                            .iter()
+                            .find(|(first, last, _)| column >= *first && column <= *last)
+                            .map(|(_, _, named)| named.clone());
+                        if let Some(picked) = picked {
+                            milestone = Some(picked);
+                            screen.selected = 0;
+                            panel = None;
+                            // The kept board shows another voyage: the next
+                            // frame is built for the pick.
+                            kept = None;
+                            break;
+                        }
+                    } else if row == layout.tab_row {
+                        let picked = layout
+                            .tabs
+                            .iter()
+                            .find(|(first, last, _)| column >= *first && column <= *last)
+                            .map(|(_, _, tab)| *tab);
+                        if let Some(picked) = picked {
                             screen.tab = picked;
                             screen.selected = 0;
                             panel = None;
@@ -1886,16 +2448,15 @@ pub fn run_with(
                         // below the data and the footer's row select nothing.
                         // The view's first row is a row of the view (T-342's
                         // rework): scrolling can put a pick there.
-                        let row = y.saturating_sub(1) as usize;
-                        let last = screen.size.1.saturating_sub(2);
-                        if row >= frame::VIEW_ROW && row < last {
+                        let last = frame::view_bottom(screen.tab, screen.size.1);
+                        if row >= layout.top && row < last {
                             // The rows above the viewport are scrolled away:
                             // the clicked row is the one the frame drew.
                             let offset = frame::offset_of(
                                 &picks,
                                 screen.selected,
-                                frame::VIEW_ROW,
-                                screen.size.1,
+                                layout.top,
+                                last,
                             );
                             // A click selects the pick drawn on that row; a
                             // row without a pick selects nothing.
@@ -1929,6 +2490,7 @@ fn open_panel(
     store: &mut Store,
     tab: frame::Tab,
     selected: usize,
+    width: usize,
 ) -> GearResult<Option<Vec<style::Line>>> {
     let Some(project) = board.projects.first() else { return Ok(None) };
     match tab {
@@ -1940,19 +2502,16 @@ fn open_panel(
             )
         })),
         frame::Tab::Tasks => {
-            let Some(task) = project.graph.get(selected) else { return Ok(None) };
-            let rows = store.read(|tx| graph::styled_panel(tx, &project.project, &task.id, now_ts()))?;
+            // The task of the selected pick: the row the graph draws for it.
+            let picks = frame::task_picks(project, board.now, width);
+            let Some(task) = picks.get(selected) else { return Ok(None) };
+            let rows = store.read(|tx| graph::styled_panel(tx, &project.project, task, now_ts()))?;
             Ok(Some(rows))
         }
         frame::Tab::Cost => {
-            // The task panel of the task the row names: its rounds with their
-            // tokens.
-            let tasks = frame::token_tasks(project);
-            let Some((_, task)) = tasks.get(selected) else {
-                return Ok(None);
-            };
-            let rows = store.read(|tx| graph::styled_panel(tx, &project.project, &task.id, now_ts()))?;
-            Ok(Some(rows))
+            // The Cost view opens no panel (T-363): `Enter` on a lane shows
+            // its tasks under the lane's row.
+            Ok(None)
         }
         frame::Tab::Log => Ok(None),
     }
@@ -1982,6 +2541,7 @@ fn print_once(board: &Board, opts: &Options, out: &mut dyn Write) -> GearResult<
                     tab: tab_of(opts.view),
                     selected: 0,
                     detail: false,
+                    opened: Vec::new(),
                     size,
                 },
                 None

@@ -447,6 +447,46 @@ fn a_plan_without_a_milestone_logs_to_the_current_voyage() {
     );
 }
 
+/// §7.4, T-351: a task moved to another voyage is recorded in the voyage it
+/// left, so that voyage's board can name it — once, not on every apply.
+#[test]
+fn a_moved_task_is_recorded_in_the_voyage_it_left() {
+    let mut s = world();
+    let voyages = "# Milestone M1: one\ndone: one\nbar: a bar\neta: 1h\n\n# Milestone M2: two\ndone: two\nbar: a bar\neta: 1h\n\n";
+    run(
+        &mut s,
+        &format!("{voyages}# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"),
+        "r1",
+    )
+    .unwrap();
+
+    // The same task, now on M2.
+    let moved = format!("{voyages}# Queue\n## T-1 [must] lane=heat milestone=M2\ngoal: A\naccept: a\ndeps: -\n");
+    run(&mut s, &moved, "r2").unwrap();
+
+    let logged = s.read(|tx| tx.decisions_of("p", "M1")).unwrap();
+    let moves: Vec<&DecisionRow> = logged.iter().filter(|d| d.kind == "move").collect();
+    assert_eq!(moves.len(), 1, "{logged:?}");
+    assert_eq!(moves[0].what, "T-1 moved to M2");
+    assert_eq!(moves[0].source, "gear");
+    assert!(!moves[0].star, "GEAR's own entries are never starred");
+    // The voyage the task joined does not record the move.
+    let m2 = s.read(|tx| tx.decisions_of("p", "M2")).unwrap();
+    assert!(m2.iter().all(|d| d.kind != "move"), "{m2:?}");
+    // The task carries the milestone of the voyage it moved to.
+    let task = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+    assert_eq!(task.milestone.as_deref(), Some("M2"));
+
+    // Applying the move again records no second line.
+    run(&mut s, &moved, "r3").unwrap();
+    let logged = s.read(|tx| tx.decisions_of("p", "M1")).unwrap();
+    assert_eq!(
+        logged.iter().filter(|d| d.kind == "move").count(),
+        1,
+        "{logged:?}"
+    );
+}
+
 /// §7.1: the structured form needs the date §7.1 writes; anything else is a
 /// note with the warning and without a star.
 #[test]

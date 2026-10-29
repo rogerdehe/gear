@@ -25,6 +25,52 @@ fn world(followup:bool) -> (Store, FakeHerdr, EngineCfg) {
 }
 fn advance(s:&mut Store,h:&mut FakeHerdr,c:&EngineCfg,t:i64) { tick(s,h,c,T+t).unwrap(); }
 
+/// A project with one lane of its own name (`probe`), so a test that reads the
+/// engine log (T-407) never mixes in another test's lines.
+fn probe_world() -> (Store, FakeHerdr, EngineCfg) {
+    let mut s = Store::open_in_memory().unwrap();
+    s.write(|tx| {
+        testing::seed_project(tx, "p", "sess", T)?;
+        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T)?;
+        testing::seed_active_seat(tx, "p", "probe", SeatRole::Lane, "w1:p9", "opencode", T)?;
+        tx.set_binding_session_ref("p:probe", 1, "old")?;
+        tx.insert_task(&TaskRow { repo:None,base:None,gate:None,rework_estimate_min:None,project:"p".into(),id:"T-1".into(),rank:1,state:TaskState::Ready,priority:"must".into(),lane:Some("probe".into()),milestone:None,required:false,contract_version:1,deps:vec![],followup_of:None,wait_on:None,wait_cond:None,rework_note:None,estimate_min:Some(30),issue:None,updated:T })?;
+        tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"accept".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T, mechanical: None,})?;
+        Ok(())
+    }).unwrap();
+    let mut h = FakeHerdr::new();
+    h.add_agent_named("w1:p1", "codex", AgentStatus::Idle, "p-captain");
+    h.add_agent_named("w1:p9", "opencode", AgentStatus::Idle, "p-probe");
+    h.set_agent_session("w1:p9", "old");
+    let mut cfg = EngineCfg::default(); cfg.cooldown_s = 0; cfg.profiles = gear_herdr::builtins();
+    let profile = cfg.profiles.get_mut("opencode").unwrap(); profile.new_session = "/new".into();
+    (s, h, cfg)
+}
+
+/// T-407: a session switch that reaches `done` writes one probe line per step
+/// and one total, in milliseconds, from the durable step times.
+#[test]
+fn a_session_switch_to_done_logs_one_probe_line_per_step_and_one_total() {
+    let (mut s, mut h, c) = probe_world();
+    advance(&mut s, &mut h, &c, 0);
+    assert!(h.calls.iter().any(|x| matches!(x, Call::PaneType { text, .. } if text == "/new")), "the switch went: {:?}", h.calls);
+    advance(&mut s, &mut h, &c, 1);
+    h.set_agent_session("w1:p9", "new");
+    advance(&mut s, &mut h, &c, 7);
+    let log: Vec<String> = gear_engine::ops::probe_log()
+        .into_iter()
+        .filter(|line| line.starts_with("probe new p:probe "))
+        .collect();
+    let steps: Vec<&str> = log.iter().map(|line| line.split_whitespace().nth(3).unwrap()).collect();
+    assert_eq!(steps, ["initial", "enter", "wait_action", "done"], "{log:?}");
+    // Each step carries its own time and the switch's time so far: the typed
+    // `/new` (tick 1) took 1 s, the Enter (tick 2) 1 s, the wait 6 s.
+    assert_eq!(log[0], "probe new p:probe initial 0 total=0");
+    assert_eq!(log[1], "probe new p:probe enter 1000 total=1000");
+    assert_eq!(log[2], "probe new p:probe wait_action 6000 total=7000");
+    assert_eq!(log[3], "probe new p:probe done 7000 total=7000", "one total: the whole switch");
+}
+
 #[test]
 fn waits_then_sends_once_records_sent_and_names_followup() {
     let (mut s,mut h,c)=world(true);

@@ -2308,8 +2308,13 @@ fn run_plan(
         .iter()
         .map(gear_app::plan::staff_line)
         .collect();
-    let rewritten =
-        gear_app::draft::rewrite_applied(&text, result.version, &result.created, &used_staff);
+    let rewritten = gear_app::draft::rewrite_applied(
+        &text,
+        result.version,
+        &result.created,
+        &used_staff,
+        &result.milestone_blocks,
+    );
     write_in_place(path, &rewritten).map_err(|e| {
         GearError::new(
             gear_model::ErrorCode::BadFormat,
@@ -2433,6 +2438,41 @@ fn render_apply(result: &gear_app::plan::ApplyResult) -> String {
     lines.join("\n")
 }
 
+/// The commit a `--candidate` names (T-421): a value that is already a sha (7 to
+/// 40 hex digits) is sent as it is; any other value is a ref, resolved with
+/// `git rev-parse --verify <value>^{commit}` in the caller's working directory.
+/// A value that names no commit here is refused, never sent: the store keeps the
+/// commit reviewed, so the commit merged is the one that was read.
+fn candidate_commit(value: &str) -> GearResult<String> {
+    let sha = (7..=40).contains(&value.len()) && value.chars().all(|c| c.is_ascii_hexdigit());
+    if sha {
+        return Ok(value.to_string());
+    }
+    let resolved = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", &format!("{value}^{{commit}}")])
+        .output();
+    match resolved {
+        Ok(out) if out.status.success() => {
+            let full = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if full.is_empty() {
+                return Err(candidate_not_a_commit(value));
+            }
+            Ok(full)
+        }
+        _ => Err(candidate_not_a_commit(value)),
+    }
+}
+
+fn candidate_not_a_commit(value: &str) -> GearError {
+    GearError::new(
+        gear_model::ErrorCode::BadFormat,
+        format!(
+            "--candidate {value} is not a commit here: hand in the commit itself, e.g. \
+             --candidate $(git rev-parse HEAD)"
+        ),
+    )
+}
+
 /// `gear send` body, over injected state (the command itself only wires this
 /// to the process environment, the socket and the store).
 fn run_send(
@@ -2451,14 +2491,18 @@ fn run_send(
         ("--saved", c.saved.is_some()),
     ])?;
     let kind = parse_kind(&c.kind)?;
+    // A hand-in names a commit, never a branch (T-421): a ref is resolved here,
+    // in the caller's working directory, to the commit it points at now, so the
+    // store never keeps a name whose commit can move.
+    let candidate = c.candidate.as_deref().map(candidate_commit).transpose()?;
     let args = gear_app::mail::SendArgs {
         kind,
         body,
         task: c.task.clone(),
         attempt: c.attempt,
         contract: c.contract,
-        // A result's candidate (T-45): the commit or ref handed in.
-        candidate: c.candidate.clone(),
+        // A result's candidate (T-45): the commit handed in.
+        candidate,
         // A review's verdict (T-2): pass or fail.
         verdict: c
             .verdict
@@ -3385,6 +3429,12 @@ fn run_engine_with(
         for line in gear_engine::release::take_release_log() {
             writeln!(out, "{line}").map_err(write_error)?;
         }
+        // The probe lines the tick's operations recorded (T-407): how long
+        // each step of a session action, a delivery, a restart and a merge
+        // took, through the same writer and stamp.
+        for line in gear_engine::ops::take_probe_log() {
+            writeln!(out, "{line}").map_err(write_error)?;
+        }
         out.flush().map_err(write_error)?;
         done += 1;
         if ticks.is_none() {
@@ -3904,6 +3954,83 @@ mod tests {
         assert!(!out.contains("warning:"), "{out}");
         let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
         assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["T-1"]);
+    }
+
+    // T-333: a plan that names a milestone without carrying its block gets the
+    // block back from the store, in the file it was applied from, and a second
+    // apply of the rewritten file changes nothing.
+    #[test]
+    fn plan_apply_writes_a_missing_milestone_block_back_into_the_file() {
+        let (mut store, mut herdr) = world();
+        let path = write_draft(&plan_draft_with_milestone());
+        run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-block-1",
+            T0 + 1,
+            false,
+            false,
+        )
+        .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("# Milestone M2: two\ndone: both ship\nbar: fast\neta: 1h"),
+            "the block the captain wrote stays: {written}"
+        );
+
+        // A draft that names M2 and says nothing about it: the words are the
+        // store's, and they go back into the file.
+        let queue_only = "<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [should] lane=heat milestone=M2\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
+        std::fs::write(&path, queue_only).unwrap();
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-block-2",
+            T0 + 2,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(
+            out.contains("the # Milestone M2 block was written back into the plan file from the store"),
+            "{out}"
+        );
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            rewritten.contains("# Milestone M2: two\ndone: both ship\nbar: fast\neta: 1h\n"),
+            "{rewritten}"
+        );
+        assert_eq!(
+            rewritten.matches("# Milestone M2").count(),
+            1,
+            "one block, not two: {rewritten}"
+        );
+
+        // A second apply of the rewritten file changes nothing (the version
+        // line only moves, as every apply moves it).
+        run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-block-3",
+            T0 + 3,
+            false,
+            false,
+        )
+        .unwrap();
+        let again = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(again, rewritten.replace("base=2", "base=3"), "nothing else moved");
     }
 
     // T-410: `gear plan apply --confirmed` parses, and the flag reaches the
@@ -5686,10 +5813,10 @@ path="api"
         std::fs::remove_file(&log).ok();
     }
 
-    #[test]
-    fn send_candidate_reaches_mail() {
-        let (mut store, mut herdr) = world();
-        // A started attempt on T-7, so a result can be submitted.
+    /// A world with T-7 started and its delivery view recorded, so a result can
+    /// be handed in.
+    fn world_with_attempt() -> (Store, FakeHerdr) {
+        let (mut store, herdr) = world();
         store
             .write(|tx| {
                 tx.insert_task(&TaskRow {
@@ -5719,18 +5846,24 @@ path="api"
                 Ok(())
             })
             .unwrap();
+        (store, herdr)
+    }
+
+    #[test]
+    fn send_candidate_reaches_mail() {
+        let (mut store, mut herdr) = world_with_attempt();
 
         let mut c = send_cmd("result");
         c.task = Some("T-7".into());
         c.attempt = Some(1);
         c.contract = Some(1);
-        c.candidate = Some("abc123".into());
+        c.candidate = Some("abc1234".into());
         let out = run_send(
             &mut store,
             &env("heat", LANE_PANE),
             &mut herdr,
             &c,
-            "done, see abc123".into(),
+            "done, see abc1234".into(),
             None,
             T0 + 2,
             false,
@@ -5740,6 +5873,154 @@ path="api"
         assert!(out.contains("Delivered to p:captain"), "{out}");
         let attempt = store.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap();
         assert_eq!(attempt.state, gear_model::AttemptState::Submitted);
+    }
+
+    /// A `git` in `dir`: the fixture builds its own commit (T-421).
+    fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Run `f` with the process working directory at `dir`: the candidate is
+    /// resolved in the caller's working directory (T-421). The lock keeps two
+    /// such tests from fighting over one process-wide setting.
+    fn in_dir<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let before = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir).unwrap();
+        let out = f();
+        std::env::set_current_dir(before).unwrap();
+        out
+    }
+
+    /// T-421: a hand-in names a commit, never a branch. A branch is resolved in
+    /// the caller's working directory: the store keeps the commit it points at.
+    #[test]
+    fn candidate_branch_is_sent_as_its_commit() {
+        let dir = scratch("send-candidate-branch");
+        git_in(&dir, &["init", "-q", "-b", "dev"]);
+        std::fs::write(dir.join("work"), "x").unwrap();
+        git_in(&dir, &["add", "work"]);
+        git_in(
+            &dir,
+            &[
+                "-c",
+                "user.name=gear",
+                "-c",
+                "user.email=gear@example.test",
+                "commit",
+                "-q",
+                "-m",
+                "one",
+            ],
+        );
+        let head = git_in(&dir, &["rev-parse", "HEAD"]);
+        git_in(&dir, &["branch", "heat/t421"]);
+
+        let (mut store, mut herdr) = world_with_attempt();
+        let mut c = send_cmd("result");
+        c.task = Some("T-7".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.candidate = Some("heat/t421".into());
+        in_dir(&dir, || {
+            run_send(
+                &mut store,
+                &env("heat", LANE_PANE),
+                &mut herdr,
+                &c,
+                "handed in".into(),
+                None,
+                T0 + 2,
+                false,
+            )
+        })
+        .unwrap();
+
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap();
+        assert_eq!(attempt.state, gear_model::AttemptState::Submitted);
+        assert_eq!(attempt.candidate.as_deref(), Some(head.as_str()), "the branch's sha, not its name");
+    }
+
+    /// T-421: a name that is no commit in the caller's working directory is
+    /// refused, and nothing is stored.
+    #[test]
+    fn candidate_that_is_no_commit_is_refused_and_stores_nothing() {
+        // A scratch directory: not a repository, so no ref resolves there.
+        let dir = scratch("send-candidate-unknown");
+        let (mut store, mut herdr) = world_with_attempt();
+        let mut c = send_cmd("result");
+        c.task = Some("T-7".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.candidate = Some("no-such-thing".into());
+        let error = in_dir(&dir, || {
+            run_send(
+                &mut store,
+                &env("heat", LANE_PANE),
+                &mut herdr,
+                &c,
+                "handed in".into(),
+                None,
+                T0 + 2,
+                false,
+            )
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, gear_model::ErrorCode::BadFormat);
+        assert_eq!(
+            error.detail,
+            "--candidate no-such-thing is not a commit here: hand in the commit itself, e.g. \
+             --candidate $(git rev-parse HEAD)"
+        );
+        // Nothing was stored: the attempt still waits for its hand-in, and the
+        // captain got no message.
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap();
+        assert_eq!(attempt.state, gear_model::AttemptState::Started);
+        assert!(attempt.candidate.is_none());
+        assert!(store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 3)).unwrap().is_empty());
+    }
+
+    /// T-421: a value that is already a sha is sent as it is — no git needed.
+    #[test]
+    fn candidate_sha_is_sent_unchanged() {
+        // Not a repository: a sha needs no resolution.
+        let dir = scratch("send-candidate-sha");
+        let (mut store, mut herdr) = world_with_attempt();
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let mut c = send_cmd("result");
+        c.task = Some("T-7".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.candidate = Some(sha.into());
+        in_dir(&dir, || {
+            run_send(
+                &mut store,
+                &env("heat", LANE_PANE),
+                &mut herdr,
+                &c,
+                "handed in".into(),
+                None,
+                T0 + 2,
+                false,
+            )
+        })
+        .unwrap();
+
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap();
+        assert_eq!(attempt.state, gear_model::AttemptState::Submitted);
+        assert_eq!(attempt.candidate.as_deref(), Some(sha));
     }
 
     // --- T-2: a temp reviewer hands in a verdict ---
@@ -5830,7 +6111,7 @@ path="api"
             let err=run_send(&mut store,&env(name,pane),&mut herdr,&c,"ok".into(),None,T0+1,false).unwrap_err();
             assert_eq!(err.code,gear_model::ErrorCode::Forbidden);
         }
-        c.direction=None; c.contract=Some(1); c.candidate=Some("abc123".into());
+        c.direction=None; c.contract=Some(1); c.candidate=Some("abc1234".into());
         let err=run_send(&mut store,&env("r-1",TEMP_PANE),&mut herdr,&c,"ok".into(),None,T0+1,false).unwrap_err();
         assert_eq!(err.code,gear_model::ErrorCode::Forbidden);
     }
@@ -5843,7 +6124,7 @@ path="api"
         }).to_string())).unwrap();
         let mut lane = send_cmd("result");
         lane.task=Some("T-7".into()); lane.attempt=Some(1); lane.contract=Some(1);
-        lane.candidate=Some("candidate123".into()); lane.request_id=Some("lane-result".into());
+        lane.candidate=Some("c0ffee1".into()); lane.request_id=Some("lane-result".into());
         run_send(&mut store,&env("heat",LANE_PANE),&mut herdr,&lane,"done".into(),None,T0+1,false).unwrap();
         let task_before=store.read(|tx|tx.get_task("p","T-7")).unwrap().unwrap().state;
         assert_eq!(store.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,gear_model::AttemptState::Submitted);

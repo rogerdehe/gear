@@ -465,7 +465,7 @@ fn q_leaves_the_board() {
 
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains("GEAR · p"), "{text}");
-    assert!(text.contains("LANES"), "{text}");
+    assert!(text.contains("NOW DOING"), "{text}");
     // The frame is drawn in place (T-403): it opens a synchronized update and
     // never clears the whole screen.
     assert!(text.contains("\x1b[?2026h\x1b[H"), "{text:?}");
@@ -538,13 +538,18 @@ struct Pty {
 
 impl Pty {
     fn open() -> Pty {
+        Pty::open_size(80, 24)
+    }
+
+    /// A pty whose screen is `cols` by `rows` cells.
+    fn open_size(cols: u16, rows: u16) -> Pty {
         let mut master: libc::c_int = -1;
         let mut slave: libc::c_int = -1;
         // The window size of the pty: the board draws on the terminal's
         // screen, and the test wants a small one (80x24).
         let mut window: libc::winsize = unsafe { std::mem::zeroed() };
-        window.ws_col = 80;
-        window.ws_row = 24;
+        window.ws_col = cols;
+        window.ws_row = rows;
         // SAFETY: both pointers are valid; the termios is null, so the pty
         // gets the default settings, and the window size is the one above.
         // (`null_mut` fits the `*const` parameters of the other unix flavours
@@ -713,7 +718,7 @@ fn every_row_of_the_frame_starts_at_column_zero_in_raw_mode() {
     let text = String::from_utf8_lossy(&captured);
     assert!(text.contains("! engine down"), "{text}");
     assert!(text.contains("GEAR · p"), "{text}");
-    assert!(text.contains("LANES"), "{text}");
+    assert!(text.contains("NOW DOING"), "{text}");
 
     // Every row starts at column zero: the frame does not drift right.
     let rows = row_starts(&captured);
@@ -809,9 +814,11 @@ fn the_board_frame_reads_herdr_and_still_renders_when_observation_fails() {
         run_with(&mut store, &options(), &mut out, &mut keys, Some(&mut herdr)).unwrap();
         let text = String::from_utf8(out).unwrap();
         // The first view shows the lanes; the agent state of the lane is in
-        // the model, and the lane's task is in the frame.
-        assert!(text.contains("LANES"), "{text}");
-        assert!(text.contains("runtime"), "{text}");
+        // the model, and the lane's task is in the frame. A lane name longer
+        // than five cells runs into NOW DOING and is cut by the task there,
+        // as the prototype paints it (T-359).
+        assert!(text.contains("NOW DOING"), "{text}");
+        assert!(text.contains("runtim"), "{text}");
         assert!(expected == "working" || expected == "unknown");
     }
 }
@@ -1118,7 +1125,7 @@ fn the_tab_row_has_the_four_views_of_the_user() {
     // The labels of the row, in order, and the keys 1 to 4.
     assert_eq!(
         Tab::all().map(|tab| tab.label()),
-        [" 1 Now ", " 2 Tasks ", " 3 Cost ", " 4 Log "]
+        ["  1 Now  ", "  2 Tasks  ", "  3 Cost  ", "  4 Log  "]
     );
     // The fifth view has no key: key 5 changes nothing.
     assert_eq!(Tab::of_number(5), None);
@@ -1128,13 +1135,22 @@ fn the_tab_row_has_the_four_views_of_the_user() {
 
     let mut store = world();
     let board = build(&mut store, &options(), T0 + 60).unwrap();
-    // The tab row holds the four labels; the last one ends the row.
-    let text = frame::frame(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
-    let row = text.lines().nth(frame::TAB_ROW).unwrap_or_default();
-    for label in [" 1 Now ", " 2 Tasks ", " 3 Cost "] {
+    // The tab row holds the four labels, framed by the bar's rules (T-356):
+    // the top rule on the row above, the bottom rule on the row under.
+    let screen = crate::screen(Tab::Now, 0, (160, 40));
+    let layout = frame::layout(&board, &screen);
+    let text = frame::frame(&board, &screen, None);
+    let row = text.lines().nth(layout.tab_row).unwrap_or_default();
+    for label in ["  1 Now  ", "  2 Tasks  ", "  3 Cost  ", "  4 Log  "] {
         assert!(row.contains(label), "{label:?} is not in {row:?}");
     }
-    assert!(row.trim_end().ends_with(" 4 Log"), "{row:?}");
+    assert!(row.trim_end().ends_with('│'), "the bar closes at the edge: {row:?}");
+    let above = text.lines().nth(layout.tab_row - 1).unwrap_or_default();
+    assert!(above.trim().starts_with('╭'), "the bar's top rule: {above:?}");
+    assert!(above.trim_end().ends_with('╮'), "the bar's top rule: {above:?}");
+    let under = text.lines().nth(layout.tab_row + 1).unwrap_or_default();
+    assert!(under.trim().starts_with('╰'), "the bar's bottom rule: {under:?}");
+    assert!(under.trim_end().ends_with('╯'), "the bar's bottom rule: {under:?}");
     // No view draws a burn-up any more (the chart is removed).
     for tab in Tab::all() {
         let text = frame::frame(&board, &crate::screen(tab, 0, (160, 40)), None);
@@ -1148,18 +1164,186 @@ fn the_tab_row_has_the_four_views_of_the_user() {
     assert_eq!(canvas.style_at(1, 39), Style::fg(Color::Dim));
 }
 
-/// T-156: the new board in a pty of 80x24. The frame and the first view
+/// T-353: the goal box says what the quality bar blocks, and a bar with a key
+/// the board knows is named by that key, however the plan wrote the rest.
+#[test]
+fn the_goal_box_says_what_the_quality_bar_blocks() {
+    use gear_board::frame::{self, Tab};
+    use gear_board::style::{Color, Style};
+
+    let mut store = world_with_a_voyage();
+    store
+        .write(|tx| {
+            tx.upsert_voyage(&gear_store::VoyageRow {
+                project: "p".into(),
+                milestone: "M4".into(),
+                title: "one seat model, a voyage the user can review".into(),
+                done: Some("a rework resumes its session".into()),
+                bar: Some("STRICT: a severe issue waits for the captain".into()),
+                eta: Some("12h".into()),
+                departure: Some(now_seconds() - 3600),
+                departure_tasks: Some(4),
+                departure_estimate_min: Some(160),
+                updated: T0,
+            })
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let board = build(&mut store, &options(), now_seconds()).unwrap();
+    let screen = crate::screen(Tab::Now, 0, (160, 40));
+    let canvas = frame::canvas(&board, &screen, None);
+    let text = canvas.text();
+
+    let line = "Quality bar: STRICT — severe issues block a task; medium ones are the captain's call";
+    let row = text
+        .lines()
+        .position(|text| text.contains(line))
+        .unwrap_or_else(|| panic!("the box holds {line:?}:\n{text}"));
+    // The bar is locked in the box with the goal: yellow, and not bold.
+    let x = text.lines().nth(row).unwrap_or_default().find(line).unwrap_or(0);
+    assert_eq!(canvas.style_at(x, row), Style::fg(Color::Warn), "{text}");
+    // That row is inside the box: it opens and closes with the box's borders.
+    let row_text = text.lines().nth(row).unwrap_or_default();
+    assert!(row_text.trim_start().starts_with("║ "), "{row_text:?}");
+    assert!(row_text.contains(" ║"), "{row_text:?}");
+}
+
+/// T-353: a click on the tab row picks the tab the layout draws there. The
+/// click counts from 1, as the terminal does, and the layout counts from 0.
+#[test]
+fn the_tab_row_of_the_layout_answers_a_click() {
+    use gear_board::frame::Tab;
+
+    let mut store = world_with_a_voyage();
+    let size = (100, 30);
+    let head = head_of(&mut store, size);
+    // The fourth tab (Log), in the middle of its columns.
+    let (first, last, tab) = *head
+        .tabs
+        .iter()
+        .find(|(_, _, tab)| *tab == Tab::Log)
+        .expect("the Log tab is on the row");
+    assert_eq!(tab, Tab::Log);
+    let events = vec![Event::Mouse {
+        button: 0,
+        x: ((first + last) / 2 + 1) as u16,
+        y: head.tab_row as u16 + 1,
+    }];
+    let frame = run_events(&mut store, events, size);
+
+    assert!(
+        frame.contains("ALL DECISIONS"),
+        "the click opened the Log view: {frame}"
+    );
+}
+
+/// T-356: the tab bar is one row, and a click on it picks the tab it draws.
+/// Column 15 of the terminal (counted from 1) is inside the Tasks tab, whose
+/// columns run from its rule to the rule after its label. `d` unfolds the
+/// header, the bar moves down with it, and a click on the bar's new row picks
+/// the tab as well.
+#[test]
+fn a_click_on_column_15_of_the_tab_bar_picks_the_tasks_tab_in_both_headers() {
+    use gear_board::frame::{self, Tab};
+
+    let mut store = world_with_a_voyage();
+    let size = (120, 48);
+    let folded = head_of(&mut store, size);
+    assert_eq!(folded.top, folded.tab_row + 3, "the view starts three rows under the tabs");
+    // Column 15 of the terminal is the screen's column 14, inside the Tasks
+    // tab: the tab's own columns and the rule after its label.
+    let (first, last, tab) = *folded
+        .tabs
+        .iter()
+        .find(|(_, _, tab)| *tab == Tab::Tasks)
+        .expect("the Tasks tab is on the row");
+    assert_eq!(tab, Tab::Tasks);
+    assert!(
+        (first..=last).contains(&14),
+        "column 15 is inside the Tasks tab: columns {first} to {last}"
+    );
+    // The range opens with a rule: the separator that ends the tab before, so
+    // a click between two labels picks the one on its right.
+    let canvas = frame::canvas(
+        &build(
+            &mut store,
+            &Options { project: Some("p".into()), ..Options::default() },
+            now_seconds(),
+        )
+        .unwrap(),
+        &crate::screen(Tab::Now, 0, size),
+        None,
+    );
+    assert_eq!(canvas.char_at(first, folded.tab_row), '│', "the range starts on the rule");
+    assert_eq!(canvas.char_at(first + 1, folded.tab_row), ' ', "the label follows the rule");
+
+    let events = vec![Event::Mouse { button: 0, x: 15, y: folded.tab_row as u16 + 1 }];
+    let frame = run_events(&mut store, events, size);
+    assert!(
+        frame.contains("merged into dev"),
+        "the click on column 15 opened the Tasks view: {frame}"
+    );
+
+    // `d` unfolds the header: the bar and its row move down with it, and a
+    // click on the new row picks the tab too.
+    let board = build(
+        &mut store,
+        &Options { project: Some("p".into()), ..Options::default() },
+        now_seconds(),
+    )
+    .unwrap();
+    let opened = frame::layout(
+        &board,
+        &frame::Screen {
+            tab: Tab::Now,
+            selected: 0,
+            detail: true,
+            opened: Vec::new(),
+            size,
+        },
+    );
+    assert!(
+        opened.tab_row > folded.tab_row,
+        "the unfolded header pushes the tab bar down: {} then {}",
+        folded.tab_row,
+        opened.tab_row
+    );
+    let events = vec![
+        Event::Key('d'),
+        Event::Mouse { button: 0, x: 15, y: opened.tab_row as u16 + 1 },
+    ];
+    let frame = run_events(&mut store, events, size);
+    assert!(
+        frame.contains("merged into dev"),
+        "the click on the unfolded bar opened the Tasks view: {frame}"
+    );
+    assert!(
+        frame.contains("d: fold"),
+        "the header stayed unfolded: {frame}"
+    );
+}
+
+/// T-156: the new board in a pty of 80x28. The frame and the first view
 /// come from the store, the keys move between the views, a click picks a view
 /// and a row, and `Enter` opens the panel of the selected row.
+///
+/// The screen is four rows taller than the 80x24 it took before the tab bar
+/// (T-356): the bar's rules and the spacer took rows of their own, and the
+/// lane's panel under the view needs the rows it drew before.
 #[test]
 fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     let mut store = world_with_a_voyage();
+    // The head of the board on the pty's 80x28 screen (T-353): the tab row and
+    // the view's first row are the layout's.
+    let head = head_of(&mut store, (80, 28));
+    let pick_row = head.top + 2;
     let opts = Options {
         project: Some("p".into()),
         refresh: Duration::from_millis(50),
         ..Options::default()
     };
-    let pty = Pty::open();
+    let pty = Pty::open_size(80, 28);
     let slave = pty.slave;
     let (left, done) = std::sync::mpsc::channel();
 
@@ -1173,50 +1357,55 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
 
     // The first frame: the title, the bars, the tabs and the first view.
     let mut frames = Frames { master: pty.master, buffer: String::new() };
-    let frame = frames.next("LANES", Duration::from_secs(5));
+    let frame = frames.next("NOW DOING", Duration::from_secs(5));
     assert!(frame.contains("GEAR · p"), "{frame}");
     assert!(frame.contains("1 Now"), "{frame}");
     assert!(frame.contains("4 Log"), "{frame}");
-    assert!(frame.contains("LANES"), "{frame}");
+    assert!(frame.contains("NOW DOING"), "{frame}");
     // The data of the store is on the frame: the idle reason of a lane, the
     // quota reading and the done sentence.
-    assert!(frame.contains("idle:"), "{frame}");
+    assert!(frame.contains("handed in, waits for a"), "{frame}");
     assert!(frame.contains("minimax-cn"), "{frame}");
     assert!(frame.contains("rework resumes its session"), "{frame}");
-    // The time bar is the voyage's time: 60 minutes of a 12 h voyage is two
-    // cells of 24.
-    assert!(frame.contains("time   ██░░░░░░░░░░░░░░░░░░░░░░"), "{frame}");
+    // The head of the board is the prototype's (T-353): the goal box and the
+    // voyage's name.
+    assert!(frame.contains("╔═ GOAL "), "{frame}");
+    assert!(frame.contains(" M4: one seat model, a voyage the user can review · "), "{frame}");
     // The footer keeps the last row of the screen.
     let rows: Vec<&str> = frame.lines().collect();
     assert!(rows.last().unwrap_or(&"").contains(FOOTER_START), "{frame}");
 
-    // The right arrow moves to the graph.
+    // The right arrow moves to the graph: the prototype's git graph, whose
+    // legend stands on the row above the footer (T-362). An 80-column screen
+    // cuts the legend after "↺ reworking", so the frame is found by the head of
+    // the legend.
     press(pty.master, b"\x1b[C");
-    let frame = frames.next("○ not started", Duration::from_secs(5));
+    let frame = frames.next("merged into dev", Duration::from_secs(5));
     assert!(frame.contains("dev"), "{frame}");
-    assert!(frame.contains("rev"), "{frame}");
+    assert!(frame.contains("task") && frame.contains("what"), "{frame}");
 
     // The left arrow moves back.
     press(pty.master, b"\x1b[D");
-    let _frame = frames.next("LANES", Duration::from_secs(5));
+    let _frame = frames.next("NOW DOING", Duration::from_secs(5));
 
-    // A click on the Graph tab, where it is drawn, moves to the graph.
-    let tab = column_of(&frame, 3, "2 Tasks") + 2;
-    press(pty.master, format!("\x1b[<0;{tab};4M").as_bytes());
-    let _frame = frames.next("○ not started", Duration::from_secs(5));
+    // A click on the Graph tab, where it is drawn, moves to the graph. The
+    // click counts from 1: the tab's first column plus one (T-353).
+    let tab = column_of(&frame, head.tab_row, "2 Tasks") + 1;
+    press(pty.master, format!("\x1b[<0;{tab};{row}M", row = head.tab_row + 1).as_bytes());
+    let _frame = frames.next("merged into dev", Duration::from_secs(5));
 
     // A click on the Now tab, where it is drawn, comes back to the lanes.
-    let now = column_of(&frame, 3, "1 Now") + 2;
-    press(pty.master, format!("\x1b[<0;{now};4M").as_bytes());
-    let _frame = frames.next("LANES", Duration::from_secs(5));
+    let now = column_of(&frame, head.tab_row, "1 Now") + 1;
+    press(pty.master, format!("\x1b[<0;{now};{row}M", row = head.tab_row + 1).as_bytes());
+    let _frame = frames.next("NOW DOING", Duration::from_secs(5));
 
     // A click on the first row of the first view picks that row, and `Enter`
     // opens its panel. The row is the one the board already shows as picked,
     // and a frame that says what the last one said is not written (T-403):
     // the selection is moved off it first, so the click is a change.
     press(pty.master, b"j");
-    let _frame = frames.next("› runtime", Duration::from_secs(5));
-    press(pty.master, b"\x1b[<0;1;7M");
+    let _frame = frames.next("› runtim", Duration::from_secs(5));
+    press(pty.master, format!("\x1b[<0;1;{pick_row}M").as_bytes());
     let _frame = frames.next("› data", Duration::from_secs(5));
     press(pty.master, b"\r");
     let frame = frames.next("lane data", Duration::from_secs(5));
@@ -1228,7 +1417,7 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     press(pty.master, b"x");
     let _frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
     press(pty.master, b"j");
-    let _frame = frames.next("› runtime", Duration::from_secs(5));
+    let _frame = frames.next("› runtim", Duration::from_secs(5));
     press(pty.master, b"j");
     assert!(
         frames.quiet(Duration::from_millis(300)),
@@ -1289,24 +1478,23 @@ fn a_board_without_a_project_shows_them_one_at_a_time() {
         let _ = left.send(result.is_ok());
     });
 
-    // The first frame shows the first project and says how many there are:
-    // the title starts with the project and ends with the key's sentence.
+    // The first frame shows the first project: its name is the first row's.
     let mut frames = Frames { master: pty.master, buffer: String::new() };
-    let frame = frames.next("LANES", Duration::from_secs(5));
+    let frame = frames.next("NOW DOING", Duration::from_secs(5));
     let title = plain(frame.lines().next().unwrap_or_default());
-    assert!(title.starts_with("GEAR · a · p: next of 2 projects"), "{title}");
+    assert!(title.trim_start().starts_with("GEAR · a "), "{title}");
 
     // `p` shows the second project.
     press(pty.master, b"p");
     let frame = frames.next("GEAR · b", Duration::from_secs(5));
     let title = plain(frame.lines().next().unwrap_or_default());
-    assert!(title.starts_with("GEAR · b · p: next of 2 projects"), "{title}");
+    assert!(title.trim_start().starts_with("GEAR · b "), "{title}");
 
     // `p` on the last project comes back to the first.
     press(pty.master, b"p");
     let frame = frames.next("GEAR · a", Duration::from_secs(5));
     let title = plain(frame.lines().next().unwrap_or_default());
-    assert!(title.starts_with("GEAR · a · p: next of 2 projects"), "{title}");
+    assert!(title.trim_start().starts_with("GEAR · a "), "{title}");
 
     press(pty.master, b"q");
     assert!(
@@ -1329,7 +1517,7 @@ fn a_board_printed_once_promises_no_project_key() {
     gear_board::run(&mut store, &opts, &mut out, None).expect("the printed board");
     let text = String::from_utf8_lossy(&out).into_owned();
     let title = plain(text.lines().next().unwrap_or_default());
-    assert!(title.starts_with("GEAR · a"), "the first project prints: {title}");
+    assert!(title.trim_start().starts_with("GEAR · a "), "the first project prints: {title}");
     assert!(!title.contains("next of"), "a printed board promises no key: {title}");
 
     // The JSON is the whole board, unchanged: the switch is only the text's
@@ -1343,7 +1531,8 @@ fn a_board_printed_once_promises_no_project_key() {
 }
 
 /// T-317: a board of one project has no suffix to explain, and neither does
-/// a board opened with `--project`.
+/// a board opened with `--project`. T-353's first row names the shown project
+/// and nothing else.
 #[test]
 fn a_board_of_one_project_has_no_project_key() {
     let mut store = world();
@@ -1359,7 +1548,7 @@ fn a_board_of_one_project_has_no_project_key() {
         None,
     );
     let title = plain(text.lines().next().unwrap_or_default());
-    assert!(title.starts_with("GEAR · p"), "{title}");
+    assert!(title.trim_start().starts_with("GEAR · p "), "{title}");
     assert!(!title.contains("next of"), "{title}");
 
     // Even with more projects in the store, `--project` names the one shown.
@@ -1373,7 +1562,7 @@ fn a_board_of_one_project_has_no_project_key() {
         None,
     );
     let title = plain(text.lines().next().unwrap_or_default());
-    assert!(title.starts_with("GEAR · p"), "{title}");
+    assert!(title.trim_start().starts_with("GEAR · p "), "{title}");
     assert!(!title.contains("next of"), "{title}");
 }
 
@@ -1434,11 +1623,12 @@ fn world_with_a_long_graph() -> Store {
                     updated: T0,
                 })?;
             }
-            // The last task's goal is longer than the screen: the panel must
-            // be cut, not hidden (F3).
+            // The last pick's goal is longer than the screen: the panel must
+            // be cut, not hidden (F3). The last pick is T-01: the waiting tasks
+            // are drawn newest first (T-361, T-362).
             tx.insert_contract(&ContractRow {
                 project: "p".into(),
-                task: "T-17".into(),
+                task: "T-01".into(),
                 version: 1,
                 goal: "Finish the board frame and keep the task panel visible when its goal exceeds terminal width".into(),
                 accept: "the panel shows both borders and the footer".into(),
@@ -1460,6 +1650,8 @@ fn world_with_a_long_graph() -> Store {
 #[test]
 fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     let mut store = world_with_a_long_graph();
+    // The head of the board on the pty's 80x24 screen (T-353).
+    let head = head_of(&mut store, (80, 24));
     let opts = Options {
         project: Some("p".into()),
         // A longer refresh: the board redraws on the keys, not every 50 ms
@@ -1479,13 +1671,13 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     });
 
     let mut frames = Frames { master: pty.master, buffer: String::new() };
-    let _frame = frames.next("LANES", Duration::from_secs(5));
+    let _frame = frames.next("NOW DOING", Duration::from_secs(5));
 
     // The panel of a lane with seventeen tasks is taller than the terminal: it
     // keeps both borders and the footer's row (F3). The first lane is the one
     // the board shows as picked, and a click that picks it again writes no
     // frame (T-403): `Enter` opens it from there.
-    press(pty.master, b"\x1b[<0;1;7M");
+    press(pty.master, format!("\x1b[<0;1;{pick}M", pick = head.top + 2).as_bytes());
     assert!(
         frames.quiet(Duration::from_millis(300)),
         "a click on the picked row writes no frame"
@@ -1508,8 +1700,8 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     // testing expects). The frame that closed the panel is the one on the
     // screen, and a frame that reads like the last one written is not written
     // again (T-403).
-    let tab = column_of(&frame, 3, "2 Tasks") + 2;
-    press(pty.master, format!("\x1b[<0;{tab};4M").as_bytes());
+    let tab = column_of(&frame, head.tab_row, "2 Tasks") + 1;
+    press(pty.master, format!("\x1b[<0;{tab};{row}M", row = head.tab_row + 1).as_bytes());
     let _frame = frames.next("dev", Duration::from_secs(5));
 
     // Repeated `Down` walks to the last task and keeps it visible (F8). Every
@@ -1523,7 +1715,9 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
         press(pty.master, b"j");
         frame = frames.last_with(FOOTER_START, Duration::from_secs(5));
     }
-    assert!(frame.contains("T-17"), "the last task stays visible: {frame}");
+    // The last pick is T-01, the last task to run (T-361, T-362): the view
+    // scrolled to it.
+    assert!(frame.contains("T-01"), "the last pick stays visible: {frame}");
 
     // A click on the footer's row and on the spacer below the data selects
     // nothing (F8): the selection stays on the last task, and no frame is
@@ -1537,7 +1731,7 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
 
     // `Enter` opens the panel of the task that is visible.
     press(pty.master, b"\r");
-    let frame = frames.next("T-17 · lane", Duration::from_secs(5));
+    let frame = frames.next("T-01 · lane", Duration::from_secs(5));
     assert!(frame.contains("ROUNDS"), "the panel of the task: {frame}");
     // The goal is longer than the screen: the panel is cut, not hidden (F3).
     assert!(frame.contains("┐"), "the right border of the panel: {frame}");
@@ -1569,7 +1763,10 @@ fn a_long_graph_draws_its_last_task() {
     )
     .unwrap();
     let text = gear_board::frame::frame(&board, &crate::screen(gear_board::frame::Tab::Tasks, 16, (80, 24)), None);
-    assert!(text.contains("T-17"), "the last task is drawn: {text}");
+    // The last pick is the last task to run, T-01: the waiting tasks hang
+    // newest first (T-361, T-362).
+    assert!(text.contains("T-01"), "the last pick is drawn: {text}");
+    assert!(!text.contains("T-17"), "the first pick scrolled away: {text}");
 }
 
 /// Keys that send the given events, then `q`, on a screen of the given size.
@@ -1609,19 +1806,24 @@ fn a_view_scrolls_to_its_selected_pick_and_a_click_keeps_it() {
         now_seconds(),
     )
     .unwrap();
-    // The last of the seventeen tasks is selected: the view scrolled to it,
-    // and the heading scrolled away with the rows above it.
-    let size = (80, 12);
+    // The last of the seventeen picks is T-01, the last task to run (the
+    // waiting tasks hang newest first, T-361 and T-362): the view scrolled to
+    // it, and the heading scrolled away with the rows above it. The tab bar
+    // takes three rows (T-356), so the screen is one row taller than the 12 it
+    // took with the tabs on a single row.
+    let size = (80, 13);
+    let tab_row = frame::layout(&board, &crate::screen(Tab::Tasks, 16, size)).tab_row;
     let canvas = frame::canvas(&board, &crate::screen(Tab::Tasks, 16, size), None);
     let text = canvas.text();
-    assert!(text.contains("T-17"), "the selected task is drawn: {text}");
-    assert!(!text.contains("T-01"), "the view scrolled past the first task: {text}");
-    // Its row is the last row the view owns, and it is the lit one.
+    assert!(text.contains("T-01"), "the selected pick is drawn: {text}");
+    assert!(!text.contains("T-17"), "the view scrolled past the first pick: {text}");
+    // Its row is the last row the view owns, and it is the lit one: the view
+    // stops on the row above the legend (T-362).
     let row = 9;
-    assert!(text.lines().nth(row).unwrap_or_default().contains("T-17"), "{text}");
+    assert!(text.lines().nth(row).unwrap_or_default().contains("T-01"), "{text}");
     assert!(canvas.style_at(1, row).reverse, "the selected row is lit: {text}");
 
-    // Sixteen `Down` keys and then a click on the row T-17 is drawn on: the
+    // Sixteen `Down` keys and then a click on the row T-01 is drawn on: the
     // click adds the viewport's offset and picks the same task.
     let mut events = vec![Event::Key('2')];
     for _ in 0..16 {
@@ -1635,20 +1837,21 @@ fn a_view_scrolls_to_its_selected_pick_and_a_click_keeps_it() {
         ..Options::default()
     };
     let mut out: Vec<u8> = Vec::new();
-    run_with(&mut store, &opts, &mut out, &mut Events { events, size: (80, 12) }, None).unwrap();
+    run_with(&mut store, &opts, &mut out, &mut Events { events, size }, None).unwrap();
 
     let frame = last_frame(&out);
     let rows: Vec<&str> = frame.lines().collect();
     assert!(
-        rows.get(row).unwrap_or(&"").contains("T-17"),
-        "the clicked row holds T-17: {frame}"
+        rows.get(row).unwrap_or(&"").contains("T-01"),
+        "the clicked row holds T-01: {frame}"
     );
     assert!(
         rows.get(row).unwrap_or(&"").contains("\u{1b}[7m"),
         "the clicked row stays the lit one: {frame}"
     );
+    // The first row is lit too: the shown voyage's label (README change 1).
     for (y, line) in rows.iter().enumerate() {
-        if y == row || y == frame::TAB_ROW {
+        if y == row || y == 0 || y == tab_row {
             continue;
         }
         assert!(!line.contains("\u{1b}[7m"), "row {y} is not lit: {line:?}");
@@ -1658,44 +1861,110 @@ fn a_view_scrolls_to_its_selected_pick_and_a_click_keeps_it() {
 /// T-342's rework (F1 of the review of attempt 1): the view's own first row is
 /// a row of the view, so after scrolling a click on it picks the task drawn
 /// there.
+///
+/// The git graph draws a task on two rows (its ○ or stage row and the row of
+/// its branch), so a scrolled view's first row holds a task only where the
+/// merges and the forks fall that way. The fixture's voyage (the prototype's
+/// M5 graph) has T-268's row three above T-262's:
+/// a 12-row screen scrolled to T-262 starts on T-268.
 #[test]
 fn a_click_on_the_top_row_of_a_scrolled_view_picks_the_task_there() {
     use gear_board::frame;
-    let mut store = world_with_a_long_graph();
-    // `2` is the graph; sixteen `Down` scroll the view to the last task. The
-    // click at x 1 y 6 is the view's first row, where T-13 is drawn (the
-    // viewport starts at `top` = 5, so screen row 6 is the view's first).
+    let (mut store, _now) = crate::golden_fixture::load();
+    // The view's first row is the view's: scrolled to T-262 (the ninth pick),
+    // it holds T-268's row. The head takes fourteen rows (T-354's three rows
+    // and the tab bar's three, T-356), so the screen is five rows taller than
+    // the 12 it took with the fixed header: the view keeps its four rows.
+    let size = (160, 21);
+    let board = build(
+        &mut store,
+        &Options { project: Some("gear".into()), ..Options::default() },
+        now_seconds(),
+    )
+    .unwrap();
+    let head = frame::layout(&board, &crate::screen(frame::Tab::Tasks, 8, size));
+    let before = frame::canvas(&board, &crate::screen(frame::Tab::Tasks, 8, size), None);
+    let before = before.text();
+    assert!(
+        before.lines().nth(head.top).unwrap_or_default().contains("T-268"),
+        "the view's first row holds T-268: {before}"
+    );
+    // `2` is the graph; eight `Down` select T-262. The click at x 1 y
+    // `top + 1` is the view's first row: the viewport starts at `top`, and
+    // scrolling has put a pick there.
     let mut events = vec![Event::Key('2')];
-    for _ in 0..16 {
+    for _ in 0..8 {
         events.push(Event::Key('j'));
     }
-    events.push(Event::Mouse { button: 0, x: 1, y: 6 });
+    events.push(Event::Mouse { button: 0, x: 1, y: (head.top + 1) as u16 });
     let opts = Options {
-        project: Some("p".into()),
+        project: Some("gear".into()),
         color: false,
         refresh: Duration::from_millis(1),
         ..Options::default()
     };
     let mut out: Vec<u8> = Vec::new();
-    run_with(&mut store, &opts, &mut out, &mut Events { events, size: (80, 12) }, None).unwrap();
+    run_with(&mut store, &opts, &mut out, &mut Events { events, size }, None).unwrap();
 
     let frame_text = last_frame(&out);
     let rows: Vec<&str> = frame_text.lines().collect();
+    let tab_row = head.tab_row;
     let lit: Vec<usize> = rows
         .iter()
         .enumerate()
-        .filter(|(y, line)| *y != frame::TAB_ROW && line.contains("\u{1b}[7m"))
+        .filter(|(y, line)| *y != 0 && *y != tab_row && line.contains("\u{1b}[7m"))
         .map(|(y, _)| y)
         .collect();
     assert_eq!(lit.len(), 1, "one lit row: {frame_text}");
     assert!(
-        rows[lit[0]].contains("T-13"),
+        rows[lit[0]].contains("T-268"),
         "the click selected the task drawn on the view's first row: {frame_text}"
     );
-    assert!(
-        !frame_text.contains("T-17"),
-        "the selection moved off the last task: {frame_text}"
+}
+
+/// T-362: `Down` moves over the rows of the git graph that hold a task — not
+/// over every row of the drawing — and `Enter` opens the task of the row.
+#[test]
+fn down_then_enter_opens_the_panel_of_the_second_task_row() {
+    let mut store = world_with_a_long_graph();
+    // The waiting tasks hang newest first, so the second task row is T-16.
+    let out = run_events_output(
+        &mut store,
+        vec![Event::Key('2'), Event::Key('j'), Event::Key('\r')],
+        (80, 24),
     );
+    assert!(out.contains("T-16 · lane"), "the panel of the second task row: {out}");
+    assert!(!out.contains("T-17 · lane"), "the first task's panel is not opened: {out}");
+}
+
+/// T-362: a Tasks view longer than the screen scrolls the selected row into
+/// view and keeps the legend on the row above the footer (`H - 2`).
+#[test]
+fn a_long_tasks_view_scrolls_and_keeps_the_legend_above_the_footer() {
+    use gear_board::frame::{self, Tab};
+    use gear_board::style::Color;
+
+    let mut store = world_with_tasks(40);
+    let board = build(
+        &mut store,
+        &Options { project: Some("p".into()), ..Options::default() },
+        now_seconds(),
+    )
+    .unwrap();
+    let size = (80, 24);
+    let canvas = frame::canvas(&board, &crate::screen(Tab::Tasks, 39, size), None);
+    let text = canvas.text();
+    let rows: Vec<&str> = text.lines().collect();
+    // The last pick is T-01 (the waiting tasks hang newest first): it scrolled
+    // into view, lit, on the last row the view owns (`H - 4`).
+    let row = 20;
+    assert!(rows.get(row).unwrap_or(&"").contains("T-01"), "the selected pick is drawn: {text}");
+    assert!(canvas.style_at(1, row).reverse, "the selected row is lit: {text}");
+    // The legend is on row `H - 2`, in Dim, and the footer keeps row `H - 1`.
+    let legend = rows.get(22).copied().unwrap_or_default();
+    assert!(legend.starts_with(" ● merged into dev"), "the legend on row H - 2: {text}");
+    assert_eq!(canvas.style_at(1, 22).fg, Some(Color::Dim), "the legend is Dim: {text}");
+    assert_eq!(canvas.style_at(1, 23).fg, Some(Color::Dim), "the footer keeps its row: {text}");
 }
 
 // ---- T-383: the QUOTA lines of the board
@@ -1777,23 +2046,15 @@ fn a_reset_days_away_prints_the_day_and_a_later_one_the_clock_alone() {
         ],
     );
     let frame = now_frame(&mut store, T0);
-    // A week out: the month and the day, then the time.
+    // A week out: the local month and the day, without the time (T-360).
     let line = frame
         .lines()
         .find(|line| line.contains("codex"))
         .unwrap_or_else(|| panic!("no codex line: {frame}"));
-    let reset = line.split("resets ").nth(1).unwrap_or_else(|| panic!("no reset: {line}"));
-    let mut words = reset.split(' ');
-    let month = words.next().unwrap_or_default();
-    let day = words.next().unwrap_or_default();
-    let time = words.next().unwrap_or_default();
-    assert_eq!(month.len(), 3, "the month is a word: {line}");
-    assert!(month.chars().all(|c| c.is_ascii_alphabetic()), "{line}");
-    assert!(day.parse::<u32>().is_ok(), "the day is a number: {line}");
-    assert_eq!(time.len(), 5, "then the time: {line}");
-    assert_eq!(&time[2..3], ":", "{line}");
-    // The date is the one the clock of the machine gives.
-    assert!(line.contains(&gear_board::idle::day_clock(week)), "{line}");
+    assert!(
+        line.contains(&format!("resets {}", gear_board::idle::month_day(week))),
+        "{line}"
+    );
     // Three hours out: only the clock, as today.
     let line = frame
         .lines()
@@ -1805,28 +2066,24 @@ fn a_reset_days_away_prints_the_day_and_a_later_one_the_clock_alone() {
     );
 }
 
-#[test]
-fn a_reading_half_an_hour_old_says_its_age() {
-    let mut store = world_reading_custom(
-        &["codex"],
-        &[("codex", &reading_json("codex", "weekly", T0 + 6 * 86_400, T0 - 45 * 60))],
-    );
-    let frame = now_frame(&mut store, T0);
-    assert!(frame.contains("(read 45 min ago)"), "{frame}");
-}
-
 // ---- T-411: the wheel and the page keys scroll a long view
 
 /// A hundred tasks on one lane: a view no viewport shows whole, so what the
 /// wheel and the page keys do to the selection is visible on the frame.
 fn world_with_a_hundred_tasks() -> Store {
+    world_with_tasks(100)
+}
+
+/// A project with `n` queued tasks, T-01 to T-n, all on one lane: a graph
+/// longer than a view holds.
+fn world_with_tasks(n: usize) -> Store {
     let mut store = Store::open_in_memory().unwrap();
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
             testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
             testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
-            for n in 1..=100 {
+            for n in 1..=n {
                 tx.insert_task(&TaskRow {
                     repo: None,
                     base: None,
@@ -1857,6 +2114,19 @@ fn world_with_a_hundred_tasks() -> Store {
     store
 }
 
+/// The head of the board of the `p` world: the row of the view's heading, the
+/// tab row and the columns of the tabs (T-353).
+fn head_of(store: &mut Store, size: (usize, usize)) -> gear_board::frame::Layout {
+    use gear_board::frame;
+    let board = build(
+        store,
+        &Options { project: Some("p".into()), ..Options::default() },
+        now_seconds(),
+    )
+    .unwrap();
+    frame::layout(&board, &crate::screen(frame::Tab::Now, 0, size))
+}
+
 /// The board's last frame over the given events, on a screen of a given size.
 fn run_events(store: &mut Store, events: Vec<Event>, size: (usize, usize)) -> String {
     let out = run_events_output(store, events, size);
@@ -1876,25 +2146,165 @@ fn run_events_output(store: &mut Store, events: Vec<Event>, size: (usize, usize)
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// A project with two voyages (T-357): M1 landed, its one task merged, and M2
+/// sailing on a task that is still open, so the board's measured voyage is M2.
+fn world_with_two_voyages() -> Store {
+    let now = now_seconds();
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", now)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", now)?;
+            testing::seed_active_seat(tx, "p", "old", SeatRole::Lane, "w1:p2", "pi", now)?;
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p3", "pi", now)?;
+            for (milestone, departure) in [("M1", now - 7200), ("M2", now - 3600)] {
+                tx.upsert_voyage(&VoyageRow {
+                    project: "p".into(),
+                    milestone: milestone.into(),
+                    title: format!("voyage {milestone}"),
+                    done: Some("it is delivered".into()),
+                    bar: None,
+                    eta: Some("8h".into()),
+                    departure: Some(departure),
+                    departure_tasks: Some(1),
+                    departure_estimate_min: Some(30),
+                    updated: departure,
+                })?;
+            }
+            for (id, rank, milestone, lane, state) in [
+                ("T-1", 1, "M1", "old", TaskState::Done),
+                ("T-2", 2, "M2", "hull", TaskState::Ready),
+            ] {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state,
+                    priority: "must".into(),
+                    lane: Some(lane.into()),
+                    milestone: Some(milestone.into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                     issue: None,updated: now,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// The rows a frame draws in reverse video, the first row's voyage labels and
+/// the tab row left out: the pick the view has selected.
+fn lit_picks(frame: &str, tab_row: usize) -> Vec<usize> {
+    frame
+        .lines()
+        .enumerate()
+        .filter(|(row, line)| *row != 0 && *row != tab_row && line.contains("\u{1b}[7m"))
+        .map(|(row, _)| row)
+        .collect()
+}
+
+/// T-357: `[` and `]` pick the voyage the whole board shows — the list is
+/// newest first, so `[` goes one entry older and `]` one newer, and the ends
+/// stay where they are — and a click on a label on the first row picks that
+/// voyage (README changes 1 and 12).
+#[test]
+fn the_voyage_keys_and_a_click_on_a_label_pick_the_shown_voyage() {
+    use gear_board::frame::{self, Tab};
+
+    let size = (160, 40);
+    let mut store = world_with_two_voyages();
+    // Where the labels sit on the first row: the board opens on the measured
+    // voyage, the sailing M2, and its list is newest first.
+    let board = build(&mut store, &options(), now_seconds()).unwrap();
+    let head = frame::layout(&board, &crate::screen(Tab::Now, 0, size));
+    let labels: Vec<&str> =
+        head.voyages.iter().map(|(_, _, milestone)| milestone.as_str()).collect();
+    assert_eq!(labels, vec!["M2", "M1"], "the labels of the first row: {labels:?}");
+    let (first, _, _) = head.voyages[1];
+    assert!(!head.tabs.is_empty(), "the tab row is drawn below the labels");
+
+    // The first frame shows the measured voyage, M2.
+    let opened = run_events_output(&mut store, vec![], size);
+    let opened = last_frame(opened.as_bytes());
+    assert!(opened.lines().nth(1).unwrap_or_default().contains("M2:"), "{opened}");
+
+    // `[` goes one entry older: the whole board shows the landed M1, and its
+    // label on the first row is the lit one.
+    let older = run_events_output(&mut store, vec![Event::Key('[')], size);
+    let older = last_frame(older.as_bytes());
+    let rows: Vec<&str> = older.lines().collect();
+    assert!(rows[1].contains("M1: voyage M1 · ⚓ landed"), "row 1 of the older voyage: {older}");
+    assert!(!rows[1].contains("M2:"), "the board shows M1 only: {older}");
+    assert!(rows[0].contains("\u{1b}[1;7m M1 ⚓"), "the M1 label is lit: {older:?}");
+
+    // `[` again: the oldest voyage stays the oldest.
+    let oldest = run_events_output(&mut store, vec![Event::Key('['), Event::Key('[')], size);
+    let oldest = last_frame(oldest.as_bytes());
+    assert!(oldest.lines().nth(1).unwrap_or_default().contains("M1:"), "{oldest}");
+
+    // `]` goes one entry newer: M2 is shown again.
+    let newer = run_events_output(&mut store, vec![Event::Key('['), Event::Key(']')], size);
+    let newer = last_frame(newer.as_bytes());
+    assert!(newer.lines().nth(1).unwrap_or_default().contains("M2:"), "{newer}");
+
+    // A click on the first column of the M1 label picks M1, and the pick starts
+    // the selection over: two `Down` keys had selected the second lane, and the
+    // clicked frame draws the first row the board of M1 draws at selection 0.
+    let click = Event::Mouse { button: 0, x: (first + 1) as u16, y: 1 };
+    let clicked = run_events_output(&mut store, vec![Event::Key('j'), Event::Key('j'), click], size);
+    let clicked = last_frame(clicked.as_bytes());
+    assert!(clicked.lines().nth(1).unwrap_or_default().contains("M1:"), "{clicked}");
+    let m1 = build(
+        &mut store,
+        &Options { project: Some("p".into()), milestone: Some("M1".into()), ..Options::default() },
+        now_seconds(),
+    )
+    .unwrap();
+    let expected = frame::canvas(&m1, &crate::screen(Tab::Now, 0, size), None).ansi(false);
+    assert_eq!(
+        lit_picks(&clicked, head.tab_row),
+        lit_picks(&expected, head.tab_row),
+        "the pick starts the selection over: {clicked}"
+    );
+}
+
 /// T-411: ten notches of the wheel move the selection three picks each, the
 /// wheel stops at the first pick, and a page key moves a screenful with the
 /// viewport.
 #[test]
 fn the_wheel_and_the_page_keys_move_the_selection_over_a_long_view() {
-    use gear_board::frame;
     let mut store = world_with_a_hundred_tasks();
     let size = (80, 40);
+    // The head of the board says where the view's first row is and how many
+    // picks a page holds (T-353).
+    let head = head_of(&mut store, size);
+    let first = head.top + 1;
+    let page = size.1 - (head.top + 2);
 
-    // Ten notches down from the first pick: pick 30, drawn on its own row and
-    // lit (the viewport has not moved yet).
+    // The waiting tasks hang newest first, so the first pick is T-100 and the
+    // thirtieth is T-70 (T-361, T-362); a task's row is two rows (its ○ and
+    // the dashed ┆), so thirty picks scroll the viewport to its end (T-353:
+    // the head's height moves the rows, not the picks).
     let mut events = vec![Event::Key('2')];
     events.extend((0..10).map(|_| Event::Mouse { button: 65, x: 1, y: 7 }));
     let frame = run_events(&mut store, events, size);
     let rows: Vec<&str> = frame.lines().collect();
-    let row = frame::FIRST_ROW + 30;
+    let row = gear_board::frame::view_bottom(gear_board::frame::Tab::Tasks, size.1) - 1;
     assert!(
-        rows.get(row).unwrap_or(&"").contains("T-31"),
-        "the thirtieth pick's row holds T-31: {frame}"
+        rows.get(row).unwrap_or(&"").contains("T-70"),
+        "the thirtieth pick's row holds T-70: {frame}"
     );
     assert!(
         rows.get(row).unwrap_or(&"").contains("\u{1b}[7m"),
@@ -1907,23 +2317,24 @@ fn the_wheel_and_the_page_keys_move_the_selection_over_a_long_view() {
     let frame = run_events(&mut store, events, size);
     let rows: Vec<&str> = frame.lines().collect();
     assert!(
-        rows.get(frame::FIRST_ROW).unwrap_or(&"").contains("T-01"),
+        rows.get(first).unwrap_or(&"").contains("T-100"),
         "the wheel up stays at the first pick: {frame}"
     );
     assert!(
-        rows.get(frame::FIRST_ROW).unwrap_or(&"").contains("\u{1b}[7m"),
+        rows.get(first).unwrap_or(&"").contains("\u{1b}[7m"),
         "the first pick is the lit row: {frame}"
     );
 
-    // A page down from the first pick: the view shows the rows (40 - 7 = 33),
-    // so the pick one screen down is the 34th task, and the viewport followed
-    // it: the heading's row scrolled away and the first pick's row is drawn on
-    // the view's first row.
+    // A page down from the first pick moves a screenful of picks, so the pick
+    // that far down is selected (the graph lists the tasks newest first), and
+    // the viewport followed it: the heading's row scrolled away and the first
+    // pick is no longer drawn.
     let frame = run_events(&mut store, vec![Event::Key('2'), Event::PageDown], size);
     let rows: Vec<&str> = frame.lines().collect();
-    let lit = frame::FIRST_ROW + 33 - 2;
+    let last = gear_board::frame::view_bottom(gear_board::frame::Tab::Tasks, size.1);
+    let lit = (first + page).min(last - 1);
     assert!(
-        rows.get(lit).unwrap_or(&"").contains("T-34"),
+        rows.get(lit).unwrap_or(&"").contains(&format!("T-{:02}", 100 - page)),
         "the page down picks the task one screen down: {frame}"
     );
     assert!(
@@ -1931,11 +2342,11 @@ fn the_wheel_and_the_page_keys_move_the_selection_over_a_long_view() {
         "the page key's pick is the lit row: {frame}"
     );
     assert!(
-        rows.get(frame::VIEW_ROW).unwrap_or(&"").contains("T-02"),
+        !frame.contains("T-100"),
         "the viewport moved with the selection: {frame}"
     );
     assert!(
-        !rows.get(frame::VIEW_ROW).unwrap_or(&"").contains("dev"),
+        !rows.get(head.top).unwrap_or(&"").contains("dev"),
         "the heading scrolled away: {frame}"
     );
 
@@ -1947,11 +2358,11 @@ fn the_wheel_and_the_page_keys_move_the_selection_over_a_long_view() {
     );
     let rows: Vec<&str> = frame.lines().collect();
     assert!(
-        rows.get(frame::FIRST_ROW).unwrap_or(&"").contains("T-01"),
+        rows.get(first).unwrap_or(&"").contains("T-100"),
         "the page up comes back to the first pick: {frame}"
     );
     assert!(
-        rows.get(frame::VIEW_ROW).unwrap_or(&"").contains("dev"),
+        rows.get(head.top).unwrap_or(&"").contains("dev"),
         "the heading is back: {frame}"
     );
 }
@@ -1960,9 +2371,9 @@ fn the_wheel_and_the_page_keys_move_the_selection_over_a_long_view() {
 /// and opens none, and a notch where the tabs are drawn switches no view.
 #[test]
 fn a_wheel_notch_is_never_a_click() {
-    use gear_board::frame;
     let mut store = world_with_a_hundred_tasks();
     let size = (80, 40);
+    let head = head_of(&mut store, size);
 
     // `Enter` opens the panel of the first task; the next notch closes it as
     // an arrow would, and no panel is opened in its place. The panel is drawn
@@ -1979,21 +2390,22 @@ fn a_wheel_notch_is_never_a_click() {
     let rows: Vec<&str> = frame.lines().collect();
     assert!(!frame.contains("ROUNDS"), "the wheel opens no panel: {frame}");
     assert!(
-        rows.get(frame::FIRST_ROW).unwrap_or(&"").contains("T-01"),
+        rows.get(head.top + 1).unwrap_or(&"").contains("T-100"),
         "the notch that closed the panel moved nothing: {frame}"
     );
 
     // A notch on the tab row is not a click on the tab under it: the view
-    // stays the task view and the selection moves three picks.
+    // stays the task view and the selection moves three picks (T-97, drawn on
+    // the row two rows per pick below the first).
     let frame = run_events(
         &mut store,
-        vec![Event::Key('2'), Event::Mouse { button: 65, x: 1, y: 4 }],
+        vec![Event::Key('2'), Event::Mouse { button: 65, x: 1, y: head.tab_row as u16 + 1 }],
         size,
     );
     let rows: Vec<&str> = frame.lines().collect();
-    let row = frame::FIRST_ROW + 3;
+    let row = head.top + 1 + 6;
     assert!(
-        rows.get(row).unwrap_or(&"").contains("T-04"),
+        rows.get(row).unwrap_or(&"").contains("T-97"),
         "a notch on the tab row scrolls instead of switching the view: {frame}"
     );
     assert!(
@@ -2126,4 +2538,420 @@ fn cancelled_tasks_are_not_counted_in_the_totals() {
     for id in ["T-6", "T-7", "T-8", "T-9"] {
         assert!(ids.contains(&id), "{id} stays in the Tasks view: {ids:?}");
     }
+}
+
+/// T-359: the Now view's table has the prototype's columns: the task column
+/// `tw = max(30, min(52, W - 110))` puts STAGE at 63 on a 200-column screen.
+#[test]
+fn the_now_table_puts_stage_at_the_prototype_column() {
+    use gear_board::frame::{self, Tab};
+
+    let mut store = world_with_a_voyage();
+    let board = build(&mut store, &options(), now_seconds()).unwrap();
+    let screen = crate::screen(Tab::Now, 0, (200, 40));
+    let text = frame::canvas(&board, &screen, None).text();
+    let top = frame::layout(&board, &screen).top;
+    assert_eq!(column_of(&text, top, "STAGE"), 63, "{text}");
+    let row = text.lines().nth(top).unwrap_or_default();
+    assert!(row.contains("LANE"), "{row:?}");
+    assert!(row.contains("NOW DOING"), "{row:?}");
+    assert!(row.contains("LANE DONE"), "{row:?}");
+    assert!(row.contains("ENDS"), "{row:?}");
+}
+
+/// T-359: a landed voyage's lanes are retired at the landing, in Dim, and no
+/// lane carries an end time any more.
+#[test]
+fn a_landed_voyage_s_lane_reads_retired_at_the_landing_and_has_no_ends() {
+    use gear_board::frame::{self, Tab};
+    use gear_board::style::{Color, Style};
+
+    let mut store = world_with_a_voyage();
+    store
+        .write(|tx| {
+            for id in ["T-2", "T-3", "T-4"] {
+                let mut row = tx.get_task("p", id)?.expect("the task");
+                row.state = TaskState::Done;
+                tx.update_task(&row)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let board = build(&mut store, &options(), now_seconds()).unwrap();
+    assert!(!board.projects[0].shown.as_ref().expect("the voyage").sailing);
+    // The second lane's row is not the lit one: its Dim reason is readable.
+    let screen = crate::screen(Tab::Now, 1, (160, 40));
+    let canvas = frame::canvas(&board, &screen, None);
+    let text = canvas.text();
+    let rows: Vec<usize> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains("retired at the landing"))
+        .map(|(row, _)| row)
+        .collect();
+    assert_eq!(rows.len(), 2, "both lanes retired:\n{text}");
+    let row = rows[0];
+    assert_eq!(canvas.style_at(9, row), Style::fg(Color::Dim), "{text}");
+    assert!(!text.lines().nth(row).unwrap_or_default().contains('~'), "{text}");
+}
+
+/// T-359: a lane with nothing open says what its next task waits for, with the
+/// dependency's lane and stage words.
+#[test]
+fn a_lane_with_nothing_open_names_the_dependency_it_waits_for() {
+    use gear_board::frame::{self, Tab};
+
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(tx, "p", "mast", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p3", "opencode", T0)?;
+            tx.upsert_voyage(&VoyageRow {
+                project: "p".into(),
+                milestone: "M4".into(),
+                title: "one voyage".into(),
+                done: Some("it is delivered".into()),
+                bar: None,
+                eta: Some("8h".into()),
+                departure: Some(T0 - 3600),
+                departure_tasks: Some(2),
+                departure_estimate_min: Some(60),
+                updated: T0 - 3600,
+            })?;
+            for (id, rank, lane, state, deps) in [
+                ("T-1", 1, "mast", TaskState::Running, vec![]),
+                ("T-2", 2, "hull", TaskState::Ready, vec!["T-1".to_string()]),
+            ] {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state,
+                    priority: "must".into(),
+                    lane: Some(lane.into()),
+                    milestone: Some("M4".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps,
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(30),
+                    issue: None,
+                    updated: T0,
+                })?;
+            }
+            tx.insert_attempt(&AttemptRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:mast".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Started,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    let board = build(&mut store, &options(), T0 + 60).unwrap();
+    let text = frame::canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None).text();
+    assert!(
+        text.contains("next T-2 waits for T-1 (mast, working)"),
+        "{text}"
+    );
+}
+
+/// T-359, the captain's answer M-6103: a cancelled task is not the lane's NOW
+/// DOING, whatever stage the graph still gives it; the lane's next open task
+/// is.
+#[test]
+fn a_cancelled_task_is_not_the_now_doing_of_its_lane() {
+    use gear_board::frame::{self, Tab};
+
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            tx.upsert_voyage(&VoyageRow {
+                project: "p".into(),
+                milestone: "M4".into(),
+                title: "one voyage".into(),
+                done: Some("it is delivered".into()),
+                bar: None,
+                eta: Some("8h".into()),
+                departure: Some(T0 - 3600),
+                departure_tasks: Some(2),
+                departure_estimate_min: Some(60),
+                updated: T0 - 3600,
+            })?;
+            for (id, rank, state) in [
+                ("T-1", 1, TaskState::Cancelled),
+                ("T-2", 2, TaskState::Running),
+            ] {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state,
+                    priority: "must".into(),
+                    lane: Some("data".into()),
+                    milestone: Some("M4".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(30),
+                    issue: None,
+                    updated: T0,
+                })?;
+                // A cancelled task keeps the attempt that made its stage open.
+                tx.insert_attempt(&AttemptRow {
+                    project: "p".into(),
+                    task: id.into(),
+                    n: 1,
+                    seat: "p:data".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Started,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let board = build(&mut store, &options(), T0 + 60).unwrap();
+    let text = frame::canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None).text();
+    assert!(text.contains("data  T-2"), "{text}");
+    assert!(!text.contains("data  T-1"), "the cancelled task is NOW DOING:\n{text}");
+}
+
+// ---- T-360: under the lanes the Now view lists what to handle, each item
+// with who acts, and the quota on one line.
+
+/// A merged task is history: a past-estimate one is not an item to handle.
+#[test]
+fn a_merged_task_past_its_estimate_is_not_an_item_to_handle() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            // T-1 is done: 40 minutes on an estimate of 20.
+            let mut row = tx.get_task("p", "T-1")?.unwrap();
+            row.estimate_min = Some(20);
+            tx.update_task(&row)?;
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:data".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Accepted,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T0)?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::HandedIn, T0 + 40 * 60)?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Merged, T0 + 40 * 60)?;
+            Ok(())
+        })
+        .unwrap();
+    let frame = now_frame(&mut store, T0 + 60 * 60);
+    assert!(!frame.contains("T-1 data"), "{frame}");
+    assert!(!frame.contains("past its estimate"), "{frame}");
+    assert!(frame.contains("TO HANDLE (0)"), "{frame}");
+    assert!(frame.contains("nothing"), "{frame}");
+}
+
+/// An open task that took more than one round is an item, and the captain is
+/// told what to do with it.
+#[test]
+fn an_open_reworked_task_is_an_item_to_handle() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            let mut row = tx.get_task("p", "T-2")?.unwrap();
+            row.estimate_min = Some(25);
+            tx.update_task(&row)?;
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-2".into(),
+                n: 2,
+                seat: "p:runtime".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Started,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            tx.set_attempt_time("p", "T-2", 2, AttemptStep::Started, T0)?;
+            Ok(())
+        })
+        .unwrap();
+    let frame = now_frame(&mut store, T0 + 30 * 60);
+    assert!(frame.contains("⚠ T-2 runtime round 2,"), "the item names its lane and round: {frame}");
+    assert!(frame.contains("the captain scopes what is left"), "{frame}");
+}
+
+/// The items follow the plan's order, not the lanes' grouping: a keel task
+/// ranked before a hull task is listed first.
+#[test]
+fn the_items_follow_the_plan_order_across_lanes() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            // The seat order puts hull before keel; the plan ranks keel first.
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            testing::seed_active_seat(tx, "p", "keel", SeatRole::Lane, "w1:p3", "opencode", T0)?;
+            tx.upsert_voyage(&VoyageRow {
+                project: "p".into(),
+                milestone: "M4".into(),
+                title: "one voyage".into(),
+                done: Some("it is delivered".into()),
+                bar: None,
+                eta: Some("8h".into()),
+                departure: Some(T0 - 3600),
+                departure_tasks: Some(2),
+                departure_estimate_min: Some(20),
+                updated: T0 - 3600,
+            })?;
+            for (id, rank, lane) in [("T-262", 1, "keel"), ("T-263", 2, "hull")] {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state: TaskState::Running,
+                    priority: "must".into(),
+                    lane: Some(lane.into()),
+                    milestone: Some("M4".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(10),
+                    issue: None,
+                    updated: T0,
+                })?;
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: id.into(),
+                    n: 1,
+                    seat: format!("p:{lane}"),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Started,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })?;
+                tx.set_attempt_time("p", id, 1, AttemptStep::Started, T0)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let frame = now_frame(&mut store, T0 + 30 * 60);
+    let keel = frame.find("T-262 keel").expect("the keel item");
+    let hull = frame.find("T-263 hull").expect("the hull item");
+    assert!(keel < hull, "the plan's order, not the lanes': {frame}");
+}
+
+/// The quota is one line: every window of every reading, the provider's name
+/// first, and a reset two days away names its day.
+#[test]
+fn the_quota_is_one_line_with_a_day_two_days_away() {
+    let in_two_days = T0 + 2 * 86_400;
+    let mut store = world_reading_custom(
+        &["codex", "minimax-cn"],
+        &[
+            ("codex", &reading_json("codex", "weekly", in_two_days, T0)),
+            ("minimax-cn", &reading_json("minimax-cn", "5h", T0 + 3600, T0)),
+        ],
+    );
+    let frame = now_frame(&mut store, T0);
+    let line = frame
+        .lines()
+        .find(|line| line.contains("Quota"))
+        .unwrap_or_else(|| panic!("no quota line: {frame}"));
+    // The hour-out window comes first: the windows are ordered by their reset.
+    let minimax = line.find("minimax-cn 5h 63%").unwrap_or_else(|| panic!("no minimax-cn window: {line}"));
+    let codex = line.find("codex weekly 63%").unwrap_or_else(|| panic!("no codex window: {line}"));
+    assert!(minimax < codex, "the window that resets first comes first: {line}");
+    assert!(
+        line.contains(&format!(
+            "codex weekly 63% · resets {}",
+            gear_board::idle::month_day(in_two_days)
+        )),
+        "a reset two days away is a date: {line}"
+    );
 }

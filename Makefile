@@ -27,8 +27,8 @@ check: prune-tmp ## the light run for lanes and reviewers: one crate, jobs from 
 	@test -n "$(CRATE)" || { echo "usage: make check CRATE=<crate>"; exit 1; }
 	tools/build-slot/build-slot.sh cargo nextest run -p $(CRATE) --no-fail-fast $(if $(strip $(TESTS)),-E '$(TESTS)')
 
-gate: prune-tmp ## the merge gate on the shared machine: workspace build and the whole suite, each sized by build-slot (the test run measures the machine after the build)
-	tools/build-slot/build-slot.sh cargo build --workspace --all-targets && tools/build-slot/build-slot.sh scripts/test.sh
+gate: prune-tmp ## the merge gate on the shared machine: workspace build and the whole suite, each sized by build-slot at least 4 jobs, at normal priority (the test run measures the machine after the build)
+	BUILD_SLOT_MIN=4 BUILD_SLOT_PRIORITY=normal tools/build-slot/build-slot.sh cargo build --workspace --all-targets && BUILD_SLOT_MIN=4 BUILD_SLOT_PRIORITY=normal tools/build-slot/build-slot.sh scripts/test.sh
 
 full: prune-tmp ## full speed for one person alone on the machine: no caps
 	cargo build --workspace --all-targets && scripts/test.sh

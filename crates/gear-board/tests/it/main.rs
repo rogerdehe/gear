@@ -7,6 +7,7 @@ mod forecast_contract;
 mod golden_contract;
 mod golden_fixture;
 mod graph_contract;
+mod header_contract;
 mod idle_contract;
 mod measures_contract;
 mod overlaps_contract;
@@ -15,6 +16,7 @@ mod stations_contract;
 mod workload_contract;
 mod colour_contract;
 mod voyage_scope_contract;
+mod voyage_select_contract;
 
 /// The screen state a test draws: a tab, a selected row and a size.
 pub fn screen(
@@ -26,6 +28,7 @@ pub fn screen(
         tab,
         selected,
         detail: false,
+        opened: Vec::new(),
         size,
     }
 }

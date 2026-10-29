@@ -1111,11 +1111,19 @@ fn parse_review(text: &str, line: usize) -> GearResult<ReviewLine> {
 ///
 /// Everything else — comments, sections, field lines, spacing — is kept as the
 /// captain wrote it, so the file is edited in place and re-applied as is.
+///
+/// `blocks` are the `# Milestone` blocks the apply wrote back from the store
+/// (T-333): each goes in with an empty line after it, before the first section
+/// that is neither `# Goal` nor a milestone block — the file keeps the goal and
+/// the voyages first, and the rest of the plan follows them. A file with no such
+/// section gets them at its end, after an empty line. With no block the text is
+/// rewritten as before.
 pub fn rewrite_applied(
     text: &str,
     version: i64,
     created: &[String],
     used_staff: &[usize],
+    blocks: &[String],
 ) -> String {
     let source: Vec<&str> = text.lines().collect();
     // The staff lines the apply used, by their number in the text.
@@ -1205,6 +1213,36 @@ pub fn rewrite_applied(
             *header = parts.join(" ");
         }
     }
+    // The blocks the store had to write back (T-333).
+    if !blocks.is_empty() {
+        let first_section = lines.iter().position(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("# ")
+                && !is_section_named(trimmed, "Goal")
+                && !trimmed.starts_with("# Milestone ")
+                && !trimmed.starts_with("# Voyage ")
+        });
+        match first_section {
+            Some(at) => {
+                let mut written: Vec<String> = Vec::new();
+                for block in blocks {
+                    written.extend(block.lines().map(str::to_string));
+                    written.push(String::new());
+                }
+                lines.splice(at..at, written);
+            }
+            None => {
+                // No later section: the blocks close the file, after an empty
+                // line.
+                if lines.last().map(|line| !line.trim().is_empty()).unwrap_or(false) {
+                    lines.push(String::new());
+                }
+                for block in blocks {
+                    lines.extend(block.lines().map(str::to_string));
+                }
+            }
+        }
+    }
     let mut out = lines.join("\n");
     if text.ends_with('\n') {
         out.push('\n');
@@ -1237,7 +1275,7 @@ mod tests {
         let text = format!(
             "{HEADER}# Goal\nthe goal\n\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\ndeps: -\n\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\ndeps: T-1\n\n# Verdicts\n- T-9 attempt=1 contract=1 candidate=abc pass evidence=x\n\n# Staff\n- hold heat reason=test\n"
         );
-        let rewritten = rewrite_applied(&text, 7, &["T-1".to_string(), "T-2".to_string()], &[]);
+        let rewritten = rewrite_applied(&text, 7, &["T-1".to_string(), "T-2".to_string()], &[], &[]);
         assert!(rewritten.starts_with("<!-- gear-plan project=p base=7 -->"), "{rewritten}");
         assert!(rewritten.contains("## T-1 [must] lane=heat milestone=M1"), "{rewritten}");
         assert!(rewritten.contains("## T-2 [should] lane=heat milestone=M1"), "{rewritten}");
@@ -1265,14 +1303,14 @@ mod tests {
             "{HEADER}# Staff\n- remerge T-12\n- hold heat reason=test\n\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n"
         );
         // The remerge line was used (line 3), the hold line was not.
-        let rewritten = rewrite_applied(&text, 2, &[], &[3]);
+        let rewritten = rewrite_applied(&text, 2, &[], &[3], &[]);
         assert!(!rewritten.contains("remerge"), "{rewritten}");
         assert!(rewritten.contains("- hold heat reason=test"), "{rewritten}");
         assert!(rewritten.contains("# Staff"), "the section keeps a line: {rewritten}");
 
         // A section that keeps nothing goes with its lines: no empty section
         // and no second one.
-        let rewritten = rewrite_applied(&text, 2, &[], &[3, 4]);
+        let rewritten = rewrite_applied(&text, 2, &[], &[3, 4], &[]);
         assert!(!rewritten.contains("# Staff"), "{rewritten}");
         assert!(!rewritten.contains("remerge"), "{rewritten}");
         assert!(!rewritten.contains("hold heat"), "{rewritten}");
@@ -1283,9 +1321,50 @@ mod tests {
     #[test]
     fn a_verdicts_section_at_the_end_leaves_no_tail() {
         let text = format!("{HEADER}# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc fail rework=\"x\"\n");
-        let rewritten = rewrite_applied(&text, 2, &["T-1".to_string()], &[]);
+        let rewritten = rewrite_applied(&text, 2, &["T-1".to_string()], &[], &[]);
         assert!(rewritten.ends_with("deps: -\n"), "{rewritten:?}");
         assert!(!rewritten.contains("Verdicts"), "{rewritten}");
+    }
+
+    #[test]
+    fn a_written_back_milestone_block_goes_before_the_first_later_section() {
+        // T-333: the file carries the `# Milestone` block of every milestone its
+        // tasks name, and a block the store wrote back sits with the goal and
+        // the voyages, before the rest of the plan.
+        let text = format!(
+            "{HEADER}# Goal\nthe goal\n\n# Milestone M1: one\ndone: m1\nbar: b1\neta: 1h\n\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\ndeps: -\n\n# Decisions\n- a note\n"
+        );
+        let block = "# Milestone M2: two\ndone: m2\nbar: b2\neta: 2h\nstation S1: the first step needs it\n";
+        let rewritten = rewrite_applied(&text, 3, &["T-1".to_string()], &[], &[block.to_string()]);
+        let os = rewritten.find("# Milestone M2: two").expect("the block is there");
+        let first = rewritten.find("# Milestone M1: one").expect("the M1 block is there");
+        let queue = rewritten.find("# Queue").expect("the queue is there");
+        let decisions = rewritten.find("# Decisions").expect("the decisions are there");
+        assert!(first < os, "the block joins the goal and the voyages: {rewritten}");
+        assert!(os < queue, "the block goes before the first later section: {rewritten}");
+        assert!(queue < decisions, "{rewritten}");
+        assert!(
+            rewritten.contains("station S1: the first step needs it\n\n# Queue"),
+            "the block keeps its station lines and an empty line after it: {rewritten}"
+        );
+        // The file still parses, and M2 is one of its milestones.
+        let again = parse(&rewritten).unwrap();
+        assert_eq!(again.milestones.len(), 2, "{rewritten}");
+    }
+
+    #[test]
+    fn a_written_back_block_closes_a_file_with_no_later_section() {
+        // T-333: with no section after the goal and the milestones, the block
+        // is appended at the end, after an empty line.
+        let text = format!("{HEADER}# Goal\nthe goal\n\n# Milestone M1: one\ndone: m1\nbar: b1\neta: 1h\n");
+        let block = "# Milestone M2: two\ndone: m2\nbar: b2\neta: 2h\n";
+        let rewritten = rewrite_applied(&text, 2, &[], &[], &[block.to_string()]);
+        assert!(
+            rewritten.ends_with("eta: 1h\n\n# Milestone M2: two\ndone: m2\nbar: b2\neta: 2h\n"),
+            "{rewritten:?}"
+        );
+        let again = parse(&rewritten).unwrap();
+        assert_eq!(again.milestones.len(), 2, "{rewritten}");
     }
 
     #[test]

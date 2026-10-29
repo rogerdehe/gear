@@ -63,6 +63,10 @@ struct FixtureVoyage {
     /// `(met, text)`.
     #[serde(rename = "DONE")]
     done: Vec<(bool, String)>,
+    /// `(id, what, state, at_m)`: the prototype's stations (T-352); the
+    /// `at_m` minute is not stored — nothing draws it.
+    #[serde(rename = "STATIONS")]
+    stations: Vec<(String, String, String, i64)>,
     /// `(task, lane, status, body)`.
     #[serde(rename = "FRICTION")]
     friction: Vec<(String, String, String, String)>,
@@ -91,7 +95,16 @@ pub fn load() -> (Store, i64) {
     let mut store = Store::open_in_memory().unwrap();
     store
         .write(|tx| {
-            testing::seed_project(tx, "gear", "s", now)?;
+            let mut project = testing::seed_project(tx, "gear", "s", now)?;
+            // The prototype's project reads the two providers its quota line
+            // draws; the board shows a reading only when the project reads it
+            // now (T-383).
+            project.config_toml = concat!(
+                "[[quota.sources]]\nprovider = \"tokenrhythm\"\n",
+                "[[quota.sources]]\nprovider = \"codex\"\n",
+            )
+            .to_string();
+            tx.update_project(&project)?;
             testing::seed_active_seat(
                 tx,
                 "gear",
@@ -177,6 +190,82 @@ pub fn load() -> (Store, i64) {
                     &format!("goal-check:gear:{}", words.milestone),
                     &serde_json::to_string(&check).unwrap(),
                 )?;
+
+                // The stations the header draws (T-352): the prototype's
+                // STATIONS as the store's station words (id, needs = what),
+                // and each station's tasks, so `stations::progress` reads
+                // "done" as Reached, "now" as Now and "next" as Next. A
+                // task counts as merged only with a merge time: the fixture's
+                // "done" tasks have one, the open stages have none.
+                let stations: Vec<gear_store::VoyageStation> = voyage
+                    .stations
+                    .iter()
+                    .map(|(id, what, _, _)| gear_store::VoyageStation {
+                        id: id.clone(),
+                        needs: what.clone(),
+                    })
+                    .collect();
+                tx.set_voyage_stations("gear", &words.milestone, &stations)?;
+                let merged: Vec<&String> = voyage
+                    .tasks
+                    .iter()
+                    .filter(|task| task.2 == "done")
+                    .map(|task| &task.0)
+                    .collect();
+                let open: Vec<&String> = voyage
+                    .tasks
+                    .iter()
+                    .filter(|task| {
+                        matches!(
+                            task.2.as_str(),
+                            "review" | "passed" | "rework" | "working" | "deps" | "queued"
+                        )
+                    })
+                    .map(|task| &task.0)
+                    .collect();
+                let reached_count = voyage
+                    .stations
+                    .iter()
+                    .filter(|(_, _, state, _)| state == "done")
+                    .count();
+                let ahead_count = stations.len() - reached_count;
+                assert!(
+                    merged.len() >= reached_count,
+                    "{}: every reached station needs a merged task",
+                    words.milestone
+                );
+                assert!(
+                    open.len() >= ahead_count,
+                    "{}: every station ahead needs an open task",
+                    words.milestone
+                );
+                // Spread each kind over its stations, so every one of them
+                // keeps at least one task and its state in `progress`.
+                let (mut done_rank, mut open_rank) = (0, 0);
+                for (id, _, state, _) in &voyage.stations {
+                    let station_tasks: Vec<&String> = if state == "done" {
+                        let picked = merged
+                            .iter()
+                            .enumerate()
+                            .filter(|(n, _)| n % reached_count == done_rank)
+                            .map(|(_, task)| *task)
+                            .collect();
+                        done_rank += 1;
+                        picked
+                    } else {
+                        let picked = open
+                            .iter()
+                            .enumerate()
+                            .filter(|(n, _)| n % ahead_count == open_rank)
+                            .map(|(_, task)| *task)
+                            .collect();
+                        open_rank += 1;
+                        picked
+                    };
+                    for task in station_tasks {
+                        tx.set_task_station("gear", task, Some(id))?;
+                    }
+                }
 
                 for task in &voyage.tasks {
                     rank += 1;

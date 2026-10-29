@@ -60,3 +60,30 @@
 
 ## The stall item fires on a delivery that is still being sent
 - 2026-10-29 M5: three captain stall items in an hour (M-5520, M-5544, M-5584) named a lane "stuck" on a delivery that was `intended, 0 min` and confirmed within 30 s. The stall check should wait out `[timing] delivery_grace_s` (180) before it counts an unconfirmed delivery.
+
+## macOS scans every new build binary
+- 2026-10-29 M5: syspolicyd (Gatekeeper) ran at about 250 % CPU for hours: every test binary, build script and fresh tool a lane, reviewer or merge gate builds is assessed on its first run, so git calls and test starts slowed many times over on a busy machine, and a reviewer saw compiles stall on signature checks. The fix is the machine's: `sudo spctl developer-mode enable-terminal`, then System Settings → Privacy & Security → Developer Tools on for the terminal app that hosts Herdr, and restart it. Candidate for the skill (`gear admin kickoff` could check it and say so on macOS), since every Rust or Go fleet on a Mac hits it.
+
+## A warm reviewer is told the previous review's directory
+- 2026-10-29 M5 (F-185, F-197): a reviewer seat reused for another task got a packet whose working directory was the previous review's worktree (review/t336 for T-331, review/t407 for T-420); the reviewer found the right one itself each time, at a few minutes' cost. The packet of a warm seat should name the worktree of the task it now reviews.
+
+## The slow-step report misses a failed observation
+- 2026-10-29 M5 (T-386 review F1): crates/gear-engine/src/lib.rs fn tick returns early when observe::snapshot fails (about line 302), before note_slow, so a slow failed Herdr observation is not in the tick's slow-step report. Note the step before the early return.
+
+## init names the reviewers by [temps] kind, not by the review entry's CLI
+- 2026-10-29 M5 (another project's captain): with [temps] kind = "pi" and [models].review = [{ model = "gpt-6.1-terra", cli = "codex" }], `gear admin init` prints "reviewers: 4 x pi gpt-6.1-terra" and crates/gear-app/src/kickoff.rs (about line 236) checks the review chain against the [temps] kind, while the engine starts the reviewers on codex as the entry says. The line and the model check should follow each entry's own CLI.
+
+## No command files a bug issue on the forge
+- 2026-10-29 M5 (another project's captain): a voyage policy asked for a GitHub issue per production bug a test found; GEAR's [github] mode only imports issues and comments on task PRs, so the captain filed them with gh by hand. A captain command that files an issue through the engine's forge ops (once, retried, recorded) would keep that path inside GEAR.
+
+## Hand-in and review checks against the packet
+- 2026-10-29 M5 (another project's rework audit: 58 of 135 reviewed tasks passed first time): a plan apply that warns when two Ready packets name one file; a pre-hand-in check that the diff stays in the task's allowed files and the report matches the adopted contract; a reviewer start that verifies its worktree, branch, task, attempt and adopted contract before it reads anything; a captain's direction-check answer carried into the review packet.
+
+## A delivery marked submitted never reaches the composer
+- 2026-10-29 M5 (both projects): our hull showed "Continue T-425" typed with no Enter; the other project's review-2 and review-3 sat at empty Codex composers with their direction-check deliveries recorded as submitted, until the captain nudged them to run `gear`. The engine should confirm a delivery by the agent turning busy and resubmit within a bounded time, not wait for the stall item.
+
+## False stall items on a delivery into a busy lane
+- 2026-10-29 M5 (both projects, about ten today: our M-6054, M-6089, M-6121, M-6144; the other project's M-2782, M-2797, M-2809): right after a hand-in the engine delivers the next task while the lane is still ending its turn. The confirmation looks for the agent turning busy, which a busy agent never does, so the window ends unconfirmed, crates/gear-engine/src/ops.rs (about line 947) flags the seat, and the item says "delivery … 0 min, no check-in this generation"; it resolves itself once the lane reads the queued text. A delivery into a working agent should be confirmed by the attempt's first check-in (or the agent's next idle-to-busy turn) within a bounded window before any item opens.
+
+## A notice typed into a busy lane aborts its running check
+- 2026-10-29 M5 (T-407 rework, M-6183): the overrun and quiet-lane notices arrive as prompts while the lane runs a 9-minute `make check`; pi stops the command to read them, twice, so the acceptance never finished. A notice to a lane whose agent is working should wait for its next idle moment, or be marked to queue without interrupting.
