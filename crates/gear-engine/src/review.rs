@@ -4082,7 +4082,7 @@ review = [
         assert!(text.contains("the goal"), "{text}");
         assert!(text.contains("the accept criteria"), "{text}");
         assert!(text.contains("abc1234"), "{text}");
-        assert!(text.contains("git diff dev...abc1234"), "{text}");
+        assert!(text.contains("git fetch origin && git diff origin/dev...abc1234"), "{text}");
         // The rules come from the binary, not from a file of the gear repo
         // (T-30): the packet names `gear --skill review` and no `ops/` path.
         assert!(text.contains("gear --skill review"), "{text}");
