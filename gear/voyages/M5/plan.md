@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=752 -->
+<!-- gear-plan project=gear base=753 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -129,6 +129,7 @@ eta: 21h
 - 2026-10-29 04:34 scope: on the user's word, builds and tests take their jobs from the machine's load and free memory, under nice, instead of fixed caps (new task at mast's front); sccache has been on since M4 but hits 1.4 %: our own crates differ in path per worktree and build incrementally, so only third-party crates can be cached; making it hit across worktrees goes to the M6 backlog
 - station M-5558: keep course 1020 min in, 37 left; T-415's merge conflicts with T-411 in board_contract.rs: back to mast as a 10 min rework
 - 2026-10-29 04:42 scope: v0.5.0 is cut with the S1 tasks merged when T-366 hands in; the S1 tasks still queued (T-376, T-380, T-386, T-400, T-401, T-402, T-406, T-407, T-413, T-415, T-419) are listed in v0.5.1's notes | why: done clause (5), a release at each station, and S1's tail sits deep in hull's queue | else: v0.5.0 waits until near the voyage's end
+- station M-5569: keep course 1029 min in, 126 done, 36 left; reviews remain the wait
 
 
 # Queue
