@@ -416,11 +416,13 @@ pub fn clock(until: Ts) -> String {
     format!("{hour:02}:{minute:02}")
 }
 
+/// The English three-letter names of the months.
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
 /// The day and the time of day, as the user's clock sees it (`Oct 30 00:35`).
 pub fn day_clock(until: Ts) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
     let seconds = until as libc::time_t;
     let mut parts: libc::tm = unsafe { std::mem::zeroed() };
     let local = unsafe { libc::localtime_r(&seconds, &mut parts) };
@@ -438,6 +440,22 @@ pub fn day_clock(until: Ts) -> String {
     };
     let month = MONTHS[(month.clamp(1, 12) - 1) as usize];
     format!("{month} {day} {hour:02}:{minute:02}")
+}
+
+/// The local date, as the user's clock sees it (`Oct 30`): a quota window that
+/// resets in more than a day names its day, not its minute (T-360).
+pub fn month_day(until: Ts) -> String {
+    let seconds = until as libc::time_t;
+    let mut parts: libc::tm = unsafe { std::mem::zeroed() };
+    let local = unsafe { libc::localtime_r(&seconds, &mut parts) };
+    let (month, day) = if local.is_null() {
+        // No local time: the clock of the machine is not readable.
+        civil_from_days(until.div_euclid(86_400))
+    } else {
+        (parts.tm_mon as i64 + 1, parts.tm_mday as i64)
+    };
+    let month = MONTHS[(month.clamp(1, 12) - 1) as usize];
+    format!("{month} {day}")
 }
 
 /// The month and the day of a count of days since 1970-01-01, in UTC.

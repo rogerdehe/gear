@@ -147,8 +147,11 @@ const PENDING: &[Pending] = &[
     // amendment allows.
     Pending { frame: "now-folded", rows: (13, 18), cols: (0, 159), swap: None, by: "T-359 (T-356 removes it)" },
     Pending { frame: "now-open", rows: (21, 26), cols: (0, 159), swap: None, by: "T-359 (T-356 removes it)" },
-    Pending { frame: "now-folded", rows: (19, 46), cols: (0, 159), swap: None, by: "T-360" },
-    Pending { frame: "now-open", rows: (27, 46), cols: (0, 159), swap: None, by: "T-360" },
+    // T-360: the block under the lanes is compared at its anchor, not at the
+    // prototype's absolute row, because the header still ends one row above the
+    // prototype's (T-356 moves it). `gate` finds the TO HANDLE block in both
+    // frames and compares it cell by cell from there; the rows above it stay
+    // with their own tasks' entries.
 
     // T-362 draws the Tasks view to the prototype's rows, but the board's own
     // view starts on row 5: the rows below are the prototype's, which the view
@@ -476,20 +479,54 @@ fn colour_matches(want: char, got: char, swap: Option<(char, char)>) -> bool {
         || (want == want_letter.to_ascii_uppercase() && got == got_letter.to_ascii_uppercase())
 }
 
+/// The row of a view's TO HANDLE block, when the frame has one: the board's
+/// is at its `top + lanes + 3` anchor (T-360), the prototype's where its own
+/// frame draws it.
+fn block_row(planes: &Planes) -> Option<usize> {
+    planes.text.iter().position(|line| line.starts_with(" TO HANDLE ("))
+}
+
+/// Where the task's block starts, relative to the prototype's: the number of
+/// rows the board's header is short, and the first prototype row the shift
+/// covers (the blank row above the block is part of it).
+///
+/// A frame without a block, or with the block on the prototype's row, has no
+/// shift: every row is compared as it is.
+fn block_shift(want: &Planes, got: &Planes) -> Option<(usize, usize)> {
+    let (want_block, got_block) = (block_row(want)?, block_row(got)?);
+    if want_block <= got_block {
+        return None;
+    }
+    Some((want_block - 1, want_block - got_block))
+}
+
 /// Why `frame` fails the gate: the cells that differ and the pending entries
 /// that match now. An empty `Vec` is a pass.
-fn failures(frame: Frame, want: &Planes, got: &Planes, pending: &[Pending]) -> Vec<String> {
+fn failures(
+    frame: Frame,
+    want: &Planes,
+    got: &Planes,
+    pending: &[Pending],
+) -> Vec<String> {
     let (want_cells, got_cells) = (cells(want), cells(got));
+    // The task's block is compared at its anchor (T-360, F1 of the review):
+    // from its first row on, the board's row is the prototype's less the rows
+    // its header is still short. The footer keeps its own row.
+    let shift = block_shift(want, got);
     let mut problems = Vec::new();
     let mut differences = Vec::new();
     let mut differing = 0;
     for row in 0..want_cells.len() {
+        let got_row = match shift {
+            Some((start, amount)) if row >= start && row < want_cells.len() - 1 => row - amount,
+            _ => row,
+        };
         for col in 0..want_cells[row].len() {
             let (skip, swap) = pending_at(pending, frame, row, col);
             if skip {
                 continue;
             }
-            let (want_cell, got_cell) = (want_cells[row][col], got_cells[row][col]);
+            let (want_cell, got_cell) = (want_cells[row][col], got_cells[got_row][col]);
             if matches(&want_cell, &got_cell, swap) {
                 continue;
             }
@@ -519,8 +556,12 @@ fn failures(frame: Frame, want: &Planes, got: &Planes, pending: &[Pending]) -> V
     // checked this way: they go when the frames are regenerated.
     for entry in pending.iter().filter(|entry| entry.frame == frame && entry.by.starts_with("NEW:")) {
         let matches_now = (entry.rows.0..=entry.rows.1).all(|row| {
+            let got_row = match shift {
+                Some((start, amount)) if row >= start && row < want_cells.len() - 1 => row - amount,
+                _ => row,
+            };
             (entry.cols.0..=entry.cols.1).all(|col| {
-                let (want_cell, got_cell) = (want_cells[row][col], got_cells[row][col]);
+                let (want_cell, got_cell) = (want_cells[row][col], got_cells[got_row][col]);
                 // Every cell has to match without the swap: a swap entry whose
                 // cell still needs the swap has not arrived either.
                 matches(&want_cell, &got_cell, None)
@@ -726,6 +767,35 @@ fn view_differences(tab: Tab, frame: Frame, top: usize, rows: Range) -> Vec<Stri
         }
     }
     problems
+}
+
+/// T-360 (F1 of the review): the block sits at its documented anchor, the
+/// board's `top + lanes + 3`. The prototype draws it one row lower because the
+/// board's header is still short (T-356); the block comparison in `failures`
+/// names that one-row difference apart instead of masking the block.
+#[test]
+fn the_to_handle_block_sits_at_its_anchor() {
+    let (_, board) = fixture_board();
+    let screen = crate::screen(Tab::Now, 0, (160, 48));
+    let layout = gear_board::frame::layout(&board, &screen);
+    let lanes = board.projects[0].lanes.len();
+    let got = render(Tab::Now, false);
+    let got_block = got.text.iter().position(|line| line.starts_with(" TO HANDLE ("));
+    assert_eq!(
+        got_block,
+        Some(layout.top + lanes + 3),
+        "the block starts at top + lanes + 3:\n{}",
+        got.text.join("\n")
+    );
+    let want = golden("now-folded");
+    let want_block = want.text.iter().position(|line| line.starts_with(" TO HANDLE ("));
+    // The prototype's view starts on row 14; the board's block is that many
+    // rows higher until T-356 moves the view (then the difference is zero).
+    assert_eq!(
+        want_block.unwrap_or(0) as i64 - got_block.unwrap_or(0) as i64,
+        14 - layout.top as i64,
+        "the header's short rows are the only difference"
+    );
 }
 
 #[test]
