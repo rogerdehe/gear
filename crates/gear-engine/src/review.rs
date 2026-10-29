@@ -1304,7 +1304,12 @@ fn start_reviewer(
     if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &config.conventions.remote, &branch, task, now)? { return Ok(Started::NotYet) }
 
     if occupant.is_none() {
-        let mut env_command = format!("export GEAR_CTX={}:{}:{}; export GEAR_DB={}", config.project.id, seat.name, generation, cfg.db_path);
+        // T-420: the reviewer's temp files go in its own scratch directory,
+        // the same line every other seat gets.
+        let mut env_command = match crate::onboard::tmpdir_prefix(&config.conventions, &config.project.id, &seat.name, Some(&path)) {
+            Some(prefix) => format!("{prefix}export GEAR_CTX={}:{}:{}; export GEAR_DB={}", config.project.id, seat.name, generation, cfg.db_path),
+            None => format!("export GEAR_CTX={}:{}:{}; export GEAR_DB={}", config.project.id, seat.name, generation, cfg.db_path),
+        };
         if let Some(start) = model.and_then(|model| model_start(kind, model)) {
             if !start.env.is_empty() { env_command = format!("{env_command}; {}", start.env); }
         }
@@ -4155,6 +4160,25 @@ review = [
             commands.iter().filter(|command| command.contains("export GEAR_CTX=")).count(),
             1,
             "the export is set once: {commands:?}"
+        );
+    }
+
+    /// T-420: a reviewer's temp files go in its own scratch directory, as a
+    /// lane's do — the environment line it runs names it as `TMPDIR`.
+    #[test]
+    fn a_reviewers_environment_names_its_own_scratch_dir() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        let export = pane_runs(&herdr, "wt1:p1")
+            .into_iter()
+            .find(|command| command.contains("export GEAR_CTX="))
+            .expect("the environment line");
+        let scratch = "/fake-worktrees/p-review-1/.gear/tmp";
+        assert!(
+            export.starts_with(&format!("mkdir -p '{scratch}'; export TMPDIR='{scratch}'; ")),
+            "{export}"
         );
     }
 
