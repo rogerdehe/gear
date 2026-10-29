@@ -46,6 +46,14 @@ pub fn build_with_agents(
         if seat.role == SeatRole::Captain {
             lines.extend(gear_board::voyage::reports(tx, &ctx.project, now)?
                 .iter().flat_map(|v| v.lines()));
+            // The voyage's goal, bar and course (T-336): the same one text
+            // every captain output uses, right under the voyage report lines.
+            let milestone = crate::plan::current_voyage(tx, &ctx.project)?;
+            if !milestone.is_empty() {
+                if let Some(goal) = gear_board::stations::goal_text(tx, &ctx.project, &milestone)? {
+                    lines.push(goal);
+                }
+            }
             if !lines.is_empty() {
                 lines.push(String::new());
             }
