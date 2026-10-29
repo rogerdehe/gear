@@ -2057,6 +2057,24 @@ fn remerge(
     } else {
         crate::base::task_branch(&conventions, project, &lane, task_id)
     };
+    // T-405: a mechanically settled attempt has no reviewer, so it has no
+    // review branch. Its merge op says so, and the merge does not require
+    // one.
+    let mechanical = settled_mechanically(tx, project, task_id, latest.n)?;
+    let mut payload = serde_json::json!({
+        "branch": branch,
+        "candidate": candidate,
+        "review": gear_model::branch::expand(
+            &conventions.review_branch,
+            project,
+            &lane,
+            task_id
+        ),
+        "remerge": true,
+    });
+    if mechanical {
+        payload["mechanical"] = serde_json::json!(true);
+    }
     tx.insert_op(&gear_store::NewOp {
         project: project.to_string(),
         seat: if lane.is_empty() { format!("{project}:captain") } else { format!("{project}:{lane}") },
@@ -2066,20 +2084,34 @@ fn remerge(
         attempt: Some(latest.n),
         ref_msg: None,
         plan_version: None,
-        payload: serde_json::json!({
-            "branch": branch,
-            "candidate": candidate,
-            "review": gear_model::branch::expand(
-                &conventions.review_branch,
-                project,
-                &lane,
-                task_id
-            ),
-            "remerge": true,
-        }),
+        payload,
         created: now,
     })?;
     Ok(None)
+}
+
+/// T-405: whether the task's accepted attempt was settled by the engine as
+/// mechanical (T-273) — the pass verdict whose note starts `mechanical:`.
+/// Such a task never had a reviewer, so its merge has no review branch to
+/// merge and must not require one.
+fn settled_mechanically(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    task: &str,
+    attempt: i64,
+) -> GearResult<bool> {
+    Ok(tx
+        .verdicts_of_task(project, task)?
+        .into_iter()
+        .any(|verdict| {
+            verdict.passed
+                && verdict.attempt == attempt
+                && verdict.by_seat == "engine"
+                && verdict
+                    .evidence
+                    .as_deref()
+                    .is_some_and(|note| note.starts_with("mechanical:"))
+        }))
 }
 
 fn priority_str(priority: Priority) -> &'static str {
