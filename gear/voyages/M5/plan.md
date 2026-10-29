@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=747 -->
+<!-- gear-plan project=gear base=748 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -125,6 +125,7 @@ eta: 21h
 - 2026-10-29 04:09 hand-fix: review-11 sat Starting 30 min with no task and its codex resume failed in its pane ("No saved session found"); nothing in the engine revisits a Starting temp with no task, so it held one of the two temp slots while T-412's and T-297's reviews waited; the captain set it released in the store, voided its pending binding and closed its pane; a new hull task makes the engine release such a seat
 - 2026-10-29 04:16 estimate: eta 16h -> 21h on the user's own word and his confirmation in a dialog: the user's two-hour stop and the work it left behind; about 4 h 20 min left from 999 min in | why: user | else: the eta stays passed
 - station M-5514: keep course 1003 min in, 120 done, 41 left; measured 8.5 min a task with two lanes puts the finish about 100 min past the 21h eta; the board chain is serial in frame.rs and hull is the slowest lane, so moving board tasks to hull gains nothing; the hand-ins wait on two review seats (three queued at 04:15): a third review seat is proposed to the user
+- station M-5533: keep course 1012 min in, 123 done, 38 left; same as M-5514: reviews are the wait, a third review seat is with the user
 
 
 # Queue
