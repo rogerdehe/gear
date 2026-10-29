@@ -6563,6 +6563,35 @@ gate = "{project_gate}"
         assert!(!branches.contains("review/t5"), "{branches}");
     }
 
+    /// T-407: a merge writes one line per step — fetch, merge, gate, push,
+    /// close — each with its own time and the attempt's time so far, so a
+    /// slow step is found from the engine log.
+    #[test]
+    fn a_merge_logs_its_five_steps_in_the_engine_log() {
+        let scratch = Scratch::new("merge-probe");
+        let worktree = scratch.merge_worktree();
+        // A task of its own, so no other test's merge lines mix in.
+        let mut op = op(&scratch.head_of("heat/t5"));
+        op.task = Some("T-9071".into());
+
+        let line = merge_one(&worktree, &repo("true"), &op).unwrap();
+
+        assert!(line.contains("merged T-9071 into dev"), "{line}");
+        let log: Vec<String> = crate::ops::probe_log()
+            .into_iter()
+            .filter(|line| line.starts_with("probe merge T-9071 "))
+            .collect();
+        let steps: Vec<&str> = log.iter().map(|line| line.split_whitespace().nth(3).unwrap()).collect();
+        assert_eq!(steps, ["fetch", "merge", "gate", "push", "close"], "{log:?}");
+        // Every line carries the step's time and the whole attempt's so far.
+        for line in &log {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 6, "{line}");
+            assert!(fields[4].parse::<u64>().is_ok(), "the step's ms: {line}");
+            assert!(fields[5].starts_with("total=") && fields[5][6..].parse::<u64>().is_ok(), "{line}");
+        }
+    }
+
     /// T-296: with the default template the merge commits read exactly as they
     /// read before: the candidate by its sha, and the review branch, under
     /// `merge(T-5): `.

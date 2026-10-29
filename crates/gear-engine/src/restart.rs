@@ -287,22 +287,10 @@ pub(crate) fn advance(
     loop {
         let before = plan.phase;
         let began = plan.at;
-        match plan.phase {
-            Phase::Stop => {
-                if !stop(store, herdr, profiles, seat, &mut plan, now)? {
-                    return Ok(None);
-                }
-            }
-            Phase::Exit => {
-                if !exit(store, herdr, seat, &mut plan, now)? {
-                    return Ok(None);
-                }
-            }
-            Phase::Start => {
-                if !start(store, herdr, cfg, profiles, seat, &mut plan, now)? {
-                    return Ok(None);
-                }
-            }
+        let moves_on = match plan.phase {
+            Phase::Stop => stop(store, herdr, profiles, seat, &mut plan, now)?,
+            Phase::Exit => exit(store, herdr, seat, &mut plan, now)?,
+            Phase::Start => start(store, herdr, cfg, profiles, seat, &mut plan, now)?,
             Phase::Finish => {
                 let finished = finish(store, herdr, profiles, project, seat, &plan, now)?;
                 // T-407: the last phase's own line, with the whole restart's
@@ -318,13 +306,16 @@ pub(crate) fn advance(
                 }
                 return Ok(finished);
             }
-        }
+        };
         // T-407: a phase that ended here is one line of the engine log, from
         // the durable time it began with (the phase itself moved `at` on).
         if plan.phase != before {
             let step_ms = now.saturating_sub(began).saturating_mul(1000);
             let total = now.saturating_sub(plan.started).saturating_mul(1000);
             crate::ops::probe("restart", &seat.id, before.as_str(), step_ms, total);
+        }
+        if !moves_on {
+            return Ok(None);
         }
     }
 }
@@ -1417,6 +1408,53 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         assert!(args.windows(2).any(|w|w==["--model","new-model"]),"{args:?}");
         assert_eq!(store.read(|tx|tx.get_meta(&model_meta_key("p:heat"))).unwrap().as_deref(),Some("new-model"));
     }
+    /// T-407: every phase of a restart onto another model is one line of the
+    /// engine log, from the durable time the phase began with.
+    #[test]
+    fn a_restart_logs_one_probe_line_per_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap(), false);
+        // Its own seat, so no other test's restart lines mix in (T-407).
+        store
+            .write(|tx| {
+                testing::seed_active_seat(tx, "p", "probe", SeatRole::Lane, PANE, "pi", T)?;
+                tx.set_binding_session_ref("p:probe", 1, "old-session")
+            })
+            .unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:probe")).unwrap().unwrap();
+        let target = ModelEntry::Entry(gear_app::config::ModelSpec {
+            model: "new-model".into(),
+            cli: Some("pi".into()),
+            args: vec![],
+            context_window_k: None,
+        });
+        // The stop: an idle agent gets its exit keys, the phase moves on.
+        assert!(advance(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", &seat, Some(&target), T + 1)
+            .unwrap()
+            .is_none());
+        herdr.exit_agent(PANE);
+        let mut finished = None;
+        for n in 2..10 {
+            let seat = store.read(|tx| tx.get_seat("p:probe")).unwrap().unwrap();
+            finished = advance(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", &seat, None, T + n).unwrap();
+            if finished.is_some() {
+                break;
+            }
+        }
+        assert!(finished.is_some(), "the restart finished: {:?}", herdr.calls);
+        let log: Vec<String> = crate::ops::probe_log()
+            .into_iter()
+            .filter(|line| line.starts_with("probe restart p:probe "))
+            .collect();
+        let steps: Vec<&str> = log.iter().map(|line| line.split_whitespace().nth(3).unwrap()).collect();
+        assert_eq!(steps, ["stop", "exit", "start", "finish"], "{log:?}");
+        // The phase that waited a tick shows it (the exit waits for the agent
+        // to go); the last line's total is the whole restart's duration, from
+        // the tick it began in to the tick it finished in.
+        assert_eq!(log[1], "probe restart p:probe exit 1000 total=1000", "{log:?}");
+        assert_eq!(log.last().unwrap().split_whitespace().last().unwrap(), "total=1000", "{log:?}");
+    }
+
     #[test]
     fn removing_the_model_chain_restarts_without_a_model_flag() {
         let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap(),true);

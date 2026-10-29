@@ -18,10 +18,11 @@ const RECOVERED_REASON: &str = "engine restarted before the call finished";
 /// never drains (a library test) does not grow for ever.
 static PROBE_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// The probe lines written since the last call, oldest first (T-407).
-pub fn take_probe_log() -> Vec<String> {
-    let mut log = PROBE_LOG.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::take(&mut *log)
+/// The probe lines this process wrote, oldest first (T-407): a test reads the
+/// one it caused by its own seat or task, which is why nothing drains them
+/// (two tests running side by side would take each other's lines).
+pub fn probe_log() -> Vec<String> {
+    PROBE_LOG.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// One line of the engine log for a finished multi-step operation and for
@@ -42,7 +43,7 @@ pub(crate) fn probe(op: &str, subject: &str, step: &str, ms: i64, total: i64) {
     let line = probe_line(op, subject, step, ms, total);
     eprintln!("{line}");
     let mut log = PROBE_LOG.lock().unwrap_or_else(|e| e.into_inner());
-    if log.len() >= 256 {
+    if log.len() >= 1024 {
         log.remove(0);
     }
     log.push(line);

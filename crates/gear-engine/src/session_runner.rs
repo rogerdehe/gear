@@ -14,10 +14,13 @@ fn str_field<'a>(state: &'a Value, field: &str) -> &'a str { state.get(field).an
 fn time(state: &Value, field: &str) -> Ts { state.get(field).and_then(Value::as_i64).unwrap_or(0) }
 
 /// The operation's elapsed time in milliseconds, from the durable state: the
-/// first step (`t0`) or, for a state another step wrote without one, from its
-/// first step (T-407).
+/// first step (`started`, written when the state was created — `t0` is
+/// re-anchored when the action's own wait begins) (T-407).
 fn elapsed(state: &Value, now: Ts) -> i64 {
-    let started = match time(state, "t0") { 0 => time(state, "step_at"), t0 => t0 };
+    let started = match time(state, "started") {
+        0 => match time(state, "t0") { 0 => time(state, "step_at"), t0 => t0 },
+        started => started,
+    };
     now.saturating_sub(started).saturating_mul(1000)
 }
 
@@ -153,7 +156,7 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
         let target = match action { Action::Resume(s) => Some(s.as_str()), _ => None };
         let old = binding.session_ref.as_deref().filter(|s| !s.is_empty());
         let offset = old.and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len()).unwrap_or(0);
-        let state = json!({"round":identity, "generation":seat.generation, "action":action.as_str(), "t0":now, "step_at":now, "old_session_ref":old, "target":target, "step":"initial", "offset":offset, "saw_working":false, "compact_after":compact_after, "initial_done":occupant.as_ref().is_some_and(|a| a.agent_status == AgentStatus::Done)});
+        let state = json!({"round":identity, "generation":seat.generation, "action":action.as_str(), "t0":now, "started":now, "step_at":now, "old_session_ref":old, "target":target, "step":"initial", "offset":offset, "saw_working":false, "compact_after":compact_after, "initial_done":occupant.as_ref().is_some_and(|a| a.agent_status == AgentStatus::Done)});
         save(store, seat, &state)?;
         state
     };
