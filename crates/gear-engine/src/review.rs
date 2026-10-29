@@ -196,10 +196,11 @@ fn start_hand_in_reviews(
         // mechanical hand-in is settled in a project without reviewers too.
         // The remaining hand-ins keep `tell_captain_of_hand_ins_without_reviewers`.
         let Some(temps) = config.temps.as_ref() else { continue };
-        // T-69 / B02-04: an attempt whose checkout already failed three times
-        // is not tried again. A recovered seat (the park's slot freed) must
-        // not restart the loop with a fresh generation and a fresh budget; a
-        // new attempt of the task has a fresh budget and its own key.
+        // T-69 / B02-04 / T-425: an attempt whose checkout failed on two
+        // different seats — the candidate itself cannot be checked out — is
+        // not tried again. A recovered seat (the park's slot freed) must not
+        // restart the loop with a fresh generation and a fresh budget; a new
+        // attempt of the task has a fresh budget and its own key.
         if checkout_stuck(store, project, &task.task, task.attempt)? {
             continue;
         }
@@ -819,6 +820,9 @@ thread_local! {
     static REVIEW_GIT_FAKE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static REVIEW_GIT_CALLS: std::cell::RefCell<Vec<(String, Vec<String>)>> = const { std::cell::RefCell::new(Vec::new()) };
     static REVIEW_GIT_FAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Fail only the calls in the worktrees whose path contains this text
+    /// (T-425): the incident's one broken worktree, not every seat's.
+    static REVIEW_GIT_FAIL_ON: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -828,7 +832,12 @@ struct FakeReviewGit;
 impl ReviewGit for FakeReviewGit {
     fn run(&self, path: &str, args: &[&str]) -> Result<String, String> {
         REVIEW_GIT_CALLS.with(|calls| calls.borrow_mut().push((path.into(), args.iter().map(|s| (*s).into()).collect())));
-        if REVIEW_GIT_FAIL.with(|fail| fail.get()) { Err("injected git failure".into()) } else { Ok(String::new()) }
+        let only = REVIEW_GIT_FAIL_ON.with(|on| on.borrow().clone());
+        if REVIEW_GIT_FAIL.with(|fail| fail.get()) || only.is_some_and(|only| path.contains(&only)) {
+            Err("injected git failure".into())
+        } else {
+            Ok(String::new())
+        }
     }
 }
 
@@ -902,7 +911,14 @@ fn stash_review_tree(git: &dyn ReviewGit, store: &mut Store, project: &str, path
 fn prepare_review_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn HerdrAct, project: &str, repo: &str, path: &str, remote: &str, branch: &str, task: &ReviewTask, now: Ts) -> GearResult<bool> {
     let git_error = |e| GearError::new(ErrorCode::BadFormat, format!("review checkout {path}: {e}"));
     let same_path = |a: &str, b: &str| a == b || std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a, b)| a == b);
+    // T-425: a warm worktree may still hold a half-done merge that an
+    // interrupted job left behind, and git refuses the stash and the checkout
+    // in it ("could not write index"). `merge --abort` clears the merge before
+    // the stash reads the tree, `reset --hard` clears what is left before the
+    // checkout. Both are ignored: no merge in progress is no error.
+    let _ = review_git(git, path, &["merge", "--abort"]);
     stash_review_tree(git, store, project, path, &task.task, task.attempt, now)?;
+    let _ = review_git(git, path, &["reset", "--hard"]);
     let listing = review_git(git, repo, &["worktree", "list", "--porcelain"]).map_err(git_error)?;
     for entry in listing.split("\n\n") {
         let mut lines = entry.lines();
@@ -950,30 +966,51 @@ fn prepare_seat_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn Her
         Ok(true) => {},
         Ok(false) => return Ok(false),
         Err(error) => {
-            let count_key = format!("engine.review_checkout_fails.{}.{}.{}", seat.project, task.task, task.attempt);
+            // T-425: the failure is counted on the **seat**, not on the task:
+            // a worktree that cannot check out fails every job it is given,
+            // and the hand-in must go on to another seat.
+            let fails = checkout_fails_key(&seat.id);
             let used = store.write(|tx| {
-                let used = tx.get_meta(&count_key)?.and_then(|n| n.parse::<u32>().ok()).unwrap_or(0) + 1;
-                tx.set_meta(&count_key, &used.to_string())?;
+                let used = tx.get_meta(&fails)?.and_then(|n| n.parse::<u32>().ok()).unwrap_or(0) + 1;
+                tx.set_meta(&fails, &used.to_string())?;
                 Ok(used)
             })?;
-            if used >= 3 {
-                let reason = format!("review checkout failed {used} times: {}", error.detail);
-                if seat.state == SeatState::Standby {
-                    crate::release::release_one(store, herdr, &seat.project, seat, None, now, "checkout")
-                        .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
-                } else {
-                    park(store, &seat.id, &reason, now)?;
+            let reason = format!("review checkout in {path} failed: {}", error.detail);
+            // The attempt is stuck only when the candidate itself cannot be
+            // checked out: two **different** seats failed on it (T-425).
+            let seats = store.write(|tx| {
+                let key = checkout_failed_seats_key(&seat.project, &task.task, task.attempt);
+                let mut seats: Vec<String> = tx
+                    .get_meta(&key)?
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                if !seats.iter().any(|id| id == &seat.id) {
+                    seats.push(seat.id.clone());
+                    tx.set_meta(&key, &seats.join(","))?;
                 }
+                Ok(seats)
+            })?;
+            if seats.len() >= 2 {
                 mark_checkout_stuck(store, &seat.project, &task.task, task.attempt, &reason)?;
-                store.write(|tx| tx.set_meta(&pending_review_key(&seat.id), ""))?;
                 tell_captain(store, &seat.project, task, &reason, now)?;
+            }
+            // The third failure on one seat is the worktree's, not the task's:
+            // the seat leaves the pool and the captain removes the worktree.
+            if used >= 3 {
+                retire_checkout_seat(store, seat, path, &error.detail, now)?;
             }
             return Ok(false);
         }
     }
     store.write(|tx| {
         tx.set_meta(&branch_key(&seat.id, repo), branch)?;
-        tx.set_meta(&key, &job)
+        tx.set_meta(&key, &job)?;
+        // A checkout that lands clears the seat's failures: the count is of
+        // failures in a row, not of a seat's whole life.
+        tx.set_meta(&checkout_fails_key(&seat.id), "")
     })?;
     Ok(true)
 }
@@ -1597,14 +1634,14 @@ fn branch_key(seat: &str, repo: &str) -> String {
 /// Count one failed checkout for this seat generation.
 
 
-/// The key of an attempt whose checkout already failed three times.
+/// The key of an attempt whose checkout failed on two different seats.
 fn checkout_stuck_key(project: &str, task: &str, attempt: i64) -> String {
     format!("engine.review_checkout_stuck.{project}.{task}.{attempt}")
 }
 
-/// Remember that this attempt's checkout is stuck: the seat is parked for a
-/// human and the attempt is not handed to another seat (B02-04: a recovered
-/// seat would restart the three-try loop with a fresh budget). A new attempt
+/// Remember that this attempt's checkout is stuck: the candidate itself cannot
+/// be checked out, so the attempt is not handed to another seat again (B02-04:
+/// a recovered seat would restart the loop with a fresh budget). A new attempt
 /// of the task has its own key.
 fn mark_checkout_stuck(
     store: &mut Store,
@@ -1616,8 +1653,87 @@ fn mark_checkout_stuck(
     store.write(|tx| tx.set_meta(&checkout_stuck_key(project, task, attempt), reason))
 }
 
-/// Whether this attempt's checkout is already stuck (three failed tries): no
-/// reviewer is started for it until a new attempt is handed in.
+/// The count of failed checkouts on this seat (T-425): kept per seat, not per
+/// task, so a broken worktree is found whichever hand-in it is tried on.
+fn checkout_fails_key(seat: &str) -> String {
+    format!("engine.review_checkout_fails.{seat}")
+}
+
+/// The seats an attempt's checkout failed on (T-425): the attempt is stuck
+/// only when a **second** seat fails too — the candidate itself cannot be
+/// checked out, not one seat's broken worktree.
+fn checkout_failed_seats_key(project: &str, task: &str, attempt: i64) -> String {
+    format!("engine.review_checkout_seats.{project}.{task}.{attempt}")
+}
+
+/// Retire a seat whose worktree failed its checkout three times (T-425): the
+/// worktree is broken, so it leaves the pool (a `Retired` temp seat is never
+/// reused), its pending review is cleared so the hand-in goes to another seat
+/// on the next tick, and the captain is told once to remove the worktree.
+fn retire_checkout_seat(
+    store: &mut Store,
+    seat: &SeatRow,
+    path: &str,
+    error: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let reason = format!("its worktree {path} failed three checkouts: {error}; remove that worktree");
+    store.write(|tx| {
+        tx.set_meta(&pending_review_key(&seat.id), "")?;
+        // A temp seat reaches Retired from Released (design/10), and it is out
+        // of the pool the moment it is not Released again.
+        if !matches!(seat.state, SeatState::Released | SeatState::Retired) {
+            tx.set_seat_state(&seat.id, SeatState::Released, Some(&reason), now)?;
+        }
+        tx.set_seat_state(&seat.id, SeatState::Retired, Some(&reason), now)
+    })?;
+    tell_captain_of_retired_seat(store, &seat.project, seat, &reason, now)
+}
+
+/// Tell the captain, once per seat, that a retired reviewer's worktree must be
+/// removed (T-425).
+fn tell_captain_of_retired_seat(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    reason: &str,
+    now: Ts,
+) -> GearResult<()> {
+    store.write(|tx| {
+        // No captain: nobody to tell.
+        let Some(captain) = tx.captain_of(project)? else { return Ok(()) };
+        let told = format!("engine.review_retired_told.{}", seat.id);
+        if tx.get_meta(&told)?.is_some() {
+            return Ok(());
+        }
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: project.to_string(),
+            thread: format!("review-seat:{}", seat.id),
+            task: None,
+            attempt: None,
+            sender: "engine".into(),
+            sender_gen: 0,
+            recipient: captain.id,
+            kind: MsgKind::System,
+            urgent: false,
+            body: format!(
+                "Reviewer {} is retired: {reason}. No review starts on it again, and the \
+                 hand-in it was given goes to another seat.",
+                seat.name
+            ),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Info,
+            created: now,
+        })?;
+        tx.set_meta(&told, &now.to_string())
+    })
+}
+
+/// Whether this attempt's checkout is already stuck (two different seats
+/// failed on it): no reviewer is started for it until a new attempt is handed
+/// in.
 fn checkout_stuck(store: &mut Store, project: &str, task: &str, attempt: i64) -> GearResult<bool> {
     Ok(store
         .read(|tx| tx.get_meta(&checkout_stuck_key(project, task, attempt)))?
@@ -2533,6 +2649,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         REVIEW_GIT_FAKE.with(|fake| fake.set(true));
         REVIEW_GIT_CALLS.with(|calls| calls.borrow_mut().clear());
         REVIEW_GIT_FAIL.with(|fail| fail.set(false));
+        REVIEW_GIT_FAIL_ON.with(|on| *on.borrow_mut() = None);
         let mut store = Store::open_in_memory().unwrap();
         store
             .write(|tx| {
@@ -3873,6 +3990,36 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(sh(&work, "git stash list").contains("gear: before review of T-1 attempt 1"));
         let messages = store.read(|tx| tx.thread_messages("p", "review-stash:T-1:1")).unwrap();
         assert_eq!(messages.iter().filter(|m| m.body.contains("Preserved changes")).count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// T-425: a warm worktree left mid-merge checks out after the reset: the
+    /// half-done merge an interrupted job left behind does not fail it.
+    #[test]
+    fn a_warm_worktree_left_mid_merge_checks_out_after_the_reset() {
+        let root = crate::testtmp::temp("gear-review-mid-merge");
+        sh(&root, "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.join("work");
+        std::fs::write(work.join("readme"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        let candidate = sh(&work, "git rev-parse HEAD");
+        // A warm seat's worktree, left with a conflicted merge in it.
+        let seat = root.join("seat");
+        sh(&work, &format!("git worktree add -q -b home/seat {} dev", seat.display()));
+        std::fs::write(seat.join("readme"), "seat").unwrap();
+        sh(&seat, "git -c user.name=a -c user.email=a@b commit -qam seat");
+        std::fs::write(work.join("readme"), "other").unwrap();
+        sh(&work, "git checkout -q -b other && git add -A && git -c user.name=a -c user.email=a@b commit -qm other && git checkout -q dev");
+        sh(&seat, "git -c user.name=a -c user.email=a@b merge other; true");
+        assert_eq!(sh(&seat, "git rev-parse -q --verify MERGE_HEAD").len(), 40, "the worktree is mid-merge");
+        let mut store = world(CONFIG);
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut herdr = FakeHerdr::new();
+        let task = ReviewTask { task: "T-1".into(), attempt: 1, writer: "p:heat".into(), lane: "heat".into(), candidate: candidate.clone() };
+        assert!(prepare_review_tree(&RealReviewGit, &mut store, &mut herdr, "p", work.to_str().unwrap(), seat.to_str().unwrap(), "origin", "review/t1", &task, T0).unwrap());
+        assert_eq!(sh(&seat, "git rev-parse HEAD"), candidate);
+        assert_eq!(sh(&seat, "git rev-parse --abbrev-ref HEAD"), "review/t1");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -5564,8 +5711,12 @@ profile = "opencode"
         assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Starting, "the earlier delivery must not cancel the new attempt");
     }
 
+    /// T-425: a reviewer worktree that cannot check out is the **seat's**
+    /// failure, not the task's. The third failure retires the seat, the
+    /// captain is told once to remove its worktree, the hand-in is not marked
+    /// stuck, and it starts on another seat.
     #[test]
-    fn standby_checkout_retries_then_releases_after_exhaustion() {
+    fn a_seat_whose_checkout_fails_three_times_is_retired_not_the_task() {
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
@@ -5575,13 +5726,62 @@ profile = "opencode"
             tx.clear_seat_task("p:review-1")
         }).unwrap();
         queue_review_job(&mut store, 2, "heat");
+        // The incident's shape: one worktree that fails every checkout, the
+        // others fine.
+        REVIEW_GIT_FAIL_ON.with(|on| *on.borrow_mut() = Some("p-review-1".into()));
+        for tick in 0..3 {
+            start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 12 + tick).unwrap();
+        }
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Retired, "the broken worktree's seat leaves the pool");
+        let reason = seat.state_reason.unwrap_or_default();
+        let path = store.read(|tx| tx.get_meta(&path_key("p:review-1"))).unwrap().unwrap();
+        assert!(path.contains("p-review-1"), "{path}");
+        assert!(reason.contains(&path), "the reason names the worktree {path}: {reason}");
+        assert!(reason.contains("injected git failure"), "the reason names the git error: {reason}");
+        assert!(!checkout_stuck(&mut store, "p", "T-2", 1).unwrap(), "one seat's worktree does not make the task stuck");
+        assert_eq!(store.read(|tx| tx.get_meta(&pending_review_key("p:review-1"))).unwrap().as_deref(), Some(""));
+        let messages = store.read(|tx| tx.thread_messages("p", "review-seat:p:review-1")).unwrap();
+        assert_eq!(messages.len(), 1, "the captain is told once to remove the worktree");
+        assert!(messages[0].body.contains(&path), "{}", messages[0].body);
+        // The same hand-in starts on another seat and is never marked stuck.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        assert!(!checkout_stuck(&mut store, "p", "T-2", 1).unwrap());
+        assert!(store.read(|tx| tx.get_seat("p:review-2")).unwrap().is_some(), "another seat takes the hand-in");
+        let delivered = store.read(|tx| tx.ops_of_seat_kind("p:review-2", OpKind::Deliver)).unwrap();
+        assert!(delivered.iter().any(|op| op.task.as_deref() == Some("T-2")), "the hand-in is delivered to the new seat");
+    }
+
+    /// T-425: the attempt is marked stuck only when its checkout failed on two
+    /// **different** seats — the candidate itself cannot be checked out — and
+    /// the captain gets today's notice.
+    #[test]
+    fn a_hand_in_failing_on_two_different_seats_is_marked_stuck() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Done; tx.update_task(&task)?;
+            tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
+            tx.clear_seat_task("p:review-1")
+        }).unwrap();
+        queue_review_job(&mut store, 2, "heat");
+        // Every checkout fails: the candidate itself cannot be checked out.
         REVIEW_GIT_FAIL.with(|fail| fail.set(true));
         for tick in 0..3 {
             start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 12 + tick).unwrap();
         }
-        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Releasing);
-        assert!(checkout_stuck(&mut store, "p", "T-2", 1).unwrap());
-        assert_eq!(store.read(|tx| tx.get_meta(&pending_review_key("p:review-1"))).unwrap().as_deref(), Some(""));
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Retired);
+        assert!(store.read(|tx| tx.get_seat("p:review-2")).unwrap().is_some(), "the hand-in moved to a second seat");
+        assert!(checkout_stuck(&mut store, "p", "T-2", 1).unwrap(), "two seats failed on the same candidate");
+        let stuck = store.read(|tx| tx.get_meta(&checkout_stuck_key("p", "T-2", 1))).unwrap().unwrap();
+        assert!(stuck.contains("injected git failure"), "{stuck}");
+        let told = thread(&mut store, "T-2:1");
+        assert!(told.iter().any(|m| m.body.contains("checkout")), "the captain gets today's notice: {told:?}");
+        // No reviewer starts for a stuck attempt from then on.
+        REVIEW_GIT_FAIL.with(|fail| fail.set(false));
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
+        assert!(report.started.is_empty(), "{report:?}");
     }
 
     fn queue_review_job(store: &mut Store, n: i64, lane: &str) {
