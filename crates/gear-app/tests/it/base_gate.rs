@@ -969,9 +969,8 @@ fn a_review_pushed_to_another_remote_is_refused() {
     // It pushed to the second remote its worktree has, and checked that one.
     let backup = r._root.path.join("backup.git");
     git(&r._root.path, &["init", "-q", "--bare", "--initial-branch=dev", backup.to_str().unwrap()]);
-    publish(&backup, &r.lane, "refs/heads/review/t1", "review/t1");
     git(&r.lane, &["remote", "add", "backup", backup.to_str().unwrap()]);
-    git(&r.lane, &["fetch", "-q", "backup"]);
+    git(&r.lane, &["push", "-q", "backup", "HEAD:refs/heads/review/t1"]);
 
     let mut s = review_world();
     let (env, fp) = reviewer();
@@ -991,13 +990,14 @@ fn a_review_pushed_to_another_remote_is_refused() {
     assert!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap().is_empty());
 }
 
-/// T-438: the same verdict on the project's own remote is taken.
+/// T-438: the same verdict, pushed to the project's own remote exactly as the
+/// packet says, is taken.
 #[test]
 fn a_review_pushed_to_the_projects_remote_is_taken() {
     let r = repos();
     git(&r.lane, &["switch", "-q", "-c", "review/t1", "origin/dev"]);
     commit(&r.lane, "review-T-1.md", "review(T-1): pass");
-    publish(&r.origin, &r.lane, "refs/heads/review/t1", "review/t1");
+    git(&r.lane, &["push", "-q", "origin", "HEAD:refs/heads/review/t1"]);
 
     let mut s = review_world();
     let (env, fp) = reviewer();
@@ -1013,6 +1013,37 @@ fn a_review_pushed_to_the_projects_remote_is_taken() {
     assert_eq!(record.by_seat, "p:r-1");
 }
 
+/// T-438: a direction check is not a verdict: it is not checked against a
+/// review branch, and an unpushed worktree takes it as before.
+#[test]
+fn a_direction_check_is_not_checked_against_a_review_branch() {
+    let r = repos();
+    // The reviewer's worktree is at a commit nothing has pushed.
+    git(&r.lane, &["switch", "-q", "-c", "direction/t1", "origin/dev"]);
+    commit(&r.lane, "direction.md", "the direction is sound");
+
+    let mut s = review_world();
+    s.write(|tx| {
+        tx.set_meta(
+            "engine.direction.p.T-1.1",
+            &serde_json::json!({"seat": "p:r-1", "generation": 1, "state": "running", "sha": "abc123"})
+                .to_string(),
+        )
+    })
+    .unwrap();
+    let (env, fp) = reviewer();
+    let mut args = review(None);
+    args.kind = MsgKind::Result;
+    args.body = "the direction is sound".into();
+    args.verdict = None;
+
+    let sent = in_dir(&r.lane, || {
+        mail::send_direction(&mut s, &env, Some(&fp), &args, T0 + 5)
+    })
+    .unwrap();
+    assert_eq!(sent.recipient, "p:captain");
+}
+
 /// T-438: the check is the reviewer's own commit, not its branch's old tip: a
 /// branch that is on the remote but behind the reviewer's HEAD is refused.
 #[test]
@@ -1020,7 +1051,7 @@ fn a_review_branch_behind_the_reviewers_head_is_refused() {
     let r = repos();
     git(&r.lane, &["switch", "-q", "-c", "review/t1", "origin/dev"]);
     commit(&r.lane, "review-T-1.md", "the review");
-    publish(&r.origin, &r.lane, "refs/heads/review/t1", "review/t1");
+    git(&r.lane, &["push", "-q", "origin", "HEAD:refs/heads/review/t1"]);
     // A second commit the reviewer made after pushing, then not pushed.
     let head = commit(&r.lane, "fixes.md", "and a fix");
 

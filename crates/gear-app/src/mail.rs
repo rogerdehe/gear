@@ -208,7 +208,7 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
     // on the review branch the project's template names. Only a temp seat
     // hands in a full review, and only a caller that brought the hand-in gate
     // is one handing in from its worktree (a direction check is a result).
-    if args.kind == MsgKind::Review && args.verdict.is_some() && args.base.is_some() {
+    if args.kind == MsgKind::Review && args.verdict.is_some() && !direction && args.base.is_some() {
         if let (Some(ctx), Some(task)) = (env.ctx.as_ref(), args.task.as_deref()) {
             let is_temp = store
                 .read(|tx| tx.get_seat(&ctx.seat_id()))?
