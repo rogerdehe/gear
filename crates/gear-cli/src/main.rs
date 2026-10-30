@@ -7868,17 +7868,14 @@ path="api"
     }
 
     /// A voyage that has not departed, with one open task, and optionally a
-    /// `[schedule] depart_at`: the captain home page shows its voyage line.
-    fn seed_waiting_voyage(store: &mut Store, depart_at: Option<i64>) {
+    /// `[schedule]` section: the captain home page shows its voyage line.
+    fn seed_waiting_voyage(store: &mut Store, schedule: Option<&str>) {
         store
             .write(|tx| {
-                if let Some(depart_at) = depart_at {
+                if let Some(schedule) = schedule {
                     let row = tx.get_project("p")?.expect("the project");
                     tx.update_project(&gear_store::ProjectRow {
-                        config_toml: format!(
-                            "[schedule]\ndepart_at = \"{}\"\n",
-                            utc(depart_at)
-                        ),
+                        config_toml: format!("{schedule}\n"),
                         ..row
                     })?;
                 }
@@ -7926,7 +7923,7 @@ path="api"
     fn the_home_voyage_line_says_when_the_voyage_departs() {
         let (mut store, mut herdr) = home_world();
         let depart = clock_at("14:00");
-        seed_waiting_voyage(&mut store, Some(depart));
+        seed_waiting_voyage(&mut store, Some(&format!("[schedule]\ndepart_at = \"{}\"", utc(depart))));
 
         let mut out = Vec::new();
         run_home(
@@ -7954,6 +7951,69 @@ path="api"
 
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("Voyage M5 the next voyage · done: it sails"), "{text}");
+        assert!(!text.contains("departs at"), "{text}");
+    }
+
+    #[test]
+    fn the_home_voyage_line_says_the_fleet_rests_outside_the_hours() {
+        let (mut store, mut herdr) = home_world();
+        let evening = clock_at("19:00");
+        seed_waiting_voyage(&mut store, Some("[schedule]\nhours = \"10:00-18:00\""));
+
+        let mut out = Vec::new();
+        run_home(&mut store, &home_env("captain", CAP_PANE), &mut herdr, evening, false, &mut out)
+            .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("off hours until 10:00"), "{text}");
+    }
+
+    #[test]
+    fn inside_the_hours_the_home_voyage_line_is_unchanged() {
+        let (mut store, mut herdr) = home_world();
+        let noon = clock_at("12:00");
+        seed_waiting_voyage(&mut store, Some("[schedule]\nhours = \"10:00-18:00\""));
+
+        let mut out = Vec::new();
+        run_home(&mut store, &home_env("captain", CAP_PANE), &mut herdr, noon, false, &mut out)
+            .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Voyage M5 the next voyage · done: it sails"), "{text}");
+        assert!(!text.contains("off hours until"), "{text}");
+    }
+
+    #[test]
+    fn without_hours_the_home_voyage_line_is_unchanged() {
+        let (mut store, mut herdr) = home_world();
+        let evening = clock_at("19:00");
+        seed_waiting_voyage(&mut store, None);
+
+        let mut out = Vec::new();
+        run_home(&mut store, &home_env("captain", CAP_PANE), &mut herdr, evening, false, &mut out)
+            .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Voyage M5 the next voyage · done: it sails"), "{text}");
+        assert!(!text.contains("off hours until"), "{text}");
+    }
+
+    #[test]
+    fn while_the_fleet_rests_the_home_voyage_line_says_the_rest_not_the_departure() {
+        let (mut store, mut herdr) = home_world();
+        let evening = clock_at("19:00");
+        let depart = evening + 3 * 3600;
+        seed_waiting_voyage(&mut store, Some(&format!(
+            "[schedule]\nhours = \"10:00-18:00\"\ndepart_at = \"{}\"",
+            utc(depart)
+        )));
+
+        let mut out = Vec::new();
+        run_home(&mut store, &home_env("captain", CAP_PANE), &mut herdr, evening, false, &mut out)
+            .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("off hours until 10:00"), "{text}");
         assert!(!text.contains("departs at"), "{text}");
     }
 

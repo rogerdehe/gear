@@ -1,5 +1,7 @@
 //! T-449: a voyage that waits for its departure time says so on the board,
 //! so the user sees why nothing moves; without `[schedule]` nothing changes.
+//! T-451: while the fleet rests outside its working hours the same line says
+//! the rest instead, so the user sees what the seat waits for.
 
 use gear_board::{build, idle, render, Options, View};
 use gear_model::TaskState;
@@ -123,5 +125,52 @@ fn without_a_departure_time_the_voyage_line_is_unchanged() {
     let text = drawn(&mut store, AROUND);
 
     assert!(text.contains("Voyage M5 the next voyage · done: it sails"), "{text}");
+    assert!(!text.contains("departs at"), "{text}");
+}
+
+#[test]
+fn the_board_says_the_fleet_rests_outside_the_hours() {
+    let evening = clock_at("19:00");
+    let mut store = world(Some("[schedule]\nhours = \"10:00-18:00\""));
+
+    let text = drawn(&mut store, evening);
+
+    assert!(text.contains("off hours until 10:00"), "{text}");
+}
+
+#[test]
+fn inside_the_hours_the_voyage_line_is_unchanged() {
+    let noon = clock_at("12:00");
+    let mut store = world(Some("[schedule]\nhours = \"10:00-18:00\""));
+
+    let text = drawn(&mut store, noon);
+
+    assert!(text.contains("Voyage M5 the next voyage · done: it sails"), "{text}");
+    assert!(!text.contains("off hours until"), "{text}");
+}
+
+#[test]
+fn without_hours_the_voyage_line_is_unchanged() {
+    let evening = clock_at("19:00");
+    let mut store = world(None);
+
+    let text = drawn(&mut store, evening);
+
+    assert!(text.contains("Voyage M5 the next voyage · done: it sails"), "{text}");
+    assert!(!text.contains("off hours until"), "{text}");
+}
+
+#[test]
+fn while_the_fleet_rests_the_board_says_the_rest_not_the_departure() {
+    let evening = clock_at("19:00");
+    let depart = evening + 3 * 3600;
+    let mut store = world(Some(&format!(
+        "[schedule]\nhours = \"10:00-18:00\"\ndepart_at = \"{}\"",
+        utc(depart)
+    )));
+
+    let text = drawn(&mut store, evening);
+
+    assert!(text.contains("off hours until 10:00"), "{text}");
     assert!(!text.contains("departs at"), "{text}");
 }
