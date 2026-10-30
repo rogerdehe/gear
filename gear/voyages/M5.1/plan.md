@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=866 -->
+<!-- gear-plan project=gear base=868 -->
 # Goal
 Fix the problems another project's fleet hits on the shared engine as they come in, and ship each batch at once as a small release (v0.5.4 and later), so that fleet never waits on GEAR. M5.1 is a voyage planned as it goes: it lasts as long as that project's current voyage, and its plan grows with each problem that project's captain reports.
 
@@ -35,5 +35,11 @@ estimate: 25
 ## T-436 [must] lane=mast milestone=M5.1 required
 goal: [v0.5.4] Release v0.5.4, the first batch of M5.1. Change, no other design: (1) the version is 0.5.4 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.5.4.md, in the form of docs/releases/v0.5.3.md: one line per task merged on origin/dev since v0.5.3 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": "Nothing outside the tasks above.". The captain merges dev into main, tags v0.5.4 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.5.4"; docs/releases/v0.5.4.md lists every task merged on origin/dev since v0.5.3 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-433, T-434, T-435
+deps: T-433, T-434, T-435, T-437
 estimate: 15
+
+## T-437 [now] lane=hull milestone=M5.1 required
+goal: [v0.5.4] A mechanical task's packet no longer tells the lane to run the merge gate itself (another project, 2026-10-30: two deletion-only mechanical tasks each ran the whole gate locally before the hand-in, minutes each, and the engine then ran it again at the merge; the packet line says "the merge gate is the only check, so run its command before you hand in"). Change, no other design: crates/gear-app/src/plan.rs fn render_task_packet, the mechanical line becomes exactly "Review: none — mechanical ({reason}): the engine runs the merge gate at the merge, and it is the only check; run only the acceptance commands above, never the gate yourself.\n"; crates/gear-app/tests/it/packet_contract.rs follows the new text. The code change is in these two files only.
+accept: The packet test asserts the new line and that the packet of a mechanical task no longer contains "run its command before you hand in". Run only `make check CRATE=gear-app TESTS='<a nextest filter: packet_contract>'`; the merge gate runs `make gate`.
+mechanical: a one-line text change and its test; the gate's packet test proves it
+estimate: 10
