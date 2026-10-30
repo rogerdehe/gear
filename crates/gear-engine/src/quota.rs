@@ -128,10 +128,11 @@ pub fn apply_quota_policy_with(
         // before the profile: the plan drives the restart, not the seat's
         // current profile.
         if crate::restart::pending(store, &seat.id)?.is_some() {
-            if let Some(line) =
-                crate::restart::advance(store, herdr, cfg, profiles, project, seat, None, now)?
-            {
-                report.events.push(line);
+            // One seat's failed restart is reported; it never stops the project's tick.
+            match crate::restart::advance(store, herdr, cfg, profiles, project, seat, None, now) {
+                Ok(Some(line)) => report.events.push(line),
+                Ok(None) => {}
+                Err(e) => report.events.push(format!("{}: restart step failed: {e}", seat.id)),
             }
             continue;
         }

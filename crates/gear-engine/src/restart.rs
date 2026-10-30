@@ -787,18 +787,21 @@ fn finish(
         let row = tx
             .get_seat(&seat.id)?
             .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id)))?;
-        require_transition(
-            SeatState::can_transition(row.role, row.state, SeatState::Active),
-            "seat",
-            row.state.as_str(),
-            SeatState::Active.as_str(),
-        )?;
-        tx.set_seat_state(
-            &seat.id,
-            SeatState::Active,
-            Some(&format!("restarted on {} ({})", plan.cli, plan.model)),
-            now,
-        )?;
+        // Onboarding may already have made the restarted agent's seat Active.
+        if !(row.state == SeatState::Active && row.generation == plan.generation) {
+            require_transition(
+                SeatState::can_transition(row.role, row.state, SeatState::Active),
+                "seat",
+                row.state.as_str(),
+                SeatState::Active.as_str(),
+            )?;
+            tx.set_seat_state(
+                &seat.id,
+                SeatState::Active,
+                Some(&format!("restarted on {} ({})", plan.cli, plan.model)),
+                now,
+            )?;
+        }
         tx.set_meta(&model_meta_key(&seat.id), &plan.model)?;
         tx.set_meta(&crate::quota::quota_meta_key(&seat.id), "0")?;
         tx.set_meta(&pending_meta_key(&seat.id), "")?;
