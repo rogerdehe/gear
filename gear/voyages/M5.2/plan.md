@@ -13,6 +13,8 @@ eta: 2h
 - 2026-10-30 07:05 config: gear/voyages/M5.2/gear.toml, CONVENTIONS.md and REVIEW.md, copied from M5.1 | why: nothing the captain writes spans voyages | else: -
 - 2026-10-30 02:53 release: v0.5.6 published: T-443's merge c5ce5c68 merged into main, tagged v0.5.6, GitHub release from docs/releases/v0.5.6.md (T-441, T-442); the shared engine runs it since 07:53Z; on the other project's store the board now shows M1.1 (246 done) instead of the plan-less M1.1-cancelled, checked with `gear board --json` and on its board pane | why: done clauses (2) and (3)
 - station M-6420: keep course 39 min in; all three tasks merged and v0.5.6 runs; the landing waits for the user's word
+- station M-6426: keep course; every M5.2 task merged and v0.5.6 runs on the shared engine; the landing and the lanes' retirement wait for the user's word
+- station M-6427: keep course; same as M-6426
 
 # Queue
 
