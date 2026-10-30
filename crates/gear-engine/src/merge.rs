@@ -1301,6 +1301,11 @@ fn other_candidates(
             if row.id == task {
                 continue;
             }
+            // A cancelled task never lands: work of it that this candidate
+            // carries is this candidate's own, never a task to wait for.
+            if row.state == gear_model::TaskState::Cancelled {
+                continue;
+            }
             let attempts = tx.attempts_of_task(project, &row.id)?;
             let Some(latest) = attempts.last() else {
                 continue;
