@@ -83,6 +83,15 @@ pub struct ApplyResult {
 ///      integration branch (T-112: its merge was given up; a done task whose
 ///      work is merged stays uncancellable); `ready` only from Draft (a Done
 ///      task reopens by a `# Verdicts` fail, T-90, not by a queue line);
+///    - a `NEW` block, or an existing task's block that changes its milestone,
+///      whose `milestone=` names a milestone that has neither a
+///      `# Milestone <id>` block in this plan file nor a stored voyage with a
+///      non-empty done sentence (T-442) → `<task>: milestone <id> is not
+///      described: add a `# Milestone <id>` block with its done, bar and eta,
+///      or use a milestone the plan describes`. A task already in such a
+///      milestone that the plan does not move is history and stays, and
+///      cancelling a task keeps its milestone (a cancelled block that moves
+///      one is checked like any other);
 /// 6. writes: `NEW` → `T-<n>` via `next_id`, state Ready, contract v1; an existing
 ///    task whose goal/accept/evidence differs from its current contract → new
 ///    contract version; rank = position in the draft (1, 2, …), unmentioned
@@ -392,6 +401,31 @@ fn apply_queue(
                 if item.state.is_some() {
                     return Err(bad(item.line, "`state=` is only for existing tasks"));
                 }
+            }
+        }
+        // A task sails on a voyage the plan describes (T-442): a milestone no
+        // `# Milestone` block in this file and no departure with a done
+        // sentence in the store describes is a typo or a made-up id, and a
+        // voyage row for it carried no words at all. A task already in such a
+        // milestone that the plan does not move is history and stays as it is;
+        // a block that moves a task into one, or a `NEW` block, is refused.
+        // Cancelling keeps a task's milestone, so a cancelled block is checked
+        // like any other that moves one.
+        if let Some(milestone) = item.milestone.as_deref() {
+            let moves = match &item.id {
+                Some(id) => existing
+                    .get(id)
+                    .is_none_or(|task| task.milestone.as_deref() != Some(milestone)),
+                None => true,
+            };
+            if moves && !milestone_described(tx, project, draft, milestone)? {
+                let task = item.id.clone().unwrap_or_else(|| "NEW".to_string());
+                return Err(bad(
+                    item.line,
+                    format!(
+                        "{task}: milestone {milestone} is not described: add a `# Milestone {milestone}` block with its done, bar and eta, or use a milestone the plan describes"
+                    ),
+                ));
             }
         }
         // A task that would take longer than the project's cap is cut into
@@ -1156,6 +1190,28 @@ fn apply_queue(
 
 fn bad(line: usize, detail: impl std::fmt::Display) -> GearError {
     GearError::new(ErrorCode::BadFormat, format!("line {line}: {detail}"))
+}
+
+/// Whether the plan describes this milestone (T-442): a `# Milestone <id>`
+/// block in this file, or a voyage the store keeps a done sentence for (the
+/// words of a block an earlier apply recorded, T-333).
+fn milestone_described(
+    tx: &Tx<'_>,
+    project: &str,
+    draft: &Draft,
+    milestone: &str,
+) -> GearResult<bool> {
+    if draft
+        .milestones
+        .iter()
+        .any(|(header, _)| crate::draft::milestone_parts(header).0 == milestone)
+    {
+        return Ok(true);
+    }
+    Ok(tx
+        .get_voyage(project, milestone)?
+        .and_then(|voyage| voyage.done)
+        .is_some_and(|done| !done.trim().is_empty()))
 }
 
 /// The done tasks this draft cancels whose accepted work is **not** on their

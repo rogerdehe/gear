@@ -10,7 +10,7 @@ use gear_app::identity::Fingerprint;
 use gear_app::plan::{apply, render_task_packet};
 use gear_app::Env;
 use gear_model::{ErrorCode, GearCtx, SeatRole, TaskState};
-use gear_store::{testing, Store};
+use gear_store::{testing, ContractRow, Store, TaskRow};
 
 const NOW: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
@@ -514,14 +514,14 @@ fn an_untouched_old_milestone_keeps_applying() {
 fn the_departure_is_the_first_task_creation_even_without_the_block() {
     let mut s = world();
     // base 0: only the queue, one task on M1, and no M1 block — refused, and
-    // nothing is written (T-333): a task sails on a voyage the file describes,
-    // and the store has no words for M1.
+    // nothing is written (T-333, T-442): a task sails on a voyage the file
+    // describes, and the store has no words for M1.
     let first_task = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     let err = run(&mut s, first_task, "r1-bare", NOW).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
         err.detail.contains(
-            "the plan names milestone M1 (NEW) but has no `# Milestone M1: <title>` block with its done:, bar: and eta: lines (T-22)"
+            "NEW: milestone M1 is not described: add a `# Milestone M1` block with its done, bar and eta, or use a milestone the plan describes"
         ),
         "{}",
         err.detail
@@ -595,6 +595,140 @@ fn a_cancelled_task_of_a_milestone_without_words_needs_no_block() {
     let result = run(&mut s, cancel, "r2", NOW + 10).unwrap();
     assert!(result.milestone_blocks.is_empty(), "{:?}", result.milestone_blocks);
     assert_eq!(result.cancelled, vec!["T-1".to_string()]);
+}
+
+/// T-442: a `NEW` block names a milestone no `# Milestone` block and no
+/// stored voyage with a done sentence describes — a typo or a made-up id. It
+/// is refused before anything is written, so it never becomes a voyage with
+/// a departure and no words (the phantom that blanked another project's
+/// board).
+#[test]
+fn a_new_task_on_a_milestone_no_plan_describes_is_refused() {
+    let mut s = world();
+    let text = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M1.1-cancelled\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    let err = run(&mut s, text, "r1", NOW).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        err.detail.contains(
+            "NEW: milestone M1.1-cancelled is not described: add a `# Milestone M1.1-cancelled` block with its done, bar and eta, or use a milestone the plan describes"
+        ),
+        "{}",
+        err.detail
+    );
+    // Nothing was written: no plan version, no task, no voyage row.
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 0);
+    assert!(s.read(|tx| tx.tasks_of_project("p")).unwrap().is_empty());
+    assert!(s.read(|tx| tx.get_voyage("p", "M1.1-cancelled")).unwrap().is_none());
+}
+
+/// T-442: the same for a block that **moves** an existing task: a milestone
+/// the plan does not describe is refused, and the task stays where it was.
+#[test]
+fn a_task_moved_to_a_milestone_no_plan_describes_is_refused() {
+    let mut s = world();
+    run(&mut s, &plan(0, FULL), "r1", NOW).unwrap();
+    let moved = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-1 [must] lane=heat milestone=M1.1-cancelled\ngoal: A\naccept: a\ndeps: -\n";
+    let err = run(&mut s, moved, "r2", NOW + 10).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        err.detail.contains(
+            "T-1: milestone M1.1-cancelled is not described: add a `# Milestone M1.1-cancelled` block with its done, bar and eta, or use a milestone the plan describes"
+        ),
+        "{}",
+        err.detail
+    );
+    // Cancelling keeps a task's milestone, so a cancelled block that moves one
+    // is refused too — it is a move into the milestone, not out of it.
+    let cancel = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-1 [must] lane=heat milestone=M1.1-cancelled\ngoal: A\naccept: a\ndeps: -\nstate: cancelled\n";
+    let err = run(&mut s, cancel, "r3", NOW + 20).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(err.detail.contains("milestone M1.1-cancelled is not described"), "{}", err.detail);
+    // Nothing was written by either refusal.
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 1);
+    let task = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+    assert_eq!(task.milestone.as_deref(), Some("M1"));
+    assert_eq!(task.state, TaskState::Ready);
+    assert!(s.read(|tx| tx.get_voyage("p", "M1.1-cancelled")).unwrap().is_none());
+}
+
+/// T-442: a voyage the store keeps a done sentence for is described, so a
+/// queue-only plan may move a task into it (the file gets its block back,
+/// T-333).
+#[test]
+fn a_task_moved_to_a_milestone_the_store_describes_is_applied() {
+    let mut s = world();
+    let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    run(&mut s, first, "r1", NOW).unwrap();
+    let second = "<!-- gear-plan project=p base=1 -->\n# Milestone M2: the next one\ndone: users install v2\nbar: it holds\neta: 4h\n# Queue\n## NEW [should] lane=heat milestone=M2\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
+    run(&mut s, second, "r2", NOW + 10).unwrap();
+
+    // No block in the file, but M2's words are in the store.
+    let moved = "<!-- gear-plan project=p base=2 -->\n# Queue\n## T-1 [must] lane=heat milestone=M2\ngoal: A\naccept: a\ndeps: -\n";
+    let result = run(&mut s, moved, "r3", NOW + 20).unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().milestone.as_deref(),
+        Some("M2")
+    );
+    assert_eq!(result.milestone_blocks.len(), 1, "{:?}", result.milestone_blocks);
+    assert!(result.milestone_blocks[0].starts_with("# Milestone M2: the next one"), "{:?}", result.milestone_blocks);
+}
+
+/// T-442: a task already in a milestone no plan describes — history, written
+/// by an earlier apply — is left as it is when the plan does not move it: a
+/// block that cancels the task names the same milestone, which is no move,
+/// and cancelling keeps the milestone.
+#[test]
+fn a_task_already_in_an_undescribed_milestone_is_left_alone() {
+    let mut s = world();
+    // The store keeps T-1 on M0 with no `# Milestone M0` block and no voyage.
+    s.write(|tx| {
+        tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: "p".into(),
+            id: "T-1".into(),
+            rank: 1,
+            state: TaskState::Ready,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: Some("M0".into()),
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: Some(30),
+            issue: None,
+            updated: NOW,
+        })?;
+        tx.insert_contract(&ContractRow {
+            project: "p".into(),
+            task: "T-1".into(),
+            version: 1,
+            goal: "A".into(),
+            accept: "a".into(),
+            evidence_files: vec![],
+            evidence_due_min: None,
+            body: String::new(),
+            created: NOW,
+            mechanical: None,
+        })
+    })
+    .unwrap();
+
+    // A block that cancels the task moves nothing: the history stays, no block
+    // is owed (T-333 skips a cancelled line), and the task keeps its milestone.
+    let cancel = "<!-- gear-plan project=p base=0 -->\n# Queue\n## T-1 [must] lane=heat milestone=M0\ngoal: A\naccept: a\ndeps: -\nstate: cancelled\n";
+    let result = run(&mut s, cancel, "r1", NOW).unwrap();
+    assert!(result.milestone_blocks.is_empty(), "{:?}", result.milestone_blocks);
+    assert_eq!(result.cancelled, vec!["T-1".to_string()]);
+    let task = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+    assert_eq!(task.milestone.as_deref(), Some("M0"));
+    assert_eq!(task.state, TaskState::Cancelled);
 }
 
 /// R2 (review): a grandfathered milestone whose block arrives later keeps the

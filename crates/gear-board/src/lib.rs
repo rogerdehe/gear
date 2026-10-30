@@ -1842,13 +1842,26 @@ fn workload_voyage(
     if let Some(report) = active.first() {
         return Ok(Some(report.clone()));
     }
-    Ok(voyage::reports_including_finished(tx, project, now)?
+    let mut finished: Vec<voyage::VoyageReport> = voyage::reports_including_finished(tx, project, now)?
         .into_iter()
         .filter(|report| !active.iter().any(|one| one.milestone == report.milestone))
         // A departed voyage: its elapsed time is known.
         .filter(|report| report.elapsed_min.is_some())
-        // The latest departure is the one with the least elapsed time.
-        .min_by_key(|report| report.elapsed_min.unwrap_or(i64::MAX)))
+        .collect();
+    // The latest departure is the one with the least elapsed time.
+    finished.sort_by_key(|report| report.elapsed_min.unwrap_or(i64::MAX));
+    // With no voyage sailing, the board shows the latest voyage the plan
+    // described (T-441): a milestone the plan never described has no done
+    // sentence, and showing it would show a voyage with no goal. A project
+    // with only such milestones still shows one: today's choice, the latest
+    // departure.
+    let described = finished
+        .iter()
+        .find(|report| report.done.as_deref().is_some_and(|done| !done.trim().is_empty()));
+    Ok(match described {
+        Some(report) => Some(report.clone()),
+        None => finished.into_iter().next(),
+    })
 }
 
 /// The quota readings of the providers (§9.1): the meta keys
