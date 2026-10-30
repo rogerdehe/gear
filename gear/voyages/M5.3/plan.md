@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=887 -->
+<!-- gear-plan project=gear base=888 -->
 # Goal
 A short trial voyage of the self-hosted lane model: two lanes on pi with hk-dgx-1/DeepSeek-V4.1-Flash-1017 (thinking high) each deliver small, well-bounded tasks taken from M6's first station, through review and the merge gate, so we learn before M6 whether that model and its machine carry two lanes at once. No release: the merged work ships with M6's first release.
 
@@ -14,17 +14,17 @@ eta: 1h
 
 # Queue
 
-## NEW [now] lane=hull milestone=M5.3 required
+## T-444 [now] lane=hull milestone=M5.3 required
 goal: A reviewer is told when its direction check is closed without its result (M5.2: review-9 kept checking T-442 after the hand-in closed the job; its `gear send` was refused with "this seat does not hold the direction job for that attempt", and it spent minutes looking for the cause). Change crates/gear-engine/src/review.rs fn finish_direction_results only, no other design: inside its `store.write`, when a running job is closed with no result (`!live && result.is_none()`) and its seat still holds it (the same test as the Standby step below it: Active, the job's generation, task_id == the task), insert one message to that seat before the job is closed: `NewMessage { meta: None, project, thread: format!("direction:{}:{}:{sha}", task.id, attempt.n), task: Some(task.id), attempt: Some(attempt.n), sender: "engine", sender_gen: 0, recipient: seat_id, kind: MsgKind::Instruction, urgent: false, body, reply_to: None, needs_ack: false, state: MsgState::Open, created: now }` with body `The direction check of <task> attempt <n> is closed: the attempt was handed in or ended. Send nothing for it; end your turn.` The job is closed in the same transaction (its meta becomes `{"checked_sha":…}`), so the message is sent once. A job closed with a result, or a live job, sends nothing new. The code change is in review.rs only; the test goes in its tests module next to `a_hand_in_closes_a_direction_check_that_never_answers`.
 accept: Engine tests: in the setup of `a_hand_in_closes_a_direction_check_that_never_answers`, after `finish_direction_results` the seat `p:review-1` has exactly one message with that body; a second `finish_direction_results` adds none; a direction check that answered `ok` before the hand-in gets no such message. Run only `make check CRATE=gear-engine TESTS='test(/review::tests::.*direction/)'`; the merge gate runs `make gate`.
 estimate: 15
 
-## NEW [now] lane=mast milestone=M5.3 required
+## T-445 [now] lane=mast milestone=M5.3 required
 goal: The board's voyage list shows only voyages a plan described (2026-10-30: another project's board listed `M1.1-cancelled`, a milestone with one cancelled task and no title or done sentence, next to its real voyages). Change crates/gear-board/src/lib.rs only, no other design: where `voyage_list` is built from `entries` (the filter `entry.departure.is_some()`), also keep only entries whose `done` is Some and not empty after trim. Nothing else changes: the shown voyage is still chosen as T-441 made it, a milestone named explicitly still shows, and `[`/`]` move through the filtered list (when the shown voyage is not in it, they do nothing, as today). The code change is in lib.rs only; the test goes in crates/gear-board/tests/it/voyage_select_contract.rs.
 accept: A board test: a store with M1 (a done sentence, departed) and M1-x (departed later, one cancelled task, no done sentence) has a `voyage_list` of M1 only; with an M2 that has a done sentence too, the list is M2 then M1. Run only `make check CRATE=gear-board TESTS='test(/voyage/)'`; the merge gate runs `make gate`.
 estimate: 15
 
-## NEW [now] lane=mast milestone=M5.3 required
+## T-446 [now] lane=mast milestone=M5.3 required
 goal: The two gear-cli tests in crates/gear-cli/tests/it/admin_init_contract.rs that both call `scratch("stale")` (`a_stale_captain_generation_may_not_register` and `a_changed_seat_branch_prints_the_worktree_it_leaves_behind`) each get their own tag, so they never share a scratch directory when they run in one process (M5 F-153: plain `cargo test` failed). Change, no other design: the second one calls `scratch("seat-branch-moved")`; no other test or file changes.
 accept: `grep -c 'scratch("stale")' crates/gear-cli/tests/it/admin_init_contract.rs` prints 1; both tests pass. Run only `make check CRATE=gear-cli TESTS='test(/a_stale_captain_generation_may_not_register|a_changed_seat_branch_prints_the_worktree_it_leaves_behind/)'`; the merge gate runs `make gate`.
 estimate: 10
