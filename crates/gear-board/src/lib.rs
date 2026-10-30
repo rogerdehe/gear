@@ -667,9 +667,13 @@ pub fn project_for(
     };
     // A landed voyage keeps its data: its lanes are retired at the landing.
     let landed = shown.as_ref().is_some_and(|entry| !entry.sailing);
+    // A voyage the plan described carries a done sentence (T-445): a
+    // milestone it never described has none, and the first row must not list
+    // it next to the real voyages.
     let mut voyage_list: Vec<VoyageEntry> = entries
         .into_iter()
         .filter(|entry| entry.departure.is_some())
+        .filter(|entry| entry.done.as_deref().is_some_and(|done| !done.trim().is_empty()))
         .collect();
     // The newest departure is the voyage the captain has just sent out.
     voyage_list.sort_by(|left, right| right.departure.cmp(&left.departure));

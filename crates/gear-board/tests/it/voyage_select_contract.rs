@@ -456,10 +456,10 @@ fn a_plan_less_milestone_that_departed_later_does_not_hide_the_landed_voyage() {
     assert_eq!(plan.totals.tasks, 1, "the tasks of M1: {:?}", plan.totals);
     assert_eq!(plan.totals.done, 1);
 
-    // The voyage list keeps every departure, the plan-less milestone included,
-    // so `[` and `]` still reach it.
+    // The voyage list shows the voyages the plan described only (T-445): the
+    // plan-less milestone is not listed, though naming it still shows it.
     let list: Vec<&str> = plan.voyage_list.iter().map(|e| e.milestone.as_str()).collect();
-    assert_eq!(list, vec!["M1.1-cancelled", "M1"], "the voyage list: {list:?}");
+    assert_eq!(list, vec!["M1"], "the voyage list: {list:?}");
 
     // A voyage named with a milestone is unchanged: M1.1-cancelled is shown.
     let named = board(&mut store, Some("M1.1-cancelled"));
@@ -490,6 +490,32 @@ fn a_project_with_only_a_plan_less_milestone_still_shows_it() {
     let shown = plan.shown.expect("the shown voyage");
     assert_eq!(shown.milestone, "M1.1-cancelled");
     assert!(!shown.sailing);
+}
+
+/// T-445: a milestone the plan never described — departed, with a task it cut
+/// and no done sentence — is not a voyage of the first row; a described voyage
+/// that departed later is listed first.
+#[test]
+fn the_voyage_list_shows_only_the_voyages_a_plan_described() {
+    let mut store = world_landed();
+    store
+        .write(|tx| {
+            planless(tx, "M1.1-cancelled", NOW - 1800)?;
+            task(tx, "T-5", 5, "M1.1-cancelled", "old", TaskState::Cancelled)
+        })
+        .unwrap();
+
+    let plan = board(&mut store, None);
+    let list: Vec<&str> = plan.voyage_list.iter().map(|e| e.milestone.as_str()).collect();
+    assert_eq!(list, vec!["M1"], "the voyage list: {list:?}");
+    // The shown voyage is still chosen as T-441 made it: M1.
+    assert_eq!(plan.shown.as_ref().map(|voyage| voyage.milestone.as_str()), Some("M1"));
+
+    // A described voyage that departed later is listed first, M1 after it.
+    store.write(|tx| voyage(tx, "M2", NOW - 600)).unwrap();
+    let plan = board(&mut store, None);
+    let list: Vec<&str> = plan.voyage_list.iter().map(|e| e.milestone.as_str()).collect();
+    assert_eq!(list, vec!["M2", "M1"], "the voyage list: {list:?}");
 }
 
 /// T-441: an active voyage still wins over the described landed one.
