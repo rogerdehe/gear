@@ -20,6 +20,7 @@ station S4: the captain's plan tools, released as v0.6.3
 - 2026-10-30 10:30 scope: the captain cannot lower the bar alone: goal, done, bar, eta, a new milestone's departure and moves between milestones go through one confirmed path with a decision line; cancel lines change the state only; landing needs every done clause met with its evidence, or the user's word; the user confirms in the conversation with the captain, GEAR enforces the path and the record and shows every such change; the board's voyage list hides plan-less milestones | why: user | else: a skill sentence the captain could ignore
 - 2026-10-30 11:40 hand-fix: the departure sheet: new skill topic `gear --skill departure` (references/departure.md) with its form; captain.md shows it before every voyage departs, after the whole plan is written, and starts nothing before the user's word; it ships with M6's release | why: user: captains never showed the voyage before departing, and this voyage departs with it
 - 2026-10-30 12:10 model: both lanes on pi with the self-hosted hk-dgx-1/DeepSeek-V4.1-Flash-1017, thinking high (args), 600K; reviewers unchanged; measured before departure: one request reading merge.rs (~80K tokens) took 71 s alone, two at once 54 s and 65 s, both correct | why: user: try the self-hosted model | else: one lane if two at once prove too slow in the voyage, then tokenrhythm/deepseek-v4.1-flash-1017
+- 2026-10-30 11:50 scope: moved to the trial voyage M5.3: the reviewer told when a hand-in closes its direction check, the board's voyage list without plan-less milestones, and the scratch-tag half of the gear-cli test task; M6 departs after M5.3, at 14:30 if the trial goes well | why: user: try the self-hosted model first | else: -
 
 # Queue
 <!-- Lanes as in M5: hull owns crates/gear-engine, gear-app, gear-store, gear-model, gear-usage; mast owns gear-cli, gear-herdr, gear-board, gear-forge, skills, docs, Makefile. Estimates are first cuts; each contract is written in full, against merged code, before departure. -->
@@ -66,13 +67,8 @@ accept: One engine or app test per item. Run make check CRATE=gear-engine and CR
 estimate: 50
 
 ## NEW [now] lane=mast milestone=M6 station=S1 required
-goal: [S1] gear-cli's two tests that share the scratch tag "stale" each get their own (F-153), so plain `cargo test` passes; `gear admin init` names each reviewer by its entry's CLI and checks its model against that CLI.
-accept: `cargo test -p gear-cli` passes twice in a row; an init with [temps] kind pi and a codex review entry prints "reviewers: … codex …". Run make check CRATE=gear-cli.
-estimate: 20
-
-## NEW [now] lane=hull milestone=M6 station=S1 required
-goal: [S1] A reviewer is told when a hand-in closes its direction check (M5.2: review-9 kept checking T-442 after the hand-in closed the job, its `gear send` was refused with "does not hold the direction job", and it spent minutes looking for the cause): the engine sends the seat one line, "The direction check of T-<n> was closed by its hand-in; end your turn."
-accept: Engine test: a hand-in that closes a running direction check sends that line to the seat once. Run make check CRATE=gear-engine.
+goal: [S1] `gear admin init` names each reviewer by its entry's CLI and checks its model against that CLI (the scratch-tag half moved to M5.3).
+accept: An init with [temps] kind pi and a codex review entry prints "reviewers: … codex …". Run make check CRATE=gear-cli.
 estimate: 15
 
 ## NEW [now] lane=mast milestone=M6 station=S1 required
@@ -84,11 +80,6 @@ estimate: 15
 goal: [S1] A captain cannot lower the bar on its own; every such change goes through the user's word in the conversation and stays visible (2026-10-30: another project's captain cancelled T-70 into a new milestone `M1.1-cancelled`; today a captain can also write a new milestone with an easy done sentence, move hard tasks into it, or cancel tasks until "every task merged" holds). The user confirms in the conversation with the captain; GEAR cannot see that conversation, so it enforces the path and the record, not the user's identity. Change crates/gear-app (plan.rs, goal.rs, voyage.rs and the plan parser as needed), no other design: (1) one confirmed path: the goal, done, bar or eta of a departed milestone, the departure of a new milestone, and moving a task between milestones are applied only with `--confirmed` and a `# Decisions` line `- <time> confirmed: <what changes, before -> after> | why: <the user's reason>` in the same apply; without both, the apply is refused and nothing is written; (2) a cancel line changes the state only: a cancel line that also changes the task's milestone, lane or any other field is refused; (3) the goal check is written by the captain, one line per done clause, `- done (<n>): met | evidence: <what proves it>` or `- done (<n>): open | <why>`, stored as today's `goal-check:<project>:<milestone>` meta the board already reads; (4) `station <id>: land` is refused while a done clause is not met or while the tasks cancelled or moved out since departure exceed 20 % of the departure's tasks, unless the apply is `--confirmed` with a `confirmed:` line naming the open clauses or the cut; (5) the voyage report lists every `confirmed:` line, every cancelled or moved task with its line, and each done clause with its evidence. The skill's captain reference says in one paragraph: these changes are the user's, asked in the conversation; the decision line is the record. The code change is in gear-app only, plus that paragraph in skills/gear/references/captain.md (an allowed edit).
 accept: App tests: a goal change, a new milestone's departure and a move between milestones are refused without `--confirmed` and its line, applied with them; a cancel line that changes the milestone is refused; `done (1): met | evidence: …` lines reach the meta the board reads; a landing with an open clause or with 3 of 10 tasks cut is refused, and applied with `--confirmed` and its line; the voyage report lists them. Run make check CRATE=gear-app.
 estimate: 60
-
-## NEW [now] lane=mast milestone=M6 station=S1 required
-goal: [S1] The board's voyage list shows only voyages the plan described (2026-10-30: another project's board lists `M1.1-cancelled`, a milestone with one cancelled task and no title or done sentence, next to its real voyages). Change crates/gear-board/src/lib.rs only, no other design: the voyage list for `[`, `]` and clicks keeps only entries with a non-empty done sentence; a milestone named explicitly still shows; the default choice stays as T-441 made it. The code change is in lib.rs only; tests go where the crate keeps them.
-accept: A board test: a store with M1 (described) and M1-x (one cancelled task, no done sentence) lists only M1. Run make check CRATE=gear-board.
-estimate: 15
 
 ## NEW [now] lane=hull milestone=M6 station=S2 required
 goal: [S2] Switch a seat's model in place: when the new model runs on the seat's current CLI, the engine switches it through the CLI's own model command at the next idle moment; the agent and its conversation stay, and no handover is written.
