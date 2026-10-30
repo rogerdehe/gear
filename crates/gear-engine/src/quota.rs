@@ -4262,6 +4262,117 @@ quota_reset_h = {reset_h}
         assert_eq!(api.sessions().last(),Some(&None));
     }
 
+    /// A project with two lanes: `heat`, whose restart is pending, and `glow`,
+    /// whose own chain is one model — a quota step of its own is a park.
+    fn two_lane_config() -> String {
+        r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 2
+temps = 0
+
+[captain]
+pane = "w9:p1"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[[lanes]]
+name = "glow"
+duty = "everything"
+owns = ["lib/"]
+kind = "opencode"
+profile = "opencode"
+models = ["minimax-cn/MiniMax-M3.1-Flash"]
+
+[models]
+lanes = ["minimax-cn/MiniMax-M3.1-Flash", { model = "gpt-6.1-sol", cli = "codex" }]
+on_quota = { lanes = "fallback" }
+on_wait = "keep"
+quota_reset_h = 5
+"#
+            .to_string()
+    }
+
+    /// One seat's failed restart step is reported as an event and never stops
+    /// the rest of the project's quota tick: the other lane is still handled in
+    /// the same call (bcdc8d0a).
+    #[test]
+    fn one_seats_failed_restart_step_does_not_stop_the_other_seats_quota_step() {
+        const GLOW: &str = "w1:p2";
+        let mut store = world(&two_lane_config());
+        store
+            .write(|tx| testing::seed_active_seat(tx, "p", "glow", SeatRole::Lane, GLOW, "opencode", T0))
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.set_screen(PANE, QUOTA_SCREEN);
+        herdr.add_agent(GLOW, "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.set_screen(GLOW, QUOTA_SCREEN);
+        let cfg = cfg();
+        let heat = lane_seat(&mut store);
+        let glow = store.read(|tx| tx.get_seat("p:glow")).unwrap().unwrap();
+        let both = |quota: bool| {
+            let mut seats = observed(&heat, quota);
+            seats.extend(observed(&glow, quota));
+            seats
+        };
+
+        // The first quota tick: both lanes count it, neither acts yet.
+        apply_quota_policy(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", &both(true), T0 + 10)
+            .unwrap();
+        // The limit is confirmed for heat: its restart onto codex begins.
+        apply_quota_policy(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", &observed(&heat, true), T0 + 20)
+            .unwrap();
+        assert!(crate::restart::pending(&mut store, "p:heat").unwrap().is_some());
+        // The old agent is gone; the start is refused once, so the generation
+        // is reserved and the restart waits before its finish phase.
+        herdr.exit_agent(PANE);
+        herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
+        apply_quota_policy(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", &observed(&heat, false), T0 + 30)
+            .unwrap();
+        let plan = crate::restart::pending(&mut store, "p:heat").unwrap().unwrap();
+        assert_eq!(plan.phase, crate::restart::Phase::Start);
+        assert_eq!(lane_seat(&mut store).state, SeatState::Starting);
+
+        // heat's seat is retired mid-restart: `Active` can no longer be reached.
+        store
+            .write(|tx| tx.set_seat_state("p:heat", SeatState::Retired, Some("retired mid-restart"), T0 + 35))
+            .unwrap();
+
+        // The finish of that restart fails; glow's confirmed limit parks it in
+        // the same call.
+        let report = apply_quota_policy(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", &both(true), T0 + 40)
+            .unwrap();
+
+        assert_eq!(report.events.len(), 2, "{:?}", report.events);
+        assert!(
+            report.events[0].starts_with("p:heat: restart step failed:")
+                && report.events[0].contains("retired -> active"),
+            "{:?}",
+            report.events
+        );
+        // The failed step is reported, not lost: the plan waits for the next tick.
+        assert!(crate::restart::pending(&mut store, "p:heat").unwrap().is_some());
+        // The other lane is still handled in the same call.
+        assert!(
+            report.events[1].starts_with("p:glow: parked until") && report.events[1].contains("chain exhausted"),
+            "{:?}",
+            report.events
+        );
+        assert_eq!(store.read(|tx| tx.get_seat("p:glow")).unwrap().unwrap().state, SeatState::Parked);
+    }
+
     /// A project with a codex reviewer and a codex source without a key file
     /// (§9.1, F4).
     fn codex_world() -> Store {

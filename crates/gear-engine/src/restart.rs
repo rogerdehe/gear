@@ -1627,3 +1627,143 @@ lanes = [{{model="{model}", cli="{kind}"}}]
     }
 
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gear_app::config::{ModelEntry, ModelSpec};
+    use gear_herdr::fake::FakeHerdr;
+    use gear_model::{SeatRole, TaskState};
+    use gear_store::{testing, ContractRow, TaskRow};
+
+    const T: i64 = 1_800_000_000;
+    const PANE: &str = "w1:p3";
+
+    fn config() -> String {
+        r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "work"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[models]
+lanes = ["minimax-cn/MiniMax-M3.1-Flash", {model="gpt-6.1-sol", cli="claude"}]
+"#
+        .to_string()
+    }
+
+    /// A project with the lane's task T-1 started (a Continue can be
+    /// delivered) and its seat active on opencode in `PANE`.
+    fn world() -> (Store, FakeHerdr, EngineCfg) {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T)?;
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config();
+                tx.update_project(&project)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, PANE, "opencode", T)?;
+                testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T)?;
+                tx.insert_task(&TaskRow { repo:None,base:None,gate:None,rework_estimate_min:None,project:"p".into(),id:"T-1".into(),rank:1,state:TaskState::Ready,priority:"must".into(),lane:Some("heat".into()),milestone:None,required:false,contract_version:1,deps:vec![],followup_of:None,wait_on:None,wait_cond:None,rework_note:None,estimate_min:Some(10),issue:None,updated:T })?;
+                tx.insert_contract(&ContractRow { project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"done".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T,mechanical:None })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", AgentStatus::Idle);
+        let mut cfg = EngineCfg::default();
+        cfg.db_path = crate::testtmp::temp("gear-engine-restart-tests").join("gear.db").to_string_lossy().into_owned();
+        cfg.profiles = gear_herdr::builtins();
+        (store, herdr, cfg)
+    }
+
+    fn lane_seat(store: &mut Store) -> SeatRow {
+        store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap()
+    }
+
+    fn step(
+        store: &mut Store,
+        herdr: &mut FakeHerdr,
+        cfg: &EngineCfg,
+        target: Option<&ModelEntry>,
+        now: Ts,
+    ) -> GearResult<Option<String>> {
+        let seat = lane_seat(store);
+        advance(store, herdr, cfg, &cfg.profiles, "p", &seat, target, now)
+    }
+
+    /// Onboarding may set the restarted agent's seat `Active` on the plan's
+    /// generation before the finish phase: the finish accepts it, books the
+    /// model and the Continue, and clears the plan.
+    #[test]
+    fn finish_accepts_a_seat_onboarding_made_active_on_the_plans_generation() {
+        let (mut store, mut herdr, cfg) = world();
+        let target = ModelEntry::Entry(ModelSpec {
+            model: "gpt-6.1-sol".into(),
+            cli: Some("claude".into()),
+            args: vec![],
+            context_window_k: None,
+        });
+        // The plan begins: the old agent is asked to exit.
+        assert_eq!(step(&mut store, &mut herdr, &cfg, Some(&target), T + 10).unwrap(), None);
+        assert!(pending(&mut store, "p:heat").unwrap().is_some());
+
+        // The old agent is gone; the start is refused once, so the generation
+        // is reserved and the seat waits in `Starting` before the finish.
+        herdr.exit_agent(PANE);
+        herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
+        assert_eq!(step(&mut store, &mut herdr, &cfg, None, T + 11).unwrap(), None);
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Starting, "{:?}", seat.state_reason);
+        let plan = pending(&mut store, "p:heat").unwrap().unwrap();
+        assert_eq!(plan.phase, Phase::Start);
+        assert_eq!(seat.generation, plan.generation);
+        assert_eq!(plan.generation, 2);
+
+        // Onboarding made the new agent's seat Active on the plan's generation
+        // before the finish phase.
+        store
+            .write(|tx| tx.set_seat_state("p:heat", SeatState::Active, Some("onboarded"), T + 12))
+            .unwrap();
+
+        let line = step(&mut store, &mut herdr, &cfg, None, T + 13)
+            .unwrap()
+            .expect("a seat already Active on the plan's generation finishes the restart");
+        assert!(line.contains("restarted on claude (gpt-6.1-sol)"), "{line}");
+        assert_eq!(pending(&mut store, "p:heat").unwrap(), None, "the plan is cleared");
+        assert_eq!(
+            store.read(|tx| tx.get_meta(&model_meta_key("p:heat"))).unwrap().as_deref(),
+            Some("gpt-6.1-sol"),
+            "the model meta is the plan's model"
+        );
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Active);
+        assert_eq!(seat.generation, plan.generation);
+        let ops = store
+            .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Deliver))
+            .unwrap();
+        assert_eq!(ops.len(), 1, "one Continue for the open attempt: {ops:?}");
+        assert_eq!(ops[0].task.as_deref(), Some("T-1"));
+        assert_eq!(ops[0].attempt, Some(1));
+        assert_eq!(ops[0].generation, plan.generation);
+        assert_eq!(ops[0].state, OpState::Intended);
+    }
+}
