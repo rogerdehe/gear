@@ -910,6 +910,13 @@ fn finish_start(
             if let Some(entry) = entry {
                 tx.set_meta(&crate::model::model_meta_key(&seat.id), entry.model())?;
             }
+            // T-447: onboarding starts the lane on its chain head, so the
+            // fingerprint is recorded here too; reconciliation then sees no
+            // config change in this or a later tick.
+            if let Some(lane) = config.lanes.iter().find(|lane| lane.name == seat.name) {
+                let desired = crate::restart::desired_config(config, &seat.name, &lane.kind);
+                tx.set_meta(&format!("engine.restart_config.{}", seat.id), &desired.to_string())?;
+            }
             Ok(())
         })
         .map_err(|e| format!("finish_onboard: {}", e.detail))?;
