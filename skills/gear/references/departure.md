@@ -4,6 +4,7 @@ Before every voyage departs, show the user its departure sheet in the chat and a
 
 Rules:
 - Write it in the user's language, as Markdown tables in the chat. Never use a dialog tool for it. GEAR's own words (task ids, commands, model ids, paths) stay as they are.
+- Show it only when your own work is finished: every contract written, the loads balanced, every task in the plan. The sheet asks the user for decisions, not for patience.
 - Every line comes from the config and the plan you are about to apply. Show nothing you have not written, and leave nothing out that you will apply.
 - Keep it short: one line per task, one line per lane. The contracts stay in the plan.
 - When the user changes something, change the config or the plan, then show the whole sheet again with each changed line marked `(changed)`. Repeat until the user says to depart.
@@ -48,9 +49,9 @@ Rules:
 Quota: lanes <n>, temps <n>. On a quota limit: <fallback to <model> / wait>; agents through a long wait: <keep / release>.
 
 ### 6. Open points
-<what you need the user to decide, one per line; or "None.">
+<only what the user must decide, one per line; or "None." Your own unfinished work never goes here.>
 
 **Depart now, or what should change?**
 ```
 
-Fill every cell; write `-` where a cell has nothing. If the loads of the lanes differ by more than a third, rebalance the owned paths before you show the sheet, or say why in Open points.
+Fill every cell; write `-` where a cell has nothing. If the loads of the lanes differ by more than a third, rebalance the owned paths before you show the sheet.
