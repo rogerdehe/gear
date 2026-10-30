@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=879 -->
+<!-- gear-plan project=gear base=880 -->
 # Goal
 Fix the problems another project's fleet hits on the shared engine as they come in, and ship each batch at once as a small release (v0.5.4 and later), so that fleet never waits on GEAR. M5.1 is a voyage planned as it goes: it lasts as long as that project's current voyage, and its plan grows with each problem that project's captain reports.
 
