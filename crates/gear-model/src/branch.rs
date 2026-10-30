@@ -29,6 +29,15 @@ pub fn expand(template: &str, project: &str, lane: &str, task: &str) -> String {
         .replace("{n}", &number(task))
 }
 
+/// The review branch of a task (T-253, T-438): the project's
+/// `[conventions].review_branch` template with `{project}`, `{lane}` and `{n}`
+/// filled in — `review/t<n>` by default (conventions 17 §3: the reviewers'
+/// branch). The engine hands it to the reviewer and the app checks the push
+/// onto it, so both read the same name.
+pub fn review_branch(template: &str, project: &str, lane: &str, task: &str) -> String {
+    expand(template, project, lane, task)
+}
+
 /// `template` with `{project}`, `{seat}` filled in: the branch of a seat's own
 /// worktree (T-252). The merge worktree is seat `merge`.
 pub fn expand_seat(template: &str, project: &str, seat: &str) -> String {
@@ -58,6 +67,15 @@ mod tests {
     fn the_defaults_are_the_names_gear_uses() {
         assert_eq!(expand(TASK_BRANCH, "p", "pay", "T-40"), "pay/t40");
         assert_eq!(expand(REVIEW_BRANCH, "p", "l", "T-7"), "review/t7");
+    }
+
+    #[test]
+    fn a_review_branch_is_the_projects_review_template() {
+        assert_eq!(review_branch(REVIEW_BRANCH, "p", "heat", "T-40"), "review/t40");
+        assert_eq!(
+            review_branch("b/{project}/review/t{n}", "acme", "heat", "T-40"),
+            "b/acme/review/t40"
+        );
     }
 
     #[test]

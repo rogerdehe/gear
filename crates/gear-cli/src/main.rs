@@ -1827,9 +1827,14 @@ fn cmd_send(c: SendCmd, json: bool) -> GearResult<()> {
     let mut herdr = open_herdr()?;
     let env = resolve_caller(&mut store, &mut herdr, env)?;
     // A hand-in must contain the project's current integration branch (T-19);
-    // the gate is built here, from this process's worktree and config.
+    // the gate is built here, from this process's worktree and config. A
+    // reviewer's verdict is checked the same way (T-438): its review branch
+    // must be on the project's remote, and the gate carries this process's
+    // working directory — the reviewer's own worktree.
     let base = match parse_kind(&c.kind)? {
-        gear_model::MsgKind::Result if c.direction.is_none() => Some(gear_app::base::gate_for(&mut store, &env)?),
+        gear_model::MsgKind::Result | gear_model::MsgKind::Review if c.direction.is_none() => {
+            Some(gear_app::base::gate_for(&mut store, &env)?)
+        }
         _ => None,
     };
     let out = run_send(&mut store, &env, &mut herdr, &c, body, base, now_ts(), json)?;
