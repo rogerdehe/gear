@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=884 -->
+<!-- gear-plan project=gear base=885 -->
 # Goal
 After a voyage lands, the board shows that voyage, not an empty one: a milestone no plan described never becomes a voyage. Released as v0.5.6.
 
@@ -11,6 +11,8 @@ eta: 2h
 - 2026-10-30 07:05 scope: fix at once the blank board another project saw after its M1.1 landed (user: handle it now): crates/gear-board/src/lib.rs fn workload_voyage, with no voyage sailing, takes the latest departure, and that store's milestone `M1.1-cancelled` (one cancelled task, no `# Milestone` block) departed after M1.1, so the board shows a voyage with no time, 0/0 tasks and a done sentence of 0 clauses; the item moves here from gear/voyages/M6/backlog.md | why: user | else: wait for M6
 - 2026-10-30 07:05 model: the same staffing as M5.1: lanes hull and mast on pi with tokenrhythm/deepseek-v4.1-flash-1017 (600K); reviewers on pi with tokenrhythm/deepseek-v4-pro-0813; quota lanes 2, temps 2 | why: user | else: -
 - 2026-10-30 07:05 config: gear/voyages/M5.2/gear.toml, CONVENTIONS.md and REVIEW.md, copied from M5.1 | why: nothing the captain writes spans voyages | else: -
+- 2026-10-30 02:53 release: v0.5.6 published: T-443's merge c5ce5c68 merged into main, tagged v0.5.6, GitHub release from docs/releases/v0.5.6.md (T-441, T-442); the shared engine runs it since 07:53Z; on the other project's store the board now shows M1.1 (246 done) instead of the plan-less M1.1-cancelled, checked with `gear board --json` and on its board pane | why: done clauses (2) and (3)
+- station M-6420: keep course 39 min in; all three tasks merged and v0.5.6 runs; the landing waits for the user's word
 
 # Queue
 
