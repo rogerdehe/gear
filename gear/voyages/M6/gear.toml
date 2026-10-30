@@ -22,8 +22,8 @@ profile = "claude"
 # M6: two lanes on DeepSeek V4.1 Flash on the self-hosted hk-dgx-1, thinking high, 600K context; one lane if two are too slow, TokenRhythm if one is.
 [[lanes]]
 name = "hull"
-duty = "M6 engine, app, store, model and usage: crates/gear-engine, gear-app, gear-store, gear-model, gear-usage (re-split 2026-10-29 for balance)"
-owns = ["crates/gear-engine/", "crates/gear-app/", "crates/gear-store/", "crates/gear-model/", "crates/gear-usage/"]
+duty = "M6 engine, model and usage: crates/gear-engine, gear-model, gear-usage"
+owns = ["crates/gear-engine/", "crates/gear-model/", "crates/gear-usage/"]
 kind = "pi"
 profile = "pi"
 models = [
@@ -32,8 +32,8 @@ models = [
 
 [[lanes]]
 name = "mast"
-duty = "M6 board, CLI, herdr, forge, skills, docs, scripts and the board prototype: everything outside hull's crates (re-split 2026-10-29)"
-owns = ["crates/gear-cli/", "crates/gear-herdr/", "crates/gear-board/", "crates/gear-forge/", "skills/", "Makefile", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml", "Cargo.lock"]
+duty = "M6 app, store, board, CLI, herdr, forge, skills, docs and build files: everything outside hull's crates"
+owns = ["crates/gear-app/", "crates/gear-store/", "crates/gear-cli/", "crates/gear-herdr/", "crates/gear-board/", "crates/gear-forge/", "skills/", "Makefile", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml", "Cargo.lock"]
 kind = "pi"
 profile = "pi"
 models = [
@@ -58,6 +58,9 @@ review = [
 ]
 on_quota = { lanes = "wait", review = "wait" }   # M5 (user): no fallback; spent means wait for the user
 quota_reset_h = 5
+
+[schedule]
+depart_at = "2026-10-30T14:00:00-05:00"   # M6 departs by itself at 14:00 local
 
 [conventions]
 integration = "dev"
