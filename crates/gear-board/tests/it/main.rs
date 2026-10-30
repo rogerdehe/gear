@@ -2,6 +2,7 @@
 mod board_contract;
 mod decisions_contract;
 mod deliveries_contract;
+mod depart_contract;
 mod deps_contract;
 mod forecast_contract;
 mod golden_contract;

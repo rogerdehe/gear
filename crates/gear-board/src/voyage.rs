@@ -13,6 +13,9 @@ pub struct VoyageReport {
     pub title: String,
     pub done: Option<String>,
     pub eta: Option<String>,
+    /// When the voyage departs, while it waits for its departure time (T-449):
+    /// `Some` only before it, `None` at and after it and without `[schedule]`.
+    pub departs_at: Option<Ts>,
     pub elapsed_min: Option<i64>,
     pub measured_actual_min: i64,
     pub measured_estimate_min: i64,
@@ -70,8 +73,13 @@ impl VoyageReport {
         let pace = self.pace().map(|p| format!("{p:.2}x")).unwrap_or_else(|| "-".into());
         let slowest = self.slowest.as_ref().map(|(id, min)| format!("{id} {min}m"))
             .unwrap_or_else(|| "-".into());
+        // The departure time says why nothing moves while the voyage waits
+        // for it (T-449); without one the line is unchanged.
+        let departs = self.departs_at
+            .map(|at| format!(" · departs at {}", crate::idle::clock(at)))
+            .unwrap_or_default();
         vec![
-            format!("Voyage {} {} · done: {}", self.milestone, self.title,
+            format!("Voyage {} {} · done: {}{departs}", self.milestone, self.title,
                 self.done.as_deref().unwrap_or("-")),
             format!("  elapsed {} / eta {}", minutes(self.elapsed_min), self.eta.as_deref().unwrap_or("-")),
             format!("  pace {pace} · projected finish {} from departure", minutes(self.projected_min)),
@@ -80,6 +88,24 @@ impl VoyageReport {
                 if self.rework_rounds == 1 { "round" } else { "rounds" }),
         ]
     }
+}
+
+/// The moment the project's voyage departs (T-449): `Some(depart_at)` while
+/// `now` is before the stored config's `[schedule] depart_at`, else `None`.
+/// The same rule as `gear_app::config::departs_at`; gear-board reads the
+/// stored config itself because gear-app already depends on gear-board.
+fn departs_at(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Ts>> {
+    let Some(row) = tx.get_project(project)? else { return Ok(None) };
+    let Ok(config) = row.config_toml.parse::<toml::Value>() else { return Ok(None) };
+    let Some(at) = config
+        .get("schedule")
+        .and_then(|schedule| schedule.get("depart_at"))
+        .and_then(toml::Value::as_str)
+    else {
+        return Ok(None);
+    };
+    let Some(at) = crate::idle::rfc3339(at) else { return Ok(None) };
+    Ok((now < at).then_some(at))
 }
 
 pub fn reports(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<VoyageReport>> {
@@ -94,6 +120,7 @@ pub fn reports_including_finished(tx: &Tx<'_>, project: &str, now: Ts) -> GearRe
 
 fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) -> GearResult<Vec<VoyageReport>> {
     let tasks = tx.tasks_of_project(project)?;
+    let departs_at = departs_at(tx, project, now)?;
     let mut reports = Vec::new();
     for voyage in tx.voyages_of_project(project)? {
         let scope: Vec<_> = tasks.iter().filter(|t| {
@@ -105,6 +132,7 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
         }
         let mut r = VoyageReport {
             milestone: voyage.milestone, title: voyage.title, done: voyage.done, eta: voyage.eta,
+            departs_at,
             elapsed_min: voyage.departure.map(|start| (now - start).max(0) / 60),
             measured_actual_min: 0, measured_estimate_min: 0,
             remaining_estimate_min: Some(0), projected_min: None, projected_at: None,

@@ -7854,6 +7854,109 @@ path="api"
         assert!(views.is_empty(), "a page that was not printed is not a view");
     }
 
+    /// The one second whose local clock is `wanted`: the search walks the day
+    /// around `T0` minute by minute, so the clock is right in any time zone.
+    fn clock_at(wanted: &str) -> i64 {
+        let mut ts = T0 - 43_200;
+        while ts < T0 + 43_200 {
+            if gear_board::idle::clock(ts) == wanted {
+                return ts;
+            }
+            ts += 60;
+        }
+        panic!("no minute of the day shows {wanted:?}");
+    }
+
+    /// A voyage that has not departed, with one open task, and optionally a
+    /// `[schedule] depart_at`: the captain home page shows its voyage line.
+    fn seed_waiting_voyage(store: &mut Store, depart_at: Option<i64>) {
+        store
+            .write(|tx| {
+                if let Some(depart_at) = depart_at {
+                    let row = tx.get_project("p")?.expect("the project");
+                    tx.update_project(&gear_store::ProjectRow {
+                        config_toml: format!(
+                            "[schedule]\ndepart_at = \"{}\"\n",
+                            utc(depart_at)
+                        ),
+                        ..row
+                    })?;
+                }
+                tx.upsert_voyage(&gear_store::VoyageRow {
+                    project: "p".into(),
+                    milestone: "M5".into(),
+                    title: "the next voyage".into(),
+                    done: Some("it sails".into()),
+                    bar: None,
+                    eta: Some("2h".into()),
+                    departure: None,
+                    departure_tasks: Some(1),
+                    departure_estimate_min: Some(30),
+                    updated: T0,
+                })?;
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-1".into(),
+                    rank: 1,
+                    state: gear_model::TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: Some("M5".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(30),
+                    issue: None,
+                    updated: T0,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn the_home_voyage_line_says_when_the_voyage_departs() {
+        let (mut store, mut herdr) = home_world();
+        let depart = clock_at("14:00");
+        seed_waiting_voyage(&mut store, Some(depart));
+
+        let mut out = Vec::new();
+        run_home(
+            &mut store,
+            &home_env("captain", CAP_PANE),
+            &mut herdr,
+            depart - 600,
+            false,
+            &mut out,
+        )
+        .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("departs at 14:00"), "{text}");
+    }
+
+    #[test]
+    fn without_a_departure_time_the_home_voyage_line_is_unchanged() {
+        let (mut store, mut herdr) = home_world();
+        seed_waiting_voyage(&mut store, None);
+
+        let mut out = Vec::new();
+        run_home(&mut store, &home_env("captain", CAP_PANE), &mut herdr, T0, false, &mut out)
+            .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Voyage M5 the next voyage · done: it sails"), "{text}");
+        assert!(!text.contains("departs at"), "{text}");
+    }
+
     /// A task with contract v1 in project `p`.
     fn seed_task(store: &mut Store, id: &str, lane: Option<&str>) {
         store
