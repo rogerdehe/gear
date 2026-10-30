@@ -408,3 +408,105 @@ fn a_landed_only_project_measures_the_tasks_view_from_its_departure() {
     );
     assert_eq!(starts_of(&plan), vec!["       starts +0h10m"], "M1's rows");
 }
+
+/// A milestone the plan never described (T-441): its tasks fixed a departure,
+/// but the row has no title and no done sentence.
+fn planless(
+    tx: &gear_store::Tx<'_>,
+    milestone: &str,
+    departure: i64,
+) -> gear_model::GearResult<()> {
+    tx.upsert_voyage(&VoyageRow {
+        project: "p".into(),
+        milestone: milestone.into(),
+        title: String::new(),
+        done: None,
+        bar: None,
+        eta: None,
+        departure: Some(departure),
+        departure_tasks: Some(1),
+        departure_estimate_min: Some(30),
+        updated: departure,
+    })
+}
+
+/// T-441: with no voyage sailing, a milestone the plan never described must not
+/// hide the latest voyage it did describe, even when it departed later.
+#[test]
+fn a_plan_less_milestone_that_departed_later_does_not_hide_the_landed_voyage() {
+    let mut store = world_landed();
+    store
+        .write(|tx| {
+            // Departed after M1, with one task it cut and no done sentence.
+            planless(tx, "M1.1-cancelled", NOW - 1800)?;
+            task(tx, "T-5", 5, "M1.1-cancelled", "old", TaskState::Cancelled)
+        })
+        .unwrap();
+
+    let plan = board(&mut store, None);
+    let voyage = plan.workload.as_ref().expect("the measured voyage");
+    assert_eq!(voyage.milestone, "M1");
+    assert_eq!(voyage.title, "voyage M1", "the described voyage's title");
+    assert_eq!(voyage.done.as_deref(), Some("it is delivered"), "its done sentence");
+    // The board shows M1's tasks only, not the one M1.1-cancelled cut.
+    let shown = plan.shown.expect("the shown voyage");
+    assert_eq!(shown.milestone, "M1");
+    assert_eq!(shown.title, "voyage M1");
+    assert!(!shown.sailing);
+    assert_eq!(plan.totals.tasks, 1, "the tasks of M1: {:?}", plan.totals);
+    assert_eq!(plan.totals.done, 1);
+
+    // The voyage list keeps every departure, the plan-less milestone included,
+    // so `[` and `]` still reach it.
+    let list: Vec<&str> = plan.voyage_list.iter().map(|e| e.milestone.as_str()).collect();
+    assert_eq!(list, vec!["M1.1-cancelled", "M1"], "the voyage list: {list:?}");
+
+    // A voyage named with a milestone is unchanged: M1.1-cancelled is shown.
+    let named = board(&mut store, Some("M1.1-cancelled"));
+    assert_eq!(
+        named.shown.as_ref().map(|voyage| voyage.milestone.as_str()),
+        Some("M1.1-cancelled")
+    );
+}
+
+/// T-441: a project whose only milestone the plan never described still shows
+/// it as today's voyage.
+#[test]
+fn a_project_with_only_a_plan_less_milestone_still_shows_it() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", NOW)?;
+            testing::seed_active_seat(tx, "p", "old", SeatRole::Lane, "w1:p1", "pi", NOW)?;
+            planless(tx, "M1.1-cancelled", NOW - 1800)?;
+            task(tx, "T-1", 1, "M1.1-cancelled", "old", TaskState::Cancelled)
+        })
+        .unwrap();
+
+    let plan = board(&mut store, None);
+    let voyage = plan.workload.as_ref().expect("the measured voyage");
+    assert_eq!(voyage.milestone, "M1.1-cancelled");
+    assert_eq!(voyage.done, None, "no done sentence to show");
+    let shown = plan.shown.expect("the shown voyage");
+    assert_eq!(shown.milestone, "M1.1-cancelled");
+    assert!(!shown.sailing);
+}
+
+/// T-441: an active voyage still wins over the described landed one.
+#[test]
+fn an_active_voyage_still_wins_over_a_later_departed_plan_less_one() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            planless(tx, "M1.1-cancelled", NOW - 1800)?;
+            task(tx, "T-5", 5, "M1.1-cancelled", "hull", TaskState::Cancelled)
+        })
+        .unwrap();
+
+    let plan = board(&mut store, None);
+    assert_eq!(plan.shown.as_ref().map(|voyage| voyage.milestone.as_str()), Some("M2"));
+    assert!(
+        plan.shown.as_ref().is_some_and(|voyage| voyage.sailing),
+        "the sailing voyage is the one shown"
+    );
+}
