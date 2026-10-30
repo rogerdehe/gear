@@ -40,6 +40,32 @@ fn reconcile(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
                 tx.set_op_state(project, &op.id, OpState::Void, Some("task is in a declared wait"), now)?;
             }
         }
+        // A wait on something outside GEAR (T-440) ends when the lane sends
+        // any later message on the task but another blocked one, or when the
+        // time the wait was given runs out. Nothing merges to wake it.
+        if task.wait_cond.as_deref() == Some("external") {
+            let key = gear_app::mail::external_wait_key(project, &task.id);
+            let until = tx.get_meta(&key)?.and_then(|s| s.parse::<Ts>().ok());
+            let declared = until.map(|at| at - gear_app::mail::EXTERNAL_WAIT_MIN * 60).unwrap_or(0);
+            let answered = tx.messages_from_since(project, &attempt.seat, declared)?.iter()
+                .any(|m| m.task.as_deref() == Some(task.id.as_str()) && m.kind != MsgKind::Blocked);
+            let expired = until.is_some_and(|at| now >= at);
+            if answered || expired {
+                tx.clear_task_wait(project, &task.id)?;
+                tx.close_pause(project, &attempt.seat, "wait", now)?;
+                tx.set_meta(&key, "")?;
+                if expired && !answered {
+                    tx.insert_message(&NewMessage {
+                        project: project.into(), thread: format!("wait-external-end:{}:{}", task.id, attempt.n),
+                        task: Some(task.id.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0,
+                        recipient: attempt.seat.clone(), kind: MsgKind::Instruction, urgent: true,
+                        body: format!("GEAR: your external wait on {} ended after {} min. Push what you have, or declare the wait again with its reason.", task.id, gear_app::mail::EXTERNAL_WAIT_MIN),
+                        reply_to: None, needs_ack: false, state: MsgState::Open, created: now, meta: None,
+                    })?;
+                }
+            }
+            continue;
+        }
         // A verdict can mark a task Done before the merge actually lands.
         // Only a merged attempt is evidence that the awaited work arrived.
         let mut landed = None;

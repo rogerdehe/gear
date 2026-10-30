@@ -135,7 +135,8 @@ struct SendCmd {
     /// does).
     #[arg(long, value_name = "TEXT")]
     blocker: Option<String>,
-    /// Blocked only (design §5.3): the task the lane waits for.
+    /// Blocked only (design §5.3): the task the lane waits for (T-N), or
+    /// `external` with the reason as the message.
     #[arg(long, value_name = "T-N")]
     on: Option<String>,
     /// Result/review only (design §6.1): what cost you time that the captain
@@ -1827,14 +1828,33 @@ fn cmd_send(c: SendCmd, json: bool) -> GearResult<()> {
     let mut herdr = open_herdr()?;
     let env = resolve_caller(&mut store, &mut herdr, env)?;
     // A hand-in must contain the project's current integration branch (T-19);
-    // the gate is built here, from this process's worktree and config.
-    let base = match parse_kind(&c.kind)? {
-        gear_model::MsgKind::Result if c.direction.is_none() => Some(gear_app::base::gate_for(&mut store, &env)?),
-        _ => None,
-    };
+    // the gate is built here, from this process's worktree and config. A
+    // reviewer's verdict is checked the same way (T-438): its review branch
+    // must be on the project's remote, and the gate carries this process's
+    // working directory — the reviewer's own worktree.
+    let base = hand_in_gate(&mut store, &env, parse_kind(&c.kind)?, c.direction.is_some())?;
     let out = run_send(&mut store, &env, &mut herdr, &c, body, base, now_ts(), json)?;
     println!("{out}");
     Ok(())
+}
+
+/// The hand-in gate of `gear send` (T-19, T-438): a result, and a review
+/// carrying a verdict, is checked against the project's remote before it is
+/// stored, and the gate carries this process's working directory — the
+/// writer's or the reviewer's own worktree. A direction check is not a hand-in
+/// of work, and nothing else is gated.
+fn hand_in_gate(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    kind: gear_model::MsgKind,
+    direction: bool,
+) -> GearResult<Option<gear_app::base::BaseGate>> {
+    match kind {
+        gear_model::MsgKind::Result | gear_model::MsgKind::Review if !direction => {
+            Ok(Some(gear_app::base::gate_for(store, env)?))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
@@ -6070,6 +6090,40 @@ path="api"
         c.attempt = Some(1);
         c.verdict = Some(verdict.into());
         c
+    }
+
+    /// T-438: a review carrying a verdict is a hand-in, so `cmd_send` builds
+    /// the gate for it and the app can check the review branch is on the
+    /// project's remote. A direction check is not gated, and neither is a
+    /// progress answer.
+    #[test]
+    fn a_review_verdict_builds_the_hand_in_gate() {
+        let (mut store, _herdr) = world();
+        // The gate reads the project's config: a project that has one, as every
+        // real project does.
+        let row = store.read(|tx| tx.get_project("p")).unwrap().unwrap();
+        store
+            .write(|tx| {
+                tx.update_project(&gear_store::ProjectRow {
+                    config_toml: "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/repo\"\n\n[quota]\nlanes = 2\ntemps = 0\n\n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\n[conventions]\nintegration = \"dev\"\n"
+                        .into(),
+                    ..row
+                })
+            })
+            .unwrap();
+        let env = env("heat", LANE_PANE);
+        for kind in [gear_model::MsgKind::Result, gear_model::MsgKind::Review] {
+            let gate = hand_in_gate(&mut store, &env, kind, false).unwrap();
+            assert!(gate.is_some(), "{kind:?} is a hand-in");
+        }
+        assert!(
+            hand_in_gate(&mut store, &env, gear_model::MsgKind::Result, true).unwrap().is_none(),
+            "a direction check is not gated"
+        );
+        assert!(
+            hand_in_gate(&mut store, &env, gear_model::MsgKind::Progress, false).unwrap().is_none(),
+            "a progress answer is not gated"
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@
 
 id = "herdr-gear"
 name = "GEAR"
-version = "0.5.4"
+version = "0.5.5"
 min_herdr_version = "0.9.1"
 description = "Keep agent fleets working under one captain: the plan board in a pane."
 platforms = ["linux", "macos"]

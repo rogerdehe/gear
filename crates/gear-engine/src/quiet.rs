@@ -413,6 +413,25 @@ mod tests {
         assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 1, "asked once after the interval");
     }
 
+    /// A wait on something outside GEAR (T-440): the no-push question stays
+    /// off the lane while the wait lasts, and comes back when it ends.
+    #[test]
+    fn an_external_wait_keeps_the_no_push_question_off_the_lane() {
+        let dir = repo_with_commit();
+        let mut s = world(dir.path().to_str().unwrap());
+        s.write(|tx| tx.set_task_wait("p", "T-1", "external", "external")).unwrap();
+        s.write(|tx| tick(tx, "p", T + 3 * 3600)).unwrap();
+        assert!(messages(&mut s, "quiet-lane:p:heat").is_empty(), "a declared external wait is not a quiet lane");
+        assert!(messages(&mut s, "quiet:p:heat").is_empty(), "and the captain is not alarmed");
+        // The wait is over: the clock runs from the end of the wait, not from
+        // the start of it.
+        s.write(|tx| { tx.clear_task_wait("p", "T-1")?; tick(tx, "p", T + 3 * 3600) }).unwrap();
+        s.write(|tx| tick(tx, "p", T + 3 * 3600 + 1199)).unwrap();
+        assert!(messages(&mut s, "quiet-lane:p:heat").is_empty());
+        s.write(|tx| tick(tx, "p", T + 3 * 3600 + 1201)).unwrap();
+        assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 1, "asked once the wait is over");
+    }
+
     /// The two times are the project's: 15 and 5 here.
     #[test]
     fn the_push_clock_follows_the_project_settings() {
