@@ -475,7 +475,7 @@ fn civil_from_days(days: i64) -> (i64, i64) {
 }
 
 /// An RFC 3339 time (`2026-10-27T10:00:00Z`) in epoch seconds.
-fn rfc3339(text: &str) -> Option<Ts> {
+pub(crate) fn rfc3339(text: &str) -> Option<Ts> {
     let text = text.trim();
     if text.len() < 19 {
         return None;
