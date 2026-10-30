@@ -3745,11 +3745,13 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
         text.push_str(&format!("Due: {minutes} minutes\n"));
     }
     // A mechanical task (T-272): the gate alone proves the change, so no
-    // reviewer looks at it — the lane knows what its hand-in rests on.
+    // reviewer looks at it — the lane knows what its hand-in rests on. The
+    // engine runs the gate at the merge (T-437), so the lane does not.
     if let Some(reason) = &contract.mechanical {
         text.push_str(&format!(
-            "Review: none — mechanical ({reason}): the merge gate is the only check, \
-             so run its command before you hand in.\n"
+            "Review: none — mechanical ({reason}): the engine runs the merge gate at the merge, \
+             and it is the only check; run only the acceptance commands above, \
+             never the gate yourself.\n"
         ));
     }
     text.push_str("\n## Report\n");
