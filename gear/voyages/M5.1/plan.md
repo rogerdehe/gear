@@ -1,17 +1,19 @@
-<!-- gear-plan project=gear base=865 -->
+<!-- gear-plan project=gear base=866 -->
 # Goal
-Fix the problems another project's fleet hits on the shared engine as they come in, and ship each batch at once as a small release (v0.5.4 and later), so that fleet never waits on GEAR.
+Fix the problems another project's fleet hits on the shared engine as they come in, and ship each batch at once as a small release (v0.5.4 and later), so that fleet never waits on GEAR. M5.1 is a voyage planned as it goes: it lasts as long as that project's current voyage, and its plan grows with each problem that project's captain reports.
 
 # Milestone M5.1: fixes for another project's fleet
-done: (1) every M5.1 task merged; (2) every problem that project's captain reports during M5.1 is answered within minutes and becomes a task here, or is shown to be no GEAR fault; (3) each batch is released as v0.5.x and the shared engine runs it
+done: (0) that project's current voyage has landed; (1) every M5.1 task merged; (2) every problem that project's captain reports during M5.1 is answered within minutes and becomes a task here, or is shown to be no GEAR fault; (3) each batch is released as v0.5.x and the shared engine runs it
 bar: DELIVERABLE: an error in normal use blocks the task; edge cases outside normal use are logged
-eta: 4h
+eta: 34h
 
 # Decisions
 - 2026-10-29 21:30 scope: M6 is paused; M5.1 fixes only the problems another project's captain reports, and releases them in small batches (user) | why: user | else: M6 first
 - 2026-10-29 21:30 model: the same staffing as M5: lanes hull (engine, app, store, model, usage) and mast (everything else) on pi with tokenrhythm/deepseek-v4.1-flash-1017 (600K), no fallback; reviewers on pi with tokenrhythm/deepseek-v4-pro-0813, no fallback; quota lanes 2, temps 2 | why: user | else: -
 - 2026-10-29 21:30 config: this voyage's config and rules are gear/voyages/M5.1/gear.toml, CONVENTIONS.md and REVIEW.md, copied from M5 | why: nothing the captain writes spans voyages | else: -
 - ★ 2026-10-29 21:22 hand-fix: since 02:11Z every tick of the other project failed with "BAD_TRANSITION: seat: active -> active": its reviewer's restart onto another model was in its finish phase when onboarding had already made the seat Active (reason "onboarded"), so restart.rs fn finish's Starting->Active check failed on every tick, and quota.rs fn apply_quota_policy passed that one seat's error up and aborted the whole project's tick. The captain changed six lines (commit bcdc8d0a on branch captain/hf-restart-active: finish skips the transition when the seat is already Active on the plan's generation; the quota step reports a failed restart step as an event and goes on), built it and restarted the shared engine at 02:22Z; the project's ticks have run since, the stuck restart cleared and its waiting merge and packets went through. T-433 adds the tests and takes the commit through review and the merge gate | why: the other project's whole fleet was stopped; no supported command clears a pending restart | else: that fleet stopped until a lane's task merged
+
+- ★ 2026-10-29 21:45 goal-change: M5.1 ends when the other project's current voyage ends, not when its first batch ships; its plan is written as the voyage goes, from that captain's reports, as a trial of a voyage planned on the way (user). Before: the goal ended with the first batches; done had no clause about the other voyage; eta 4h. After: the goal says the voyage lasts as long as the other project's voyage; done clause (0) "that project's current voyage has landed"; eta 34h, the other voyage's total eta as its user confirmed it, a ceiling the stations measure against | why: user | else: land after v0.5.4 and open M5.2 for the next reports
 
 # Queue
 
