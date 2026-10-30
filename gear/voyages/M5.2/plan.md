@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=886 -->
+<!-- gear-plan project=gear base=887 -->
 # Goal
 After a voyage lands, the board shows that voyage, not an empty one: a milestone no plan described never becomes a voyage. Released as v0.5.6.
 
@@ -15,6 +15,10 @@ eta: 2h
 - station M-6420: keep course 39 min in; all three tasks merged and v0.5.6 runs; the landing waits for the user's word
 - station M-6426: keep course — every M5.2 task merged and v0.5.6 runs on the shared engine; the landing and the lanes' retirement wait for the user's word
 - station M-6427: keep course — same as M-6426
+
+- 2026-10-30 04:55 note: voyage report (gear report voyage): 3 tasks merged in 39 min of work (T-441 board, T-442 plan apply, T-443 v0.5.6), no rework, no hand fix, no friction; v0.5.6 runs on the shared engine and the other project's board shows its landed M1.1; one backlog item left for M6 (a reviewer is not told when a hand-in closes its direction check)
+- 2026-10-30 04:55 user: land M5.2 now, lanes retired
+- station M-6426: land
 
 # Queue
 
