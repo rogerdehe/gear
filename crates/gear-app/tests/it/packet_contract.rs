@@ -118,6 +118,8 @@ fn pending_update_and_missing_task() {
 
 /// T-272: a mechanical task's packet says the review is skipped and that the
 /// merge gate is the only check; another task's packet says nothing of it.
+/// T-437: the engine runs the gate at the merge, so the packet no longer tells
+/// the lane to run it before the hand-in.
 #[test]
 fn a_mechanical_task_says_the_gate_is_the_only_check() {
     let mut s = world(true);
@@ -153,11 +155,13 @@ fn a_mechanical_task_says_the_gate_is_the_only_check() {
     let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
     assert!(
         text.contains(
-            "Review: none — mechanical (delete three dead fns): the merge gate is the only check, \
-             so run its command before you hand in."
+            "Review: none — mechanical (delete three dead fns): the engine runs the merge gate at \
+             the merge, and it is the only check; run only the acceptance commands above, never \
+             the gate yourself."
         ),
         "{text}"
     );
+    assert!(!text.contains("run its command before you hand in"), "{text}");
 }
 
 /// The world of a rework round (T-118): T-7 was handed in as `CANDIDATE`, the

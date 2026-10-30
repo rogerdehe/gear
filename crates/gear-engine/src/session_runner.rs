@@ -41,6 +41,25 @@ fn step(seat: &SeatRow, state: &mut Value, name: &str, now: Ts) {
     state["step"] = json!(name); state["step_at"] = json!(now);
 }
 
+/// Press Enter on the text already in the box; `true` when Herdr took it.
+/// The step that types a session command submits it here, in the same call
+/// (T-434): a tick that runs long or an agent that looks busy after the text
+/// can no longer leave `/new` or `/quit` typed and unsent.
+fn enter(herdr: &mut dyn HerdrAct, pane: &str) -> bool {
+    herdr.type_settle();
+    !matches!(herdr.send_keys(pane, &["enter".into()]), Outcome::Refused { .. })
+}
+
+/// The step a submitted session command waits in, with the `t0` and the
+/// compact `offset` that belong to this submission (T-434).
+fn submitted(seat: &SeatRow, state: &mut Value, action_name: &str, now: Ts) {
+    step(seat, state, if action_name == "resume" { "wait_exit" } else { "wait_action" }, now);
+    state["t0"] = json!(now);
+    if action_name == "compact" {
+        state["offset"] = json!(state.get("old_session_ref").and_then(Value::as_str).and_then(|path| std::fs::metadata(path).ok()).map(|m| m.len()).unwrap_or(0));
+    }
+}
+
 fn record(store: &mut Store, seat: &SeatRow, task: &str, attempt: i64, role: Role, action: &str, state: &mut Value, now: Ts) -> GearResult<Prep> {
     step(seat, state, "done", now);
     // T-407: the operation's own line, with the whole duration in it.
@@ -194,7 +213,10 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
             return record(store, seat, task, attempt, role, if action_name == "compact" { "compact-fallback" } else { "new-unconfirmed" }, &mut state, now);
         } else {
             if matches!(herdr.pane_type(&binding.pane_id, command), Outcome::Refused { .. }) { return Ok(Prep::Wait) }
-            step(seat, &mut state, "enter", now);
+            // T-434: type and Enter in this same step; a refused Enter waits
+            // at "enter" for a later call, the text already in the box.
+            if enter(herdr, &binding.pane_id) { submitted(seat, &mut state, &action_name, now) }
+            else { step(seat, &mut state, "enter", now); }
         }
         save(store, seat, &state)?; return Ok(Prep::Wait);
     }
@@ -202,15 +224,13 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
         if action_name == "resume" && occupant.is_none() {
             step(seat, &mut state, "start_resume", now); save(store, seat, &state)?; return Ok(Prep::Wait);
         }
-        if !is_ready { return Ok(Prep::Wait) }
-        herdr.type_settle();
-        if matches!(herdr.send_keys(&binding.pane_id, &["enter".into()]), Outcome::Refused { .. }) { return Ok(Prep::Wait) }
-        step(seat, &mut state, if action_name == "resume" { "wait_exit" } else { "wait_action" }, now);
-        state["t0"] = json!(now);
-        if action_name == "compact" {
-            state["offset"] = json!(state.get("old_session_ref").and_then(Value::as_str).and_then(|path| std::fs::metadata(path).ok()).map(|m| m.len()).unwrap_or(0));
+        // T-434: the text is already in the box, so a later Enter does not
+        // wait for the agent to be idle or done again.
+        if enter(herdr, &binding.pane_id) {
+            submitted(seat, &mut state, &action_name, now);
+            save(store, seat, &state)?;
         }
-        save(store, seat, &state)?; return Ok(Prep::Wait);
+        return Ok(Prep::Wait);
     }
     if phase == "wait_action" {
         let elapsed = now.saturating_sub(time(&state, "t0"));
@@ -249,7 +269,11 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
         else if is_ready {
             if let Some(command) = profile.exit_command.as_deref().filter(|s| !s.is_empty()) {
                 if !matches!(herdr.pane_type(&binding.pane_id, command), Outcome::Refused { .. }) {
-                    step(seat, &mut state, "fallback_enter", now); save(store, seat, &state)?;
+                    // T-434: the exit command leaves with its Enter too;
+                    // "fallback_enter" stays for a refused Enter.
+                    if enter(herdr, &binding.pane_id) { step(seat, &mut state, "fallback_wait_exit", now) }
+                    else { step(seat, &mut state, "fallback_enter", now); }
+                    save(store, seat, &state)?;
                 }
             } else if !matches!(herdr.send_keys(&binding.pane_id, &profile.exit_keys), Outcome::Refused { .. }) {
                 step(seat, &mut state, "fallback_wait_exit", now); save(store, seat, &state)?;
@@ -260,11 +284,8 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
     if phase == "fallback_enter" {
         if occupant.is_none() { step(seat, &mut state, "start_fallback", now); save(store, seat, &state)?; return Ok(Prep::Wait) }
         if now.saturating_sub(time(&state, "step_at")) >= 30 { return recovery_failed(store, seat, &mut state, &phase, now); }
-        if is_ready {
-            herdr.type_settle();
-            if !matches!(herdr.send_keys(&binding.pane_id, &["enter".into()]), Outcome::Refused { .. }) {
-                step(seat, &mut state, "fallback_wait_exit", now); save(store, seat, &state)?;
-            }
+        if is_ready && enter(herdr, &binding.pane_id) {
+            step(seat, &mut state, "fallback_wait_exit", now); save(store, seat, &state)?;
         }
         return Ok(Prep::Wait);
     }

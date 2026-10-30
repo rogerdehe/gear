@@ -62,13 +62,14 @@ fn a_session_switch_to_done_logs_one_probe_line_per_step_and_one_total() {
         .filter(|line| line.starts_with("probe new p:probe "))
         .collect();
     let steps: Vec<&str> = log.iter().map(|line| line.split_whitespace().nth(3).unwrap()).collect();
-    assert_eq!(steps, ["initial", "enter", "wait_action", "done"], "{log:?}");
+    // T-434: the typed command and its Enter leave in one step, so the switch
+    // goes from `initial` straight to `wait_action`.
+    assert_eq!(steps, ["initial", "wait_action", "done"], "{log:?}");
     // Each step carries its own time and the switch's time so far: the typed
-    // `/new` (tick 1) took 1 s, the Enter (tick 2) 1 s, the wait 6 s.
+    // `/new` with its Enter (tick 0), then the wait to tick 7.
     assert_eq!(log[0], "probe new p:probe initial 0 total=0");
-    assert_eq!(log[1], "probe new p:probe enter 1000 total=1000");
-    assert_eq!(log[2], "probe new p:probe wait_action 6000 total=7000");
-    assert_eq!(log[3], "probe new p:probe done 7000 total=7000", "one total: the whole switch");
+    assert_eq!(log[1], "probe new p:probe wait_action 7000 total=7000");
+    assert_eq!(log[2], "probe new p:probe done 7000 total=7000", "one total: the whole switch");
 }
 
 #[test]

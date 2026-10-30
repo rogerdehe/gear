@@ -81,6 +81,8 @@
 
 ## A delivery marked submitted never reaches the composer
 - 2026-10-29 M5 (both projects): our hull showed "Continue T-425" typed with no Enter; the other project's review-2 and review-3 sat at empty Codex composers with their direction-check deliveries recorded as submitted, until the captain nudged them to run `gear`. The engine should confirm a delivery by the agent turning busy and resubmit within a bounded time, not wait for the stall item.
+- 2026-10-29 14:00 (the other project, on 0.5.2: review-3 T-225 O-2642, review-1 T-226 O-2652): each review seat sat done with 0 % context and an empty composer right after a fresh Codex conversation, while GEAR said in review. Likely cause, unverified: with Codex 0.165 the `/new` that starts a fresh conversation opens "Where should the new conversation run?"; the delivery's text lands in that dialog and its Enter picks the preselected "Use current Git worktree", so the conversation starts empty. The root fix is the same as for the startup dialogs above: the codex profile answers that dialog (or starts so it never shows) and waits for an empty composer before it types the packet, and a delivery is confirmed by the agent's first `gear` call, resent once if none comes within a bounded time.
+- 2026-10-29 (the other project, two more shapes): review-1's Codex composer held '/new' joined to the pasted packet, unsubmitted (the session step's /new and the delivery went into one input); lane api's Pi composer held the engine's '/quit' with no Enter while a rework waited. Each step that types must confirm its Enter took (the composer emptied) before the next step types.
 
 ## False stall items on a delivery into a busy lane
 - 2026-10-29 M5 (both projects, about ten today: our M-6054, M-6089, M-6121, M-6144; the other project's M-2782, M-2797, M-2809): right after a hand-in the engine delivers the next task while the lane is still ending its turn. The confirmation looks for the agent turning busy, which a busy agent never does, so the window ends unconfirmed, crates/gear-engine/src/ops.rs (about line 947) flags the seat, and the item says "delivery … 0 min, no check-in this generation"; it resolves itself once the lane reads the queued text. A delivery into a working agent should be confirmed by the attempt's first check-in (or the agent's next idle-to-busy turn) within a bounded window before any item opens.
@@ -90,3 +92,48 @@
 
 ## Codex 0.165 startup dialogs stop reviewers
 - 2026-10-29 M5 (another project): after `/new` Codex asks "Where should the new conversation run? 1. Use current Git worktree / 2. Create new Git worktree", and on a resume from another directory it asks which working directory to use; Herdr reports both as done/idle, so the engine waits on a reviewer that never starts. GEAR's codex profile should recognise both screens as blocked and answer them (current worktree; the seat's own directory), or start Codex so they never show.
+
+## A reviewer resumes another seat's direction-check conversation
+- 2026-10-29 M5 (the other project, after T-423 shipped: review-2 for T-226 resumed the direction-check conversation review-1 had run, and Codex locked it, "This conversation is open in another app"; O-2609 sat submitted 45 min). T-423 compares only each live agent's current session, but a Codex process keeps the writer lock of every conversation it opened (seen as `$CODEX_HOME/thread-writer-locks/<id>.lock` held by the other seat's process), so a conversation another seat ran earlier still passes the check. Root fix: a review round resumes an earlier round's conversation only when the same seat ran it (V1 as written); any other seat starts fresh.
+
+## An accepted review whose branch never reached the remote
+- 2026-10-29 M5 (the other project, T-265, M-3539): the verdict was accepted, then the merge refused because origin/<project>/review/t265 did not exist; the reviewer's push had not landed and nothing checked it. The engine should confirm the review branch on the remote when it records the verdict (or push the seat's local branch itself) before the task is accepted.
+
+## Direction-check and review packets quote the goal, not the rework that replaced it
+- 2026-10-29 M5 (the other project: T-254's direction check M-3565 held the lane to the original goal's "all 3 clickable" while the applied rework narrowed it to two Settings cases and a prototype exemption; T-271 similar). A packet for a rework round should show the latest applied rework text first, marked as the instruction that governs where it differs from the goal, and the reviewer should judge against it. Also: T-270 was a second accepted review whose branch never reached the remote (see above).
+- 2026-10-29 (the other project, third case: T-293 attempt 2, direction check M-3872 on 27bcee99e quoted contract v1's goal against the captain's applied rework after issue #339; the lane stopped to ask, M-3875, and the captain corrected review-4, M-3877). Recurring in every rework round with a narrowed goal: the direction-check packet must carry the current attempt's rework text.
+- 2026-10-29 (fourth case: T-304 attempt 2, M-4064, an old direction check rejected the applied rework's SaveData isolation; the captain settled it in M-4078).
+
+## A review job replaced mid-review learns it only at hand-in
+- 2026-10-29 M5 (the other project, T-283, M-3715): the engine rebound review-4 to a new job on the attempt's current candidate while the previous job was still reviewing an earlier commit; the old job finished, judged the stale commit, and its hand-in failed NO_TARGET ("review-4 not bound"). A replaced job should be told at once (stop, your binding moved), and a review packet should refuse a candidate that is not the attempt's current one.
+- 2026-10-29 (the other project, F-215, review-2 on T-284 attempt 2): the seat's worktree was switched to T-292 while its agent was still reviewing T-284; the agent restored an accidental unpushed commit and rebuilt the T-284 tree by hand. Same root as T-283: the engine treats a seat as free (Standby after a verdict or direction result) while its agent is still working, and prepares the next job's tree in the same worktree. A seat is free only when its agent is idle and its last job's hand-in is recorded; until then the next job waits or takes another seat.
+
+## A direction-check packet reads as a lane packet
+- 2026-10-29 M5 (the other project, M-3899): review-4 on direction/t-307 (candidate 8da2ef276) got a packet that says "You implement" and gives the lane's result command, so it asked whether it was a direction check or a full review. A direction-check packet should say what it is in its first line and give only the direction verdict command. The same evening review-3, bound to T-296, ran diffs of T-307 (M-3900): see "A review job replaced mid-review"; each review packet should open with the seat's binding (task, attempt, branch, expected HEAD) and the reviewer should check pwd, branch and HEAD against it before reading.
+
+## No plan state holds a task back from delivery
+- 2026-10-29 M5 (the other project): the captain was told (wrongly, by this captain) that `state: draft` keeps a packet from delivery; the plan parser accepts only `state: ready` and `state: cancelled`, and Draft exists only in the store. A packet still under discussion can be held only by queue order or deps. A `state: draft` (or `hold`) line that keeps a task out of delivery until set ready would cover it.
+
+## Switching a seat's model or its agent (user's request, 2026-10-29)
+- Two operations, not one. **Switch model**: when the new model runs on the same CLI, switch it in place through the CLI's own model command (e.g. `/model`); the agent and its context stay, no handover. **Switch agent**: a new CLI (or a model only another CLI serves) means the old agent exits and a new one starts, so the conversation is lost and a handover is needed.
+- Timing of an agent switch: either at the next safe point (today's behaviour), or at once: the engine tells the agent to wrap up and commit now, waits a bounded grace period (default 10 minutes, set by the user 2026-10-29), then exits it whether or not it handed in. A model that thinks for hours must not hold the switch.
+- The incoming agent is told it takes over someone else's work: its packet starts with the handover (the previous agent's session id or transcript path to read first, and the worktree's state: uncommitted changes, unpushed commits, the branch and its last commit), then the task packet. It must not start over or overwrite half-done work it has not inspected.
+- Applies to lanes and reviewers alike; a model switch with no CLI change needs none of this.
+
+## Captain handover (user's request, 2026-10-29)
+- Only when the user asks for it (a new captain, model or CLI); the captain then confirms it with the user in the one allowed dialog. The outgoing captain writes the handover document (goal, done clauses, bar, eta, state, open threads, the user's standing orders, files to read first) and hands over, as a colleague leaving would.
+- `gear captain take` from a pane the user started: the new captain takes the seat at once, and the engine asks the previous captain for its handover document.
+- When the previous captain cannot answer (quota spent, gone): the new captain reads the previous captain's conversation by its session id and writes the summary itself.
+- The core is the same for every seat: switching an agent always means a handover; switching only the model does not.
+
+## Elastic reviewer and lane counts (user's request, 2026-10-29)
+- On the user's word the captain raises a quota for a while (e.g. reviewers from 4 to 8 to clear a review backlog), and the engine returns it to the normal count by itself once the backlog is gone. The temporary count, its reason and its end condition are recorded in the plan.
+- The change is staffing, so it is confirmed with the user in a dialog, and only when the user asked for it.
+
+## Dialogs never block the fleet (user's request, 2026-10-29)
+- The captain never opens a dialog the user did not ask for (goal, bar, eta, staffing, models, scaling); only a change the user requests is confirmed, on the assumption that the user is at the screen.
+- The engine cancels a captain dialog left unanswered for a default time (about 20 minutes), so it cannot hold the captain's messages.
+- A lane's or reviewer's dialog (an approval, a question, a CLI startup screen) becomes an item for the captain; if the captain has not handled it within a default time (10-20 minutes), the engine closes it.
+
+## A mechanical packet still tells the writer to run the merge gate
+- 2026-10-29 M5 (the other project, F-257, T-333: one trailing blank byte, accept said no tests and an exact-parent `git diff --check`): the rendered packet's Evidence section still told the writer to run the project's merge-gate command, which contradicts both the accept line and the convention that only the engine runs the gate; the lane had to ask. A mechanical packet's Evidence should carry the task's own accept checks only.
