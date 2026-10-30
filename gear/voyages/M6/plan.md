@@ -107,12 +107,12 @@ accept: gear-app tests: a config with two charters renders two rules files; a re
 estimate: 50
 
 ## NEW [now] lane=hull milestone=M6 station=S3 required
-goal: [S3] GEAR near idle: read the M5 probe lines (T-407) and fix the slow operations they show, starting with every multi-step operation that waits a whole tick between steps; the engine under 3 % of one core and 50 MB on average.
+goal: [S3] GEAR near idle: read the M5 probe lines (T-407) and fix the slow operations they show, starting with every multi-step operation that waits a whole tick between steps; the engine under 10 % of one core and 50 MB on average.
 accept: A probe summary before and after, from a real voyage's log; engine tests for each changed step. Run make check CRATE=gear-engine.
 estimate: 60
 
 ## NEW [now] lane=mast milestone=M6 station=S3 required
-goal: [S3] The board near idle: it redraws only what changed and reads the store incrementally (M5 measured 20-34 % CPU per board); under 3 % of one core and 50 MB.
+goal: [S3] The board near idle: it redraws only what changed and reads the store incrementally (M5 measured 20-34 % CPU per board); under 10 % of one core and 50 MB.
 accept: A measured board run before and after; board tests. Run make check CRATE=gear-board.
 estimate: 50
 
