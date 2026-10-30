@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=874 -->
+<!-- gear-plan project=gear base=875 -->
 # Goal
 Fix the problems another project's fleet hits on the shared engine as they come in, and ship each batch at once as a small release (v0.5.4 and later), so that fleet never waits on GEAR. M5.1 is a voyage planned as it goes: it lasts as long as that project's current voyage, and its plan grows with each problem that project's captain reports.
 
@@ -18,6 +18,7 @@ eta: 34h
 - station M-6364: keep course 52 min in; all five tasks done, T-436's merge gate running; v0.5.4 is published and the shared engine restarted on it after that merge; M5.1 does not land before the other project's voyage lands (done clause 0), and its next tasks come from that captain's reports
 - 2026-10-29 22:25 release: v0.5.4 published: T-436's merge d3255b1f merged into main as 6db339b1, tagged v0.5.4, GitHub release from docs/releases/v0.5.4.md; the shared engine (both projects) runs it since 03:25Z | why: done clause (3)
 - station M-6366: keep course 107 min in; v0.5.4 runs on the shared engine; T-438 (review branch on the project's remote) on hull, then mast releases v0.5.5 (T-439); mast waits on that dependency, with no other reported problem to take
+- station M-6373: keep course 120 min in; T-438 on hull after its gate question (M-6367, answered: gate the check like a lane's hand-in), then v0.5.5 (T-439) on mast
 
 # Queue
 
