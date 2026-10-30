@@ -13,7 +13,7 @@
 //! without `[[repos]]` is a single-repo project and behaves exactly as
 //! before.
 
-use gear_model::{ErrorCode, GearError, GearResult};
+use gear_model::{ErrorCode, GearError, GearResult, Ts};
 use gear_store::Store;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -36,6 +36,9 @@ pub struct ProjectConfig {
     pub conventions: Conventions,
     #[serde(default)]
     pub timing: Timing,
+    /// The departure time of a voyage (T-448); absent = today's behaviour.
+    #[serde(default)]
+    pub schedule: Option<ScheduleSection>,
     /// API-equivalent USD per million tokens, keyed by provider/model.
     #[serde(default)]
     pub prices: BTreeMap<String, Price>,
@@ -757,6 +760,66 @@ impl Default for Timing {
     }
 }
 
+/// A voyage that departs at an agreed time (T-448): before it, the engine
+/// starts no lane and delivers nothing; at it, it starts them by itself.
+///
+/// ```toml
+/// [schedule]
+/// depart_at = "2026-10-30T14:00:00-05:00"  # RFC3339
+/// hours = "09:00-18:00"                    # local time
+/// notice_min = 15
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ScheduleSection {
+    /// The moment the voyage departs (RFC3339); absent = as soon as ready.
+    pub depart_at: Option<String>,
+    /// The working hours of the day (`"HH:MM-HH:MM"`, local time).
+    pub hours: Option<String>,
+    /// How long before the departure the captain is told (T-450).
+    pub notice_min: u32,
+}
+
+impl Default for ScheduleSection {
+    fn default() -> Self {
+        Self { depart_at: None, hours: None, notice_min: 15 }
+    }
+}
+
+/// The moment a voyage departs (T-448): `Some(depart_at)` while `now` is
+/// before it, `None` at and after it, and when the config names none. A
+/// `depart_at` that does not parse is refused by `validate`, so a reader that
+/// skipped the check fails closed (no departure time, today's behaviour).
+pub fn departs_at(config: &ProjectConfig, now: Ts) -> Option<Ts> {
+    let at = crate::plan::parse_rfc3339(config.schedule.as_ref()?.depart_at.as_deref()?)?;
+    (now < at).then_some(at)
+}
+
+/// `"HH:MM-HH:MM"` with a start different from its end, both real times of
+/// the day.
+fn valid_hours(text: &str) -> bool {
+    let Some((start, end)) = text.trim().split_once('-') else { return false };
+    let Some(start) = minutes_of_day(start) else { return false };
+    let Some(end) = minutes_of_day(end) else { return false };
+    start != end
+}
+
+/// `"HH:MM"` as minutes past midnight; `None` when it is not a time of day.
+fn minutes_of_day(text: &str) -> Option<u32> {
+    let (hours, minutes) = text.split_once(':')?;
+    if hours.len() != 2 || minutes.len() != 2 {
+        return None;
+    }
+    if !hours.bytes().all(|byte| byte.is_ascii_digit())
+        || !minutes.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let hours: u32 = hours.parse().ok()?;
+    let minutes: u32 = minutes.parse().ok()?;
+    (hours <= 23 && minutes <= 59).then_some(hours * 60 + minutes)
+}
+
 /// One validation finding. `field` is a dotted path such as `lanes[1].owns`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigIssue {
@@ -1427,6 +1490,32 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
 
     if cfg.timing.lane_busy_idle_min == 0 {
         issues.push(issue("timing.lane_busy_idle_min", "must be at least one minute".to_string()));
+    }
+
+    // ---- the schedule (T-448): a departure time must be an RFC3339 moment
+    // the engine can compare with the clock, and the hours of the day must be
+    // two real times with a start different from the end.
+    if let Some(schedule) = &cfg.schedule {
+        if let Some(depart_at) = &schedule.depart_at {
+            if crate::plan::parse_rfc3339(depart_at).is_none() {
+                issues.push(issue(
+                    "schedule.depart_at",
+                    format!(
+                        "must be an RFC3339 moment (e.g. 2026-10-30T14:00:00-05:00), got {depart_at:?}"
+                    ),
+                ));
+            }
+        }
+        if let Some(hours) = &schedule.hours {
+            if !valid_hours(hours) {
+                issues.push(issue(
+                    "schedule.hours",
+                    format!(
+                        "must be two HH:MM times with a different start and end (e.g. \"09:00-18:00\"), got {hours:?}"
+                    ),
+                ));
+            }
+        }
     }
 
     // ---- models (17 §0): empty chains mean models are not managed

@@ -447,6 +447,12 @@ pub fn onboard_queued(
             }
         };
 
+        // A voyage that has not departed yet starts no lane this tick
+        // (T-448): at its departure time the engine onboards them by itself.
+        if gear_app::config::departs_at(&config, now).is_some() {
+            continue;
+        }
+
         for seat in seats {
             // Only lanes are onboarded by the engine in this cut; the captain
             // and the temps get their pane elsewhere.

@@ -535,7 +535,17 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         }
         // Session setup may take several ticks; no packet goes before Ready.
         dispatch::recover_open_rounds(store, herdr, cfg, &project, &observed, &planned, now)?;
-        let prepared = dispatch::prepare_dispatch(store, herdr, cfg, &project, &planned, now)?;
+        // A voyage that has not departed yet plans no delivery this tick
+        // (T-448): its lanes are not started yet, and nothing is sent to
+        // them. Reviews, merges and the captain's items are untouched.
+        let departing = gear_app::config::latest(store, &project)
+            .map(|config| gear_app::config::departs_at(&config, now).is_some())
+            .unwrap_or(false);
+        let prepared = if departing {
+            Vec::new()
+        } else {
+            dispatch::prepare_dispatch(store, herdr, cfg, &project, &planned, now)?
+        };
         let deliveries = store.write(|tx| dispatch::intend_dispatch(tx, &project, &prepared, now))?;
         report.intended.extend(deliveries.into_iter().map(|op| op.id));
         note_slow(report, "dispatch", step);

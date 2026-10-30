@@ -455,3 +455,84 @@ fn an_unnamed_leftover_agent_is_named_and_asked_to_exit_in_the_same_tick() {
         SeatState::Active
     );
 }
+
+/// T-448: a voyage whose departure time is in the future starts no lane and
+/// delivers nothing; at that time the engine onboards the lane and, once it is
+/// idle, gives it its task — nobody asks.
+#[test]
+fn a_future_departure_onboards_no_lane_and_dispatches_nothing_until_its_time() {
+    use gear_app::identity::Fingerprint;
+    use gear_herdr::HerdrRead as _;
+    use gear_model::GearCtx;
+
+    // T0 is 2027-01-15T08:00:00Z; the departure is one hour later.
+    let scheduled = format!("{CONFIG}\n[schedule]\ndepart_at = \"2027-01-15T09:00:00Z\"\n");
+    let mut s = Store::open_in_memory().unwrap();
+    admin::init_with_home(
+        &mut s,
+        &Env { ctx: None, pane_id: None, admin: true },
+        &scheduled,
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
+    let mut herdr = FakeHerdr::new();
+    // A delivered prompt starts the lane's turn, as a real agent does.
+    herdr.prompt_starts_turn = true;
+    let cfg = cfg();
+
+    let cap = Fingerprint { pane_id: "w1:p1".into(), kind: Some("claude".into()), session_ref: None };
+    let env = Env {
+        ctx: Some(GearCtx { project: "toy".into(), seat: "captain".into(), generation: 1 }),
+        pane_id: Some("w1:p1".into()),
+        admin: false,
+    };
+
+    // One ready task waits for heat.
+    let text = "<!-- gear-plan project=toy base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: Fix the login crash\naccept: repro passes\nestimate: 30\ndeps: -\n";
+    let draft = gear_app::draft::parse(text).unwrap();
+    let agents = herdr.agents().unwrap();
+    gear_app::plan::apply(&mut s, &env, Some(&cap), Some(&agents), &draft, text, "v1", T0 + 1).unwrap();
+
+    // Before the departure: the queued lane is not onboarded and the ready
+    // task is not delivered.
+    gear_engine::tick(&mut s, &mut herdr, &cfg, T0 + 100).unwrap();
+    let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+    assert_eq!(seat.state, SeatState::Queued, "no lane is started before the departure");
+    assert!(
+        herdr.calls.iter().all(|call| !matches!(call, Call::AgentStart { .. })),
+        "no agent starts: {:?}",
+        herdr.calls
+    );
+    assert_eq!(
+        s.read(|tx| tx.get_task("toy", "T-1")).unwrap().unwrap().state,
+        gear_model::TaskState::Ready,
+        "the task waits"
+    );
+    assert!(
+        s.read(|tx| tx.get_attempt("toy", "T-1", 1)).unwrap().is_none(),
+        "no attempt before the departure"
+    );
+    assert!(
+        herdr.calls.iter().all(|call| !matches!(call, Call::Prompt { .. })),
+        "nothing is delivered: {:?}",
+        herdr.calls
+    );
+
+    // At the departure time the engine starts the lane by itself, and once it
+    // is idle the task goes to it.
+    gear_engine::tick(&mut s, &mut herdr, &cfg, T0 + 3600).unwrap();
+    gear_engine::tick(&mut s, &mut herdr, &cfg, T0 + 3700).unwrap();
+    let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+    assert_eq!(seat.state, SeatState::Active, "the lane starts at its departure time");
+    let binding = s.read(|tx| tx.get_binding("toy:heat", seat.generation)).unwrap().unwrap();
+    let prompts = herdr.prompts_to(&binding.pane_id);
+    assert_eq!(prompts.len(), 1, "its task is delivered: {prompts:?}");
+    assert!(prompts[0].starts_with("New task T-1 (contract v1)"), "{}", prompts[0]);
+    assert_eq!(
+        s.read(|tx| tx.get_attempt("toy", "T-1", 1)).unwrap().unwrap().state,
+        gear_model::AttemptState::Delivered,
+        "one delivery, nobody asked"
+    );
+}
