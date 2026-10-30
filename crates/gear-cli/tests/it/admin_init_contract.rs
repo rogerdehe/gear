@@ -1109,7 +1109,7 @@ fn lane_config(dir: &Path, repo: &Path, template: &str) -> PathBuf {
 /// removes the old tree.
 #[test]
 fn a_changed_seat_branch_prints_the_worktree_it_leaves_behind() {
-    let dir = scratch("stale");
+    let dir = scratch("seat-branch-moved");
     let repo = dir.join("repo");
     std::fs::create_dir_all(&repo).expect("the repo");
     let db = dir.join("gear.db");
