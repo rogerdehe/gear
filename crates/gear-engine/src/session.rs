@@ -764,8 +764,16 @@ mod tests {
         assert_eq!(herdr.calls.len(), calls);
     }
 
+    /// The persisted session step of a seat; the T-434 tests read the step
+    /// the runner wrote.
+    fn session_state(store: &mut Store, seat: &str) -> serde_json::Value {
+        let key = format!("engine.session_step.{seat}");
+        let raw = store.read(|tx| tx.get_meta(&key)).unwrap().unwrap();
+        serde_json::from_str::<serde_json::Value>(&raw).unwrap()
+    }
+
     #[test]
-    fn new_session_is_typed_then_waits_five_seconds_for_codex() {
+    fn new_session_is_typed_and_entered_in_one_step() {
         let mut store = world();
         let mut herdr = FakeHerdr::new();
         herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
@@ -773,12 +781,46 @@ mod tests {
         let action = Action::New;
         let run = |store: &mut Store, herdr: &mut FakeHerdr, now| crate::session_runner::run(store, herdr, &cfg(), &seat, "T-1", 1, Role::Dev, &action, false, now).unwrap();
         assert_eq!(run(&mut store, &mut herdr, T0), Prep::Wait);
+        // T-434: the text and its Enter leave in the same call, so the `enter`
+        // step is never visited and nothing stays typed in the box.
+        assert_eq!(session_state(&mut store, "p:heat")["step"], "wait_action");
+        let typed = herdr.calls.iter().position(|call| matches!(call, gear_herdr::fake::Call::PaneType { text, .. } if text == "/new")).expect("the new session is typed");
+        let entered = herdr.calls.iter().position(|call| matches!(call, gear_herdr::fake::Call::SendKeys { keys, .. } if keys == &["enter"])).expect("the Enter is sent at once");
+        assert!(typed < entered);
+        // The agent looks busy right after the text: the Enter already went.
+        herdr.set_status("w1:p1", gear_herdr::AgentStatus::Working);
         assert_eq!(run(&mut store, &mut herdr, T0 + 1), Prep::Wait);
-        assert_eq!(run(&mut store, &mut herdr, T0 + 5), Prep::Wait);
-        assert_eq!(run(&mut store, &mut herdr, T0 + 6), Prep::Ready);
+        assert_eq!(herdr.calls.iter().filter(|call| matches!(call, gear_herdr::fake::Call::PaneType { text, .. } if text == "/new")).count(), 1, "the command is not typed twice");
+        herdr.set_status("w1:p1", gear_herdr::AgentStatus::Idle);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 4), Prep::Wait);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 5), Prep::Ready);
         let attempt = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
         assert_eq!(attempt.session_action.as_deref(), Some("new-unconfirmed"));
-        assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::PaneType { text, .. } if text == "/new")));
+    }
+
+    #[test]
+    fn a_refused_enter_stays_at_enter_and_goes_on_a_later_call_while_working() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        store.write(|tx| tx.set_meta("engine.session_step.p:heat", &serde_json::json!({
+            "round":"p:T-1:1:dev", "generation":1, "action":"new", "step":"enter", "started":T0,
+            "t0":T0, "step_at":T0, "old_session_ref":"old-session", "target":null, "offset":0,
+            "saw_working":false, "compact_after":false, "initial_done":false
+        }).to_string())).unwrap();
+        let action = Action::New;
+        let run = |store: &mut Store, herdr: &mut FakeHerdr, now| crate::session_runner::run(store, herdr, &cfg(), &seat, "T-1", 1, Role::Dev, &action, false, now).unwrap();
+        herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "refused".into() });
+        assert_eq!(run(&mut store, &mut herdr, T0 + 1), Prep::Wait);
+        assert_eq!(session_state(&mut store, "p:heat")["step"], "enter", "a refused Enter waits for a later call");
+        // The text is in the box already: a busy agent does not hold the Enter.
+        herdr.set_status("w1:p1", gear_herdr::AgentStatus::Working);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 2), Prep::Wait);
+        let state = session_state(&mut store, "p:heat");
+        assert_eq!(state["step"], "wait_action");
+        assert_eq!(state["t0"], T0 + 2);
+        assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::SendKeys { keys, .. } if keys == &["enter"])));
     }
 
     #[test]
@@ -818,8 +860,8 @@ mod tests {
             assert_eq!(run(&mut store, &mut herdr, T0), Prep::Wait);
             assert_eq!(run(&mut store, &mut herdr, T0 + 1), Prep::Wait);
             if changed { store.write(|tx| tx.set_binding_session_ref(&seat.id, 1, "new-session")).unwrap(); }
-            assert_eq!(run(&mut store, &mut herdr, T0 + 5), Prep::Wait);
-            assert_eq!(run(&mut store, &mut herdr, T0 + if changed { 6 } else { 31 }), Prep::Ready);
+            assert_eq!(run(&mut store, &mut herdr, T0 + 4), Prep::Wait);
+            assert_eq!(run(&mut store, &mut herdr, T0 + if changed { 5 } else { 31 }), Prep::Ready);
             let action = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().session_action.unwrap();
             assert_eq!(action, if changed { "new" } else { "new-unconfirmed" });
             let messages = store.read(|tx| tx.thread_messages("p", "session:p:pi-lane")).unwrap();
@@ -873,8 +915,8 @@ mod tests {
         let run = |store: &mut Store, herdr: &mut FakeHerdr, now| crate::session_runner::run(store, herdr, &config, &seat, "T-1", 1, Role::Dev, &Action::Compact, false, now).unwrap();
         assert_eq!(run(&mut store, &mut herdr, T0), Prep::Wait);
         assert_eq!(run(&mut store, &mut herdr, T0 + 1), Prep::Wait);
-        assert_eq!(run(&mut store, &mut herdr, T0 + 15), Prep::Wait);
-        assert_eq!(run(&mut store, &mut herdr, T0 + 16), Prep::Ready);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 14), Prep::Wait);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 15), Prep::Ready);
         assert_eq!(store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().session_action.as_deref(), Some("keep"));
     }
 
@@ -944,6 +986,27 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
                 assert_eq!(herdr.calls.iter().filter(|call| matches!(call, gear_herdr::fake::Call::AgentStart { .. })).count(), starts_before);
             }
         }
+    }
+
+    #[test]
+    fn resume_fallback_types_the_exit_command_and_enter_in_one_step() {
+        let (mut store, mut herdr, seat, config) = pi_world();
+        let action = Action::Resume("wanted".into());
+        let run = |store: &mut Store, herdr: &mut FakeHerdr, now| crate::session_runner::run(store, herdr, &config, &seat, "T-1", 1, Role::Dev, &action, false, now).unwrap();
+        let types = |herdr: &FakeHerdr| herdr.calls.iter().filter(|call| matches!(call, gear_herdr::fake::Call::PaneType { text, .. } if text == "/quit")).count();
+        assert_eq!(run(&mut store, &mut herdr, T0), Prep::Wait);
+        assert_eq!(session_state(&mut store, "p:pi-lane")["step"], "wait_exit", "the initial step submits the exit command too");
+        assert_eq!(types(&herdr), 1);
+        // The agent does not exit: the fallback types `/quit` and submits it in
+        // the same call, so it cannot sit unsent while the agent looks busy.
+        assert_eq!(run(&mut store, &mut herdr, T0 + 31), Prep::Wait);
+        assert_eq!(session_state(&mut store, "p:pi-lane")["step"], "fallback_exit");
+        assert_eq!(run(&mut store, &mut herdr, T0 + 32), Prep::Wait);
+        assert_eq!(session_state(&mut store, "p:pi-lane")["step"], "fallback_wait_exit");
+        assert_eq!(types(&herdr), 2);
+        let n = herdr.calls.len();
+        assert!(matches!(&herdr.calls[n - 2], gear_herdr::fake::Call::PaneType { text, .. } if text == "/quit"), "{:?}", &herdr.calls[n - 2..]);
+        assert!(matches!(&herdr.calls[n - 1], gear_herdr::fake::Call::SendKeys { keys, .. } if keys == &["enter"]), "{:?}", &herdr.calls[n - 2..]);
     }
 
     #[test]
@@ -1440,7 +1503,7 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
         let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
 
         let first = prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 10).unwrap();
-        let second = prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 20).unwrap();
+        let second = prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 12).unwrap();
 
         assert_eq!(first, Prep::Wait, "the seat has no session yet: a new one");
         assert_eq!(second, Prep::Wait, "the round goes on with its action");
