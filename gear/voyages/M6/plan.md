@@ -3,15 +3,19 @@
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3).
 
 # Milestone M6: a fleet that needs no nursing
-done: (1) every M6 task merged; (2) the voyage never stops: while some lane has a task it can start, no lane sits idle; (3) every hand fix the captain makes during M6 is either turned into an M6 task and merged, or, only when it needs a sweeping change, written into gear/voyages/M7/backlog.md; (4) every recovery the captain makes by hand during M6 (a nudge, a release, an answered dialog) is recorded as a decision and becomes an M6 task that is merged, and the voyage report shows no false stall item; (5) the engine and each board stay under 10 % of one core and 50 MB on average over the last station, measured from the probe lines; (6) released at each station, the last as v0.6.x
+done: (1) every M6 task merged; (2) the voyage never stops: while some lane has a task it can start, no lane sits idle; (3) every hand fix or hand recovery the captain makes during M6 (a few lines of code, a nudge, a release, an answered dialog) is recorded as a decision and becomes an M6 task that is merged, or, only when it needs a sweeping change, is written into gear/voyages/M7/backlog.md; the voyage report shows no false stall item; (4) the engine and each board stay under 10 % of one core and 50 MB on average over the last station, measured from the probe lines; (5) released at each station, the last as v0.6.x
 bar: DELIVERABLE: an error in normal use blocks the task; edge cases outside normal use are logged
-eta: (to agree with the user)
+eta: 12h
 station S1: deliveries and reviews never stall, released as v0.6.0
 station S2: models, agents and captains switch with a handover; elastic counts; dialogs never block; role charters fit the chosen models, released as v0.6.1
 station S3: GEAR near idle and the fleet's health watched, released as v0.6.2
 station S4: the captain's plan tools, released as v0.6.3
 
 # Decisions
+- 2026-10-30 09:30 scope: done (3) and (4) of the first draft are one rule: a hand fix (the captain's few lines of code) and a hand recovery (a nudge, a release, an answered dialog) are allowed, each recorded as a decision and turned into an M6 task; the engine and board target is 10 % of one core and 50 MB (measured 2026-10-30: engines 0-0.5 %, boards 0.4 % to 10 %, all under 30 MB) | why: user | else: no hand recovery in the last station, 3 %
+- 2026-10-30 09:30 scope: every dialog times out after 10 minutes and the work goes on without it; lanes and reviewers may not stop on dialogs, the engine closes them and points the seat to the captain; counts scale by themselves within the configured ones, and going above them is a user-started config change with an end condition, after which the engine returns to the configured counts | why: user | else: per-role timeouts, captain items for lane dialogs
+- 2026-10-30 09:30 scope: dropped as done in M5.1 (T-438 verdict needs the review branch on the project's remote); moved to gear/voyages/M7/backlog.md: builds cached across worktrees, `gear issue file`, remote builds; added: the reviewer told when a hand-in closes its direction check, `gear queue` naming a verdict that waits for the captain | why: the goal is a fleet without nursing; those three are speed and convenience | else: a longer M6
+- 2026-10-30 09:30 model: two lanes and the models of M5 (hull, mast on pi with tokenrhythm/deepseek-v4.1-flash-1017; reviewers on pi with tokenrhythm/deepseek-v4-pro-0813); bar DELIVERABLE; eta 12h; the whole voyage decomposed before departure; handovers follow gear/voyages/M6/handover.md | why: user | else: three lanes
 
 # Queue
 <!-- Lanes as in M5: hull owns crates/gear-engine, gear-app, gear-store, gear-model, gear-usage; mast owns gear-cli, gear-herdr, gear-board, gear-forge, skills, docs, Makefile. Estimates are first cuts; each contract is written in full, against merged code, before departure. -->
@@ -23,7 +27,7 @@ accept: `cargo fmt --all --check` exits 0 on dev; `make -n check` and `make -n g
 estimate: 10
 
 ## NEW [now] lane=hull milestone=M6 station=S1 required
-goal: [S1] A delivery counts as landed only when the agent shows it took it: the attempt's first check-in, or the agent's idle-to-busy turn after the text was submitted with an empty composer, within a bounded window; one resend after the window, then a captain item. Covers: text left in the composer without its Enter, a command joined to the packet ('/new' + packet), a delivery typed into a busy agent (today's false stall items), and a fresh Codex conversation that starts empty. Each step that types confirms its Enter took (the composer emptied) before the next step types.
+goal: [S1] (M5.1's T-434 already types a command and its Enter in one step; build on it.) A delivery counts as landed only when the agent shows it took it: the attempt's first check-in, or the agent's idle-to-busy turn after the text was submitted with an empty composer, within a bounded window; one resend after the window, then a captain item. Covers: text left in the composer without its Enter, a command joined to the packet ('/new' + packet), a delivery typed into a busy agent (today's false stall items), and a fresh Codex conversation that starts empty. Each step that types confirms its Enter took (the composer emptied) before the next step types.
 accept: Engine tests with FakeHerdr for each shape above; no stall item while a delivery is inside its window; a lost delivery is resent once and then rung. Run make check CRATE=gear-engine.
 estimate: 60
 
@@ -47,11 +51,6 @@ goal: [S1] Every review and direction packet opens with the seat's binding (task
 accept: Engine tests on the rendered packets: a direction packet's first line names it a direction check and gives only the direction command; a rework packet shows the rework above the goal; a hand-in for a stale candidate is refused. Run make check CRATE=gear-engine.
 estimate: 45
 
-## NEW [now] lane=hull milestone=M6 station=S1 required
-goal: [S1] A verdict is accepted only when the review branch is on the remote at the reviewed commit; otherwise the engine pushes the seat's local branch once, and tells the captain if that fails (T-265, T-270).
-accept: Engine tests: a verdict with no remote review branch triggers one push; a failed push is an item, not an accepted verdict. Run make check CRATE=gear-engine.
-estimate: 25
-
 ## NEW [now] lane=mast milestone=M6 station=S1 required
 goal: [S1] The codex profile handles Codex 0.165's startup screens: after `/new` it answers "Where should the new conversation run?" with the current worktree, on a resume it chooses the seat's own directory, and Herdr's done/idle on those screens is read as blocked. Slash commands are typed in one go.
 accept: gear-herdr tests with the two screens captured from M5; a real Codex start in a test worktree reaches an empty composer with no dialog left. Run make check CRATE=gear-herdr.
@@ -66,6 +65,16 @@ estimate: 50
 goal: [S1] gear-cli's two tests that share the scratch tag "stale" each get their own (F-153), so plain `cargo test` passes; `gear admin init` names each reviewer by its entry's CLI and checks its model against that CLI.
 accept: `cargo test -p gear-cli` passes twice in a row; an init with [temps] kind pi and a codex review entry prints "reviewers: … codex …". Run make check CRATE=gear-cli.
 estimate: 20
+
+## NEW [now] lane=hull milestone=M6 station=S1 required
+goal: [S1] A reviewer is told when a hand-in closes its direction check (M5.2: review-9 kept checking T-442 after the hand-in closed the job, its `gear send` was refused with "does not hold the direction job", and it spent minutes looking for the cause): the engine sends the seat one line, "The direction check of T-<n> was closed by its hand-in; end your turn."
+accept: Engine test: a hand-in that closes a running direction check sends that line to the seat once. Run make check CRATE=gear-engine.
+estimate: 15
+
+## NEW [now] lane=mast milestone=M6 station=S1 required
+goal: [S1] `gear queue` and the board name an attempt whose review is in and waits for the captain as "waits for your verdict (M-<id>)", not only "submitted" (M5.1: another project's captain read a finished review as a stall).
+accept: CLI and board tests: an attempt with a recorded fail verdict and an open item shows the text with the item id. Run make check CRATE=gear-cli and CRATE=gear-board.
+estimate: 15
 
 ## NEW [now] lane=hull milestone=M6 station=S2 required
 goal: [S2] Switch a seat's model in place: when the new model runs on the seat's current CLI, the engine switches it through the CLI's own model command at the next idle moment; the agent and its conversation stay, and no handover is written.
@@ -83,13 +92,13 @@ accept: gear-cli tests for the template and the take path's request; the skill t
 estimate: 45
 
 ## NEW [now] lane=hull milestone=M6 station=S2 required
-goal: [S2] Elastic counts: a plan line raises a lane or reviewer quota for a while with its reason and end condition (e.g. until no hand-in waits), confirmed with the user; the engine returns to the normal count by itself when the condition holds and records both changes.
-accept: Engine and app tests: temps raised to 8 starts extra reviewers while hand-ins wait and releases them back to 4 when none wait. Run make check CRATE=gear-engine and CRATE=gear-app.
+goal: [S2] Elastic counts. Within the configured counts (e.g. 2 lanes, 4 reviewers) the engine starts and releases seats by itself as work comes and goes, with nobody asked. Going above them is a config change the user starts and confirms in the one dialog: a plan line raises a count with its reason and end condition (e.g. 4 to 8 reviewers until no hand-in waits for a review); when the condition holds, the engine releases idle extra seats only, never a running review, until the count is back to the configured one, and records both changes; after that it scales within the configured counts as before.
+accept: Engine and app tests: reviewers raised to 8 start while hand-ins wait; once none wait, idle extra reviewers are released down to 4 and a running review is not interrupted. Run make check CRATE=gear-engine and CRATE=gear-app.
 estimate: 50
 
 ## NEW [now] lane=hull milestone=M6 station=S2 required
-goal: [S2] Dialogs never block: a lane's or reviewer's blocking screen becomes a captain item; the engine closes it if the captain has not handled it within a default time (15 minutes); a captain dialog left unanswered for 20 minutes is cancelled by the engine. The skill says the captain opens a dialog only for a change the user asked for.
-accept: Engine tests: a blocked reviewer rings once and is closed after the timeout; the captain timeout cancels. Run make check CRATE=gear-engine.
+goal: [S2] Dialogs never block. A lane or reviewer may not stop on a dialog at all: when its agent shows a blocking screen (an approval or a question the CLI asks), the engine closes it at once and tells the seat "Dialogs are not allowed for your role; ask the captain with gear send --kind question." Every other dialog (the captain's to the user) is cancelled when nobody answers it within 10 minutes, and the work goes on as it would have without it. The skill says the captain opens a dialog only for a change the user asked for.
+accept: Engine tests: a blocked lane or reviewer screen is closed in the same tick and the seat gets the text; a captain dialog unanswered for 10 minutes is cancelled. Run make check CRATE=gear-engine.
 estimate: 40
 
 ## NEW [now] lane=mast milestone=M6 station=S2 required
@@ -112,11 +121,6 @@ goal: [S3] Fleet and machine health watch, costing almost nothing: the CPU and m
 accept: Engine tests with injected readings for both cases; the watch's own cost measured under 1 % of one core. Run make check CRATE=gear-engine.
 estimate: 60
 
-## NEW [now] lane=mast milestone=M6 station=S3 required
-goal: [S3] Builds cache across worktrees: sccache hits our own crates (the M5 hit rate was 1.4 % because paths differ per worktree), by a shared target directory or path remapping, with the build-slot shares unchanged.
-accept: A second worktree's build of the same commit hits the cache for our crates (measured); `make check` unchanged in result. The merge gate runs `make gate`.
-estimate: 40
-
 ## NEW [now] lane=hull milestone=M6 station=S4 required
 goal: [S4] Plan tools: `state: hold` keeps a task out of delivery until set ready; a milestone departs only on an explicit `depart` line; a milestone with no task and no history can be removed; a plan apply warns when two Ready tasks name one file.
 accept: App tests for each. Run make check CRATE=gear-app.
@@ -126,11 +130,6 @@ estimate: 50
 goal: [S4] Branch hygiene and coverage: a cancelled task's branch is deleted; a merged task's branch is deleted even when its tip moved past the merged candidate (its extra commits listed to the captain first); `gear report coverage` lists accepted attempts not on the integration branch.
 accept: Engine and app tests. Run make check CRATE=gear-engine and CRATE=gear-app.
 estimate: 40
-
-## NEW [now] lane=mast milestone=M6 station=S4 required
-goal: [S4] `gear issue file` lets a captain file a bug issue through the engine's forge ops (once, retried, recorded in the plan), for projects whose policy asks for one.
-accept: gear-forge tests against the fake forge; the skill's github reference. Run make check CRATE=gear-forge.
-estimate: 35
 
 ## NEW [now] lane=mast milestone=M6 station=S4 required
 goal: [S4] Release M6's stations: version, notes and the skill review for v0.6.0 to v0.6.3, one task per station in the form of M5's T-367 to T-369 (written when M6 departs, one per station).
