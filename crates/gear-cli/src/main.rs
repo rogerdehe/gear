@@ -18,7 +18,7 @@ struct Cli {
     /// Expand a task id (T-n): its packet.
     #[arg(long, global = false)]
     show: Option<String>,
-    /// Print the version-matched skill: (none)=SKILL.md | conventions | captain | course | decompose | review | adopt | github | agent:opencode | agent:codex | agent:claude | agent:grok | agent:pi.
+    /// Print the version-matched skill: (none)=SKILL.md | conventions | captain | departure | course | decompose | review | adopt | github | agent:opencode | agent:codex | agent:claude | agent:grok | agent:pi.
     #[arg(long, num_args = 0..=1, default_missing_value = "main")]
     skill: Option<String>,
     #[arg(long, global = true)]

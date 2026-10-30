@@ -44,6 +44,7 @@ The captain's guide: `gear --skill captain`. Holding the course: `gear --skill c
 |---|---|
 | `conventions` | names, branches, worktrees, the lane's task loop, questions, review and merge |
 | `captain` | kickoff, config, the plan file, the daily loop |
+| `departure` | the departure sheet the user confirms before every voyage departs |
 | `course` | keeping the work aimed at the goal: findings, eta, signals, landing |
 | `decompose` | cutting work into tasks |
 | `review` | what a temp reviewer delivers |

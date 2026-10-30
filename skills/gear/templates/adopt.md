@@ -2,7 +2,7 @@
 
 <!--
 Template for `gear/adopt.md`. The captain fills it before the kickoff of a
-project that already runs, and turns it into the kickoff sheet. One line per
+project that already runs, and turns it into the departure sheet. One line per
 answer where a line is enough; delete the instructions.
 -->
 

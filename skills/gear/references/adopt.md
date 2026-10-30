@@ -7,7 +7,7 @@ feedback, not a procedure to follow to the letter.
 
 Write the analysis to `gear/adopt.md` and the standard to `gear/standard.md`
 (both templates ship next to this file, in the skill's `templates/`
-directory: `adopt.md` and `standard.md`). The analysis feeds the kickoff sheet:
+directory: `adopt.md` and `standard.md`). The analysis feeds the departure sheet:
 what the project already has decides repos, integration branches, the gate, the
 lanes and the model chain — not GEAR's defaults.
 
@@ -55,7 +55,7 @@ If there is no gate, build a trusted one first (one command, offline, seconds).
 
 ## 4. Keep, replace or drop
 
-Decide, one line each, and put the decision in the kickoff sheet:
+Decide, one line each, and put the decision in the departure sheet:
 
 | Thing | Ask |
 |---|---|

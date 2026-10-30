@@ -52,6 +52,11 @@ pub const TOPICS: &[Topic] = &[
         text: include_str!("../../../skills/gear/references/captain.md"),
     },
     Topic {
+        name: "departure",
+        file: "references/departure.md",
+        text: include_str!("../../../skills/gear/references/departure.md"),
+    },
+    Topic {
         name: "adopt",
         file: "references/adopt.md",
         text: include_str!("../../../skills/gear/references/adopt.md"),
