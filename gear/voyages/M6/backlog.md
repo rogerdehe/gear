@@ -113,3 +113,24 @@
 
 ## No plan state holds a task back from delivery
 - 2026-10-29 M5 (the other project): the captain was told (wrongly, by this captain) that `state: draft` keeps a packet from delivery; the plan parser accepts only `state: ready` and `state: cancelled`, and Draft exists only in the store. A packet still under discussion can be held only by queue order or deps. A `state: draft` (or `hold`) line that keeps a task out of delivery until set ready would cover it.
+
+## Switching a seat's model or its agent (user's request, 2026-10-29)
+- Two operations, not one. **Switch model**: when the new model runs on the same CLI, switch it in place through the CLI's own model command (e.g. `/model`); the agent and its context stay, no handover. **Switch agent**: a new CLI (or a model only another CLI serves) means the old agent exits and a new one starts, so the conversation is lost and a handover is needed.
+- Timing of an agent switch: either at the next safe point (today's behaviour), or at once: the engine tells the agent to wrap up and commit now, waits a bounded grace period (default to be chosen), then exits it whether or not it handed in. A model that thinks for hours must not hold the switch.
+- The incoming agent is told it takes over someone else's work: its packet starts with the handover (the previous agent's session id or transcript path to read first, and the worktree's state: uncommitted changes, unpushed commits, the branch and its last commit), then the task packet. It must not start over or overwrite half-done work it has not inspected.
+- Applies to lanes and reviewers alike; a model switch with no CLI change needs none of this.
+
+## Captain handover (user's request, 2026-10-29)
+- Only when the user asks for it (a new captain, model or CLI); the captain then confirms it with the user in the one allowed dialog. The outgoing captain writes the handover document (goal, done clauses, bar, eta, state, open threads, the user's standing orders, files to read first) and hands over, as a colleague leaving would.
+- `gear captain take` from a pane the user started: the new captain takes the seat at once, and the engine asks the previous captain for its handover document.
+- When the previous captain cannot answer (quota spent, gone): the new captain reads the previous captain's conversation by its session id and writes the summary itself.
+- The core is the same for every seat: switching an agent always means a handover; switching only the model does not.
+
+## Elastic reviewer and lane counts (user's request, 2026-10-29)
+- On the user's word the captain raises a quota for a while (e.g. reviewers from 4 to 8 to clear a review backlog), and the engine returns it to the normal count by itself once the backlog is gone. The temporary count, its reason and its end condition are recorded in the plan.
+- The change is staffing, so it is confirmed with the user in a dialog, and only when the user asked for it.
+
+## Dialogs never block the fleet (user's request, 2026-10-29)
+- The captain never opens a dialog the user did not ask for (goal, bar, eta, staffing, models, scaling); only a change the user requests is confirmed, on the assumption that the user is at the screen.
+- The engine cancels a captain dialog left unanswered for a default time (about 20 minutes), so it cannot hold the captain's messages.
+- A lane's or reviewer's dialog (an approval, a question, a CLI startup screen) becomes an item for the captain; if the captain has not handled it within a default time (10-20 minutes), the engine closes it.
