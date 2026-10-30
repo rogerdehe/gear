@@ -25,11 +25,6 @@ station S4: the captain's plan tools, released as v0.6.3
 # Queue
 <!-- Lanes as in M5: hull owns crates/gear-engine, gear-app, gear-store, gear-model, gear-usage; mast owns gear-cli, gear-herdr, gear-board, gear-forge, skills, docs, Makefile. Estimates are first cuts; each contract is written in full, against merged code, before departure. -->
 
-## NEW [now] lane=hull milestone=M6 station=S1 required
-goal: [S1] A lane never loses its seat identity at a start or restart (M5.3 departure, 2026-10-30: in the tick that onboarded hull and mast on a new model, `crate::restart` also ran for both (`probe restart gear:mast stop/start/finish` at 16:37:19Z, in the same tick as `onboarded: [gear:hull, gear:mast]`), bumped each seat's generation and ran its `export GEAR_CTX=<seat>:<new gen>` line with `pane run` into a pane whose pi had just started, so the line landed in pi's composer and every `gear` call of the lane failed with STALE_GENERATION; a later `/quit` of hull made the missing-seat restart (crates/gear-engine/src/lib.rs, the loop that calls `restart::advance` at about line 944) bump it again, with the same result). Find why a restart plan ran for a seat onboarding had just started on the chain's head, and fix it there; and in crates/gear-engine/src/restart.rs the environment line is run only into a shell (the pane's agent is gone, read right before typing), never into a live agent. The exact contract is written against merged code before departure.
-accept: Engine tests with FakeHerdr: a seat onboarded on the chain head in a tick runs no restart in that tick or the next; a restart whose pane holds a live agent types nothing into it; a lane restarted after `/quit` runs `gear` with its new generation. Run make check CRATE=gear-engine.
-estimate: 45
-
 ## NEW [now] lane=mast milestone=M6 station=S1 required
 mechanical: one sweeping `cargo fmt` before any lane branches, then the check in the Makefile; the gate proves it
 goal: [S1] The tree is rustfmt-clean and stays so (M5 F-140): one `cargo fmt --all` commit at the voyage's start, then `cargo fmt --check` in `make check` and `make gate`.
