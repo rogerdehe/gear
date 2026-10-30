@@ -1,8 +1,8 @@
 //! Contract for gear_app::config (T-7). Pure: no store, no Herdr.
 
 use gear_app::config::{
-    departs_at, parse, validate, ConfigIssue, Conventions, Models, QuotaPolicy, Repo, Timing,
-    WaitPolicy,
+    departs_at, hours_end, hours_next_start, off_hours_until, parse, validate, ConfigIssue,
+    Conventions, Models, QuotaPolicy, Repo, Timing, WaitPolicy,
 };
 use gear_model::ErrorCode;
 
@@ -248,6 +248,39 @@ fn a_bad_departure_or_hours_is_an_init_issue() {
         let cfg = parse(&format!("{MINIMAL}\n[schedule]\nhours = {good:?}\n")).unwrap();
         assert_eq!(validate(&cfg), vec![], "{good:?}");
     }
+}
+
+/// A local time on 2027-03-10, as the machine's clock sees it (T-450).
+fn local(hour: i32, minute: i32) -> i64 {
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_year = 127;
+    tm.tm_mon = 2;
+    tm.tm_mday = 10;
+    tm.tm_hour = hour;
+    tm.tm_min = minute;
+    tm.tm_isdst = -1;
+    (unsafe { libc::mktime(&mut tm) }) as i64
+}
+
+#[test]
+fn the_working_hours_say_when_the_fleet_rests_and_comes_back() {
+    let cfg = parse(&format!("{MINIMAL}\n[schedule]\nhours = \"10:00-18:00\"\n")).unwrap();
+    let end = hours_end(&cfg, local(12, 0)).expect("the end of the working day");
+    assert_eq!(gear_board::idle::clock(end), "18:00");
+    assert_eq!(off_hours_until(&cfg, local(12, 0)), None, "inside the hours");
+    let start = off_hours_until(&cfg, local(18, 0)).expect("the next start");
+    assert_eq!(gear_board::idle::clock(start), "10:00");
+    assert_eq!(hours_next_start(&cfg, local(17, 0)), Some(start), "the notice names it");
+    assert!(start > local(18, 0), "the next start is after the end");
+
+    // An overnight window works from its start to its end on the next day.
+    let night = parse(&format!("{MINIMAL}\n[schedule]\nhours = \"18:00-09:00\"\n")).unwrap();
+    assert_eq!(off_hours_until(&night, local(12, 0)), Some(local(18, 0)), "resting by day");
+    assert_eq!(hours_end(&night, local(20, 0)).map(gear_board::idle::clock).as_deref(), Some("09:00"));
+
+    let none = parse(MINIMAL).unwrap();
+    assert_eq!(off_hours_until(&none, local(12, 0)), None);
+    assert_eq!(hours_end(&none, local(12, 0)), None);
 }
 
 // ---- `[conventions].scratch_dir` (T-413): where a seat's temp files go.

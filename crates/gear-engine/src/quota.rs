@@ -159,7 +159,7 @@ pub fn apply_quota_policy_with(
             // T-326: with `on_wait = "release"` a lane parked on a long wait
             // does not hold its agent: the agent exits until the reset, and its
             // pane, worktree and session are kept.
-            if let Some(line) = release_for_wait(store, herdr, project, &config, profile, seat, now)? {
+            if let Some(line) = release_for_wait(store, herdr, project, &config, profile, seat, now, false)? {
                 report.events.push(line);
                 continue;
             }
@@ -803,7 +803,10 @@ const RELEASE_MIN_WAIT_S: i64 = 900;
 ///   session Herdr reports), else the agent waits out the quota in its pane;
 /// - the seat's binding is `Active` and its pane holds an agent — a pane that
 ///   is already a shell has nothing to release.
-fn release_for_wait(
+/// The exit goes the way the stop phase of a restart sends it (T-134): the
+/// agent's name first, the command as a prompt or the profile's keys.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn release_for_wait(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
     project: &str,
@@ -811,8 +814,10 @@ fn release_for_wait(
     profile: &Profile,
     seat: &SeatRow,
     now: Ts,
+    force: bool,
 ) -> GearResult<Option<String>> {
-    if config.models.on_wait != WaitPolicy::Release {
+    // T-450: the working hours release every lane whatever `on_wait` says.
+    if !force && config.models.on_wait != WaitPolicy::Release {
         return Ok(None);
     }
     if seat.role != SeatRole::Lane {
@@ -875,8 +880,9 @@ fn release_for_wait(
     }
     meta_set(store, &key, "1")?;
     let line = format!(
-        "{}: released for the wait until {until} (on_wait = release): its agent exited; its pane, worktree and session are kept",
-        seat.id
+        "{}: released for the wait until {until} ({}): its agent exited; its pane, worktree and session are kept",
+        seat.id,
+        if force { "working hours end" } else { "on_wait = release" }
     );
     tell_captain(store, project, seat, &line, now)?;
     Ok(Some(line))
@@ -947,7 +953,7 @@ fn signal_start(
 }
 
 /// A key of the engine's own state in the store's meta.
-fn meta_key(what: &str, seat: &str) -> String {
+pub(crate) fn meta_key(what: &str, seat: &str) -> String {
     format!("engine.{what}.{seat}")
 }
 
@@ -958,12 +964,12 @@ pub(crate) fn quota_meta_key(seat: &str) -> String {
 }
 
 /// Read one key of the engine's own state.
-fn meta_get(store: &mut Store, key: &str) -> GearResult<Option<String>> {
+pub(crate) fn meta_get(store: &mut Store, key: &str) -> GearResult<Option<String>> {
     store.read(|tx| tx.get_meta(key))
 }
 
 /// Write one key of the engine's own state.
-fn meta_set(store: &mut Store, key: &str, value: &str) -> GearResult<()> {
+pub(crate) fn meta_set(store: &mut Store, key: &str, value: &str) -> GearResult<()> {
     store.write(|tx| tx.set_meta(key, value))
 }
 
@@ -1524,22 +1530,23 @@ fn source_of(
 
 /// What a seat waits for (§9.2).
 #[derive(Debug, Clone, PartialEq)]
-struct Wait {
-    /// `quota` (a spent window), `error` (quota is left) or `unreadable`.
-    kind: String,
+pub(crate) struct Wait {
+    /// `quota` (a spent window), `error` (quota is left), `unreadable` or
+    /// `hours` (T-450: the working hours are over).
+    pub kind: String,
     /// When the wait ends.
-    until: Ts,
+    pub until: Ts,
     /// When it began: the round's clock pauses for this long (§5.1).
-    started_at: Ts,
+    pub started_at: Ts,
     /// The provider the seat waits for.
-    provider: String,
+    pub provider: String,
     /// The window that is spent (a quota park).
-    window: String,
+    pub window: String,
     /// The task the seat continues.
-    task: Option<String>,
+    pub task: Option<String>,
     /// The wait opened a pause row (§5.4): a quota park does, a provider
     /// error does not — that is not quota wait time.
-    pause: bool,
+    pub pause: bool,
 }
 
 /// The key of a seat's wait in the engine's meta.
@@ -1548,7 +1555,7 @@ fn wait_meta_key(seat: &str) -> String {
 }
 
 /// The wait of a seat, if it has one.
-fn load_wait(store: &mut Store, seat: &str) -> GearResult<Option<Wait>> {
+pub(crate) fn load_wait(store: &mut Store, seat: &str) -> GearResult<Option<Wait>> {
     let Some(raw) = meta_get(store, &wait_meta_key(seat))? else {
         return Ok(None);
     };
@@ -1637,7 +1644,7 @@ fn reset_error_episodes(store: &mut Store, seat: &str) -> GearResult<()> {
 ///
 /// False when the seat's state does not allow the park (a retiring lane, for
 /// instance).
-fn park_seat(
+pub(crate) fn park_seat(
     store: &mut Store,
     project: &str,
     seat: &SeatRow,
@@ -1850,11 +1857,17 @@ fn wake_from_source(
     if wait.until > now {
         return Ok(None);
     }
-    // The Continue: the same session, the same task (§9.2).
+    // The Continue: the same session, the same task (§9.2). T-450: a lane that
+    // waited out the working hours is told its hours are back, not its quota.
     let open = open_attempt(store, &seat.id)?;
+    let (back, reason) = if wait.kind == "hours" {
+        ("the working hours are back", "hours: the working hours start again")
+    } else {
+        ("your quota is back", "quota: the provider is back")
+    };
     let text = match wait.task.as_deref() {
-        Some(task) => format!("Continue {task}: your quota is back."),
-        None => "Continue: your quota is back.".to_string(),
+        Some(task) => format!("Continue {task}: {back}."),
+        None => format!("Continue: {back}."),
     };
     store.write(|tx| {
         // The pause row ends (§5.4) and the round's clock pauses for the
@@ -1875,7 +1888,7 @@ fn wake_from_source(
             tx.set_seat_state(
                 &seat.id,
                 SeatState::Active,
-                Some("quota: the provider is back"),
+                Some(reason),
                 now,
             )?;
         }
@@ -1920,7 +1933,7 @@ fn wake_from_source(
 /// round's clock takes its pause, and every counter of the wait starts again.
 /// A restart that is still pending goes on through the `crate::restart::pending`
 /// check at the top of the loop on later ticks.
-fn bring_back(
+pub(crate) fn bring_back(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
     cfg: &EngineCfg,

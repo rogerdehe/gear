@@ -219,7 +219,7 @@ fn bad(message: impl Into<String>) -> GearError {
 ///
 /// One or more `<number><unit>` groups and nothing else: `apply` refuses a
 /// milestone whose `eta:` this does not read (T-387).
-pub(crate) fn eta_seconds(text: &str) -> Option<i64> {
+pub fn eta_seconds(text: &str) -> Option<i64> {
     let mut rest = text.trim();
     let mut total = 0.0;
     while !rest.is_empty() {

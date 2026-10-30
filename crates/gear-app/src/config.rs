@@ -795,6 +795,105 @@ pub fn departs_at(config: &ProjectConfig, now: Ts) -> Option<Ts> {
     (now < at).then_some(at)
 }
 
+/// The working hours of `[schedule].hours` as (start, end) in minutes past
+/// local midnight. `None` when the section names no hours or they do not
+/// parse (the config check refuses them).
+fn hours_window(config: &ProjectConfig) -> Option<(u32, u32)> {
+    let text = config.schedule.as_ref()?.hours.as_deref()?;
+    let (start, end) = text.trim().split_once('-')?;
+    let start = minutes_of_day(start)?;
+    let end = minutes_of_day(end)?;
+    (start != end).then_some((start, end))
+}
+
+/// Whether `minute` (past local midnight) is inside the working hours. An
+/// overnight window (`start > end`) works from its start to its end on the
+/// next day.
+fn inside_hours(window: (u32, u32), minute: u32) -> bool {
+    let (start, end) = window;
+    if start < end {
+        start <= minute && minute < end
+    } else {
+        minute >= start || minute < end
+    }
+}
+
+/// The local time at `minute` past midnight, `day_offset` days after the day
+/// of `now`. `None` when the machine's local time is not readable.
+fn local_at(now: Ts, day_offset: i32, minute: u32) -> Option<Ts> {
+    let stamp = now as libc::time_t;
+    let mut parts = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // SAFETY: both pointers address valid storage; localtime_r initializes tm
+    // on success and returns null on failure.
+    if unsafe { libc::localtime_r(&stamp, parts.as_mut_ptr()) }.is_null() {
+        return None;
+    }
+    let mut target = unsafe { parts.assume_init() };
+    target.tm_mday += day_offset;
+    target.tm_hour = (minute / 60) as i32;
+    target.tm_min = (minute % 60) as i32;
+    target.tm_sec = 0;
+    target.tm_isdst = -1;
+    let time = unsafe { libc::mktime(&mut target) } as Ts;
+    (time != -1).then_some(time)
+}
+
+/// The minute of the day `now` is, in local time. `None` when the machine's
+/// local time is not readable.
+fn local_minute(now: Ts) -> Option<u32> {
+    let stamp = now as libc::time_t;
+    let mut parts = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // SAFETY: as in `local_at`.
+    if unsafe { libc::localtime_r(&stamp, parts.as_mut_ptr()) }.is_null() {
+        return None;
+    }
+    let parts = unsafe { parts.assume_init() };
+    Some(parts.tm_hour as u32 * 60 + parts.tm_min as u32)
+}
+
+/// The end of the working period that is current or next (T-450): the hour the
+/// fleet stops, from `[schedule].hours` and the local time of `now`.
+pub fn hours_end(config: &ProjectConfig, now: Ts) -> Option<Ts> {
+    let window = hours_window(config)?;
+    let minute = local_minute(now)?;
+    let day = if minute < window.1 { 0 } else { 1 };
+    local_at(now, day, window.1)
+}
+
+/// The start of the next working period, while `now` is outside the working
+/// hours (T-450): when the fleet comes back from `[schedule].hours`. `None`
+/// without hours, and while `now` is inside them.
+pub fn off_hours_until(config: &ProjectConfig, now: Ts) -> Option<Ts> {
+    let window = hours_window(config)?;
+    let minute = local_minute(now)?;
+    if inside_hours(window, minute) {
+        return None;
+    }
+    if window.0 < window.1 {
+        let day = if minute < window.0 { 0 } else { 1 };
+        local_at(now, day, window.0)
+    } else {
+        // Overnight: outside is between the end and the start, so the start is
+        // later today.
+        local_at(now, 0, window.0)
+    }
+}
+
+/// The start of the next working period after `now`, inside or outside the
+/// working hours (T-450): the time the notice tells a seat to continue at.
+pub fn hours_next_start(config: &ProjectConfig, now: Ts) -> Option<Ts> {
+    let window = hours_window(config)?;
+    let minute = local_minute(now)?;
+    if window.0 < window.1 {
+        let day = if minute < window.0 { 0 } else { 1 };
+        local_at(now, day, window.0)
+    } else if minute >= window.0 {
+        local_at(now, 1, window.0)
+    } else {
+        local_at(now, 0, window.0)
+    }
+}
+
 /// `"HH:MM-HH:MM"` with a start different from its end, both real times of
 /// the day.
 fn valid_hours(text: &str) -> bool {
