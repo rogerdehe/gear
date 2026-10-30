@@ -17,13 +17,33 @@
 //! lane works in the same directory, so two fleets that edit one file hear of
 //! it before the merge conflicts. Each project's own pass writes its own
 //! captain's item; a store's other projects only, never another store's.
+//!
+//! T-435: a diff of two commits is remembered for the life of the process.
+//! The scan diffs the same pair every ten minutes and at every hand-in; on a
+//! large repository that reads cost one project's tick 41.7 s. A pair of full
+//! commit ids names one result that never changes, so the second read is the
+//! cache's; an error from git is not a result and is not kept.
 
-use std::{collections::{BTreeMap, BTreeSet}, path::{Path, PathBuf}, process::Command};
+use std::{collections::{BTreeMap, BTreeSet, HashMap}, path::{Path, PathBuf}, process::Command};
 use gear_app::config::Repo;
 use gear_model::{GearResult, MsgKind, MsgState, TaskState, Ts};
 use gear_store::{NewMessage, Store, TaskRow, Tx};
 
 const PERIOD: i64 = 600;
+
+/// The diffs of commit pairs already read (T-435): keyed by the repo and the
+/// two full commit ids of the pair, which never change for a key.
+static DIFFS: std::sync::LazyLock<std::sync::Mutex<HashMap<(PathBuf, String, String), BTreeSet<String>>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// The entries the cache holds before it is cleared (T-435): an engine runs
+/// for weeks, so the map is bounded rather than grown forever.
+const DIFFS_MAX: usize = 4096;
+
+/// The diffs the cache missed (T-435): the test counts git reads through it,
+/// so the test build carries it and no other build does.
+#[cfg(test)]
+static DIFF_MISSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// The key of the project root in the meta: a repo name never starts with a
 /// dash.
@@ -520,11 +540,25 @@ fn ancestor(repo: &Path, from: &str, to: &str) -> Result<bool, String> {
     }
 }
 
+/// The files that changed between two commits: read from git the first time a
+/// scan asks for a pair, and from the cache after that (T-435). A failed read
+/// keeps nothing, so the next scan asks git again.
 fn changed(repo: &Path, from: &str, to: &str) -> Result<BTreeSet<String>, String> {
+    let key = (repo.to_path_buf(), from.to_string(), to.to_string());
+    if let Some(files) = DIFFS.lock().ok().and_then(|diffs| diffs.get(&key).cloned()) {
+        return Ok(files);
+    }
     let output = git(repo, &["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z",
         &format!("{from}...{to}"), "--"])?;
-    Ok(output.split(|b| *b == 0).filter(|s| !s.is_empty())
-        .map(|s| String::from_utf8_lossy(s).into_owned()).collect())
+    let files: BTreeSet<String> = output.split(|b| *b == 0).filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned()).collect();
+    #[cfg(test)]
+    DIFF_MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut diffs) = DIFFS.lock() {
+        if diffs.len() >= DIFFS_MAX { diffs.clear(); }
+        diffs.insert(key, files.clone());
+    }
+    Ok(files)
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
@@ -532,5 +566,122 @@ fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
         .output().map_err(|e| format!("git {}: {e}", args.join(" ")))?;
     if output.status.success() { Ok(output.stdout) } else {
         Err(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gear_model::{SeatRole, TaskState};
+    use gear_store::{testing, Store, TaskRow};
+    use std::sync::atomic::Ordering;
+
+    const T0: i64 = 1_800_000_000;
+
+    /// The integration file the two branches share.
+    const SRC: &str = "src/lib.rs";
+
+    fn sh(path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git").arg("-C").arg(path).args(args).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn commit(path: &Path, message: &str, file: &str, text: &str) -> String {
+        let full = path.join(file);
+        if let Some(dir) = full.parent() { std::fs::create_dir_all(dir).unwrap(); }
+        std::fs::write(full, text).unwrap();
+        sh(path, &["add", "--", file]);
+        sh(path, &["commit", "-qm", message]);
+        sh(path, &["rev-parse", "HEAD"])
+    }
+
+    /// A real repository: `dev` and two task branches, one of which changes a
+    /// file `dev` also changes, the other a file of its own.
+    fn repo() -> PathBuf {
+        let path = crate::testtmp::temp("gear-parallel-cache").join("repo");
+        std::fs::create_dir_all(&path).unwrap();
+        sh(&path, &["init", "-q", "-b", "dev"]);
+        sh(&path, &["config", "user.name", "test"]);
+        sh(&path, &["config", "user.email", "a@b"]);
+        sh(&path, &["config", "commit.gpgsign", "false"]);
+        sh(&path, &["config", "core.hooksPath", "/dev/null"]);
+        commit(&path, "base", SRC, "base\n");
+        commit(&path, "other", "other.rs", "base\n");
+        sh(&path, &["switch", "-qc", "heat/t1"]);
+        commit(&path, "heat", SRC, "heat\n");
+        sh(&path, &["switch", "-qc", "steady/t2", "dev"]);
+        commit(&path, "steady", "other.rs", "steady\n");
+        sh(&path, &["switch", "-q", "dev"]);
+        path
+    }
+
+    /// A project of one repo with two lanes and one task each: the scan reads
+    /// both branches, each both ways.
+    fn store(repo: &Path) -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        store.write(|tx| {
+            let mut project = testing::seed_project(tx, "p", "sess", T0)?;
+            project.config_toml = format!(r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = {}
+[quota]
+lanes = 2
+temps = 0
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+"#, serde_json::json!(repo.to_string_lossy()).to_string());
+            tx.update_project(&project)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T0)?;
+            for (n, lane) in [(1, "heat"), (2, "steady")] {
+                tx.insert_task(&TaskRow {
+                    repo: None, base: None, gate: None, rework_estimate_min: None,
+                    project: "p".into(), id: format!("T-{n}"), rank: n, state: TaskState::Running,
+                    priority: "must".into(), lane: Some(lane.into()), milestone: None, required: false,
+                    contract_version: 1, deps: vec![], followup_of: None, wait_on: None,
+                    wait_cond: None, rework_note: None, estimate_min: Some(30), issue: None, updated: T0,
+                })?;
+            }
+            Ok(())
+        }).unwrap();
+        store
+    }
+
+    /// T-435: one pair of commits is diffed once, however often a scan asks
+    /// for it; a new commit is a pair the cache has not seen and is read once.
+    #[test]
+    fn a_pair_of_commits_is_diffed_once_and_a_new_commit_is_diffed_again() {
+        let path = repo();
+        let mut store = store(&path);
+        let integration = sh(&path, &["rev-parse", "dev"]);
+        let first = sh(&path, &["rev-parse", "heat/t1"]);
+        let before = DIFF_MISSES.load(Ordering::Relaxed);
+        // Each of the two task branches is read both ways: against the
+        // integration branch and back for the overlap line.
+        assert!(check(&mut store, "p", T0).unwrap().problems.is_empty());
+        let read = DIFF_MISSES.load(Ordering::Relaxed) - before;
+        assert_eq!(read, 4, "two task branches, each read both ways");
+        // The same commits at the next period: the cache answers, git runs
+        // no diff at all.
+        assert!(check(&mut store, "p", T0 + PERIOD).unwrap().problems.is_empty());
+        assert_eq!(DIFF_MISSES.load(Ordering::Relaxed) - before, read, "a repeated scan runs no git diff");
+        // A new commit on one task branch: its pair is read again, the other
+        // branch's pairs are still the cache's.
+        sh(&path, &["switch", "-q", "heat/t1"]);
+        let second = commit(&path, "heat again", SRC, "heat again\n");
+        assert_ne!(first, second);
+        assert!(check(&mut store, "p", T0 + 2 * PERIOD).unwrap().problems.is_empty());
+        assert_eq!(DIFF_MISSES.load(Ordering::Relaxed) - before, read + 2,
+            "only the changed branch's pair is read again");
+        assert!(check(&mut store, "p", T0 + 3 * PERIOD).unwrap().problems.is_empty());
+        assert_eq!(DIFF_MISSES.load(Ordering::Relaxed) - before, read + 2, "the new pair is the cache's too");
+        let diffs = DIFFS.lock().unwrap();
+        assert!(diffs.contains_key(&(path.clone(), integration.clone(), first.clone())));
+        assert!(diffs.contains_key(&(path.clone(), integration.clone(), second.clone())));
+        assert!(diffs.contains_key(&(path.clone(), second.clone(), integration.clone())));
     }
 }
