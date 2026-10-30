@@ -199,6 +199,10 @@ eta: 21h
 - 2026-10-29 08:00 release: v0.5.1 (station S2) published: T-367's merge 6d8d3a0a merged into main as 0974d950, tagged v0.5.1, GitHub release from docs/releases/v0.5.1.md | why: done clause (5)
 
 
+# Staff
+- release hull
+- release mast
+
 # Queue
 
 ## T-412 [now] lane=hull milestone=M5 required
