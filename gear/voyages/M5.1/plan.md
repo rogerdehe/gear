@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=877 -->
+<!-- gear-plan project=gear base=878 -->
 # Goal
 Fix the problems another project's fleet hits on the shared engine as they come in, and ship each batch at once as a small release (v0.5.4 and later), so that fleet never waits on GEAR. M5.1 is a voyage planned as it goes: it lasts as long as that project's current voyage, and its plan grows with each problem that project's captain reports.
 
@@ -54,8 +54,8 @@ goal: [v0.5.5] A reviewer pushes its review branch to the project's remote, and 
 accept: A review.rs test: the packet contains "git push origin HEAD:refs/heads/<the review branch>" (and the project's remote when it names its own). gear-app tests with a real temporary repository and a bare remote: a review verdict whose branch is only on a second remote is refused with the push command and nothing is stored; after `git push origin HEAD:refs/heads/<branch>` the same send succeeds; a direction check's verdict is not checked. Run only `make check CRATE=gear-engine TESTS='<a nextest filter: review packet tests>'` and `make check CRATE=gear-app TESTS='<a nextest filter: the send tests>'`; the merge gate runs `make gate`.
 estimate: 35
 
-## T-439 [must] lane=mast milestone=M5.1 required
-goal: [v0.5.5] Release v0.5.5, the second batch of M5.1. Change, no other design: (1) the version is 0.5.5 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.5.5.md, in the form of docs/releases/v0.5.4.md: one line per task merged on origin/dev since v0.5.4 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": "Nothing outside the tasks above."; "Upgrading" as in v0.5.4. The captain merges dev into main, tags v0.5.5 and publishes the release; this task does not. The code change is in these files only.
+## T-439 [now] lane=hull milestone=M5.1 required
+goal: [v0.5.5] Release v0.5.5, the second batch of M5.1 (moved to hull at station M-6381: the files below are allowed edits for hull). Change, no other design: (1) the version is 0.5.5 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.5.5.md, in the form of docs/releases/v0.5.4.md: one line per task merged on origin/dev since v0.5.4 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": "Nothing outside the tasks above."; "Upgrading" as in v0.5.4. The captain merges dev into main, tags v0.5.5 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.5.5"; docs/releases/v0.5.5.md lists every task merged on origin/dev since v0.5.4 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
 deps: T-438
 estimate: 15
