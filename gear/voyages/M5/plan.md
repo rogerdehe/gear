@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=861 -->
+<!-- gear-plan project=gear base=862 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -198,10 +198,6 @@ eta: 21h
 - station M-6332: land
 - 2026-10-29 08:00 release: v0.5.1 (station S2) published: T-367's merge 6d8d3a0a merged into main as 0974d950, tagged v0.5.1, GitHub release from docs/releases/v0.5.1.md | why: done clause (5)
 
-
-# Staff
-- release hull
-- release mast
 
 # Queue
 
