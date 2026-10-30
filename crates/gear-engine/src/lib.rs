@@ -25,6 +25,7 @@ pub mod doorbell;
 pub mod feed;
 pub mod friction;
 pub mod guardrails;
+pub mod hours;
 pub mod merge;
 pub mod model;
 pub mod names;
@@ -138,6 +139,9 @@ pub struct TickReport {
     pub onboarded: Vec<String>,
     /// Quota switches and parks this tick, one line each (design/01 `on_quota`).
     pub quota: Vec<String>,
+    /// Working-hours notices, parks, releases and comebacks this tick, one
+    /// line each (T-450).
+    pub hours: Vec<String>,
     /// The lanes that were told to go on after they stopped (T-206).
     pub lane_nudged: Vec<String>,
     /// The lanes whose plan park ended this tick (T-190), one line each.
@@ -450,6 +454,14 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         restart::reconcile_config(store, herdr, cfg, &profiles, &project, now)?;
         note_slow(report, "restart config", step);
 
+        // 1a. the working hours (T-450): the notice before the end, the park
+        //     and release at it, and the comeback at the next start. It runs
+        //     before quota, so a lane it parks is not decided on again.
+        let step = std::time::Instant::now();
+        let hours = hours::tick(store, herdr, cfg, &profiles, &project, now)?;
+        report.hours.extend(hours.events);
+        note_slow(report, "hours", step);
+
         // 1b. quota: a lane on a provider limit switches model or parks
         //     (design/01 `[models].on_quota`). It runs before the confirm, so a
         //     lane that is on quota does not have its delivery budget spent.
@@ -541,7 +553,9 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let departing = gear_app::config::latest(store, &project)
             .map(|config| gear_app::config::departs_at(&config, now).is_some())
             .unwrap_or(false);
-        let prepared = if departing {
+        // T-450: while the fleet rests, no delivery goes out.
+        let resting = hours::resting(store, &project, now)?;
+        let prepared = if departing || resting {
             Vec::new()
         } else {
             dispatch::prepare_dispatch(store, herdr, cfg, &project, &planned, now)?
@@ -594,7 +608,13 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         // T-386: the step reads every repository's branch tips once, so its
         // cost no longer grows with the started attempts.
         let step = std::time::Instant::now();
-        let reviews = review::start_reviews_with_tips(store, herdr, cfg, &profiles, &mut tips_by_repo, &project, now)?;
+        // T-450: while the fleet rests, no review starts. Its reviewers were
+        // released at the end, and the review starts again at the next start.
+        let reviews = if hours::resting(store, &project, now)? {
+            review::ReviewReport::default()
+        } else {
+            review::start_reviews_with_tips(store, herdr, cfg, &profiles, &mut tips_by_repo, &project, now)?
+        };
         report.reviewers.extend(reviews.started);
         // A mechanical hand-in settles itself (T-273): reported the way a
         // review's own settlement is, so one failed settlement is visible and
