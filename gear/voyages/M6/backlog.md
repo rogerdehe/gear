@@ -134,3 +134,6 @@
 - The captain never opens a dialog the user did not ask for (goal, bar, eta, staffing, models, scaling); only a change the user requests is confirmed, on the assumption that the user is at the screen.
 - The engine cancels a captain dialog left unanswered for a default time (about 20 minutes), so it cannot hold the captain's messages.
 - A lane's or reviewer's dialog (an approval, a question, a CLI startup screen) becomes an item for the captain; if the captain has not handled it within a default time (10-20 minutes), the engine closes it.
+
+## A mechanical packet still tells the writer to run the merge gate
+- 2026-10-29 M5 (the other project, F-257, T-333: one trailing blank byte, accept said no tests and an exact-parent `git diff --check`): the rendered packet's Evidence section still told the writer to run the project's merge-gate command, which contradicts both the accept line and the convention that only the engine runs the gate; the lane had to ask. A mechanical packet's Evidence should carry the task's own accept checks only.
