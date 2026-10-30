@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=881 -->
+<!-- gear-plan project=gear base=882 -->
 # Goal
 Fix the problems another project's fleet hits on the shared engine as they come in, and ship each batch at once as a small release (v0.5.4 and later), so that fleet never waits on GEAR. M5.1 is a voyage planned as it goes: it lasts as long as that project's current voyage, and its plan grows with each problem that project's captain reports.
 
@@ -21,6 +21,10 @@ eta: 34h
 - station M-6373: keep course 120 min in; T-438 on hull after its gate question (M-6367, answered: gate the check like a lane's hand-in), then v0.5.5 (T-439) on mast
 - station M-6381: move 136 min in; T-438 merged, hull idle and mast on T-440, so the v0.5.5 release T-439 moved to hull and v0.5.5 ships without waiting for T-440 (v0.5.6)
 - 2026-10-30 00:33 release: v0.5.5 published: T-439's merge c376f6bb merged into main as 0c9a0746, tagged v0.5.5, GitHub release from docs/releases/v0.5.5.md (T-438 and T-440); the shared engine runs it since 05:32Z | why: done clause (3)
+
+- 2026-10-30 00:45 note: voyage report (gear report voyage): 8 tasks merged in 3h28m against the 34 h ceiling (T-433..T-440), one rework round (T-439, its notes missed T-440), one pass over a review (T-438, an allowed edit the contract left out); one hand fix (★ 21:22, the restart that stopped the other project's ticks, landed as T-433); releases v0.5.4 and v0.5.5, the shared engine runs v0.5.5; every report from the other captain answered in minutes: five became tasks, two were no GEAR fault (a finished review read as a stop, a stale binary notice); friction F-227 closed with lessons 1 and 2 | why: landing report
+- 2026-10-30 00:45 user: M5.1 ends when the other project's voyage ends; that voyage has landed (its captain, 05:41Z), so done clause (0) is met and M5.1 lands now with its lanes retired
+- station M-6364: land
 
 # Queue
 
