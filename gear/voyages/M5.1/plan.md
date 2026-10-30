@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=869 -->
+<!-- gear-plan project=gear base=870 -->
 # Goal
 Fix the problems another project's fleet hits on the shared engine as they come in, and ship each batch at once as a small release (v0.5.4 and later), so that fleet never waits on GEAR. M5.1 is a voyage planned as it goes: it lasts as long as that project's current voyage, and its plan grows with each problem that project's captain reports.
 
@@ -15,6 +15,7 @@ eta: 34h
 
 - ★ 2026-10-29 21:45 goal-change: M5.1 ends when the other project's current voyage ends, not when its first batch ships; its plan is written as the voyage goes, from that captain's reports, as a trial of a voyage planned on the way (user). Before: the goal ended with the first batches; done had no clause about the other voyage; eta 4h. After: the goal says the voyage lasts as long as the other project's voyage; done clause (0) "that project's current voyage has landed"; eta 34h, the other voyage's total eta as its user confirmed it, a ceiling the stations measure against | why: user | else: land after v0.5.4 and open M5.2 for the next reports
 - station M-6353: keep course 31 min in; T-433, T-434, T-435 merged; T-437 on hull, then mast releases v0.5.4 (T-436); new tasks come from the other captain's reports
+- station M-6364: keep course 52 min in; all five tasks done, T-436's merge gate running; v0.5.4 is published and the shared engine restarted on it after that merge; M5.1 does not land before the other project's voyage lands (done clause 0), and its next tasks come from that captain's reports
 
 # Queue
 
