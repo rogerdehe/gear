@@ -97,7 +97,9 @@ pub struct SendResult {
 ///   left and what stops it, in the message's meta.
 /// - A declared wait (design §5.3) — the `blocked` kind — works: the lane
 ///   names the task it waits for, the wait is written on its task and the
-///   attempt goes on.
+///   attempt goes on. `--on external` waits on something outside GEAR
+///   (T-440): the body says what for, and the engine ends the wait after
+///   `EXTERNAL_WAIT_MIN` or when the lane writes again.
 /// - Messages to a reviewer seat carry the task (design §3.8): a reviewer
 ///   seat is bound to a task for life, so the messages it writes carry that
 ///   task, and an instruction the captain addresses to it without `--task`
