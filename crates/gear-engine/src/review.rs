@@ -512,6 +512,16 @@ fn finish_direction_results(store: &mut Store, cfg: &EngineCfg, tips: &mut RepoT
                         }
                     }
                 }
+                // T-444: a check closed without a result tells the seat that held
+                // it, so the reviewer stops checking a job its `gear send` no
+                // longer holds. The job is closed in this same transaction, so
+                // the message is sent once; a result or a live check sends none.
+                if !live && result.is_none()
+                    && tx.get_seat(seat_id)?.is_some_and(|s| s.state == SeatState::Active && s.generation == generation && s.task_id.as_deref() == Some(task.id.as_str()))
+                {
+                    let body = format!("The direction check of {} attempt {} is closed: the attempt was handed in or ended. Send nothing for it; end your turn.", task.id, attempt.n);
+                    tx.insert_message(&NewMessage { meta: None, project: project.into(), thread: format!("direction:{}:{}:{sha}", task.id, attempt.n), task: Some(task.id.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0, recipient: seat_id.into(), kind: MsgKind::Instruction, urgent: false, body, reply_to: None, needs_ack: false, state: MsgState::Open, created: now })?;
+                }
                 tx.set_meta(&key, &serde_json::json!({"checked_sha":sha}).to_string())?;
                 if tx.get_seat(seat_id)?.is_some_and(|s| s.state == SeatState::Active && s.generation == generation && s.task_id.as_deref() == Some(task.id.as_str())) {
                     tx.set_seat_state(seat_id, SeatState::Standby, Some("direction check done"), now)?;
@@ -3754,6 +3764,91 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             Some("T-1"),
             "the hand-in's review took the seat the direction check held"
         );
+    }
+
+    /// T-444: a direction check closed without its result tells the seat that
+    /// held it, once, so the reviewer stops checking a job its `gear send` no
+    /// longer holds.
+    #[test]
+    fn a_closed_direction_check_tells_its_seat_once() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm one");
+        publish(&work, "heat/t1");
+        let first = sh(&work, "git rev-parse HEAD");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world(&text);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Running; tx.update_task(&task)?;
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap(); attempt.state = AttemptState::Started; attempt.candidate = None; tx.update_attempt(&attempt)
+        }).unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let pc = gear_app::config::parse(&text).unwrap();
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().task_id.as_deref(), Some("T-1"));
+        // The lane hands T-1 in while its direction check still runs, and the
+        // check never answers.
+        store.write(|tx| gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, &first, "ops/reports/T-1.md", T0 + 11)).unwrap();
+        finish_direction_results(&mut store, &config, &mut RepoTips::new(), &pc, "p", T0 + 12).unwrap();
+        let told = |store: &mut Store| -> Vec<_> { store.read(|tx| tx.thread_messages("p", &format!("direction:T-1:1:{first}"))).unwrap().into_iter().filter(|m| m.sender == "engine" && m.recipient == "p:review-1").collect() };
+        let messages = told(&mut store);
+        assert_eq!(messages.len(), 1, "the seat is told once: {messages:?}");
+        assert_eq!(messages[0].body, "The direction check of T-1 attempt 1 is closed: the attempt was handed in or ended. Send nothing for it; end your turn.");
+        assert_eq!(messages[0].kind, MsgKind::Instruction);
+        assert_eq!(messages[0].state, MsgState::Open);
+        // A second pass adds none: the job is closed, so nothing is sent again.
+        finish_direction_results(&mut store, &config, &mut RepoTips::new(), &pc, "p", T0 + 13).unwrap();
+        assert_eq!(told(&mut store).len(), 1, "the message is sent once only");
+    }
+
+    /// T-444: a direction check that answered `ok` before the hand-in sends its
+    /// seat no closure message: it has its result, the job closes with it.
+    #[test]
+    fn a_direction_check_that_answered_before_the_hand_in_tells_its_seat_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm one");
+        publish(&work, "heat/t1");
+        let first = sh(&work, "git rev-parse HEAD");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world(&text);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Running; tx.update_task(&task)?;
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap(); attempt.state = AttemptState::Started; attempt.candidate = None; tx.update_attempt(&attempt)
+        }).unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let pc = gear_app::config::parse(&text).unwrap();
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        let key = direction_key("p", "T-1", 1);
+        // The check answers `ok` before the hand-in.
+        store.write(|tx| tx.insert_message(&NewMessage {
+            meta: Some(serde_json::json!({"direction":true,"sha":first}).to_string()), project: "p".into(),
+            thread: format!("direction:T-1:1:{first}"), task: Some("T-1".into()), attempt: Some(1), sender: "p:review-1".into(),
+            sender_gen: 1, recipient: "p:captain".into(), kind: MsgKind::Result, urgent: false, body: "ok. Candidate follows contract v4; src/base is the right place".into(),
+            reply_to: None, needs_ack: false, state: MsgState::Info, created: T0 + 11,
+        }).map(|_| ())).unwrap();
+        store.write(|tx| gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, &first, "ops/reports/T-1.md", T0 + 12)).unwrap();
+        finish_direction_results(&mut store, &config, &mut RepoTips::new(), &pc, "p", T0 + 13).unwrap();
+        let job: serde_json::Value = serde_json::from_str(&store.read(|tx| tx.get_meta(&key)).unwrap().unwrap()).unwrap();
+        assert_eq!(job["checked_sha"], first, "the job closes with its result");
+        let told: Vec<_> = store.read(|tx| tx.thread_messages("p", &format!("direction:T-1:1:{first}"))).unwrap().into_iter().filter(|m| m.sender == "engine" && m.recipient == "p:review-1").collect();
+        assert!(told.is_empty(), "a check with its result sends its seat nothing: {told:?}");
     }
 
     /// T-258: a failing direction result that arrives after the hand-in is the
