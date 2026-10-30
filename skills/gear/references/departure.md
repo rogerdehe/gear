@@ -6,7 +6,7 @@ Rules:
 - Write it in the user's language, as Markdown tables in the chat. Never use a dialog tool for it. GEAR's own words (task ids, commands, model ids, paths) stay as they are.
 - Show it only when your own work is finished: every contract written, the loads balanced, every task in the plan. The sheet asks the user for decisions, not for patience.
 - Every line comes from the config and the plan you are about to apply. Show nothing you have not written, and leave nothing out that you will apply.
-- Keep it short: one line per task, one line per lane. The contracts stay in the plan.
+- It is not the plan. It aligns where the voyage goes, not how: one line per station and per seat, never a line per task. Tasks and contracts stay in the plan.
 - When the user changes something, change the config or the plan, then show the whole sheet again with each changed line marked `(changed)`. Repeat until the user says to depart.
 - Start nothing before that word: no `gear admin init` without `--check`, and no `gear plan apply`. Then init, apply and open the board. The confirmed sheet is the user's consent for both.
 
@@ -29,18 +29,14 @@ Rules:
 | Eta | <duration>: <quick landing or do it properly> |
 | Release | <version and when: at each station, or at the landing; or "none"> |
 
-### 3. Scope
-| Item | Decision | Where it goes |
-|---|---|---|
-| <backlog item> | taken / postponed / dropped | <task ids, next voyage's backlog, or why dropped> |
+### 3. Stations
+| Station | What the user gets | Tasks | Est. (min) |
+|---|---|---|---|
+| S1 <name> | <one line> | <n> | <n> |
 
-### 4. Stations and tasks
-| Station | Task | Lane | What it delivers | Est. (min) |
-|---|---|---|---|---|
-| S1 <name> | T-<n> or NEW | <lane> | <one line> | <n> |
-| | | | **Station total** | <n> |
+Left out: <each backlog item not taken, and where it went; or "nothing">.
 
-### 5. Staffing
+### 4. Staffing
 | Seat | Agent / model (full id) | Repo | Owns | Load (min) |
 |---|---|---|---|---|
 | <lane> | <cli> / <model id> | <repo> | <paths> | <sum of its estimates> |
@@ -48,7 +44,7 @@ Rules:
 
 Quota: lanes <n>, temps <n>. On a quota limit: <fallback to <model> / wait>; agents through a long wait: <keep / release>.
 
-### 6. Open points
+### 5. Open points
 <only what the user must decide, one per line; or "None." Your own unfinished work never goes here.>
 
 **Depart now, or what should change?**
