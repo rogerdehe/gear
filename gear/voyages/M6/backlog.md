@@ -116,7 +116,7 @@
 
 ## Switching a seat's model or its agent (user's request, 2026-10-29)
 - Two operations, not one. **Switch model**: when the new model runs on the same CLI, switch it in place through the CLI's own model command (e.g. `/model`); the agent and its context stay, no handover. **Switch agent**: a new CLI (or a model only another CLI serves) means the old agent exits and a new one starts, so the conversation is lost and a handover is needed.
-- Timing of an agent switch: either at the next safe point (today's behaviour), or at once: the engine tells the agent to wrap up and commit now, waits a bounded grace period (default to be chosen), then exits it whether or not it handed in. A model that thinks for hours must not hold the switch.
+- Timing of an agent switch: either at the next safe point (today's behaviour), or at once: the engine tells the agent to wrap up and commit now, waits a bounded grace period (default 10 minutes, set by the user 2026-10-29), then exits it whether or not it handed in. A model that thinks for hours must not hold the switch.
 - The incoming agent is told it takes over someone else's work: its packet starts with the handover (the previous agent's session id or transcript path to read first, and the worktree's state: uncommitted changes, unpushed commits, the branch and its last commit), then the task packet. It must not start over or overwrite half-done work it has not inspected.
 - Applies to lanes and reviewers alike; a model switch with no CLI change needs none of this.
 
