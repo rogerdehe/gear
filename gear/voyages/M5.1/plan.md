@@ -20,6 +20,9 @@ eta: 34h
 - station M-6366: keep course 107 min in; v0.5.4 runs on the shared engine; T-438 (review branch on the project's remote) on hull, then mast releases v0.5.5 (T-439); mast waits on that dependency, with no other reported problem to take
 - station M-6373: keep course 120 min in; T-438 on hull after its gate question (M-6367, answered: gate the check like a lane's hand-in), then v0.5.5 (T-439) on mast
 
+# Verdicts
+- T-438 attempt=1 contract=1 candidate=3851f47af1772b21d4246549858b2d7c872a1b34 pass why="F1 is the captain's: the gate in crates/gear-cli/src/main.rs cmd_send was allowed in the answer to M-6367 (gate the review check like a lane's hand-in) but not written into the contract (lesson 1); F2 is logged: on the review branch the shorter push command in the refusal works, and the packet itself names the exact one"
+
 # Queue
 
 ## T-433 [now] lane=hull milestone=M5.1 required
