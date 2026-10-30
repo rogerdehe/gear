@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=895 -->
+<!-- gear-plan project=gear base=899 -->
 # Goal
 A short trial voyage of the self-hosted lane model: two lanes on pi with hk-dgx-1/DeepSeek-V4.1-Flash-1017 (thinking high) each deliver small, well-bounded tasks taken from M6's first station, through review and the merge gate, so we learn before M6 whether that model and its machine carry two lanes at once. No release: the merged work ships with M6's first release.
 
@@ -18,6 +18,8 @@ eta: 2h
 - station M-6456: keep course — 3 of 4 merged in 20 min; T-447 in review
 - 2026-10-30 12:05 confirmed: M5.3 takes the departure time and working hours from M6 S2 (three tasks), done gets clause (3) the engine runs the departure-time build before 13:45, eta 1h -> 2h | why: user: put it in M5.3 so M6 can depart at 14:00 by itself
 - 2026-10-30 12:29 hand-fix: both shared engines restarted on the build of T-448's merge 6828a4cd (departure time, and T-447's root fix of the departure restart), after both stores had no executing operation | why: done clause (3)
+- station M-6469: keep course — 5 of 8 merged, the engine runs the departure build since 12:28; projected finish 89 min from departure, inside the 2 h
+- station M-6491: keep course — 6 of 8 merged; T-450 in review rework, T-451 after it; projected finish 13:26, before M6's 14:00 departure
 
 # Queue
 
@@ -57,3 +59,9 @@ goal: Working hours: with `[schedule] hours = "10:00-18:00"` the fleet works ins
 accept: Engine tests with an injected clock: at end minus `notice_min` each lane and each reviewer with a job gets the message once; at the end each lane is parked with a `hours` wait and released, its worktree and session kept, and no delivery or review starts; at the next start each comes back with its session and a Continue; with `depart_at` and no `hours` the release happens at `depart_at` + eta and nothing comes back. Run only `make check CRATE=gear-engine TESTS='test(/hours|quota/)'`; the merge gate runs `make gate`.
 deps: T-448
 estimate: 60
+
+## T-451 [now] lane=mast milestone=M5.3 required
+goal: While the fleet rests outside its working hours, `gear` and the board say so. Change, no other design: where T-449 shows `departs at HH:MM`, show `off hours until HH:MM` instead while the fleet is outside `[schedule] hours`, read from the stored config_toml in gear-board the same way T-449 reads `depart_at` (gear-board cannot call gear-app: that would be a dependency cycle), with the same rule as `gear_app::config::off_hours_until` (T-450), formatted with `gear_board::idle::clock`; nothing is shown otherwise. The code change is in gear-board only; tests go next to T-449's in gear-cli and gear-board.
+accept: CLI and board tests: a config with `hours = "10:00-18:00"` at 19:00 local shows `off hours until 10:00`; inside the hours, or without `hours`, nothing is shown. Run only `make check CRATE=gear-cli TESTS='test(/depart|hours/)'` and `make check CRATE=gear-board TESTS='test(/depart|hours/)'`; the merge gate runs `make gate`.
+deps: T-449, T-450
+estimate: 10
