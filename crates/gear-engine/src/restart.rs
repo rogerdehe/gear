@@ -1084,6 +1084,22 @@ fn meta_set(store: &mut Store, key: &str, value: &str) -> GearResult<()> {
     store.write(|tx| tx.set_meta(key, value))
 }
 
+/// The fingerprint of the configuration a lane runs on: its chain head's cli,
+/// model and args, and the chain itself. Both onboarding and reconciliation
+/// record it, so a seat that onboarding started on the chain's head is not
+/// taken for a config change in the same or a later tick.
+pub(crate) fn desired_config(
+    config: &gear_app::config::ProjectConfig, lane_name: &str, lane_kind: &str,
+) -> serde_json::Value {
+    let chain = crate::model::role_chain(config, lane_name);
+    let first = chain.first().copied();
+    let target_cli = first.and_then(|e|e.cli()).unwrap_or(lane_kind);
+    let model = first.map(|e|e.model()).unwrap_or("");
+    let args = first.map(|e|e.args()).unwrap_or(&[]);
+    serde_json::json!({"cli":target_cli,"model":model,"args":args,
+        "chain":chain.iter().map(|e|serde_json::json!([e.model(),e.cli(),e.args()])).collect::<Vec<_>>()})
+}
+
 /// Notice a changed lane configuration and start its in-place replacement.
 /// The desired configuration is durable so quota fallbacks are not mistaken
 /// for a new config change on every tick.
@@ -1109,8 +1125,7 @@ pub(crate) fn reconcile_config(
         let target_cli = first.and_then(|e|e.cli()).unwrap_or(&lane.kind);
         let model = first.map(|e|e.model()).unwrap_or("");
         let args = first.map(|e|e.args()).unwrap_or(&[]);
-        let desired = serde_json::json!({"cli":target_cli,"model":model,"args":args,
-            "chain":chain.iter().map(|e|serde_json::json!([e.model(),e.cli(),e.args()])).collect::<Vec<_>>()});
+        let desired = desired_config(&config, &lane.name, &lane.kind);
         let key = format!("engine.restart_config.{}",seat.id);
         let previous = meta_get(store, &key)?.and_then(|s|serde_json::from_str::<serde_json::Value>(&s).ok());
         let changed = previous.as_ref().is_some_and(|old| old != &desired);
@@ -1161,6 +1176,29 @@ mod config_change_tests {
     const T: i64 = 1_800_000_000;
     const PANE: &str = "w1:p2";
 
+    fn config_with_args(kind: &str, model: &str, args: &str) -> String {
+        format!(r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+[quota]
+lanes = 1
+temps = 0
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+[[lanes]]
+name = "heat"
+duty = "work"
+owns = ["src/"]
+kind = "{kind}"
+profile = "{kind}"
+[models]
+lanes = [{{model="{model}", cli="{kind}", args={args}}}]
+"#)
+    }
     fn config(kind: &str, model: &str) -> String {
         format!(r#"
 [project]
@@ -1207,9 +1245,10 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         let mut cfg=EngineCfg::default(); cfg.profiles=gear_herdr::builtins();
         (store,herdr,cfg)
     }
-    fn change(store:&mut Store, kind:&str, model:&str) {
-        store.write(|tx| {let mut p=tx.get_project("p")?.unwrap();p.config_toml=config(kind,model);p.config_version+=1;tx.update_project(&p)}).unwrap();
+    fn change_to(store:&mut Store, kind:&str, model:&str, args:&str) {
+        store.write(|tx| {let mut p=tx.get_project("p")?.unwrap();p.config_toml=config_with_args(kind,model,args);p.config_version+=1;tx.update_project(&p)}).unwrap();
     }
+    fn change(store:&mut Store, kind:&str, model:&str) { change_to(store,kind,model,"[]") }
     fn advance_pending(store:&mut Store,herdr:&mut FakeHerdr,cfg:&EngineCfg,now:i64) {
         let seat=store.read(|tx|tx.get_seat("p:heat")).unwrap().unwrap();
         advance(store,herdr,cfg,&cfg.profiles,"p",&seat,None,now).unwrap();
@@ -1308,6 +1347,49 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         crate::switch::clear_pending(&mut store,"p:heat").unwrap();
         reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+2).unwrap();
         assert!(pending(&mut store,"p:heat").unwrap().is_some());
+    }
+    /// T-447, the M5.3 departure: a lane onboarding starts on its chain's head
+    /// records the fingerprint in the same write that records its model, so
+    /// reconciliation sees no config change in that tick or the next. A re-init
+    /// that changes the head after the onboarding still restarts the lane.
+    #[test]
+    fn onboarding_on_the_chain_head_is_not_a_config_change() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.write(|tx| {
+            testing::seed_project(tx,"p","sess",T)?;
+            let mut project=tx.get_project("p")?.unwrap();
+            project.config_toml=config_with_args("pi","new-model",r#"["--thinking","high"]"#);
+            project.config_version=2;
+            tx.update_project(&project)?;
+            tx.insert_seat(&SeatRow{id:"p:heat".into(),project:"p".into(),role:SeatRole::Lane,name:"heat".into(),profile:"pi".into(),generation:0,state:SeatState::Queued,state_since:T,state_reason:Some("registered".into()),task_id:None})?;
+            // What M5.2 left behind: another CLI and model, no args.
+            tx.set_meta("engine.restart_config.p:heat",r#"{"cli":"tokenrhythm","model":"old-model","args":[],"chain":[["old-model","tokenrhythm",[]]]}"#)?;
+            Ok(())
+        }).unwrap();
+        let mut herdr=FakeHerdr::new();
+        let mut cfg=EngineCfg::default(); cfg.profiles=gear_herdr::builtins();
+        assert_eq!(crate::onboard::onboard_queued(&mut store,&mut herdr,&cfg,T+1).unwrap(),["p:heat"]);
+        let seat=store.read(|tx|tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(seat.state,SeatState::Active,"{:?}",seat.state_reason);
+        assert_eq!(seat.generation,1);
+        assert_eq!(store.read(|tx|tx.get_meta(&model_meta_key("p:heat"))).unwrap().as_deref(),Some("new-model"));
+        let recorded=store.read(|tx|tx.get_meta("engine.restart_config.p:heat")).unwrap().unwrap();
+        assert!(recorded.contains("new-model")&&recorded.contains("--thinking"),"{recorded}");
+
+        // In this tick and the next, reconciliation sees no change: no restart
+        // plan, the generation stays, nothing is typed into the new agent.
+        herdr.calls.clear();
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+1).unwrap();
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+2).unwrap();
+        assert!(pending(&mut store,"p:heat").unwrap().is_none(),"no restart plan");
+        assert_eq!(store.read(|tx|tx.get_seat("p:heat")).unwrap().unwrap().generation,1);
+        assert!(!herdr.calls.iter().any(|c|matches!(c,Call::PaneRun {command,..} if command.contains("export GEAR_CTX"))),"nothing typed: {:?}",herdr.calls);
+
+        // A re-init that changes the head after the onboarding is a real
+        // change and still starts a restart.
+        change_to(&mut store,"pi","other-model",r#"["--thinking","low"]"#);
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+3).unwrap();
+        assert!(pending(&mut store,"p:heat").unwrap().is_some(),"the re-init starts a restart");
     }
     #[test]
     fn same_cli_restart_waits_until_the_open_session_is_known() {
