@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=894 -->
+<!-- gear-plan project=gear base=895 -->
 # Goal
 A short trial voyage of the self-hosted lane model: two lanes on pi with hk-dgx-1/DeepSeek-V4.1-Flash-1017 (thinking high) each deliver small, well-bounded tasks taken from M6's first station, through review and the merge gate, so we learn before M6 whether that model and its machine carry two lanes at once. No release: the merged work ships with M6's first release.
 
@@ -17,6 +17,7 @@ eta: 2h
 - station M-6447: keep course — 15 min in, T-445 merged, T-444 and T-446 in review, T-447 in work; the 45 min left cover them
 - station M-6456: keep course — 3 of 4 merged in 20 min; T-447 in review
 - 2026-10-30 12:05 confirmed: M5.3 takes the departure time and working hours from M6 S2 (three tasks), done gets clause (3) the engine runs the departure-time build before 13:45, eta 1h -> 2h | why: user: put it in M5.3 so M6 can depart at 14:00 by itself
+- 2026-10-30 12:29 hand-fix: both shared engines restarted on the build of T-448's merge 6828a4cd (departure time, and T-447's root fix of the departure restart), after both stores had no executing operation | why: done clause (3)
 
 # Queue
 
