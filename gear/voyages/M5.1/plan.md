@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=871 -->
+<!-- gear-plan project=gear base=875 -->
 # Goal
 Fix the problems another project's fleet hits on the shared engine as they come in, and ship each batch at once as a small release (v0.5.4 and later), so that fleet never waits on GEAR. M5.1 is a voyage planned as it goes: it lasts as long as that project's current voyage, and its plan grows with each problem that project's captain reports.
 
@@ -17,6 +17,8 @@ eta: 34h
 - station M-6353: keep course 31 min in; T-433, T-434, T-435 merged; T-437 on hull, then mast releases v0.5.4 (T-436); new tasks come from the other captain's reports
 - station M-6364: keep course 52 min in; all five tasks done, T-436's merge gate running; v0.5.4 is published and the shared engine restarted on it after that merge; M5.1 does not land before the other project's voyage lands (done clause 0), and its next tasks come from that captain's reports
 - 2026-10-29 22:25 release: v0.5.4 published: T-436's merge d3255b1f merged into main as 6db339b1, tagged v0.5.4, GitHub release from docs/releases/v0.5.4.md; the shared engine (both projects) runs it since 03:25Z | why: done clause (3)
+- station M-6366: keep course 107 min in; v0.5.4 runs on the shared engine; T-438 (review branch on the project's remote) on hull, then mast releases v0.5.5 (T-439); mast waits on that dependency, with no other reported problem to take
+- station M-6373: keep course 120 min in; T-438 on hull after its gate question (M-6367, answered: gate the check like a lane's hand-in), then v0.5.5 (T-439) on mast
 
 # Queue
 
@@ -46,3 +48,14 @@ goal: [v0.5.4] A mechanical task's packet no longer tells the lane to run the me
 accept: The packet test asserts the new line and that the packet of a mechanical task no longer contains "run its command before you hand in". Run only `make check CRATE=gear-app TESTS='<a nextest filter: packet_contract>'`; the merge gate runs `make gate`.
 mechanical: a one-line text change and its test; the gate's packet test proves it
 estimate: 10
+
+## T-438 [now] lane=hull milestone=M5.1 required
+goal: [v0.5.5] A reviewer pushes its review branch to the project's remote, and a verdict whose branch is not there is refused at once (another project, recurring: T-265 earlier, T-375 at 04:09Z: its worktrees have two remotes, `origin` and a second one; the review packet says only "commit it … and push it", the reviewer pushed to the second remote and checked that one, handed in, and the merge then could not find `origin/<review branch>` and was refused, so the captain had to push by hand and remerge). Change, no other design: (1) crates/gear-engine/src/review.rs fn review_packet, the sentence "… and push it (the candidate stays untouched)." becomes "… and push it with exactly `git push {remote} HEAD:refs/heads/{branch}` (the candidate stays untouched; GEAR refuses the verdict until `{remote}/{branch}` holds your commit)."; (2) crates/gear-app/src/mail.rs, `gear send --kind review` with a `--verdict` from a Temp seat for a full review (not a direction check): before the transaction, as the result path does for a lane, call crate::base::require_pushed with the current directory as the worktree, the project's `[conventions].remote`, the review branch (the project's `[conventions].review_branch` template expanded with gear_model::branch::expand for the task's project, lane and task, as review.rs fn review_branch does; move that helper where both use it, e.g. gear_model::branch, if it is not there already) and the worktree's `git rev-parse HEAD` as the candidate; the refusal names the exact push command. The code change is in these files (and the helper's new home) only; tests go where the crates keep them.
+accept: A review.rs test: the packet contains "git push origin HEAD:refs/heads/<the review branch>" (and the project's remote when it names its own). gear-app tests with a real temporary repository and a bare remote: a review verdict whose branch is only on a second remote is refused with the push command and nothing is stored; after `git push origin HEAD:refs/heads/<branch>` the same send succeeds; a direction check's verdict is not checked. Run only `make check CRATE=gear-engine TESTS='<a nextest filter: review packet tests>'` and `make check CRATE=gear-app TESTS='<a nextest filter: the send tests>'`; the merge gate runs `make gate`.
+estimate: 35
+
+## T-439 [must] lane=mast milestone=M5.1 required
+goal: [v0.5.5] Release v0.5.5, the second batch of M5.1. Change, no other design: (1) the version is 0.5.5 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.5.5.md, in the form of docs/releases/v0.5.4.md: one line per task merged on origin/dev since v0.5.4 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": "Nothing outside the tasks above."; "Upgrading" as in v0.5.4. The captain merges dev into main, tags v0.5.5 and publishes the release; this task does not. The code change is in these files only.
+accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.5.5"; docs/releases/v0.5.5.md lists every task merged on origin/dev since v0.5.4 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+deps: T-438
+estimate: 15
