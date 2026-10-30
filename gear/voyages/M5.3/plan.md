@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=891 -->
+<!-- gear-plan project=gear base=892 -->
 # Goal
 A short trial voyage of the self-hosted lane model: two lanes on pi with hk-dgx-1/DeepSeek-V4.1-Flash-1017 (thinking high) each deliver small, well-bounded tasks taken from M6's first station, through review and the merge gate, so we learn before M6 whether that model and its machine carry two lanes at once. No release: the merged work ships with M6's first release.
 
@@ -13,6 +13,8 @@ eta: 1h
 - 2026-10-30 11:50 config: gear/voyages/M5.3/gear.toml, CONVENTIONS.md and REVIEW.md, copied from M6 and M5.2 | why: nothing the captain writes spans voyages | else: -
 - 2026-10-30 11:45 hand-fix: both lanes lost their seat identity at departure: in the tick that onboarded them on the new model (hull gen 34, mast gen 31) a restart also ran (`probe restart … stop/start/finish` at 16:37:19Z), bumped the generation and typed its `export GEAR_CTX=…` line into the live pi composer, so every `gear` call failed with STALE_GENERATION; my `/quit` of hull to recover made a second restart (gen 36) with the same result; told each lane its current generation to prefix every gear call with (`GEAR_CTX=gear:hull:36`, `GEAR_CTX=gear:mast:32`); root cause goes to M6 S1 | why: both lanes stopped; the self-hosted model was not at fault
 - 2026-10-30 11:50 scope: the root fix of the departure restart moves from M6 S1 into this voyage as a new hull task (the restart came from `reconcile_config` comparing M5.2's stored fingerprint with the new head after onboarding had already started the lane on it) | why: user: fix it in this voyage | else: M6 S1
+
+- station M-6447: keep course — 15 min in, T-445 merged, T-444 and T-446 in review, T-447 in work; the 45 min left cover them
 
 # Queue
 
