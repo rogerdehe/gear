@@ -1,7 +1,8 @@
 //! Contract for gear_app::config (T-7). Pure: no store, no Herdr.
 
 use gear_app::config::{
-    parse, validate, ConfigIssue, Conventions, Models, QuotaPolicy, Repo, Timing, WaitPolicy,
+    departs_at, parse, validate, ConfigIssue, Conventions, Models, QuotaPolicy, Repo, Timing,
+    WaitPolicy,
 };
 use gear_model::ErrorCode;
 
@@ -193,6 +194,60 @@ fn whitespace_does_not_hide_overlaps_or_empty_values() {
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.conventions.staging = "  ".into();
     assert_eq!(validate(&cfg), vec![], "blank staging means no staging");
+}
+
+// ---- [schedule] (T-448): a voyage departs at an agreed time.
+
+const SCHEDULE: &str = r#"
+[schedule]
+depart_at = "2026-10-30T14:00:00-05:00"
+hours = "09:00-18:00"
+"#;
+
+#[test]
+fn a_scheduled_departure_parses_and_holds_until_its_time() {
+    let cfg = parse(&format!("{MINIMAL}{SCHEDULE}")).unwrap();
+    assert_eq!(validate(&cfg), vec![], "a departure and hours are valid");
+    let schedule = cfg.schedule.as_ref().expect("the section parses");
+    assert_eq!(schedule.depart_at.as_deref(), Some("2026-10-30T14:00:00-05:00"));
+    assert_eq!(schedule.hours.as_deref(), Some("09:00-18:00"));
+    assert_eq!(schedule.notice_min, 15, "the notice default");
+    let at = gear_app::plan::parse_rfc3339("2026-10-30T14:00:00-05:00").unwrap();
+    assert_eq!(departs_at(&cfg, at - 1), Some(at), "before the departure");
+    assert_eq!(departs_at(&cfg, at), None, "at it");
+    assert_eq!(departs_at(&cfg, at + 1), None, "after it");
+
+    let cfg = parse(&format!("{MINIMAL}\n[schedule]\nnotice_min = 5\n")).unwrap();
+    assert_eq!(cfg.schedule.as_ref().map(|s| s.notice_min), Some(5));
+    assert_eq!(validate(&cfg), vec![]);
+    assert_eq!(departs_at(&cfg, 0), None, "no departure time named");
+}
+
+#[test]
+fn a_config_without_a_schedule_parses_as_today() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert_eq!(cfg.schedule, None, "the section is optional");
+    assert_eq!(departs_at(&cfg, 0), None);
+    assert_eq!(validate(&cfg), vec![], "today's config stays valid");
+}
+
+#[test]
+fn a_bad_departure_or_hours_is_an_init_issue() {
+    let bad_time = parse(&format!("{MINIMAL}\n[schedule]\ndepart_at = \"tomorrow\"\n")).unwrap();
+    assert_eq!(fields(&validate(&bad_time)), vec!["schedule.depart_at"]);
+    assert!(!validate(&bad_time)[0].problem.is_empty());
+
+    let same = parse(&format!("{MINIMAL}\n[schedule]\nhours = \"10:00-10:00\"\n")).unwrap();
+    assert_eq!(fields(&validate(&same)), vec!["schedule.hours"]);
+
+    for bad in ["09:00-24:00", "9:00-18:00", "09:00", "18:00-09:60", "09:00-18:00-20:00"] {
+        let cfg = parse(&format!("{MINIMAL}\n[schedule]\nhours = {bad:?}\n")).unwrap();
+        assert_eq!(fields(&validate(&cfg)), vec!["schedule.hours"], "{bad:?}");
+    }
+    for good in ["09:00-18:00", "00:00-23:59", "18:00-09:00"] {
+        let cfg = parse(&format!("{MINIMAL}\n[schedule]\nhours = {good:?}\n")).unwrap();
+        assert_eq!(validate(&cfg), vec![], "{good:?}");
+    }
 }
 
 // ---- `[conventions].scratch_dir` (T-413): where a seat's temp files go.
