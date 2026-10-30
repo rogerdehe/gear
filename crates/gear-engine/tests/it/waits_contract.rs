@@ -120,3 +120,83 @@ fn full_tick_uses_quota_resume_transition_instead_of_observation_time() {
     let r=s.read(|tx|tx.rounds_of_task("p","T-1")).unwrap().remove(0);
     assert_eq!((r.paused_s,r.active_s),(1400,800));
 }
+
+// T-440: a wait on something outside GEAR lasts at most 120 minutes, and the
+// lane's own next word on the task ends it early.
+
+/// Declare an external wait for T-1 as the lane, with the reason in the body.
+fn wait_outside(s: &mut Store, at: i64) {
+    let env = Env { ctx: Some(GearCtx { project: "p".into(), seat: "heat".into(), generation: 1 }), pane_id: Some(LANE.into()), admin: false };
+    let fp = Fingerprint { pane_id: LANE.into(), kind: Some("opencode".into()), session_ref: None };
+    let args = SendArgs { kind: MsgKind::Blocked, body: "the CI run on heat/t1".into(), task: Some("T-1".into()), attempt: Some(1),
+        contract: Some(1), candidate: None, verdict: None, blocking: None, base: None, about: None, to: None, reply_to: None,
+        urgent: false, left: None, blocker: None, on: Some("external".into()), friction: None, request_id: "wait-outside".into() };
+    mail::send(s, &env, Some(&fp), &args, T + at).unwrap();
+}
+
+fn external_wait(s: &mut Store) -> (Option<String>, Option<String>) {
+    let task = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+    (task.wait_on, task.wait_cond)
+}
+
+/// The lane's later message on the task ends the wait without an instruction:
+/// it is back to work, and the pause is closed.
+#[test]
+fn a_later_message_ends_an_external_wait() {
+    let (mut s, mut h, c) = world();
+    wait_outside(&mut s, 10);
+    assert_eq!(external_wait(&mut s), (Some("external".into()), Some("external".into())));
+    advance(&mut s, &mut h, &c, 100);
+    assert_eq!(external_wait(&mut s), (Some("external".into()), Some("external".into())), "still waiting");
+
+    // A later blocked message does not end it; a progress one does.
+    let late = |kind, at: i64, s: &mut Store| {
+        s.write(|tx| tx.insert_message(&NewMessage { project: "p".into(), thread: "T-1:q".into(), task: Some("T-1".into()), attempt: Some(1),
+            sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(), kind, urgent: false, body: "still waiting".into(),
+            reply_to: None, needs_ack: false, state: MsgState::Info, created: T + at, meta: None }).map(|_| ())).unwrap()
+    };
+    late(MsgKind::Blocked, 150, &mut s);
+    advance(&mut s, &mut h, &c, 160);
+    assert_eq!(external_wait(&mut s), (Some("external".into()), Some("external".into())), "another blocked message is not a word to go on");
+
+    late(MsgKind::Progress, 200, &mut s);
+    advance(&mut s, &mut h, &c, 210);
+    assert_eq!(external_wait(&mut s), (None, None));
+    let pause = s.read(|tx| tx.pauses_of_project("p")).unwrap().into_iter().find(|p| p.kind == "wait" && p.seat == "p:heat").unwrap();
+    assert_eq!((pause.start_at, pause.end_at), (T + 10, Some(T + 210)), "the wait pause is closed");
+    assert_eq!(s.read(|tx| tx.get_meta(&gear_app::mail::external_wait_key("p", "T-1"))).unwrap().as_deref(), Some(""), "the clock is emptied");
+    assert!(s.read(|tx| tx.thread_messages("p", "wait-external-end:T-1:1")).unwrap().is_empty(), "the lane ended it, so no time-out instruction");
+}
+
+/// 120 minutes with no word from the lane: the wait ends and the lane is told
+/// to push what it has, or to declare the wait again.
+#[test]
+fn an_external_wait_times_out_with_an_instruction() {
+    let (mut s, mut h, c) = world();
+    wait_outside(&mut s, 0);
+    advance(&mut s, &mut h, &c, 120 * 60 - 1);
+    assert_eq!(external_wait(&mut s), (Some("external".into()), Some("external".into())), "not before 120 min");
+    assert!(h.prompts_to(LANE).is_empty(), "{:?}", h.calls);
+    advance(&mut s, &mut h, &c, 120 * 60);
+    assert_eq!(external_wait(&mut s), (None, None));
+    let told = s.read(|tx| tx.thread_messages("p", "wait-external-end:T-1:1")).unwrap();
+    assert_eq!(told.len(), 1);
+    assert_eq!(told[0].recipient, "p:heat");
+    assert_eq!(told[0].kind, MsgKind::Instruction);
+    assert!(told[0].urgent);
+    assert_eq!(told[0].body, "GEAR: your external wait on T-1 ended after 120 min. Push what you have, or declare the wait again with its reason.");
+    assert_eq!(s.read(|tx| tx.get_meta(&gear_app::mail::external_wait_key("p", "T-1"))).unwrap().as_deref(), Some(""));
+    assert!(h.prompts_to(LANE).iter().any(|p| p.contains(&told[0].id)), "{:?}", h.calls);
+    advance(&mut s, &mut h, &c, 120 * 60 + 10);
+    assert_eq!(s.read(|tx| tx.thread_messages("p", "wait-external-end:T-1:1")).unwrap().len(), 1, "told once");
+}
+
+/// A wait on another task still wakes on the merge, not on the clock.
+#[test]
+fn a_merged_wait_keeps_its_own_ending() {
+    let (mut s, mut h, c) = world();
+    block(&mut s);
+    advance(&mut s, &mut h, &c, 200 * 60);
+    assert_eq!(s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().wait_on.as_deref(), Some("T-2"), "no 120-minute clock on a merged wait");
+    assert!(s.read(|tx| tx.thread_messages("p", "wait-external-end:T-1:1")).unwrap().is_empty());
+}
