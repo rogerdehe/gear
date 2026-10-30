@@ -7,8 +7,8 @@
 use gear_app::identity::Fingerprint;
 use gear_app::mail::{self, SendArgs};
 use gear_app::Env;
-use gear_model::{ErrorCode, GearCtx, MsgKind, MsgState, SeatRole};
-use gear_store::{testing, Store};
+use gear_model::{ErrorCode, GearCtx, MsgKind, MsgState, SeatRole, TaskState};
+use gear_store::{testing, ContractRow, Store, TaskRow};
 
 const NOW: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
@@ -413,4 +413,87 @@ fn a_replayed_ack_returns_the_stored_receipt() {
         s.read(|tx| tx.get_message("p", "M-4")).unwrap().is_none(),
         "no second ack was stored"
     );
+}
+
+// T-440: a lane that waits on something outside GEAR (a CI run, evidence the
+// captain must fix) declares it with `--on external` and the reason as the
+// message body; the wait lasts at most 120 minutes.
+
+const WAIT_TASK: &str = "T-7";
+
+/// A world where the lane works on T-7: a declared wait needs an attempt that
+/// has started, and T-8 is there for the wait on another task.
+fn wait_world() -> Store {
+    let mut s = world();
+    s.write(|tx| {
+        for (id, rank) in [("T-7", 1), ("T-8", 2)] {
+            tx.insert_task(&TaskRow { repo: None, base: None, gate: None, rework_estimate_min: None, project: "p".into(), id: id.into(), rank,
+                state: TaskState::Ready, priority: "must".into(), lane: Some("heat".into()), milestone: None, required: false,
+                contract_version: 1, deps: vec![], followup_of: None, wait_on: None, wait_cond: None, rework_note: None,
+                estimate_min: None, issue: None, updated: NOW })?;
+            tx.insert_contract(&ContractRow { project: "p".into(), task: id.into(), version: 1, goal: "g".into(), accept: "a".into(),
+                evidence_files: vec![], evidence_due_min: None, body: String::new(), created: NOW, mechanical: None })?;
+        }
+        gear_app::tasks::start_attempt(tx, "p", WAIT_TASK, "p:heat", 1, NOW)?;
+        gear_app::tasks::on_delivery_confirmed(tx, "p", WAIT_TASK, 1, NOW)?;
+        Ok(())
+    })
+    .unwrap();
+    s
+}
+
+/// A blocked message that declares a wait for `on`.
+fn blocked(on: &str, body: &str) -> SendArgs {
+    let mut a = args(MsgKind::Blocked);
+    a.task = Some(WAIT_TASK.into());
+    a.attempt = Some(1);
+    a.contract = Some(1);
+    a.on = Some(on.into());
+    a.body = body.into();
+    a
+}
+
+#[test]
+fn an_external_wait_is_stored_with_its_reason_and_capped_at_two_hours() {
+    let mut s = wait_world();
+    mail::send(&mut s, &lane_env(), Some(&lane_fp()), &blocked("external", "the CI run on heat/t1"), NOW + 30).unwrap();
+
+    let task = s.read(|tx| tx.get_task("p", WAIT_TASK)).unwrap().unwrap();
+    assert_eq!((task.wait_on.as_deref(), task.wait_cond.as_deref()), (Some("external"), Some("external")));
+
+    let pause = s.read(|tx| tx.pauses_of_project("p")).unwrap().into_iter().find(|p| p.kind == "wait").unwrap();
+    assert_eq!((pause.seat.as_str(), pause.end_at), ("p:heat", None), "the pause is open");
+    assert_eq!(pause.reason.as_deref(), Some("waiting for: the CI run on heat/t1"));
+
+    let until = s.read(|tx| tx.get_meta(&gear_app::mail::external_wait_key("p", WAIT_TASK))).unwrap();
+    assert_eq!(until.as_deref(), Some((NOW + 30 + 120 * 60).to_string().as_str()), "the wait ends in 120 min");
+
+    let item = s.read(|tx| tx.thread_messages("p", "wait-external:T-7:1")).unwrap();
+    assert_eq!(item.len(), 1, "one info item");
+    assert_eq!(item[0].recipient, "p:captain");
+    assert_eq!(item[0].state, MsgState::Info);
+    assert_eq!(item[0].body, "heat waits on T-7 for: the CI run on heat/t1 (at most 120 min)");
+}
+
+#[test]
+fn an_external_wait_needs_its_reason() {
+    let mut s = wait_world();
+    for body in ["", "   "] {
+        let err = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &blocked("external", body), NOW + 30).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadFormat);
+        assert!(err.detail.contains("external"), "the refusal names what is missing: {}", err.detail);
+    }
+    let task = s.read(|tx| tx.get_task("p", WAIT_TASK)).unwrap().unwrap();
+    assert!(task.wait_on.is_none(), "nothing was kept");
+    assert!(s.read(|tx| tx.get_meta(&gear_app::mail::external_wait_key("p", WAIT_TASK))).unwrap().is_none());
+}
+
+#[test]
+fn a_wait_on_a_task_is_unchanged() {
+    let mut s = wait_world();
+    mail::send(&mut s, &lane_env(), Some(&lane_fp()), &blocked("T-8", "waiting for the API"), NOW + 30).unwrap();
+    let task = s.read(|tx| tx.get_task("p", WAIT_TASK)).unwrap().unwrap();
+    assert_eq!((task.wait_on.as_deref(), task.wait_cond.as_deref()), (Some("T-8"), Some("merged")));
+    assert!(s.read(|tx| tx.get_meta(&gear_app::mail::external_wait_key("p", WAIT_TASK))).unwrap().is_none(), "no external clock");
+    assert!(s.read(|tx| tx.thread_messages("p", "wait-external:T-7:1")).unwrap().is_empty(), "no external item");
 }

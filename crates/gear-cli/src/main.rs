@@ -135,7 +135,8 @@ struct SendCmd {
     /// does).
     #[arg(long, value_name = "TEXT")]
     blocker: Option<String>,
-    /// Blocked only (design §5.3): the task the lane waits for.
+    /// Blocked only (design §5.3): the task the lane waits for (T-N), or
+    /// `external` with the reason as the message.
     #[arg(long, value_name = "T-N")]
     on: Option<String>,
     /// Result/review only (design §6.1): what cost you time that the captain

@@ -10,6 +10,16 @@ use std::collections::BTreeMap;
 /// spin forever.
 const MAX_THREAD_SEQ: u32 = 10_000;
 
+/// How long a wait on something outside GEAR lasts before the lane is asked
+/// to push again (T-440): the engine ends the wait at this time.
+pub const EXTERNAL_WAIT_MIN: i64 = 120;
+
+/// The time an external wait ends (T-440): the engine reads it, the lane's
+/// wait is written with it.
+pub fn external_wait_key(project: &str, task: &str) -> String {
+    format!("engine.wait_until.{project}.{task}")
+}
+
 /// Unhandled messages of one thread that are shown in the batch.
 const SHOWN_PER_THREAD: usize = 3;
 
@@ -87,7 +97,9 @@ pub struct SendResult {
 ///   left and what stops it, in the message's meta.
 /// - A declared wait (design §5.3) — the `blocked` kind — works: the lane
 ///   names the task it waits for, the wait is written on its task and the
-///   attempt goes on.
+///   attempt goes on. `--on external` waits on something outside GEAR
+///   (T-440): the body says what for, and the engine ends the wait after
+///   `EXTERNAL_WAIT_MIN` or when the lane writes again.
 /// - Messages to a reviewer seat carry the task (design §3.8): a reviewer
 ///   seat is bound to a task for life, so the messages it writes carry that
 ///   task, and an instruction the captain addresses to it without `--task`
@@ -285,7 +297,8 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
             }
             MsgKind::Blocked => {
                 // A declared wait (design §5.3): the lane names the task it
-                // waits for, and the attempt the wait belongs to.
+                // waits for — or `external` — and the attempt the wait
+                // belongs to.
                 if args.task.is_none()
                     || args.attempt.is_none()
                     || args.contract.is_none()
@@ -293,7 +306,7 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
                 {
                     return Err(GearError::new(
                         ErrorCode::BadFormat,
-                        "a blocked message needs `--task`, `--attempt`, `--contract` and `--on T-<n>`",
+                        "a blocked message needs `--task`, `--attempt`, `--contract` and `--on T-<n>|external`",
                     ));
                 }
             }
@@ -627,8 +640,9 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
             }
 
             // A declared wait (design §5.3): the lane's task waits for
-            // another task to land. The attempt stays Started and the lane
-            // ends its turn; the wait itself is on the task.
+            // another task to land, or for something outside GEAR. The
+            // attempt stays Started and the lane ends its turn; the wait
+            // itself is on the task.
             if args.kind == MsgKind::Blocked {
                 declare_wait(
                     tx,
@@ -638,6 +652,7 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
                     args.attempt.unwrap_or_default(),
                     args.contract.unwrap_or_default(),
                     args.on.as_deref().unwrap_or_default(),
+                    &body,
                     now,
                 )?;
             }
@@ -1204,11 +1219,16 @@ fn rework_waiting(
 }
 
 /// A declared wait (design §5.3): the lane's task cannot finish until another
-/// task lands.
+/// task lands, or until something outside GEAR is done (a CI run, evidence
+/// the captain must fix) (T-440).
 ///
 /// The wait is written on the task (`wait_on`, `wait_cond`); the attempt
 /// stays Started, so the lane's round goes on when the wait ends. The message
 /// itself is the captain's info item: the wait is a fact, not an action.
+///
+/// `on` is the task it waits for, or `external`: then the body says what the
+/// lane waits for (required), the wait lasts `EXTERNAL_WAIT_MIN` and the
+/// captain gets one info item naming it.
 ///
 /// Accepted only when the task it waits for exists and is not Done: a wait
 /// for a task that is already done would never end.
@@ -1220,6 +1240,7 @@ fn declare_wait(
     attempt: i64,
     contract: i64,
     on: &str,
+    body: &str,
     now: Ts,
 ) -> GearResult<()> {
     let attempt_row = tx.get_attempt(project, task, attempt)?.ok_or_else(|| {
@@ -1274,6 +1295,51 @@ fn declare_wait(
                 attempt_row.state.as_str()
             ),
         ));
+    }
+    // Waiting on something outside GEAR (T-440): the body says what for, and
+    // the wait lasts no longer than EXTERNAL_WAIT_MIN — the engine ends it,
+    // so the no-push clock cannot be silenced for good.
+    if on == "external" {
+        let reason = body.trim();
+        if reason.is_empty() {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                "a wait on `external` needs the reason as the message body: what you wait for",
+            ));
+        }
+        let captain = tx.captain_of(project)?.ok_or_else(|| {
+            GearError::new(
+                ErrorCode::NoTarget,
+                format!("project {project} has no captain"),
+            )
+        })?;
+        tx.set_task_wait(project, task, on, "external")?;
+        tx.open_pause(project, &seat.id, "wait", &format!("waiting for: {reason}"), now)?;
+        tx.set_meta(
+            &external_wait_key(project, task),
+            &(now + EXTERNAL_WAIT_MIN * 60).to_string(),
+        )?;
+        tx.insert_message(&NewMessage {
+            project: project.into(),
+            thread: format!("wait-external:{task}:{attempt}"),
+            task: Some(task.into()),
+            attempt: Some(attempt),
+            sender: "engine".into(),
+            sender_gen: 0,
+            recipient: captain.id,
+            kind: MsgKind::System,
+            urgent: false,
+            body: format!(
+                "{} waits on {task} for: {reason} (at most {EXTERNAL_WAIT_MIN} min)",
+                seat.name
+            ),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Info,
+            created: now,
+            meta: None,
+        })?;
+        return Ok(());
     }
     let waited = tx.get_task(project, on)?.ok_or_else(|| {
         GearError::new(
