@@ -893,3 +893,178 @@ fn a_branch_deleted_on_the_remote_is_refused() {
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
     assert_eq!((attempt.state, attempt.candidate), (AttemptState::Started, None));
 }
+
+// ---------------------------------------------------------------- a review
+
+const REVIEW_PANE: &str = "w1:p3";
+
+/// `world()` plus the temp reviewer of T-1: only a temp seat hands in a
+/// verdict.
+fn review_world() -> Store {
+    let mut s = world();
+    s.write(|tx| testing::seed_temp_seat(tx, "p", "r-1", "T-1", REVIEW_PANE, "opencode", T0).map(|_| ()))
+        .unwrap();
+    s
+}
+
+fn reviewer() -> (Env, Fingerprint) {
+    (
+        Env {
+            ctx: Some(GearCtx { project: "p".into(), seat: "r-1".into(), generation: 1 }),
+            pane_id: Some(REVIEW_PANE.into()),
+            admin: false,
+        },
+        Fingerprint { pane_id: REVIEW_PANE.into(), kind: Some("opencode".into()), session_ref: None },
+    )
+}
+
+/// A verdict with the gate the CLI builds for a review (T-438): its presence
+/// is what marks a reviewer handing in from its worktree.
+fn review(gate: Option<BaseGate>) -> SendArgs {
+    SendArgs {
+        kind: MsgKind::Review,
+        body: "P1: the row drifts right".into(),
+        task: Some("T-1".into()),
+        attempt: Some(1),
+        contract: None,
+        candidate: None,
+        verdict: Some(gear_app::review::Outcome::Pass),
+        blocking: None,
+        base: gate,
+        about: None,
+        to: None,
+        reply_to: None,
+        urgent: false,
+        left: None,
+        blocker: None,
+        on: None,
+        friction: None,
+        request_id: "rev-1".into(),
+    }
+}
+
+/// Run `f` with the process working directory at `dir`: the review check reads
+/// the reviewer's worktree, and its HEAD, from the caller's directory (T-438).
+/// The lock keeps two such tests from fighting over one process-wide setting.
+fn in_dir<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _held = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let before = std::env::current_dir().unwrap();
+    std::env::set_current_dir(dir).unwrap();
+    let out = f();
+    std::env::set_current_dir(before).unwrap();
+    out
+}
+
+/// T-438: a verdict whose review branch is on a *second* remote but not on the
+/// project's is refused — T-265 and T-375 checked the remote they pushed to,
+/// handed in, and the merge could not find `<origin>/<review branch>`, so the
+/// captain pushed and remerged by hand.
+#[test]
+fn a_review_pushed_to_another_remote_is_refused() {
+    let r = repos();
+    // The reviewer's worktree: the review branch, committed.
+    git(&r.lane, &["switch", "-q", "-c", "review/t1", "origin/dev"]);
+    commit(&r.lane, "review-T-1.md", "review(T-1): pass");
+    // It pushed to the second remote its worktree has, and checked that one.
+    let backup = r._root.path.join("backup.git");
+    git(&r._root.path, &["init", "-q", "--bare", "--initial-branch=dev", backup.to_str().unwrap()]);
+    git(&r.lane, &["remote", "add", "backup", backup.to_str().unwrap()]);
+    git(&r.lane, &["push", "-q", "backup", "HEAD:refs/heads/review/t1"]);
+
+    let mut s = review_world();
+    let (env, fp) = reviewer();
+    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 0 });
+
+    let err = in_dir(&r.lane, || {
+        mail::send(&mut s, &env, Some(&fp), &review(gate), T0 + 5)
+    })
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(err.detail.contains("cannot fetch origin/review/t1"), "{}", err.detail);
+    // The refusal names the exact push of the review branch.
+    assert!(err.detail.contains("`git push origin review/t1`"), "{}", err.detail);
+    // Nothing was stored: no verdict, nothing in the captain's inbox.
+    assert!(s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().is_none());
+    assert!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap().is_empty());
+}
+
+/// T-438: the same verdict, pushed to the project's own remote exactly as the
+/// packet says, is taken.
+#[test]
+fn a_review_pushed_to_the_projects_remote_is_taken() {
+    let r = repos();
+    git(&r.lane, &["switch", "-q", "-c", "review/t1", "origin/dev"]);
+    commit(&r.lane, "review-T-1.md", "review(T-1): pass");
+    git(&r.lane, &["push", "-q", "origin", "HEAD:refs/heads/review/t1"]);
+
+    let mut s = review_world();
+    let (env, fp) = reviewer();
+    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 0 });
+
+    in_dir(&r.lane, || {
+        mail::send(&mut s, &env, Some(&fp), &review(gate), T0 + 5)
+    })
+    .unwrap();
+
+    let record = s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().unwrap();
+    assert!(record.passed);
+    assert_eq!(record.by_seat, "p:r-1");
+}
+
+/// T-438: a direction check is not a verdict: it is not checked against a
+/// review branch, and an unpushed worktree takes it as before.
+#[test]
+fn a_direction_check_is_not_checked_against_a_review_branch() {
+    let r = repos();
+    // The reviewer's worktree is at a commit nothing has pushed.
+    git(&r.lane, &["switch", "-q", "-c", "direction/t1", "origin/dev"]);
+    commit(&r.lane, "direction.md", "the direction is sound");
+
+    let mut s = review_world();
+    s.write(|tx| {
+        tx.set_meta(
+            "engine.direction.p.T-1.1",
+            &serde_json::json!({"seat": "p:r-1", "generation": 1, "state": "running", "sha": "abc123"})
+                .to_string(),
+        )
+    })
+    .unwrap();
+    let (env, fp) = reviewer();
+    let mut args = review(None);
+    args.kind = MsgKind::Result;
+    args.body = "the direction is sound".into();
+    args.verdict = None;
+
+    let sent = in_dir(&r.lane, || {
+        mail::send_direction(&mut s, &env, Some(&fp), &args, T0 + 5)
+    })
+    .unwrap();
+    assert_eq!(sent.recipient, "p:captain");
+}
+
+/// T-438: the check is the reviewer's own commit, not its branch's old tip: a
+/// branch that is on the remote but behind the reviewer's HEAD is refused.
+#[test]
+fn a_review_branch_behind_the_reviewers_head_is_refused() {
+    let r = repos();
+    git(&r.lane, &["switch", "-q", "-c", "review/t1", "origin/dev"]);
+    commit(&r.lane, "review-T-1.md", "the review");
+    git(&r.lane, &["push", "-q", "origin", "HEAD:refs/heads/review/t1"]);
+    // A second commit the reviewer made after pushing, then not pushed.
+    let head = commit(&r.lane, "fixes.md", "and a fix");
+
+    let mut s = review_world();
+    let (env, fp) = reviewer();
+    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 0 });
+
+    let err = in_dir(&r.lane, || {
+        mail::send(&mut s, &env, Some(&fp), &review(gate), T0 + 5)
+    })
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(err.detail.contains(&format!("{head} is not on refs/remotes/origin/review/t1")), "{}", err.detail);
+    assert!(s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().is_none());
+}

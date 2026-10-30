@@ -1232,7 +1232,7 @@ fn start_reviewer(
     let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&task.lane));
     // The job's branch, and the seat's own anchor (its workspace label is
     // long-lived; the agent of a job is named after its task).
-    let branch = if direction { format!("direction/{}", task.task.to_lowercase()) } else { review_branch(&config.conventions.review_branch, &config.project.id, &task.lane, &task.task) };
+    let branch = if direction { format!("direction/{}", task.task.to_lowercase()) } else { gear_model::branch::review_branch(&config.conventions.review_branch, &config.project.id, &task.lane, &task.task) };
     let seat_branch = gear_model::branch::expand_seat(&config.conventions.seat_branch, &config.project.id, &seat.name);
     let seat_label = worktree_label(config, &seat.name, &repo);
     let label = agent_name(config, &task.task);
@@ -2051,7 +2051,7 @@ fn review_packet_for(
         candidate,
         &config.conventions.remote,
         &repo.integration,
-        &review_branch(&config.conventions.review_branch, &config.project.id, &lane, task),
+        &gear_model::branch::review_branch(&config.conventions.review_branch, &config.project.id, &lane, task),
         &commit,
     );
     // The review's own budget (design §5.1) and what a verdict past it must
@@ -2197,14 +2197,6 @@ fn worktree_label(config: &ProjectConfig, seat: &str, repo: &Repo) -> String {
     }
 }
 
-/// The review branch of a task (T-253): the project's
-/// `[conventions].review_branch` template with `{project}`, `{lane}` and `{n}`
-/// filled in — `review/t<n>` by default (conventions 17 §3: the reviewers'
-/// branch).
-fn review_branch(template: &str, project: &str, lane: &str, task: &str) -> String {
-    gear_model::branch::expand(template, project, lane, task)
-}
-
 /// The Herdr agent name (and workspace label) of a task's reviewer:
 /// `<project>-review-<task-id>` — project prefix plus what the agent is for
 /// (kickoff naming rule, 17 §2).
@@ -2256,7 +2248,8 @@ fn review_packet(
          \n\
          Write the review in your worktree at the path your project uses for reviews, commit it \
          on `{branch}` with the message `{commit}` (replace `{{what}}` with what the commit does) \
-         and push it (the candidate stays untouched).\n\
+         and push it with exactly `git push {remote} HEAD:refs/heads/{branch}` (the candidate \
+         stays untouched; GEAR refuses the verdict until `{remote}/{branch}` holds your commit).\n\
          \n\
          Every finding is either blocking or logged: a blocking finding names the part of the \
          done-sentence or the bar it breaks. Fail only for a failed mechanical fact, a P0, or a \
@@ -4423,6 +4416,41 @@ review = [
         let mut store = world(&text);
         let packet = review_packet_for(&mut store, &config, "T-1", 2, "abc1234").unwrap();
         assert!(packet.contains("`T-1#2 review: {what}`"), "{packet}");
+    }
+
+    /// T-438: the packet names the exact push of the review branch onto the
+    /// project's remote — a reviewer of T-265 and of T-375 pushed to the
+    /// second remote its worktree also had, and the merge could not find
+    /// `<origin>/<review branch>` afterwards.
+    #[test]
+    fn the_review_packet_names_the_exact_push_of_the_review_branch() {
+        let mut store = world(CONFIG);
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        assert!(
+            packet.contains("`git push origin HEAD:refs/heads/review/t1`"),
+            "{packet}"
+        );
+        assert!(
+            packet.contains("GEAR refuses the verdict until `origin/review/t1` holds your commit"),
+            "{packet}"
+        );
+
+        // A team's own remote and review branch are named as they are.
+        let text = format!(
+            "{CONFIG}\n[conventions]\nremote = \"upstream\"\nreview_branch = \"b/review/t{{n}}\"\n"
+        );
+        let config = gear_app::config::parse(&text).unwrap();
+        let mut store = world(&text);
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        assert!(
+            packet.contains("`git push upstream HEAD:refs/heads/b/review/t1`"),
+            "{packet}"
+        );
+        assert!(
+            packet.contains("GEAR refuses the verdict until `upstream/b/review/t1` holds your commit"),
+            "{packet}"
+        );
     }
 
     /// T-380: the packet's diff is against the remote integration branch —

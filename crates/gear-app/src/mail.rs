@@ -199,6 +199,44 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
             }
         }
     }
+    // A reviewer's verdict is only taken once its branch is on the project's
+    // remote (T-438): T-265 and T-375 pushed to a second remote that their
+    // worktrees also had, the verdict was accepted, and the merge then could
+    // not find `<remote>/<review branch>`, so the captain pushed and remerged
+    // by hand. As a lane's hand-in is checked (T-83), and before the
+    // transaction: the reviewer's own commit — its worktree's HEAD — must be
+    // on the review branch the project's template names. Only a temp seat
+    // hands in a full review, and only a caller that brought the hand-in gate
+    // is one handing in from its worktree (a direction check is a result).
+    if args.kind == MsgKind::Review && args.verdict.is_some() && !direction && args.base.is_some() {
+        if let (Some(ctx), Some(task)) = (env.ctx.as_ref(), args.task.as_deref()) {
+            let is_temp = store
+                .read(|tx| tx.get_seat(&ctx.seat_id()))?
+                .is_some_and(|seat| seat.role == SeatRole::Temp);
+            let lane = store
+                .read(|tx| tx.get_task(&ctx.project, task))?
+                .and_then(|row| row.lane);
+            if let (true, Some(lane)) = (is_temp, lane) {
+                let conventions = crate::config::conventions_or_default(store, &ctx.project)?;
+                let branch = gear_model::branch::review_branch(
+                    &conventions.review_branch,
+                    &ctx.project,
+                    &lane,
+                    task,
+                );
+                let worktree = std::env::current_dir().map_err(|error| {
+                    GearError::new(
+                        ErrorCode::BadFormat,
+                        format!(
+                            "cannot read the working directory for the review check: {error}"
+                        ),
+                    )
+                })?;
+                let candidate = head(&worktree)?;
+                crate::base::require_pushed(&worktree, &conventions.remote, &branch, &candidate)?;
+            }
+        }
+    }
     store.write(|tx| {
         // The caller must be a seat that may write (design/03).
         let (ctx, seat) = require_seat(
@@ -712,6 +750,32 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
         let recipient = value["recipient"].as_str().unwrap_or_default().to_string();
         Ok(SendResult { project, msg_id, thread, recipient, replayed })
     })
+}
+
+/// The commit a worktree is at: `git rev-parse HEAD` in `worktree` (T-438).
+/// Git that cannot answer is a refusal, never an unchecked pass (T-19's rule).
+fn head(worktree: &std::path::Path) -> GearResult<String> {
+    let where_ = worktree.display();
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(worktree)
+        .output()
+        .map_err(|error| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("cannot read HEAD in {where_} for the review check: {error}"),
+            )
+        })?;
+    if !out.status.success() {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "cannot read HEAD in {where_} for the review check: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// The receipt of a request that already committed, if the caller is the live
