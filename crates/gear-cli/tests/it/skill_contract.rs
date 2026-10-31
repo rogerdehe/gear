@@ -189,6 +189,40 @@ fn no_topic_names_a_file_of_the_gear_repo() {
     }
 }
 
+/// T-469: the skill describes the role charter — written in gear.toml per
+/// lane and for the reviewers, given once per conversation — and the captain's
+/// guide still carries its hand-fix paragraph.
+#[test]
+fn the_skill_describes_role_charters() {
+    let home = scratch::home("skill-charters");
+    for (topic, needles) in [
+        (
+            "conventions",
+            &[
+                "Role charters",
+                "charter = ",
+                "never again in a resumed one",
+            ][..],
+        ),
+        (
+            "captain",
+            &[
+                "one charter per role",
+                "charter =",
+                "hand-fix:",
+                "The same holds for an urgent fix",
+            ][..],
+        ),
+    ] {
+        let o = gear(&home, &["--skill", topic]);
+        assert!(o.status.success(), "{topic}: {}", stderr(&o));
+        let text = stdout(&o);
+        for needle in needles {
+            assert!(text.contains(needle), "{topic} missing {needle}");
+        }
+    }
+}
+
 #[test]
 fn unknown_topic_is_bad_format_and_lists_topics() {
     let home = scratch::home("skill-unknown");

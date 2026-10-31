@@ -4511,6 +4511,27 @@ pub fn render_task_packet(
         .map(|failed| open_n.map_or(failed + 1, |n| n.max(failed + 1)));
 
     let mut text = String::new();
+    // T-465: the incoming agent's packet starts with the handover of the
+    // agent whose seat this one takes over, when the engine wrote one for this
+    // generation and this attempt. It is part 1 of handover.md part A and
+    // points at the document with the outgoing agent's own summary and notes.
+    if let (Some(lane), Some(n)) = (&row.lane, open_n) {
+        let seat_id = format!("{project}:{lane}");
+        if let Some(seat) = tx.get_seat(&seat_id)? {
+            if let Some(raw) = tx.get_meta(&format!("engine.handover.{seat_id}"))? {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if value["generation"].as_i64() == Some(seat.generation)
+                        && value["task"].as_str() == Some(task)
+                        && value["attempt"].as_i64() == Some(n)
+                    {
+                        if let Some(block) = value["block"].as_str() {
+                            text.push_str(block);
+                        }
+                    }
+                }
+            }
+        }
+    }
     text.push_str(&format!("# {task} — {}\n", contract.goal));
     text.push_str(&format!(
         "Lane: {} · Contract: v{} · State: {}\n",

@@ -83,6 +83,18 @@ pub struct Plan {
     pub resume: Option<String>,
     pub resume_required: bool,
     pub profile_name: Option<String>,
+    /// T-465: whether the switch happens at once instead of at the seat's next
+    /// safe point. The outgoing agent is told to wrap up, and the engine exits
+    /// it after `grace_s` whether or not it handed in.
+    pub at_once: bool,
+    /// How long the outgoing agent has to wrap up, in seconds.
+    pub grace_s: i64,
+    /// When the wrap-up message went out (0 = not yet).
+    pub wrap_at: Ts,
+    /// Whether the wrap-up message went out.
+    pub wrapped: bool,
+    /// The handover document written for the incoming agent.
+    pub handover_doc: Option<String>,
 }
 
 /// How many ticks a phase may wait before the seat needs a human. A pane
@@ -149,6 +161,20 @@ pub fn pending(store: &mut Store, seat_id: &str) -> GearResult<Option<Plan>> {
             .get("profile_name")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        at_once: record
+            .get("at_once")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        grace_s: record.get("grace_s").and_then(|v| v.as_i64()).unwrap_or(0),
+        wrap_at: record.get("wrap_at").and_then(|v| v.as_i64()).unwrap_or(0),
+        wrapped: record
+            .get("wrapped")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        handover_doc: record
+            .get("handover_doc")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         waited: record
             .get("waited")
             .and_then(|value| value.as_i64())
@@ -206,9 +232,17 @@ pub(crate) fn profile_for_kind<'a>(
         })
 }
 
+/// When an agent switch happens (T-465): at the seat's next safe point, or
+/// at once — the outgoing agent is told to wrap up, and the engine exits it
+/// after the configured grace period whether or not it handed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum When {
+    SafePoint,
+    AtOnce,
+}
+
 /// Start (or continue) the cross-CLI restart of `seat` on the CLI of
-/// `entry`. One step per tick; the plan carries the target, so a restart
-/// without an entry continues where it stopped.
+/// `entry`, at the seat's next safe point.
 ///
 /// `entry` is the chain entry that needs another CLI. `None` when a plan is
 /// already running.
@@ -220,6 +254,33 @@ pub(crate) fn advance(
     project: &str,
     seat: &SeatRow,
     entry: Option<&ModelEntry>,
+    now: Ts,
+) -> GearResult<Option<String>> {
+    advance_when(
+        store,
+        herdr,
+        cfg,
+        profiles,
+        project,
+        seat,
+        entry,
+        When::SafePoint,
+        now,
+    )
+}
+
+/// [`advance`] with the switch's timing: an at-once switch tells the outgoing
+/// agent to wrap up and commit, waits `[timing].switch_grace_min` (default 10
+/// minutes), then exits it whether or not it handed in (T-465).
+pub(crate) fn advance_when(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, Profile>,
+    project: &str,
+    seat: &SeatRow,
+    entry: Option<&ModelEntry>,
+    when: When,
     now: Ts,
 ) -> GearResult<Option<String>> {
     let mut plan = match pending(store, &seat.id)? {
@@ -286,6 +347,11 @@ pub(crate) fn advance(
                 waited: 0,
                 at: now,
                 started: now,
+                at_once: when == When::AtOnce,
+                grace_s: grace_seconds(store, project, when),
+                wrap_at: 0,
+                wrapped: false,
+                handover_doc: None,
             };
             set_pending(store, &seat.id, &plan)?;
             plan
@@ -328,7 +394,7 @@ pub(crate) fn advance(
         let before = plan.phase;
         let began = plan.at;
         let moves_on = match plan.phase {
-            Phase::Stop => stop(store, herdr, profiles, seat, &mut plan, now)?,
+            Phase::Stop => stop(store, herdr, cfg, profiles, seat, &mut plan, now)?,
             Phase::Exit => exit(store, herdr, seat, &mut plan, now)?,
             Phase::Start => start(store, herdr, cfg, profiles, seat, &mut plan, now)?,
             Phase::Finish => {
@@ -365,9 +431,11 @@ pub(crate) fn advance(
 }
 
 /// The agent must be stopped before it is closed.
+#[allow(clippy::too_many_arguments)]
 fn stop(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
     profiles: &std::collections::BTreeMap<String, Profile>,
     seat: &SeatRow,
     plan: &mut Plan,
@@ -379,6 +447,25 @@ fn stop(
         return Ok(false);
     };
     let expected_cli = current_cli(store, seat)?;
+    // T-465: an at-once switch tells the outgoing agent once to wrap up and
+    // commit, writes the handover document for it, and starts the grace
+    // period. The agent's own summary and notes go into that document.
+    if plan.at_once && !plan.wrapped {
+        crate::names::ensure(herdr, &pane, &crate::names::desired(seat));
+        let facts = collect_handover(store, herdr, cfg, seat, plan, now)?;
+        if let Some(facts) = &facts {
+            crate::handover::write_document(cfg, facts, false)?;
+            plan.handover_doc = Some(facts.doc.clone());
+        }
+        let text = wrap_up_text(plan, facts.as_ref());
+        if let Some(name) = crate::names::live_name(herdr, &pane) {
+            let _ = herdr.prompt(&name, &text);
+        }
+        plan.wrapped = true;
+        plan.wrap_at = now;
+        set_pending(store, &seat.id, plan)?;
+        return Ok(false);
+    }
     // The agent's status is read again right now: a stale `idle` is not
     // trusted (the rule of the in-place switch).
     match herdr.agent_get(&pane) {
@@ -393,7 +480,13 @@ fn stop(
                 clear_pending(store, &seat.id)?;
                 return Ok(false);
             }
-            if !matches!(info.agent_status, AgentStatus::Idle | AgentStatus::Done) {
+            let idle = matches!(info.agent_status, AgentStatus::Idle | AgentStatus::Done);
+            // T-465: past the grace period the switch exits the agent whether
+            // or not it handed in; a model that thinks for hours must not hold
+            // the switch.
+            let past_grace =
+                plan.at_once && plan.wrapped && now >= plan.wrap_at.saturating_add(plan.grace_s);
+            if !idle && !past_grace {
                 // Still working: wait for it to stop.
                 // A busy agent may be legitimately retrying for an arbitrary
                 // time. No timeout may turn that into a failed seat.
@@ -405,7 +498,9 @@ fn stop(
             }
         }
         Ok(None) => {
-            // The agent is already gone: the next CLI may start.
+            // The agent is already gone: the handover facts are still the
+            // worktree's, and the next CLI may start.
+            finish_handover(store, herdr, cfg, seat, plan, now)?;
             plan.phase = Phase::Start;
             plan.waited = 0;
             plan.at = now;
@@ -422,6 +517,10 @@ fn stop(
             );
         }
     }
+
+    // The handover is written from the worktree as the outgoing agent leaves
+    // it (T-465): after the wrap-up grace, before the exit keys.
+    finish_handover(store, herdr, cfg, seat, plan, now)?;
 
     // The seat leaves the states a doorbell may reach **before** its agent
     // goes: a seat whose agent is gone reaches the captain (L-56), and a
@@ -491,6 +590,96 @@ fn stop(
     plan.at = now;
     set_pending(store, &seat.id, plan)?;
     Ok(false)
+}
+
+/// The handover facts of this switch (T-465): whose work the incoming agent
+/// takes over, the previous conversation, and the worktree as the outgoing
+/// agent leaves it.
+fn collect_handover(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    seat: &SeatRow,
+    plan: &Plan,
+    now: Ts,
+) -> GearResult<Option<crate::handover::Facts>> {
+    let old_model = meta_get(store, &model_meta_key(&seat.id))?.unwrap_or_default();
+    let mut facts = crate::handover::collect(
+        store,
+        cfg,
+        herdr,
+        &seat.project,
+        seat,
+        &plan.old_cli,
+        &old_model,
+        &plan.cli,
+        &plan.model,
+        now,
+    )?;
+    // The document written at the wrap-up keeps its path: the stamp is the
+    // switch's, not the tick's.
+    if let (Some(facts), Some(doc)) = (facts.as_mut(), plan.handover_doc.as_ref()) {
+        facts.doc = doc.clone();
+    }
+    Ok(facts)
+}
+
+/// Write the handover document from the worktree as it is now and store the
+/// block for the incoming agent's packet (T-465). The generation is the one
+/// the new agent will run on.
+fn finish_handover(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    seat: &SeatRow,
+    plan: &mut Plan,
+    now: Ts,
+) -> GearResult<()> {
+    let Some(facts) = collect_handover(store, herdr, cfg, seat, plan, now)? else {
+        return Ok(());
+    };
+    crate::handover::write_document(cfg, &facts, true)?;
+    plan.handover_doc = Some(facts.doc.clone());
+    let generation = if plan.generation > 0 {
+        plan.generation
+    } else {
+        seat.generation + 1
+    };
+    crate::handover::store_block(store, &seat.id, generation, &facts)
+}
+
+/// What an at-once switch tells the outgoing agent: wrap up, commit and push,
+/// write its part of the handover, then stop (T-465).
+fn wrap_up_text(plan: &Plan, facts: Option<&crate::handover::Facts>) -> String {
+    let grace = if plan.grace_s > 0 {
+        format!("{} minutes", plan.grace_s / 60)
+    } else {
+        "at once".to_string()
+    };
+    let document = match facts {
+        Some(facts) => format!(
+            " Write your summary and any notes into {} (parts 2 and 3 of the handover template, part A of the voyage's handover.md).",
+            facts.doc
+        ),
+        None => String::new(),
+    };
+    format!(
+        "Wrap up and commit now: the engine switches your agent to {} ({}). Commit and push the work on your branch.{document} Then stop: the engine exits this agent in {grace} whether or not you handed in, and the next agent takes over your work.",
+        plan.cli, plan.model
+    )
+}
+
+/// The grace period of an at-once switch, from `[timing].switch_grace_min`
+/// (default 10 minutes); zero for a safe-point switch.
+fn grace_seconds(store: &mut Store, project: &str, when: When) -> i64 {
+    if when != When::AtOnce {
+        return 0;
+    }
+    let minutes = gear_app::config::latest(store, project)
+        .ok()
+        .map(|config| config.timing.switch_grace_min)
+        .unwrap_or(10);
+    i64::from(minutes) * 60
 }
 
 /// The exit keys were sent: the agent must be gone before the next CLI
@@ -642,8 +831,10 @@ fn start(
         store,
         &seat.project,
         seat.role,
+        &seat.name,
         &cfg.db_path,
         profile,
+        plan.resume.is_some(),
     )?);
     if !plan.model.is_empty() {
         if let Some(model_args) = start_args(&plan.cli, &plan.model, &plan.args) {
@@ -1187,6 +1378,11 @@ fn set_pending(store: &mut Store, seat_id: &str, plan: &Plan) -> GearResult<()> 
         "resume": plan.resume,
         "resume_required": plan.resume_required,
         "profile_name": plan.profile_name,
+        "at_once": plan.at_once,
+        "grace_s": plan.grace_s,
+        "wrap_at": plan.wrap_at,
+        "wrapped": plan.wrapped,
+        "handover_doc": plan.handover_doc,
     });
     meta_set(store, &plan_key(seat_id), &record.to_string())
 }
@@ -1347,7 +1543,15 @@ pub(crate) fn reconcile_config(
         });
         // Persist the request before any terminal action. A crash resumes the
         // restart plan; the desired fingerprint prevents another one afterward.
-        let _ = advance(
+        // T-465: an explicit config change is the user's request to switch the
+        // agent; `[timing].switch_at_once` says whether it waits for the next
+        // safe point or happens at once (wrap up, grace, exit).
+        let when = if config.timing.switch_at_once {
+            When::AtOnce
+        } else {
+            When::SafePoint
+        };
+        let _ = advance_when(
             store,
             herdr,
             cfg,
@@ -1355,6 +1559,7 @@ pub(crate) fn reconcile_config(
             project,
             &seat,
             Some(&target),
+            when,
             now,
         )?;
         meta_set(store, &key, &desired.to_string())?;
@@ -1680,14 +1885,19 @@ lanes = [{{model="{model}", cli="{kind}"}}]
                 }
             })
             .unwrap();
-        let path = dir.path().join("rules/lane.md");
-        assert!(args
-            .windows(2)
-            .any(|w| w[0] == "--append-system-prompt" && w[1] == path.to_string_lossy()));
+        // T-469: a resumed session gets no charter again (its rules file is
+        // refreshed, but nothing is appended), and the lane's rules file is
+        // its own, under `rules/lanes`.
+        let path = dir.path().join("rules/lanes/heat.md");
+        assert!(
+            !args.windows(2).any(|w| w[0] == "--append-system-prompt"),
+            "a resumed session gets no charter again: {args:?}"
+        );
         assert!(args.windows(2).any(|w| w == ["--session", "old-session"]));
-        assert!(std::fs::read_to_string(path)
-            .unwrap()
-            .starts_with(include_str!("../../../skills/gear/references/rules/lane.md").trim_end()));
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            gear_app::charter::text(None, SeatRole::Lane, "heat", "-", "-").unwrap()
+        );
     }
 
     #[test]
@@ -2388,6 +2598,11 @@ lanes = [{{model="{model}", cli="{kind}"}}]
             profile_name: Some("opencode".into()),
             at: T,
             started: T,
+            at_once: false,
+            grace_s: 0,
+            wrap_at: 0,
+            wrapped: false,
+            handover_doc: None,
         };
         herdr.exit_agent(PANE);
         assert!(start(
@@ -2519,6 +2734,11 @@ lanes = [{{model="{model}", cli="{kind}"}}]
             profile_name: Some("codex".into()),
             at: T,
             started: T,
+            at_once: false,
+            grace_s: 0,
+            wrap_at: 0,
+            wrapped: false,
+            handover_doc: None,
         };
         assert!(start(
             &mut store,
@@ -2756,6 +2976,287 @@ lanes = ["minimax-cn/MiniMax-M3.1-Flash", {model="gpt-6.1-sol", cli="claude"}]
         assert_eq!(ops[0].attempt, Some(1));
         assert_eq!(ops[0].generation, plan.generation);
         assert_eq!(ops[0].state, OpState::Intended);
+    }
+}
+
+#[cfg(test)]
+mod handover_tests {
+    //! T-465: switching a seat's agent carries a handover. An at-once switch
+    //! tells the outgoing agent to wrap up, waits the configured grace period
+    //! and then exits it whether or not it handed in; the incoming agent's
+    //! packet starts with the handover and the worktree's state, a dirty tree
+    //! included.
+    use super::*;
+    use gear_herdr::fake::FakeHerdr;
+    use gear_model::{SeatRole, TaskState};
+    use gear_store::{testing, ContractRow, NewRound, RoundKey, TaskRow};
+
+    const T: i64 = 1_800_000_000;
+    const PANE: &str = "w1:p6";
+    const GRACE: i64 = 600;
+
+    fn config(kind: &str, model: &str) -> String {
+        format!(
+            r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+[quota]
+lanes = 1
+temps = 0
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+[[lanes]]
+name = "heat"
+duty = "work"
+owns = ["src/"]
+kind = "{kind}"
+profile = "{kind}"
+[models]
+lanes = [{{model="{model}", cli="{kind}"}}]
+[timing]
+switch_at_once = true
+switch_grace_min = 10
+"#
+        )
+    }
+
+    fn sh(dir: &std::path::Path, command: &str) -> String {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{command}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A worktree with one committed file, then a dirty tracked file and an
+    /// untracked one: what the handover must name.
+    fn dirty_worktree() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "fn a() {}\n").unwrap();
+        sh(
+            dir.path(),
+            "git init -q -b work && git add -A && \
+             git -c user.email=gear@example.invalid -c user.name=gear commit -qm init",
+        );
+        std::fs::write(dir.path().join("src/a.rs"), "fn a() { let _ = 1; }\n").unwrap();
+        std::fs::write(dir.path().join("new.txt"), "untracked\n").unwrap();
+        dir
+    }
+
+    fn world(worktree: &str) -> (Store, FakeHerdr, EngineCfg) {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T)?;
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config("pi", "old-model");
+                tx.update_project(&project)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, PANE, "pi", T)?;
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "captain",
+                    SeatRole::Captain,
+                    "w1:p1",
+                    "codex",
+                    T,
+                )?;
+                tx.set_binding_session_ref("p:heat", 1, "old-session")?;
+                tx.set_meta(&model_meta_key("p:heat"), "old-model")?;
+                tx.set_meta(&crate::onboard::worktree_path_key("p:heat"), worktree)?;
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-1".into(),
+                    rank: 1,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: Some("M6".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(10),
+                    issue: None,
+                    updated: T,
+                })?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 1,
+                    goal: "goal".into(),
+                    accept: "cargo test".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T,
+                    mechanical: None,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T)?;
+                let key = RoundKey {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    role: "dev".into(),
+                };
+                tx.insert_round(&NewRound {
+                    key: key.clone(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    cli: "pi".into(),
+                    model: Some("old-model".into()),
+                    start_at: T,
+                })?;
+                tx.add_round_session(&key, "old-session")?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(PANE, "pi", AgentStatus::Idle, "p-heat");
+        herdr.set_agent_session(PANE, "old-session");
+        let mut cfg = EngineCfg::default();
+        cfg.profiles = gear_herdr::builtins();
+        (store, herdr, cfg)
+    }
+
+    fn change_to_codex(store: &mut Store) {
+        store
+            .write(|tx| {
+                let mut p = tx.get_project("p")?.unwrap();
+                p.config_toml = config("codex", "new-model");
+                p.config_version += 1;
+                tx.update_project(&p)
+            })
+            .unwrap();
+    }
+
+    fn advance_pending(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg, now: i64) {
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        advance(store, herdr, cfg, &cfg.profiles, "p", &seat, None, now).unwrap();
+    }
+
+    fn quit_prompts(herdr: &FakeHerdr) -> usize {
+        herdr
+            .prompts_to(PANE)
+            .iter()
+            .filter(|text| **text == "/quit")
+            .count()
+    }
+
+    #[test]
+    fn an_at_once_switch_waits_the_grace_period_then_exits_even_while_working() {
+        let dir = dirty_worktree();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap());
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        change_to_codex(&mut store);
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
+
+        // The outgoing agent was told once to wrap up and commit, and the
+        // handover document is there for it to write its part into.
+        let plan = pending(&mut store, "p:heat").unwrap().unwrap();
+        assert!(plan.at_once, "{plan:?}");
+        assert_eq!(plan.grace_s, GRACE, "{plan:?}");
+        let wrap = herdr
+            .prompts_to(PANE)
+            .iter()
+            .find(|text| text.starts_with("Wrap up and commit now"))
+            .cloned()
+            .unwrap_or_else(|| panic!("no wrap-up prompt: {:?}", herdr.calls));
+        let doc = plan.handover_doc.clone().expect("the handover document");
+        assert!(wrap.contains(&doc), "{wrap}");
+        assert!(std::path::Path::new(&doc).exists(), "{doc}");
+        assert_eq!(quit_prompts(&herdr), 0, "no exit during the wrap-up");
+
+        // A model that thinks for hours must not hold the switch: while the
+        // grace runs the agent is left alone, at its end it is exited anyway.
+        herdr.set_status(PANE, AgentStatus::Working);
+        let wrap_at = plan.wrap_at;
+        advance_pending(&mut store, &mut herdr, &cfg, wrap_at + 1);
+        assert_eq!(quit_prompts(&herdr), 0, "still inside the grace period");
+        advance_pending(&mut store, &mut herdr, &cfg, wrap_at + GRACE - 1);
+        assert_eq!(quit_prompts(&herdr), 0, "still inside the grace period");
+        advance_pending(&mut store, &mut herdr, &cfg, wrap_at + GRACE);
+        assert_eq!(quit_prompts(&herdr), 1, "the exit went out after the grace");
+        let plan = pending(&mut store, "p:heat").unwrap().unwrap();
+        assert_eq!(plan.phase, Phase::Exit, "{plan:?}");
+    }
+
+    #[test]
+    fn the_incoming_packet_starts_with_the_handover_of_a_dirty_tree() {
+        let dir = dirty_worktree();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap());
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        change_to_codex(&mut store);
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
+        herdr.set_status(PANE, AgentStatus::Working);
+        // Idle after the wrap-up: the exit goes now, the new agent starts and
+        // the packet is rendered for it.
+        herdr.set_status(PANE, AgentStatus::Idle);
+        advance_pending(&mut store, &mut herdr, &cfg, T + 2);
+        herdr.exit_agent(PANE);
+        advance_pending(&mut store, &mut herdr, &cfg, T + 3);
+        assert!(pending(&mut store, "p:heat").unwrap().is_none());
+
+        let packet = store
+            .read(|tx| gear_app::plan::render_task_packet(tx, "p", "T-1"))
+            .unwrap();
+        assert!(
+            packet.starts_with("## Handover — you take over another agent's work"),
+            "{packet}"
+        );
+        assert!(packet.contains("old-session"), "{packet}");
+        assert!(packet.contains("Branch: work"), "{packet}");
+        assert!(packet.contains("Uncommitted changes: src/a.rs"), "{packet}");
+        assert!(packet.contains("Untracked files: new.txt"), "{packet}");
+        assert!(packet.contains("handovers/heat-"), "{packet}");
+        assert!(packet.contains("Then the task packet:"), "{packet}");
+        // The task packet follows the handover.
+        let handover = packet.find("## Handover").unwrap();
+        let task = packet.find("# T-1 — goal").unwrap();
+        assert!(handover < task, "{packet}");
+        // The document holds part 1 and leaves parts 2 and 3 to the agent.
+        let doc = pending_doc(&mut store);
+        let text = std::fs::read_to_string(&doc).unwrap();
+        assert!(text.contains("## 1. Facts"), "{text}");
+        assert!(text.contains("## 2. Summary"), "{text}");
+        assert!(text.contains("## 3. Free notes"), "{text}");
+        assert!(text.contains("Uncommitted changes: src/a.rs"), "{text}");
+        assert!(
+            sh(dir.path(), "git log -1 --format=%s").contains("gear: handover of p:heat"),
+            "the document is committed on the seat's branch"
+        );
+    }
+
+    fn pending_doc(store: &mut Store) -> String {
+        let raw = store
+            .read(|tx| tx.get_meta(&crate::handover::meta_key("p:heat")))
+            .unwrap()
+            .expect("the handover block");
+        serde_json::from_str::<serde_json::Value>(&raw).unwrap()["doc"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 }
 

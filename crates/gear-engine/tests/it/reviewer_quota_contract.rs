@@ -349,7 +349,13 @@ fn a_spent_codex_reviewer_is_restarted_on_the_review_fallback() {
     assert_eq!(packet.attempt, Some(1));
     assert_eq!(packet.generation, 2);
     let text = packet.payload["text"].as_str().unwrap_or_default();
-    assert!(text.starts_with("Review T-7 attempt 1."), "{text}");
+    // T-465: the restarted reviewer's packet starts with the handover of the
+    // agent that was switched, then the review packet.
+    assert!(
+        text.starts_with("## Handover — you take over another agent's work"),
+        "{text}"
+    );
+    assert!(text.contains("Review T-7 attempt 1."), "{text}");
     assert!(
         text.contains("abc1234"),
         "the candidate rides along: {text}"

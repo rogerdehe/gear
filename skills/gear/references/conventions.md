@@ -178,3 +178,9 @@ models = [{ model = "<other-model-id>", cli = "codex" }]
 - A lane's worktree holds only its repo: it is cut from that repo's integration branch, reviewed against it and merged into it with that repo's gate.
 - `owns` paths are relative to the lane's repo, so two lanes may own the same path in two repos.
 - A repo may have several lanes, each owning its own paths. A task changes one repo; a requirement that crosses repos is cut into a contract task first, then one task per repo (`gear --skill decompose`).
+
+## 10. Role charters
+
+At kickoff the captain proposes, and the user confirms with the staffing, one charter per role: for each lane and for the reviewers, written for the agent and model that role runs. A lane on a fast, simple agent implements its packet without designing; a lane on a strong agent and model designs inside its own task and owned paths and still never decides for the whole project; the captain always holds the whole picture.
+
+A charter is configuration, not code: `charter = """…"""` in a lane's `[[lanes]]` block, `charter = """…"""` under `[temps]`. The fixed rules that ship with the skill (`references/rules/lane.md`, `references/rules/review.md`) hold a role's stance and the GEAR working rules (asking, pushing, reporting) every seat keeps: a charter replaces the stance, the working rules are always rendered, and a role that names no charter renders as the fixed file does today. GEAR renders the result into the seat's own rules file (`rules/lanes/<lane>.md`, `rules/review.md`) together with the voyage's `done:` and `bar:`, and gives it to the agent once per conversation: at a new session, never again in a resumed one, which already holds the charter it started with. The captain's guide (`gear --skill captain`) stays a skill topic, with the captain's hand-fix and urgent-fix text.

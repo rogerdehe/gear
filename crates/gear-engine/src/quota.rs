@@ -754,8 +754,26 @@ pub(crate) fn resume_delivery(
     seat: &SeatRow,
 ) -> GearResult<(String, Option<(String, i64)>)> {
     if seat.role == SeatRole::Temp {
+        let generation = store
+            .read(|tx| tx.get_seat(&seat.id))?
+            .map(|row| row.generation)
+            .unwrap_or(seat.generation);
         return match crate::review::job_for_seat(store, project, seat)? {
-            Some(job) => Ok((job.packet, Some((job.task, job.attempt)))),
+            Some(job) => {
+                // T-465: a reviewer whose agent was switched reads the
+                // handover first, then its review packet.
+                let packet = match crate::handover::stored_block(
+                    store,
+                    &seat.id,
+                    generation,
+                    &job.task,
+                    job.attempt,
+                )? {
+                    Some(block) => format!("{block}{}", job.packet),
+                    None => job.packet,
+                };
+                Ok((packet, Some((job.task, job.attempt))))
+            }
             // No job left (its verdict is in): a short line, no stale packet.
             None => Ok((
                 format!(
@@ -2893,7 +2911,7 @@ quota_reset_h = {reset_h}
                     &std::path::Path::new(&cfg().db_path)
                         .parent()
                         .unwrap()
-                        .join("rules/lane.md")
+                        .join("rules/lanes/heat.md")
                         .to_string_lossy(),
                     ""
                 )[0]

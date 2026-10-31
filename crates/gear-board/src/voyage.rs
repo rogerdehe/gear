@@ -264,7 +264,7 @@ fn local_minute(now: Ts) -> Option<u32> {
 }
 
 pub fn reports(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<VoyageReport>> {
-    build_reports(tx, project, now, false)
+    build_reports(tx, project, now, false, None)
 }
 
 /// Also measure finished voyages, so a station can include the final third
@@ -274,7 +274,22 @@ pub fn reports_including_finished(
     project: &str,
     now: Ts,
 ) -> GearResult<Vec<VoyageReport>> {
-    build_reports(tx, project, now, true)
+    build_reports(tx, project, now, true, None)
+}
+
+/// The report of one voyage (T-471): the board shows one voyage, so its
+/// rebuild measures that voyage and reads no other voyage's history. The
+/// report is the one [`reports_including_finished`] would give for the same
+/// milestone, finished or not.
+pub fn report_for(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+    now: Ts,
+) -> GearResult<Option<VoyageReport>> {
+    Ok(build_reports(tx, project, now, true, Some(milestone))?
+        .into_iter()
+        .next())
 }
 
 fn build_reports(
@@ -282,12 +297,16 @@ fn build_reports(
     project: &str,
     now: Ts,
     include_finished: bool,
+    only: Option<&str>,
 ) -> GearResult<Vec<VoyageReport>> {
     let tasks = tx.tasks_of_project(project)?;
     let departs_at = departs_at(tx, project, now)?;
     let off_hours_until = off_hours_until(tx, project, now)?;
     let mut reports = Vec::new();
     for voyage in tx.voyages_of_project(project)? {
+        if only.is_some_and(|milestone| milestone != voyage.milestone) {
+            continue;
+        }
         let scope: Vec<_> = tasks
             .iter()
             .filter(|t| {

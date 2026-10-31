@@ -668,8 +668,10 @@ pub(crate) fn run(
             store,
             &seat.project,
             seat.role,
+            &seat.name,
             &cfg.db_path,
             &profile,
+            phase == "start_resume",
         )?);
         let target = str_field(&state, "target");
         if phase == "start_resume" {
