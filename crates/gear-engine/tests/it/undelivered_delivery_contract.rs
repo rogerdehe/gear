@@ -414,7 +414,9 @@ fn resolved_failed_delivery_stays_closed_after_a_late_checkin() {
 fn cancel_failed_task(w: &mut World) {
     use gear_app::{draft::parse, identity::Fingerprint, plan::apply, Env};
     use gear_model::GearCtx;
-    let text = "<!-- gear-plan project=p base=0 -->\n# Queue\n## T-1 [must] lane=heat\ngoal: g\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n";
+    // T-461: a cancel line changes the state only, so the block repeats the
+    // stored fields (no `estimate:`: the task has none) and adds the state.
+    let text = "<!-- gear-plan project=p base=0 -->\n# Queue\n## T-1 [must] lane=heat\ngoal: g\naccept: a\ndeps: -\nstate: cancelled\n";
     let env = Env {
         ctx: Some(GearCtx {
             project: "p".into(),
