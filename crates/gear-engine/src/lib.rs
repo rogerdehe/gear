@@ -1897,9 +1897,7 @@ review=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high
             .slow
             .iter()
             .find(|line| line.starts_with("observe: "))
-            .unwrap_or_else(|| {
-                panic!("a failed observation over the budget is named: {report:?}")
-            });
+            .unwrap_or_else(|| panic!("a failed observation over the budget is named: {report:?}"));
         let ms = line
             .rsplit_once(": ")
             .and_then(|(_, ms)| ms.trim_end_matches(" ms").parse::<u128>().ok())

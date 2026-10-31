@@ -363,7 +363,12 @@ pub fn lane_view(
     }
     // The newest open attempt comes first (T-458): a lane may hold a parked
     // one and a new one at once, and the new one is what it works on.
-    open.sort_by_key(|a| (a.state == AttemptState::Submitted, std::cmp::Reverse(a.started)));
+    open.sort_by_key(|a| {
+        (
+            a.state == AttemptState::Submitted,
+            std::cmp::Reverse(a.started),
+        )
+    });
     // The seat has no open attempt that is not Submitted (T-290): an empty
     // list, or one that is handed in, is fine.
     let no_open_unsubmitted = open.iter().all(|a| a.state == AttemptState::Submitted);
