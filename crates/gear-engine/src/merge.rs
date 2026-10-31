@@ -3119,6 +3119,21 @@ fn sweep_in(
                 }
                 continue;
             }
+            // A done task whose merge is queued or running is landing, not
+            // lost: its branch is not news to the captain.
+            let landing = store.read(|tx| {
+                for state in [OpState::Intended, OpState::Executing, OpState::Submitted] {
+                    if tx.ops_in_state(project, state)?.iter().any(|op| {
+                        op.kind == OpKind::Merge && op.task.as_deref() == Some(branch.task.as_str())
+                    }) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            })?;
+            if landing {
+                continue;
+            }
             let key = branch_told_key(project, &branch.name);
             let told = store
                 .read(|tx| tx.get_meta(&key))?

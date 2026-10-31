@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=985 -->
+<!-- gear-plan project=gear base=990 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -90,6 +90,12 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7021: move — projected 885m of 1020m; hull runs dry in ~21 min (M-7023) while mast holds 225m: T-497 and T-498 (Antigravity CLI profile and usage) go to hull
 - 2026-11-01 06:00 staff: T-491 (v0.5 upgrade test) moves to mast | why: mast runs dry in ~17 min (M-7028; its releases wait for their stations) while hull holds the T-487 rework, T-488, T-492, T-497 and T-498
 - 2026-11-01 06:10 hand-fix: copied the T-495 omp probe's session log (checked: no secrets) into mast's worktree target/tmp for T-496's fixture | why: seats may not read ~/.omp (M-7029)
+- 2026-11-01 06:40 hand-fix: released v0.6.2 (notes: T-489 and three hand fixes added, T-482 left to v0.6.1; dev merged into main as 9b27cc4e, tag v0.6.2); both engines on v0.6.2 | why: station S3 reached, done (5); the skill review found nothing new
+- station M-7053: move — 36 done, projected 915m of 1020m; hull 217m against mast 106m: T-497 and T-498 (Antigravity CLI) go back to mast, hull keeps the T-487 rework and T-492
+- 2026-11-01 07:00 staff: T-491 (v0.5 upgrade test) moves to hull | why: hull has nothing to start after T-487 (M-7055; T-492 waits for its deps) while mast still holds T-478, T-497, T-498 and T-493
+- 2026-11-01 07:30 hand-fix: the done-branch scan skips a task whose merge is intended, executing or submitted (merge.rs); make gate passed; engines restarted | why: three false 'branches of done tasks' items in an hour (M-7038, M-7056, M-7065), each while the merge was running
+- station M-7075: keep course — 39 done, projected 857m of 1020m
+- station M-7076: keep course — projected 861m of 1020m, six tasks left
 
 # Queue
 
@@ -303,7 +309,7 @@ goal: [S5] The captain skill covers several projects: skills/gear/references/cap
 accept: The skill tests pass: make check CRATE=gear-cli TESTS='test(skill)'.
 estimate: 15
 
-## T-491 [now] lane=mast milestone=M6 station=S5 required
+## T-491 [now] lane=hull milestone=M6 station=S5 required
 goal: [S5] A project on v0.5.x upgrades to v0.6 with no hand step: its store (schema of v0.5.6) migrates when the new engine or any gear command first opens it, its gear.toml of v0.5 loads unchanged (every new field has a default), its running voyage, seats and open items carry on, and docs/releases notes say "Upgrading: install, restart the engine". An end-to-end test opens a store made by the v0.5.6 schema with a voyage in progress and a v0.5-shaped config (a fixture committed with the test), runs one engine tick and `gear` and finds the voyage, seats and items intact. Change crates/gear-store migrations if anything is missing and the test, no other design.
 accept: Store and engine tests: the v0.5.6 fixture migrates to the current schema with no loss of tasks, attempts, seats, messages or plan versions; one tick and the home page run on it; a second open is a no-op. Run make check CRATE=gear-store and CRATE=gear-engine.
 estimate: 45
@@ -325,12 +331,12 @@ accept: Usage tests on a fixture of a few records from a real local omp run (con
 deps: T-495
 estimate: 25
 
-## T-497 [now] lane=hull milestone=M6 station=S5 required
+## T-497 [now] lane=mast milestone=M6 station=S5 required
 goal: [S5] Antigravity CLI (`agy`, 1.2.13 on this machine; Herdr kind `agy`) starts as a lane or a reviewer like the CLIs GEAR knows. Today kickoff finds it and Herdr starts `--kind agy`, but GEAR has no built-in agy profile and `gear admin install-skill` has no agy target. Change crates/gear-herdr (profile.rs: a built-in `agy` profile: unattended `--dangerously-skip-permissions`, `--model`, `--effort` for the reasoning level, `--conversation <id>` to resume, its exit keys and its quota, back-off and dialog markers read from agy's own screens; agy has no system-prompt flag, so the role rules reach it the way GEAR reaches a CLI without one, named in the report) and crates/gear-app (skill.rs: `SkillAgent::Agy` with agy's skills directory, found from agy's docs or `agy plugin`/`~/.gemini/antigravity-cli/`; kickoff lists agy with `agy models`), no other design. Check every flag and path against `agy --help` and agy's docs before writing it, and name what you checked in the report.
 accept: Tests: the built-in agy profile starts with its unattended and model arguments and resumes with `--conversation`; `gear admin install-skill --agent agy` writes SKILL.md where agy loads skills and init accepts an agy lane. A real `herdr agent start --kind agy` in a test worktree with the profile's arguments reaches an empty composer with no dialog left (record the command and the screen in the report). Run make check CRATE=gear-herdr, CRATE=gear-app and CRATE=gear-cli.
 estimate: 55
 
-## T-498 [now] lane=hull milestone=M6 station=S5 required
+## T-498 [now] lane=mast milestone=M6 station=S5 required
 goal: [S5] gear-usage reads an agy seat's tokens and model, so its cost shows on the board. agy keeps its data under `~/.gemini/antigravity-cli/` (conversations/, history.jsonl, conversation_summaries.db, cli.log); find where a conversation's token counts live and read them with a small reader the built-in agy profile names. If agy writes no token counts anywhere readable, the seat's usage is unknown (never 0) and the report says so. Change crates/gear-usage and the agy profile's usage field only, no other design.
 accept: Usage tests on a fixture made from a real local agy run (content redacted): its tokens and model are read, or, if agy records none, the record reads as unknown; a pi fixture still reads as before. Run make check CRATE=gear-usage and CRATE=gear-engine.
 deps: T-497
