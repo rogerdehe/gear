@@ -1353,6 +1353,10 @@ fn doorbell_inputs(
                 &binding.kind,
                 captain.as_deref(),
             ),
+            // T-454 v2: the notice that closes a direction check under its
+            // reviewer cuts that turn and goes even while the seat holds a
+            // delivery slot (the review it was just handed).
+            cut: doorbell::ends_direction_check(message),
         };
         let mut waiting: Vec<doorbell::DoorbellItem> = Vec::new();
         let declared_wait = waits::waiting_seat(tx, &seat.id)?;
@@ -1430,10 +1434,14 @@ fn doorbell_inputs(
                     && op.task == seat.task_id
             });
         if review_question {
-            waiting.retain(|item| overrun_questions.contains(&item.id));
+            // T-454 v2: a message that cuts the turn is never dropped by the
+            // review-question narrowing — it is the one notice that must
+            // reach the reviewer now.
+            waiting.retain(|item| overrun_questions.contains(&item.id) || item.cut);
         }
-        let slot_busy = (!slot_ops.is_empty() && !review_question)
-            || session_preparation_pending(tx, seat_obs)?;
+        let slot_busy =
+            (!slot_ops.is_empty() && !review_question && !waiting.iter().any(|item| item.cut))
+                || session_preparation_pending(tx, seat_obs)?;
         let last_settled_at = tx
             .last_op(&seat.id, OpKind::Doorbell)?
             .filter(|op| {

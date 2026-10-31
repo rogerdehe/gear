@@ -729,7 +729,7 @@ fn finish_direction_results(
                 if !live && result.is_none()
                     && tx.get_seat(seat_id)?.is_some_and(|s| s.state == SeatState::Active && s.generation == generation && s.task_id.as_deref() == Some(task.id.as_str()))
                 {
-                    let body = format!("The direction check of {} attempt {} is closed: the attempt was handed in or ended. Send nothing for it; end your turn.", task.id, attempt.n);
+                    let body = gear_store::direction_closed_notice_body(&task.id, attempt.n);
                     tx.insert_message(&NewMessage { meta: None, project: project.into(), thread: format!("direction:{}:{}:{sha}", task.id, attempt.n), task: Some(task.id.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0, recipient: seat_id.into(), kind: MsgKind::Instruction, urgent: false, body, reply_to: None, needs_ack: false, state: MsgState::Open, created: now })?;
                 }
                 tx.set_meta(&key, &serde_json::json!({"checked_sha":sha}).to_string())?;

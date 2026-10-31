@@ -5,6 +5,13 @@
 //! while it works (pi, claude), is typed at once — one doorbell per message,
 //! and the text names the message ids. A working agent of a kind that does
 //! not queue input (opencode, codex) still waits for idle, as before.
+//!
+//! T-454: the engine's own notices (the overrun question, the no-push question,
+//! the think ask) never go into a working agent. Typed into one, a notice stops
+//! the running command (M5: two notices stopped a 9-minute check twice), so a
+//! notice waits for the seat's next idle moment. A seat's word keeps its path.
+//! One notice is the exception (T-444): the one that closes a direction check
+//! under its reviewer reaches it while it works, and ends that turn at once.
 
 use gear_model::{MsgKind, Ts};
 
@@ -17,6 +24,10 @@ pub struct DoorbellItem {
     /// Typed into the pane even while the agent works (T-130): urgent, or a
     /// captain instruction for an agent that queues input.
     pub at_once: bool,
+    /// Cuts a working turn and goes even when the seat holds a delivery slot
+    /// (T-454 v2): only the notice that closes a direction check under its
+    /// reviewer, which ends that turn at once.
+    pub cut: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +80,9 @@ pub struct DoorbellAction {
 /// `at_once` bypasses the idle check and the cooldown: an urgent message (or a
 /// captain instruction for a queueing agent) is typed at once, and the cooldown
 /// is only there to keep ordinary reminders apart. The slot check is not
-/// bypassed: a prompt in the same moment as a delivery is swallowed (T-71).
+/// bypassed: a prompt in the same moment as a delivery is swallowed (T-71) —
+/// except for an item that cuts the turn (T-454 v2: the direction-closed
+/// notice), which ends the turn at once even while a delivery holds the slot.
 ///
 /// A working agent is told only about the messages that must reach it now; the
 /// others wait for idle, as before. An idle agent is told about everything.
@@ -99,20 +112,48 @@ pub fn decide(inputs: &[DoorbellInput], cooldown_s: i64, now: Ts) -> Vec<Doorbel
 /// An urgent message always (a codex or opencode agent takes it mid-turn too).
 /// A captain instruction only when the agent queues input typed while it works
 /// (pi, claude): it reads the text after the current step, so nothing is lost.
+/// This is a seat's word; an engine notice never goes at once, whatever its
+/// urgency ([`reaches_while_working`], T-454).
 pub fn at_once(urgent: bool, kind: MsgKind, from_captain: bool, queues_input: bool) -> bool {
     urgent || (from_captain && kind == MsgKind::Instruction && queues_input)
+}
+
+/// The sender GEAR's engine writes its own notices under.
+pub const NOTICE_SENDER: &str = gear_store::ENGINE_SENDER;
+
+/// Is this message one of the engine's own notices? A notice is not a seat's
+/// word: it never goes into a working agent (T-454).
+pub fn is_notice(sender: &str) -> bool {
+    sender == NOTICE_SENDER
+}
+
+/// Is this the notice that ends a direction check under its reviewer (T-444)?
+/// It is the one engine notice that reaches a working agent (T-454 v2): the
+/// reviewer still working on that check ends its turn at once. The body and
+/// its prefix have one definition ([`gear_store::is_direction_closed_notice`]),
+/// so the sender and this reader cannot drift apart.
+pub fn ends_direction_check(message: &gear_store::MessageRow) -> bool {
+    gear_store::is_direction_closed_notice(message)
 }
 
 /// [`at_once`] for one stored message and the seat it is addressed to: the seat
 /// is a lane whose agent kind queues input, and `captain` is the project's
 /// captain (so the message is a captain instruction). Used by the engine tick
 /// and by `gear send` alike, so the two never drift apart.
+///
+/// A notice is the exception (T-454): whatever its urgency it waits for the
+/// seat's next idle moment, so it never stops a command the agent runs. The
+/// one notice that must reach a working agent is the one that closes a
+/// direction check under its reviewer (T-444): it ends that turn at once.
 pub fn reaches_while_working(
     message: &gear_store::MessageRow,
     seat: &gear_store::SeatRow,
     agent_kind: &str,
     captain: Option<&str>,
 ) -> bool {
+    if is_notice(&message.sender) {
+        return ends_direction_check(message);
+    }
     let queues_input =
         seat.role == gear_model::SeatRole::Lane && gear_herdr::queues_input(agent_kind);
     at_once(
@@ -187,7 +228,7 @@ fn rings(input: &DoorbellInput, cooldown_s: i64, now: Ts) -> bool {
     if input.waiting.is_empty() {
         return false; // nothing to show
     }
-    if input.slot_busy {
+    if input.slot_busy && !input.waiting.iter().any(|item| item.cut) {
         return false; // a delivery already occupies the seat
     }
     let at_once = input.waiting.iter().any(|item| item.at_once);

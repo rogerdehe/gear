@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=934 -->
+<!-- gear-plan project=gear base=937 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3).
 
@@ -45,6 +45,7 @@ station S4: the captain's plan tools, released as v0.6.3
 - station M-6669: keep course — projected 651m of 720m, but hull carries 516m against mast's 177m; T-461 (S1) and T-473 (S4), both in gear-app, move back to mast (hull 406m, mast 287m)
 - station M-6702: move — projected 809m of 720m, hull the bottleneck (634m against mast's 252m); T-458, T-468, T-472 and T-482 move to mast (hull ~464m, mast ~422m); they touch engine files apart from hull's S1/S2 work, and the second to merge merges dev first
 - station M-6704: keep course — after the move projected 623m of 720m, lanes balanced (hull 443m, mast 411m)
+- 2026-10-31 19:30 lesson: T-469 and T-461 passed their acceptance and failed the merge gate on tests in crates that call the changed one (engine, cli) | why: the captain's acceptance named only the changed crate | else: from now on a contract's acceptance names every crate whose tests use the changed behaviour
 
 # Queue
 
@@ -86,7 +87,7 @@ estimate: 40
 
 ## T-458 [now] lane=mast milestone=M6 station=S1 required
 goal: [S1] Smaller M5 fleet bugs: a lane that reports blocked gets its next startable task; a held seat may still report a finished hand-in; a repeated confirmed goal/bar/eta change records its second decision; the lost-merge scan runs before the old filters; the slow-step report includes a failed observation.
-accept: One engine or app test per item. Run make check CRATE=gear-engine and CRATE=gear-app.
+accept: One engine or app test per item. Run make check CRATE=gear-engine, CRATE=gear-app and CRATE=gear-cli (the crates that use the changed code).
 estimate: 50
 
 ## T-459 [now] lane=mast milestone=M6 station=S1 required
@@ -155,7 +156,7 @@ estimate: 45
 
 ## T-467 [now] lane=hull milestone=M6 station=S2 required
 goal: [S2] Elastic counts. Within the configured counts (e.g. 2 lanes, 4 reviewers) the engine starts and releases seats by itself as work comes and goes, with nobody asked. Going above them is a config change the user starts and confirms in the one dialog: a plan line raises a count with its reason and end condition (e.g. 4 to 8 reviewers until no hand-in waits for a review); when the condition holds, the engine releases idle extra seats only, never a running review, until the count is back to the configured one, and records both changes; after that it scales within the configured counts as before. A seat is released only after it has been idle for its role's `release_idle_min` (config per role, default 30), not at once when the lanes stop working (today release.rs releases standby reviewers beyond the working lanes at once), so a re-review finds its reviewer warm (the user's seat model, gear/voyages/M4/backlog.md:81).
-accept: Engine and app tests: reviewers raised to 8 start while hand-ins wait; once none wait, idle extra reviewers are released down to 4 and a running review is not interrupted. Run make check CRATE=gear-engine and CRATE=gear-app.
+accept: Engine and app tests: reviewers raised to 8 start while hand-ins wait; once none wait, idle extra reviewers are released down to 4 and a running review is not interrupted. Run make check CRATE=gear-engine, CRATE=gear-app and CRATE=gear-cli (the crates that use the changed code).
 estimate: 50
 
 ## T-468 [now] lane=mast milestone=M6 station=S2 required
@@ -197,12 +198,12 @@ estimate: 15
 
 ## T-473 [now] lane=mast milestone=M6 station=S4 required
 goal: [S4] Plan tools: `state: hold` keeps a task out of delivery until set ready; a milestone departs only on an explicit `depart` line; a milestone with no task and no history can be removed; a plan apply warns when two Ready tasks name one file.
-accept: App tests for each. Run make check CRATE=gear-app.
+accept: App tests for each. Run make check CRATE=gear-app, CRATE=gear-engine and CRATE=gear-cli (the crates that use the changed code).
 estimate: 50
 
 ## T-474 [now] lane=hull milestone=M6 station=S4 required
 goal: [S4] Branch hygiene and coverage: a cancelled task's branch is deleted; a merged task's branch is deleted even when its tip moved past the merged candidate (its extra commits listed to the captain first); `gear report coverage` lists accepted attempts not on the integration branch. Direction branches too (another project, 2026-10-31: stale `origin/direction/t-328` and a reviewer still on `direction/t-400`): their name comes from a conventions template like the review branch's, default `{project}/direction/{task}` (today crates/gear-engine/src/review.rs hard-codes `direction/<task>`), and a direction branch, local and on the remote, is deleted when its job closes. A task moved to another lane leaves its old lane's task branch behind (another project's T-199: done on surface, stale `api/t199` left, fully an ancestor of dev): when the task is done, every branch the task branch template gives for any lane that held the task is deleted when it is an ancestor of the integration branch, and listed to the captain otherwise.
-accept: Engine and app tests. Run make check CRATE=gear-engine and CRATE=gear-app.
+accept: Engine and app tests. Run make check CRATE=gear-engine, CRATE=gear-app and CRATE=gear-cli (the crates that use the changed code).
 estimate: 40
 
 ## T-482 [now] lane=mast milestone=M6 station=S4 required

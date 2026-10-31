@@ -141,6 +141,7 @@ pub fn deliver_doorbell_now(
         id: message.to_string(),
         urgent,
         at_once: true,
+        cut: false,
     }];
     // Design §10.4: a lane with no open attempt gets the text that tells it
     // to stop working on earlier things.
@@ -652,7 +653,7 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
     let Some(text) = op.payload.get("text").and_then(serde_json::Value::as_str) else {
         return void("the op carries no text".to_string());
     };
-    let mut urgent = false;
+    let mut cut = false;
     let policy = if op.kind == OpKind::Deliver {
         // T-290: a rework packet (attempt n ≥ 2) that is on its way to a lane
         // whose agent queues input while it works (pi, claude) may go while
@@ -686,7 +687,12 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
                         captain.as_deref(),
                     );
                     unknown &= message.urgent;
-                    urgent |= message.urgent;
+                    // T-454: only a seat's own urgent word cuts a working turn;
+                    // an engine notice waits for the next idle moment instead —
+                    // except the notice that closes a direction check under its
+                    // reviewer (T-444), which must end that turn at once.
+                    cut |= crate::doorbell::ends_direction_check(&message)
+                        || (message.urgent && !crate::doorbell::is_notice(&message.sender));
                 } else {
                     working = false;
                     unknown = false;
@@ -704,10 +710,12 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
         }),
         // T-241: an urgent doorbell for a lane or a reviewer cuts the working
         // turn first (never the captain: its turn is not cut). Deliveries and
-        // every other op never interrupt.
+        // every other op never interrupt. T-454: an engine notice is never
+        // urgent in this sense, so it never cuts a running command — except the
+        // direction-closed notice (T-444), which ends the reviewer's turn.
         interrupt: op.kind == OpKind::Doorbell
             && matches!(seat.role, SeatRole::Lane | SeatRole::Temp)
-            && urgent,
+            && cut,
         policy,
         id: op.id.clone(),
         pane_id: binding.pane_id.clone(),
@@ -2493,6 +2501,34 @@ mod tests {
             .id)
     }
 
+    /// An open notice from the engine to `recipient`, with `body`. Returns its
+    /// id.
+    fn notice_for(tx: &Tx<'_>, recipient: &str, body: &str) -> GearResult<String> {
+        Ok(tx
+            .insert_message(&NewMessage {
+                project: "p".into(),
+                thread: "direction:T-1:1:abc1234".into(),
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: recipient.into(),
+                kind: MsgKind::Instruction,
+                urgent: false,
+                body: body.into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: T0,
+                meta: None,
+            })
+            .unwrap()
+            .id)
+    }
+
+    /// The body of the notice that closes a direction check (T-444).
+    const DIRECTION_CLOSED: &str = "The direction check of T-1 attempt 1 is closed: the attempt was handed in or ended. Send nothing for it; end your turn.";
+
     /// An Intended doorbell for `seat` covering `message`.
     fn doorbell_for(tx: &Tx<'_>, seat: &str, message: &str) -> GearResult<String> {
         Ok(tx
@@ -2656,6 +2692,67 @@ mod tests {
             &herdr,
             REVIEW_PANE,
             "a working reviewer is cut before its urgent send",
+        );
+    }
+
+    /// T-454 v2 (T-444): the notice that closes a direction check reaches a
+    /// working reviewer — the engine cuts its turn first, then types it, so the
+    /// reviewer ends its turn at once.
+    #[test]
+    fn the_direction_closed_notice_cuts_a_working_reviewers_turn_first() {
+        let mut store = interrupt_world();
+        store
+            .write(|tx| {
+                let id = notice_for(tx, "p:r-1", DIRECTION_CLOSED)?;
+                doorbell_for(tx, "p:r-1", &id)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = review_herdr(AgentStatus::Working);
+
+        let done = execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
+
+        assert_eq!(done, vec![("O-1".to_string(), "submitted".to_string())]);
+        prompt_or_esc(
+            &herdr,
+            REVIEW_PANE,
+            "a working reviewer is cut before the direction-closed notice",
+        );
+    }
+
+    /// T-454: every other engine notice to a working reviewer waits: no
+    /// escape, no text; the doorbell op waits for its idle moment.
+    #[test]
+    fn an_ordinary_notice_to_a_working_reviewer_waits() {
+        let mut store = interrupt_world();
+        store
+            .write(|tx| {
+                let id = notice_for(tx, "p:r-1", "No push to heat/t1 for 20 min.")?;
+                doorbell_for(tx, "p:r-1", &id)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = review_herdr(AgentStatus::Working);
+
+        let done = execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
+
+        // The agent is working and the notice may not go into it: nothing is
+        // typed, and the op does not count as a doorbell that reached the
+        // seat (a failed one covers nothing), so the message waits for the
+        // next idle moment.
+        assert_eq!(done, vec![("O-1".to_string(), "failed".to_string())]);
+        assert!(
+            !herdr
+                .calls
+                .iter()
+                .any(|c| matches!(c, Call::SendKeys { .. })),
+            "a notice does not cut the reviewer's turn: {:?}",
+            herdr.calls
+        );
+        assert!(
+            herdr.prompts_to(REVIEW_PANE).is_empty(),
+            "a notice waits for idle: {:?}",
+            herdr.prompts_to(REVIEW_PANE)
         );
     }
 
