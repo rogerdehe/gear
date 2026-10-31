@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=992 -->
+<!-- gear-plan project=gear base=994 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -98,6 +98,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7076: keep course — projected 861m of 1020m, six tasks left
 - 2026-11-01 08:10 hand-fix: released v0.6.3 at the user's word for another project's omp use (notes: T-488 and one hand fix added; dev merged into main as ec0c4b8a, tag v0.6.3) | why: station S4 reached, done (5)
 - 2026-11-01 08:20 hand-fix: restarted both engines on v0.6.3 (the earlier restart was interrupted) | why: another project's M-5348, a real notice after the 10-minute grace
+- 2026-11-01 08:40 scope: added to S5 (hull): a re-review resumes the conversation of the review it continues | why: the user's design (a rework's review continues its own earlier review); measured: re-reviews go to the right seat and take ~2 min, but run in the seat's latest session, not attempt 1's | else: -
 
 # Queue
 
@@ -344,8 +345,13 @@ accept: Usage tests on a fixture made from a real local agy run (content redacte
 deps: T-497
 estimate: 35
 
+## T-499 [now] lane=hull milestone=M6 station=S5 required
+goal: [S5] A re-review resumes the conversation of the review it continues, not whatever conversation its seat had last. Today T-480 sends attempt n's review to the seat that reviewed attempt n-1, but when that seat reviewed other tasks in between, the re-review runs in the session of its latest job (T-472 attempt 2 ran in T-495's review session, not attempt 1's), so the reviewer does not have its own earlier findings. Change crates/gear-engine (the review start in review.rs and session.rs), no other design: the re-review's start resumes the session recorded on the seat's round of attempt n-1 (its last session id) when the CLI and the seat are the same; when that session cannot be resumed, the packet carries one line naming it and the earlier review file, as T-481 does for a lane.
+accept: Engine tests: a seat reviews T-1 attempt 1 in session A, then T-2 in session B; T-1 attempt 2's review starts with a resume of session A, not B; a seat whose attempt-1 session is gone starts fresh with the reference line. Run make check CRATE=gear-engine.
+estimate: 35
+
 ## T-493 [now] lane=mast milestone=M6 station=S5 required
 goal: [S5] Release v0.6.4, station S5's release. Change, no other design: (1) the version is 0.6.4 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.4.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.3 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.3 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.4 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.4"; docs/releases/v0.6.4.md lists every task merged on origin/dev since v0.6.3 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-478, T-489, T-490, T-491, T-492, T-495, T-496, T-497, T-498
+deps: T-478, T-489, T-490, T-491, T-492, T-495, T-496, T-497, T-498, T-499
 estimate: 15
