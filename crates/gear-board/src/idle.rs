@@ -239,8 +239,9 @@ pub fn helping(tx: &Tx<'_>, project: &str, seat: &SeatRow, now: Ts) -> GearResul
 }
 
 /// The times the lane worked on a task (T-463): every attempt of one of the
-/// lane's tasks by this seat, from its start to its hand-in, merge or end (the
-/// settle of a closed attempt).
+/// lane's tasks by this seat, from its start to the earliest of its hand-in,
+/// merge and settle (the end of the work; a closed attempt's row time stands
+/// in when no step wrote one).
 fn work_spans(tx: &Tx<'_>, project: &str, seat: &SeatRow) -> GearResult<Vec<(Ts, Ts)>> {
     let mut spans = Vec::new();
     for task in tx.tasks_of_project(project)? {
@@ -263,7 +264,7 @@ fn work_spans(tx: &Tx<'_>, project: &str, seat: &SeatRow) -> GearResult<Vec<(Ts,
             ]
             .into_iter()
             .flatten()
-            .max();
+            .min();
             if let Some(end) = end {
                 spans.push((start, end));
             }
