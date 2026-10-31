@@ -229,6 +229,10 @@ pub struct LaneSection {
     /// root.
     #[serde(default)]
     pub repo: Option<String>,
+    /// This lane's charter (T-469): how its agent works on the model it runs,
+    /// written at kickoff for that model. Absent = the lane rules.
+    #[serde(default)]
+    pub charter: Option<String>,
 }
 
 /// One repo of a multi-repo project (T-52): a child repository below
@@ -374,6 +378,10 @@ pub struct Repo {
 pub struct TempsSection {
     pub kind: String,
     pub profile: String,
+    /// The reviewers' charter (T-469): how a reviewer works on its model.
+    /// Absent = the reviewer rules.
+    #[serde(default)]
+    pub charter: Option<String>,
 }
 
 /// The default cap on a task's planned time (T-279): no task is planned for
@@ -1357,6 +1365,31 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                 &owns_field,
                 format!("overlaps the paths owned by lane {:?}", other.name),
             ));
+        }
+
+        // A charter (T-469) that is present must say something: a blank one
+        // would replace the lane rules with nothing, so it is a finding.
+        if let Some(charter) = &lane.charter {
+            if charter.trim().is_empty() {
+                issues.push(issue(
+                    &format!("lanes[{index}].charter"),
+                    "a charter is empty after trimming: leave it out to keep the lane rules"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
+    // ---- the reviewers' charter (T-469), the same rule.
+    if let Some(temps) = &cfg.temps {
+        if let Some(charter) = &temps.charter {
+            if charter.trim().is_empty() {
+                issues.push(issue(
+                    "temps.charter",
+                    "a charter is empty after trimming: leave it out to keep the reviewer rules"
+                        .to_string(),
+                ));
+            }
         }
     }
 

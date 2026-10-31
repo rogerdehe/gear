@@ -586,6 +586,10 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
         format!("kind = \"{lane_kind}\""),
         format!("profile = \"{lane_kind}\""),
         pad(
+            "# charter = \"\"\"…\"\"\"",
+            "# optional (T-469): how this lane works on the agent and model it runs; empty = the lane rules",
+        ),
+        pad(
             "# repo = \"TODO\"",
             "# the [[repos]] name this lane works in; empty = the project root",
         ),
@@ -619,6 +623,10 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
         "[temps]".to_string(),
         format!("kind = \"{lane_kind}\""),
         format!("profile = \"{lane_kind}\""),
+        pad(
+            "# charter = \"\"\"…\"\"\"",
+            "# optional (T-469): how a reviewer works on the agent and model it runs; empty = the reviewer rules",
+        ),
         String::new(),
         "[models]                      # full model ids; the user confirms them at kickoff".to_string(),
         format!(

@@ -831,8 +831,10 @@ fn start(
         store,
         &seat.project,
         seat.role,
+        &seat.name,
         &cfg.db_path,
         profile,
+        plan.resume.is_some(),
     )?);
     if !plan.model.is_empty() {
         if let Some(model_args) = start_args(&plan.cli, &plan.model, &plan.args) {
@@ -1883,14 +1885,19 @@ lanes = [{{model="{model}", cli="{kind}"}}]
                 }
             })
             .unwrap();
-        let path = dir.path().join("rules/lane.md");
-        assert!(args
-            .windows(2)
-            .any(|w| w[0] == "--append-system-prompt" && w[1] == path.to_string_lossy()));
+        // T-469: a resumed session gets no charter again (its rules file is
+        // refreshed, but nothing is appended), and the lane's rules file is
+        // its own, under `rules/lanes`.
+        let path = dir.path().join("rules/lanes/heat.md");
+        assert!(
+            !args.windows(2).any(|w| w[0] == "--append-system-prompt"),
+            "a resumed session gets no charter again: {args:?}"
+        );
         assert!(args.windows(2).any(|w| w == ["--session", "old-session"]));
-        assert!(std::fs::read_to_string(path)
-            .unwrap()
-            .starts_with(include_str!("../../../skills/gear/references/rules/lane.md").trim_end()));
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            gear_app::charter::text(None, SeatRole::Lane, "heat", "-", "-").unwrap()
+        );
     }
 
     #[test]
