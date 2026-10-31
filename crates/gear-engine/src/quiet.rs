@@ -388,7 +388,16 @@ pub fn tick(
                 settle(tx)?;
                 continue;
             }
-            if now - asked >= reply {
+            // The answer window opens when the ask reached the lane: a notice
+            // to a working lane waits for its next idle moment (T-454), and a
+            // lane cannot answer an ask it has not seen.
+            let reached = tx
+                .ops_of_seat_kind(&seat.id, gear_model::OpKind::Doorbell)?
+                .into_iter()
+                .filter(|op| op.state == gear_model::OpState::Confirmed && op.created >= asked)
+                .map(|op| op.updated)
+                .min();
+            if reached.is_some_and(|reached| now - reached >= reply) {
                 alarm(
                     tx,
                     &seat,
@@ -746,6 +755,26 @@ mod tests {
         .unwrap();
     }
 
+    /// The ask reached the lane: a doorbell to its seat confirmed at `at`.
+    fn rang(s: &mut Store, at: Ts) {
+        s.write(|tx| {
+            let op = tx.insert_op(&gear_store::NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: gear_model::OpKind::Doorbell,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({}),
+                created: at,
+            })?;
+            tx.set_op_state("p", &op.id, gear_model::OpState::Confirmed, None, at)
+        })
+        .unwrap();
+    }
+
     /// 20 min without a push: the lane is asked once to tell the captain why
     /// within 10 min; its answer becomes the captain's item; the clock then
     /// restarts at the end of the window, so the next question comes at 50.
@@ -803,6 +832,16 @@ mod tests {
         let dir = repo_with_commit();
         let mut s = world(dir.path().to_str().unwrap());
         s.write(|tx| tick(tx, "p", T + 1201)).unwrap();
+        // A working lane gets the ask at its next idle moment (T-454): until
+        // it has, no window runs and the captain is not alarmed.
+        s.write(|tx| tick(tx, "p", T + 1201 + 1800)).unwrap();
+        assert!(
+            messages(&mut s, "quiet:p:heat").is_empty(),
+            "an ask the lane has not seen raises no alarm"
+        );
+        let mut s = world(dir.path().to_str().unwrap());
+        s.write(|tx| tick(tx, "p", T + 1201)).unwrap();
+        rang(&mut s, T + 1201);
         s.write(|tx| tick(tx, "p", T + 1201 + 599)).unwrap();
         assert!(
             messages(&mut s, "quiet:p:heat").is_empty(),
@@ -928,6 +967,7 @@ mod tests {
             1,
             "asked after 15 min"
         );
+        rang(&mut s, T + 901);
         s.write(|tx| tick(tx, "p", T + 901 + 300)).unwrap();
         assert_eq!(
             messages(&mut s, "quiet:p:heat").len(),
