@@ -637,3 +637,27 @@ fn an_active_voyage_still_wins_over_a_later_departed_plan_less_one() {
         "the sailing voyage is the one shown"
     );
 }
+
+/// T-471: the report of one voyage is the report the full measure gives for
+/// the same milestone, so a board that shows one voyage measures that voyage
+/// and reads no other voyage's history.
+#[test]
+fn the_report_of_one_voyage_is_the_full_measures_own() {
+    let mut store = world();
+    let all = store
+        .read(|tx| gear_board::voyage::reports_including_finished(tx, "p", NOW))
+        .unwrap();
+    let m1 = all
+        .iter()
+        .find(|report| report.milestone == "M1")
+        .cloned()
+        .expect("M1 is measured");
+    let one = store
+        .read(|tx| gear_board::voyage::report_for(tx, "p", "M1", NOW))
+        .unwrap();
+    assert_eq!(one.as_ref(), Some(&m1));
+    let none = store
+        .read(|tx| gear_board::voyage::report_for(tx, "p", "M9", NOW))
+        .unwrap();
+    assert_eq!(none, None, "a voyage the project never had");
+}
