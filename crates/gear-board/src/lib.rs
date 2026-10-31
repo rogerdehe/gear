@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gear_model::{
-    ErrorCode, GearError, GearResult, MsgKind, OpKind, OpState, SeatRole, SeatState, TaskState, Ts,
+    ErrorCode, GearError, GearResult, MsgKind, OpKind, SeatRole, SeatState, TaskState, Ts,
 };
 use gear_store::{BindingStatus, MessageRow, RoundRow, SeatRow, Store, TaskRow, Tx};
 
@@ -1019,32 +1019,24 @@ pub fn project_for(
     // home page showed it as a lost message.
     let mut unconfirmed_deliveries = 0;
     let mut unconfirmed: Vec<Unconfirmed> = Vec::new();
-    for state in [
-        OpState::Intended,
-        OpState::Executing,
-        OpState::Submitted,
-        OpState::Unknown,
-    ] {
-        for op in tx.ops_in_state(project, state)? {
-            if op.kind != OpKind::Deliver {
-                continue;
-            }
-            let seat = tx.get_seat(&op.seat)?;
-            let live = seat.as_ref().is_some_and(|seat| {
-                matches!(
-                    seat.state,
-                    SeatState::Active | SeatState::Standby | SeatState::Starting
-                ) && seat.generation == op.generation
+    // Only the Deliver ops that are not settled yet are read (T-471): the
+    // other ops of the project cannot change what this list shows.
+    for op in tx.unsettled_deliveries(project)? {
+        let seat = tx.get_seat(&op.seat)?;
+        let live = seat.as_ref().is_some_and(|seat| {
+            matches!(
+                seat.state,
+                SeatState::Active | SeatState::Standby | SeatState::Starting
+            ) && seat.generation == op.generation
+        });
+        if live {
+            unconfirmed_deliveries += 1;
+            unconfirmed.push(Unconfirmed {
+                op: op.id.clone(),
+                seat: seat.map(|seat| seat.name).unwrap_or_default(),
+                task: op.task.clone(),
+                age_s: (now - op.created).max(0),
             });
-            if live {
-                unconfirmed_deliveries += 1;
-                unconfirmed.push(Unconfirmed {
-                    op: op.id.clone(),
-                    seat: seat.map(|seat| seat.name).unwrap_or_default(),
-                    task: op.task.clone(),
-                    age_s: (now - op.created).max(0),
-                });
-            }
         }
     }
     // The oldest first: the delivery that waits longest is the one that may be
