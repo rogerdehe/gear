@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1036 -->
+<!-- gear-plan project=gear base=1037 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -133,6 +133,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-10-31 17:30 scope: six audit tasks (S1-S5 and the goal's clauses 2-3) run by reviewers before v0.6.4; clauses (1) and (4) are the captain's own check at landing; a gap goes back as fix tasks added to the audit's deps | why: user: the voyage is audited by promise before it lands | else: -
 - 2026-10-31 17:28 recovery: engines restarted on the T-505 build; the gear engine ignored SIGTERM for 20 s and was killed with SIGKILL, with no operation executing | why: audit tasks need the T-505 engine | else: -
 - station M-7265: keep course — projected 1120m of 1200m; the six audits are with two reviewers, then the v0.6.4 release
+- station M-7277: keep course — projected 1131m of 1200m; T-506 passed, five audits with the reviewers, then v0.6.4
 
 # Queue
 
