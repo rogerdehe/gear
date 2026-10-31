@@ -67,7 +67,11 @@ pub fn tick(
             //     keeps no open round, so the overrun watch stops counting it
             //     (M-5705: T-407's round stayed open 91 minutes after its
             //     result). The round ends at the time of the result, else now.
-            for round in &rounds {
+            //     The rounds are read again (F2 of the review of attempt 1):
+            //     step 1 may have closed one already, and closing it a second
+            //     time with `now` would push its end past the next round's
+            //     start.
+            for round in &tx.rounds_of_project(&project)? {
                 if round.end_at.is_some() || round.role != "direction" {
                     continue;
                 }
@@ -99,8 +103,19 @@ pub fn tick(
                     live.push(round);
                 }
             }
-            for round in &rounds {
+            for round in &tx.rounds_of_project(&project)? {
                 if round.end_at.is_none() || !attempt_in_progress(tx, round)? {
+                    continue;
+                }
+                // T-515 (F1 of the review of attempt 1): a direction round is
+                // never a parked attempt to resume. A check whose result is in
+                // ends in step 1a and stays closed; reopening it would ring the
+                // captain about the check it already answered.
+                // T-515 (F1 of the review of attempt 1): a direction round is
+                // never a parked attempt to resume. A check whose result is in
+                // ends in step 1a and stays closed; reopening it would ring the
+                // captain about the check it already answered.
+                if round.role == "direction" {
                     continue;
                 }
                 let waiting = tx
