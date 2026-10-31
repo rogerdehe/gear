@@ -1,4 +1,4 @@
-<!-- DRAFT, not applied: applying it departs M6. The goal, done clauses, bar, eta and staffing are agreed with the user first; each task's contract is then checked against merged code (M5 lessons 28, 30, 32) before departure. -->
+<!-- gear-plan project=gear base=905 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3).
 
@@ -26,139 +26,143 @@ station S4: the captain's plan tools, released as v0.6.3
 - 2026-10-30 12:45 scope: added to S1: a direction check on a rework attempt reaches the lane as information, not as an urgent interrupt (another project's F-310) | why: noise that interrupts a lane mid-fix | else: M7
 - 2026-10-30 12:55 scope: added to S1: an instruction sent during a task does not pin the lane as helping after its hand-in (another project's M-5128) | why: it stops deliveries for 30 min | else: M7
 - 2026-10-30 12:40 model: departs by itself at 14:00 (`[schedule] depart_at`), the build of M5.3's T-448 | why: user | else: -
+- 2026-10-30 14:20 note: departs now instead of 14:00: the captain waited for a word the user had already given; `[schedule]` is left out of the config
 
 # Queue
-<!-- Lanes: hull owns crates/gear-engine, gear-model, gear-usage; mast owns gear-app, gear-store, gear-cli, gear-herdr, gear-board, gear-forge, skills, docs, Makefile. -->
 
-## NEW [now] lane=mast milestone=M6 station=S1 required
+## T-452 [now] lane=mast milestone=M6 station=S1 required
 mechanical: the check in the Makefile; the captain commits the one `cargo fmt --all` before departure; the gate proves it
 goal: [S1] The tree stays rustfmt-clean (M5 F-140; the captain formats the whole tree in one commit before departure): `cargo fmt --all --check` runs in `make check` and in `make gate`. Change the Makefile only.
 accept: `cargo fmt --all --check` exits 0 on dev; `make -n check` and `make -n gate` show it. The merge gate runs `make gate`.
 estimate: 5
 
-## NEW [now] lane=hull milestone=M6 station=S1 required
+## T-453 [now] lane=hull milestone=M6 station=S1 required
 goal: [S1] (M5.1's T-434 already types a command and its Enter in one step; build on it.) A delivery counts as landed only when the agent shows it took it: the attempt's first check-in, or the agent's idle-to-busy turn after the text was submitted with an empty composer, within a bounded window; one resend after the window, then a captain item. Covers: text left in the composer without its Enter, a command joined to the packet ('/new' + packet), a delivery typed into a busy agent (today's false stall items), and a fresh Codex conversation that starts empty. Each step that types confirms its Enter took (the composer emptied) before the next step types.
 accept: Engine tests with FakeHerdr for each shape above; no stall item while a delivery is inside its window; a lost delivery is resent once and then rung. Run make check CRATE=gear-engine.
 estimate: 60
 
-## NEW [now] lane=hull milestone=M6 station=S1 required
+## T-454 [now] lane=hull milestone=M6 station=S1 required
 goal: [S1] A notice to a working agent waits for its next idle moment, so it never interrupts a running command (M5: overrun and quiet notices stopped a 9-minute check twice). Urgent captain instructions keep their own path.
 accept: Engine tests: a notice to a busy seat is held and delivered at idle; an urgent captain instruction is not held. Run make check CRATE=gear-engine.
 estimate: 30
 
-## NEW [now] lane=hull milestone=M6 station=S1 required
+## T-455 [now] lane=hull milestone=M6 station=S1 required
 goal: [S1] A review seat is free only when its agent is idle and its last job's verdict or direction result is recorded; until then the next job waits or takes another seat, so a live review never has its worktree switched under it (T-283, F-215). A job that loses its binding is told at once.
 accept: Engine tests: a seat whose agent still works after its verdict gets no new job; a rebind tells the old job to stop. Run make check CRATE=gear-engine.
 estimate: 40
 
-## NEW [now] lane=hull milestone=M6 station=S1 required
+## T-456 [now] lane=hull milestone=M6 station=S1 required
 goal: [S1] Every review and direction packet opens with the seat's binding (task, attempt, current candidate, branch, worktree) and says which kind of job it is; the reviewer checks pwd, branch and HEAD against it before reading, and a hand-in for any other candidate is refused. A rework round's packet shows the latest applied rework first, as the text that governs where it differs from the goal (four cases in M5).
 accept: Engine tests on the rendered packets: a direction packet's first line names it a direction check and gives only the direction command; a rework packet shows the rework above the goal; a hand-in for a stale candidate is refused. Run make check CRATE=gear-engine.
 estimate: 45
 
-## NEW [now] lane=mast milestone=M6 station=S1 required
+## T-457 [now] lane=mast milestone=M6 station=S1 required
 goal: [S1] The codex profile handles Codex 0.165's startup screens: after `/new` it answers "Where should the new conversation run?" with the current worktree, on a resume it chooses the seat's own directory, and Herdr's done/idle on those screens is read as blocked. Slash commands are typed in one go.
 accept: gear-herdr tests with the two screens captured from M5; a real Codex start in a test worktree reaches an empty composer with no dialog left. Run make check CRATE=gear-herdr.
 estimate: 40
 
-## NEW [now] lane=hull milestone=M6 station=S1 required
+## T-458 [now] lane=hull milestone=M6 station=S1 required
 goal: [S1] Smaller M5 fleet bugs: a lane that reports blocked gets its next startable task; a held seat may still report a finished hand-in; a repeated confirmed goal/bar/eta change records its second decision; the lost-merge scan runs before the old filters; the slow-step report includes a failed observation.
 accept: One engine or app test per item. Run make check CRATE=gear-engine and CRATE=gear-app.
 estimate: 50
 
-## NEW [now] lane=mast milestone=M6 station=S1 required
+## T-459 [now] lane=mast milestone=M6 station=S1 required
 goal: [S1] `gear admin init` names each reviewer by its entry's CLI and checks its model against that CLI (the scratch-tag half moved to M5.3).
 accept: An init with [temps] kind pi and a codex review entry prints "reviewers: … codex …". Run make check CRATE=gear-cli.
 estimate: 15
 
-## NEW [now] lane=mast milestone=M6 station=S1 required
+## T-460 [now] lane=mast milestone=M6 station=S1 required
 goal: [S1] `gear queue` and the board name an attempt whose review is in and waits for the captain as "waits for your verdict (M-<id>)", not only "submitted" (M5.1: another project's captain read a finished review as a stall).
 accept: CLI and board tests: an attempt with a recorded fail verdict and an open item shows the text with the item id. Run make check CRATE=gear-cli and CRATE=gear-board.
 estimate: 15
 
-## NEW [now] lane=mast milestone=M6 station=S1 required
+## T-461 [now] lane=mast milestone=M6 station=S1 required
 goal: [S1] A captain cannot lower the bar on its own; every such change goes through the user's word in the conversation and stays visible (2026-10-30: another project's captain cancelled T-70 into a new milestone `M1.1-cancelled`; today a captain can also write a new milestone with an easy done sentence, move hard tasks into it, or cancel tasks until "every task merged" holds). The user confirms in the conversation with the captain; GEAR cannot see that conversation, so it enforces the path and the record, not the user's identity. Change crates/gear-app (plan.rs, goal.rs, voyage.rs and the plan parser as needed), no other design: (1) one confirmed path: the goal, done, bar or eta of a departed milestone, the departure of a new milestone, and moving a task between milestones are applied only with `--confirmed` and a `# Decisions` line `- <time> confirmed: <what changes, before -> after> | why: <the user's reason>` in the same apply; without both, the apply is refused and nothing is written; (2) a cancel line changes the state only: a cancel line that also changes the task's milestone, lane or any other field is refused; (3) the goal check is written by the captain, one line per done clause, `- done (<n>): met | evidence: <what proves it>` or `- done (<n>): open | <why>`, stored as today's `goal-check:<project>:<milestone>` meta the board already reads; (4) `station <id>: land` is refused while a done clause is not met or while the tasks cancelled or moved out since departure exceed 20 % of the departure's tasks, unless the apply is `--confirmed` with a `confirmed:` line naming the open clauses or the cut; (5) the voyage report lists every `confirmed:` line, every cancelled or moved task with its line, and each done clause with its evidence. The skill's captain reference says in one paragraph: these changes are the user's, asked in the conversation; the decision line is the record. The code change is in gear-app only, plus that paragraph in skills/gear/references/captain.md (an allowed edit).
 accept: App tests: a goal change, a new milestone's departure and a move between milestones are refused without `--confirmed` and its line, applied with them; a cancel line that changes the milestone is refused; `done (1): met | evidence: …` lines reach the meta the board reads; a landing with an open clause or with 3 of 10 tasks cut is refused, and applied with `--confirmed` and its line; the voyage report lists them. Run make check CRATE=gear-app.
 estimate: 60
 
-## NEW [now] lane=hull milestone=M6 station=S1 required
+## T-462 [now] lane=hull milestone=M6 station=S1 required
 goal: [S1] A direction check on a rework attempt never interrupts the lane (another project's M2, F-310: the check of attempt 2's first push judged work in progress, and its fail reached the lane as an urgent instruction restating the rework it was already applying). Change crates/gear-engine/src/review.rs fn finish_direction_results only, no other design: when the attempt's number is 2 or more, a failing direction result goes to the lane with `urgent: false` and `MsgState::Info`, its body prefixed "For information (your rework is the instruction): "; attempt 1 keeps today's urgent instruction; the captain's copy is unchanged.
 accept: Engine tests: a failing direction result on attempt 2 reaches the lane as a non-urgent Info message with the prefix; on attempt 1 it stays an urgent Open instruction. Run make check CRATE=gear-engine TESTS='test(/review::tests::.*direction/)'.
 estimate: 15
 
-## NEW [now] lane=mast milestone=M6 station=S1 required
+## T-463 [now] lane=mast milestone=M6 station=S1 required
 goal: [S1] An instruction the captain sent while the lane worked on a task does not pin the lane as "helping the captain" after that task is handed in (another project's M2, 2026-10-30: M-5128, an informational instruction sent during T-387, had no reply, so after the hand-in `idle::helping` held the lane for up to 30 minutes and it got no next packet). Change crates/gear-board/src/idle.rs fn helping only, no other design: skip an instruction created while the lane had an attempt in progress (its task's attempt by this seat whose start is before the instruction and whose hand-in, merge or end is after it); every other rule stays.
 accept: Board tests: an instruction sent during an attempt that was handed in afterwards does not make the lane helping; an instruction sent while the lane held no attempt still does, until its reply or the 30-minute limit. Run make check CRATE=gear-board TESTS='test(/idle|help/)'.
 estimate: 15
 
-## NEW [now] lane=hull milestone=M6 station=S2 required
+## T-464 [now] lane=hull milestone=M6 station=S2 required
 goal: [S2] Switch a seat's model in place: when the new model runs on the seat's current CLI, the engine switches it through the CLI's own model command at the next idle moment; the agent and its conversation stay, and no handover is written.
 accept: Engine tests with FakeHerdr: a lane whose chain head changes model on the same CLI gets the model command, keeps its session and is not restarted. Run make check CRATE=gear-engine.
 estimate: 40
 
-## NEW [now] lane=hull milestone=M6 station=S2 required
+## T-465 [now] lane=hull milestone=M6 station=S2 required
 goal: [S2] Switch a seat's agent with a handover: either at the next safe point, or at once: the engine tells the agent to wrap up and commit, waits the grace period (default 10 minutes, configurable), then exits it whether or not it handed in. The incoming agent's packet starts with the handover: it takes over another agent's work; the previous session id or transcript path to read first; the worktree's state (uncommitted changes, unpushed commits, branch, last commit); then the task packet. The handover follows gear/voyages/M6/handover.md part A (facts the engine fills when the agent cannot, the agent's own summary, free notes); the template ships in the skill.
 accept: Engine tests: an at-once switch waits the grace period and exits; the new packet carries the handover block with the worktree state of a dirty tree. Run make check CRATE=gear-engine.
 estimate: 60
 
-## NEW [now] lane=mast milestone=M6 station=S2 required
+## T-466 [now] lane=mast milestone=M6 station=S2 required
 goal: [S2] Captain handover: on the user's request (confirmed in the one dialog) the outgoing captain writes the handover document from a template GEAR prints (goal, done clauses, bar, eta, state, open threads, the user's standing orders, files to read first); `gear captain take` asks the previous captain for it and, when that captain does not answer within a bounded time, points the new captain at the previous session to read and summarise. The document follows gear/voyages/M6/handover.md part B, and `gear captain handover --facts` prints its part 1. The skill's captain reference says how.
 accept: gear-cli tests for the template and the take path's request; the skill text. Run make check CRATE=gear-cli.
 estimate: 45
 
-## NEW [now] lane=hull milestone=M6 station=S2 required
+## T-467 [now] lane=hull milestone=M6 station=S2 required
 goal: [S2] Elastic counts. Within the configured counts (e.g. 2 lanes, 4 reviewers) the engine starts and releases seats by itself as work comes and goes, with nobody asked. Going above them is a config change the user starts and confirms in the one dialog: a plan line raises a count with its reason and end condition (e.g. 4 to 8 reviewers until no hand-in waits for a review); when the condition holds, the engine releases idle extra seats only, never a running review, until the count is back to the configured one, and records both changes; after that it scales within the configured counts as before.
 accept: Engine and app tests: reviewers raised to 8 start while hand-ins wait; once none wait, idle extra reviewers are released down to 4 and a running review is not interrupted. Run make check CRATE=gear-engine and CRATE=gear-app.
 estimate: 50
 
-## NEW [now] lane=hull milestone=M6 station=S2 required
+## T-468 [now] lane=hull milestone=M6 station=S2 required
 goal: [S2] Dialogs never block. A lane or reviewer may not stop on a dialog at all: when its agent shows a blocking screen (an approval or a question the CLI asks), the engine closes it at once and tells the seat "Dialogs are not allowed for your role; ask the captain with gear send --kind question." Every other dialog (the captain's to the user) is cancelled when nobody answers it within 10 minutes, and the work goes on as it would have without it. The skill says the captain opens a dialog only for a change the user asked for.
 accept: Engine tests: a blocked lane or reviewer screen is closed in the same tick and the seat gets the text; a captain dialog unanswered for 10 minutes is cancelled. Run make check CRATE=gear-engine.
 estimate: 40
 
-## NEW [now] lane=mast milestone=M6 station=S2 required
+## T-469 [now] lane=mast milestone=M6 station=S2 required
 goal: [S2] Role charters fit the models the user chose. At kickoff the captain proposes, and the user confirms with the staffing, one charter per role (captain, each lane, reviewers) from the CLI and model each runs: a lane on a fast, simple agent (pi on a flash model) implements the packet without designing, as today's rules/lane.md says; a lane on a strong agent and model (e.g. Claude on Opus) designs inside its own task and owned paths, and still never decides for the whole project; the captain always holds the whole picture. The charter generalises today's fixed rules files (skills/gear/references/rules/lane.md and review.md): it is written into gear.toml per lane and for the reviewers, rendered into the seat's rules file, and given to an agent once per conversation (at a new session, never again in a resumed one). The skill drops the absolute "the captain writes no product code" and says, in skills/gear/references/captain.md, exactly: "When a few lines of your own clear a block faster than any packet could (a merge conflict, a one-line premise, a stopped fleet), change them yourself at once: commit with a message that says why, let the merge gate run, and write one decision line (`- <time> hand-fix: <what> | why: <why>`). Nothing more: no task, no contract, no report, no tests from a lane for it. Open a task only when you judge the cause needs more than a few lines. The opening is there for speed; paperwork around it would defeat it." The same text holds for a hand recovery (a nudge, a release, an answered dialog): one decision line.
 accept: gear-app tests: a config with two charters renders two rules files; a resumed session gets no charter again, a new one does. The skill's captain reference and conventions describe the charter, and captain.md carries the small-change text above word for word. Run make check CRATE=gear-app and CRATE=gear-cli.
 estimate: 50
 
-## NEW [now] lane=hull milestone=M6 station=S3 required
+## T-470 [now] lane=hull milestone=M6 station=S3 required
 goal: [S3] GEAR near idle: read the M5 probe lines (T-407) and fix the slow operations they show, starting with every multi-step operation that waits a whole tick between steps; the engine under 10 % of one core and 50 MB on average.
 accept: A probe summary before and after, from a real voyage's log; engine tests for each changed step. Run make check CRATE=gear-engine.
 estimate: 60
 
-## NEW [now] lane=mast milestone=M6 station=S3 required
+## T-471 [now] lane=mast milestone=M6 station=S3 required
 goal: [S3] The board near idle: it redraws only what changed and reads the store incrementally (M5 measured 20-34 % CPU per board); under 10 % of one core and 50 MB.
 accept: A measured board run before and after; board tests. Run make check CRATE=gear-board.
 estimate: 50
 
-## NEW [now] lane=hull milestone=M6 station=S3 required
+## T-472 [now] lane=hull milestone=M6 station=S3 required
 goal: [S3] Fleet and machine health watch, costing almost nothing: the CPU and memory of each seat's own processes (children included) and the machine's load, memory and disk, sampled each minute; a seat over the safe line is interrupted and stopped, and the captain is told; a machine short for other reasons is an urgent captain item naming the top processes (never touched).
 accept: Engine tests with injected readings for both cases; the watch's own cost measured under 1 % of one core. Run make check CRATE=gear-engine.
 estimate: 60
 
-## NEW [now] lane=mast milestone=M6 station=S4 required
+## T-473 [now] lane=mast milestone=M6 station=S4 required
 goal: [S4] Plan tools: `state: hold` keeps a task out of delivery until set ready; a milestone departs only on an explicit `depart` line; a milestone with no task and no history can be removed; a plan apply warns when two Ready tasks name one file.
 accept: App tests for each. Run make check CRATE=gear-app.
 estimate: 50
 
-## NEW [now] lane=hull milestone=M6 station=S4 required
+## T-474 [now] lane=hull milestone=M6 station=S4 required
 goal: [S4] Branch hygiene and coverage: a cancelled task's branch is deleted; a merged task's branch is deleted even when its tip moved past the merged candidate (its extra commits listed to the captain first); `gear report coverage` lists accepted attempts not on the integration branch.
 accept: Engine and app tests. Run make check CRATE=gear-engine and CRATE=gear-app.
 estimate: 40
 
-## NEW [now] lane=mast milestone=M6 station=S1 required
+## T-475 [now] lane=mast milestone=M6 station=S1 required
 goal: [S1] Release v0.6.0, station S1's release. Change, no other design: (1) the version is 0.6.0 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.0.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.5.6 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.5.6 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.0 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.0"; docs/releases/v0.6.0.md lists every task merged on origin/dev since v0.5.6 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+deps: T-452, T-453, T-454, T-455, T-456, T-457, T-458, T-459, T-460, T-461, T-462, T-463
 estimate: 15
-## NEW [now] lane=mast milestone=M6 station=S2 required
+## T-476 [now] lane=mast milestone=M6 station=S2 required
 goal: [S2] Release v0.6.1, station S2's release. Change, no other design: (1) the version is 0.6.1 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.1.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.0 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.0 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.1 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.1"; docs/releases/v0.6.1.md lists every task merged on origin/dev since v0.6.0 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+deps: T-464, T-465, T-466, T-467, T-468, T-469
 estimate: 15
-## NEW [now] lane=mast milestone=M6 station=S3 required
+## T-477 [now] lane=mast milestone=M6 station=S3 required
 goal: [S3] Release v0.6.2, station S3's release. Change, no other design: (1) the version is 0.6.2 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.2.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.1 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.1 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.2 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.2"; docs/releases/v0.6.2.md lists every task merged on origin/dev since v0.6.1 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+deps: T-470, T-471, T-472
 estimate: 15
-## NEW [now] lane=mast milestone=M6 station=S4 required
+## T-478 [now] lane=mast milestone=M6 station=S4 required
 goal: [S4] Release v0.6.3, station S4's release. Change, no other design: (1) the version is 0.6.3 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.3.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.2 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.2 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.3 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.3"; docs/releases/v0.6.3.md lists every task merged on origin/dev since v0.6.2 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+deps: T-473, T-474
 estimate: 15
