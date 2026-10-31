@@ -1012,13 +1012,15 @@ mod tests {
             Prep::Wait
         );
         herdr.exit_agent("w1:p1");
+        // T-470: the shell is already known this tick, so the resume starts in
+        // the same call; the agent is ready on the next one.
         assert_eq!(
             prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 12).unwrap(),
             Prep::Wait
         );
         assert_eq!(
             prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 13).unwrap(),
-            Prep::Wait
+            Prep::Ready
         );
         assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::AgentStart { args, .. } if args.contains(&"round-session".to_string()))));
         store
@@ -1200,6 +1202,208 @@ mod tests {
         assert_eq!(state["step"], "wait_action");
         assert_eq!(state["t0"], T0 + 2);
         assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::SendKeys { keys, .. } if keys == &["enter"])));
+    }
+
+    /// T-470: the steps of a session action that need no new observation run
+    /// in the same call, so a whole tick no longer separates them.
+    #[test]
+    fn a_resume_of_a_shell_starts_the_agent_in_the_same_tick() {
+        let mut store = world();
+        store
+            .write(|tx| {
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "t470",
+                    gear_model::SeatRole::Lane,
+                    "pi:p9",
+                    "pi",
+                    T0,
+                )?;
+                tx.set_binding_session_ref("p:t470", 1, "old-session")
+            })
+            .unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:t470")).unwrap().unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("pi:p9");
+        let mut config = cfg();
+        config
+            .profiles
+            .insert("pi".into(), gear_herdr::builtin("pi").unwrap());
+        let action = Action::Resume("wanted-session".into());
+        assert_eq!(
+            crate::session_runner::run(
+                &mut store,
+                &mut herdr,
+                &config,
+                &seat,
+                "T-1",
+                1,
+                Role::Dev,
+                &action,
+                false,
+                T0,
+            )
+            .unwrap(),
+            Prep::Wait
+        );
+        // The pane is a shell this tick already: the agent starts in the same
+        // call, with the session the resume asked for.
+        assert!(
+            herdr.calls.iter().any(|call| matches!(
+                call,
+                gear_herdr::fake::Call::AgentStart { args, .. }
+                    if args.contains(&"wanted-session".to_string())
+            )),
+            "{:?}",
+            herdr.calls
+        );
+        assert_eq!(
+            session_state(&mut store, "p:t470")["step"],
+            "wait_resume",
+            "the next step waits for the agent, not for a tick"
+        );
+        // The probe lines say the same: `initial` and `start_resume` left in
+        // the same second, so the start step is 0 ms instead of a tick.
+        let log: Vec<String> = crate::ops::probe_log()
+            .into_iter()
+            .filter(|line| line.starts_with("probe resume p:t470 "))
+            .collect();
+        assert!(
+            log.contains(&"probe resume p:t470 start_resume 0 total=0".to_string()),
+            "{log:?}"
+        );
+        assert_eq!(
+            crate::session_runner::run(
+                &mut store,
+                &mut herdr,
+                &config,
+                &seat,
+                "T-1",
+                1,
+                Role::Dev,
+                &action,
+                false,
+                T0 + 1,
+            )
+            .unwrap(),
+            Prep::Ready,
+            "the agent is ready on the next tick"
+        );
+    }
+
+    /// T-470: an agent that left idle/done took the command, so a command
+    /// still shown in the transcript does not hold the step for ticks.
+    #[test]
+    fn an_enter_the_agent_left_idle_is_confirmed_in_the_same_call() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Working);
+        herdr.set_screen("w1:p1", "> /new\n  gpt-6.1-sol high · Context 0% used");
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    "engine.session_step.p:heat",
+                    &serde_json::json!({
+                        "round":"p:T-1:1:dev", "generation":1, "action":"new", "step":"enter",
+                        "started":T0, "t0":T0, "step_at":T0, "old_session_ref":"old-session",
+                        "target":null, "offset":0, "saw_working":false, "compact_after":false,
+                        "initial_done":false
+                    })
+                    .to_string(),
+                )
+            })
+            .unwrap();
+        let action = Action::New;
+        assert_eq!(
+            crate::session_runner::run(
+                &mut store,
+                &mut herdr,
+                &cfg(),
+                &seat,
+                "T-1",
+                1,
+                Role::Dev,
+                &action,
+                false,
+                T0 + 1,
+            )
+            .unwrap(),
+            Prep::Wait
+        );
+        assert_eq!(
+            session_state(&mut store, "p:heat")["step"],
+            "wait_action",
+            "the working agent proves the Enter took"
+        );
+        assert!(
+            !herdr.calls.iter().any(|call| matches!(
+                call,
+                gear_herdr::fake::Call::SendKeys { keys, .. } if keys == &["enter"]
+            )),
+            "nothing is typed again into the working agent: {:?}",
+            herdr.calls
+        );
+    }
+
+    /// T-470: while the agent is still idle and the screen still shows the
+    /// command, the step waits — but one call later the agent's state decides,
+    /// not a screen that scrolls at its own pace.
+    #[test]
+    fn an_enter_with_the_screen_still_showing_the_command_waits_one_call() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.set_screen("w1:p1", "> /new\n  gpt-6.1-sol high · Context 0% used");
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    "engine.session_step.p:heat",
+                    &serde_json::json!({
+                        "round":"p:T-1:1:dev", "generation":1, "action":"new", "step":"enter",
+                        "started":T0, "t0":T0, "step_at":T0, "old_session_ref":"old-session",
+                        "target":null, "offset":0, "saw_working":false, "compact_after":false,
+                        "initial_done":false
+                    })
+                    .to_string(),
+                )
+            })
+            .unwrap();
+        let action = Action::New;
+        let run = |store: &mut Store, herdr: &mut FakeHerdr, now| {
+            crate::session_runner::run(
+                store,
+                herdr,
+                &cfg(),
+                &seat,
+                "T-1",
+                1,
+                Role::Dev,
+                &action,
+                false,
+                now,
+            )
+            .unwrap()
+        };
+        assert_eq!(run(&mut store, &mut herdr, T0 + 1), Prep::Wait);
+        assert_eq!(
+            session_state(&mut store, "p:heat")["step"],
+            "enter",
+            "an idle agent and a screen that still shows the command: wait"
+        );
+        assert!(herdr.calls.iter().any(|call| matches!(
+            call,
+            gear_herdr::fake::Call::SendKeys { keys, .. } if keys == &["enter"]
+        )));
+        herdr.set_status("w1:p1", gear_herdr::AgentStatus::Working);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 2), Prep::Wait);
+        assert_eq!(
+            session_state(&mut store, "p:heat")["step"],
+            "wait_action",
+            "the agent works: the command took"
+        );
     }
 
     #[test]
@@ -1600,15 +1804,13 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
             assert_eq!(run(&mut store, &mut herdr, T0), Prep::Wait);
             assert_eq!(run(&mut store, &mut herdr, T0 + 1), Prep::Wait);
             herdr.exit_agent("pi:p1");
-            assert_eq!(run(&mut store, &mut herdr, T0 + 2), Prep::Wait);
             if fallback {
                 herdr.refuse_starts = Some(("failed".into(), 1));
             }
-            assert_eq!(run(&mut store, &mut herdr, T0 + 3), Prep::Wait);
-            if fallback {
-                assert_eq!(run(&mut store, &mut herdr, T0 + 4), Prep::Wait);
-            }
-            assert_eq!(run(&mut store, &mut herdr, T0 + 5), Prep::Ready);
+            // T-470: the shell is seen and the agent started in the same call,
+            // so the resume is ready on the next tick.
+            assert_eq!(run(&mut store, &mut herdr, T0 + 2), Prep::Wait);
+            assert_eq!(run(&mut store, &mut herdr, T0 + 3), Prep::Ready);
             let args: Vec<Vec<String>> = herdr
                 .calls
                 .iter()
@@ -1684,17 +1886,14 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
         );
         assert_eq!(types(&herdr), 1);
         // The agent does not exit: the fallback types `/quit` and submits it in
-        // the same call, so it cannot sit unsent while the agent looks busy.
+        // the same call (T-470: the fallback step runs in the tick the timeout
+        // is seen), so it cannot sit unsent while the agent looks busy.
         assert_eq!(run(&mut store, &mut herdr, T0 + 31), Prep::Wait);
-        assert_eq!(
-            session_state(&mut store, "p:pi-lane")["step"],
-            "fallback_exit"
-        );
-        assert_eq!(run(&mut store, &mut herdr, T0 + 32), Prep::Wait);
         assert_eq!(
             session_state(&mut store, "p:pi-lane")["step"],
             "fallback_wait_exit"
         );
+        assert_eq!(run(&mut store, &mut herdr, T0 + 32), Prep::Wait);
         assert_eq!(types(&herdr), 2);
         let n = herdr.calls.len();
         assert!(
@@ -1856,9 +2055,10 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
             assert_eq!(run(&mut store, &mut herdr, T0 + n), Prep::Wait);
         }
         herdr.exit_agent("pi:p1");
+        // T-470: the fallback agent starts in the tick the shell is seen, so it
+        // is ready on the next one.
         assert_eq!(run(&mut store, &mut herdr, T0 + 63), Prep::Wait);
-        assert_eq!(run(&mut store, &mut herdr, T0 + 64), Prep::Wait);
-        assert_eq!(run(&mut store, &mut herdr, T0 + 65), Prep::Ready);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 64), Prep::Ready);
         assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::AgentStart { args, .. } if !args.contains(&"wanted".to_string()))));
     }
 
@@ -1897,10 +2097,14 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
             )
             .unwrap()
         };
-        for n in [0, 1, 2] {
+        // T-470: the refused resume and the plain fallback both start in the
+        // first call. The fallback agent never becomes ready (the test makes it
+        // work), so the bound is what keeps the step from waiting for ever.
+        assert_eq!(run(&mut store, &mut herdr, T0), Prep::Wait);
+        herdr.set_status("pi:p1", gear_herdr::AgentStatus::Working);
+        for n in [1, 2] {
             assert_eq!(run(&mut store, &mut herdr, T0 + n), Prep::Wait);
         }
-        herdr.set_status("pi:p1", gear_herdr::AgentStatus::Working);
         let before = herdr.calls.len();
         assert_eq!(run(&mut store, &mut herdr, T0 + 62), Prep::Wait);
         let seat = store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap();
