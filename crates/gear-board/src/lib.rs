@@ -2545,6 +2545,7 @@ pub fn run_with(
                         if count > 1 {
                             board.projects.rotate_left(1);
                             board_gen += 1;
+                            milestone = None;
                         }
                         // `shown` names the project shown, not the presses
                         // since the board opened (T-384 rework, F1): kept
@@ -2561,8 +2562,27 @@ pub fn run_with(
                 // `[` and `]` pick the voyage the whole board shows (T-357):
                 // the list is newest first, so `[` goes one entry older and `]`
                 // one newer, and the oldest and the newest voyage stay where
-                // they are.
+                // they are. With several projects they switch the project
+                // instead (T-489), as `p` does, and the picked voyage is the
+                // new project's own.
                 Event::Key(character @ ('[' | ']')) => {
+                    if let Some(board) = kept.as_mut() {
+                        let count = board.projects.len();
+                        if count > 1 {
+                            if character == ']' {
+                                shown = (shown + 1) % count;
+                                board.projects.rotate_left(1);
+                            } else {
+                                shown = (shown + count - 1) % count;
+                                board.projects.rotate_right(1);
+                            }
+                            board_gen += 1;
+                            milestone = None;
+                            screen.selected = 0;
+                            panel = None;
+                            break;
+                        }
+                    }
                     let picked = kept.as_ref().and_then(|board| {
                         let project = board.projects.first()?;
                         let shown = project.shown.as_ref()?.milestone.as_str();

@@ -461,7 +461,12 @@ pub fn canvas(board: &Board, screen: &Screen, panel: Option<&[Line]>) -> Canvas 
             Style::fg(Color::Dim),
         );
     }
-    canvas.put_styled(1, height - 1, FOOTER, Style::fg(Color::Dim));
+    let footer = if board.projects.len() > 1 {
+        FOOTER.replace("[ ] older / newer voyage", "[ ] previous / next project")
+    } else {
+        FOOTER.to_string()
+    };
+    canvas.put_styled(1, height - 1, &footer, Style::fg(Color::Dim));
     if let Some(panel) = panel {
         draw_panel(&mut canvas, panel, top);
     }
@@ -509,8 +514,76 @@ pub fn offset_of(picks: &[usize], selected: usize, top: usize, last: usize) -> u
 ///
 /// It returns the layout it drew ([`Layout`]), which is what the clicks and
 /// the view need.
+/// The project bar (T-489): one line at the top when the store holds several
+/// projects, every project with its state, voyage, station, the time used of
+/// its eta and its open items; the shown project is bracketed.
+fn project_bar(board: &Board) -> String {
+    let mut parts = Vec::new();
+    for (index, project) in board.projects.iter().enumerate() {
+        let state = match project
+            .workload
+            .as_ref()
+            .and_then(|voyage| voyage.off_hours_until)
+        {
+            Some(_) => "off hours",
+            None => "working",
+        };
+        let milestone = project
+            .shown
+            .as_ref()
+            .map(|voyage| voyage.milestone.clone())
+            .unwrap_or_else(|| "-".to_string());
+        let station = project
+            .stations
+            .iter()
+            .find(|station| station.state == crate::stations::StationState::Now)
+            .map(|station| station.id.clone())
+            .unwrap_or_else(|| {
+                if project
+                    .stations
+                    .iter()
+                    .any(|station| station.state == crate::stations::StationState::Reached)
+                {
+                    "✔".to_string()
+                } else {
+                    "-".to_string()
+                }
+            });
+        let numbers = header_numbers(board, project);
+        let used = hours(numbers.used);
+        let eta = if numbers.eta > 0 {
+            hours(numbers.eta)
+        } else {
+            "-".to_string()
+        };
+        let segment = format!(
+            "{}{} · {} · {} · {} · {}/{} · {}",
+            if index == 0 { "" } else { " │ " },
+            project.project,
+            state,
+            milestone,
+            station,
+            used,
+            eta,
+            project.waiting.count
+        );
+        parts.push(if index == 0 {
+            format!("[{segment}]")
+        } else {
+            segment
+        });
+    }
+    parts.join("")
+}
+
 fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
     let project = board.projects.first();
+    // T-489: several projects put a bar above the board; the rest moves down a
+    // row. One project draws no bar and is exactly as before.
+    let shift = if board.projects.len() > 1 { 1 } else { 0 };
+    if shift == 1 {
+        canvas.put_styled(1, 0, &project_bar(board), Style::bold());
+    }
     // The voyage the board shows (T-350): the whole head names it and boxes
     // its goal, so a landed voyage keeps the data of its landing.
     let voyage = project.and_then(|project| project.shown.as_ref());
@@ -520,7 +593,7 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
         Some(project) => format!("GEAR · {}  ", project.project),
         None => "GEAR".to_string(),
     };
-    canvas.put_styled(1, 0, &title, Style::bold());
+    canvas.put_styled(1, shift, &title, Style::bold());
     let mut voyages = Vec::new();
     let mut x = match project {
         Some(project) => project.project.chars().count() + 8,
@@ -535,19 +608,19 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
             let label = format!(" {} {} ", entry.milestone, mark);
             // The prototype draws a wide mark in two cells; the label's own
             // length is its characters, as the prototype counts them.
-            let cells = canvas.put_wide(x, 0, &label, voyage_style(voyage, entry));
+            let cells = canvas.put_wide(x, shift, &label, voyage_style(voyage, entry));
             voyages.push((x, x + cells - 1, entry.milestone.clone()));
             x += label.chars().count() + 1;
         }
     }
-    canvas.put_styled(x + 1, 0, "[ older   ] newer", Style::fg(Color::Dim));
+    canvas.put_styled(x + 1, shift, "[ older   ] newer", Style::fg(Color::Dim));
     if board.engine == crate::EngineState::Down {
         // The engine is down: the next `gear` call starts it (README). It says
         // so two columns after "newer", so that the tab row stays where it is.
         let after = x + 1 + "[ older   ] newer".chars().count() + 1;
         canvas.put_styled(
             after,
-            0,
+            shift,
             "! engine down — the next gear call starts it",
             Style::fg(Color::Bad),
         );
@@ -557,7 +630,7 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
     let clock = crate::idle::clock(board.now);
     canvas.put_styled(
         canvas.width.saturating_sub(8),
-        0,
+        shift,
         &clock,
         Style::fg(Color::Dim),
     );
@@ -570,12 +643,12 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
             "⚓ landed"
         };
         let line = format!("{}: {} · {}", voyage.milestone, voyage.title, state);
-        canvas.put_wide(1, 1, &line, Style::bold());
+        canvas.put_wide(1, shift + 1, &line, Style::bold());
     }
 
     // The goal box: the voyage's done sentence, word-wrapped, and the quality
     // bar under it, in the prototype's yellow box (README change 2).
-    let mut row = 2;
+    let mut row = 2 + shift;
     let box_width = canvas.width.saturating_sub(3);
     if let Some(voyage) = voyage {
         let inside = box_width.saturating_sub(4);
