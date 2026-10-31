@@ -1466,9 +1466,10 @@ fn last_job_recorded(store: &mut Store, project: &str, seat: &SeatRow) -> GearRe
                         .is_none_or(|state| state != "running" && state != "starting")
             }));
         }
-        Ok(tx
-            .get_review_verdict(project, &task, attempt)?
-            .is_some_and(|verdict| verdict.by_seat == seat.id))
+        // A verdict on that attempt ends the job, whoever recorded it: a
+        // direction check whose round was never written, or a review another
+        // seat finished, must not hold this seat forever.
+        Ok(tx.get_review_verdict(project, &task, attempt)?.is_some())
     })
 }
 
