@@ -472,6 +472,13 @@ pub(crate) fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<Task
                 .is_none_or(|(repo, current)| repo == current)
         })
         .filter(|task| task.state == TaskState::Ready)
+        // T-505: a voyage audit is run by reviewers against the integration
+        // branch and is never assigned to its lane.
+        .filter(|task| {
+            !tx.task_audit(&seat.project, &task.id)
+                .map(|mark| mark.is_some())
+                .unwrap_or(false)
+        })
         .filter(|task| task.priority != "wont")
         .filter(|task| task.deps.iter().all(|dep| done.contains(dep)))
         .collect())

@@ -55,6 +55,10 @@ pub struct QueueItem {
     /// `review-model: gpt-6.1-sol`. It names an entry of `[models] review`
     /// and must differ from the lane's model.
     pub review_model: Option<String>,
+    /// The voyage audit mark (T-505): `audit: true`. The task is run by
+    /// reviewers against the integration branch and is never assigned to its
+    /// lane.
+    pub audit: Option<bool>,
 }
 
 /// One `# Staff` line.
@@ -638,6 +642,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
         mechanical: None,
         fresh: None,
         review_model: None,
+        audit: None,
     })
 }
 
@@ -670,6 +675,7 @@ fn parse_queue_field(
         "mechanical" => "mechanical",
         "fresh" => "fresh",
         "review-model" => "review-model",
+        "audit" => "audit",
         other => return Err(bad(line, format!("unknown queue field {other:?}"))),
     };
     if seen.contains(&field) {
@@ -759,6 +765,19 @@ fn parse_queue_field(
                 ));
             }
             item.review_model = Some(value.to_string());
+        }
+        "audit" => {
+            // T-505: the mark is `true` (an audit) or `false` (no longer one).
+            item.audit = Some(match value {
+                "true" => true,
+                "false" => false,
+                other => {
+                    return Err(bad(
+                        line,
+                        format!("`audit` is `true` or `false`, got {other:?}"),
+                    ))
+                }
+            });
         }
         _ => unreachable!("the field was matched above"),
     }
