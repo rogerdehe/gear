@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=971 -->
+<!-- gear-plan project=gear base=972 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -76,6 +76,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-11-01 02:20 scope: added to S5 (mast): omp runs as a lane or reviewer (built-in profile, skill install, usage log) | why: user: add omp support | else: -
 - 2026-11-01 02:45 hand-fix: a standby reviewer is free once the attempt of its last packet has a verdict, whoever wrote it (review.rs last_job_recorded); make gate passed; engines restarted | why: review-11's last packet was T-473's direction check with no direction round, so it waited forever for its own verdict and T-476 had no reviewer (M-6929)
 - 2026-11-01 03:00 scope: added to S5: Antigravity CLI (agy) runs as a lane or reviewer (profile and skill on mast, usage on hull) | why: user: add Antigravity CLI to GEAR's supported CLIs | else: -
+- 2026-11-01 03:20 hand-fix: a new engine closes the open engine:binary-changed items at start (gear-cli run_engine_with); make gate passed | why: the old engine sees the rebuild seconds before it is stopped, so every restart left a stale item in both projects (M-6802, M-6845, another project's M-5343, M-5344)
 
 # Queue
 
