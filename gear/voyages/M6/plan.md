@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1062 -->
+<!-- gear-plan project=gear base=1063 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -152,6 +152,8 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7380: keep course — not ready to land: goal clause (4) failed the landing measure (engines 25-41 % of one core); T-516 fixes it, then v0.6.5, a new measure, and the landing
 - station M-7381: keep course — projected 1168m of 1200m; T-516 on hull, then v0.6.5, a new measure of clause (4) and the landing
 - 2026-10-31 20:35 hand-fix: crates/gear-engine/src/review.rs last_job_recorded reads a deliver op with no round on its seat as a direction job when its packet starts "Direction check of", so its result frees the seat (test a_direction_job_without_a_round_is_freed_by_its_result); make gate passed (2323 tests); both engines restarted on it | why: another project's T-415 attempt 3 waited silently for review-1, whose roundless T-407 direction job was judged as a review that never gets a verdict (M-5874); a GEAR bug stopping another fleet | else: -
+- 2026-10-31 21:00 hand-fix: released v0.6.5 (T-516 and the roundless direction-seat fix; dev merged into main, tag v0.6.5) | why: T-516 merged and another project's re-reviews depend on the hand fix | else: -
+- 2026-10-31 21:02 note: goal clause (4) measured again on the T-516 build (3-minute ps sample): engines 20-24 % of one core, 27-32 MB; boards 3-5 %, under 20 MB; the merge step fell from 2-3 s to 0.2 s per tick, but a tick still spends about 1.2 s across many steps, about 7 ticks a minute; clause (4) is not met
 
 # Queue
 
