@@ -59,8 +59,8 @@ review = [
 on_quota = { lanes = "wait", review = "wait" }   # M5 (user): no fallback; spent means wait for the user
 quota_reset_h = 5
 
-[schedule]
-depart_at = "2026-10-30T14:00:00-05:00"   # M6 departs by itself at 14:00 local
+# [schedule]
+# depart_at: none; M6 departs when its plan is applied (14:00 passed while the captain waited)
 
 [conventions]
 integration = "dev"
