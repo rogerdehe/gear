@@ -1338,9 +1338,28 @@ fn view_tasks(
 ) -> Vec<usize> {
     let lanes = task_lanes(project);
     let width = canvas.width();
-    let info_x = 9 + 6 * lanes.len().saturating_sub(1) + 6;
+    // One row per row of the graph: dev's line, the cells of the drawing, the
+    // deps column and the text after it.
+    let rows = task_rows(project, now, width);
+    // The deps column stands right of the lanes, one space after the last
+    // lane label, before the task text (T-494): one column per line, up to
+    // four. The task text follows the drawn columns and one space. It keeps at
+    // least 40 columns for the text, so a narrower frame caps the lines.
+    let deps_x = 9 + 6 * lanes.len().saturating_sub(1) + 4;
+    let cap = 4.min(width.saturating_sub(deps_x + 40));
+    let needed = graph::deps_needed(&rows, &project.graph);
+    let omitted = needed > cap;
+    let drawn = if omitted {
+        cap.saturating_sub(1)
+    } else {
+        needed
+    };
+    // The `+N` count takes the column after the drawn lines.
+    let deps_width = if omitted { drawn + 1 } else { drawn };
+    let info_x = deps_x + deps_width + 1;
     let tw = (width as i64 - info_x as i64 - 52).clamp(30, 56) as usize;
-    // The head of the columns: dev, the lanes and the text's columns.
+    // The head of the columns: dev, the lanes, the deps column and the text's
+    // columns.
     canvas.put_styled(2, top, "dev", Style::fg(Color::Ok).and_bold());
     for (index, lane) in lanes.iter().enumerate() {
         canvas.put_styled(
@@ -1350,60 +1369,50 @@ fn view_tasks(
             Style::fg(lane_color(&lanes, lane)).and_bold(),
         );
     }
+    if drawn > 0 {
+        canvas.put_styled(deps_x, top, &"deps"[..drawn.min(4)], Style::fg(Color::Dim));
+    }
     canvas.put_styled(
         info_x,
         top,
         &format!("{:<7}{:<tw$}  {:<36}time", "task", "what", "stage"),
         Style::fg(Color::Dim),
     );
-    // One row per row of the graph: dev's line, the cells of the drawing and
-    // the text after it.
-    let rows = task_rows(project, now, width);
-    let mut picks: Vec<(usize, String)> = Vec::new();
+    let picks: Vec<(usize, String)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| !row.text.is_empty())
+        .filter_map(|(index, row)| {
+            row.task
+                .as_ref()
+                .map(|task| (top + 1 + index, task.clone()))
+        })
+        .collect();
+    let selected_task = picks.get(screen.selected).map(|(_, task)| task.as_str());
+    let deps = graph::deps_rows(&rows, &project.graph, deps_x, drawn, selected_task);
+    // The column kept for the lines that do not fit: `+N` on the task's row.
+    let plus_x = deps_x + drawn;
     for (index, row) in rows.iter().enumerate() {
         let at = top + 1 + index;
         canvas.put_styled(3, at, "│", Style::fg(Color::Ok));
         for (x, character, style) in &row.cells {
             canvas.put_styled(*x, at, &character.to_string(), *style);
         }
+        for (x, character, style) in &deps[index].cells {
+            canvas.put_styled(*x, at, &character.to_string(), *style);
+        }
+        if deps[index].more > 0 {
+            canvas.put_styled(
+                plus_x,
+                at,
+                &format!("+{}", deps[index].more),
+                Style::fg(Color::Warn).and_bold(),
+            );
+        }
         if row.text.is_empty() {
             continue;
         }
         canvas.put_styled(info_x, at, &row.text, row.style);
-        if let Some(task) = &row.task {
-            picks.push((at, task.clone()));
-        }
-    }
-    // The selected pick's dependencies light up: what it needs, and what waits
-    // for it.
-    if let Some((_, selected)) = picks.get(screen.selected) {
-        let deps_of = |task: &str| -> Vec<String> {
-            project
-                .graph
-                .iter()
-                .find(|row| row.id == task)
-                .map(|row| row.deps.clone())
-                .unwrap_or_default()
-        };
-        let needed = deps_of(selected);
-        for (at, task) in &picks {
-            let waits = deps_of(task);
-            let mark = if needed.contains(task) {
-                // The row's task is what the selected one waits for.
-                format!("◂ needed by {selected}")
-            } else if waits.contains(selected) {
-                // The row's task waits for the selected one.
-                format!("▸ waits for {selected}")
-            } else {
-                continue;
-            };
-            canvas.put_styled(
-                width.saturating_sub(22),
-                *at,
-                &mark,
-                Style::fg(Color::Warn).and_bold(),
-            );
-        }
     }
     picks.into_iter().map(|(at, _)| at).collect()
 }

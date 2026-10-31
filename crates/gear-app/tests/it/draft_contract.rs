@@ -243,6 +243,34 @@ fn release_is_a_staff_line() {
     );
 }
 
+/// T-467: `- raise reviewers to=8 until=no-hand-ins-wait reason=<text>` is a
+/// staff line of its own, with its end condition.
+#[test]
+fn a_raise_is_a_staff_line() {
+    let d = parse(
+        "<!-- gear-plan project=p base=1 -->\n# Staff\n- raise reviewers to=8 until=no-hand-ins-wait reason=clear the backlog\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        &d.staff[0],
+        StaffItem::Raise { role, to, until, reason, .. }
+            if role == "reviewers" && *to == 8 && until == "no-hand-ins-wait" && reason == "clear the backlog"
+    ));
+    for bad in [
+        "- raise lanes to=8 until=no-hand-ins-wait reason=x",
+        "- raise reviewers to=0 until=no-hand-ins-wait reason=x",
+        "- raise reviewers to=8 until=someday reason=x",
+        "- raise reviewers to=8 until=no-hand-ins-wait",
+        "- raise reviewers to=8 reason=x",
+        "- raise reviewers until=no-hand-ins-wait reason=x",
+        "- raise reviewers to=8 until=no-hand-ins-wait reason=",
+    ] {
+        let text = format!("<!-- gear-plan project=p base=1 -->\n# Staff\n{bad}\n");
+        // A bad raise line is refused as a malformed staff line.
+        bad_line(&text);
+    }
+}
+
 /// T-305: `- rebind <lane> cancel` is a staff line of its own.
 #[test]
 fn rebind_cancel_is_a_staff_line() {

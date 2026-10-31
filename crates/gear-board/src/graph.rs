@@ -176,7 +176,7 @@ impl Stage {
                 if deps.is_empty() {
                     "-".to_string()
                 } else {
-                    deps.join(", ")
+                    deps.len().to_string()
                 }
             ),
             Stage::Queued => "queued".to_string(),
@@ -471,6 +471,155 @@ pub fn git_rows(
         }
     }
     rows
+}
+
+/// One row of the Tasks view's deps column (T-494): the cells of the
+/// dependency lines at their columns, and the number of lines left out of the
+/// column on this row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepsRow {
+    pub cells: Vec<(usize, char, Style)>,
+    pub more: usize,
+}
+
+/// The deps column of the Tasks view (T-494): for every task not yet merged,
+/// a line from the row that names it to the row of every direct dependency it
+/// waits for that is shown and not merged. Only the direct dependencies are
+/// drawn: a dependency of a dependency gets its own line from that task, never
+/// a line from the first one. A dependency on a merged task draws nothing.
+///
+/// The lines stand in `deps_x + column`, one column each; two lines share a
+/// column only when their rows do not touch, so two lines that meet on a row
+/// stay two lines. `drawn` is the number of columns the caller gives them; a
+/// line that finds no column is counted in [`DepsRow::more`]. The lines of
+/// `selected` are lit.
+pub fn deps_rows(
+    rows: &[GraphRow],
+    tasks: &[GraphTask],
+    deps_x: usize,
+    drawn: usize,
+    selected: Option<&str>,
+) -> Vec<DepsRow> {
+    let mut out: Vec<DepsRow> = rows
+        .iter()
+        .map(|_| DepsRow {
+            cells: Vec::new(),
+            more: 0,
+        })
+        .collect();
+    let edges = edges_of(rows, tasks);
+    let (placed, omitted, _) = place(&edges, drawn);
+    for (column, start, end, task_id) in placed {
+        let lit = selected == Some(task_id);
+        let style = if lit {
+            Style::fg(Color::Warn).and_bold()
+        } else {
+            Style::fg(Color::Dim)
+        };
+        for row in start..=end {
+            let glyph = if row == start {
+                '┌'
+            } else if row == end {
+                '└'
+            } else {
+                '│'
+            };
+            out[row].cells.push((deps_x + column, glyph, style));
+        }
+    }
+    for (row, count) in omitted {
+        out[row].more = count;
+    }
+    out
+}
+
+/// The number of columns the deps column needs for these rows (T-494): the
+/// lines' minimum layout, before the caller caps it.
+pub fn deps_needed(rows: &[GraphRow], tasks: &[GraphTask]) -> usize {
+    let edges = edges_of(rows, tasks);
+    place(&edges, usize::MAX).2
+}
+
+/// The lines of the deps column: `(task row, dependency row, task id)` for
+/// every task not yet merged and every direct dependency of it that is shown
+/// and not merged.
+fn edges_of<'a>(rows: &[GraphRow], tasks: &'a [GraphTask]) -> Vec<(usize, usize, &'a str)> {
+    // The row that names a shown task: the first row with the task and a text.
+    let mut at: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        if let Some(task) = &row.task {
+            if !row.text.is_empty() {
+                at.entry(task.as_str()).or_insert(index);
+            }
+        }
+    }
+    // A dependency that is merged (or not in the shown graph) is not drawn.
+    let merged = |id: &str| {
+        tasks
+            .iter()
+            .find(|task| task.id == id)
+            .is_none_or(|task| task.finished.is_some() || task.stage == Stage::Merged)
+    };
+    let mut edges: Vec<(usize, usize, &str)> = Vec::new();
+    for task in tasks {
+        if task.finished.is_some() || task.stage == Stage::Merged {
+            continue;
+        }
+        let Some(&task_row) = at.get(task.id.as_str()) else {
+            continue;
+        };
+        for dep in &task.deps {
+            if merged(dep) {
+                continue;
+            }
+            let Some(&dep_row) = at.get(dep.as_str()) else {
+                continue;
+            };
+            if dep_row == task_row {
+                continue;
+            }
+            edges.push((task_row, dep_row, task.id.as_str()));
+        }
+    }
+    // The plan's order is the task's; the rows order the lines.
+    edges.sort_by_key(|(task_row, dep_row, _)| (*task_row, *dep_row));
+    edges
+}
+
+/// Place the lines in columns: each line gets the first column whose lines do
+/// not touch its rows (a shared row would make two lines look like one), and
+/// a line that finds no free column is counted on its task's row. Returns the
+/// placed lines, the omitted counts per row, and the number of columns used.
+fn place<'a>(
+    edges: &[(usize, usize, &'a str)],
+    cap: usize,
+) -> (
+    Vec<(usize, usize, usize, &'a str)>,
+    std::collections::BTreeMap<usize, usize>,
+    usize,
+) {
+    let mut spans: Vec<Vec<(usize, usize)>> = Vec::new();
+    let mut placed = Vec::new();
+    let mut omitted: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    for &(task_row, dep_row, task_id) in edges {
+        let start = task_row.min(dep_row);
+        let end = task_row.max(dep_row);
+        let column = (0..cap).find(|column| {
+            spans
+                .get(*column)
+                .is_none_or(|spans| spans.iter().all(|(s, e)| end < *s || start > *e))
+        });
+        let Some(column) = column else {
+            *omitted.entry(task_row).or_insert(0) += 1;
+            continue;
+        };
+        while spans.len() <= column {
+            spans.push(Vec::new());
+        }
+        spans[column].push((start, end));
+        placed.push((column, start, end, task_id));
+    }
+    (placed, omitted, spans.len())
 }
 
 /// A span of minutes as the graph says it: the hours always, then the minutes.
