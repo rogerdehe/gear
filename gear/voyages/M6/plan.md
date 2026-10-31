@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=991 -->
+<!-- gear-plan project=gear base=992 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -97,6 +97,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7075: keep course — 39 done, projected 857m of 1020m
 - station M-7076: keep course — projected 861m of 1020m, six tasks left
 - 2026-11-01 08:10 hand-fix: released v0.6.3 at the user's word for another project's omp use (notes: T-488 and one hand fix added; dev merged into main as ec0c4b8a, tag v0.6.3) | why: station S4 reached, done (5)
+- 2026-11-01 08:20 hand-fix: restarted both engines on v0.6.3 (the earlier restart was interrupted) | why: another project's M-5348, a real notice after the 10-minute grace
 
 # Queue
 
