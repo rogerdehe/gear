@@ -602,8 +602,16 @@ fn onboard_seat(
         &cfg.db_path,
         None,
     )?;
-    let rules = crate::rules::arguments(store, &seat.project, seat.role, &cfg.db_path, profile)
-        .map_err(|e| e.detail)?;
+    let rules = crate::rules::arguments(
+        store,
+        &seat.project,
+        seat.role,
+        &seat.name,
+        &cfg.db_path,
+        profile,
+        false,
+    )
+    .map_err(|e| e.detail)?;
     plan.args.splice(
         profile.unattended_args.len()..profile.unattended_args.len(),
         rules,
@@ -878,8 +886,16 @@ fn resume_busy_start(
         ));
     }
     let mut args = pending.args.clone();
-    let rules = crate::rules::arguments(store, &seat.project, seat.role, &cfg.db_path, profile)
-        .map_err(|e| e.detail)?;
+    let rules = crate::rules::arguments(
+        store,
+        &seat.project,
+        seat.role,
+        &seat.name,
+        &cfg.db_path,
+        profile,
+        false,
+    )
+    .map_err(|e| e.detail)?;
     crate::rules::refresh_args(&mut args, profile, rules);
     match herdr.agent_start(&pending.agent_name, &pending.kind, &pending.pane, &args) {
         Outcome::Ok(started) => finish_start(

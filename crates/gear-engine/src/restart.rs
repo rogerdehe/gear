@@ -642,8 +642,10 @@ fn start(
         store,
         &seat.project,
         seat.role,
+        &seat.name,
         &cfg.db_path,
         profile,
+        plan.resume.is_some(),
     )?);
     if !plan.model.is_empty() {
         if let Some(model_args) = start_args(&plan.cli, &plan.model, &plan.args) {

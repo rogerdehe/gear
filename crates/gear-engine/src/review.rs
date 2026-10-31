@@ -2103,8 +2103,15 @@ fn start_reviewer(
             //    the session of an earlier review of the same task when the
             //    reviewer resumes it (F3).
             let mut args = reviewer_args(store, config, profile, kind, entry, &task.task)?;
-            let rules =
-                crate::rules::arguments(store, &seat.project, seat.role, &cfg.db_path, profile)?;
+            let rules = crate::rules::arguments(
+                store,
+                &seat.project,
+                seat.role,
+                &seat.name,
+                &cfg.db_path,
+                profile,
+                false,
+            )?;
             args.splice(
                 profile.unattended_args.len()..profile.unattended_args.len(),
                 rules,

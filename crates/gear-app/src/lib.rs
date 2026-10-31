@@ -14,6 +14,7 @@ pub(crate) mod testtmp;
 pub mod admin;
 pub mod base;
 pub mod captain;
+pub mod charter;
 pub mod config;
 pub mod decision;
 pub mod draft;
