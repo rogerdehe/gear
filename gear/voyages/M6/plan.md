@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=946 -->
+<!-- gear-plan project=gear base=947 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -52,6 +52,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-6746: keep course — projected 693m of 720m; mast now carries 453m against hull's 332m (T-484 added), so T-472 (S3) goes back to hull (about 392m each)
 - 2026-10-31 20:20 confirmed: eta 12h -> 17h; goal and station S5 added (one captain, several projects; a v0.5 project upgrades painlessly; v0.6.4) | why: user: bring M7's multi-project captain into M6 as a last station; another project stays with its own captain and must upgrade with no pain after M6
 - station M-6769: move — projected 1031m of 1020m, mast the bottleneck (756m against hull's 571m); T-484 (gear-usage, hull's crate) and T-468 (engine) move to hull (about 670m and 655m)
+- 2026-10-31 21:10 hand-fix: deleted origin/review/t454 by hand, already in dev | why: the merge left its review branch (same as review/t457); T-483 removes the cause
 
 # Queue
 
