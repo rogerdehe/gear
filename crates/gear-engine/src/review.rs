@@ -1580,7 +1580,7 @@ impl ReviewGit for FakeReviewGit {
 }
 
 /// Run git without sending shell text to a reviewer pane.
-fn review_git(git: &dyn ReviewGit, path: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn review_git(git: &dyn ReviewGit, path: &str, args: &[&str]) -> Result<String, String> {
     #[cfg(test)]
     if REVIEW_GIT_FAKE.with(|fake| fake.get()) {
         return FakeReviewGit.run(path, args);
@@ -3184,6 +3184,11 @@ fn review_packet_for(
             ("attempt", &attempt.to_string()),
         ],
     );
+    // T-505: an audit has no change to review — it checks the promise in the
+    // goal against the integration branch, end to end.
+    let audit = store
+        .read(|tx| tx.task_audit(&config.project.id, task))?
+        .is_some();
     let packet = review_packet(
         task,
         attempt,
@@ -3196,6 +3201,7 @@ fn review_packet_for(
         candidate,
         &config.conventions.remote,
         &repo.integration,
+        audit,
         &gear_model::branch::review_branch(
             &config.conventions.review_branch,
             &config.project.id,
@@ -3470,6 +3476,7 @@ fn review_recovery_line(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn review_packet(
     task: &str,
     attempt: i64,
@@ -3482,12 +3489,29 @@ fn review_packet(
     candidate: &str,
     remote: &str,
     integration: &str,
+    audit: bool,
     branch: &str,
     commit: &str,
     worktree: &str,
     recovery: &str,
     rework: &str,
 ) -> String {
+    // T-505: the change-review instruction, or — for a voyage audit — what the
+    // audit checks instead: there is no diff, and every gap it finds is a
+    // finding.
+    let change = if audit {
+        format!(
+            "Audit {task}: no diff. Check the promise in the goal against the {integration} \
+             branch at {candidate}, end to end in normal use. For each point of the promise say \
+             met or not, with the evidence (a command and its output). Every gap is a finding, \
+             also one outside this audit's slice."
+        )
+    } else {
+        format!(
+            "Diff to review: `git fetch {remote} && git diff {remote}/{integration}...{candidate}` \
+             (three dots: the change since the merge base)"
+        )
+    };
     // T-282: the task's contract moved past the one this hand-in was made
     // against — the reviewer is told, and still judges the hand-in by its own.
     let newer = if current > version {
@@ -3508,7 +3532,7 @@ fn review_packet(
          Done (the milestone's sentence): {done}\n\
          Bar (the quality this phase needs): {bar}\n\
          Candidate: {candidate}\n\
-         Diff to review: `git fetch {remote} && git diff {remote}/{integration}...{candidate}` (three dots: the change since the merge base)\n\
+         {change}\n\
          Your worktree: branch `{branch}`, checked out at the candidate.\n\
          \n\
          Rules: `gear --skill review` — the mechanical acceptance you run yourself, \

@@ -49,6 +49,7 @@ mod adopt_contract;
 mod app_home;
 mod app_identity;
 mod app_reply;
+mod audit_contract;
 mod app_select_batch;
 mod app_send;
 mod backoff_home_contract;

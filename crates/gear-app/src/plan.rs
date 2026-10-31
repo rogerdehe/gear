@@ -561,6 +561,23 @@ fn apply_queue(
                 .cloned()
                 .ok_or_else(|| bad(item.line, "cannot assign an id to this NEW block"))?,
         };
+        // The `audit:` mark of a task (T-505): a voyage audit runs on
+        // reviewers against the integration branch and is never assigned to
+        // its lane, so the review model choice and the writer seat need the
+        // lane the block names.
+        if item.audit == Some(true) {
+            let lane_name = item
+                .lane
+                .clone()
+                .or_else(|| existing.get(&id).and_then(|task| task.lane.clone()))
+                .unwrap_or_default();
+            if lane_name.trim().is_empty() {
+                return Err(bad(
+                    item.line,
+                    "an audit task keeps its `lane=`: the review model choice and the writer seat need it",
+                ));
+            }
+        }
         // The `review-model:` of a task (T-500): it names an entry of
         // `[models] review` and differs from the task's lane model, so the
         // captain can send one task to a light reviewer and another to a
@@ -753,6 +770,11 @@ fn apply_queue(
                 if let Some(model) = &item.review_model {
                     tx.set_task_review_model(project, &id, model)?;
                 }
+                // The `audit:` mark of a task (T-505): a voyage audit is run
+                // by reviewers and never assigned to its lane.
+                if let Some(audit) = item.audit {
+                    tx.set_task_audit(project, &id, audit)?;
+                }
                 let contract = ContractRow {
                     project: project.to_string(),
                     task: id.clone(),
@@ -814,6 +836,11 @@ fn apply_queue(
                 // has.
                 if let Some(model) = &item.review_model {
                     tx.set_task_review_model(project, id, model)?;
+                }
+                // The `audit:` mark of a task (T-505): a block that names the
+                // field sets it; a block without it keeps the mark.
+                if let Some(audit) = item.audit {
+                    tx.set_task_audit(project, id, audit)?;
                 }
                 // The planned time (T-38): the draft may change it; a draft
                 // that says nothing keeps the estimate the task has.
@@ -2807,6 +2834,10 @@ pub fn show(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<String> {
     // of it runs on.
     if let Some(model) = tx.task_review_model(project, task)? {
         text.push_str(&format!("review-model: {model}\n"));
+    }
+    // The `audit:` mark of a task (T-505): a voyage audit, run by reviewers.
+    if tx.task_audit(project, task)?.is_some() {
+        text.push_str("audit: true\n");
     }
     if let Some(issue) = row.issue {
         text.push_str(&format!("issue: #{issue}\n"));

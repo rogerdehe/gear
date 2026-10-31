@@ -71,6 +71,7 @@ pub fn temp(name: &str) -> std::path::PathBuf {
     })
 }
 
+mod audit_contract;
 mod backoff_contract;
 mod cancel_tick_contract;
 mod config_profile_onboard;

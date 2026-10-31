@@ -15,6 +15,7 @@
 //! directly with an injected `now` and a `FakeHerdr`.
 
 mod attention;
+pub mod audit;
 pub mod blocked;
 pub mod busy;
 pub mod captain_quota;
@@ -221,6 +222,12 @@ pub struct TickReport {
     pub parallel: Vec<String>,
     /// Git evidence that could not be read during a parallel-change scan.
     pub parallel_failed: Vec<String>,
+    /// `project:task/attempt` of the voyage audits handed in for review this
+    /// tick (T-505).
+    pub audits: Vec<String>,
+    /// `project:task: CODE: detail` of the audits that could not be handed in
+    /// this tick; reported, never fatal.
+    pub audit_failed: Vec<String>,
     /// The rounds that ended or learned a session this tick (design §4.1).
     pub rounds: crate::rounds::RoundReport,
     /// The steps of this tick that took over 200 ms, as `<step>: <ms> ms`
@@ -712,6 +719,24 @@ pub fn tick(
                     .map(|change| format!("friction:{}", change.as_str())),
             );
             note_slow(report, "friction", step);
+
+            // 6e. a voyage audit hands itself in (T-505): a task the captain
+            //     marked `audit: true` is never assigned to its lane, so when
+            //     it is Ready and every dependency is merged it becomes a
+            //     hand-in at the integration branch's tip, and step 7 gives it
+            //     a reviewer.
+            let step = std::time::Instant::now();
+            let audits = match gear_app::config::latest(store, &project) {
+                Ok(config) => {
+                    audit::start_audits(store, cfg, &mut tips_by_repo, &config, &project, now)?
+                }
+                // A config that does not parse is reported by the steps that
+                // need it; an audit waits for the next tick with a good one.
+                Err(_) => Default::default(),
+            };
+            report.audits.extend(audits.handed_in);
+            report.audit_failed.extend(audits.failed);
+            note_slow(report, "audit", step);
 
             // 7. review: a lane handed a result in → a temp reviewer starts. The
             //    lane is not blocked; the reviewer is a seat of its own.
