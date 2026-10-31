@@ -58,17 +58,13 @@ fn seed(store: &mut Store, eta: &str, count: usize) {
         text.push_str(&format!("## NEW [must] lane=heat milestone=M2\ngoal: task {n}\naccept: works\nestimate: {estimate}\ndeps: -\n"));
     }
     let (env, fp) = captain();
-    plan::apply(
-        store,
-        &env,
-        Some(&fp),
-        None,
-        &draft::parse(&text).unwrap(),
-        &text,
-        "seed",
-        T0,
-    )
-    .unwrap();
+    // T-461: the first departure is the user's too.
+    let mut draft = draft::parse(&text).unwrap();
+    draft.confirmed = true;
+    draft.decisions.push(
+        "2026-10-27 10:05 confirmed: milestone M2 departs | why: the user said depart".to_string(),
+    );
+    plan::apply(store, &env, Some(&fp), None, &draft, &text, "seed", T0).unwrap();
 }
 
 fn world(eta: &str, count: usize) -> Store {
@@ -271,7 +267,7 @@ fn each_third_completion_is_a_station_including_the_final_task() {
     assert!(land_body.contains("station <id>: land"), "{land_body}");
     apply(
         &mut store,
-        &format!("- station {land}: land"),
+        &format!("- done (1): met | evidence: all 6 tasks merged\n- station {land}: land"),
         "land",
         T0 + 7300,
     )

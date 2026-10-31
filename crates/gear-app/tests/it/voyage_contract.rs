@@ -70,13 +70,22 @@ fn cap() -> (Env, Fingerprint) {
     )
 }
 
+const CONFIRMED_LINE: &str =
+    "2026-10-27 10:05 confirmed: the voyage departs | why: the user said depart";
+
 fn run(
     s: &mut Store,
     text: &str,
     rid: &str,
     now: i64,
 ) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
-    let draft = parse(text).unwrap();
+    let mut draft = parse(text).unwrap();
+    // T-461: the first departure is the user's word; the first apply of a
+    // voyage that carries tasks is confirmed with its line here.
+    if draft.base == 0 && draft.queue.iter().any(|item| item.milestone.is_some()) {
+        draft.confirmed = true;
+        draft.decisions.push(CONFIRMED_LINE.to_string());
+    }
     let (env, fp) = cap();
     apply(s, &env, Some(&fp), None, &draft, text, rid, now)
 }
@@ -91,6 +100,7 @@ fn run_confirmed(
 ) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     let mut draft = parse(text).unwrap();
     draft.confirmed = true;
+    draft.decisions.push(CONFIRMED_LINE.to_string());
     let (env, fp) = cap();
     apply(s, &env, Some(&fp), None, &draft, text, rid, now)
 }
@@ -564,13 +574,20 @@ fn a_departed_voyage_without_stations_gets_its_first_list() {
         "the first list needs no confirmation"
     );
     assert!(
-        s.read(|tx| tx.decisions_of("p", "M1")).unwrap().is_empty(),
-        "no confirmation, no decision"
+        s.read(|tx| tx.decisions_of("p", "M1"))
+            .unwrap()
+            .iter()
+            .all(|decision| decision.kind == "confirmed"),
+        "no confirmation of a change, no decision"
     );
 
     // The unchanged list applies again, and still records nothing.
     run(&mut s, &with(2, "the first station"), "r3", NOW + 20).unwrap();
-    assert!(s.read(|tx| tx.decisions_of("p", "M1")).unwrap().is_empty());
+    assert!(s
+        .read(|tx| tx.decisions_of("p", "M1"))
+        .unwrap()
+        .iter()
+        .all(|decision| decision.kind == "confirmed"));
 
     // Now the list is stored: changing it needs the confirmation.
     let err = run(&mut s, &with(3, "the second station"), "r4", NOW + 30).unwrap_err();
@@ -617,8 +634,11 @@ fn a_voyage_that_has_not_departed_changes_without_confirmation() {
         Some("10h")
     );
     assert!(
-        s.read(|tx| tx.decisions_of("p", "M1")).unwrap().is_empty(),
-        "no confirmation, no decision"
+        s.read(|tx| tx.decisions_of("p", "M1"))
+            .unwrap()
+            .iter()
+            .all(|decision| decision.kind == "confirmed"),
+        "no confirmation of a change, no decision"
     );
 }
 
@@ -847,11 +867,11 @@ fn a_task_moved_to_a_milestone_the_store_describes_is_applied() {
     let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, first, "r1", NOW).unwrap();
     let second = "<!-- gear-plan project=p base=1 -->\n# Milestone M2: the next one\ndone: users install v2\nbar: it holds\neta: 4h\n# Queue\n## NEW [should] lane=heat milestone=M2\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
-    run(&mut s, second, "r2", NOW + 10).unwrap();
+    run_confirmed(&mut s, second, "r2", NOW + 10).unwrap();
 
     // No block in the file, but M2's words are in the store.
     let moved = "<!-- gear-plan project=p base=2 -->\n# Queue\n## T-1 [must] lane=heat milestone=M2\ngoal: A\naccept: a\ndeps: -\n";
-    let result = run(&mut s, moved, "r3", NOW + 20).unwrap();
+    let result = run_confirmed(&mut s, moved, "r3", NOW + 20).unwrap();
     assert_eq!(
         s.read(|tx| tx.get_task("p", "T-1"))
             .unwrap()
@@ -1021,7 +1041,7 @@ fn the_snapshot_shows_only_the_current_voyage() {
     .unwrap();
     // M2 departs later with one done and one ready task.
     let second = "<!-- gear-plan project=p base=1 -->\n# Milestone M2: the second voyage\ndone: it ships too\nbar: stable\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n\n## NEW [should] lane=heat milestone=M2\ngoal: C\naccept: c\nestimate: 30\ndeps: T-2\n";
-    run(&mut s, second, "r2", NOW - 60).unwrap();
+    run_confirmed(&mut s, second, "r2", NOW - 60).unwrap();
     s.write(|tx| {
         let mut task = tx.get_task("p", "T-2")?.expect("the task");
         task.state = TaskState::Done;
@@ -1334,7 +1354,7 @@ fn an_emptied_milestone_loses_its_departure_and_a_reused_id_starts_again() {
 
     // The trial is moved to M0: M1 loses every task and with them its departure.
     let moved = "<!-- gear-plan project=p base=1 -->\n# Milestone M0: the trial\ndone: the trial runs\nbar: it holds\neta: 4h\n# Queue\n## T-1 [must] lane=heat milestone=M0\n## T-2 [should] lane=heat milestone=M0\n";
-    run(&mut s, moved, "r2", NOW + 100).unwrap();
+    run_confirmed(&mut s, moved, "r2", NOW + 100).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
         (
@@ -1355,7 +1375,7 @@ fn an_emptied_milestone_loses_its_departure_and_a_reused_id_starts_again() {
     // The real voyage reuses M1: its departure is its own first task, not the
     // trial's, and its scope is the new tasks' estimates.
     let reuse = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: delivery v0.2.0\ndone: users install v0.2.0\nbar: block only loop breaks\neta: 3h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: C\naccept: c\nestimate: 45\ndeps: -\n";
-    run(&mut s, reuse, "r3", NOW + 200).unwrap();
+    run_confirmed(&mut s, reuse, "r3", NOW + 200).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
         (
@@ -1435,7 +1455,7 @@ fn the_snapshot_lists_the_voyages_by_departure_not_by_id() {
             NOW,
         )
         .unwrap();
-        run(
+        run_confirmed(
             &mut s,
             &block.replace("{base}", "1").replace("{id}", second),
             "r2",
@@ -1585,7 +1605,11 @@ fn a_whitespace_only_difference_is_no_change() {
     let stations = s.read(|tx| tx.voyage_stations("p", "M1")).unwrap();
     assert_eq!(stations[0].id, "S1", "{stations:?}");
     assert_eq!(stations[0].needs, "the first station", "{stations:?}");
-    assert!(s.read(|tx| tx.decisions_of("p", "M1")).unwrap().is_empty());
+    assert!(s
+        .read(|tx| tx.decisions_of("p", "M1"))
+        .unwrap()
+        .iter()
+        .all(|decision| decision.kind == "confirmed"));
 }
 
 /// T-336: the captain's home page carries the voyage's goal, its bar and how
