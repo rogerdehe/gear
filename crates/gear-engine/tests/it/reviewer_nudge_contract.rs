@@ -14,6 +14,11 @@ const T0: i64 = 1_800_000_000;
 const COOLDOWN: i64 = 90;
 
 fn world() -> (Store, SeatRow) {
+    world_with("Review T-7")
+}
+
+/// The same world, with the seat's one packet of this attempt reading `packet`.
+fn world_with(packet: &str) -> (Store, SeatRow) {
     let mut s = Store::open_in_memory().unwrap();
     let seat = s
         .write(|tx| {
@@ -81,7 +86,7 @@ fn world() -> (Store, SeatRow) {
                 attempt: Some(1),
                 ref_msg: None,
                 plan_version: None,
-                payload: serde_json::json!({"text": "Review T-7"}),
+                payload: serde_json::json!({"text": packet}),
                 created: T0,
             })?;
             tx.set_op_state("p", &op.id, OpState::Confirmed, Some("x"), T0 + 1)?;
@@ -132,6 +137,18 @@ fn an_idle_reviewer_without_a_verdict_is_nudged_then_flagged() {
     assert_eq!(
         nudge_stopped_reviewers(&mut s, "p", &idle(&seat), COOLDOWN, t).unwrap(),
         (vec![], vec![seat.id.clone()])
+    );
+}
+
+/// A seat that checked the direction of this attempt and now holds its review
+/// has no review packet yet: the direction packet is not one, and no
+/// "verdict not in" nudge resends it (M6, M-6962).
+#[test]
+fn a_direction_packet_is_not_the_review_packet_of_a_nudge() {
+    let (mut s, seat) = world_with("Direction check of T-7 attempt 1. Binding: ...");
+    assert_eq!(
+        nudge_stopped_reviewers(&mut s, "p", &idle(&seat), COOLDOWN, T0 + COOLDOWN + 1).unwrap(),
+        (vec![], vec![])
     );
 }
 
