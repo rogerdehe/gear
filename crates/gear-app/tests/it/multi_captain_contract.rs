@@ -7,7 +7,7 @@ use std::path::Path;
 
 use gear_app::captain::{release, take_all};
 use gear_app::identity::Fingerprint;
-use gear_app::mail::{self, ReplyArgs, ReplyMode};
+use gear_app::mail::{self, ReplyArgs, ReplyMode, SendArgs};
 use gear_app::Env;
 use gear_herdr::fake::FakeHerdr;
 use gear_herdr::AgentStatus;
@@ -343,4 +343,54 @@ fn one_held_project_keeps_the_unqualified_reply() {
     )
     .unwrap();
     assert_eq!(out.handled, vec![(id, "resolved".into())]);
+}
+
+#[test]
+fn a_qualified_task_send_reaches_its_project() {
+    let root = tempfile::tempdir().unwrap();
+    let mut s = world(root.path());
+    let mut herdr = herdr();
+    take_all(
+        &mut s,
+        &bare(),
+        &mut herdr,
+        &[],
+        root.path(),
+        &["gear".to_string(), "prometheus".to_string()],
+        NOW,
+    )
+    .unwrap();
+    let args = SendArgs {
+        kind: MsgKind::Question,
+        body: "what now?".into(),
+        task: Some("prometheus:T-1".into()),
+        attempt: None,
+        contract: None,
+        candidate: None,
+        verdict: None,
+        blocking: None,
+        base: None,
+        about: None,
+        to: None,
+        reply_to: None,
+        urgent: false,
+        left: None,
+        blocker: None,
+        on: None,
+        friction: None,
+        request_id: "s1".into(),
+    };
+    let out = mail::send(&mut s, &env("gear", 2), Some(&fp()), &args, NOW + 20).unwrap();
+    let message = s
+        .read(|tx| tx.get_message("prometheus", &out.msg_id))
+        .unwrap()
+        .expect("the message is in prometheus");
+    assert_eq!(message.task.as_deref(), Some("T-1"));
+    assert_eq!(message.recipient, "prometheus:captain");
+    assert!(
+        s.read(|tx| tx.get_message("gear", &out.msg_id))
+            .unwrap()
+            .is_none(),
+        "not in gear"
+    );
 }

@@ -159,6 +159,11 @@ fn send_inner(
     direction: bool,
     ack: bool,
 ) -> GearResult<SendResult> {
+    // T-485: a qualified `--task` names its project and the caller is
+    // resolved as that project's captain.
+    let (env, args) = send_target(store, env, fp, args)?;
+    let env = &env;
+    let args = &args;
     // A request that already committed replays its receipt before the hand-in
     // gate: the hand-in happened, only the receipt was lost, and an outage
     // must not report it as failed (T-19 review F2). The caller is the live
@@ -1465,6 +1470,30 @@ fn split_qualified(tx: &Tx<'_>, id: &str) -> GearResult<(Option<String>, String)
         }
     }
     Ok((None, id.to_string()))
+}
+
+/// A send whose `--task` is a qualified id `<project>:<T-n>` (T-485): the
+/// project it names, with the task id bare. A task id without a colon (or
+/// whose prefix is not a registered project) keeps the caller's own project.
+fn send_target(
+    store: &mut Store,
+    env: &Env,
+    fp: Option<&Fingerprint>,
+    args: &SendArgs,
+) -> GearResult<(Env, SendArgs)> {
+    let Some(task) = args.task.as_deref() else {
+        return Ok((env.clone(), args.clone()));
+    };
+    let Some((prefix, bare)) = task.split_once(':') else {
+        return Ok((env.clone(), args.clone()));
+    };
+    if bare.is_empty() || store.read(|tx| tx.get_project(prefix))?.is_none() {
+        return Ok((env.clone(), args.clone()));
+    }
+    let env = store.read(|tx| env_of_captain(tx, env, fp, prefix))?;
+    let mut args = args.clone();
+    args.task = Some(bare.to_string());
+    Ok((env, args))
 }
 
 /// The project a reply acts on (T-485): a qualified id names it; else the
