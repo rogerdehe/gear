@@ -523,8 +523,9 @@ fn a_project_registered_later_does_not_move_the_shown_one() {
     // the shown project only: the number of the session's projects is no
     // longer on the row.
     let names = |frame: &str, project: &str| {
-        let title = frame.lines().next().unwrap_or_default();
-        title.contains(&format!("GEAR · {project} "))
+        let title = frame.lines().nth(1).unwrap_or_default();
+        let bar = frame.lines().next().unwrap_or_default();
+        title.contains(&format!("GEAR · {project} ")) && bar.contains(&format!("[{project} ·"))
     };
     // a, b, and a again — two presses over two projects complete the cycle.
     assert!(names(&drawn[1], "b"), "the second project: {drawn:?}");

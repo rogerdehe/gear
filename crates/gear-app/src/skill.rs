@@ -123,6 +123,7 @@ pub enum SkillAgent {
     OpenCode,
     Grok,
     Pi,
+    Omp,
 }
 
 impl SkillAgent {
@@ -132,6 +133,7 @@ impl SkillAgent {
         SkillAgent::OpenCode,
         SkillAgent::Grok,
         SkillAgent::Pi,
+        SkillAgent::Omp,
     ];
 
     /// The name the user writes.
@@ -142,6 +144,7 @@ impl SkillAgent {
             SkillAgent::OpenCode => "opencode",
             SkillAgent::Grok => "grok",
             SkillAgent::Pi => "pi",
+            SkillAgent::Omp => "omp",
         }
     }
 
@@ -153,6 +156,7 @@ impl SkillAgent {
             "opencode" => Ok(SkillAgent::OpenCode),
             "grok" => Ok(SkillAgent::Grok),
             "pi" => Ok(SkillAgent::Pi),
+            "omp" => Ok(SkillAgent::Omp),
             other => {
                 let known = SkillAgent::ALL
                     .iter()
@@ -177,6 +181,10 @@ impl SkillAgent {
     /// is `~/.pi/agent` (pi 1.4.0, `docs/configuration.md`: "User skills and
     /// supporting files" live in `<agent-dir>/skills/`), so the skill goes to
     /// `~/.pi/agent/skills/<name>/SKILL.md`.
+    /// omp (oh-my-pi, a pi fork) reads `<agent-dir>/skills/<name>/SKILL.md`
+    /// like pi, and `omp config path` names its agent directory
+    /// `~/.omp/agent` (omp 18.12.6), so the skill goes to
+    /// `~/.omp/agent/skills/<name>/SKILL.md`.
     pub fn skills_root(self, home: &Path) -> PathBuf {
         match self {
             SkillAgent::Claude => home.join(".claude").join("skills"),
@@ -184,6 +192,7 @@ impl SkillAgent {
             SkillAgent::OpenCode => home.join(".config").join("opencode").join("skills"),
             SkillAgent::Grok => home.join(".grok").join("skills"),
             SkillAgent::Pi => home.join(".pi").join("agent").join("skills"),
+            SkillAgent::Omp => home.join(".omp").join("agent").join("skills"),
         }
     }
 }
@@ -311,6 +320,12 @@ mod tests {
         assert_eq!(
             SkillAgent::Pi.skills_root(&home),
             home.join(".pi").join("agent").join("skills")
+        );
+        // omp's agent directory is `~/.omp/agent` (`omp config path`, omp
+        // 18.12.6), and its user skills live in `<agent-dir>/skills` like pi's.
+        assert_eq!(
+            SkillAgent::Omp.skills_root(&home),
+            home.join(".omp").join("agent").join("skills")
         );
         std::fs::remove_dir_all(&home).ok();
     }

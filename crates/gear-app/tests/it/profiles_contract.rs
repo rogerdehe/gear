@@ -106,17 +106,17 @@ fn a_partial_block_overrides_only_the_given_fields() {
 fn a_profile_without_unattended_args_is_refused_at_init() {
     let mut s = world();
     // A lane whose profile has no unattended args cannot run unattended.
-    // A kind with no built-in profile: the block is the whole profile.
+    // A profile name with no built-in: the block is the whole profile.
     let text = config_with("")
         .replace(
             r#"[profiles.grok]
 kind = "grok"
 unattended_args = ["--yolo"]
 exit_keys = ["ctrl+c", "ctrl+d"]"#,
-            r#"[profiles.omp]
+            r#"[profiles.plain]
 kind = "omp""#,
         )
-        .replace(r#"profile = "opencode""#, r#"profile = "omp""#);
+        .replace(r#"profile = "opencode""#, r#"profile = "plain""#);
 
     let err = admin::init_with_home(
         &mut s,
@@ -172,17 +172,17 @@ fn a_configured_profile_is_accepted_at_init() {
 fn the_kickoff_prints_a_skeleton_for_an_unknown_kind() {
     let inventory = kickoff::Inventory {
         installed: vec![kickoff::Installed {
-            kind: "omp".into(),
-            executable: "/usr/local/bin/omp".into(),
-            models: vec!["omp-1".into()],
+            kind: "gemini".into(),
+            executable: "/usr/local/bin/gemini".into(),
+            models: vec!["gemini-1".into()],
             note: None,
             skill: false,
         }],
         missing: vec![],
     };
     let text = kickoff::skeleton(&inventory);
-    assert!(text.contains("[profiles.omp]"), "{text}");
-    assert!(text.contains("# kind = \"omp\""), "{text}");
+    assert!(text.contains("[profiles.gemini]"), "{text}");
+    assert!(text.contains("# kind = \"gemini\""), "{text}");
     assert!(text.contains("# unattended_args"), "{text}");
     // A kind with a built-in profile needs no block.
     let known = kickoff::Inventory {
@@ -205,18 +205,21 @@ fn the_kickoff_prints_a_skeleton_for_an_unknown_kind() {
 fn a_new_profile_gets_the_operational_defaults() {
     let text = config_with(
         r#"
-[profiles.omp]
-kind = "omp"
+[profiles.gemini]
+kind = "gemini"
 unattended_args = ["--yolo"]
 busy_markers = ["BUSY"]
 "#,
     );
     let parsed = config::parse(&text).unwrap();
     let table = config::profile_table(&gear_herdr::builtins(), &parsed).unwrap();
-    let omp = table.get("omp").expect("omp is configured");
-    assert_eq!(omp.tail_lines, 16, "the screen window has a real default");
-    assert_eq!(omp.confirm_rounds, 2, "a flag needs two observations");
-    assert_eq!(omp.busy_markers, vec!["BUSY".to_string()]);
+    let gemini = table.get("gemini").expect("gemini is configured");
+    assert_eq!(
+        gemini.tail_lines, 16,
+        "the screen window has a real default"
+    );
+    assert_eq!(gemini.confirm_rounds, 2, "a flag needs two observations");
+    assert_eq!(gemini.busy_markers, vec!["BUSY".to_string()]);
     // A built-in keeps its own values when the block leaves them out.
     let opencode = table.get("opencode").expect("built in");
     assert_eq!(
