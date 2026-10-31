@@ -80,6 +80,7 @@ mod remerge_contract;
 mod result_contract;
 mod retired_lane_contract;
 mod review_contract;
+mod review_model_contract;
 mod reviewer_mail_contract;
 mod seats_contract;
 mod settle_review_contract;
