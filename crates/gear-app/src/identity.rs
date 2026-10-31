@@ -472,6 +472,84 @@ pub fn seat_bound_to(tx: &Tx<'_>, pane: &str) -> GearResult<Option<SeatRow>> {
     Ok(best.map(|(_, seat)| seat))
 }
 
+/// Every seat with an **active** binding on `pane` (T-485), in project order:
+/// one pane may hold several projects' captain seats.
+pub fn seats_bound_to(tx: &Tx<'_>, pane: &str) -> GearResult<Vec<SeatRow>> {
+    let mut seats = Vec::new();
+    for project in tx.project_ids()? {
+        for seat in tx.seats_of_project(&project)? {
+            let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else {
+                continue;
+            };
+            if binding.status == BindingStatus::Active && binding.pane_id == pane {
+                seats.push(seat);
+            }
+        }
+    }
+    Ok(seats)
+}
+
+/// The captain seats of the projects whose active binding is on `pane`
+/// (T-485): what the pane answers as the captain of.
+pub fn captains_on_pane(tx: &Tx<'_>, pane: &str) -> GearResult<Vec<SeatRow>> {
+    Ok(seats_bound_to(tx, pane)?
+        .into_iter()
+        .filter(|seat| seat.role == SeatRole::Captain)
+        .collect())
+}
+
+/// The env a captain command acts with for `project` (T-485): the caller's own
+/// context when it names `project`; else the captain seat of `project` whose
+/// active binding is on the caller's pane, at that seat's own generation. The
+/// command then checks the claim with [`require_seat`], so a stale generation
+/// or a wrong pane still fails.
+pub fn env_of_captain(
+    tx: &Tx<'_>,
+    env: &Env,
+    fp: Option<&Fingerprint>,
+    project: &str,
+) -> GearResult<Env> {
+    if env.ctx.as_ref().is_some_and(|ctx| ctx.project == project) {
+        return Ok(env.clone());
+    }
+    let pane = fp
+        .map(|fp| fp.pane_id.clone())
+        .or_else(|| env.pane_id.clone())
+        .ok_or_else(|| {
+            GearError::new(
+                ErrorCode::NotRegistered,
+                format!("no pane is known for the captain of {project}"),
+            )
+        })?;
+    let held = captains_on_pane(tx, &pane)?;
+    let seat = held
+        .iter()
+        .find(|seat| seat.project == project)
+        .ok_or_else(|| {
+            let names: Vec<String> = held.iter().map(|seat| seat.project.clone()).collect();
+            GearError::new(
+                ErrorCode::Forbidden,
+                if names.is_empty() {
+                    format!("pane {pane} holds no captain seat, so it cannot act for {project}")
+                } else {
+                    format!(
+                        "pane {pane} holds the captain of {}, not of {project}",
+                        names.join(", ")
+                    )
+                },
+            )
+        })?;
+    Ok(Env {
+        ctx: Some(GearCtx {
+            project: seat.project.clone(),
+            seat: seat.name.clone(),
+            generation: seat.generation,
+        }),
+        pane_id: Some(pane),
+        admin: env.admin,
+    })
+}
+
 /// The **one** pane of the session that hosts an agent of a daemon kind and is
 /// (`bound`) or is not (`!bound`) bound to a seat (T-126). More than one such
 /// pane is no answer: the caller has to name itself then.
