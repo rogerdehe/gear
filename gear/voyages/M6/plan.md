@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=975 -->
+<!-- gear-plan project=gear base=976 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -80,6 +80,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-11-01 03:40 hand-fix: released v0.6.1 (notes completed with T-473, T-482 and the three hand fixes; dev merged into main as 2bb34c81, tag v0.6.1, six assets); both engines on v0.6.1 | why: station S2 reached, done (5); the skill review found nothing new to add
 - station M-6933: keep course — projected 829m of 1020m, lanes even
 - station M-6942: keep course — 27 done, projected 880m of 1020m with the omp and agy tasks (hull 316m, mast 325m)
+- 2026-11-01 04:10 hand-fix: the reviewer nudge counts only review packets, never a direction packet of the same attempt (review.rs nudge_stopped_reviewers, one new test); make gate passed; engines restarted; told review-9 to stop | why: review-9 got 'your verdict on T-489 is not in' with its old direction packet and searched the store for its job (M-6962)
 
 # Queue
 

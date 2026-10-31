@@ -11798,8 +11798,17 @@ pub fn nudge_stopped_reviewers(
             {
                 return Ok(None);
             }
+            // Only packets of the job this nudge is about count: a seat that
+            // checked the direction of this attempt and now holds its review
+            // has not got its review packet from the direction packet.
             let deliveries: Vec<_> = tx.ops_of_seat_kind(&seat.id, OpKind::Deliver)?.into_iter()
                 .filter(|op| op.task.as_deref() == Some(task.as_str()) && op.attempt == Some(attempt.n))
+                .filter(|op| {
+                    let checks_direction = op.payload["text"]
+                        .as_str()
+                        .is_some_and(|text| text.starts_with("Direction check of "));
+                    direction || !checks_direction
+                })
                 .collect();
             let Some(last) = deliveries.last() else {
                 return Ok(None); // the packet itself is not sent yet
