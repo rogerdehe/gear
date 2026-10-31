@@ -20,6 +20,9 @@ pub struct VoyageReport {
     /// (T-451): `Some` only outside `[schedule] hours`, `None` inside them and
     /// without the section.
     pub off_hours_until: Option<Ts>,
+    /// The IANA zone the schedule is read in (T-488), when the config names
+    /// one: the wait is shown on the project's clock, not the machine's.
+    pub zone: Option<String>,
     pub elapsed_min: Option<i64>,
     pub measured_actual_min: i64,
     pub measured_estimate_min: i64,
@@ -87,10 +90,13 @@ impl VoyageReport {
         // rests outside its working hours (T-451), that moment is said
         // instead: it is what the seat waits for.
         let waits = match self.off_hours_until {
-            Some(until) => format!(" · off hours until {}", crate::idle::clock(until)),
+            Some(until) => format!(
+                " · off hours until {}",
+                clock_in(self.zone.as_deref(), until)
+            ),
             None => self
                 .departs_at
-                .map(|at| format!(" · departs at {}", crate::idle::clock(at)))
+                .map(|at| format!(" · departs at {}", clock_in(self.zone.as_deref(), at)))
                 .unwrap_or_default(),
         };
         vec![
@@ -138,15 +144,20 @@ fn departs_at(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Ts>> {
     let Ok(config) = row.config_toml.parse::<toml::Value>() else {
         return Ok(None);
     };
-    let Some(at) = config
-        .get("schedule")
-        .and_then(|schedule| schedule.get("depart_at"))
-        .and_then(toml::Value::as_str)
-    else {
+    let Some(schedule) = config.get("schedule") else {
+        return Ok(None);
+    };
+    let Some(at) = schedule.get("depart_at").and_then(toml::Value::as_str) else {
         return Ok(None);
     };
     let Some(at) = crate::idle::rfc3339(at) else {
         return Ok(None);
+    };
+    // T-488: a zone-less moment is read in the project's zone; one with its
+    // own zone is absolute (the board's parse reads a zone-less one as UTC).
+    let at = match zone_of(schedule) {
+        Some(zone) if !names_zone(at_text(schedule)) => in_zone(&zone, at),
+        _ => at,
     };
     Ok((now < at).then_some(at))
 }
@@ -163,33 +174,92 @@ fn off_hours_until(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Ts>
     let Ok(config) = row.config_toml.parse::<toml::Value>() else {
         return Ok(None);
     };
-    let Some(hours) = config
-        .get("schedule")
-        .and_then(|schedule| schedule.get("hours"))
-        .and_then(toml::Value::as_str)
-    else {
+    let Some(schedule) = config.get("schedule") else {
         return Ok(None);
     };
-    Ok(off_hours_until_at(hours, now))
+    let Some(hours) = schedule.get("hours").and_then(toml::Value::as_str) else {
+        return Ok(None);
+    };
+    Ok(off_hours_until_at(hours, zone_of(schedule), now))
+}
+
+/// The project's `[schedule] tz` as a zone, when it is a known IANA zone
+/// (T-488). `None` = the machine's local time, as before.
+fn zone_of(schedule: &toml::Value) -> Option<jiff::tz::TimeZone> {
+    schedule
+        .get("tz")
+        .and_then(toml::Value::as_str)
+        .and_then(|name| jiff::tz::TimeZone::get(name).ok())
+}
+
+/// The `[schedule] tz` text, for the report's clock.
+fn zone_name(schedule: &toml::Value) -> Option<String> {
+    schedule
+        .get("tz")
+        .and_then(toml::Value::as_str)
+        .map(str::to_string)
+}
+
+/// Whether the departure text names its own zone (`Z`, `+HH:MM`, `-HH:MM`).
+fn names_zone(text: Option<&str>) -> bool {
+    let Some(text) = text else {
+        return false;
+    };
+    let Some((_, time)) = text.trim().split_once(['T', 't', ' ']) else {
+        return false;
+    };
+    time.contains(['+', '-']) || time.ends_with(['Z', 'z'])
+}
+
+fn at_text<'a>(schedule: &'a toml::Value) -> Option<&'a str> {
+    schedule.get("depart_at").and_then(toml::Value::as_str)
+}
+
+/// The moment of the same wall clock read in `zone` (T-488).
+fn in_zone(zone: &jiff::tz::TimeZone, at: Ts) -> Ts {
+    let Ok(utc) = jiff::Timestamp::from_second(at) else {
+        return at;
+    };
+    let parts = jiff::tz::TimeZone::UTC.to_datetime(utc);
+    let civil = jiff::civil::DateTime::from_parts(parts.date(), parts.time());
+    zone.to_timestamp(civil)
+        .map(|at| at.as_second())
+        .unwrap_or(at)
+}
+
+/// `HH:MM` of `at` on the project's clock (T-488), or the machine's clock
+/// when the project names no zone.
+fn clock_in(zone: Option<&str>, at: Ts) -> String {
+    let zone = zone.and_then(|name| jiff::tz::TimeZone::get(name).ok());
+    match zone {
+        Some(zone) => match jiff::Timestamp::from_second(at) {
+            Ok(at) => {
+                let parts = zone.to_datetime(at);
+                format!("{:02}:{:02}", parts.hour(), parts.minute())
+            }
+            Err(_) => crate::idle::clock(at),
+        },
+        None => crate::idle::clock(at),
+    }
 }
 
 /// The rule of `gear_app::config::off_hours_until` (T-450), on `hours` text:
 /// the next start while `now` is outside the window, `None` inside it and
 /// when it does not parse (the config check refuses that, so this fails
 /// closed).
-fn off_hours_until_at(hours: &str, now: Ts) -> Option<Ts> {
+fn off_hours_until_at(hours: &str, zone: Option<jiff::tz::TimeZone>, now: Ts) -> Option<Ts> {
     let window = hours_window(hours)?;
-    let minute = local_minute(now)?;
+    let minute = local_minute(zone.as_ref(), now)?;
     if inside_hours(window, minute) {
         return None;
     }
     if window.0 < window.1 {
         let day = if minute < window.0 { 0 } else { 1 };
-        local_at(now, day, window.0)
+        local_at(zone.as_ref(), now, day, window.0)
     } else {
         // Overnight: outside is between the end and the start, so the start is
         // later today.
-        local_at(now, 0, window.0)
+        local_at(zone.as_ref(), now, 0, window.0)
     }
 }
 
@@ -230,9 +300,31 @@ fn minutes_of_day(text: &str) -> Option<u32> {
     (hours <= 23 && minutes <= 59).then_some(hours * 60 + minutes)
 }
 
-/// The local time at `minute` past midnight, `day_offset` days after the day
-/// of `now`. `None` when the machine's local time is not readable.
-fn local_at(now: Ts, day_offset: i32, minute: u32) -> Option<Ts> {
+/// The time at `minute` past midnight, `day_offset` days after the day of
+/// `now`, in `zone` or the machine's local time when it is `None` (T-488).
+fn local_at(
+    zone: Option<&jiff::tz::TimeZone>,
+    now: Ts,
+    day_offset: i32,
+    minute: u32,
+) -> Option<Ts> {
+    if let Some(zone) = zone {
+        let at = jiff::Timestamp::from_second(now).ok()?;
+        let day = zone
+            .to_datetime(at)
+            .date()
+            .checked_add(jiff::Span::new().days(i64::from(day_offset)))
+            .ok()?;
+        let time = jiff::civil::Time::new((minute / 60) as i8, (minute % 60) as i8, 0, 0).ok()?;
+        let civil = jiff::civil::DateTime::from_parts(day, time);
+        return zone.to_timestamp(civil).ok().map(|at| at.as_second());
+    }
+    local_at_machine(now, day_offset, minute)
+}
+
+/// The time at `minute` past midnight, `day_offset` days after the day of
+/// `now`, in the machine's local time. `None` when it is not readable.
+fn local_at_machine(now: Ts, day_offset: i32, minute: u32) -> Option<Ts> {
     let stamp = now as libc::time_t;
     let mut parts = std::mem::MaybeUninit::<libc::tm>::uninit();
     // SAFETY: both pointers address valid storage; localtime_r initializes tm
@@ -250,9 +342,20 @@ fn local_at(now: Ts, day_offset: i32, minute: u32) -> Option<Ts> {
     (time != -1).then_some(time)
 }
 
-/// The minute of the day `now` is, in local time. `None` when the machine's
-/// local time is not readable.
-fn local_minute(now: Ts) -> Option<u32> {
+/// The minute of the day `now` is, in `zone` or the machine's local time when
+/// it is `None` (T-488).
+fn local_minute(zone: Option<&jiff::tz::TimeZone>, now: Ts) -> Option<u32> {
+    if let Some(zone) = zone {
+        let at = jiff::Timestamp::from_second(now).ok()?;
+        let parts = zone.to_datetime(at);
+        return Some(u32::try_from(parts.hour()).ok()? * 60 + u32::try_from(parts.minute()).ok()?);
+    }
+    local_minute_machine(now)
+}
+
+/// The minute of the day `now` is, in the machine's local time. `None` when
+/// it is not readable.
+fn local_minute_machine(now: Ts) -> Option<u32> {
     let stamp = now as libc::time_t;
     let mut parts = std::mem::MaybeUninit::<libc::tm>::uninit();
     // SAFETY: as in `local_at`.
@@ -302,6 +405,11 @@ fn build_reports(
     let tasks = tx.tasks_of_project(project)?;
     let departs_at = departs_at(tx, project, now)?;
     let off_hours_until = off_hours_until(tx, project, now)?;
+    let zone = tx
+        .get_project(project)?
+        .and_then(|row| row.config_toml.parse::<toml::Value>().ok())
+        .and_then(|config| config.get("schedule").cloned())
+        .and_then(|schedule| zone_name(&schedule));
     let mut reports = Vec::new();
     for voyage in tx.voyages_of_project(project)? {
         if only.is_some_and(|milestone| milestone != voyage.milestone) {
@@ -327,6 +435,7 @@ fn build_reports(
             eta: voyage.eta,
             departs_at,
             off_hours_until,
+            zone: zone.clone(),
             elapsed_min: voyage.departure.map(|start| (now - start).max(0) / 60),
             measured_actual_min: 0,
             measured_estimate_min: 0,
