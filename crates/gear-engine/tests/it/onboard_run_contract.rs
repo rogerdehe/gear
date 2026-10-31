@@ -831,7 +831,7 @@ fn a_future_departure_onboards_no_lane_and_dispatches_nothing_until_its_time() {
             .unwrap()
             .unwrap()
             .state,
-        gear_model::AttemptState::Delivered,
-        "one delivery, nobody asked"
+        gear_model::AttemptState::Started,
+        "the prompt started its turn: the lane took it (T-453)"
     );
 }

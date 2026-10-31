@@ -4,8 +4,9 @@
 //! 4-7 min build or suite; pi queued the doorbell behind the turn, the check
 //! budget ran out and the engine opened "lane is stuck". A doorbell that
 //! reached a working agent spends no check budget: the budget counts only the
-//! checks made while the agent is idle or done. A delivery keeps its
-//! wall-clock window.
+//! checks made while the agent is idle or done. T-453: a delivery's window is
+//! paused while the agent works too — the text waits in its input queue — and
+//! starts when the agent is idle again.
 
 use gear_engine::ops::confirm_pending_with;
 use gear_herdr::fake::FakeHerdr;
@@ -103,7 +104,7 @@ fn the_budget_counts_again_once_the_agent_is_idle() {
 }
 
 #[test]
-fn a_delivery_keeps_its_window_while_the_agent_works() {
+fn a_delivery_window_pauses_while_the_agent_works() {
     let mut s = Store::open_in_memory().unwrap();
     let op = s
         .write(|tx| {
@@ -123,23 +124,43 @@ fn a_delivery_keeps_its_window_while_the_agent_works() {
             })?;
             tx.set_op_state("p", &op.id, OpState::Executing, None, T0 + 1)?;
             tx.set_op_state("p", &op.id, OpState::Submitted, None, T0 + 2)?;
+            // The delivery was typed into a working agent (T-453): its text
+            // waits in the input queue, so the window starts when the agent is
+            // idle again.
+            tx.set_meta(&format!("engine.deliver_working.{}", op.id), "1")?;
+            tx.set_meta("engine.agent_idle_since.p:heat.1", &(T0 + 300).to_string())?;
             Ok(op.id)
         })
         .unwrap();
 
-    // The window (8 s) is wall clock: a working agent is not spared it.
-    let (confirmed, flagged) = confirm_pending_with(&mut s, "p", 3, 8, &working(), T0 + 5).unwrap();
-    assert!(confirmed.is_empty());
+    // The agent works through the window (8 s): the text waits in its queue,
+    // so the window does not run and no stall item is raised (T-453).
+    for at in [T0 + 5, T0 + 30, T0 + 300] {
+        let (confirmed, flagged) = confirm_pending_with(&mut s, "p", 3, 8, &working(), at).unwrap();
+        assert!(confirmed.is_empty());
+        assert!(
+            flagged.is_empty(),
+            "the text waits behind the working agent: {flagged:?}"
+        );
+        assert_eq!(
+            s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state,
+            OpState::Submitted,
+            "the delivery still waits"
+        );
+    }
+
+    // The agent is idle again: the window starts at that tick, so five seconds
+    // on it is not over yet.
+    let (_, flagged) = confirm_pending_with(&mut s, "p", 3, 8, &[], T0 + 305).unwrap();
     assert!(
         flagged.is_empty(),
         "the window is not over yet: {flagged:?}"
     );
-
-    let (_, flagged) = confirm_pending_with(&mut s, "p", 3, 8, &working(), T0 + 30).unwrap();
+    let (_, flagged) = confirm_pending_with(&mut s, "p", 3, 8, &[], T0 + 310).unwrap();
     assert_eq!(
         flagged,
         vec![LANE.to_string()],
-        "the delivery failed as before"
+        "the delivery failed after its window"
     );
     assert_eq!(
         s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state,
