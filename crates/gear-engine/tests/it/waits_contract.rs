@@ -296,12 +296,20 @@ fn declared_wait_stops_the_live_overrun_clock() {
         .unwrap()
         .remove(0);
     assert_eq!((r.active_s, r.paused_s), (10, 990));
+    // T-458 (the captain's decision): one seat has one live round. The parked
+    // round ended when T-2's round started, and its clock stopped there — the
+    // wait that goes on after it is not that round's time.
     advance(&mut s, &mut h, &c, 2000);
     let r = s
         .read(|tx| tx.rounds_of_task("p", "T-1"))
         .unwrap()
         .remove(0);
-    assert_eq!((r.active_s, r.paused_s), (10, 1990));
+    assert_eq!((r.active_s, r.paused_s), (10, 990));
+    assert_eq!(
+        r.end_at,
+        Some(T + 1000),
+        "the round ended with the next one"
+    );
     assert!(s
         .read(|tx| tx.thread_messages("p", "overrun-question:T-1:1:dev"))
         .unwrap()
@@ -314,6 +322,51 @@ fn declared_wait_stops_the_live_overrun_clock() {
             .all(|text| !text.contains("Continue T-1")),
         "{:?}",
         h.calls
+    );
+}
+
+/// T-458 (the captain's decision): when the parked task resumes, its round
+/// opens a new window — the resumed work is its own time, and the seat still
+/// has one live round.
+#[test]
+fn a_parked_round_opens_a_new_window_when_its_task_resumes() {
+    let (mut s, mut h, c) = world();
+    block(&mut s);
+    advance(&mut s, &mut h, &c, 100);
+    h.set_status(LANE, AgentStatus::Done);
+    advance(&mut s, &mut h, &c, 110);
+    let closed = s
+        .read(|tx| tx.rounds_of_task("p", "T-1"))
+        .unwrap()
+        .remove(0);
+    assert!(closed.end_at.is_some(), "the parked round ended");
+
+    // T-2 lands: the wait ends and the lane continues T-1.
+    s.write(|tx| {
+        let mut attempt = tx.get_attempt("p", "T-2", 1)?.unwrap();
+        attempt.state = AttemptState::Accepted;
+        attempt.candidate = Some(SHA.into());
+        tx.update_attempt(&attempt)?;
+        let mut task = tx.get_task("p", "T-2")?.unwrap();
+        task.state = TaskState::Done;
+        tx.update_task(&task)?;
+        tx.set_attempt_time("p", "T-2", 1, AttemptStep::Merged, T + 150)
+    })
+    .unwrap();
+    advance(&mut s, &mut h, &c, 160);
+    let reopened = s
+        .read(|tx| tx.rounds_of_task("p", "T-1"))
+        .unwrap()
+        .remove(0);
+    assert_eq!(reopened.end_at, None, "the resumed round is live");
+    assert_eq!(reopened.start_at, T + 160, "its new window starts now");
+    assert_eq!((reopened.active_s, reopened.paused_s), (0, 0));
+    assert_eq!(
+        s.read(|tx| tx.get_task("p", "T-1"))
+            .unwrap()
+            .unwrap()
+            .wait_on,
+        None
     );
 }
 

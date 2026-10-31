@@ -53,17 +53,49 @@ pub fn tick(
                     .filter(|other| other.seat == round.seat && other.start_at > round.start_at)
                     .min_by_key(|other| other.start_at);
                 if let Some(next) = next {
-                    // T-458: a round whose attempt still goes on does not end
-                    // here. A lane that reported blocked keeps its parked
-                    // attempt (still Started) and takes its next task; the
-                    // parked round keeps its clock, since the wait is its
-                    // time.
-                    if attempt_in_progress(tx, round)? {
-                        continue;
-                    }
-                    tx.close_round(&key_of(round), next.start_at)?;
+                    close_with_clock(tx, round, next.start_at)?;
                     report.closed.push(label(round));
                 }
+            }
+            // 1b. T-458: a parked attempt whose wait has ended goes on in a
+            //     new window of its round — the resumed work is its own time,
+            //     and the seat has one live round. Only when the seat works on
+            //     no other attempt: a lane still busy with the next task
+            //     reopens the parked round when that task is handed in.
+            let mut live: Vec<&gear_store::RoundRow> = Vec::new();
+            for round in &rounds {
+                if attempt_in_progress(tx, round)? {
+                    live.push(round);
+                }
+            }
+            for round in &rounds {
+                if round.end_at.is_none() || !attempt_in_progress(tx, round)? {
+                    continue;
+                }
+                let waiting = tx
+                    .get_task(&round.project, &round.task)?
+                    .is_some_and(|task| task.wait_on.is_some());
+                if waiting {
+                    continue;
+                }
+                let same = |other: &gear_store::RoundRow| {
+                    other.task == round.task
+                        && other.attempt == round.attempt
+                        && other.role == round.role
+                };
+                let busy_elsewhere = live.iter().any(|other| {
+                    other.seat == round.seat && other.end_at.is_none() && !same(other)
+                });
+                if busy_elsewhere {
+                    continue;
+                }
+                for other in &rounds {
+                    if other.seat == round.seat && other.end_at.is_none() && !same(other) {
+                        close_with_clock(tx, other, now)?;
+                        report.closed.push(label(other));
+                    }
+                }
+                tx.reopen_round(&key_of(round), now)?;
             }
             // 2. The session the seat carries now belongs to its open round —
             //    before the release below closes it, so the round keeps the
@@ -95,7 +127,7 @@ pub fn tick(
                     continue;
                 };
                 if matches!(seat.state, SeatState::Released | SeatState::Retired) {
-                    tx.close_round(&key_of(&round), seat.state_since)?;
+                    close_with_clock(tx, &round, seat.state_since)?;
                     report.closed.push(label(&round));
                 }
             }
@@ -152,6 +184,21 @@ fn attempt_in_progress(tx: &Tx<'_>, round: &gear_store::RoundRow) -> GearResult<
     Ok(tx
         .get_attempt(&round.project, &round.task, round.attempt)?
         .is_some_and(|attempt| attempt.state.occupies_seat()))
+}
+
+/// End a round at `at` with its clock reaching that moment (T-458): the
+/// overrun pass accounts a round each tick while it is open, and a round
+/// closed before that pass would lose the time since the last tick — a lane
+/// that reports blocked and takes its next task parks its attempt, and the
+/// parked round's clock must stop at the next round's start, not at the last
+/// tick.
+pub(crate) fn close_with_clock(
+    tx: &Tx<'_>,
+    round: &gear_store::RoundRow,
+    at: Ts,
+) -> GearResult<()> {
+    crate::overrun::process(tx, round, at)?;
+    tx.close_round(&key_of(round), at)
 }
 
 /// How a round is named in the report.
