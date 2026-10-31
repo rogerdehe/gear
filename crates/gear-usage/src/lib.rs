@@ -7,7 +7,9 @@
 //!   `~/.codex/sessions/YYYY/MM/DD`;
 //! - `claude-jsonl` — the session file under `~/.claude/projects/*/`;
 //! - `opencode-db` — the `session_message` table of
-//!   `~/.local/share/opencode/opencode.db`.
+//!   `~/.local/share/opencode/opencode.db`;
+//! - `agy-jsonl` — an Antigravity CLI conversation's transcript under
+//!   `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/`.
 //!
 //! [`usage`] sums the records of a session inside a window (`from <= time <
 //! to`); [`last_context`] reads the context of its last assistant record
@@ -38,6 +40,7 @@ pub enum UsageLog {
     CodexRollout,
     ClaudeJsonl,
     OpencodeDb,
+    AgyJsonl,
 }
 
 impl UsageLog {
@@ -48,6 +51,7 @@ impl UsageLog {
             UsageLog::CodexRollout => "codex-rollout",
             UsageLog::ClaudeJsonl => "claude-jsonl",
             UsageLog::OpencodeDb => "opencode-db",
+            UsageLog::AgyJsonl => "agy-jsonl",
         }
     }
 
@@ -58,6 +62,7 @@ impl UsageLog {
             "codex-rollout" => Some(UsageLog::CodexRollout),
             "claude-jsonl" => Some(UsageLog::ClaudeJsonl),
             "opencode-db" => Some(UsageLog::OpencodeDb),
+            "agy-jsonl" => Some(UsageLog::AgyJsonl),
             _ => None,
         }
     }
@@ -93,6 +98,7 @@ pub fn usage_in(log: UsageLog, session_ref: &str, from: Ts, to: Ts, home: &Path)
         UsageLog::CodexRollout => codex_rollout(session_ref, from, to, home),
         UsageLog::ClaudeJsonl => claude_jsonl(session_ref, from, to, home),
         UsageLog::OpencodeDb => opencode_db(session_ref, from, to, home),
+        UsageLog::AgyJsonl => agy_jsonl(session_ref, from, to, home),
     }
 }
 
@@ -111,6 +117,7 @@ pub fn last_context_in(log: UsageLog, session_ref: &str, home: &Path) -> Option<
         UsageLog::CodexRollout => codex_last_context(session_ref, home),
         UsageLog::ClaudeJsonl => claude_last_context(session_ref, home),
         UsageLog::OpencodeDb => opencode_last_context(session_ref, home),
+        UsageLog::AgyJsonl => agy_last_context(session_ref, home),
     }
 }
 
@@ -179,6 +186,83 @@ fn pi_last_context(path: &Path) -> Option<i64> {
             Some(number(usage, "input") + number(usage, "cacheRead") + number(usage, "cacheWrite"));
     }
     context
+}
+
+/// agy (Antigravity CLI): the conversation's transcript, one JSON object per
+/// line, under `~/.gemini/antigravity-cli/brain/<conversation>/
+/// .system_generated/logs/transcript.jsonl` (agy 1.4.12). A model record
+/// carries `input_tokens`, `cache_read_tokens` and `output_tokens` (the older
+/// records carry none, so they add nothing). The transcript carries no cost
+/// and no model id: the record's model is None and the caller's model prices
+/// it.
+fn agy_jsonl(session: &str, from: Ts, to: Ts, home: &Path) -> Option<Usage> {
+    let path = agy_transcript_path(home, session)?;
+    let lines = read_lines(&path)?;
+    let mut totals = Totals::default();
+    for line in lines {
+        let Some(value) = parse(&line) else { continue };
+        let Some((time, usage)) = agy_record(&value) else {
+            continue;
+        };
+        if time < from || time >= to {
+            continue;
+        }
+        totals.input += number(&usage, "input_tokens");
+        totals.output += number(&usage, "output_tokens");
+        totals.cache_read += number(&usage, "cache_read_tokens");
+        totals.cache_write += number(&usage, "cache_write_tokens");
+        totals.reasoning += number(&usage, "thinking_tokens");
+        totals.records += 1;
+    }
+    Some(totals.usage())
+}
+
+/// agy: the context of the last model record (§3.5).
+fn agy_last_context(session: &str, home: &Path) -> Option<i64> {
+    let path = agy_transcript_path(home, session)?;
+    let lines = read_lines(&path)?;
+    let mut context = None;
+    for line in lines {
+        let Some(value) = parse(&line) else { continue };
+        let Some((_, usage)) = agy_record(&value) else {
+            continue;
+        };
+        context = Some(
+            number(&usage, "input_tokens")
+                + number(&usage, "cache_read_tokens")
+                + number(&usage, "cache_write_tokens"),
+        );
+    }
+    context
+}
+
+/// The time and token fields of an agy model record, if it is one.
+fn agy_record<'a>(value: &'a Value) -> Option<(Ts, &'a Value)> {
+    if value.get("source").and_then(Value::as_str) != Some("MODEL") {
+        return None;
+    }
+    let usage = value.get("input_tokens")?;
+    let _ = usage;
+    let time = value.get("created_at").and_then(timestamp)?;
+    Some((time, value))
+}
+
+/// agy's transcript of a conversation: `brain/<session>/.system_generated/
+/// logs/transcript.jsonl` under the CLI's directory.
+fn agy_transcript_path(home: &Path, session: &str) -> Option<PathBuf> {
+    let session = session.trim();
+    if session.is_empty() || session.contains('/') {
+        return None;
+    }
+    let path = home
+        .join(".gemini")
+        .join("antigravity-cli")
+        .join("brain")
+        .join(session)
+        .join(".system_generated")
+        .join("logs")
+        .join("transcript.jsonl");
+    Some(path)
 }
 
 /// Codex: the rollout file of a thread. Every token count carries the totals
@@ -874,6 +958,7 @@ pub fn usage_records_in(
         UsageLog::CodexRollout => codex_rollout_path(home, session)?,
         UsageLog::ClaudeJsonl => claude_json_path(home, session)?,
         UsageLog::OpencodeDb => unreachable!(),
+        UsageLog::AgyJsonl => agy_transcript_path(home, session)?,
     };
     let mut previous = CodexTokens::zero();
     let mut seen = HashSet::new();
@@ -913,6 +998,30 @@ pub fn usage_records_in(
                             .get("cost")
                             .and_then(|c| c.get("total"))
                             .and_then(Value::as_f64),
+                        records: 1,
+                    },
+                });
+            }
+            UsageLog::AgyJsonl => {
+                let Some((t, _)) = agy_record(&value) else {
+                    continue;
+                };
+                if t < from || t >= to {
+                    continue;
+                }
+                result.push(UsageRecord {
+                    model: value
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    at: t,
+                    usage: Usage {
+                        input: number(&value, "input_tokens"),
+                        output: number(&value, "output_tokens"),
+                        cache_read: number(&value, "cache_read_tokens"),
+                        cache_write: number(&value, "cache_write_tokens"),
+                        reasoning: number(&value, "thinking_tokens"),
+                        cost_usd: None,
                         records: 1,
                     },
                 });

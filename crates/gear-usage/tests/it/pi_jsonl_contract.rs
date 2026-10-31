@@ -109,6 +109,8 @@ fn the_names_of_the_logs_are_the_names_of_the_profiles() {
         ("codex-rollout", UsageLog::CodexRollout),
         ("claude-jsonl", UsageLog::ClaudeJsonl),
         ("opencode-db", UsageLog::OpencodeDb),
+        // T-498: agy's conversation transcript.
+        ("agy-jsonl", UsageLog::AgyJsonl),
     ] {
         assert_eq!(UsageLog::from_name(name), Some(log), "{name}");
         assert_eq!(log.name(), name);
