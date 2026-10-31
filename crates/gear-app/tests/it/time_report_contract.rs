@@ -71,7 +71,8 @@ const NEW_TASK: &str =
 
 /// The voyage M2 the task sails on (T-333): a plan that names M2 carries its
 /// `# Milestone` block.
-const M2_BLOCK: &str = "# Milestone M2: delivery\ndone: it ships\nbar: it holds\neta: 8h\n\n";
+const M2_BLOCK: &str =
+    "# Milestone M2: delivery\ndone: it ships\nbar: it holds\neta: 8h\ndepart: now\n\n";
 
 /// T-171: the work and the waiting time of a voyage (§5.4): the lane's work,
 /// its quota wait and its declared wait, the wall clock of the voyage and the

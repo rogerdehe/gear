@@ -97,6 +97,9 @@ pub enum StaffItem {
     RebindCancel { line: usize, lane: String },
     /// `- remerge T-<n>`: retry the task's failed merge (T-92).
     Remerge { line: usize, task: String },
+    /// `- drop <milestone>`: remove a milestone with no task and no history
+    /// (T-473).
+    Drop { line: usize, milestone: String },
 }
 
 /// `- T-29 attempt=2 contract=3 candidate=abc1234 pass evidence=<path>`
@@ -188,6 +191,19 @@ pub fn milestone_fields(body: &str) -> (Option<String>, Option<String>, Option<S
         }
     }
     (done, bar, eta)
+}
+
+/// The `depart:` line of a milestone block (T-473): `now` is the only value;
+/// a timed departure is `[schedule] depart_at` in the config, not a second
+/// way. A block without the line does not depart.
+pub fn milestone_depart(body: &str) -> Option<String> {
+    for line in body.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("depart:") {
+            return Some(value.trim().to_string());
+        }
+    }
+    None
 }
 
 /// The stations a milestone block names (M5 S3), in plan order: every trimmed
@@ -674,10 +690,10 @@ fn parse_queue_field(
             }
         }
         "state" => {
-            if value != "ready" && value != "cancelled" {
+            if value != "ready" && value != "hold" && value != "cancelled" {
                 return Err(bad(
                     line,
-                    format!("`state` is `ready` or `cancelled`, got {value:?}"),
+                    format!("`state` is `ready`, `hold` or `cancelled`, got {value:?}"),
                 ));
             }
             item.state = Some(value.to_string());
@@ -882,9 +898,24 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
             }
             Ok(StaffItem::Remerge { line, task: task.to_string() })
         }
+        "drop" => {
+            let milestone = tokens
+                .next()
+                .ok_or_else(|| bad(line, "`drop` needs a milestone id"))?;
+            if milestone.is_empty() || milestone.chars().any(char::is_whitespace) {
+                return Err(bad(
+                    line,
+                    format!("`drop` needs one milestone id, got {milestone:?}"),
+                ));
+            }
+            if tokens.next().is_some() {
+                return Err(bad(line, "`drop` takes only a milestone id"));
+            }
+            Ok(StaffItem::Drop { line, milestone: milestone.to_string() })
+        }
         other => Err(bad(
             line,
-            format!("unknown staff verb {other:?}, expected temp, park, hold, release, retire, retry, rebind or remerge"),
+            format!("unknown staff verb {other:?}, expected temp, park, hold, release, retire, retry, rebind, remerge or drop"),
         )),
     }
 }
