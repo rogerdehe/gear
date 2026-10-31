@@ -389,9 +389,11 @@ fn apply_queue(
     // `[conventions].max_task_min` from the stored config, the default when
     // none parses. A rework estimate (`estimate=` on a fail verdict) is not
     // capped: it is the price of finishing a task that is already open.
-    let max_task_min = tx
+    let stored_config = tx
         .get_project(project)?
-        .and_then(|row| crate::config::parse(&row.config_toml).ok())
+        .and_then(|row| crate::config::parse(&row.config_toml).ok());
+    let max_task_min = stored_config
+        .as_ref()
         .map(|config| config.conventions.max_task_min)
         .unwrap_or(crate::config::MAX_TASK_MIN);
     let mut graph: BTreeMap<String, Vec<String>> = existing
@@ -559,6 +561,55 @@ fn apply_queue(
                 .cloned()
                 .ok_or_else(|| bad(item.line, "cannot assign an id to this NEW block"))?,
         };
+        // The `review-model:` of a task (T-500): it names an entry of
+        // `[models] review` and differs from the task's lane model, so the
+        // captain can send one task to a light reviewer and another to a
+        // strong one.
+        if let Some(model) = &item.review_model {
+            let lane_name = item
+                .lane
+                .clone()
+                .or_else(|| existing.get(&id).and_then(|task| task.lane.clone()))
+                .unwrap_or_default();
+            let Some(config) = stored_config.as_ref() else {
+                return Err(bad(
+                    item.line,
+                    "the project config cannot be read, so `review-model` cannot be checked",
+                ));
+            };
+            let review: Vec<&str> = config
+                .models
+                .review
+                .iter()
+                .map(|entry| entry.model())
+                .filter(|model| !model.is_empty())
+                .collect();
+            if !review.contains(&model.as_str()) {
+                return Err(bad(
+                    item.line,
+                    format!(
+                        "review-model {model:?} is not an entry of [models] review ({}); name one of them",
+                        review.join(", ")
+                    ),
+                ));
+            }
+            let lane_model = config
+                .lanes
+                .iter()
+                .find(|lane| lane.name == lane_name)
+                .and_then(|lane| lane.models.first())
+                .or_else(|| config.models.lanes.first())
+                .map(|entry| entry.model().to_string())
+                .filter(|model| !model.is_empty());
+            if lane_model.as_deref() == Some(model.as_str()) {
+                return Err(bad(
+                    item.line,
+                    format!(
+                        "review-model {model:?} is the model of lane {lane_name}; it must differ from it"
+                    ),
+                ));
+            }
+        }
         graph.insert(id, item.deps.clone());
     }
     if let Some(cycle) = find_cycle(&graph) {
@@ -697,6 +748,11 @@ fn apply_queue(
                 if let Some(why) = &item.fresh {
                     tx.set_task_fresh(project, &id, why)?;
                 }
+                // The `review-model:` of a task (T-500): every review of it
+                // runs on the entry the captain named.
+                if let Some(model) = &item.review_model {
+                    tx.set_task_review_model(project, &id, model)?;
+                }
                 let contract = ContractRow {
                     project: project.to_string(),
                     task: id.clone(),
@@ -752,6 +808,12 @@ fn apply_queue(
                 // block without `fresh:` keeps the mark the task has.
                 if let Some(why) = &item.fresh {
                     tx.set_task_fresh(project, id, why)?;
+                }
+                // The `review-model:` of a task (T-500): a block that names
+                // one sets it; a block without it keeps the model the task
+                // has.
+                if let Some(model) = &item.review_model {
+                    tx.set_task_review_model(project, id, model)?;
                 }
                 // The planned time (T-38): the draft may change it; a draft
                 // that says nothing keeps the estimate the task has.
@@ -2740,6 +2802,11 @@ pub fn show(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<String> {
     // unrelated to what the lane did before.
     if let Some(why) = tx.task_fresh(project, task)? {
         text.push_str(&format!("fresh: {why}\n"));
+    }
+    // The `review-model:` of a task (T-500): the review entry every review
+    // of it runs on.
+    if let Some(model) = tx.task_review_model(project, task)? {
+        text.push_str(&format!("review-model: {model}\n"));
     }
     if let Some(issue) = row.issue {
         text.push_str(&format!("issue: #{issue}\n"));

@@ -73,15 +73,23 @@ pub(crate) fn writer_model(config: &ProjectConfig, writer_seat: &str) -> Option<
 /// from the writer's **current** model (17 §0: the reviewer never runs the
 /// model it reviews). `None` when the chain is empty — then the model is not
 /// managed.
-pub(crate) fn review_entry<'a>(
+/// The entry a review of a task runs on (T-500): the `review-model:` the
+/// captain named for it, when that names an entry of the review chain; else
+/// the first entry that differs from the writer's model (T-35). Every review
+/// of the task — first review and re-review — runs on the entry this returns.
+pub(crate) fn review_entry_for<'a>(
     config: &'a ProjectConfig,
     writer_model: Option<&str>,
+    wanted: Option<&str>,
 ) -> Option<&'a ModelEntry> {
-    config
-        .models
-        .review
-        .iter()
-        .filter(|entry| !entry.model().is_empty())
+    let chain = review_chain(config);
+    if let Some(wanted) = wanted.filter(|model| !model.is_empty()) {
+        if let Some(entry) = chain.iter().find(|entry| entry.model() == wanted) {
+            return Some(*entry);
+        }
+    }
+    chain
+        .into_iter()
         .find(|entry| Some(entry.model()) != writer_model)
 }
 
