@@ -45,6 +45,15 @@ pub struct Report {
     /// The confirmed goal changes of the voyage (T-335): the user's decisions
     /// on its `done`, `bar` and `eta` (T-410, T-331).
     pub goal_changes: Vec<DecisionLine>,
+    /// The `confirmed:` lines of the voyage (T-461): every change the user
+    /// asked for and the captain recorded.
+    pub confirmed: Vec<DecisionLine>,
+    /// The tasks cancelled or moved out of the voyage, with their decision
+    /// lines (T-461).
+    pub cuts: Vec<DecisionLine>,
+    /// The captain's goal check of the voyage's done clauses (T-461), with
+    /// the evidence or the reason each clause carries.
+    pub goal_check: Vec<crate::goal::DoneCheck>,
     /// How many decisions of each kind there are besides the ★ ones.
     pub kind_counts: Vec<(String, usize)>,
     /// Every decision of the voyage (only with `--all`).
@@ -232,6 +241,19 @@ pub fn report_with(
         .filter(|d| d.kind == "user" && d.source == "gear")
         .cloned()
         .collect();
+    // T-461: every `confirmed:` line, and every cancelled or moved task with
+    // its line, are parts of the report of their own.
+    let confirmed: Vec<DecisionLine> = decisions
+        .iter()
+        .filter(|d| d.kind == "confirmed")
+        .cloned()
+        .collect();
+    let cuts: Vec<DecisionLine> = decisions
+        .iter()
+        .filter(|d| d.kind == "cut" || d.kind == "move")
+        .cloned()
+        .collect();
+    let goal_check = crate::goal::goal_check(tx, project, milestone, voyage.done.as_deref())?;
     let mut kind_counts: BTreeMap<String, usize> = BTreeMap::new();
     for decision in decisions.iter().filter(|d| !d.star) {
         *kind_counts.entry(decision.kind.clone()).or_default() += 1;
@@ -276,6 +298,9 @@ pub fn report_with(
         slowest,
         starred,
         goal_changes,
+        confirmed,
+        cuts,
+        goal_check,
         kind_counts: kind_counts.into_iter().collect(),
         all_decisions: if all { decisions } else { Vec::new() },
         frictions,
@@ -287,7 +312,7 @@ pub fn report_with(
 ///
 /// The sentence is a numbered list in one line: `(1) …; (2) …`. A clause
 /// starts with its number, so the clauses are split there.
-fn clauses_of(done: &str) -> Vec<String> {
+pub(crate) fn clauses_of(done: &str) -> Vec<String> {
     // The places a clause starts: a "(<number>)" at the beginning of the
     // text or right after a "; ".
     let bytes = done.as_bytes();
@@ -354,6 +379,43 @@ pub fn render(report: &Report) -> String {
     }
     for change in &report.goal_changes {
         lines.push(format!("  {}", decision_line(change)));
+    }
+    lines.push(String::new());
+    // 3b. The confirmed changes and the cut of the voyage (T-461).
+    lines.push(format!("Confirmed ({})", report.milestone));
+    if report.confirmed.is_empty() {
+        lines.push("  no confirmed change".to_string());
+    }
+    for change in &report.confirmed {
+        lines.push(format!("  {}", decision_line(change)));
+    }
+    lines.push(String::new());
+    lines.push(format!("Cancelled or moved ({})", report.milestone));
+    if report.cuts.is_empty() {
+        lines.push("  no cancelled or moved task".to_string());
+    }
+    for cut in &report.cuts {
+        lines.push(format!("  {}", decision_line(cut)));
+    }
+    lines.push(String::new());
+    // 3c. The captain's goal check, clause by clause, with its evidence.
+    lines.push(format!("Goal check ({})", report.milestone));
+    if report.goal_check.is_empty() {
+        lines.push("  no done clause".to_string());
+    }
+    for check in &report.goal_check {
+        let state = if check.met {
+            match &check.evidence {
+                Some(evidence) => format!("met | evidence: {evidence}"),
+                None => "met".to_string(),
+            }
+        } else {
+            match &check.why {
+                Some(why) => format!("open | {why}"),
+                None => "open".to_string(),
+            }
+        };
+        lines.push(format!("  ({}) {} · {state}", check.n, check.text));
     }
     lines.push(String::new());
     // 4. Time and tokens: the wall clock (§5.4), the work and waiting time
