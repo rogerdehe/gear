@@ -1314,6 +1314,31 @@ pub(crate) fn reconcile_config(
             meta_set(store, &key, &desired.to_string())?;
             continue;
         }
+        // T-464: a model change that runs on the seat's own CLI is switched
+        // through the CLI's own model command — the agent and its conversation
+        // stay, nothing is restarted and no handover is written. Only a CLI
+        // GEAR drives a picker for is switched in place (T-114): another CLI,
+        // a CLI without a picker, or a change of launch arguments keeps the
+        // restart path below. The durable switch plan is recorded here; the
+        // tick's switch step takes the first step and continues it.
+        let in_place = !model.is_empty()
+            && current_model.as_deref() != Some(model)
+            && current_cli == target_cli
+            && crate::switch::switches_in_place(&current_cli)
+            && previous
+                .as_ref()
+                .is_some_and(|old| old["args"] == desired["args"]);
+        if in_place {
+            match crate::switch::begin(store, herdr, &seat.id, &config, model)? {
+                Ok(()) => {}
+                // No labels anywhere: the seat is flagged, never restarted (a
+                // restart cannot carry a model through OpenCode's shared
+                // service).
+                Err(reason) => crate::quota::flag_and_alert(store, project, &seat, &reason, now)?,
+            }
+            meta_set(store, &key, &desired.to_string())?;
+            continue;
+        }
         let target = ModelEntry::Entry(gear_app::config::ModelSpec {
             model: model.into(),
             cli: Some(target_cli.into()),
@@ -2731,5 +2756,339 @@ lanes = ["minimax-cn/MiniMax-M3.1-Flash", {model="gpt-6.1-sol", cli="claude"}]
         assert_eq!(ops[0].attempt, Some(1));
         assert_eq!(ops[0].generation, plan.generation);
         assert_eq!(ops[0].state, OpState::Intended);
+    }
+}
+
+#[cfg(test)]
+mod in_place_config_tests {
+    //! T-464: a chain-head model change that runs on the seat's own CLI is
+    //! switched in place through the CLI's own model command. The agent and
+    //! its conversation stay: no exit, no start, no handover.
+    use super::*;
+    use crate::observe::{Presence, SeatObs};
+    use gear_herdr::fake::{Call, FakeHerdr};
+    use gear_model::{SeatRole, TaskState};
+    use gear_store::{testing, ContractRow, TaskRow};
+    use std::collections::BTreeSet;
+
+    const T: i64 = 1_800_000_000;
+    const PANE: &str = "w1:p5";
+    const SESSION: &str = "ses_lane";
+
+    fn config(kind: &str, head: &str) -> String {
+        format!(
+            r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+[quota]
+lanes = 1
+temps = 0
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+[[lanes]]
+name = "heat"
+duty = "work"
+owns = ["src/"]
+kind = "{kind}"
+profile = "{kind}"
+[models]
+lanes = ["{head}"]
+[models.switch."provider/old"]
+picker = "Old Provider"
+bar = "Old Provider"
+[models.switch."provider/new"]
+picker = "New Provider"
+bar = "New Provider"
+"#
+        )
+    }
+
+    /// An opencode lane on `provider/old`, its conversation `ses_lane`, and a
+    /// task in flight so a Continue can be delivered.
+    fn world(kind: &str) -> (Store, FakeHerdr, EngineCfg) {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T)?;
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config(kind, "provider/old");
+                tx.update_project(&project)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, PANE, kind, T)?;
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "captain",
+                    SeatRole::Captain,
+                    "w1:p1",
+                    "codex",
+                    T,
+                )?;
+                tx.set_binding_session_ref("p:heat", 1, SESSION)?;
+                tx.set_meta(&model_meta_key("p:heat"), "provider/old")?;
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-1".into(),
+                    rank: 1,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(10),
+                    issue: None,
+                    updated: T,
+                })?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 1,
+                    goal: "goal".into(),
+                    accept: "done".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T,
+                    mechanical: None,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(PANE, kind, AgentStatus::Idle, "p-heat");
+        herdr.set_agent_session(PANE, SESSION);
+        herdr.set_screen(PANE, "Build auto · Old Provider");
+        // esc clears the screen, /model opens the picker, the filter selects
+        // the row and the status bar shows the new model.
+        herdr.screen_after = vec![
+            ("esc".into(), "  Ask anything…".into()),
+            (
+                "/model".into(),
+                "  Search\n  Recent\n  New Provider  OpenCode Go".into(),
+            ),
+            ("New Provider".into(), "Build auto · New Provider".into()),
+        ];
+        let mut cfg = EngineCfg::default();
+        cfg.profiles = gear_herdr::builtins();
+        (store, herdr, cfg)
+    }
+
+    fn change_head(store: &mut Store, kind: &str, head: &str) {
+        store
+            .write(|tx| {
+                let mut p = tx.get_project("p")?.unwrap();
+                p.config_toml = config(kind, head);
+                p.config_version += 1;
+                tx.update_project(&p)
+            })
+            .unwrap();
+    }
+
+    fn observed(seat: &SeatRow, idle: bool) -> Vec<SeatObs> {
+        vec![SeatObs {
+            seat: seat.clone(),
+            presence: Presence::Present,
+            status: Some(if idle {
+                AgentStatus::Idle
+            } else {
+                AgentStatus::Working
+            }),
+            flags: BTreeSet::new(),
+            idle,
+            screen: None,
+            session: None,
+        }]
+    }
+
+    /// One engine tick in the engine's order: config reconciliation, then the
+    /// quota step that resumes a pending switch.
+    fn tick(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg, idle: bool, now: Ts) {
+        reconcile_config(store, herdr, cfg, &cfg.profiles, "p", now).unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        crate::quota::apply_quota_policy(
+            store,
+            herdr,
+            cfg,
+            &cfg.profiles,
+            "p",
+            &observed(&seat, idle),
+            now,
+        )
+        .unwrap();
+    }
+
+    fn texts(herdr: &FakeHerdr) -> Vec<String> {
+        herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::PaneType { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn keys(herdr: &FakeHerdr) -> Vec<String> {
+        herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::SendKeys { keys, .. } => keys.first().cloned(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_chain_head_model_change_on_the_same_cli_switches_in_place() {
+        let (mut store, mut herdr, cfg) = world("opencode");
+        // The baseline fingerprint of the lane as it runs now.
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        herdr.calls.clear();
+        change_head(&mut store, "opencode", "provider/new");
+
+        // A working agent is waited for: nothing is typed into it.
+        herdr.set_status(PANE, AgentStatus::Working);
+        for n in 1..4 {
+            tick(&mut store, &mut herdr, &cfg, false, T + n);
+        }
+        assert!(
+            texts(&herdr).is_empty() && keys(&herdr).is_empty(),
+            "no key into a working agent: {:?}",
+            herdr.calls
+        );
+        assert!(
+            crate::switch::pending(&mut store, "p:heat")
+                .unwrap()
+                .is_some(),
+            "the switch waits as a durable plan"
+        );
+
+        // At the next idle moment the CLI's own model command is driven to
+        // the chain head; the switch confirms on the status bar.
+        herdr.set_status(PANE, AgentStatus::Idle);
+        for n in 4..12 {
+            tick(&mut store, &mut herdr, &cfg, true, T + n);
+            if crate::switch::pending(&mut store, "p:heat")
+                .unwrap()
+                .is_none()
+            {
+                break;
+            }
+        }
+
+        // The model command: /model and the picker filter, each with its own
+        // Enter. No exit key and no start: the agent and the conversation stay.
+        let sent = texts(&herdr);
+        assert!(
+            sent.contains(&"/model".to_string()) && sent.contains(&"New Provider".to_string()),
+            "the model command was driven: {sent:?}"
+        );
+        assert_eq!(
+            keys(&herdr).iter().filter(|key| *key == "enter").count(),
+            2,
+            "{:?}",
+            keys(&herdr)
+        );
+        assert!(
+            !keys(&herdr).iter().any(|key| key == "ctrl+c"),
+            "the agent was not closed: {:?}",
+            keys(&herdr)
+        );
+        assert!(
+            !herdr
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::AgentStart { .. })),
+            "no restart: {:?}",
+            herdr.calls
+        );
+        assert!(
+            !herdr
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::Prompt { text, .. } if text == "/quit")),
+            "no exit command: {:?}",
+            herdr.calls
+        );
+        assert!(
+            pending(&mut store, "p:heat").unwrap().is_none(),
+            "no restart plan"
+        );
+        assert!(
+            crate::switch::pending(&mut store, "p:heat")
+                .unwrap()
+                .is_none(),
+            "the switch plan is cleared"
+        );
+
+        // The session and the generation are the ones the lane had.
+        let binding = store
+            .read(|tx| tx.get_binding("p:heat", 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.session_ref.as_deref(), Some(SESSION));
+        assert_eq!(binding.pane_id, PANE);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(seat.generation, 1, "the seat was not restarted");
+        assert_eq!(seat.state, SeatState::Active);
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&model_meta_key("p:heat")))
+                .unwrap()
+                .as_deref(),
+            Some("provider/new"),
+            "the new model is recorded"
+        );
+
+        // The change is applied: a later tick types nothing more.
+        herdr.calls.clear();
+        tick(&mut store, &mut herdr, &cfg, true, T + 20);
+        assert!(
+            texts(&herdr).is_empty() && keys(&herdr).is_empty(),
+            "settled: {:?}",
+            herdr.calls
+        );
+    }
+
+    /// T-114: a CLI GEAR does not drive a picker for (pi) is still restarted
+    /// on the next model — the model is given at the start.
+    #[test]
+    fn a_chain_head_model_change_on_a_cli_without_a_picker_restarts() {
+        let (mut store, mut herdr, cfg) = world("pi");
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        herdr.calls.clear();
+        change_head(&mut store, "pi", "provider/new");
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
+        assert!(
+            pending(&mut store, "p:heat").unwrap().is_some(),
+            "pi is restarted, not switched in place"
+        );
+        assert!(crate::switch::pending(&mut store, "p:heat")
+            .unwrap()
+            .is_none());
+        assert!(
+            !herdr
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::PaneType { .. })),
+            "no model command is typed: {:?}",
+            herdr.calls
+        );
     }
 }
