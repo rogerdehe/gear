@@ -5,5 +5,6 @@ mod claude_jsonl_contract;
 mod codex_rollout_contract;
 mod opencode_db_contract;
 mod pi_jsonl_contract;
+mod price_contract;
 mod quota_contract;
 mod shared;
