@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1021 -->
+<!-- gear-plan project=gear base=1025 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -120,6 +120,10 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - added NEW (S5, mast, before T-493): GEAR's own pi write boundary replaces guardrails' path-access: reads anywhere (cat/head/ls/git log outside the worktree), writes only inside the worktree and temp dirs; permissionGate and policies stay. Lanes of both fleets lose time on refused shell reads several times a day.
 - T-504 cancelled: the user wants the shell-read problem solved in Pi's own configuration, not in GEAR.
 - station M-7190: keep course — 45 done, projected 985m of 1020m; a few minutes of hk-dgx-1 502s stopped both lanes and the lane nudge restarted them.
+- hand recovery: hk-dgx-1 rejected the lanes' key (401) from ~15:30Z; after the user replaced it, one Continue nudge each resumed hull (T-492) and mast (T-501) in their sessions; running pi reads the new key without a restart.
+- station M-7207: keep course — 900 min, projected 1010m of 1020m after the hk-dgx-1 key outage; hull ends T-492 → T-502, mast T-501 → T-503 → T-493; moving T-503 to hull would make hull the longer lane, so no move.
+- T-501 fail on review F1 (a reviewer would be restarted mid-review on the quota return); F2/F3 logged.
+- hand fix (review.rs last_job_recorded): a direction record counts only for the seat it names; another project's T-424 re-review waited for good on review-3 after a later T-434 check on review-1 rewrote the record review-3's result was matched against. Test: a_direction_result_frees_its_seat_after_a_later_check_takes_the_record; gate 2283 passed.
 
 # Queue
 
