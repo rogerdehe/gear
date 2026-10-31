@@ -149,3 +149,4 @@
 - M6 (2026-10-31, F-235): a rework packet told the lane to "rebase on dev first", but GEAR denies force-push; the lane merged dev instead. Packets should say "merge dev" (or the configured way), never rebase.
 - M6 (2026-10-31, M-6655): T-457 merged (O-5340, after an earlier failed merge O-5298) but its merge closed only mast/t457; review/t457, already in dev, stayed on origin and rang the 120-min branch item. A confirmed merge deletes the review branch it merged.
 - M6 (2026-10-31, F-238): T-457 attempt 2's reviewer could not push its review: origin/review/t457 still held attempt 1's review and the new candidate is not its descendant. A new attempt's review starts from a review branch reset to its candidate (same family as the review branch the merge left behind).
+- M6 (2026-10-31): the built-in DeepSeek price table does not model Chinese public holidays (off-peak all day); a holiday weekday is priced at the peak rate inside the peak windows.
