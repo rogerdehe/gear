@@ -160,6 +160,29 @@ pub struct MessageRow {
     pub meta: Option<String>,
 }
 
+/// The sender GEAR's engine writes its own notices under (T-454).
+pub const ENGINE_SENDER: &str = "engine";
+
+/// The body the engine's notice that closes a direction check under its
+/// reviewer opens with (T-444, T-454 v2).
+pub const DIRECTION_CLOSED_PREFIX: &str = "The direction check of ";
+
+/// The body of that notice (T-444, T-454 v2): one definition, so the sender
+/// (`review.rs`) and its readers (the doorbell, `message_belongs`) cannot
+/// drift apart.
+pub fn direction_closed_notice_body(task: &str, attempt: i64) -> String {
+    format!(
+        "{DIRECTION_CLOSED_PREFIX}{task} attempt {attempt} is closed: the attempt was handed in or ended. Send nothing for it; end your turn."
+    )
+}
+
+/// Is this the notice that closes a direction check under its reviewer? It is
+/// the one engine notice that reaches a working agent, and the one a freed
+/// reviewer seat still owns (T-454 v2).
+pub fn is_direction_closed_notice(message: &MessageRow) -> bool {
+    message.sender == ENGINE_SENDER && message.body.starts_with(DIRECTION_CLOSED_PREFIX)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewOp {
     pub project: String,
@@ -4080,6 +4103,45 @@ fn view_from_row(row: &rusqlite::Row) -> rusqlite::Result<ViewRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-454 v2 (F2 of the T-454 review): the body of the direction-closed
+    /// notice and the prefix its readers recognise have one definition, so a
+    /// reword of the body cannot silently disable the interrupt path.
+    #[test]
+    fn the_direction_closed_notice_body_carries_the_recognised_prefix() {
+        let body = direction_closed_notice_body("T-7", 2);
+        assert!(
+            body.starts_with(DIRECTION_CLOSED_PREFIX),
+            "{body:?} must open with {DIRECTION_CLOSED_PREFIX:?}"
+        );
+        let message = MessageRow {
+            project: "p".into(),
+            id: "M-1".into(),
+            thread: "direction:T-7:2:abc".into(),
+            task: Some("T-7".into()),
+            attempt: Some(2),
+            sender: ENGINE_SENDER.into(),
+            sender_gen: 0,
+            recipient: "p:review-1".into(),
+            kind: MsgKind::Instruction,
+            urgent: false,
+            body,
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            wait_on: None,
+            wait_until: None,
+            result: None,
+            created: 0,
+            resolved: None,
+            meta: None,
+        };
+        assert!(is_direction_closed_notice(&message));
+        // Any other engine notice is not it.
+        let mut other = message.clone();
+        other.body = "No push to heat/t1 for 20 min.".into();
+        assert!(!is_direction_closed_notice(&other));
+    }
 
     // Both connections see the old schema before the writer commits. The
     // opener must choose its work from the version under BEGIN IMMEDIATE.
