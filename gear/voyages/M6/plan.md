@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1007 -->
+<!-- gear-plan project=gear base=1008 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -108,6 +108,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7125: keep course — 780 min mark, projected 872m of 1020m, same picture as M-7124.
 - T-486 verdict fail after its merge gate: home_multi_contract depends on the live Herdr pane and fails under the engine's gate; rework to the scratch::gear fixture.
 - added NEW (S5, hull, after T-500): a seat that fell back on quota returns to its first model at the next task boundary after that model's reset; today a fallback lane stays on the backup for good.
+- T-498 pass over review F1: agy's transcript has no model field and the model sits only in an undocumented protobuf; in normal use the seat's configured model prices the round, so reading it from the blob is an edge case logged to the backlog, not a block (bar: DELIVERABLE).
 
 # Queue
 
