@@ -1644,6 +1644,7 @@ fn stash_review_tree(
 }
 
 /// Prepare a checkout; a live reviewer on an unfinished job keeps its branch.
+#[allow(clippy::too_many_arguments)]
 fn prepare_review_tree(
     git: &dyn ReviewGit,
     store: &mut Store,
@@ -1654,6 +1655,7 @@ fn prepare_review_tree(
     remote: &str,
     branch: &str,
     task: &ReviewTask,
+    direction: bool,
     now: Ts,
 ) -> GearResult<bool> {
     let git_error =
@@ -1738,9 +1740,29 @@ fn prepare_review_tree(
         &["checkout", "-f", "-B", branch, &task.candidate],
     )
     .map_err(git_error)?;
+    // T-483: the review branch on the remote is cut at **this** attempt's
+    // candidate before the reviewer starts, so the reviewer's push of its
+    // review commit is a fast-forward. An earlier attempt's review stays in
+    // that attempt's record: the branch is only a pointer, and the earlier
+    // review commit stays reachable through it. A direction check has no
+    // review branch of the task (T-456): its own branch is not pointed.
+    if !direction {
+        review_git(
+            git,
+            path,
+            &[
+                "push",
+                "--force",
+                remote,
+                &format!("HEAD:refs/heads/{branch}"),
+            ],
+        )
+        .map_err(git_error)?;
+    }
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_seat_tree(
     git: &dyn ReviewGit,
     store: &mut Store,
@@ -1751,6 +1773,7 @@ fn prepare_seat_tree(
     remote: &str,
     branch: &str,
     task: &ReviewTask,
+    direction: bool,
     now: Ts,
 ) -> GearResult<bool> {
     let key = format!("engine.review_tree.{}", seat.id);
@@ -1771,6 +1794,7 @@ fn prepare_seat_tree(
         remote,
         branch,
         task,
+        direction,
         now,
     ) {
         Ok(true) => {}
@@ -2257,6 +2281,7 @@ fn start_reviewer(
             &config.conventions.remote,
             &branch,
             task,
+            direction,
             now,
         )? {
             return Ok(Started::NotYet);
@@ -2371,6 +2396,7 @@ fn start_reviewer(
         &config.conventions.remote,
         &branch,
         task,
+        direction,
         now,
     )? {
         return Ok(Started::NotYet);
@@ -6724,6 +6750,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             "origin",
             "direction/t-1",
             &task,
+            true,
             T0,
         )
         .unwrap();
@@ -6737,6 +6764,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             "origin",
             "review/t1",
             &task,
+            false,
             T0 + 1,
         )
         .unwrap();
@@ -6819,6 +6847,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             "origin",
             "review/t1",
             &task,
+            false,
             T0
         )
         .unwrap());
@@ -6834,6 +6863,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             "origin",
             "review/t1",
             &task,
+            false,
             T0
         )
         .unwrap());
@@ -6911,6 +6941,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             "origin",
             "review/t1",
             &task,
+            false,
             T0
         )
         .unwrap());
@@ -6990,6 +7021,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             "origin",
             "review/t1",
             &task,
+            false,
             T0
         )
         .unwrap());
@@ -7036,11 +7068,119 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             "origin",
             "review/t1",
             &task,
+            false,
             T0
         )
         .unwrap());
         assert_eq!(sh(&work, "git rev-parse HEAD"), candidate);
         assert_eq!(sh(&work, "git rev-parse --abbrev-ref HEAD"), "review/t1");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// T-483: the review of a second attempt starts with the remote's review
+    /// branch at **that** attempt's candidate, so the reviewer's push of its
+    /// review commit is a fast-forward. Before this, `origin/review/t<n>` held
+    /// the earlier attempt's review, the new candidate did not descend from
+    /// it, and the reviewer's push was refused (T-457 attempt 2). The earlier
+    /// review stays in that attempt's record: the branch is only a pointer.
+    #[test]
+    fn a_second_attempts_review_branch_is_pointed_at_its_candidate() {
+        let root = crate::testtmp::temp("gear-review-second-attempt");
+        sh(
+            &root,
+            "git init -q --bare origin.git && git init -q -b dev work",
+        );
+        let work = root.join("work");
+        std::fs::write(work.join("readme"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        // Attempt 1: its candidate, and its review commit on review/t1.
+        let first = sh(
+            &work,
+            "git switch -qc heat/t1 && echo one > one.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm one && git rev-parse HEAD",
+        );
+        publish(&work, "heat/t1");
+        let earlier_review = sh(
+            &work,
+            "git switch -qc review/t1 && echo r1 > r1.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm r1 && git rev-parse HEAD",
+        );
+        publish(&work, "review/t1");
+        // Attempt 2 of the task: a new candidate that does not descend from
+        // the earlier attempt's review.
+        let second = sh(
+            &work,
+            "git switch -qc heat/t1-v2 dev && echo two > two.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm two && git rev-parse HEAD",
+        );
+        publish(&work, "heat/t1-v2");
+        assert_eq!(
+            sh(
+                &root,
+                &format!("git -C origin.git merge-base --is-ancestor {second} review/t1; echo $?")
+            ),
+            "1",
+            "the new candidate does not descend from the earlier review"
+        );
+        assert_ne!(first, second, "the attempt's candidate is new");
+        let seat = root.join("seat");
+        sh(
+            &work,
+            &format!("git worktree add -q -b home/seat {} dev", seat.display()),
+        );
+        let mut store = world(CONFIG);
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut herdr = FakeHerdr::new();
+        let task = ReviewTask {
+            task: "T-1".into(),
+            attempt: 2,
+            writer: "p:heat".into(),
+            lane: "heat".into(),
+            candidate: second.clone(),
+        };
+        assert!(prepare_review_tree(
+            &RealReviewGit,
+            &mut store,
+            &mut herdr,
+            "p",
+            work.to_str().unwrap(),
+            seat.to_str().unwrap(),
+            "origin",
+            "review/t1",
+            &task,
+            false,
+            T0
+        )
+        .unwrap());
+        // The remote's review branch is at the new candidate …
+        assert_eq!(sh(&root, "git -C origin.git rev-parse review/t1"), second);
+        assert_eq!(sh(&seat, "git rev-parse HEAD"), second);
+        // … and the reviewer's push of its review commit is a fast-forward.
+        let review = sh(
+            &seat,
+            "echo r2 > r2.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm r2 \
+             && git push -q origin HEAD:refs/heads/review/t1 && git rev-parse HEAD",
+        );
+        assert_eq!(sh(&root, "git -C origin.git rev-parse review/t1"), review);
+        assert_eq!(
+            sh(
+                &root,
+                &format!("git -C origin.git merge-base --is-ancestor {second} review/t1; echo $?")
+            ),
+            "0",
+            "the review commit is a fast-forward of the candidate"
+        );
+        // The earlier attempt's review is still in the repository: moving the
+        // branch deleted nothing.
+        assert_eq!(
+            sh(
+                &root,
+                &format!("git -C origin.git cat-file -t {earlier_review}")
+            ),
+            "commit"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
