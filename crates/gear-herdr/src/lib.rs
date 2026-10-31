@@ -95,6 +95,23 @@ pub fn queues_input(kind: &str) -> bool {
     matches!(kind, "pi" | "claude")
 }
 
+/// Answer the startup dialog an agent's screen shows (T-457).
+///
+/// Reads the pane's tail, matches the profile's dialogs and sends the keys of
+/// the one that is open. `None` = no dialog open (or the screen could not be
+/// read): nothing was sent. A dialog is answered although Herdr reports the
+/// agent done/idle — the screen is the only place it shows, and text typed
+/// into it is lost.
+pub fn answer_dialog(
+    herdr: &mut dyn HerdrAct,
+    pane: &str,
+    profile: &Profile,
+) -> Option<Outcome<()>> {
+    let screen = herdr.read_tail(pane, profile.tail_lines.max(1)).ok()?;
+    let dialog = profile.dialog(&screen)?;
+    Some(herdr.send_keys(pane, &dialog.keys))
+}
+
 /// The processes of a pane, as Herdr reports them (T-104): its shell, the
 /// foreground process group, and the terminal (`/dev/ttys…`). The one pane
 /// fact a shell cannot set with an environment variable — an identity check
@@ -123,8 +140,8 @@ pub struct PaneProcess {
     pub cmdline: Option<String>,
 }
 pub use profile::{
-    builtin, builtins, classify_screen, render_args, validate_template, Profile, ProfilePatch,
-    ScreenFlag,
+    builtin, builtins, classify_screen, render_args, validate_template, Dialog, Profile,
+    ProfilePatch, ScreenFlag,
 };
 
 /// Reading Herdr failed. Callers must treat this as "observation failed",

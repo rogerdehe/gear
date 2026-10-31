@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=924 -->
+<!-- gear-plan project=gear base=928 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3).
 
@@ -38,6 +38,8 @@ station S4: the captain's plan tools, released as v0.6.3
 - 2026-10-31 16:30 scope: first in hull's queue: a lane keeps its conversation from task to task unless the captain marks `fresh: <why>`; a CLI change starts fresh with the earlier session named for reference | why: user: the M4 rule L7 (new conversation unless `followup-of`) reversed the user's design; the captain's error | else: -
 - 2026-10-31 16:50 scope: audit of the user's decisions against the code (nine departures): sessions (T-481, T-480), new-session recovery mark (T-481), CLI switch handover (S2 agent-switch task and T-481's reference line), reviewer idle release by time (elastic counts task), strong-model lanes may design (role charter task), captain cannot lower the bar (T-461), reviewer named after its seat (new S4 task); the 'round cap escalates to the user' line was not the user's: docs/design/17-conventions.md now says the captain decides | why: user: priorities may move, his design never | else: -
 - 2026-10-31 17:10 hand-fix: skills/gear/references/captain.md drops "you write no product code" and says the captain fixes a few-line block or an urgent fault itself (commit, merge gate, one decision line, release if users wait), a task only when more is needed and nothing urgent waits | why: user: in an emergency lane and review rounds defeat the tool's purpose, speed
+- 2026-10-31 17:40 hand-fix: a reply resolves a late merge-failed item of a cancelled task (verdict_hint skips cancelled tasks) | why: another project's late O-4007 item on cancelled T-404 asked for a remerge or a fail verdict that a cancelled task cannot take
+- station M-6645: keep course — projected 616m of 720m; hull carries 496m against mast's 232m, so when mast runs dry the next unstarted hull task that touches no engine file moves to mast
 
 # Queue
 

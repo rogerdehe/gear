@@ -61,6 +61,10 @@ fn codex_is_built_in_and_never_shows_its_update_dialog() {
             // worktree at start), so no "Trust this folder?" dialog.
             "-c".to_string(),
             "projects={\"{repo_root}\"={trust_level=\"trusted\"}}".to_string(),
+            // T-457: a resume uses the directory Codex was started in (the
+            // seat's own worktree) and never asks which working directory.
+            "-c".to_string(),
+            "tui.resume_cwd=\"current\"".to_string(),
         ]
     );
 }

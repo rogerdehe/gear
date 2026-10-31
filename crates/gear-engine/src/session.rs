@@ -1037,6 +1037,72 @@ mod tests {
     }
 
     #[test]
+    fn a_codex_new_conversation_answers_the_worktree_dialog_first() {
+        // T-457: Codex 0.165's `/new` opens "Where should the new
+        // conversation run?" and Herdr still reports the agent idle. The
+        // answer (Enter, the preselected current worktree) goes before the
+        // step records the new session, so no delivery lands in the dialog.
+        const CODEX_NEW_SCREEN: &str = "\
+  Where should the new conversation run?
+  1. Use current Git worktree
+     Keep using the current working directory
+  2. Create new Git worktree
+     Create a separate checkout of this repository in another directory
+";
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let action = Action::New;
+        let run = |store: &mut Store, herdr: &mut FakeHerdr, now| {
+            crate::session_runner::run(
+                store,
+                herdr,
+                &cfg(),
+                &seat,
+                "T-1",
+                1,
+                Role::Dev,
+                &action,
+                false,
+                now,
+            )
+            .unwrap()
+        };
+        assert_eq!(run(&mut store, &mut herdr, T0), Prep::Wait);
+        assert_eq!(session_state(&mut store, "p:heat")["step"], "wait_action");
+        let enters = |herdr: &FakeHerdr| {
+            herdr
+                .calls
+                .iter()
+                .filter(|call| {
+                    matches!(call, gear_herdr::fake::Call::SendKeys { keys, .. } if keys == &["enter"])
+                })
+                .count()
+        };
+        let submitted = enters(&herdr);
+        // The dialog opens with the agent still idle: the answer goes, and
+        // the step records nothing yet.
+        herdr.set_screen("w1:p1", CODEX_NEW_SCREEN);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 1), Prep::Wait);
+        assert_eq!(enters(&herdr), submitted + 1, "the dialog is answered");
+        assert_eq!(session_state(&mut store, "p:heat")["step"], "wait_action");
+        // The dialog is gone and the conversation is idle: the new session is
+        // recorded on the usual codex timing.
+        herdr.set_screen(
+            "w1:p1",
+            "  > \n  gpt-6.1-sol high · Context 0% used · weekly 94% left",
+        );
+        assert_eq!(run(&mut store, &mut herdr, T0 + 2), Prep::Wait);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 6), Prep::Ready);
+        let attempt = store
+            .read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.session_action.as_deref(), Some("new-unconfirmed"));
+    }
+
+    #[test]
     fn a_refused_enter_stays_at_enter_and_goes_on_a_later_call_while_working() {
         let mut store = world();
         let mut herdr = FakeHerdr::new();

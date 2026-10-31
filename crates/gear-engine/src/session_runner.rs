@@ -466,6 +466,20 @@ pub(crate) fn run(
         return Ok(Prep::Wait);
     }
     if phase == "wait_action" {
+        // T-457: Codex 0.165 opens "Where should the new conversation run?"
+        // after `/new`. Herdr reports the agent done/idle while the dialog
+        // waits, and the text of the next delivery would land in it. The
+        // profile's answer keys take it (Enter keeps the seat in its current
+        // worktree); the step waits a tick for the conversation to start.
+        if action_name == "new"
+            && matches!(
+                gear_herdr::answer_dialog(herdr, &binding.pane_id, &profile),
+                Some(Outcome::Ok(()))
+            )
+        {
+            save(store, seat, &state)?;
+            return Ok(Prep::Wait);
+        }
         let elapsed = now.saturating_sub(time(&state, "t0"));
         if action_name == "compact"
             && occupant
@@ -733,6 +747,19 @@ pub(crate) fn run(
         return Ok(Prep::Wait);
     }
     if phase == "wait_resume" || phase == "wait_fallback" {
+        // T-457: a resume from another directory asks which working directory
+        // to use. The start args keep it from showing
+        // (`tui.resume_cwd="current"` — the seat's own directory); if it does
+        // show, the profile answers it with the preselected current directory.
+        if phase == "wait_resume"
+            && matches!(
+                gear_herdr::answer_dialog(herdr, &binding.pane_id, &profile),
+                Some(Outcome::Ok(()))
+            )
+        {
+            save(store, seat, &state)?;
+            return Ok(Prep::Wait);
+        }
         if is_ready {
             if phase == "wait_resume" && state["compact_after"].as_bool().unwrap_or(false) {
                 state["action"] = json!("compact");
