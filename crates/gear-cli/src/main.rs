@@ -4488,7 +4488,7 @@ mod tests {
     fn plan_draft_with_milestone() -> String {
         // T-461: a new milestone's departure needs the user's word — the
         // `confirmed:` line in this same draft and `--confirmed` on the apply.
-        "<!-- gear-plan project=p base=0 -->\n# Milestone M2: two\ndone: both ship\nbar: fast\neta: 1h\n\n# Decisions\n- 2026-10-27 10:20 confirmed: M2 departs with its first tasks | why: the user asked for it\n\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"
+        "<!-- gear-plan project=p base=0 -->\n# Milestone M2: two\ndone: both ship\nbar: fast\neta: 1h\ndepart: now\n\n# Decisions\n- 2026-10-27 10:20 confirmed: M2 departs with its first tasks | why: the user asked for it\n\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"
             .to_string()
     }
 

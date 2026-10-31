@@ -75,6 +75,11 @@ pub fn missing_blocks(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResult<V
             voyage.bar.as_deref().unwrap_or_default(),
             voyage.eta.as_deref().unwrap_or_default()
         );
+        // T-473: a departed voyage's block carries its `depart: now` line, so
+        // the written-back block can be applied again as it stands.
+        if voyage.departure.is_some() {
+            block.push_str("depart: now\n");
+        }
         for station in tx.voyage_stations(project, milestone)? {
             block.push_str(&format!("station {}: {}\n", station.id, station.needs));
         }

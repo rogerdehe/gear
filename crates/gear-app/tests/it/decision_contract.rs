@@ -511,7 +511,7 @@ fn a_plan_without_a_milestone_logs_to_the_current_voyage() {
     // A voyage that departs: a milestone block and a task on it.
     run_confirmed(
         &mut s,
-        "# Milestone M1: the first voyage\ndone: something\nbar: a bar\neta: 1h\n\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
+        "# Milestone M1: the first voyage\ndone: something\nbar: a bar\neta: 1h\ndepart: now\n\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
         "r1",
     )
     .unwrap();
@@ -547,7 +547,7 @@ fn a_plan_without_a_milestone_logs_to_the_current_voyage() {
 #[test]
 fn a_moved_task_is_recorded_in_the_voyage_it_left() {
     let mut s = world();
-    let voyages = "# Milestone M1: one\ndone: one\nbar: a bar\neta: 1h\n\n# Milestone M2: two\ndone: two\nbar: a bar\neta: 1h\n\n";
+    let voyages = "# Milestone M1: one\ndone: one\nbar: a bar\neta: 1h\ndepart: now\n\n# Milestone M2: two\ndone: two\nbar: a bar\neta: 1h\ndepart: now\n\n";
     run_confirmed(
         &mut s,
         &format!("{voyages}# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"),
