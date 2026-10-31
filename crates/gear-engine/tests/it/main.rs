@@ -77,6 +77,7 @@ mod config_profile_onboard;
 mod contract_update;
 mod deliver_confirm_contract;
 mod deliver_contract;
+mod delivery_landing_contract;
 mod dispatch_contract;
 mod dispatch_tick_contract;
 mod doorbell_contract;

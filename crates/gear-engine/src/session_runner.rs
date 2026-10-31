@@ -76,6 +76,31 @@ fn enter(herdr: &mut dyn HerdrAct, pane: &str) -> bool {
     )
 }
 
+/// How many lines of the pane the typed command is looked for in (T-453).
+const COMPOSER_READ_LINES: u32 = 12;
+
+/// Whether `text` still sits in the pane's input box (T-453): the Enter did not
+/// take. A failed read says nothing is held (the next call types).
+fn composer_holds(herdr: &mut dyn HerdrAct, pane: &str, text: &str) -> bool {
+    herdr
+        .read_tail(pane, COMPOSER_READ_LINES)
+        .map(|tail| crate::composer::holds(&tail, text))
+        .unwrap_or(false)
+}
+
+/// Type `command` into the pane and submit it (T-434), then confirm the Enter
+/// took: the command no longer shows in the composer (T-453). A refused type
+/// changes nothing. `false` = the text is still in the box; the step waits at
+/// `enter` and tries again on a later tick.
+fn type_and_submit(herdr: &mut dyn HerdrAct, pane: &str, command: &str) -> Option<bool> {
+    if !composer_holds(herdr, pane, command)
+        && matches!(herdr.pane_type(pane, command), Outcome::Refused { .. })
+    {
+        return None;
+    }
+    Some(enter(herdr, pane) && !composer_holds(herdr, pane, command))
+}
+
 /// The step a submitted session command waits in, with the `t0` and the
 /// compact `offset` that belong to this submission (T-434).
 fn submitted(seat: &SeatRow, state: &mut Value, action_name: &str, now: Ts) {
@@ -404,15 +429,13 @@ pub(crate) fn run(
                 now,
             );
         } else {
-            if matches!(
-                herdr.pane_type(&binding.pane_id, command),
-                Outcome::Refused { .. }
-            ) {
+            // T-434: type and Enter in this same step; T-453: the next step
+            // goes only when the composer emptied — a command left in the box
+            // would join the packet typed after it.
+            let Some(took) = type_and_submit(herdr, &binding.pane_id, command) else {
                 return Ok(Prep::Wait);
-            }
-            // T-434: type and Enter in this same step; a refused Enter waits
-            // at "enter" for a later call, the text already in the box.
-            if enter(herdr, &binding.pane_id) {
+            };
+            if took {
                 submitted(seat, &mut state, &action_name, now)
             } else {
                 step(seat, &mut state, "enter", now);
@@ -428,8 +451,15 @@ pub(crate) fn run(
             return Ok(Prep::Wait);
         }
         // T-434: the text is already in the box, so a later Enter does not
-        // wait for the agent to be idle or done again.
-        if enter(herdr, &binding.pane_id) {
+        // wait for the agent to be idle or done again. T-453: the step moves
+        // on only when the composer emptied.
+        let command = match action_name.as_str() {
+            "new" => profile.new_session.as_str(),
+            "compact" => profile.compact.as_str(),
+            "resume" => profile.exit_command.as_deref().unwrap_or(""),
+            _ => "",
+        };
+        if enter(herdr, &binding.pane_id) && !composer_holds(herdr, &binding.pane_id, command) {
             submitted(seat, &mut state, &action_name, now);
             save(store, seat, &state)?;
         }
@@ -560,8 +590,11 @@ pub(crate) fn run(
                     Outcome::Refused { .. }
                 ) {
                     // T-434: the exit command leaves with its Enter too;
-                    // "fallback_enter" stays for a refused Enter.
-                    if enter(herdr, &binding.pane_id) {
+                    // "fallback_enter" stays for a refused Enter. T-453: the
+                    // step moves on only when the composer emptied.
+                    if enter(herdr, &binding.pane_id)
+                        && !composer_holds(herdr, &binding.pane_id, command)
+                    {
                         step(seat, &mut state, "fallback_wait_exit", now)
                     } else {
                         step(seat, &mut state, "fallback_enter", now);
@@ -587,7 +620,14 @@ pub(crate) fn run(
         if now.saturating_sub(time(&state, "step_at")) >= 30 {
             return recovery_failed(store, seat, &mut state, &phase, now);
         }
-        if is_ready && enter(herdr, &binding.pane_id) {
+        if is_ready
+            && enter(herdr, &binding.pane_id)
+            && !composer_holds(
+                herdr,
+                &binding.pane_id,
+                profile.exit_command.as_deref().unwrap_or(""),
+            )
+        {
             step(seat, &mut state, "fallback_wait_exit", now);
             save(store, seat, &state)?;
         }
