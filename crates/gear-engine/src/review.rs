@@ -2102,7 +2102,7 @@ fn start_reviewer(
         .map(|row| config.repo_of_task(row))
         .unwrap_or_else(|| config.repo_of_lane(&task.lane));
     // The job's branch, and the seat's own anchor (its workspace label is
-    // long-lived; the agent of a job is named after its task).
+    // long-lived; the reviewer's agent carries its seat's name, T-482).
     let branch = if direction {
         format!("direction/{}", task.task.to_lowercase())
     } else {
@@ -2119,7 +2119,7 @@ fn start_reviewer(
         &seat.name,
     );
     let seat_label = worktree_label(config, &seat.name, &repo);
-    let label = agent_name(config, &task.task);
+    let label = agent_name(config, &seat.name);
     let model = entry.map(ModelEntry::model);
 
     // 1. the pane: the seat's, from its binding (an interrupted start or a new
@@ -3330,14 +3330,13 @@ fn worktree_label(config: &ProjectConfig, seat: &str, repo: &Repo) -> String {
     }
 }
 
-/// The Herdr agent name (and workspace label) of a task's reviewer:
-/// `<project>-review-<task-id>` — project prefix plus what the agent is for
-/// (kickoff naming rule, 17 §2).
-fn agent_name(config: &ProjectConfig, task: &str) -> String {
-    // One rule with `names::desired` (T-134 review F1): the reviewer's agent
-    // carries the task it reviews, so a name Herdr cleared is restored to the
-    // same name the review started with.
-    crate::names::review_agent_name(&config.project.id, task)
+/// The Herdr agent name of a reviewer: its seat's name, `<project>-review-<k>`
+/// (T-482) — the seat is long-lived, the task under review shows in its title.
+fn agent_name(config: &ProjectConfig, seat: &str) -> String {
+    // One rule with `names::desired` (T-134 review F1): the agent carries the
+    // seat's name, so a name Herdr cleared is restored to the same name the
+    // review started with.
+    crate::names::agent_name(&config.project.id, seat)
 }
 
 /// The packet the reviewer gets: what to review, where the rules are and the
@@ -9025,7 +9024,7 @@ review = [
                 // The engine recorded the start it asked Herdr for.
                 tx.set_meta(
                     &start_key("p:review-1", 1),
-                    &serde_json::json!({ "pane": pane, "kind": "codex", "label": "p-review-t1" })
+                    &serde_json::json!({ "pane": pane, "kind": "codex", "label": "p-review-1" })
                         .to_string(),
                 )?;
                 Ok(())
@@ -9155,7 +9154,8 @@ review = [
     fn two_jobs_on_one_seat_reuse_the_warm_worktree() {
         // T-18: a seat keeps its worktree and its build cache between jobs.
         // The second job takes the released seat, uses the same worktree (no
-        // second worktree_open/create) and its agent is named after its task.
+        // second worktree_open/create) and its agent keeps its seat's name
+        // (T-482).
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
 
@@ -9187,7 +9187,7 @@ review = [
             worktrees_after_first,
             vec![("p/review-1".to_string(), "dev".to_string())]
         );
-        // The job's agent is named after its task.
+        // The job's agent carries its seat's name (T-482).
         let names: Vec<String> = herdr
             .calls
             .iter()
@@ -9196,7 +9196,7 @@ review = [
                 _ => None,
             })
             .collect();
-        assert_eq!(names, vec!["p-review-t1".to_string()]);
+        assert_eq!(names, vec!["p-review-1".to_string()]);
 
         // The job ends (T-17 releases it) and a second task is handed in.
         store
@@ -9323,7 +9323,7 @@ review = [
             .collect();
         assert_eq!(
             names,
-            vec!["p-review-t1".to_string(), "p-review-t2".to_string()]
+            vec!["p-review-1".to_string(), "p-review-1".to_string()]
         );
         // The checkout took the second job's branch at its candidate.
         let checkouts = REVIEW_GIT_CALLS.with(|calls| {
