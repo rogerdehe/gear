@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=928 -->
+<!-- gear-plan project=gear base=929 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3).
 
@@ -40,6 +40,7 @@ station S4: the captain's plan tools, released as v0.6.3
 - 2026-10-31 17:10 hand-fix: skills/gear/references/captain.md drops "you write no product code" and says the captain fixes a few-line block or an urgent fault itself (commit, merge gate, one decision line, release if users wait), a task only when more is needed and nothing urgent waits | why: user: in an emergency lane and review rounds defeat the tool's purpose, speed
 - 2026-10-31 17:40 hand-fix: a reply resolves a late merge-failed item of a cancelled task (verdict_hint skips cancelled tasks) | why: another project's late O-4007 item on cancelled T-404 asked for a remerge or a fail verdict that a cancelled task cannot take
 - station M-6645: keep course — projected 616m of 720m; hull carries 496m against mast's 232m, so when mast runs dry the next unstarted hull task that touches no engine file moves to mast
+- 2026-10-31 18:20 hand-fix: deleted origin/review/t457 by hand | why: T-457 was merged (O-5340) but the merge left its review branch, which rang the 120-min branch item; root cause in the M6 backlog
 
 # Queue
 
