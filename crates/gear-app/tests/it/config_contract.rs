@@ -97,7 +97,9 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             captain_item_stale_min: 15,
             lane_busy_idle_min: 10,
             delivery_grace_s: 180,
-            handin_base_window_min: 30
+            handin_base_window_min: 30,
+            switch_grace_min: 10,
+            switch_at_once: false
         }
     );
     assert!(cfg.profiles.is_empty());

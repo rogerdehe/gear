@@ -105,6 +105,10 @@ pub const TEMPLATES: &[(&str, &str)] = &[
         "templates/standard.md",
         include_str!("../../../skills/gear/templates/standard.md"),
     ),
+    (
+        "templates/handover.md",
+        include_str!("../../../skills/gear/templates/handover.md"),
+    ),
 ];
 
 /// The name of the skill: the directory it is installed as, and the name in
