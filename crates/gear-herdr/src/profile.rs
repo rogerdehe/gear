@@ -859,7 +859,10 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             }],
             new_session: String::new(),
             compact: String::new(),
-            usage_log: None,
+            // T-498: a conversation's transcript under
+            // `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/
+            // logs/transcript.jsonl` carries its token counts.
+            usage_log: Some("agy-jsonl".into()),
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--dangerously-skip-permissions".into()],
@@ -1002,6 +1005,7 @@ mod tests {
             vec!["ctrl+c".to_string(), "ctrl+c".to_string()]
         );
         assert!(agy.exit_command.is_none());
+        assert_eq!(agy.usage_log.as_deref(), Some("agy-jsonl"));
         assert!(agy.verified);
 
         // The project-trust dialog of a fresh worktree, as agy draws it.
