@@ -1478,7 +1478,14 @@ fn last_job_recorded(store: &mut Store, project: &str, seat: &SeatRow) -> GearRe
             let job = tx
                 .get_meta(&direction_key(project, &task, attempt))?
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-            let sha = job.as_ref().and_then(|job| {
+            // The check this seat ran is the job record only while the record
+            // still names this seat: a later check of the same attempt (a new
+            // candidate) on another seat rewrites the record, and this seat's
+            // own result then answers for its own job.
+            let own_job = job
+                .as_ref()
+                .is_some_and(|job| job["seat"].as_str().is_none_or(|owner| owner == seat.id));
+            let sha = job.as_ref().filter(|_| own_job).and_then(|job| {
                 job["checked_sha"]
                     .as_str()
                     .or_else(|| job["sha"].as_str())
@@ -12304,6 +12311,80 @@ profile = "opencode"
             "the recorded hand-in comes first"
         );
     }
+    /// A seat ran the direction check of T-1 attempt 1 and answered it; a
+    /// later check of the same attempt (a new candidate) on another seat then
+    /// rewrote the task's direction record. The first seat's own result still
+    /// ends its job, so it comes free (another project's re-review waited on
+    /// such a seat for good).
+    #[test]
+    fn a_direction_result_frees_its_seat_after_a_later_check_takes_the_record() {
+        let mut store = world(CONFIG);
+        store
+            .write(|tx| {
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "review-1",
+                    SeatRole::Temp,
+                    "w2:p1",
+                    "codex",
+                    T0,
+                )?;
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    kind: OpKind::Deliver,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "text": "Direction check of T-1 attempt 1." }),
+                    created: T0,
+                })?;
+                tx.insert_round(&gear_store::NewRound {
+                    key: gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-1".into(),
+                        attempt: 1,
+                        role: "direction".into(),
+                    },
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    cli: "codex".into(),
+                    model: None,
+                    start_at: T0,
+                })?;
+                tx.insert_message(&NewMessage {
+                    project: "p".into(),
+                    thread: "T-1:1".into(),
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    sender: "p:review-1".into(),
+                    sender_gen: 1,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::Result,
+                    urgent: false,
+                    body: "direction ok".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Info,
+                    created: T0 + 5,
+                    meta: Some(r#"{"direction":true,"sha":"aaaa"}"#.into()),
+                })?;
+                // A later check of the same attempt, at another candidate, on
+                // another seat, rewrites the record.
+                tx.set_meta(
+                    &direction_key("p", "T-1", 1),
+                    r#"{"seat":"p:review-2","sha":"bbbb","state":"starting"}"#,
+                )?;
+                tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 6)
+            })
+            .unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert!(last_job_recorded(&mut store, "p", &seat).unwrap());
+    }
+
     /// T-467: a raise the plan applied lets the engine start reviewers up to
     /// the raised count while hand-ins wait.
     #[test]
