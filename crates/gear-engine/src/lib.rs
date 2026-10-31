@@ -465,6 +465,7 @@ pub fn tick(
                 .health
                 .extend(health.stopped.iter().map(|seat| format!("{seat}:stopped")));
             report.health.extend(health.items);
+            report.health.extend(health.notes);
             note_slow(report, "health", step);
             // A seat blocked by a dialog for minutes reaches the captain (lesson
             // 7b): the agent waits on a dialog nobody sees.

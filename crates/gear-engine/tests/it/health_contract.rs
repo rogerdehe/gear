@@ -11,10 +11,10 @@ use gear_engine::health::{self, Machine, PaneProcs, Proc, Read, Reading, SeatPro
 use gear_engine::{tick, EngineCfg};
 use gear_herdr::fake::{Call, FakeHerdr};
 use gear_herdr::AgentStatus;
-use gear_model::{MsgKind, MsgState, SeatRole, SeatState};
+use gear_model::{ErrorCode, GearError, MsgKind, MsgState, SeatRole, SeatState};
 use gear_store::{testing, Store};
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 const T0: i64 = 1_800_000_000;
@@ -27,6 +27,7 @@ const TEMP: &str = "w1:p3";
 struct FakeRead {
     readings: Mutex<VecDeque<Reading>>,
     samples: AtomicUsize,
+    fail: AtomicBool,
 }
 
 impl FakeRead {
@@ -34,6 +35,7 @@ impl FakeRead {
         Arc::new(FakeRead {
             readings: Mutex::new(readings.into()),
             samples: AtomicUsize::new(0),
+            fail: AtomicBool::new(false),
         })
     }
 }
@@ -45,6 +47,9 @@ impl health::Read for FakeRead {
         _volumes: &[String],
     ) -> gear_model::GearResult<Reading> {
         self.samples.fetch_add(1, Ordering::Relaxed);
+        if self.fail.load(Ordering::Relaxed) {
+            return Err(GearError::new(ErrorCode::BadFormat, "ps: not readable"));
+        }
         Ok(self
             .readings
             .lock()
@@ -148,10 +153,26 @@ fn a_seat_over_the_safe_line_is_stopped_and_the_captain_told() {
     // The lane's own processes hold 3 GB (over the 2 GB safe line) for five
     // minutes while the machine is short: an internal cause.
     let mut w = world(readings(short_machine(), 60.0, 3 * 1024 * 1024, vec![]));
-    for minute in 0..=5 {
+    // Nine minutes: the machine stays short after the stop, and the watch must
+    // not blame an outside cause while it recovers (F2).
+    for n in 6..9 {
+        w.read.readings.lock().unwrap().push_back(Reading {
+            machine: short_machine(),
+            seats: BTreeMap::from([(
+                "p:heat".to_string(),
+                SeatProcs {
+                    cpu_s: 60.0 * f64::from(n),
+                    rss_kb: 3 * 1024 * 1024,
+                    procs: 3,
+                },
+            )]),
+            top: vec![],
+        });
+    }
+    for minute in 0..=8 {
         run(&mut w, minute * 60);
     }
-    assert_eq!(w.read.samples.load(Ordering::Relaxed), 6);
+    assert_eq!(w.read.samples.load(Ordering::Relaxed), 9);
     assert!(
         keys(&w, LANE, "esc") >= 1,
         "the turn is interrupted: {:?}",
@@ -179,7 +200,8 @@ fn a_seat_over_the_safe_line_is_stopped_and_the_captain_told() {
     assert!(item[0].body.contains("- retry heat"), "{}", item[0].body);
     assert!(
         items(&mut w, "health:machine:p").is_empty(),
-        "an internal cause is not the machine's item"
+        "an internal cause is not the machine's item, and the machine-short \
+         timer re-arms after the stop (F2): no outside cause is blamed"
     );
     // The reviewer, under the safe line, is untouched.
     assert_eq!(keys(&w, TEMP, "esc"), 0);
@@ -372,4 +394,60 @@ fn the_watch_costs_under_one_percent_of_one_core() {
         used < 600.0,
         "the sample used {used:.1} ms of CPU; the line is 600 ms"
     );
+}
+
+/// T-472 F1: a sample that fails is reported — the tick report and the engine
+/// log carry it — and the next sample retries.
+#[test]
+fn a_failed_sample_is_reported_not_swallowed() {
+    let mut w = world(readings(fine_machine(), 6.0, 100 * 1024, vec![]));
+    w.read.fail.store(true, Ordering::Relaxed);
+    let report = run(&mut w, 0);
+    assert!(
+        report
+            .health
+            .iter()
+            .any(|line| line.contains("sample failed") && line.contains("ps: not readable")),
+        "{:?}",
+        report.health
+    );
+    // The failure is not a lock: the next sample is taken a minute later.
+    w.read.fail.store(false, Ordering::Relaxed);
+    run(&mut w, 60);
+    assert_eq!(w.read.samples.load(Ordering::Relaxed), 2);
+    assert!(run(&mut w, 120).health.is_empty());
+}
+
+/// T-472 F3: when the exit is not delivered, the captain's item says the seat
+/// was asked to stop but did not get the exit, and the tick report notes it.
+#[test]
+fn an_exit_that_was_not_delivered_is_said_in_the_item() {
+    let mut w = world(readings(short_machine(), 60.0, 3 * 1024 * 1024, vec![]));
+    // The lane's agent is unnamed, and its name is taken by another agent:
+    // the rename cannot happen, so no prompt can reach the agent.
+    w.herdr
+        .add_agent_named("w1:p9", "codex", AgentStatus::Idle, "p-heat");
+    let mut report = run(&mut w, 0);
+    for minute in 1..=5 {
+        report = run(&mut w, minute * 60);
+    }
+    let item = items(&mut w, "health:p:heat");
+    assert_eq!(item.len(), 1, "the captain is told");
+    assert!(
+        item[0]
+            .body
+            .contains("asked it to stop, but its exit was not delivered"),
+        "{}",
+        item[0].body
+    );
+    assert!(
+        report
+            .health
+            .iter()
+            .any(|line| line.contains("p:heat: the exit was not delivered")),
+        "{:?}",
+        report.health
+    );
+    let seat = w.store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+    assert_eq!(seat.state, SeatState::NeedsCheck, "it is parked either way");
 }

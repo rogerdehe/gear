@@ -136,6 +136,10 @@ pub struct Watch {
     /// Captain items opened or resolved (`<seat>:opened|resolved`,
     /// `machine:opened|resolved`).
     pub items: Vec<String>,
+    /// What the watch could not do: a sample that failed, a stop whose exit
+    /// was not delivered. Never silent: the tick report and the engine log
+    /// carry these.
+    pub notes: Vec<String>,
 }
 
 /// The health limits of a project, from its `[health]` (the defaults when the
@@ -285,9 +289,11 @@ fn watched(observed: &[SeatObs]) -> Vec<&SeatObs> {
 
 /// One step of the health watch for `project`.
 ///
-/// It samples once per `[health].sample_min` minutes; between samples it only
-/// reads the store's meta. A sample that fails changes nothing and is retried
-/// at the next interval. The actions are the engine's own seats only: a seat
+/// It samples once per `[health].sample_min` minutes; between samples it reads
+/// the store's sample time and parses the project's config (a few KB of TOML),
+/// and nothing else. A sample that fails is noted (the tick report and the
+/// engine log) and retried at the next interval. The actions are the engine's
+/// own seats only: a seat
 /// over the safe line is interrupted and stopped, and the captain is told;
 /// a machine that is short for another reason gets one urgent captain item
 /// naming the top processes.
@@ -302,8 +308,8 @@ pub fn check(
 ) -> GearResult<Watch> {
     let mut watch = Watch::default();
     let limits = limits_of(store, project);
-    // Once per sample_min minutes: the meta read is the whole cost between
-    // samples.
+    // Once per sample_min minutes: between samples this is the sample time
+    // and the project config, not a machine read.
     let last = store
         .read(|tx| tx.get_meta(&sample_key(project)))?
         .and_then(|value| value.parse::<Ts>().ok());
@@ -345,7 +351,15 @@ pub fn check(
     let volumes = volumes_of(store, cfg, project);
     let reading = match cfg.health.sample(&panes, &volumes) {
         Ok(reading) => reading,
-        Err(_) => return Ok(watch), // nothing this minute: the next sample retries
+        Err(error) => {
+            // The watch is blind this minute, not quiet: the failure reaches
+            // the tick report and the engine log, and the next sample retries.
+            watch.notes.push(format!(
+                "sample failed ({}: {}): the next sample retries",
+                error.code, error.detail
+            ));
+            return Ok(watch);
+        }
     };
 
     // Each seat's CPU use over the interval: the sample carries cumulative
@@ -443,11 +457,24 @@ pub fn check(
         let Some(pane) = pane else {
             continue;
         };
-        stop_seat(herdr, profiles, &obs.seat, &pane)?;
-        let reason = format!(
-            "the health watch stopped seat {}: its own processes used {:.0}% of one core and {} MB of memory for {} minutes while the machine was short ({})",
-            obs.seat.name, over.cpu_pct, over.rss_mb, limits.seat_over_min, short.why
-        );
+        let delivered = stop_seat(herdr, profiles, &obs.seat, &pane);
+        let reason = if delivered {
+            format!(
+                "the health watch stopped seat {}: its own processes used {:.0}% of one core and {} MB of memory for {} minutes while the machine was short ({})",
+                obs.seat.name, over.cpu_pct, over.rss_mb, limits.seat_over_min, short.why
+            )
+        } else {
+            // The seat is parked either way; the words say what really
+            // happened, and the tick report carries the note.
+            watch.notes.push(format!(
+                "{}: the exit was not delivered, the seat is parked and the captain told",
+                seat_id
+            ));
+            format!(
+                "the health watch found seat {} over the safe line and asked it to stop, but its exit was not delivered: its own processes used {:.0}% of one core and {} MB of memory for {} minutes while the machine was short ({})",
+                obs.seat.name, over.cpu_pct, over.rss_mb, limits.seat_over_min, short.why
+            )
+        };
         store.write(|tx| {
             tx.set_seat_state(&seat_id, SeatState::NeedsCheck, Some(&reason), now)?;
             tx.set_meta(&stop_key, "1")
@@ -486,31 +513,46 @@ pub fn check(
         watch.stopped.push(seat_id.clone());
         watch.items.push(format!("{seat_id}:opened"));
     }
+    // T-472 F2: the spell is answered, so the machine-short timer starts over:
+    // the next samples do not blame an outside cause while the machine
+    // recovers (a genuinely external cause re-arms and is reported after
+    // `machine_over_min` again).
+    store.write(|tx| tx.set_meta(&short_key(project), ""))?;
     Ok(watch)
 }
 
 /// Interrupt the seat's agent and stop it: its turn is cut (esc), then the
 /// profile's exit (a command for the CLIs whose exit is a slash command, keys
 /// for the others). The pane stays open; the seat waits for the captain.
+///
+/// Returns whether the exit was actually delivered: a pane that is gone, an
+/// agent Herdr left unnamed, or a refused call means the agent may still run,
+/// and the caller says so instead of claiming a stop that did not happen.
 fn stop_seat(
     herdr: &mut dyn HerdrAct,
     profiles: &BTreeMap<String, Profile>,
     seat: &gear_store::SeatRow,
     pane: &str,
-) -> GearResult<()> {
+) -> bool {
     crate::names::ensure(herdr, pane, &crate::names::desired(seat));
     // Interrupt the turn that is burning the machine; an idle agent ignores it.
     let _ = herdr.send_keys(pane, &["esc".into()]);
-    if let Some(profile) = profiles.get(&seat.profile) {
-        if let Some(command) = profile.exit_command.as_deref() {
-            if let Some(name) = crate::names::live_name(herdr, pane) {
-                let _ = herdr.prompt(&name, command);
-            }
-        } else if !profile.exit_keys.is_empty() {
-            let _ = herdr.send_keys(pane, &profile.exit_keys);
-        }
+    let Some(profile) = profiles.get(&seat.profile) else {
+        return false;
+    };
+    if let Some(command) = profile.exit_command.as_deref() {
+        let Some(name) = crate::names::live_name(herdr, pane) else {
+            return false;
+        };
+        return matches!(herdr.prompt(&name, command), gear_herdr::Outcome::Ok(()));
     }
-    Ok(())
+    if profile.exit_keys.is_empty() {
+        return false;
+    }
+    matches!(
+        herdr.send_keys(pane, &profile.exit_keys),
+        gear_herdr::Outcome::Ok(())
+    )
 }
 
 /// Open (or keep) the captain's item for a machine that is short without one
