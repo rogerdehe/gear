@@ -147,6 +147,14 @@ pub(crate) fn model_start(kind: &str, model: &str) -> Option<ModelStart> {
             env: String::new(),
             args: vec!["--model".to_string(), model.to_string()],
         }),
+        // agy (Antigravity CLI 1.4.12) takes the model as a start flag
+        // (`--model <id>`; `agy --help`). The reasoning level is a property
+        // of the chain entry (`--effort low|medium|high|xhigh|max`), never a
+        // constant here (T-35), like pi's `--thinking`.
+        "agy" => Some(ModelStart {
+            env: String::new(),
+            args: vec!["--model".to_string(), model.to_string()],
+        }),
         _ => None,
     }
 }
@@ -258,6 +266,28 @@ mod tests {
         assert_eq!(
             claude.args,
             vec!["--model".to_string(), "claude-opus-4".to_string()]
+        );
+    }
+
+    #[test]
+    fn agy_takes_the_model_and_the_effort_from_the_entry() {
+        // T-497: agy `--model <id>`; the reasoning effort is the chain
+        // entry's (`--effort low|medium|high|xhigh|max`), like pi's thinking.
+        let agy = model_start("agy", "gemini-3.8-flash-high").unwrap();
+        assert_eq!(agy.env, "", "agy needs no environment line");
+        assert_eq!(
+            agy.args,
+            vec!["--model".to_string(), "gemini-3.8-flash-high".to_string()]
+        );
+        let entry = entry("gemini-3.8-flash-high", Some("agy"), &["--effort", "high"]);
+        assert_eq!(
+            entry_args("agy", &entry).unwrap(),
+            vec![
+                "--model".to_string(),
+                "gemini-3.8-flash-high".to_string(),
+                "--effort".to_string(),
+                "high".to_string(),
+            ]
         );
     }
 

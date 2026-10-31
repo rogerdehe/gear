@@ -42,6 +42,12 @@ fn skills_dir(home: &Path, agent: &str) -> PathBuf {
         // T-495: omp's agent directory is `~/.omp/agent` (`omp config path`),
         // and its user skills live in `<agent-dir>/skills` like pi's.
         "omp" => home.join(".omp").join("agent").join("skills").join("gear"),
+        // T-497: agy's global skills are `~/.gemini/antigravity-cli/skills`.
+        "agy" => home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("skills")
+            .join("gear"),
         other => panic!("unknown agent {other}"),
     }
 }
@@ -56,7 +62,7 @@ fn repo_skill(rel: &str) -> String {
 
 #[test]
 fn the_skill_is_written_for_every_agent() {
-    for agent in ["claude", "codex", "opencode", "grok", "pi", "omp"] {
+    for agent in ["claude", "codex", "opencode", "grok", "pi", "omp", "agy"] {
         let home = scratch_home(agent);
         let o = gear(&home, &["admin", "install-skill", "--agent", agent]);
         assert!(o.status.success(), "{agent}: {}", stderr(&o));
