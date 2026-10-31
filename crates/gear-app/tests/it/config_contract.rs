@@ -2,7 +2,7 @@
 
 use gear_app::config::{
     departs_at, hours_end, hours_next_start, off_hours_until, parse, validate, ConfigIssue,
-    Conventions, Models, QuotaPolicy, Repo, Timing, WaitPolicy,
+    Conventions, Health, Models, QuotaPolicy, Repo, Timing, WaitPolicy,
 };
 use gear_model::ErrorCode;
 
@@ -107,6 +107,64 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
     );
     assert!(cfg.profiles.is_empty());
     assert_eq!(validate(&cfg), vec![]);
+}
+
+/// T-472: the health watch's thresholds are the project's, agreed at kickoff;
+/// a section that names some keeps the defaults for the rest.
+#[test]
+fn a_health_section_keeps_its_thresholds() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert_eq!(cfg.health, Health::default());
+    let text = format!(
+        "{MINIMAL}\n[health]\nsample_min = 2\nload_x_cores = 3.0\nmachine_over_min = 10\nmem_free_pct = 5\ndisk_free_gb = 20\nseat_cpu_pct = 300\nseat_mem_mb = 4096\nseat_over_min = 8\n"
+    );
+    let cfg = parse(&text).unwrap();
+    assert_eq!(
+        cfg.health,
+        Health {
+            sample_min: 2,
+            load_x_cores: 3.0,
+            machine_over_min: 10,
+            mem_free_pct: 5,
+            disk_free_gb: 20,
+            seat_cpu_pct: 300,
+            seat_mem_mb: 4096,
+            seat_over_min: 8,
+        }
+    );
+    assert_eq!(validate(&cfg), vec![]);
+    let partial = format!("{MINIMAL}\n[health]\nseat_cpu_pct = 250\n");
+    let cfg = parse(&partial).unwrap();
+    assert_eq!(cfg.health.seat_cpu_pct, 250);
+    assert_eq!(cfg.health.sample_min, 1, "the other defaults stand");
+    assert_eq!(cfg.health.seat_mem_mb, 2048);
+}
+
+/// T-472: a threshold of zero would fire on every sample, a sample interval
+/// of zero would read the machine every tick, and a free-memory line of 100 %
+/// would never be reached.
+#[test]
+fn health_thresholds_are_validated() {
+    let mut cfg = parse(MINIMAL).unwrap();
+    cfg.health.sample_min = 0;
+    cfg.health.machine_over_min = 0;
+    cfg.health.seat_over_min = 0;
+    cfg.health.load_x_cores = 0.0;
+    cfg.health.seat_cpu_pct = 0;
+    cfg.health.seat_mem_mb = 0;
+    cfg.health.mem_free_pct = 100;
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec![
+            "health.sample_min",
+            "health.machine_over_min",
+            "health.seat_over_min",
+            "health.load_x_cores",
+            "health.seat_cpu_pct",
+            "health.seat_mem_mb",
+            "health.mem_free_pct",
+        ]
+    );
 }
 
 #[test]

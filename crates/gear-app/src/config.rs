@@ -39,6 +39,10 @@ pub struct ProjectConfig {
     /// The departure time of a voyage (T-448); absent = today's behaviour.
     #[serde(default)]
     pub schedule: Option<ScheduleSection>,
+    /// The fleet and machine health watch's thresholds (T-472). Absent = the
+    /// defaults below.
+    #[serde(default)]
+    pub health: Health,
     /// API-equivalent USD per million tokens, keyed by provider/model.
     #[serde(default)]
     pub prices: BTreeMap<String, Price>,
@@ -838,6 +842,68 @@ impl Default for ScheduleSection {
             depart_at: None,
             hours: None,
             notice_min: 15,
+        }
+    }
+}
+
+/// The thresholds of the fleet and machine health watch (T-472), agreed at
+/// kickoff. The engine samples the machine and each seat's own processes once
+/// per `sample_min` minutes; a machine that stays short (`load_x_cores` × the
+/// cores for `machine_over_min` minutes, memory free under `mem_free_pct` %,
+/// or a watched volume under `disk_free_gb` GB) is relieved by stopping a seat
+/// whose processes are over the safe line (`seat_cpu_pct` % of one core or
+/// `seat_mem_mb` MB for `seat_over_min` minutes), or is named to the captain
+/// when no seat is the cause.
+///
+/// ```toml
+/// [health]
+/// sample_min = 1
+/// load_x_cores = 2.0
+/// machine_over_min = 5
+/// mem_free_pct = 10
+/// disk_free_gb = 5
+/// seat_cpu_pct = 200
+/// seat_mem_mb = 2048
+/// seat_over_min = 5
+/// ```
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Health {
+    /// How many minutes between two samples of the machine and the seats.
+    pub sample_min: u32,
+    /// The load (5-minute average) over this many times the machine's cores
+    /// makes the machine short.
+    pub load_x_cores: f64,
+    /// How many consecutive samples the machine must be short for the load or
+    /// the memory pressure before the watch acts.
+    pub machine_over_min: u32,
+    /// Free memory under this percentage of the total makes the machine short.
+    pub mem_free_pct: u32,
+    /// A watched volume (the state directory, the project's repos) with less
+    /// free space than this makes the machine short at once.
+    pub disk_free_gb: u64,
+    /// A seat's own processes over this percentage of one core are over the
+    /// safe line.
+    pub seat_cpu_pct: u32,
+    /// A seat's own processes over this many MB of resident memory are over
+    /// the safe line.
+    pub seat_mem_mb: u64,
+    /// How many consecutive samples a seat must be over the safe line before
+    /// the watch stops it.
+    pub seat_over_min: u32,
+}
+
+impl Default for Health {
+    fn default() -> Self {
+        Self {
+            sample_min: 1,
+            load_x_cores: 2.0,
+            machine_over_min: 5,
+            mem_free_pct: 10,
+            disk_free_gb: 5,
+            seat_cpu_pct: 200,
+            seat_mem_mb: 2048,
+            seat_over_min: 5,
         }
     }
 }
@@ -1735,6 +1801,51 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                 ));
             }
         }
+    }
+
+    // ---- the health watch (T-472): a threshold of zero would fire on every
+    // sample, and a sample interval of zero would read the machine each tick.
+    if cfg.health.sample_min == 0 {
+        issues.push(issue(
+            "health.sample_min",
+            "must be at least one minute".to_string(),
+        ));
+    }
+    if cfg.health.machine_over_min == 0 {
+        issues.push(issue(
+            "health.machine_over_min",
+            "must be at least one minute".to_string(),
+        ));
+    }
+    if cfg.health.seat_over_min == 0 {
+        issues.push(issue(
+            "health.seat_over_min",
+            "must be at least one minute".to_string(),
+        ));
+    }
+    if !(cfg.health.load_x_cores > 0.0) {
+        issues.push(issue(
+            "health.load_x_cores",
+            "must be greater than zero".to_string(),
+        ));
+    }
+    if cfg.health.seat_cpu_pct == 0 {
+        issues.push(issue(
+            "health.seat_cpu_pct",
+            "must be at least one percent of one core".to_string(),
+        ));
+    }
+    if cfg.health.seat_mem_mb == 0 {
+        issues.push(issue(
+            "health.seat_mem_mb",
+            "must be at least one MB".to_string(),
+        ));
+    }
+    if cfg.health.mem_free_pct == 0 || cfg.health.mem_free_pct >= 100 {
+        issues.push(issue(
+            "health.mem_free_pct",
+            "must be between 1 and 99 percent".to_string(),
+        ));
     }
 
     // ---- models (17 §0): empty chains mean models are not managed

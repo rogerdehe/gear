@@ -3619,6 +3619,9 @@ fn engine_cfg(db_path: &str) -> gear_engine::EngineCfg {
     // the captain's judgement (the engine settles passes only).
     cfg.auto_settle = true;
     cfg.profiles = builtin_profiles();
+    // T-472: the running engine reads the machine and the fleet's own
+    // processes; a test's EngineCfg keeps the silent reader.
+    cfg.health = std::sync::Arc::new(gear_engine::health::SystemRead::new());
     cfg
 }
 
