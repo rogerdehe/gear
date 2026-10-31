@@ -2008,7 +2008,7 @@ fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
     Ok(())
 }
 
-/// `gear admin install-skill --agent <claude|codex|opencode|grok|pi>`: write the
+/// `gear admin install-skill --agent <claude|codex|opencode|grok|pi|omp>`: write the
 /// skill (SKILL.md and its references) into the directory the agent CLI loads
 /// its skills from, and say where it was written.
 ///

@@ -31,6 +31,14 @@ minimax-cn   MiniMax-M3.1-Flash          1M       524.3K   yes       yes
 opencode-go  deepseek-v4.1-flash         1M       384K     yes       yes
 ";
 
+/// A captured `omp models --json` (omp 18.12.6), trimmed to what the parser
+/// reads: each chat model carries the selector its `--model` takes.
+const OMP_MODELS: &str = r#"{"models":[
+  {"provider":"minimax","kind":"chat","id":"MiniMax-M2","selector":"minimax/MiniMax-M2"},
+  {"provider":"anthropic","kind":"chat","id":"claude-sonnet-4-5","selector":"anthropic/claude-sonnet-4-5"},
+  {"provider":"minimax","kind":"chat","id":"MiniMax-M2","selector":"minimax/MiniMax-M2"}
+]}"#;
+
 /// A captured `~/.codex/models_cache.json`, trimmed to what the parser reads.
 const CODEX_CACHE: &str = r#"{
   "fetched_at": "2026-10-23T04:15:50.630332Z",
@@ -111,6 +119,22 @@ fn pi_models_are_the_provider_and_the_model() {
         "the header row is not a model"
     );
     assert!(kickoff::parse_pi_models("").is_empty());
+}
+
+/// T-495: omp prints its models as JSON; the id its `--model` takes is the
+/// entry's selector.
+#[test]
+fn omp_models_are_the_selectors() {
+    let models = kickoff::parse_omp_models(OMP_MODELS);
+
+    assert_eq!(
+        models,
+        vec!["minimax/MiniMax-M2", "anthropic/claude-sonnet-4-5"],
+        "the duplicate is listed once"
+    );
+    assert!(kickoff::parse_omp_models("").is_empty());
+    assert!(kickoff::parse_omp_models("{\"models\":[]}").is_empty());
+    assert!(kickoff::parse_omp_models("not json").is_empty());
 }
 
 #[test]

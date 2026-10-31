@@ -203,9 +203,59 @@ pub fn models_of(kind: &str) -> (Vec<String>, Option<String>) {
                 Some(format!("cannot run `pi --list-models`: {e}")),
             ),
         },
+        // omp (oh-my-pi, a pi fork) prints its chat models as JSON
+        // (`omp models --json`): each entry carries the `selector` its
+        // `--model` takes (`provider/model`).
+        "omp" => match Command::new("omp").args(["models", "--json"]).output() {
+            Ok(out) if out.status.success() => {
+                let models = parse_omp_models(&String::from_utf8_lossy(&out.stdout));
+                if models.is_empty() {
+                    (
+                        Vec::new(),
+                        Some("no model listed by `omp models`".to_string()),
+                    )
+                } else {
+                    (models, None)
+                }
+            }
+            Ok(out) => (
+                Vec::new(),
+                Some(format!("`omp models --json` exited {}", out.status)),
+            ),
+            Err(e) => (
+                Vec::new(),
+                Some(format!("cannot run `omp models --json`: {e}")),
+            ),
+        },
         // The other CLIs do not print their models.
         _ => (Vec::new(), Some("no model list from this CLI".to_string())),
     }
+}
+
+/// The model ids `omp models --json` lists (T-495): each entry's `selector`
+/// (`provider/model`), the id `--model` takes. A document without a `models`
+/// array lists none.
+pub fn parse_omp_models(text: &str) -> Vec<String> {
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    let Some(entries) = doc.get("models").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    let mut models = Vec::new();
+    for entry in entries {
+        let Some(selector) = entry.get("selector").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if selector.is_empty() {
+            continue;
+        }
+        let id = selector.to_string();
+        if !models.iter().any(|seen| seen == &id) {
+            models.push(id);
+        }
+    }
+    models
 }
 
 /// The configured model ids that the CLI running them does not list (T-315):
