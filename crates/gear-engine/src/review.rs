@@ -2415,12 +2415,20 @@ fn start_reviewer(
             Some(&path),
         ) {
             Some(prefix) => format!(
-                "{prefix}export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
-                config.project.id, seat.name, generation, cfg.db_path
+                "{prefix}export GEAR_CTX={}:{}:{}; export GEAR_DB={}; {}",
+                config.project.id,
+                seat.name,
+                generation,
+                cfg.db_path,
+                crate::onboard::EDITOR_ENV
             ),
             None => format!(
-                "export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
-                config.project.id, seat.name, generation, cfg.db_path
+                "export GEAR_CTX={}:{}:{}; export GEAR_DB={}; {}",
+                config.project.id,
+                seat.name,
+                generation,
+                cfg.db_path,
+                crate::onboard::EDITOR_ENV
             ),
         };
         if let Some(start) = model.and_then(|model| model_start(kind, model)) {

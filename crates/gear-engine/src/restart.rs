@@ -1276,8 +1276,12 @@ fn env_command(
     let prefix = crate::onboard::tmpdir_prefix(conventions, &seat.project, &seat.name, worktree)
         .unwrap_or_default();
     let mut env = format!(
-        "{prefix}export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
-        seat.project, seat.name, generation, cfg.db_path
+        "{prefix}export GEAR_CTX={}:{}:{}; export GEAR_DB={}; {}",
+        seat.project,
+        seat.name,
+        generation,
+        cfg.db_path,
+        crate::onboard::EDITOR_ENV
     );
     if !model.is_empty() {
         if let Some(start) = model_start(cli, model) {

@@ -313,7 +313,8 @@ pub struct WorktreeStep {
 pub struct OnboardPlan {
     /// Lanes only; the captain and temps get their pane elsewhere.
     pub worktree: Option<WorktreeStep>,
-    /// One shell line: `export GEAR_CTX=<project>:<seat>:<gen>; export GEAR_DB=<db>`.
+    /// One shell line: `export GEAR_CTX=<project>:<seat>:<gen>; export GEAR_DB=<db>`,
+    /// then [`EDITOR_ENV`].
     pub env_command: String,
     /// `<project>-<seat name>` (17 §2), at most 32 chars.
     pub agent_name: String,
@@ -323,12 +324,19 @@ pub struct OnboardPlan {
     pub args: Vec<String>,
 }
 
+/// The editor variables every agent GEAR starts carries (T-468): a git
+/// command that opens an editor would wait for an answer no one can give
+/// (2026-10-31: review-11's `git rebase --continue` sat in vim for 59
+/// minutes).
+pub const EDITOR_ENV: &str =
+    "export GIT_EDITOR=true; export GIT_SEQUENCE_EDITOR=true; export EDITOR=true";
+
 /// Plan onboarding of `seat` as generation `generation` (the next one):
 /// - Lane seats get a `WorktreeStep` (branch
 ///   `seat_branch` = the project's `[conventions].seat_branch` template,
 ///   `<project>/<name>` by default, base `integration`, label
 ///   `<project>-<name>`); other roles `None`;
-/// - `env_command` exactly `export GEAR_CTX=<project>:<name>:<generation>; export GEAR_DB=<db_path>`;
+/// - `env_command` exactly `export GEAR_CTX=<project>:<name>:<generation>; export GEAR_DB=<db_path>; <EDITOR_ENV>`;
 /// - `args` = `profile.unattended_args` (+ resume args when `resume` is Some and
 ///   the profile has them; a resume request for a profile without resume
 ///   support → Err with a reason);
@@ -383,7 +391,7 @@ pub fn plan_onboard(
     Ok(OnboardPlan {
         worktree,
         env_command: format!(
-            "export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
+            "export GEAR_CTX={}:{}:{}; export GEAR_DB={}; {EDITOR_ENV}",
             seat.project, seat.name, generation, db_path
         ),
         agent_name,
@@ -2222,7 +2230,7 @@ repo = "web"
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
         assert_eq!(active, vec!["toy:heat".to_string()]);
-        assert_eq!(env_line(&herdr), format!("mkdir -p '/fake-worktrees/toy-heat/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path));
+        assert_eq!(env_line(&herdr), format!("mkdir -p '/fake-worktrees/toy-heat/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}; {}", cfg().db_path, EDITOR_ENV));
         assert_eq!(start_args(&herdr), vec!["--auto".to_string()]);
     }
 
