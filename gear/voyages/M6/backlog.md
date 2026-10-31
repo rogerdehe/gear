@@ -167,3 +167,6 @@
 
 ## A model-switch handover names the worktree's branch, not the task's
 - 2026-10-31 M6 (F-284): hull switched to TokenRhythm right after T-505 was assigned; the handover (crates/gear-engine/src/handover.rs, `facts.branch` from `git rev-parse --abbrev-ref HEAD`) named T-502's branch, because the worktree had not switched yet, and had no part 2, so the new model rebuilt the state from the transcript. The handover should name the attempt's own branch and say when the worktree is on another one.
+
+## The health-watch cost test fails under load
+- 2026-10-31 M6 (T-508 audit F1): crates/gear-engine/tests/it/health_contract.rs:393 `the_watch_costs_under_one_percent_of_one_core` measured one real sample at 930 ms CPU on a busy machine and passed on three re-runs. A load-sensitive test can fail a merge gate falsely; measure the cost with a bound that holds under contention, or average several samples.

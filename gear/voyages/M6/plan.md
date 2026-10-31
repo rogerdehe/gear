@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1039 -->
+<!-- gear-plan project=gear base=1046 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -135,6 +135,10 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7265: keep course — projected 1120m of 1200m; the six audits are with two reviewers, then the v0.6.4 release
 - station M-7277: keep course — projected 1131m of 1200m; T-506 passed, five audits with the reviewers, then v0.6.4
 - 2026-10-31 18:05 hand fix: merged origin/review/t506 (only the audit record T-506.md) into dev by hand, and a mast task makes an audit pass merge its review record | why: M-7280: T-505's audit pass marks the task merged with no merge op, so the record never lands; an error in normal use, fixed in M6 | else: delete the branch and lose the record
+- 2026-10-31 18:15 T-507 fail (audit S2): the reviewer found all points met and F1 (T-465, T-469 missing from the release notes, fixed by hand in docs/releases/v0.6.0.md); the captain adds a gap the audit missed: F-284, a model switch today handed over the wrong branch (point 1 in normal use); a hull fix task goes into T-507's deps and S2 is audited again | why: user: a gap goes back onto the fix path | else: pass and log F-284
+- 2026-10-31 18:18 recovery: T-507 attempt 2 started at once because T-513 joined its deps in a second apply; failed by hand so the re-audit waits for T-513 | why: the fail and the fix task must go in one apply | else: an S2 re-audit without the fix
+- 2026-10-31 18:30 scope: hull task, a hand-in queued behind busy reviewers rings no review stall | why: M-7294, M-7295 are false stall items (goal clause 3): both reviewers were busy with other audits | else: log it
+- 2026-10-31 18:35 T-514 moved hull → mast: mast has nothing to start after T-512 while hull holds T-513 and T-514 (as T-501 moved before) | why: no lane sits idle while another holds startable work | else: mast idle about 40 min
 
 # Queue
 
@@ -428,7 +432,7 @@ estimate: 30
 audit: true
 goal: [S5] Audit S2. Audit, no code change: check the promise below against origin/dev end to end in normal use, as a user and a captain meet it, not task by task. Use the code, its tests, the gear CLI (`gear report`, `gear queue`, `gear friction --all`, `gear plan show`) and, where a run is needed, a temp GEAR_DB and a temp git repo; never open the live store files. The voyage goal is in the packet: a gap you see outside this slice is a finding too. Promise: station S2: models, agents and captains switch with a handover; elastic counts; dialogs never block; role charters fit the chosen models, released as v0.6.1. Points: a model or CLI switch of a lane mid-task keeps the task and hands over the right branch and state; a lane count change applies without a restart by hand; an agent dialog is closed and the seat asks instead; each role's rules fit its model.
 accept: One line per point of the promise: met or not, with the evidence (a command and its output, or a file and line). Every gap is a finding with how it shows in normal use.
-deps: T-464, T-465, T-466, T-467, T-468, T-469, T-484, T-494, T-476
+deps: T-464, T-465, T-466, T-467, T-468, T-469, T-484, T-494, T-476, T-513
 estimate: 30
 
 ## T-508 [now] lane=hull milestone=M6 station=S5 required
@@ -464,8 +468,18 @@ goal: [S5] An audit's review record reaches the integration branch. Today a capt
 accept: Tests: a captain pass of an audit attempt creates one Intended merge op for its review branch and the attempt has no merge time until that op merges; a task depending on the audit starts only after it; a fail creates no merge op. Run make check CRATE=gear-app and CRATE=gear-cli.
 estimate: 25
 
+## T-513 [now] lane=hull milestone=M6 station=S5 required
+goal: [S2] A model-switch handover names the attempt's own branch. Today crates/gear-engine/src/handover.rs fills `facts.branch` from `git rev-parse --abbrev-ref HEAD` of the worktree; when the switch comes right after a new task was assigned, the worktree is still on the previous task's branch, so hull's T-505 handover named T-502's branch and the new model rebuilt the state from the transcript (F-284). Change, no other design: for a lane seat with an attempt, `facts.branch` is the attempt's task branch (`dispatch::task_branch` with the project's `[conventions].task_branch`, the lane and the task); when the worktree's HEAD is another branch the handover adds one line: "The worktree is on <head>; this task's branch is <branch>: switch to it before you go on." and the last-commit, unpushed and changed-file facts stay those of the worktree as now. A reviewer or a seat with no attempt is unchanged.
+accept: Engine tests: a lane switched while its worktree is on hull/t1 and its attempt is T-2 gets a handover naming hull/t2 and the switch line; a lane whose worktree is on its own task branch gets no switch line; a reviewer's handover is unchanged. Run make check CRATE=gear-engine and CRATE=gear-cli.
+estimate: 25
+
+## T-514 [now] lane=mast milestone=M6 station=S5 required
+goal: [S1] A hand-in queued behind busy reviewers is not a review stall. Today `tell_captain_of_a_review_stall` (crates/gear-engine/src/review.rs) rings the captain urgently 20 minutes (`REVIEW_STALL_S`) after the hand-in when no reviewer has its packet, even when every reviewer seat is busy reviewing other tasks and the hand-in is simply next in line (M-7294, M-7295: T-510 and T-511 behind T-508 and T-509). Change, no other design: the 20 minutes count from the first tick a reviewer could take the hand-in (a temp seat free for it, or fewer temp seats than the effective count from `release::effective_temps`), kept in a meta key per task and attempt (`engine.review_free_since.<task>.<attempt>`, cleared when its packet is confirmed); while every seat holds another task's review with a confirmed packet, nothing rings. A hand-in waiting 20 minutes with a seat free still rings as today.
+accept: Engine tests: two seats busy with other confirmed reviews and a third hand-in 30 minutes old: no item; a seat frees and the packet is not confirmed 20 minutes later: one item; a seat free from the hand-in on and no packet after 20 minutes: one item as today. Run make check CRATE=gear-engine and CRATE=gear-cli.
+estimate: 25
+
 ## T-493 [now] lane=mast milestone=M6 station=S5 required
 goal: [S5] Release v0.6.4, station S5's release. Change, no other design: (1) the version is 0.6.4 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.4.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.3 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.3 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.4 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.4"; docs/releases/v0.6.4.md lists every task merged on origin/dev since v0.6.3 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-478, T-489, T-490, T-491, T-492, T-495, T-496, T-497, T-498, T-499, T-500, T-501, T-502, T-503, T-505, T-506, T-507, T-508, T-509, T-510, T-511, T-512
+deps: T-478, T-489, T-490, T-491, T-492, T-495, T-496, T-497, T-498, T-499, T-500, T-501, T-502, T-503, T-505, T-506, T-507, T-508, T-509, T-510, T-511, T-512, T-513, T-514
 estimate: 15
