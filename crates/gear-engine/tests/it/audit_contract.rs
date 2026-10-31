@@ -7,7 +7,7 @@ use std::process::Command;
 use gear_engine::{tick, EngineCfg};
 use gear_herdr::fake::FakeHerdr;
 use gear_herdr::AgentStatus;
-use gear_model::{AttemptState, OpKind, SeatRole, TaskState};
+use gear_model::{AttemptState, OpKind, OpState, SeatRole, TaskState};
 use gear_store::{testing, AttemptRow, AttemptStep, ContractRow, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
@@ -72,6 +72,50 @@ impl Repo {
 
     fn tip(&self) -> String {
         sh(&self.work, "git rev-parse origin/dev")
+    }
+
+    /// A reviewer's record commit on `branch`, pushed to the origin (T-512):
+    /// what the reviewer's `review/t<n>` holds when the captain rules.
+    fn review_record(&self, branch: &str, path: &str) {
+        let dir = self._root.path().join("review-worktree");
+        sh(
+            self._root.path(),
+            &format!(
+                "git -C {} worktree add -q -B {branch} {} dev",
+                self.work.display(),
+                dir.display()
+            ),
+        );
+        let file = dir.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "# Review of T-2\n\neach promise met\n").unwrap();
+        sh(
+            &dir,
+            &format!(
+                "git add -A && git -c user.email=a@b -c user.name=a commit -qm 'review(T-2): met' \
+                 && git push -q origin HEAD:refs/heads/{branch}"
+            ),
+        );
+    }
+
+    /// The text of `path` as it stands on the origin's `dev`.
+    fn read_record_on_dev(&self, path: &str) -> String {
+        sh(&self.work, "git fetch -q origin");
+        sh(&self.work, &format!("git show origin/dev:{path}"))
+    }
+
+    /// The engine's merge worktree for `branch`, on the origin's `dev`.
+    fn merge_worktree(&self, branch: &str) -> PathBuf {
+        let path = self._root.path().join("merge-worktree");
+        sh(
+            self._root.path(),
+            &format!(
+                "git -C {} worktree add -q -b {branch} {} origin/dev",
+                self.work.display(),
+                path.display()
+            ),
+        );
+        path
     }
 }
 
@@ -258,6 +302,42 @@ fn prompts(w: &mut World, pane: &str) -> Vec<String> {
         .collect()
 }
 
+/// Run the merge step until the audit's merge op is confirmed; it must not
+/// fail.
+fn wait_merge(w: &mut World) {
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+    for _ in 0..40 {
+        let seen = w.cfg.merges.progress();
+        gear_engine::merge::merge_passed(&mut w.store, &mut w.herdr, &w.cfg, "p", T0 + 30).unwrap();
+        let (confirmed, failed) = w
+            .store
+            .read(|tx| {
+                let confirmed = tx
+                    .ops_in_state("p", OpState::Confirmed)?
+                    .into_iter()
+                    .any(|op| op.kind == OpKind::Merge);
+                let failed = tx
+                    .ops_in_state("p", OpState::Failed)?
+                    .into_iter()
+                    .find(|op| op.kind == OpKind::Merge)
+                    .map(|op| op.result.unwrap_or_default());
+                Ok((confirmed, failed))
+            })
+            .unwrap();
+        assert!(failed.is_none(), "the merge failed: {failed:?}");
+        if confirmed {
+            return;
+        }
+        if w.cfg.merges.running("p") {
+            assert!(
+                w.cfg.merges.wait_progress(seen, WAIT),
+                "the merge worker did not report within {WAIT:?}"
+            );
+        }
+    }
+    panic!("the audit's merge did not confirm");
+}
+
 #[test]
 fn an_audit_is_handed_in_at_the_integration_tip_and_never_worked_by_its_lane() {
     let mut w = world();
@@ -354,6 +434,43 @@ fn a_captain_pass_merges_the_audit_and_starts_what_waits_for_it() {
         .unwrap();
     let row = w.store.read(|tx| tx.get_task("p", "T-2")).unwrap().unwrap();
     assert_eq!(row.state, TaskState::Done);
+    // T-512: the pass queues the merge of the reviewer's record, so the audit
+    // has no merge time until that op merges — the dependant keeps waiting.
+    let ops = w
+        .store
+        .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Merge))
+        .unwrap();
+    assert_eq!(ops.len(), 1, "one merge op for the audit: {ops:?}");
+    assert_eq!(
+        ops[0].payload["branch"].as_str(),
+        Some("review/t2"),
+        "the op lands the review branch"
+    );
+    assert_eq!(ops[0].attempt, Some(1));
+    assert!(
+        w.store
+            .read(|tx| gear_app::tasks::merged_at(tx, "p", "T-2"))
+            .unwrap()
+            .is_none(),
+        "no merge time until the merge op merges"
+    );
+    assert!(
+        !prompts(&mut w, LANE_PANE)
+            .iter()
+            .any(|text| text.contains("T-3")),
+        "T-3 waits for the audit's merge"
+    );
+
+    // The merge gate lands the reviewer's record: the audit is merged at the
+    // candidate it checked, the review branch is closed, and the tasks that
+    // wait for the audit start.
+    w.repo
+        .review_record("review/t2", "gear/voyages/M6/reviews/T-2.md");
+    let merge_worktree = w.repo.merge_worktree("p/merge");
+    w.herdr.add_shell("wt-merge:p1");
+    w.herdr
+        .add_worktree("p/merge", &merge_worktree.to_string_lossy(), "wt-merge:p1");
+    wait_merge(&mut w);
     assert!(
         w.store
             .read(|tx| gear_app::tasks::merged_at(tx, "p", "T-2"))
@@ -361,22 +478,26 @@ fn a_captain_pass_merges_the_audit_and_starts_what_waits_for_it() {
             .is_some(),
         "the audit is merged at the candidate it checked"
     );
+    assert_eq!(
+        sh(&w.repo.work, "git ls-remote --heads origin review/t2"),
+        "",
+        "the review branch is closed by the merge, so no open-branch item rings (M-7280)"
+    );
+    assert!(
+        w.repo
+            .read_record_on_dev("gear/voyages/M6/reviews/T-2.md")
+            .contains("each promise met"),
+        "the record landed on the integration branch"
+    );
+    // T-3 depended on the audit and waits for its merge: the dependency rule
+    // the engine reads is `merged_at`, which the merge gate has just written
+    // (the dependant's own delivery is the dispatch rule of T-236, unchanged).
     assert!(
         w.store
-            .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Merge))
+            .read(|tx| gear_app::tasks::merged_at(tx, "p", "T-2"))
             .unwrap()
-            .is_empty(),
-        "an audit merges with no merge op"
-    );
-
-    // T-3 depended on the audit: the lane gets it on the next tick.
-    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 30).unwrap();
-    let lane_texts = prompts(&mut w, LANE_PANE);
-    assert!(
-        lane_texts
-            .iter()
-            .any(|text| text.starts_with("New task T-3")),
-        "the dependant starts after the audit's pass: {lane_texts:?}"
+            .is_some(),
+        "the dependant's dependency is met"
     );
 }
 
