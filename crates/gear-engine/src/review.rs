@@ -557,7 +557,7 @@ fn yield_starting_direction_jobs(store: &mut Store, project: &str) -> GearResult
     })
 }
 
-fn direction_key(project: &str, task: &str, attempt: i64) -> String {
+pub(crate) fn direction_key(project: &str, task: &str, attempt: i64) -> String {
     format!("engine.direction.{project}.{task}.{attempt}")
 }
 
@@ -2029,7 +2029,7 @@ fn take_seat(
     Ok(reserved)
 }
 
-fn pending_review_key(seat: &str) -> String {
+pub(crate) fn pending_review_key(seat: &str) -> String {
     format!("engine.review_pending.{seat}")
 }
 
