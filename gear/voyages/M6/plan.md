@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1033 -->
+<!-- gear-plan project=gear base=1035 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -130,6 +130,8 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-10-31 16:43 scope: new S5 task, audit tasks run by reviewers; M6's audit slices are added once it merges and v0.6.4 depends on them | why: user: a voyage ends with an audit split by promise, run by several reviewers, ruled by the captain, and a gap goes back onto the fix path; it lands in M6 | else: the captain audits alone, or GEAR support waits for M7
 - 2026-10-31 16:55 confirmed: lanes hull and mast hk-dgx-1/DeepSeek-V4.1-Flash-1017 -> tokenrhythm/deepseek-v4.1-flash-1017, applied with init --confirmed; the engine switches each lane at its next idle point | why: user: six lanes on the self-hosted endpoint load it too much; it stays with the other project's four
 - station M-7250: keep course — projected 1078m of 1200m; T-501 merged, T-505 in work on hull, T-502 in review, then the audit slices and v0.6.4
+- 2026-10-31 17:30 scope: six audit tasks (S1-S5 and the goal's clauses 2-3) run by reviewers before v0.6.4; clauses (1) and (4) are the captain's own check at landing; a gap goes back as fix tasks added to the audit's deps | why: user: the voyage is audited by promise before it lands | else: -
+- 2026-10-31 17:28 recovery: engines restarted on the T-505 build; the gear engine ignored SIGTERM for 20 s and was killed with SIGKILL, with no operation executing | why: audit tasks need the T-505 engine | else: -
 
 # Queue
 
@@ -412,8 +414,50 @@ goal: [S5] The captain plans a voyage audit as tasks that reviewers run, and a g
 accept: Tests: an audit task with merged deps gets a Submitted attempt at the integration tip and a reviewer, never a lane assignment; its packet carries the audit text and no diff instruction; a captain pass marks it Done and merged with no merge op, and a task depending on it becomes startable; a captain fail returns it to Ready, it waits while a dep added in the same apply is unmerged, then attempt 2 goes to the same reviewer seat; a task without the field is dispatched to its lane as today; `gear plan show` prints `audit: true`. Run make check CRATE=gear-app, CRATE=gear-store, CRATE=gear-engine and CRATE=gear-cli.
 estimate: 60
 
+## T-506 [now] lane=hull milestone=M6 station=S5 required
+audit: true
+goal: [S5] Audit S1. Audit, no code change: check the promise below against origin/dev end to end in normal use, as a user and a captain meet it, not task by task. Use the code, its tests, the gear CLI (`gear report`, `gear queue`, `gear friction --all`, `gear plan show`) and, where a run is needed, a temp GEAR_DB and a temp git repo; never open the live store files. The voyage goal is in the packet: a gap you see outside this slice is a finding too. Promise: station S1: deliveries and reviews never stall, released as v0.6.0. Points: a delivery is confirmed or resent and never sits unconfirmed; a hand-in gets a reviewer without the captain; a rework's review goes to the seat before and resumes it; a stall item names a real stall only.
+accept: One line per point of the promise: met or not, with the evidence (a command and its output, or a file and line). Every gap is a finding with how it shows in normal use.
+deps: T-452, T-481, T-453, T-454, T-455, T-456, T-457, T-458, T-459, T-460, T-461, T-463, T-480, T-483, T-475
+estimate: 30
+
+## T-507 [now] lane=mast milestone=M6 station=S5 required
+audit: true
+goal: [S5] Audit S2. Audit, no code change: check the promise below against origin/dev end to end in normal use, as a user and a captain meet it, not task by task. Use the code, its tests, the gear CLI (`gear report`, `gear queue`, `gear friction --all`, `gear plan show`) and, where a run is needed, a temp GEAR_DB and a temp git repo; never open the live store files. The voyage goal is in the packet: a gap you see outside this slice is a finding too. Promise: station S2: models, agents and captains switch with a handover; elastic counts; dialogs never block; role charters fit the chosen models, released as v0.6.1. Points: a model or CLI switch of a lane mid-task keeps the task and hands over the right branch and state; a lane count change applies without a restart by hand; an agent dialog is closed and the seat asks instead; each role's rules fit its model.
+accept: One line per point of the promise: met or not, with the evidence (a command and its output, or a file and line). Every gap is a finding with how it shows in normal use.
+deps: T-464, T-465, T-466, T-467, T-468, T-469, T-484, T-494, T-476
+estimate: 30
+
+## T-508 [now] lane=hull milestone=M6 station=S5 required
+audit: true
+goal: [S5] Audit S3. Audit, no code change: check the promise below against origin/dev end to end in normal use, as a user and a captain meet it, not task by task. Use the code, its tests, the gear CLI (`gear report`, `gear queue`, `gear friction --all`, `gear plan show`) and, where a run is needed, a temp GEAR_DB and a temp git repo; never open the live store files. The voyage goal is in the packet: a gap you see outside this slice is a finding too. Promise: station S3: GEAR near idle and the fleet's health watched, released as v0.6.2. Points: the engine's tick does no repeated work while nothing changes (read the probe lines it writes); the health watch names a dead or stuck seat and nothing healthy.
+accept: One line per point of the promise: met or not, with the evidence (a command and its output, or a file and line). Every gap is a finding with how it shows in normal use.
+deps: T-470, T-471, T-472, T-477
+estimate: 30
+
+## T-509 [now] lane=mast milestone=M6 station=S5 required
+audit: true
+goal: [S5] Audit S4. Audit, no code change: check the promise below against origin/dev end to end in normal use, as a user and a captain meet it, not task by task. Use the code, its tests, the gear CLI (`gear report`, `gear queue`, `gear friction --all`, `gear plan show`) and, where a run is needed, a temp GEAR_DB and a temp git repo; never open the live store files. The voyage goal is in the packet: a gap you see outside this slice is a finding too. Promise: station S4: the captain's plan tools, released as v0.6.3. Points: `gear plan show`, `gear queue` and plan apply give the captain what the skill says, with clear errors for a wrong draft.
+accept: One line per point of the promise: met or not, with the evidence (a command and its output, or a file and line). Every gap is a finding with how it shows in normal use.
+deps: T-473, T-474, T-482, T-478
+estimate: 30
+
+## T-510 [now] lane=hull milestone=M6 station=S5 required
+audit: true
+goal: [S5] Audit S5. Audit, no code change: check the promise below against origin/dev end to end in normal use, as a user and a captain meet it, not task by task. Use the code, its tests, the gear CLI (`gear report`, `gear queue`, `gear friction --all`, `gear plan show`) and, where a run is needed, a temp GEAR_DB and a temp git repo; never open the live store files. The voyage goal is in the packet: a gap you see outside this slice is a finding too. Promise: station S5: one captain, several projects; a v0.5 project upgrades painlessly. Points: one captain runs two registered projects in one store with separate engines, items and boards; a project registered and run on v0.5 config and store upgrades to this build with no hand step and no lost state; per-task review models, model return after a quota fallback, onboarding of a dirty home worktree and audit tasks work as the skill says.
+accept: One line per point of the promise: met or not, with the evidence (a command and its output, or a file and line). Every gap is a finding with how it shows in normal use.
+deps: T-485, T-486, T-487, T-488, T-489, T-490, T-491, T-501, T-492, T-495, T-496, T-497, T-498, T-499, T-500, T-502, T-503, T-505
+estimate: 30
+
+## T-511 [now] lane=mast milestone=M6 station=S5 required
+audit: true
+goal: [S5] Audit goal. Audit, no code change: check the promise below against origin/dev end to end in normal use, as a user and a captain meet it, not task by task. Use the code, its tests, the gear CLI (`gear report`, `gear queue`, `gear friction --all`, `gear plan show`) and, where a run is needed, a temp GEAR_DB and a temp git repo; never open the live store files. The voyage goal is in the packet: a gap you see outside this slice is a finding too. Promise: the voyage's clauses (2) and (3): the voyage never stops (while some lane has a task it can start, no lane sits idle) and the voyage report shows no false stall item; every captain hand fix or recovery is a decision line in gear/voyages/M6/plan.md. Read `gear report` for M6 and the plan's decision lines, and list each idle stretch and each stall item with whether it was false.
+accept: One line per point of the promise: met or not, with the evidence (a command and its output, or a file and line). Every gap is a finding with how it shows in normal use.
+deps: T-452, T-464, T-470, T-473, T-485, T-492, T-501, T-502, T-503, T-505
+estimate: 30
+
 ## T-493 [now] lane=mast milestone=M6 station=S5 required
 goal: [S5] Release v0.6.4, station S5's release. Change, no other design: (1) the version is 0.6.4 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.4.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.3 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.3 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.4 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.4"; docs/releases/v0.6.4.md lists every task merged on origin/dev since v0.6.3 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-478, T-489, T-490, T-491, T-492, T-495, T-496, T-497, T-498, T-499, T-500, T-501, T-502, T-503, T-505
+deps: T-478, T-489, T-490, T-491, T-492, T-495, T-496, T-497, T-498, T-499, T-500, T-501, T-502, T-503, T-505, T-506, T-507, T-508, T-509, T-510, T-511
 estimate: 15
