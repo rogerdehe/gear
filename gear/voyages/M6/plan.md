@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1010 -->
+<!-- gear-plan project=gear base=1012 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -111,6 +111,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - T-498 pass over review F1: agy's transcript has no model field and the model sits only in an undocumented protobuf; in normal use the seat's configured model prices the round, so reading it from the blob is an edge case logged to the backlog, not a block (bar: DELIVERABLE).
 - T-501 moved hull → mast, ahead of T-492: mast would sit idle after T-486 until it merges; hull keeps T-500.
 - T-492 back to hull after T-500: by then T-486 should be merged; mast keeps T-486 → T-501 → T-493, so both lanes end near the same time.
+- added NEW (S5, hull, after T-492): the Tasks tab colours each row's stage by state and dims merged rows, so working/in review/reworking stand out (the user could not tell them apart at a glance).
 
 # Queue
 
@@ -372,8 +373,13 @@ goal: [S5] The captain picks a task's review model. Today every review takes the
 accept: Tests: a task with `review-model: B` is reviewed on B while the chain's first entry is A, and its re-review too; a task without it is reviewed on A; apply rejects a model not in the chain and one equal to the lane's model; `gear plan show` prints the field back. Run make check CRATE=gear-app, CRATE=gear-store, CRATE=gear-engine and CRATE=gear-cli.
 estimate: 55
 
+## T-502 [now] lane=hull milestone=M6 station=S5 required
+goal: [S5] On the board's Tasks tab the live tasks stand out at a glance. Today a row's whole text (id, title, stage, time) is one style, bold for an open task, so `working`, `in review` and `reworking` look like `merged`; only the small node glyph carries the stage colour. Change, no other design: (1) the stage words of a row are drawn in the stage's own colour (`Stage::color`: working/rework yellow, handed/in review/passed/merging accent, sent back/merge failed/failed red, merged green, waiting/queued dim) and bold for a live stage; (2) a merged row's id, title and time are dim, so live rows are the bright ones; (3) a live row (working, asking, rework, handed, review, verdict, merging, merge failed) keeps the bold id and title. The text column becomes styled spans instead of one style (GraphRow); the narrow layout and the selection highlight keep working. Change crates/gear-board (graph.rs, the row rendering in frame.rs/screen.rs) and its golden snapshots, no other design.
+accept: Board tests on the rendered Tasks tab: a working row's stage cell carries the working colour and bold, an in-review row the review colour, a reworking row the rework colour; a merged row's title is dim; the selected row still shows its highlight. Run make check CRATE=gear-board and CRATE=gear-cli.
+estimate: 35
+
 ## T-493 [now] lane=mast milestone=M6 station=S5 required
 goal: [S5] Release v0.6.4, station S5's release. Change, no other design: (1) the version is 0.6.4 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.4.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.3 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.3 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.4 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.4"; docs/releases/v0.6.4.md lists every task merged on origin/dev since v0.6.3 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-478, T-489, T-490, T-491, T-492, T-495, T-496, T-497, T-498, T-499, T-500, T-501
+deps: T-478, T-489, T-490, T-491, T-492, T-495, T-496, T-497, T-498, T-499, T-500, T-501, T-502
 estimate: 15
