@@ -115,6 +115,9 @@ fn probe_world() -> (Store, FakeHerdr, EngineCfg) {
             created: T,
             mechanical: None,
         })?;
+        // T-481: a task marked unrelated starts a new conversation, so this
+        // world still exercises the `/new` switch.
+        tx.set_task_fresh("p", "T-1", "a new parser")?;
         Ok(())
     })
     .unwrap();
@@ -168,22 +171,22 @@ fn a_session_switch_to_done_logs_one_probe_line_per_step_and_one_total() {
 }
 
 #[test]
-fn waits_then_sends_once_records_sent_and_names_followup() {
+fn sends_once_records_sent_and_names_followup() {
+    // T-481: the lane keeps its conversation, so a follow-up whose earlier
+    // session is not on the seat is delivered at once, with the pointer to
+    // the task it follows.
     let (mut s, mut h, c) = world(true);
     advance(&mut s, &mut h, &c, 0);
     let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
-    assert!(a.sent_at.is_none());
-    assert!(h.prompts_to(PANE).is_empty());
-    assert!(h
-        .calls
-        .iter()
-        .any(|x| matches!(x,Call::PaneType { text,.. } if text=="/new")));
-    advance(&mut s, &mut h, &c, 1);
-    assert!(h.prompts_to(PANE).is_empty());
-    h.set_agent_session(PANE, "new");
-    advance(&mut s, &mut h, &c, 7);
-    let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
-    assert_eq!(a.sent_at, Some(T + 7));
+    assert_eq!(a.session_action.as_deref(), Some("keep"));
+    assert_eq!(a.sent_at, Some(T));
+    assert!(
+        !h.calls
+            .iter()
+            .any(|x| matches!(x,Call::PaneType { text,.. } if text=="/new")),
+        "a kept conversation is not restarted: {:?}",
+        h.calls
+    );
     let prompts = h.prompts_to(PANE);
     assert_eq!(prompts.len(), 1);
     assert!(prompts[0].contains("This task follows T-7; read its report: gear --show T-7"));
@@ -223,13 +226,12 @@ fn open_round_with_dead_agent_starts_with_resume_arguments() {
 #[test]
 fn refused_packet_does_not_record_sent_at() {
     let (mut s, mut h, c) = world(false);
-    advance(&mut s, &mut h, &c, 0);
-    advance(&mut s, &mut h, &c, 1);
-    h.set_agent_session(PANE, "new");
+    // T-481: the kept conversation needs no switch, so the packet goes at the
+    // first tick — and it is the refusal that stops it.
     h.inject_next = Some(gear_herdr::fake::Inject::Refuse {
         code: "refused".into(),
     });
-    advance(&mut s, &mut h, &c, 7);
+    advance(&mut s, &mut h, &c, 0);
     assert!(s
         .read(|tx| tx.get_attempt("p", "T-1", 1))
         .unwrap()
@@ -303,6 +305,9 @@ fn urgent_doorbell_waits_for_session_preparation_and_delivery() {
     use gear_store::{NewMessage, ViewRecord};
     let (mut s, mut h, c) = world(false);
     s.write(|tx| {
+        // T-481: a task marked unrelated starts a new conversation, so the
+        // doorbell still waits for the session step.
+        tx.set_task_fresh("p", "T-1", "a new parser")?;
         tx.insert_message(&NewMessage {
             project: "p".into(),
             thread: "instruction".into(),
@@ -426,13 +431,17 @@ fn recovering_existing_round_consumes_fresh_marker_before_unrelated_task() {
     .unwrap();
     advance(&mut s, &mut h, &c, 5);
     let a = s.read(|tx| tx.get_attempt("p", "T-2", 1)).unwrap().unwrap();
-    assert_eq!(a.session_action.as_deref(), Some("new"));
+    // T-481: T-2 carries no `fresh:` mark, so the lane keeps the conversation
+    // its earlier round made (compacted, since no usage is recorded) — the
+    // fresh marker was spent on the recovery of T-1's round and does not leak
+    // into the next task.
+    assert_eq!(a.session_action.as_deref(), Some("compact"));
     assert!(
-        h.calls
+        !h.calls
             .iter()
             .any(|x| matches!(x,Call::PaneType {pane,text} if pane==PANE && text=="/new")),
-        "{:?}",
-        h.calls
+        "{calls:?}",
+        calls = h.calls
     );
 }
 

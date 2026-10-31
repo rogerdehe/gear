@@ -544,6 +544,72 @@ fn a_lane_with_nothing_queued_is_still_in_the_snapshot() {
 }
 
 #[test]
+fn the_lane_home_marks_a_new_session_recovery() {
+    let mut s = world();
+    s.write(|tx| {
+        tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: "p".into(),
+            id: "T-1".into(),
+            rank: 1,
+            state: TaskState::Running,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: Vec::new(),
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: None,
+            issue: None,
+            updated: NOW,
+        })?;
+        tx.insert_attempt(&AttemptRow {
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
+            project: "p".into(),
+            task: "T-1".into(),
+            n: 2,
+            seat: "p:heat".into(),
+            generation: 1,
+            contract_version: 1,
+            adopted_version: 1,
+            pending_update: None,
+            state: AttemptState::Delivered,
+            candidate: None,
+            report: None,
+            safe_point: None,
+            started: NOW,
+            updated: NOW,
+        })?;
+        tx.set_session_recovery("p", "T-1", 2, "codex", "session-x")
+    })
+    .unwrap();
+
+    let home = home::build(
+        &mut s,
+        &seat_env("heat", LANE_PANE),
+        Some(&fp(LANE_PANE, "opencode")),
+        NOW + 2,
+    )
+    .unwrap();
+    assert!(
+        home.text.contains("round: new-session recovery"),
+        "the round is marked: {}",
+        home.text
+    );
+    assert!(home.text.contains("task T-1 attempt 2"), "{}", home.text);
+}
+
+#[test]
 fn the_lane_home_has_no_snapshot() {
     let mut s = world();
     let home = home::build(

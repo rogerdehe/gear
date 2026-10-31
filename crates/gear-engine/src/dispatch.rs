@@ -900,10 +900,16 @@ pub fn intend_dispatch(
                     }
                 }
                 let action = attempt.session_action.as_deref().unwrap_or("");
+                // T-481: a follow-up whose session cannot be used keeps the
+                // lane's own conversation instead of starting one, so the
+                // pointer to the task it follows goes with the `keep` too —
+                // the design's §3.3 sentence covers every case where the
+                // follow-up's session is not the one the round runs in.
                 if attempt.n == 1
                     && (action.starts_with("new")
                         || action == "fresh"
-                        || action == "resume-fallback")
+                        || action == "resume-fallback"
+                        || action == "keep")
                 {
                     if let Some(followup) = tx.get_task(project, task)?.and_then(|t| t.followup_of)
                     {

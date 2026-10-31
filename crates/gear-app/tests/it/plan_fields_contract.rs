@@ -214,6 +214,68 @@ fn a_followup_is_set_on_an_existing_task_too() {
     assert_eq!(task(&mut s, "T-1").followup_of.as_deref(), Some("T-2"));
 }
 
+/// T-481: a task block may carry `fresh: <why>` — the captain's mark that
+/// the work is unrelated to what the lane did before. It is stored with the
+/// task and `gear plan show` prints it back.
+#[test]
+fn a_fresh_mark_is_parsed_stored_and_shown() {
+    let mut s = world();
+    run(
+        &mut s,
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\nfresh: a new parser, unrelated to the old one\ndeps: -\n\n## NEW [should] lane=wire\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n",
+        "r1",
+    )
+    .unwrap();
+
+    assert_eq!(
+        s.read(|tx| tx.task_fresh("p", "T-1")).unwrap().as_deref(),
+        Some("a new parser, unrelated to the old one")
+    );
+    let shown = s.read(|tx| gear_app::plan::show(tx, "p", "T-1")).unwrap();
+    assert!(
+        shown.contains("fresh: a new parser, unrelated to the old one"),
+        "{shown}"
+    );
+
+    // An existing task's block may set it too; a block without `fresh:` keeps
+    // the mark the task has.
+    run_at(
+        &mut s,
+        "# Queue\n## T-2 [should] lane=wire\nfresh: another subsystem\ndeps: -\n",
+        "r2",
+    )
+    .unwrap();
+    assert_eq!(
+        s.read(|tx| tx.task_fresh("p", "T-2")).unwrap().as_deref(),
+        Some("another subsystem")
+    );
+    run_at(
+        &mut s,
+        "# Queue\n## T-2 [should] lane=wire\ndeps: -\n",
+        "r3",
+    )
+    .unwrap();
+    assert_eq!(
+        s.read(|tx| tx.task_fresh("p", "T-2")).unwrap().as_deref(),
+        Some("another subsystem")
+    );
+}
+
+/// T-481: `fresh:` needs a reason.
+#[test]
+fn an_empty_fresh_mark_is_refused() {
+    let error = parse(
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\nfresh:\ndeps: -\n",
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat, "{}", error.detail);
+    assert!(
+        error.detail.contains("`fresh` needs the reason"),
+        "{}",
+        error.detail
+    );
+}
+
 /// §3.3: the follow-up names a task that exists.
 #[test]
 fn an_unknown_followup_is_refused() {
