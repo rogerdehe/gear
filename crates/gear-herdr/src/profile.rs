@@ -241,6 +241,16 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// `["--session", "{session}"]`; exit by the `/quit` command
 /// (`exit_command`, no keys); new session `/new`; compact `/compact`;
 /// usage log `pi-jsonl`.
+/// omp (oh-my-pi, a pi fork): quota `insufficient_quota`,
+/// `exceeded your current quota` and `usage_limit_reached`; rate limit
+/// `rate_limit_error`, `rate_limit_reached`, `too_many_requests` and
+/// `request_throttled`; auth `authentication_error` and
+/// `No API key found for`; back-off `Retrying (`; provider error
+/// `overloaded_error` and `Retry failed after`; unattended
+/// `--auto-approve`; session_ref false (Herdr 0.9.1 reports no
+/// `agent_session` for omp); resume `["--resume", "{session}"]`; exit by
+/// the `/quit` command; new session `/new`; compact `/compact`; usage log
+/// `pi-jsonl` (omp writes pi's session files).
 ///
 /// The busy markers of the older profiles are still there, so that an old
 /// config loads; they decide nothing (§10.2).
@@ -412,7 +422,7 @@ impl Profile {
 /// without the user configuring anything.
 pub fn builtins() -> BTreeMap<String, Profile> {
     let mut table = BTreeMap::new();
-    for kind in ["opencode", "claude", "codex", "grok", "pi"] {
+    for kind in ["opencode", "claude", "codex", "grok", "pi", "omp"] {
         if let Some(profile) = builtin(kind) {
             table.insert(kind.to_string(), profile);
         }
@@ -746,6 +756,68 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             exit_command: Some("/quit".into()),
             verified: true,
         }),
+        // omp (oh-my-pi 18.12.6, a pi fork; checked 2026-10-31 against
+        // `omp --help`, omp's own config and a live start through Herdr
+        // 0.9.1 — the SOP is `gear --skill agent:pi` until omp has its own):
+        // busy ` Working…` (the spinner line the TUI draws while a turn
+        // runs: `⎋ Working…`); unattended `--auto-approve` (omp's own flag;
+        // `--approval-mode yolo` is its other spelling and is not passed);
+        // session_ref false (Herdr 0.9.1 reports no `agent_session` for an
+        // omp pane — checked live with `herdr agent list`); resume
+        // `--resume <session>` (omp's own hint after ctrl+d; omp has no
+        // `--session` flag); exit on the `/quit` command (`exit_command`, no
+        // keys — live: `/quit` from the command palette ends omp; ctrl+d
+        // exits only while the composer is empty).
+        //
+        // The provider signs are omp's own (18.12.6: the live 401 screen
+        // `✘ 401 {"type":"error","error":{"type":"authentication_error",…}}`
+        // and the binary's string table): auth `authentication_error`,
+        // `No API key found for` and `No credential available for provider`;
+        // quota `insufficient_quota`, `exceeded your current quota` and
+        // `usage_limit_reached`; rate limit `rate_limit_error`,
+        // `rate_limit_reached`, `too_many_requests` and
+        // `request_throttled`; back-off `Retrying (`; provider error
+        // `overloaded_error` and `Retry failed after`. omp has no
+        // pi-guardrails markers; `--auto-approve` keeps approval dialogs
+        // away, so `blocked_markers` and `dialogs` stay empty.
+        "omp" => Some(Profile {
+            kind: "omp".into(),
+            busy_markers: vec![" Working…".into()],
+            ratelimit_markers: vec![
+                "rate_limit_error".into(),
+                "rate_limit_reached".into(),
+                "too_many_requests".into(),
+                "request_throttled".into(),
+            ],
+            quota_markers: vec![
+                "insufficient_quota".into(),
+                "exceeded your current quota".into(),
+                "usage_limit_reached".into(),
+            ],
+            quota_bar: None,
+            auth_markers: vec![
+                "authentication_error".into(),
+                "No API key found for".into(),
+                "No credential available for provider".into(),
+            ],
+            backoff_markers: vec!["Retrying (".into()],
+            blocked_markers: vec![],
+            error_markers: vec!["overloaded_error".into(), "Retry failed after".into()],
+            dialogs: vec![],
+            new_session: "/new".into(),
+            compact: "/compact".into(),
+            usage_log: Some("pi-jsonl".into()),
+            tail_lines: 16,
+            confirm_rounds: 2,
+            unattended_args: vec!["--auto-approve".into()],
+            // T-195: omp takes the rules as text or an existing file, like pi.
+            instructions_args: vec!["--append-system-prompt".into(), "{rules_file}".into()],
+            session_ref: false,
+            resume_args: Some(vec!["--resume".into(), "{session}".into()]),
+            exit_keys: vec![],
+            exit_command: Some("/quit".into()),
+            verified: true,
+        }),
         // Only kinds with a verified SOP are built in (design/04).
         _ => None,
     }
@@ -807,6 +879,46 @@ mod tests {
         );
         assert!(builtin("opencode").unwrap().instructions_args.is_empty());
         assert!(builtin("grok").unwrap().instructions_args.is_empty());
+    }
+
+    /// T-495: omp starts unattended with its own flag and takes the role
+    /// rules as a system prompt file; it exits by the `/quit` command and
+    /// its back-off and quota signs are the ones its own screens show.
+    #[test]
+    fn the_omp_profile_starts_unattended_with_the_rules() {
+        let omp = builtin("omp").unwrap();
+        assert_eq!(omp.kind, "omp");
+        assert_eq!(omp.unattended_args, vec!["--auto-approve".to_string()]);
+        assert_eq!(
+            omp.instructions_args,
+            vec![
+                "--append-system-prompt".to_string(),
+                "{rules_file}".to_string()
+            ]
+        );
+        assert_eq!(omp.exit_command.as_deref(), Some("/quit"));
+        assert!(omp.exit_keys.is_empty());
+        // omp has no `--session`: the resume is omp's own `--resume`.
+        assert_eq!(
+            omp.resume_args,
+            Some(vec!["--resume".to_string(), "{session}".to_string()])
+        );
+        assert!(!omp.session_ref, "Herdr reports no agent_session for omp");
+        assert!(omp.verified);
+        // The signs omp's own screens carry (18.12.6).
+        assert!(omp.backoff("⎋ Retrying (2/3) in 5s…"));
+        let quota = "✘ 429 {\"type\":\"error\",\"error\":{\"type\":\"insufficient_quota\"}}";
+        assert!(classify_screen(&omp, quota).contains(&ScreenFlag::Quota));
+        let limited = "✘ 429 {\"error\":{\"type\":\"rate_limit_error\"}}";
+        assert!(classify_screen(&omp, limited).contains(&ScreenFlag::RateLimit));
+        let auth = "✘ 401 {\"error\":{\"type\":\"authentication_error\"}}";
+        assert!(classify_screen(&omp, auth).contains(&ScreenFlag::Auth));
+        assert!(classify_screen(
+            &omp,
+            "Error: Retry failed after 3 attempts: 529 overloaded_error"
+        )
+        .contains(&ScreenFlag::Error));
+        assert!(builtins().contains_key("omp"));
     }
 
     /// T-195: the rules file's path goes into the args.

@@ -39,6 +39,10 @@ pub struct ProjectConfig {
     /// The departure time of a voyage (T-448); absent = today's behaviour.
     #[serde(default)]
     pub schedule: Option<ScheduleSection>,
+    /// The fleet and machine health watch's thresholds (T-472). Absent = the
+    /// defaults below.
+    #[serde(default)]
+    pub health: Health,
     /// API-equivalent USD per million tokens, keyed by provider/model.
     #[serde(default)]
     pub prices: BTreeMap<String, Price>,
@@ -459,6 +463,10 @@ pub struct Conventions {
     /// The branch a task is reviewed on (T-252), expanded like
     /// `task_branch`. Default `review/t{n}`.
     pub review_branch: String,
+    /// The branch of a direction check (T-474), expanded like the review
+    /// branch: `{project}` and `{task}` (or `{n}`) are filled in. Default
+    /// `{project}/direction/{task}`.
+    pub direction_branch: String,
     /// The branch of a seat's own worktree (T-252), with `{project}` and
     /// `{seat}` filled in: the merge worktree is seat `merge`, so Herdr names
     /// the worktree `<project>-<seat>`. Default `{project}/{seat}`.
@@ -504,6 +512,7 @@ impl Default for Conventions {
             gate: String::new(),
             task_branch: gear_model::branch::TASK_BRANCH.to_string(),
             review_branch: gear_model::branch::REVIEW_BRANCH.to_string(),
+            direction_branch: gear_model::branch::DIRECTION_BRANCH.to_string(),
             seat_branch: gear_model::branch::SEAT_BRANCH.to_string(),
             remote: gear_model::layout::REMOTE.to_string(),
             voyage_dir: gear_model::layout::VOYAGE_DIR.to_string(),
@@ -886,6 +895,68 @@ impl Default for ScheduleSection {
             depart_at: None,
             hours: None,
             notice_min: 15,
+        }
+    }
+}
+
+/// The thresholds of the fleet and machine health watch (T-472), agreed at
+/// kickoff. The engine samples the machine and each seat's own processes once
+/// per `sample_min` minutes; a machine that stays short (`load_x_cores` × the
+/// cores for `machine_over_min` minutes, memory free under `mem_free_pct` %,
+/// or a watched volume under `disk_free_gb` GB) is relieved by stopping a seat
+/// whose processes are over the safe line (`seat_cpu_pct` % of one core or
+/// `seat_mem_mb` MB for `seat_over_min` minutes), or is named to the captain
+/// when no seat is the cause.
+///
+/// ```toml
+/// [health]
+/// sample_min = 1
+/// load_x_cores = 2.0
+/// machine_over_min = 5
+/// mem_free_pct = 10
+/// disk_free_gb = 5
+/// seat_cpu_pct = 200
+/// seat_mem_mb = 2048
+/// seat_over_min = 5
+/// ```
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Health {
+    /// How many minutes between two samples of the machine and the seats.
+    pub sample_min: u32,
+    /// The load (5-minute average) over this many times the machine's cores
+    /// makes the machine short.
+    pub load_x_cores: f64,
+    /// How many consecutive samples the machine must be short for the load or
+    /// the memory pressure before the watch acts.
+    pub machine_over_min: u32,
+    /// Free memory under this percentage of the total makes the machine short.
+    pub mem_free_pct: u32,
+    /// A watched volume (the state directory, the project's repos) with less
+    /// free space than this makes the machine short at once.
+    pub disk_free_gb: u64,
+    /// A seat's own processes over this percentage of one core are over the
+    /// safe line.
+    pub seat_cpu_pct: u32,
+    /// A seat's own processes over this many MB of resident memory are over
+    /// the safe line.
+    pub seat_mem_mb: u64,
+    /// How many consecutive samples a seat must be over the safe line before
+    /// the watch stops it.
+    pub seat_over_min: u32,
+}
+
+impl Default for Health {
+    fn default() -> Self {
+        Self {
+            sample_min: 1,
+            load_x_cores: 2.0,
+            machine_over_min: 5,
+            mem_free_pct: 10,
+            disk_free_gb: 5,
+            seat_cpu_pct: 200,
+            seat_mem_mb: 2048,
+            seat_over_min: 5,
         }
     }
 }
@@ -1676,31 +1747,37 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     // checks. A template is expanded with its placeholders; anything else stays
     // a literal brace and git refuses the branch, so each is checked here — on
     // a sample — rather than when a lane cannot push.
-    let templates: [(&str, &str, &str, &[&str]); 3] = [
-        // the field, the template, the placeholder it must name, the ones it
-        // may name
+    let templates: [(&str, &str, &[&str], &[&str]); 4] = [
+        // the field, the template, the placeholders it may name (one of the
+        // first is required), the ones it may name
         (
             "conventions.task_branch",
             &conventions.task_branch,
-            "n",
-            &["project", "lane", "n"],
+            &["n"],
+            &["project", "lane", "n", "task"],
         ),
         (
             "conventions.review_branch",
             &conventions.review_branch,
-            "n",
-            &["project", "lane", "n"],
+            &["n"],
+            &["project", "lane", "n", "task"],
+        ),
+        (
+            "conventions.direction_branch",
+            &conventions.direction_branch,
+            &["task", "n"],
+            &["project", "lane", "n", "task"],
         ),
         (
             "conventions.seat_branch",
             &conventions.seat_branch,
-            "seat",
+            &["seat"],
             &["project", "seat"],
         ),
     ];
-    let mut usable = [false; 3];
+    let mut usable = [false; 4];
     for (index, (field, template, required, allowed)) in templates.iter().enumerate() {
-        let sample = if *required == "seat" {
+        let sample = if required.contains(&"seat") {
             gear_model::branch::expand_seat(template, SAMPLE_PROJECT, SAMPLE_SEAT)
         } else {
             gear_model::branch::expand(template, SAMPLE_PROJECT, SAMPLE_LANE, SAMPLE_TASK)
@@ -1728,6 +1805,24 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                     "the review branch {review:?} is the same name as the task branch: a task needs a branch for its work and another for its review"
                 ),
             ));
+        }
+        if usable[2] {
+            let direction = gear_model::branch::expand(
+                &conventions.direction_branch,
+                SAMPLE_PROJECT,
+                SAMPLE_LANE,
+                SAMPLE_TASK,
+            );
+            for (other, name) in [("task", &task), ("review", &review)] {
+                if &direction == name {
+                    issues.push(issue(
+                        "conventions.direction_branch",
+                        format!(
+                            "the direction branch {direction:?} is the same name as the {other} branch: a direction check needs its own branch"
+                        ),
+                    ));
+                }
+            }
         }
     }
 
@@ -1812,6 +1907,51 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                 ));
             }
         }
+    }
+
+    // ---- the health watch (T-472): a threshold of zero would fire on every
+    // sample, and a sample interval of zero would read the machine each tick.
+    if cfg.health.sample_min == 0 {
+        issues.push(issue(
+            "health.sample_min",
+            "must be at least one minute".to_string(),
+        ));
+    }
+    if cfg.health.machine_over_min == 0 {
+        issues.push(issue(
+            "health.machine_over_min",
+            "must be at least one minute".to_string(),
+        ));
+    }
+    if cfg.health.seat_over_min == 0 {
+        issues.push(issue(
+            "health.seat_over_min",
+            "must be at least one minute".to_string(),
+        ));
+    }
+    if !(cfg.health.load_x_cores > 0.0) {
+        issues.push(issue(
+            "health.load_x_cores",
+            "must be greater than zero".to_string(),
+        ));
+    }
+    if cfg.health.seat_cpu_pct == 0 {
+        issues.push(issue(
+            "health.seat_cpu_pct",
+            "must be at least one percent of one core".to_string(),
+        ));
+    }
+    if cfg.health.seat_mem_mb == 0 {
+        issues.push(issue(
+            "health.seat_mem_mb",
+            "must be at least one MB".to_string(),
+        ));
+    }
+    if cfg.health.mem_free_pct == 0 || cfg.health.mem_free_pct >= 100 {
+        issues.push(issue(
+            "health.mem_free_pct",
+            "must be between 1 and 99 percent".to_string(),
+        ));
     }
 
     // ---- models (17 §0): empty chains mean models are not managed
@@ -2020,7 +2160,7 @@ fn message_template_issues(
 fn branch_template_issues(
     field: &str,
     template: &str,
-    required: &str,
+    required: &[&str],
     allowed: &[&str],
     sample: &str,
     issues: &mut Vec<ConfigIssue>,
@@ -2037,11 +2177,13 @@ fn branch_template_issues(
         ));
         return false;
     }
-    if !names.contains(&required) {
+    if !required.iter().any(|name| names.contains(name)) {
+        let wanted: Vec<String> = required.iter().map(|name| format!("{{{name}}}")).collect();
         issues.push(issue(
             field,
             format!(
-                "the template {template:?} has no {{{required}}}: each one needs its own branch"
+                "the template {template:?} names none of {}: each one needs its own branch",
+                wanted.join(", ")
             ),
         ));
         return false;

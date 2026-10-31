@@ -15,17 +15,23 @@ pub const TASK_BRANCH: &str = "{lane}/t{n}";
 /// The default review branch of a task.
 pub const REVIEW_BRANCH: &str = "review/t{n}";
 
+/// The default branch of a direction check (T-474): the reviewer's own branch
+/// of the task, named after the project so two projects on one remote do not
+/// share it. The old shape was `direction/t<n>`.
+pub const DIRECTION_BRANCH: &str = "{project}/direction/{task}";
+
 /// The default branch of a seat's own worktree (T-252): the name says whose
 /// worktree it is, so Herdr names the worktree `<project>-<seat>`.
 pub const SEAT_BRANCH: &str = "{project}/{seat}";
 
-/// `template` with `{project}`, `{lane}` and `{n}` filled in. `project` is the
-/// project id, `lane` the lane name and `task` the task id (`T-40` → `{n}` is
-/// `40`).
+/// `template` with `{project}`, `{lane}`, `{task}` and `{n}` filled in.
+/// `project` is the project id, `lane` the lane name, `{task}` the task id in
+/// lower case (`T-40` → `t-40`) and `{n}` its number (`40`).
 pub fn expand(template: &str, project: &str, lane: &str, task: &str) -> String {
     template
         .replace("{project}", project)
         .replace("{lane}", lane)
+        .replace("{task}", &task.to_lowercase())
         .replace("{n}", &number(task))
 }
 
@@ -35,6 +41,12 @@ pub fn expand(template: &str, project: &str, lane: &str, task: &str) -> String {
 /// branch). The engine hands it to the reviewer and the app checks the push
 /// onto it, so both read the same name.
 pub fn review_branch(template: &str, project: &str, lane: &str, task: &str) -> String {
+    expand(template, project, lane, task)
+}
+
+/// The direction branch of a task (T-474): the project's
+/// `[conventions].direction_branch` template, expanded like the review branch.
+pub fn direction_branch(template: &str, project: &str, lane: &str, task: &str) -> String {
     expand(template, project, lane, task)
 }
 
@@ -69,6 +81,14 @@ mod tests {
     fn the_defaults_are_the_names_gear_uses() {
         assert_eq!(expand(TASK_BRANCH, "p", "pay", "T-40"), "pay/t40");
         assert_eq!(expand(REVIEW_BRANCH, "p", "l", "T-7"), "review/t7");
+        assert_eq!(
+            direction_branch(DIRECTION_BRANCH, "p", "l", "T-7"),
+            "p/direction/t-7"
+        );
+        assert_eq!(
+            direction_branch("{project}/dir/t{n}", "acme", "l", "T-7"),
+            "acme/dir/t7"
+        );
     }
 
     #[test]

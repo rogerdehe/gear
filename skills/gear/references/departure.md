@@ -7,6 +7,7 @@ Rules:
 - Show it only when your own work is finished: every contract written, the loads balanced, every task in the plan. The sheet asks the user for decisions, not for patience.
 - Every line comes from the config and the plan you are about to apply. Show nothing you have not written, and leave nothing out that you will apply.
 - It is not the plan. It aligns where the voyage goes, not how: one table, one line per item, never a line per task. Tasks and contracts stay in the plan.
+- The sheet's title names the project: start it `Departure: <project> · <voyage id> <title>`, so the user knows which project is departing when several run from one pane.
 - When the user changes something, change the config or the plan, then show the whole sheet again with each changed line marked `(changed)`. Repeat until the user says to depart.
 - Start nothing before that word: no `gear admin init` without `--check`, and no `gear plan apply`. Then init, apply and open the board. The confirmed sheet is the user's consent for both.
 
@@ -15,7 +16,7 @@ Rules:
 One table, one line per item, nothing else:
 
 ```markdown
-| Departure: <voyage id> <title> | |
+| Departure: <project> · <voyage id> <title> | |
 |---|---|
 | Goal | <one sentence> |
 | Done when | (1) <clause>; (2) <clause>; … |
