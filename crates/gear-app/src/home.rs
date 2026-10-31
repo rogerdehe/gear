@@ -224,21 +224,26 @@ pub fn build_with_agents(
         };
         Ok((lines.join("\n"), vec![view]))
     })?;
-    let view = views.first().cloned().unwrap_or_else(|| ViewRecord {
-        project: env
-            .ctx
-            .as_ref()
-            .map(|ctx| ctx.project.clone())
-            .unwrap_or_default(),
-        seat: String::new(),
-        generation: 0,
-        ts: now,
-        shown_msgs: Vec::new(),
-        shown_ops: Vec::new(),
-        shown_task: None,
-        shown_attempt: None,
-        shown_contract: None,
-    });
+    // The caller's own project's view (T-486 F2): a multi-project page has
+    // one view per held project, and `Home.view` is the one of the project
+    // the caller runs in, not the first held one.
+    let caller = env.ctx.as_ref().map(|ctx| ctx.project.clone());
+    let view = caller
+        .as_ref()
+        .and_then(|project| views.iter().find(|view| &view.project == project))
+        .or_else(|| views.first())
+        .cloned()
+        .unwrap_or_else(|| ViewRecord {
+            project: caller.unwrap_or_default(),
+            seat: String::new(),
+            generation: 0,
+            ts: now,
+            shown_msgs: Vec::new(),
+            shown_ops: Vec::new(),
+            shown_task: None,
+            shown_attempt: None,
+            shown_contract: None,
+        });
     Ok(Home { text, view, views })
 }
 

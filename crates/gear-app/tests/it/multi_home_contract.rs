@@ -217,6 +217,20 @@ fn two_held_projects_show_their_voyage_lines_and_qualified_items() {
 }
 
 #[test]
+fn the_page_reports_the_callers_own_project_view() {
+    let mut s = two_projects();
+    let mut caller = env();
+    caller.ctx.as_mut().unwrap().project = "b".into();
+    let page = home::build(&mut s, &caller, Some(&fp()), NOW + 10).unwrap();
+    assert_eq!(page.views.len(), 2, "one view per project");
+    assert_eq!(
+        page.view.project, "b",
+        "the caller's own project, not the first held"
+    );
+    assert_eq!(page.view.shown_msgs, vec!["M-1".to_string()]);
+}
+
+#[test]
 fn a_second_page_shows_no_item_again_as_unshown() {
     let mut s = two_projects();
     let page = home::build(&mut s, &env(), Some(&fp()), NOW + 10).unwrap();

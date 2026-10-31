@@ -7,7 +7,7 @@
 //! occupant's kind. Without a Herdr socket there is no seat to prove, and the
 //! test does nothing (the rendered-page tests of `gear-app` still run).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
 
 use gear_model::{MsgKind, MsgState, SeatRole, TaskState};
