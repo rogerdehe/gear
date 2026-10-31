@@ -124,6 +124,7 @@ mod ready_state_contract;
 mod remote_contract;
 mod reviewer_quota_contract;
 mod rework_mid_turn_contract;
+mod ring_contract;
 mod rounds_contract;
 mod session_dispatch_contract;
 mod station_contract;

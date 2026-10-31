@@ -292,6 +292,93 @@ pub fn intend_doorbells(
     Ok(ops)
 }
 
+/// Write the ops of the tick's rings (T-487), one transaction. The ring's own
+/// op is recorded under the first ringing seat (Intended: the execute step
+/// types it once for the pane). Every other seat the ring covers gets an op of
+/// its own, already Submitted with the same text and its own ids: its items are
+/// covered (never rung twice) and its slot is held without a second prompt.
+pub fn intend_rings(
+    tx: &Tx<'_>,
+    rings: &[crate::doorbell::Ring],
+    now: Ts,
+) -> GearResult<Vec<OpRow>> {
+    let mut ops = Vec::new();
+    for ring in rings {
+        // The captain's reminder clock counts each seat's own items.
+        for seat in &ring.seats {
+            crate::attention::record(
+                tx,
+                &crate::doorbell::DoorbellAction {
+                    project: seat.project.clone(),
+                    seat: seat.seat.clone(),
+                    generation: seat.generation,
+                    pane_id: ring.pane_id.clone(),
+                    text: ring.text.clone(),
+                    covers: seat.covers.clone(),
+                },
+                now,
+            )?;
+        }
+        let primary = tx.insert_op(&NewOp {
+            project: ring.project.clone(),
+            seat: ring.seat.clone(),
+            generation: ring.generation,
+            kind: OpKind::Doorbell,
+            task: None,
+            attempt: None,
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({
+                "text": ring.text,
+                "covers": ring.covers,
+                "pane": ring.pane_id,
+                "ring": ring.seats.iter().map(|seat| serde_json::json!({
+                    "project": seat.project,
+                    "seat": seat.seat,
+                    "generation": seat.generation,
+                    "covers": seat.covers,
+                })).collect::<Vec<_>>(),
+            }),
+            created: now,
+        })?;
+        ops.push(primary.clone());
+        for seat in &ring.seats {
+            if seat.seat == ring.seat {
+                continue;
+            }
+            let op = tx.insert_op(&NewOp {
+                project: seat.project.clone(),
+                seat: seat.seat.clone(),
+                generation: seat.generation,
+                kind: OpKind::Doorbell,
+                task: None,
+                attempt: None,
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({
+                    "text": ring.text,
+                    "covers": seat.covers,
+                    "pane": ring.pane_id,
+                    "ring_by": primary.id,
+                }),
+                created: now,
+            })?;
+            // It is part of the same prompt: never typed again.
+            tx.set_op_state(&seat.project, &op.id, OpState::Executing, None, now)?;
+            let evidence = format!("rung with {} in pane {}", primary.id, ring.pane_id);
+            tx.set_op_state(
+                &seat.project,
+                &op.id,
+                OpState::Submitted,
+                Some(&evidence),
+                now,
+            )?;
+            ops.push(op);
+        }
+    }
+    Ok(ops)
+}
+
 /// One Deliver op per action (state Intended): `task`/`attempt` set, payload
 /// `{ "text": <text> }`. Same transaction rules as [`intend_doorbells`].
 pub fn intend_deliveries(
