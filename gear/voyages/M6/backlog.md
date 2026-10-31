@@ -164,3 +164,6 @@
 
 ## The captain cannot give a reviewer an audit job
 - 2026-10-31 M6: a reviewer seat only gets jobs bound to a lane's push (the direction check) or hand-in (the review), so the whole-voyage audit of decompose rule 7 has no GEAR path. Design at M7 kickoff: an audit job with its own text sent to a reviewer seat, its slices planned at kickoff, the gaps judged by the captain, and landing refused while a gap has no ruling.
+
+## A model-switch handover names the worktree's branch, not the task's
+- 2026-10-31 M6 (F-284): hull switched to TokenRhythm right after T-505 was assigned; the handover (crates/gear-engine/src/handover.rs, `facts.branch` from `git rev-parse --abbrev-ref HEAD`) named T-502's branch, because the worktree had not switched yet, and had no part 2, so the new model rebuilt the state from the transcript. The handover should name the attempt's own branch and say when the worktree is on another one.
