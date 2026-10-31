@@ -459,6 +459,10 @@ pub struct Conventions {
     /// The branch a task is reviewed on (T-252), expanded like
     /// `task_branch`. Default `review/t{n}`.
     pub review_branch: String,
+    /// The branch of a direction check (T-474), expanded like the review
+    /// branch: `{project}` and `{task}` (or `{n}`) are filled in. Default
+    /// `{project}/direction/{task}`.
+    pub direction_branch: String,
     /// The branch of a seat's own worktree (T-252), with `{project}` and
     /// `{seat}` filled in: the merge worktree is seat `merge`, so Herdr names
     /// the worktree `<project>-<seat>`. Default `{project}/{seat}`.
@@ -504,6 +508,7 @@ impl Default for Conventions {
             gate: String::new(),
             task_branch: gear_model::branch::TASK_BRANCH.to_string(),
             review_branch: gear_model::branch::REVIEW_BRANCH.to_string(),
+            direction_branch: gear_model::branch::DIRECTION_BRANCH.to_string(),
             seat_branch: gear_model::branch::SEAT_BRANCH.to_string(),
             remote: gear_model::layout::REMOTE.to_string(),
             voyage_dir: gear_model::layout::VOYAGE_DIR.to_string(),
@@ -1676,31 +1681,37 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     // checks. A template is expanded with its placeholders; anything else stays
     // a literal brace and git refuses the branch, so each is checked here — on
     // a sample — rather than when a lane cannot push.
-    let templates: [(&str, &str, &str, &[&str]); 3] = [
-        // the field, the template, the placeholder it must name, the ones it
-        // may name
+    let templates: [(&str, &str, &[&str], &[&str]); 4] = [
+        // the field, the template, the placeholders it may name (one of the
+        // first is required), the ones it may name
         (
             "conventions.task_branch",
             &conventions.task_branch,
-            "n",
-            &["project", "lane", "n"],
+            &["n"],
+            &["project", "lane", "n", "task"],
         ),
         (
             "conventions.review_branch",
             &conventions.review_branch,
-            "n",
-            &["project", "lane", "n"],
+            &["n"],
+            &["project", "lane", "n", "task"],
+        ),
+        (
+            "conventions.direction_branch",
+            &conventions.direction_branch,
+            &["task", "n"],
+            &["project", "lane", "n", "task"],
         ),
         (
             "conventions.seat_branch",
             &conventions.seat_branch,
-            "seat",
+            &["seat"],
             &["project", "seat"],
         ),
     ];
-    let mut usable = [false; 3];
+    let mut usable = [false; 4];
     for (index, (field, template, required, allowed)) in templates.iter().enumerate() {
-        let sample = if *required == "seat" {
+        let sample = if required.contains(&"seat") {
             gear_model::branch::expand_seat(template, SAMPLE_PROJECT, SAMPLE_SEAT)
         } else {
             gear_model::branch::expand(template, SAMPLE_PROJECT, SAMPLE_LANE, SAMPLE_TASK)
@@ -1728,6 +1739,24 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                     "the review branch {review:?} is the same name as the task branch: a task needs a branch for its work and another for its review"
                 ),
             ));
+        }
+        if usable[2] {
+            let direction = gear_model::branch::expand(
+                &conventions.direction_branch,
+                SAMPLE_PROJECT,
+                SAMPLE_LANE,
+                SAMPLE_TASK,
+            );
+            for (other, name) in [("task", &task), ("review", &review)] {
+                if &direction == name {
+                    issues.push(issue(
+                        "conventions.direction_branch",
+                        format!(
+                            "the direction branch {direction:?} is the same name as the {other} branch: a direction check needs its own branch"
+                        ),
+                    ));
+                }
+            }
         }
     }
 
@@ -2020,7 +2049,7 @@ fn message_template_issues(
 fn branch_template_issues(
     field: &str,
     template: &str,
-    required: &str,
+    required: &[&str],
     allowed: &[&str],
     sample: &str,
     issues: &mut Vec<ConfigIssue>,
@@ -2037,11 +2066,13 @@ fn branch_template_issues(
         ));
         return false;
     }
-    if !names.contains(&required) {
+    if !required.iter().any(|name| names.contains(name)) {
+        let wanted: Vec<String> = required.iter().map(|name| format!("{{{name}}}")).collect();
         issues.push(issue(
             field,
             format!(
-                "the template {template:?} has no {{{required}}}: each one needs its own branch"
+                "the template {template:?} names none of {}: each one needs its own branch",
+                wanted.join(", ")
             ),
         ));
         return false;
