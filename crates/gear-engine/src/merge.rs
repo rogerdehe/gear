@@ -2314,13 +2314,19 @@ fn merge_one_locked(
     }
     probe.step("push");
     probe.begin("close");
-    let (closed, left) = close_branches(dir, repo, &branch, &review, remote, &pushed);
+    let (closed, left, moved) = close_branches(dir, repo, &branch, &review, remote, &pushed);
     probe.step("close");
 
     let head = git(dir, &["log", "-1", "--oneline"]).unwrap_or_default();
     let mut line = format!("merged {task} into {integration}: {head}");
     if !closed.is_empty() {
         line.push_str(&format!("\nclosed on {remote_name}: {}", closed.join(", ")));
+    }
+    if !moved.is_empty() {
+        line.push_str(&format!(
+            "\nclosed on {remote_name} (their commits after the approved candidate were not merged): {}",
+            moved.join(", ")
+        ));
     }
     if !left.is_empty() {
         line.push_str(&format!(
@@ -2611,9 +2617,13 @@ fn close_branches(
     review: &str,
     remote: Target<'_>,
     pushed: &Pushed,
-) -> (Vec<String>, Vec<String>) {
+) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut closed = Vec::new();
     let mut left = Vec::new();
+    // T-474: the task's own branches closed although their commits past the
+    // approved candidate were not merged; the commits are named to the
+    // captain with them.
+    let mut moved = Vec::new();
     // The review branch: it holds the review of this task and nothing else.
     // T-483: it is closed whatever its tip holds. A review branch left by an
     // earlier attempt of the task does not contain the candidate, and the
@@ -2647,9 +2657,10 @@ fn close_branches(
     // the hand-in): when every commit of it is on the merged integration
     // branch it is closed too; when its commits past the candidate write
     // nothing but reports it is closed as well (a lane often pushes its report
-    // after the hand-in, T-402); otherwise it holds work nobody reviewed or
-    // merged, so it stays and the captain is told (another project,
-    // 2026-10-29: a branch left behind without a word).
+    // after the hand-in, T-402); otherwise T-474 closes it anyway — a merged
+    // task leaves no branch behind — and names its commits past the candidate
+    // to the captain (the commit is kept by the remote's history until it is
+    // pruned, and the lane's own branch has it).
     let task_ref = format!("{}/{task_branch}", remote.name);
     if !closed.iter().any(|name| name == task_branch)
         && pushed.refs.iter().any(|name| name == &task_ref)
@@ -2666,25 +2677,25 @@ fn close_branches(
                 .map(str::trim)
                 .filter(|line| !line.is_empty())
                 .collect();
-            if !files.is_empty() && files.iter().all(|file| is_report_path(file)) {
-                if delete_remote(dir, task_branch, remote) {
+            let ahead =
+                git(dir, &["log", "--oneline", &format!("HEAD..{task_ref}")]).unwrap_or_default();
+            let commits: Vec<&str> = ahead
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .collect();
+            if delete_remote(dir, task_branch, remote) {
+                if !files.is_empty() && files.iter().all(|file| is_report_path(file)) {
                     closed.push(task_branch.to_string());
+                } else {
+                    moved.push(format!(
+                        "{task_branch} (commits after the approved candidate, not merged: {})",
+                        commits.join("; ")
+                    ));
                 }
-            } else {
-                let ahead = git(dir, &["log", "--oneline", &format!("HEAD..{task_ref}")])
-                    .unwrap_or_default();
-                let commits: Vec<&str> = ahead
-                    .lines()
-                    .filter(|line| !line.trim().is_empty())
-                    .collect();
-                left.push(format!(
-                    "{task_branch} (commits after the approved candidate, not merged: {})",
-                    commits.join("; ")
-                ));
             }
         }
     }
-    (closed, left)
+    (closed, left, moved)
 }
 
 /// A file a lane writes its report to: it lies in a `reports/` directory, a
@@ -2915,7 +2926,26 @@ fn sweep_branches(
             continue;
         };
         let found = task_branches(store, project, config, &tasks, &repo, &heads)?;
-        sweep_in(store, project, config, dir, remote, found, now)?;
+        // T-474: the integration branch's tip, so a done task's branches can be
+        // told apart from the ones that still hold work: fetched (a merged
+        // branch's commits are in its history, so the ancestry test finds
+        // them). An unreadable integration leaves the done branches listed.
+        let integration = git(dir, &["fetch", "--quiet", remote.name, &repo.integration])
+            .ok()
+            .and_then(|_| git(dir, &["rev-parse", "FETCH_HEAD"]).ok())
+            .map(|sha| sha.trim().to_string())
+            .filter(|sha| !sha.is_empty());
+        sweep_in(
+            store,
+            project,
+            config,
+            dir,
+            remote,
+            found,
+            now,
+            &repo.integration,
+            integration.as_deref(),
+        )?;
     }
     Ok(())
 }
@@ -2932,17 +2962,32 @@ fn task_branches(
 ) -> GearResult<Vec<TaskBranch>> {
     let mut names: Vec<(String, String, &gear_store::TaskRow)> = Vec::new();
     for task in tasks {
-        let Some(lane) = task.lane.as_deref() else {
-            continue;
-        };
         if config.repo_of_task(task).path != repo.path {
             continue;
         }
-        names.push((
-            branch_of(&config.conventions.task_branch, project, lane, &task.id),
-            review_branch(&config.conventions.review_branch, project, lane, &task.id),
-            task,
-        ));
+        // T-474: every lane that held the task, not only the one it names now:
+        // a task moved to another lane leaves its old lane's branch behind
+        // (another project's T-199: `api/t199`, fully an ancestor of dev).
+        let mut lanes: Vec<String> = Vec::new();
+        if let Some(lane) = task.lane.as_deref() {
+            lanes.push(lane.to_string());
+        }
+        for attempt in store.read(|tx| tx.attempts_of_task(project, &task.id))? {
+            let Some(lane) = attempt.seat.strip_prefix(&format!("{project}:")) else {
+                continue;
+            };
+            if lane.is_empty() || lanes.iter().any(|known| known == lane) {
+                continue;
+            }
+            lanes.push(lane.to_string());
+        }
+        for lane in lanes {
+            names.push((
+                branch_of(&config.conventions.task_branch, project, &lane, &task.id),
+                review_branch(&config.conventions.review_branch, project, &lane, &task.id),
+                task,
+            ));
+        }
     }
     let mut open = std::collections::HashSet::new();
     for task in tasks {
@@ -2999,6 +3044,8 @@ fn sweep_in(
     remote: Target<'_>,
     found: Vec<TaskBranch>,
     now: Ts,
+    integration: &str,
+    integration_sha: Option<&str>,
 ) -> GearResult<()> {
     let limit = i64::from(config.conventions.branch_max_age_min.max(1)) * 60;
     // The open voyages' task branches (not the reviewers'), oldest first.
@@ -3035,6 +3082,9 @@ fn sweep_in(
     }
     let mut deleted = Vec::new();
     let mut old = Vec::new();
+    // T-474: the branches of done tasks that still hold commits the integration
+    // branch does not have; named to the captain, who decides.
+    let mut left = Vec::new();
     for branch in found {
         let short = &branch.sha[..branch.sha.len().min(10)];
         if branch.state == TaskState::Cancelled {
@@ -3044,6 +3094,55 @@ fn sweep_in(
                     branch.name, branch.task
                 ));
             }
+            continue;
+        }
+        // T-474: a done task leaves no branch behind: one whose tip is on the
+        // integration branch is deleted, and one whose commits the integration
+        // branch does not have is named to the captain with them.
+        if branch.state == TaskState::Done {
+            let on_integration = integration_sha.is_some_and(|sha| {
+                git(dir, &["merge-base", "--is-ancestor", &branch.sha, sha]).is_ok()
+            });
+            if on_integration {
+                if remote.delete(dir, &branch.name) {
+                    deleted.push(format!(
+                        "{} at {short} ({}, done)",
+                        branch.name, branch.task
+                    ));
+                }
+                continue;
+            }
+            let key = branch_told_key(project, &branch.name);
+            let told = store
+                .read(|tx| tx.get_meta(&key))?
+                .and_then(|value| value.parse::<i64>().ok());
+            if told.is_some_and(|at| now - at < limit) {
+                continue;
+            }
+            store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
+            let commits = integration_sha
+                .map(|sha| {
+                    git(
+                        dir,
+                        &["log", "--oneline", &format!("{sha}..{}", branch.sha)],
+                    )
+                    .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            let commits: Vec<&str> = commits
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .collect();
+            left.push(format!(
+                "{} ({}, done, commits not on {integration}: {})",
+                branch.name,
+                branch.task,
+                if commits.is_empty() {
+                    "none readable".to_string()
+                } else {
+                    commits.join("; ")
+                }
+            ));
             continue;
         }
         let Some(since) = branch.since else { continue };
@@ -3067,7 +3166,7 @@ fn sweep_in(
             age / 60
         ));
     }
-    if deleted.is_empty() && old.is_empty() && crowded.is_empty() {
+    if deleted.is_empty() && old.is_empty() && crowded.is_empty() && left.is_empty() {
         return Ok(());
     }
     let mut body = String::new();
@@ -3092,9 +3191,18 @@ fn sweep_in(
             body.push_str(&format!("- {line}\n"));
         }
     }
+    if !left.is_empty() {
+        body.push_str(&format!(
+            "{} branch(es) of done tasks still hold commits the {integration} branch does not have (the task is done, so nothing will merge them): merge or restore them by hand, or delete the branch if the commits write only reports.\n",
+            left.len()
+        ));
+        for line in &left {
+            body.push_str(&format!("- {line}\n"));
+        }
+    }
     if !deleted.is_empty() {
         body.push_str(&format!(
-            "{} branch(es) of cancelled tasks deleted on {} (restore one with `git push {} <commit>:refs/heads/<branch>`):\n",
+            "{} branch(es) of cancelled or done tasks deleted on {} (restore one with `git push {} <commit>:refs/heads/<branch>`):\n",
             deleted.len(),
             remote.name,
             remote.name
@@ -5460,7 +5568,19 @@ gate = "{gate}"
             name: "origin",
             runner: &GitRemote,
         };
-        sweep_in(&mut store, "p", &config, &work, remote, found, now).unwrap();
+        let dev = git(&work, &["rev-parse", "dev"]).unwrap();
+        sweep_in(
+            &mut store,
+            "p",
+            &config,
+            &work,
+            remote,
+            found,
+            now,
+            "dev",
+            Some(dev.trim()),
+        )
+        .unwrap();
 
         let left = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
         assert!(
@@ -5496,11 +5616,144 @@ gate = "{gate}"
         // Ten minutes later the same old branch is not named again.
         let heads = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
         let found = task_branches(&mut store, "p", &config, &tasks, &repo, &heads).unwrap();
-        sweep_in(&mut store, "p", &config, &work, remote, found, now + 600).unwrap();
+        let dev = git(&work, &["rev-parse", "dev"]).unwrap();
+        sweep_in(
+            &mut store,
+            "p",
+            &config,
+            &work,
+            remote,
+            found,
+            now + 600,
+            "dev",
+            Some(dev.trim()),
+        )
+        .unwrap();
         let items = store
             .read(|tx| tx.actionable_for("p", "p:captain", now + 600))
             .unwrap();
         assert_eq!(items.len(), 1, "told once per limit");
+    }
+
+    /// T-474: a task moved to another lane leaves its old lane's task branch
+    /// behind (another project's T-199: `api/t199`, fully an ancestor of dev).
+    /// When the task is done, every branch its template gives for any lane that
+    /// held it is deleted when it is on the integration branch; one that still
+    /// holds commits the integration branch does not have is kept and named to
+    /// the captain with them.
+    #[test]
+    fn the_branch_sweep_cleans_a_done_task_moved_between_lanes() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(
+            root.path(),
+            &format!("git init -q --bare {}", origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git init -q -b dev {}", work.display()),
+        );
+        sh(
+            &work,
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base",
+        );
+        sh(
+            &work,
+            &format!("git remote add origin {}", origin.display()),
+        );
+        for branch in ["dev", "api/t8"] {
+            sh(
+                &work,
+                &format!("git push -q origin HEAD:refs/heads/{branch}"),
+            );
+        }
+        // The lane it moved to left work the integration branch does not have.
+        sh(
+            &work,
+            "git checkout -q -b heat/t8 && git -c user.email=t@t -c user.name=t \
+             commit -q --allow-empty -m extra && git push -q origin HEAD:refs/heads/heat/t8",
+        );
+        sh(&work, "git checkout -q dev");
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.id = "T-8".into();
+                task.rank = 8;
+                task.state = TaskState::Done;
+                task.lane = Some("heat".into());
+                task.milestone = Some("M5".into());
+                tx.insert_task(&task)?;
+                // First held by `api`, then moved to `heat`.
+                for (n, seat) in [(1, "p:api"), (2, "p:heat")] {
+                    tx.insert_attempt(&gear_store::AttemptRow {
+                        project: "p".into(),
+                        task: "T-8".into(),
+                        n,
+                        seat: seat.into(),
+                        generation: 1,
+                        contract_version: 1,
+                        adopted_version: 1,
+                        pending_update: None,
+                        state: gear_model::AttemptState::Accepted,
+                        candidate: None,
+                        report: None,
+                        safe_point: None,
+                        started: 0,
+                        updated: 0,
+                        session_ref: None,
+                        session_cli: None,
+                        session_action: None,
+                        sent_at: None,
+                    })?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let config = gear_app::config::parse(&config_text_in("true", &work)).unwrap();
+        let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
+        let repo = config.repo_of_task(&tasks[1]);
+        let now = 3 * 3600;
+        let heads = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        let found = task_branches(&mut store, "p", &config, &tasks, &repo, &heads).unwrap();
+        let dev = git(&work, &["rev-parse", "dev"]).unwrap();
+        let remote = Target {
+            name: "origin",
+            runner: &GitRemote,
+        };
+        sweep_in(
+            &mut store,
+            "p",
+            &config,
+            &work,
+            remote,
+            found,
+            now,
+            "dev",
+            Some(dev.trim()),
+        )
+        .unwrap();
+
+        let branches = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        assert!(
+            !branches.contains("api/t8"),
+            "the old lane's merged branch is deleted: {branches}"
+        );
+        assert!(
+            branches.contains("heat/t8"),
+            "the branch holding work is kept: {branches}"
+        );
+        let items = store
+            .read(|tx| tx.actionable_for("p", "p:captain", now))
+            .unwrap();
+        let body: Vec<&str> = items.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(items.len(), 1, "{body:?}");
+        assert!(
+            body[0].contains("heat/t8") && body[0].contains("extra") && body[0].contains("T-8"),
+            "{}",
+            body[0]
+        );
     }
 
     /// The branch sweep counts the open voyage's task branches: more than
@@ -5569,7 +5822,19 @@ gate = "{gate}"
         let sweep = |store: &mut Store, at: Ts| {
             let heads = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
             let found = task_branches(store, "p", &config, &tasks, &repo, &heads).unwrap();
-            sweep_in(store, "p", &config, &work, remote, found, at).unwrap();
+            let dev = git(&work, &["rev-parse", "dev"]).unwrap();
+            sweep_in(
+                store,
+                "p",
+                &config,
+                &work,
+                remote,
+                found,
+                at,
+                "dev",
+                Some(dev.trim()),
+            )
+            .unwrap();
         };
         // Three task branches of M1 (and M0's T-9, also open): four, over 3.
         sweep(&mut store, now);
@@ -7922,14 +8187,16 @@ gate = "{project_gate}"
             "the unreviewed commit is not on dev: {log}"
         );
         assert!(scratch.dev_has_task_commit());
-        // The branch holds more than the candidate: it is not closed, and the
-        // commit it holds is named (T-402: only reports there close it).
+        // T-474: the branch holds more than the candidate, so it is closed
+        // anyway — a merged task leaves no branch behind — and the commit it
+        // held is named to the captain.
         let branches = scratch.origin_branches();
-        assert!(branches.contains("heat/t5"), "{branches}");
+        assert!(!branches.contains("heat/t5"), "{branches}");
         assert!(!branches.contains("review/t5"), "{branches}");
         assert!(
-            line.contains("commits after the approved candidate, not merged:")
-                && line.contains("sneaky"),
+            line.contains(
+                "closed on origin (their commits after the approved candidate were not merged):"
+            ) && line.contains("sneaky"),
             "{line}"
         );
     }

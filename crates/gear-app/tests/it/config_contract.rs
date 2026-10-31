@@ -77,6 +77,7 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             gate: "make test".into(),
             task_branch: "{lane}/t{n}".into(),
             review_branch: "review/t{n}".into(),
+            direction_branch: "{project}/direction/{task}".into(),
             seat_branch: "{project}/{seat}".into(),
             remote: "origin".into(),
             voyage_dir: "gear/voyages/{milestone}".into(),

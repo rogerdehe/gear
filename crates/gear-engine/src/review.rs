@@ -615,9 +615,15 @@ fn job_packet(
         .as_ref()
         .map(|row| config.repo_of_task(row))
         .unwrap_or_else(|| config.repo_of_lane(&task.lane));
-    // The direction reviewer's own branch, not the lane's (T-456): its worktree
-    // is cut at the candidate on `direction/t<n>`, and the binding names it.
-    let branch = format!("direction/{}", task.task.to_lowercase());
+    // The direction reviewer's own branch, not the lane's (T-456, T-474): its
+    // worktree is cut at the candidate on the project's
+    // `[conventions].direction_branch`, and the binding names it.
+    let branch = gear_model::branch::direction_branch(
+        &config.conventions.direction_branch,
+        &config.project.id,
+        &task.lane,
+        &task.task,
+    );
     // The contract the lane works to (T-282): the task's current version, read
     // here so the direction reviewer judges this text and never has to guess
     // which version `gear --show` names for its own view.
@@ -736,6 +742,9 @@ fn finish_direction_results(
             current.insert(key, tip);
         }
     }
+    // T-474: the direction branch a closed job held, deleted after the write
+    // (a git call never runs inside the store's transaction).
+    let mut closed_jobs: Vec<(String, Option<String>, String)> = Vec::new();
     store.write(|tx| {
         for task in tx.tasks_of_project(project)? {
             for attempt in tx.attempts_of_task(project, &task.id)? {
@@ -796,10 +805,38 @@ fn finish_direction_results(
                     tx.set_seat_state(seat_id, SeatState::Standby, Some("direction check done"), now)?;
                     tx.clear_seat_task(seat_id)?;
                 }
+                // T-474: the check's own branch (its job meta names it; an
+                // older job falls back to the branch its checkout recorded).
+                let repo = config.repo_of_task(&task);
+                let branch = job["branch"].as_str().map(str::to_string).or(tx
+                    .get_meta(&branch_key(seat_id, &repo.path))?
+                    .filter(|branch| !branch.is_empty()));
+                let path = tx
+                    .get_meta(&repo_path_key(seat_id, &repo.path))?
+                    .filter(|path| !path.is_empty());
+                if let Some(branch) = branch {
+                    closed_jobs.push((repo.path.clone(), path, branch));
+                }
             }
         }
         Ok(())
-    })
+    })?;
+    // A direction branch is the check's own: it is deleted, locally in the
+    // reviewer's worktree and on the remote, once the job closes. Detaching the
+    // worktree is how git lets the branch go; the next job checks out its own.
+    for (repo_path, worktree, branch) in closed_jobs {
+        if let Some(worktree) = worktree {
+            let git = cfg.review_git.as_ref();
+            let _ = review_git(git, &worktree, &["checkout", "--detach"]);
+            let _ = review_git(git, &worktree, &["branch", "-D", &branch]);
+        }
+        cfg.remote.delete(
+            std::path::Path::new(&repo_path),
+            &config.conventions.remote,
+            &branch,
+        );
+    }
+    Ok(())
 }
 
 fn start_direction_checks(
@@ -977,10 +1014,16 @@ fn start_direction_checks(
         if !occupies_quota(seat.state) && !has_free_slot(store, herdr, project, quota)? {
             continue;
         }
+        let direction_branch = gear_model::branch::direction_branch(
+            &config.conventions.direction_branch,
+            project,
+            &lane,
+            &row.id,
+        );
         store.write(|tx| {
             tx.set_meta(
                 &key,
-                &serde_json::json!({"seat":seat.id,"sha":sha,"state":"starting"}).to_string(),
+                &serde_json::json!({"seat":seat.id,"sha":sha,"state":"starting","branch":direction_branch}).to_string(),
             )
         })?;
         let task = ReviewTask {
@@ -2103,7 +2146,12 @@ fn start_reviewer(
     // The job's branch, and the seat's own anchor (its workspace label is
     // long-lived; the agent of a job is named after its task).
     let branch = if direction {
-        format!("direction/{}", task.task.to_lowercase())
+        gear_model::branch::direction_branch(
+            &config.conventions.direction_branch,
+            &config.project.id,
+            &task.lane,
+            &task.task,
+        )
     } else {
         gear_model::branch::review_branch(
             &config.conventions.review_branch,
@@ -2298,7 +2346,7 @@ fn start_reviewer(
         store.write(|tx| {
             tx.set_seat_state(&seat.id, SeatState::Active, Some("review assigned"), now)?;
             tx.set_seat_task(&seat.id, &task.task)?;
-            if direction { tx.set_meta(&direction_key(&config.project.id, &task.task, task.attempt), &serde_json::json!({"seat":seat.id,"generation":seat.generation,"sha":task.candidate,"state":"running"}).to_string())?; }
+            if direction { tx.set_meta(&direction_key(&config.project.id, &task.task, task.attempt), &serde_json::json!({"seat":seat.id,"generation":seat.generation,"sha":task.candidate,"state":"running","branch":branch}).to_string())?; }
             if direction {
                 if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
                     if let Some(session) = binding.session_ref.as_deref().filter(|s| !s.is_empty()) {
@@ -2569,7 +2617,7 @@ fn start_reviewer(
     store.write(|tx| {
         gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now)?;
         tx.set_seat_task(&seat.id, &task.task)?;
-        if direction { tx.set_meta(&direction_key(&config.project.id, &task.task, task.attempt), &serde_json::json!({"seat":seat.id,"generation":generation,"sha":task.candidate,"state":"running"}).to_string())?; }
+        if direction { tx.set_meta(&direction_key(&config.project.id, &task.task, task.attempt), &serde_json::json!({"seat":seat.id,"generation":generation,"sha":task.candidate,"state":"running","branch":branch}).to_string())?; }
         if direction {
             if let Some(session) = session_ref.filter(|s| !s.is_empty()) {
                 crate::rounds::add_session(tx, &gear_store::RoundKey { project: config.project.id.clone(), task: task.task.clone(), attempt: task.attempt, role: "direction".into() }, session, kind)?;
@@ -4716,7 +4764,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         );
         for needle in [
             "candidate 8da2ef2",
-            "branch direction/t-1",
+            "branch p/direction/t-1",
             "worktree /fake-worktrees/direction-t1",
             "`pwd` must be the worktree",
             "`git rev-parse --abbrev-ref HEAD` must be the branch",
@@ -5179,7 +5227,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             .unwrap();
         REVIEW_GIT_FAKE.with(|fake| fake.set(false));
         let mut config = cfg();
-        config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        config.review_git = std::sync::Arc::new(RecordingFixtureGit);
         let pc = gear_app::config::parse(&text).unwrap();
         let mut herdr = FakeHerdr::new();
         start_reviews(
@@ -5198,6 +5246,10 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let initial: serde_json::Value = serde_json::from_str(&job(&mut store, &key)).unwrap();
         assert_eq!(initial["state"], "running");
         assert_eq!(initial["sha"], first);
+        assert_eq!(initial["branch"], "p/direction/t-1");
+        // T-474: the check's branch on the remote is deleted when its job
+        // closes (a direction branch of an older job was left there).
+        sh(&work, "git push -q origin HEAD:refs/heads/p/direction/t-1");
         assert_eq!(
             store
                 .read(|tx| tx.rounds_of_task("p", "T-1"))
@@ -5226,7 +5278,8 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(packet.contains("Run `gear` first"), "{packet}");
         assert!(
             packet.contains("Binding: task T-1, attempt 1, candidate ")
-                && packet.contains(", branch direction/t-1, worktree /fake-worktrees/p-review-1."),
+                && packet
+                    .contains(", branch p/direction/t-1, worktree /fake-worktrees/p-review-1."),
             "the binding names the candidate, the branch and the worktree: {packet}"
         );
         let failed = store
@@ -5334,6 +5387,33 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()
                 ["checked_sha"],
             first
+        );
+        // T-474: the closed check's branch is deleted, locally and on the
+        // remote.
+        let calls = REVIEW_GIT_CALLS.with(|calls| calls.borrow().clone());
+        assert!(
+            calls.iter().any(|(path, args)| {
+                path == "/fake-worktrees/p-review-1"
+                    && args == &["checkout".to_string(), "--detach".to_string()]
+            }),
+            "the worktree is detached: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|(path, args)| {
+                path == "/fake-worktrees/p-review-1"
+                    && args
+                        == &[
+                            "branch".to_string(),
+                            "-D".to_string(),
+                            "p/direction/t-1".to_string(),
+                        ]
+            }),
+            "the local branch is deleted: {calls:?}"
+        );
+        let heads = sh(&work, "git ls-remote --heads origin");
+        assert!(
+            !heads.contains("p/direction/t-1"),
+            "the remote branch is deleted: {heads}"
         );
         let inbox = store
             .read(|tx| tx.actionable_for("p", "p:heat", T0 + 13))
