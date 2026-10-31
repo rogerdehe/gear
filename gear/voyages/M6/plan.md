@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=988 -->
+<!-- gear-plan project=gear base=989 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -93,6 +93,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-11-01 06:40 hand-fix: released v0.6.2 (notes: T-489 and three hand fixes added, T-482 left to v0.6.1; dev merged into main as 9b27cc4e, tag v0.6.2); both engines on v0.6.2 | why: station S3 reached, done (5); the skill review found nothing new
 - station M-7053: move — 36 done, projected 915m of 1020m; hull 217m against mast 106m: T-497 and T-498 (Antigravity CLI) go back to mast, hull keeps the T-487 rework and T-492
 - 2026-11-01 07:00 staff: T-491 (v0.5 upgrade test) moves to hull | why: hull has nothing to start after T-487 (M-7055; T-492 waits for its deps) while mast still holds T-478, T-497, T-498 and T-493
+- 2026-11-01 07:30 hand-fix: the done-branch scan skips a task whose merge is intended, executing or submitted (merge.rs); make gate passed; engines restarted | why: three false 'branches of done tasks' items in an hour (M-7038, M-7056, M-7065), each while the merge was running
 
 # Queue
 
