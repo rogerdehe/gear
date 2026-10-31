@@ -3651,6 +3651,26 @@ fn tell_captain_of_a_review_stall(store: &mut Store, project: &str, now: Ts) -> 
             if reached {
                 continue;
             }
+            // T-480: a rework's review waits for the seat that reviewed the
+            // attempt before it. While that seat works on another review the
+            // hand-in is queued behind it by design, not stalled.
+            if task.attempt >= 2 {
+                let waits_for_its_reviewer = tx
+                    .rounds_of_task(project, &task.task)?
+                    .into_iter()
+                    .rev()
+                    .find(|round| round.role == "review" && round.attempt == task.attempt - 1)
+                    .map(|round| tx.get_seat(&round.seat))
+                    .transpose()?
+                    .flatten()
+                    .is_some_and(|seat| {
+                        seat.state == SeatState::Active
+                            && seat.task_id.as_deref().is_some_and(|t| t != task.task)
+                    });
+                if waits_for_its_reviewer {
+                    continue;
+                }
+            }
             tx.insert_message(&NewMessage {
                 meta: None,
                 project: project.to_string(),
