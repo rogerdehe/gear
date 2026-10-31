@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1055 -->
+<!-- gear-plan project=gear base=1056 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -146,6 +146,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-10-31 19:05 T-511 fail (audit of goal clauses 2-3): F1, a false review-stall item behind busy reviewers, is T-514; the captain adds T-515 (another project's false overrun items for finished direction checks, same clause); both join T-511's deps in this apply and the clause is audited again | why: user: a gap goes back onto the fix path | else: -
 - station M-7352: keep course — projected 1164m of 1200m; T-512, T-513 merged; T-514, T-515 in review; then the S2 and goal re-audits and the v0.6.4 tag
 - station M-7354: keep course — projected 1167m of 1200m; T-512/T-513 merging, T-514/T-515 in review, then two re-audits and the tag
+- 2026-10-31 19:00 recovery: T-507 re-audit passed (S2 met, no finding); its record merged by hand because the engines still ran the T-505 build; both engines restarted on dev with T-512, T-513, T-514 (no operation executing) | why: an audit pass merges its record only from T-512 on | else: -
 
 # Queue
 
