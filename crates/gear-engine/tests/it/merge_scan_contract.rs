@@ -221,7 +221,11 @@ fn a_settled_merge_op_brings_the_next_scan_at_once() {
                     payload: serde_json::json!({ "branch": "heat/t9", "candidate": "c0ffee" }),
                     created: T0 + 5,
                 })?;
-                tx.set_op_state("p", "O-1", state, Some("done"), T0 + 5)
+                tx.set_op_state("p", "O-1", state, Some("done"), T0 + 5)?;
+                // The merge step records where a merge op settles, in the same
+                // write (F2 of the review of attempt 1): the next tick reads
+                // that word instead of scanning the settled ops.
+                tx.set_meta("engine.last_settled.p", &(T0 + 5).to_string())
             })
             .unwrap();
 
@@ -237,6 +241,12 @@ fn a_settled_merge_op_brings_the_next_scan_at_once() {
 
 /// T-516: on a store with 500 done tasks, an idle `merge_passed` — no merge op,
 /// nothing changed — costs under 100 ms once the scan has run.
+///
+/// The wall clock alone cannot gate an acceptance run on a shared machine (F1
+/// of the review of attempt 1: the single measurement read 110 ms in a full
+/// parallel run and 42 ms alone), so this test also pins the deterministic
+/// fact: an idle tick does not re-run the scan. The clock check then takes the
+/// best of three idle ticks, so one scheduling spike cannot fail it.
 #[test]
 fn an_idle_merge_step_on_five_hundred_done_tasks_is_under_a_hundred_milliseconds() {
     let mut store = world();
@@ -246,16 +256,40 @@ fn an_idle_merge_step_on_five_hundred_done_tasks_is_under_a_hundred_milliseconds
     let mut herdr = FakeHerdr::new();
     let cfg = EngineCfg::default();
 
-    // The first tick runs the scan (this one may take as long as the reading
-    // of 500 tasks needs) and writes the scan's time.
+    // The first tick runs the scan (this one may take as long as reading 500
+    // tasks needs) and writes the scan's time.
     tick(&mut store, &mut herdr, &cfg, T0);
+    let scanned = last_scan(&mut store);
+    assert_eq!(scanned, Some(T0), "the first tick ran the scan");
 
-    // The next tick, before the scan is due, must not read the tasks again.
+    // An idle tick (before the scan is due again) does not read the tasks: the
+    // stored time does not move.
     let started = Instant::now();
     tick(&mut store, &mut herdr, &cfg, T0 + 10);
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < std::time::Duration::from_millis(100),
-        "an idle merge step took {elapsed:?} on 500 done tasks"
+    let first = started.elapsed();
+    assert_eq!(
+        last_scan(&mut store),
+        Some(T0),
+        "an idle tick re-ran the lost scan"
     );
+
+    // Three idle ticks, the best of them is the step's own cost.
+    let mut best = first;
+    for k in 2..=3 {
+        let started = Instant::now();
+        tick(&mut store, &mut herdr, &cfg, T0 + k * 10);
+        best = best.min(started.elapsed());
+    }
+    assert!(
+        best < std::time::Duration::from_millis(100),
+        "the best of three idle merge steps took {best:?} on 500 done tasks"
+    );
+}
+
+/// The stored time of the lost scan, as the merge step keeps it.
+fn last_scan(store: &mut Store) -> Option<i64> {
+    store
+        .read(|tx| tx.get_meta("engine.lost_scan.p"))
+        .unwrap()
+        .and_then(|value| value.parse::<i64>().ok())
 }
