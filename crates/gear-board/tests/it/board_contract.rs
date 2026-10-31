@@ -1770,25 +1770,32 @@ fn a_board_without_a_project_shows_them_one_at_a_time() {
         let _ = left.send(result.is_ok());
     });
 
-    // The first frame shows the first project: its name is the first row's.
+    // The first frame shows the first project: the bar on the first row
+    // brackets it (T-489) and its name is the second row's title.
     let mut frames = Frames {
         master: pty.master,
         buffer: String::new(),
     };
     let frame = frames.next("NOW DOING", Duration::from_secs(5));
-    let title = plain(frame.lines().next().unwrap_or_default());
+    let bar = plain(frame.lines().next().unwrap_or_default());
+    assert!(bar.contains("[a ·"), "{bar}");
+    let title = plain(frame.lines().nth(1).unwrap_or_default());
     assert!(title.trim_start().starts_with("GEAR · a "), "{title}");
 
     // `p` shows the second project.
     press(pty.master, b"p");
     let frame = frames.next("GEAR · b", Duration::from_secs(5));
-    let title = plain(frame.lines().next().unwrap_or_default());
+    let bar = plain(frame.lines().next().unwrap_or_default());
+    assert!(bar.contains("[b ·"), "{bar}");
+    let title = plain(frame.lines().nth(1).unwrap_or_default());
     assert!(title.trim_start().starts_with("GEAR · b "), "{title}");
 
     // `p` on the last project comes back to the first.
     press(pty.master, b"p");
     let frame = frames.next("GEAR · a", Duration::from_secs(5));
-    let title = plain(frame.lines().next().unwrap_or_default());
+    let bar = plain(frame.lines().next().unwrap_or_default());
+    assert!(bar.contains("[a ·"), "{bar}");
+    let title = plain(frame.lines().nth(1).unwrap_or_default());
     assert!(title.trim_start().starts_with("GEAR · a "), "{title}");
 
     press(pty.master, b"q");
