@@ -52,7 +52,15 @@ fn world() -> Store {
 
 /// Apply a plan as the captain.
 fn apply(s: &mut Store, text: &str, rid: &str) -> gear_model::GearResult<plan::ApplyResult> {
-    let draft = draft::parse(text).unwrap();
+    let mut draft = draft::parse(text).unwrap();
+    // T-461: a first voyage's departure is the user's word.
+    if draft.base == 0 {
+        draft.confirmed = true;
+        draft.decisions.push(
+            "2026-10-27 10:05 confirmed: the voyage departs | why: the user said depart"
+                .to_string(),
+        );
+    }
     let (env, fp) = captain();
     plan::apply(s, &env, Some(&fp), None, &draft, text, rid, T0)
 }

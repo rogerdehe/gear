@@ -158,6 +158,10 @@ pub fn apply(
         let outcome = tx.run_request(request_id, &args_key, now, |tx| {
             // Steps 3 to 6 run inside the closure, so a replay returns the
             // stored result instead of meeting a moved plan version.
+            // T-461: the departure and the move this draft would make, read
+            // before the queue writes so the guard can tell a new milestone
+            // from one that already carried tasks.
+            let guard = planned_guard(tx, &ctx.project, draft)?;
             let result = apply_queue(
                 tx,
                 &ctx.project,
@@ -179,6 +183,14 @@ pub fn apply(
             fix_departures(tx, &ctx.project, now)?;
             record_voyages(tx, &ctx.project, draft, &departed, now)?;
             record_task_stations(tx, &ctx.project, draft, &result.created)?;
+            // T-461: after every validation of the file has spoken, a new
+            // milestone's departure and a move between milestones need the
+            // user's word: --confirmed and its `confirmed:` line.
+            require_confirmed_changes(draft, &guard.0, &guard.1)?;
+            // T-461: the captain's goal check of the voyage's done clauses,
+            // written before a landing of this same apply reads it.
+            let checked = voyage_of(tx, &ctx.project, draft)?;
+            crate::goal::record_goal_check(tx, &ctx.project, &checked, draft)?;
             crate::station::apply_decisions(tx, &ctx.project, draft, now)?;
             serde_json::to_value(&result).map_err(|e| {
                 GearError::new(
@@ -241,6 +253,11 @@ fn apply_queue(
     let applied_version = current + 1;
     let mut warnings: Vec<String> = Vec::new();
     for (index, line) in draft.decisions.iter().enumerate() {
+        // T-461: a goal-check line is a check of the voyage's done clauses,
+        // written to the board's meta below; it is no decision of the log.
+        if crate::goal::is_done_line(line) {
+            continue;
+        }
         let decision = &decisions[index];
         if decision.note {
             warnings.push(format!(
@@ -449,6 +466,17 @@ fn apply_queue(
                         "{task}: milestone {milestone} is not described: add a `# Milestone {milestone}` block with its done, bar and eta, or use a milestone the plan describes"
                     ),
                 ));
+            }
+        }
+        // T-461: a cancel line changes the state only. Every other field it
+        // carries must be the task's current one; a cancel that also moves
+        // the task, its lane or its words is refused, so the cut and the
+        // change stay apart in the log. Checked after the milestone is known
+        // to be described, so a move into an undescribed milestone still
+        // names that milestone.
+        if item.state.as_deref() == Some("cancelled") {
+            if let Some(task) = item.id.as_ref().and_then(|id| existing.get(id)) {
+                cancel_changes_only_state(tx, project, item, task)?;
             }
         }
         // A task that would take longer than the project's cap is cut into
@@ -706,10 +734,11 @@ fn apply_queue(
                             // The decision log (design §7.4): a cancelled task
                             // is a cut, and the why is the one the captain
                             // wrote about it.
+                            let cut_voyage = task.milestone.as_deref().unwrap_or(&voyage);
                             record_gear_decision(
                                 tx,
                                 project,
-                                &voyage,
+                                cut_voyage,
                                 applied_version,
                                 "cut",
                                 &format!("{id} cancelled"),
@@ -3555,6 +3584,250 @@ fn departed_voyages(tx: &Tx<'_>, project: &str) -> GearResult<std::collections::
         .collect())
 }
 
+/// T-461: the departures and the moves a draft would make, read before the
+/// queue writes. A milestone that already carried tasks keeps its departure;
+/// one that had none — a new voyage, or a reused id after T-239 emptied it —
+/// departs when this draft gives it its first tasks.
+fn planned_guard(
+    tx: &Tx<'_>,
+    project: &str,
+    draft: &Draft,
+) -> GearResult<(BTreeSet<String>, Vec<(String, String, String)>)> {
+    let existing: BTreeMap<String, TaskRow> = tx
+        .tasks_of_project(project)?
+        .into_iter()
+        .map(|task| (task.id.clone(), task))
+        .collect();
+    let mut counts_before: BTreeMap<String, usize> = BTreeMap::new();
+    for task in existing.values() {
+        if let Some(milestone) = &task.milestone {
+            *counts_before.entry(milestone.clone()).or_default() += 1;
+        }
+    }
+    let mut after: BTreeMap<String, Option<String>> = existing
+        .iter()
+        .map(|(id, task)| (id.clone(), task.milestone.clone()))
+        .collect();
+    let mut moved: Vec<(String, String, String)> = Vec::new();
+    for (index, item) in draft.queue.iter().enumerate() {
+        let key = match &item.id {
+            Some(id) => id.clone(),
+            None => format!("#{index}"),
+        };
+        let old = after.get(&key).cloned().unwrap_or(None);
+        if let (Some(old), Some(new)) = (&old, &item.milestone) {
+            if old != new {
+                moved.push((key.clone(), old.clone(), new.clone()));
+            }
+        }
+        after.insert(key, item.milestone.clone());
+    }
+    let mut counts_after: BTreeMap<String, usize> = BTreeMap::new();
+    for milestone in after.values().flatten() {
+        *counts_after.entry(milestone.clone()).or_default() += 1;
+    }
+    let mut departing: BTreeSet<String> = BTreeSet::new();
+    for milestone in counts_after.keys() {
+        if counts_before.get(milestone).copied().unwrap_or(0) > 0 {
+            continue;
+        }
+        let voyage = tx.get_voyage(project, milestone)?;
+        if voyage.as_ref().is_some_and(|v| v.departure.is_some()) {
+            continue;
+        }
+        departing.insert(milestone.clone());
+    }
+    Ok((departing, moved))
+}
+
+/// T-461: a new milestone's departure and a move between milestones are
+/// applied only with `--confirmed` and a `confirmed:` line in this same
+/// `# Decisions`; without both the apply is refused and nothing is written.
+fn require_confirmed_changes(
+    draft: &Draft,
+    departing: &BTreeSet<String>,
+    moved: &[(String, String, String)],
+) -> GearResult<()> {
+    if departing.is_empty() && moved.is_empty() {
+        return Ok(());
+    }
+    if !draft.confirmed {
+        let what = if !departing.is_empty() {
+            format!(
+                "milestone {} departs in this apply",
+                departing.iter().cloned().collect::<Vec<_>>().join(", ")
+            )
+        } else {
+            let (id, old, new) = &moved[0];
+            format!("{id} moves from {old} to {new} in this apply")
+        };
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "{what}: a departure and a move between milestones are the user's; confirm it with them, then apply again with --confirmed and a `confirmed:` line in # Decisions"
+            ),
+        ));
+    }
+    if confirmed_decisions(draft).is_empty() {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "this apply changes {} but # Decisions carries no `confirmed:` line: add `- <time> confirmed: <what changes, before -> after> | why: <the user's reason>` in this same apply",
+                guarded_summary(departing, moved)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The `confirmed:` lines of a draft (T-461): the captain's record of the
+/// user's word, `- <time> confirmed: <what changes, before -> after> | why:
+/// <the user's reason>`. A malformed line is a note and does not count.
+fn confirmed_decisions(draft: &Draft) -> Vec<crate::decision::Decision> {
+    draft
+        .decisions
+        .iter()
+        .map(|line| crate::decision::parse(line))
+        .filter(|decision| decision.kind == "confirmed" && !decision.note)
+        .collect()
+}
+
+/// What a guarded apply changes, for the refusal that names it (T-461).
+fn guarded_summary(
+    departing: &std::collections::BTreeSet<String>,
+    moved: &[(String, String, String)],
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !departing.is_empty() {
+        parts.push(format!(
+            "the departure of {}",
+            departing.iter().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    for (id, old, new) in moved {
+        parts.push(format!("{id} moving from {old} to {new}"));
+    }
+    parts.join(" and ")
+}
+
+/// T-461: a cancel line changes the state only. Every other field it carries
+/// must be the task's current one; a difference is refused, so a cut never
+/// hides a move, a lane change or a reworded contract.
+fn cancel_changes_only_state(
+    tx: &Tx<'_>,
+    project: &str,
+    item: &QueueItem,
+    task: &TaskRow,
+) -> GearResult<()> {
+    let id = task.id.as_str();
+    let mut changed: Vec<String> = Vec::new();
+    if item.milestone != task.milestone {
+        changed.push(format!(
+            "milestone (stored {:?}, got {:?})",
+            task.milestone, item.milestone
+        ));
+    }
+    if item.lane != task.lane {
+        changed.push(format!(
+            "lane (stored {:?}, got {:?})",
+            task.lane, item.lane
+        ));
+    }
+    let priority = priority_str(item.priority).to_string();
+    if priority != task.priority {
+        changed.push(format!(
+            "priority (stored {:?}, got {priority:?})",
+            task.priority
+        ));
+    }
+    if item.required != task.required {
+        changed.push(format!(
+            "required (stored {}, got {})",
+            task.required, item.required
+        ));
+    }
+    if item.deps != task.deps {
+        changed.push(format!(
+            "deps (stored {:?}, got {:?})",
+            task.deps, item.deps
+        ));
+    }
+    if let Some(estimate) = item.estimate {
+        if Some(i64::from(estimate)) != task.estimate_min {
+            changed.push(format!(
+                "estimate (stored {:?}, got {estimate})",
+                task.estimate_min
+            ));
+        }
+    }
+    if let Some(followup) = &item.followup_of {
+        if Some(followup.clone()) != task.followup_of {
+            changed.push(format!(
+                "followup-of (stored {:?}, got {followup:?})",
+                task.followup_of
+            ));
+        }
+    }
+    if let Some(issue) = item.issue {
+        let issue = i64::try_from(issue).ok();
+        if issue != task.issue {
+            changed.push(format!("issue (stored {:?}, got {:?})", task.issue, issue));
+        }
+    }
+    // The station is a field too (M5 S3): a block without `station=` clears
+    // it, so a cancel that carries a different one is refused.
+    let stored_station = tx.task_station(project, id)?;
+    if item.station != stored_station {
+        changed.push(format!(
+            "station (stored {:?}, got {:?})",
+            stored_station, item.station
+        ));
+    }
+    if let Some(contract) = tx.get_contract(project, id, task.contract_version)? {
+        if let Some(goal) = &item.goal {
+            if *goal != contract.goal {
+                changed.push(format!("goal (stored {:?}, got {goal:?})", contract.goal));
+            }
+        }
+        if let Some(accept) = &item.accept {
+            if *accept != contract.accept {
+                changed.push(format!(
+                    "accept (stored {:?}, got {accept:?})",
+                    contract.accept
+                ));
+            }
+        }
+        if item.evidence_files != contract.evidence_files {
+            changed.push(format!(
+                "evidence-files (stored {:?}, got {:?})",
+                contract.evidence_files, item.evidence_files
+            ));
+        }
+        if item.evidence_due.map(i64::from) != contract.evidence_due_min {
+            changed.push(format!(
+                "evidence-due (stored {:?}, got {:?})",
+                contract.evidence_due_min, item.evidence_due
+            ));
+        }
+        if item.mechanical != contract.mechanical {
+            changed.push(format!(
+                "mechanical (stored {:?}, got {:?})",
+                contract.mechanical, item.mechanical
+            ));
+        }
+    }
+    if changed.is_empty() {
+        return Ok(());
+    }
+    Err(bad(
+        item.line,
+        format!(
+            "{id}: a cancel line changes the state only: it also changes {}; write the change on its own line",
+            changed.join(", ")
+        ),
+    ))
+}
+
 /// The meta key that remembers the plan version at which a milestone lost its
 /// last task (T-239): `departure_from_history` starts after it.
 fn departure_reset_key(project: &str, milestone: &str) -> String {
@@ -3886,6 +4159,9 @@ fn record_voyages(
     departed: &std::collections::BTreeSet<String>,
     now: Ts,
 ) -> GearResult<()> {
+    // The plan version this apply writes (T-458): a repeated confirmed change
+    // is a decision of its own, and the version keeps its key apart.
+    let version = tx.plan_version(project)?;
     for (header, body) in &draft.milestones {
         let (id, title) = crate::draft::milestone_parts(header);
         let (done, bar, eta) = crate::draft::milestone_fields(body);
@@ -3953,10 +4229,26 @@ fn record_voyages(
                         ),
                     ));
                 }
+                // T-461: the flag alone is not the record. The user's word is
+                // the `confirmed:` line in the same `# Decisions`; without it
+                // the change is refused like a change nobody asked for.
+                if confirmed_decisions(draft).is_empty() {
+                    return Err(bad(
+                        0,
+                        format!(
+                            "milestone {id}: {field} changed after departure (stored \"{old:.40}\", got \"{new:.40}\"): --confirmed is set but # Decisions carries no `confirmed:` line: add `- <time> confirmed: <what changes, before -> after> | why: <the user's reason>` in this same apply"
+                        ),
+                    ));
+                }
                 // The user's confirmation is a starred decision (T-410).
                 let what = format!("{field} of {id} changed from \"{old}\" to \"{new}\"");
                 let why = "confirmed by the user".to_string();
-                let key = format!("user|{project}|{id}|{field}|{old}|{new}");
+                // T-458: the key names the plan version too. A voyage that goes
+                // back and forth (8h, 10h, 8h) confirms the same transition
+                // twice, and the second confirmation is a decision of its own
+                // (M5: the key held only the field and the two texts, so the
+                // repeat was dropped as a duplicate).
+                let key = format!("user|{project}|{id}|{field}|{old}|{new}|v{version}");
                 tx.insert_decision_if_new(&gear_store::NewDecision {
                     project: project.to_string(),
                     key: crate::decision::key_of(&key),
@@ -3970,7 +4262,7 @@ fn record_voyages(
                     star: true,
                     source: "gear".to_string(),
                     line: Some(format!("{what} | why: {why}")),
-                    plan_version: None,
+                    plan_version: Some(version),
                 })?;
             }
         }

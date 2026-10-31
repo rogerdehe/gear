@@ -4375,7 +4375,9 @@ mod tests {
 
     /// A draft with a milestone block: the plan commit is named for it (T-299).
     fn plan_draft_with_milestone() -> String {
-        "<!-- gear-plan project=p base=0 -->\n# Milestone M2: two\ndone: both ship\nbar: fast\neta: 1h\n\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"
+        // T-461: a new milestone's departure needs the user's word — the
+        // `confirmed:` line in this same draft and `--confirmed` on the apply.
+        "<!-- gear-plan project=p base=0 -->\n# Milestone M2: two\ndone: both ship\nbar: fast\neta: 1h\n\n# Decisions\n- 2026-10-27 10:20 confirmed: M2 departs with its first tasks | why: the user asked for it\n\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"
             .to_string()
     }
 
@@ -4439,7 +4441,7 @@ mod tests {
             "r-block-1",
             T0 + 1,
             false,
-            false,
+            true,
         )
         .unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
@@ -4531,7 +4533,8 @@ mod tests {
         }
 
         // The flag is set on the draft before the apply: M2 departs with the
-        // first block, so its eta moves only with the confirmation.
+        // first block, so its eta moves only with the confirmation. T-461: a
+        // departure needs `--confirmed` and its `confirmed:` line too.
         let (mut store, mut herdr) = world();
         let path = write_draft(&plan_draft_with_milestone());
         run_plan(
@@ -4544,7 +4547,7 @@ mod tests {
             "r-plan",
             T0 + 1,
             false,
-            false,
+            true,
         )
         .unwrap();
         let changed = plan_draft_with_milestone()
@@ -4613,7 +4616,7 @@ mod tests {
             "plan-commit",
             T0 + 1,
             false,
-            false,
+            true,
         )
         .unwrap();
         assert!(out.ends_with("commit the plan as: M2: {what}"), "{out}");
@@ -4632,7 +4635,7 @@ mod tests {
             "plan-commit",
             T0 + 1,
             false,
-            false,
+            true,
         )
         .unwrap();
         assert!(
@@ -4653,7 +4656,7 @@ mod tests {
             "plan-commit",
             T0 + 1,
             true,
-            false,
+            true,
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_str(&out).unwrap();

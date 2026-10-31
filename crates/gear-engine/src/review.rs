@@ -283,6 +283,16 @@ fn start_hand_in_reviews(
             continue;
         }
         // 2. the reviewer seat: created once and bound to the task for life.
+        // T-480: a rework's review is the continuation of the review of the
+        // attempt before it. It goes to the seat that reviewed attempt n-1 and
+        // waits for that seat while it is busy — never another seat while that
+        // seat lives, because another seat starts a new conversation and reads
+        // the whole change again (rule V1 resumes the earlier one).
+        let rework_seat = if task.attempt >= 2 {
+            earlier_review_seat(store, project, &task.task, task.attempt)?
+        } else {
+            None
+        };
         let seat = match temp_seat_of(store, project, &task.task)? {
             Some(seat)
                 if matches!(seat.state, SeatState::Standby | SeatState::Released)
@@ -291,19 +301,51 @@ fn start_hand_in_reviews(
                 take_seat(store, &seat, &task.task, task.attempt, profile_name, now)?
             }
             Some(seat) => seat,
-            // A seat that finished its last job is warm: the job takes it
-            // rather than building a new worktree (17 §8a).
-            None => match free_seat(store, herdr, project, &task.task, &kind)? {
-                Some(seat) => take_seat(store, &seat, &task.task, task.attempt, profile_name, now)?,
-                // No warm seat free: a new one only while the quota has room.
-                // Otherwise the job waits for a seat instead of building a
-                // cold extra worktree (finding 2 of the T-18 review).
-                None => match seats_free_for_new(store, project, i64::from(config.quota.temps))? {
-                    true => create_temp_seat(store, project, &task.task, profile_name, now)?,
-                    false => {
-                        note_waiting(report, &task.task);
-                        tell_captain(store, project, task, "every temp seat is in use", now)?;
-                        continue;
+            None => match rework_seat {
+                Some(seat) if rework_seat_free(store, herdr, project, &seat, &task.task)? => {
+                    take_seat(store, &seat, &task.task, task.attempt, profile_name, now)?
+                }
+                Some(_) => {
+                    note_waiting(report, &task.task);
+                    tell_captain(
+                        store,
+                        project,
+                        task,
+                        &format!(
+                            "the seat that reviewed attempt {} is busy",
+                            task.attempt - 1
+                        ),
+                        now,
+                    )?;
+                    continue;
+                }
+                // A seat that finished its last job is warm: the job takes it
+                // rather than building a new worktree (17 §8a).
+                None => match free_seat(store, herdr, project, &task.task, &kind)? {
+                    Some(seat) => {
+                        take_seat(store, &seat, &task.task, task.attempt, profile_name, now)?
+                    }
+                    // No warm seat free: a new one only while the quota has
+                    // room. Otherwise the job waits for a seat instead of
+                    // building a cold extra worktree (finding 2 of the T-18
+                    // review).
+                    None => {
+                        match seats_free_for_new(store, project, i64::from(config.quota.temps))? {
+                            true => {
+                                create_temp_seat(store, project, &task.task, profile_name, now)?
+                            }
+                            false => {
+                                note_waiting(report, &task.task);
+                                tell_captain(
+                                    store,
+                                    project,
+                                    task,
+                                    "every temp seat is in use",
+                                    now,
+                                )?;
+                                continue;
+                            }
+                        }
                     }
                 },
             },
@@ -520,15 +562,20 @@ fn rework_section(
     project: &str,
     task: &str,
     attempt: i64,
+    candidate: &str,
+    remote: &str,
 ) -> GearResult<String> {
     if attempt < 2 {
         return Ok(String::new());
     }
-    let note = store.read(|tx| {
-        Ok(tx
-            .get_task(project, task)?
-            .and_then(|row| row.rework_note)
-            .unwrap_or_default())
+    let (note, previous) = store.read(|tx| {
+        Ok((
+            tx.get_task(project, task)?
+                .and_then(|row| row.rework_note)
+                .unwrap_or_default(),
+            tx.get_attempt(project, task, attempt - 1)?
+                .and_then(|row| row.candidate),
+        ))
     })?;
     let note = note.trim();
     let body = if note.is_empty() {
@@ -536,8 +583,18 @@ fn rework_section(
     } else {
         note
     };
+    // T-480: the rework's review is the continuation of the review of attempt
+    // n-1. The delta between the two candidates is the change to judge first;
+    // the whole change is still named below.
+    let delta = match previous {
+        Some(previous) => format!(
+            "The change to judge first: `git fetch {remote} && git diff {previous}..{candidate}` (two dots: what attempt {attempt} changed since attempt {})\n",
+            attempt - 1
+        ),
+        None => String::new(),
+    };
     Ok(format!(
-        "\n## Rework (attempt {attempt}, applied to the round before) — where it differs from the goal below, this text governs\n{body}\n"
+        "\n## Rework (attempt {attempt}, applied to the round before) — where it differs from the goal below, this text governs\n{body}\n{delta}"
     ))
 }
 
@@ -581,7 +638,14 @@ fn job_packet(
     };
     // T-456: a rework round's direction check carries the applied rework above
     // the goal, as the review packet does.
-    let rework = rework_section(store, &config.project.id, &task.task, task.attempt)?;
+    let rework = rework_section(
+        store,
+        &config.project.id,
+        &task.task,
+        task.attempt,
+        &task.candidate,
+        &config.conventions.remote,
+    )?;
     // T-267: the reviewer's first `gear` is what confirms the delivery, so the
     // direction packet asks for it as the review packet does.
     Ok(format!(
@@ -766,6 +830,13 @@ fn start_direction_checks(
             continue;
         };
         if attempt.state != AttemptState::Started {
+            continue;
+        }
+        // T-480: a rework attempt (n >= 2) starts no direction check. The lane
+        // already works from the captain's rework, and the attempt's review is
+        // the continuation of the review of attempt n-1 (its seat and its
+        // conversation), not a fresh look at the whole change.
+        if attempt.n >= 2 {
             continue;
         }
         // T-273: a mechanical task's push starts no direction check — no
@@ -1175,6 +1246,62 @@ fn direction_seat(
         }))
 }
 
+/// T-480: the seat that reviewed attempt `attempt - 1` of the task, if it
+/// still exists. A rework's review goes to that seat, so rule V1 continues
+/// the review's own conversation instead of a new reviewer reading the whole
+/// change again.
+fn earlier_review_seat(
+    store: &mut Store,
+    project: &str,
+    task: &str,
+    attempt: i64,
+) -> GearResult<Option<SeatRow>> {
+    store.read(|tx| {
+        let Some(round) = tx
+            .rounds_of_task(project, task)?
+            .into_iter()
+            .rev()
+            .find(|round| round.role == "review" && round.attempt == attempt - 1)
+        else {
+            return Ok(None);
+        };
+        // A retired seat is gone: the rework falls back to the ordinary seat
+        // choice.
+        Ok(tx
+            .get_seat(&round.seat)?
+            .filter(|seat| seat.state != SeatState::Retired))
+    })
+}
+
+/// T-480: whether the seat that reviewed the attempt before this rework can
+/// take it now. A seat that is busy — it waits (`Queued`, `Starting`), works
+/// (`Active`), is parked (`Unknown`), still runs its last turn, or holds
+/// another job — is waited for, never skipped.
+fn rework_seat_free(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    seat: &SeatRow,
+    task: &str,
+) -> GearResult<bool> {
+    if !matches!(seat.state, SeatState::Standby | SeatState::Released) {
+        return Ok(false);
+    }
+    if store
+        .read(|tx| tx.get_meta(&pending_review_key(&seat.id)))?
+        .is_some_and(|value| !value.is_empty() && value != task)
+    {
+        return Ok(false);
+    }
+    if !agent_idle(store, herdr, seat)? {
+        return Ok(false);
+    }
+    if seat.state == SeatState::Standby && !last_job_recorded(store, project, seat)? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 /// A seat that finished its last job and holds no live one: a warm worktree
 /// with its build cache waiting for the next review (17 §8a).
 ///
@@ -1517,6 +1644,7 @@ fn stash_review_tree(
 }
 
 /// Prepare a checkout; a live reviewer on an unfinished job keeps its branch.
+#[allow(clippy::too_many_arguments)]
 fn prepare_review_tree(
     git: &dyn ReviewGit,
     store: &mut Store,
@@ -1527,6 +1655,7 @@ fn prepare_review_tree(
     remote: &str,
     branch: &str,
     task: &ReviewTask,
+    direction: bool,
     now: Ts,
 ) -> GearResult<bool> {
     let git_error =
@@ -1611,9 +1740,29 @@ fn prepare_review_tree(
         &["checkout", "-f", "-B", branch, &task.candidate],
     )
     .map_err(git_error)?;
+    // T-483: the review branch on the remote is cut at **this** attempt's
+    // candidate before the reviewer starts, so the reviewer's push of its
+    // review commit is a fast-forward. An earlier attempt's review stays in
+    // that attempt's record: the branch is only a pointer, and the earlier
+    // review commit stays reachable through it. A direction check has no
+    // review branch of the task (T-456): its own branch is not pointed.
+    if !direction {
+        review_git(
+            git,
+            path,
+            &[
+                "push",
+                "--force",
+                remote,
+                &format!("HEAD:refs/heads/{branch}"),
+            ],
+        )
+        .map_err(git_error)?;
+    }
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_seat_tree(
     git: &dyn ReviewGit,
     store: &mut Store,
@@ -1624,6 +1773,7 @@ fn prepare_seat_tree(
     remote: &str,
     branch: &str,
     task: &ReviewTask,
+    direction: bool,
     now: Ts,
 ) -> GearResult<bool> {
     let key = format!("engine.review_tree.{}", seat.id);
@@ -1644,6 +1794,7 @@ fn prepare_seat_tree(
         remote,
         branch,
         task,
+        direction,
         now,
     ) {
         Ok(true) => {}
@@ -2130,6 +2281,7 @@ fn start_reviewer(
             &config.conventions.remote,
             &branch,
             task,
+            direction,
             now,
         )? {
             return Ok(Started::NotYet);
@@ -2244,6 +2396,7 @@ fn start_reviewer(
         &config.conventions.remote,
         &branch,
         task,
+        direction,
         now,
     )? {
         return Ok(Started::NotYet);
@@ -2970,7 +3123,14 @@ fn review_packet_for(
         ),
         &commit,
         worktree,
-        &rework_section(store, &config.project.id, task, attempt)?,
+        &rework_section(
+            store,
+            &config.project.id,
+            task,
+            attempt,
+            candidate,
+            &config.conventions.remote,
+        )?,
     );
     // The review's own budget (design §5.1) and what a verdict past it must
     // carry (design §6.2): the reviewer is charged from its own start, and a
@@ -6439,6 +6599,118 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(packet.starts_with("Review T-1 attempt 1"), "{packet}");
     }
 
+    /// T-480: a rework attempt (n >= 2) starts no direction check. Attempt 1
+    /// keeps its check.
+    #[test]
+    fn a_rework_attempt_starts_no_direction_check() {
+        let root = tempfile::tempdir().unwrap();
+        sh(
+            root.path(),
+            "git init -q --bare origin.git && git init -q -b dev work",
+        );
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(
+            &work,
+            "git add -A && git -c user.name=a -c user.email=a@b commit -qm one",
+        );
+        publish(&work, "heat/t1");
+        let text = CONFIG.replace(
+            "repo = \"/repo\"",
+            &format!("repo = \"{}\"", work.display()),
+        );
+        let mut store = world(&text);
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Running;
+                tx.update_task(&task)?;
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.state = AttemptState::Started;
+                attempt.candidate = None;
+                tx.update_attempt(&attempt)
+            })
+            .unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg();
+        config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let mut herdr = FakeHerdr::new();
+        // Attempt 1 is checked as before.
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &config,
+            &config.profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        assert!(
+            store
+                .read(|tx| tx.get_meta(&direction_key("p", "T-1", 1)))
+                .unwrap()
+                .is_some(),
+            "attempt 1 gets its direction check"
+        );
+        // The lane reworks and attempt 2 is started.
+        store
+            .write(|tx| {
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.state = AttemptState::Rejected;
+                tx.update_attempt(&attempt)?;
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 2,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Started,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0 + 20,
+                    updated: T0 + 20,
+                })
+            })
+            .unwrap();
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &config,
+            &config.profiles,
+            "p",
+            T0 + 21,
+        )
+        .unwrap();
+        assert!(
+            store
+                .read(|tx| tx.get_meta(&direction_key("p", "T-1", 2)))
+                .unwrap()
+                .is_none(),
+            "attempt 2 starts no direction check"
+        );
+        assert!(
+            !store
+                .read(|tx| tx.rounds_of_task("p", "T-1"))
+                .unwrap()
+                .iter()
+                .any(|round| round.role == "direction" && round.attempt == 2),
+            "no direction round of attempt 2"
+        );
+        assert!(report.started.is_empty(), "{report:?}");
+    }
+
     #[test]
     fn changing_from_direction_to_review_invalidates_checkout_cache() {
         REVIEW_GIT_FAKE.with(|fake| fake.set(true));
@@ -6478,6 +6750,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             "origin",
             "direction/t-1",
             &task,
+            true,
             T0,
         )
         .unwrap();
@@ -6491,6 +6764,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             "origin",
             "review/t1",
             &task,
+            false,
             T0 + 1,
         )
         .unwrap();
@@ -6573,6 +6847,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             "origin",
             "review/t1",
             &task,
+            false,
             T0
         )
         .unwrap());
@@ -6588,6 +6863,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             "origin",
             "review/t1",
             &task,
+            false,
             T0
         )
         .unwrap());
@@ -6665,6 +6941,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             "origin",
             "review/t1",
             &task,
+            false,
             T0
         )
         .unwrap());
@@ -6744,6 +7021,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             "origin",
             "review/t1",
             &task,
+            false,
             T0
         )
         .unwrap());
@@ -6790,11 +7068,119 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             "origin",
             "review/t1",
             &task,
+            false,
             T0
         )
         .unwrap());
         assert_eq!(sh(&work, "git rev-parse HEAD"), candidate);
         assert_eq!(sh(&work, "git rev-parse --abbrev-ref HEAD"), "review/t1");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// T-483: the review of a second attempt starts with the remote's review
+    /// branch at **that** attempt's candidate, so the reviewer's push of its
+    /// review commit is a fast-forward. Before this, `origin/review/t<n>` held
+    /// the earlier attempt's review, the new candidate did not descend from
+    /// it, and the reviewer's push was refused (T-457 attempt 2). The earlier
+    /// review stays in that attempt's record: the branch is only a pointer.
+    #[test]
+    fn a_second_attempts_review_branch_is_pointed_at_its_candidate() {
+        let root = crate::testtmp::temp("gear-review-second-attempt");
+        sh(
+            &root,
+            "git init -q --bare origin.git && git init -q -b dev work",
+        );
+        let work = root.join("work");
+        std::fs::write(work.join("readme"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        // Attempt 1: its candidate, and its review commit on review/t1.
+        let first = sh(
+            &work,
+            "git switch -qc heat/t1 && echo one > one.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm one && git rev-parse HEAD",
+        );
+        publish(&work, "heat/t1");
+        let earlier_review = sh(
+            &work,
+            "git switch -qc review/t1 && echo r1 > r1.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm r1 && git rev-parse HEAD",
+        );
+        publish(&work, "review/t1");
+        // Attempt 2 of the task: a new candidate that does not descend from
+        // the earlier attempt's review.
+        let second = sh(
+            &work,
+            "git switch -qc heat/t1-v2 dev && echo two > two.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm two && git rev-parse HEAD",
+        );
+        publish(&work, "heat/t1-v2");
+        assert_eq!(
+            sh(
+                &root,
+                &format!("git -C origin.git merge-base --is-ancestor {second} review/t1; echo $?")
+            ),
+            "1",
+            "the new candidate does not descend from the earlier review"
+        );
+        assert_ne!(first, second, "the attempt's candidate is new");
+        let seat = root.join("seat");
+        sh(
+            &work,
+            &format!("git worktree add -q -b home/seat {} dev", seat.display()),
+        );
+        let mut store = world(CONFIG);
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut herdr = FakeHerdr::new();
+        let task = ReviewTask {
+            task: "T-1".into(),
+            attempt: 2,
+            writer: "p:heat".into(),
+            lane: "heat".into(),
+            candidate: second.clone(),
+        };
+        assert!(prepare_review_tree(
+            &RealReviewGit,
+            &mut store,
+            &mut herdr,
+            "p",
+            work.to_str().unwrap(),
+            seat.to_str().unwrap(),
+            "origin",
+            "review/t1",
+            &task,
+            false,
+            T0
+        )
+        .unwrap());
+        // The remote's review branch is at the new candidate …
+        assert_eq!(sh(&root, "git -C origin.git rev-parse review/t1"), second);
+        assert_eq!(sh(&seat, "git rev-parse HEAD"), second);
+        // … and the reviewer's push of its review commit is a fast-forward.
+        let review = sh(
+            &seat,
+            "echo r2 > r2.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm r2 \
+             && git push -q origin HEAD:refs/heads/review/t1 && git rev-parse HEAD",
+        );
+        assert_eq!(sh(&root, "git -C origin.git rev-parse review/t1"), review);
+        assert_eq!(
+            sh(
+                &root,
+                &format!("git -C origin.git merge-base --is-ancestor {second} review/t1; echo $?")
+            ),
+            "0",
+            "the review commit is a fast-forward of the candidate"
+        );
+        // The earlier attempt's review is still in the repository: moving the
+        // branch deleted nothing.
+        assert_eq!(
+            sh(
+                &root,
+                &format!("git -C origin.git cat-file -t {earlier_review}")
+            ),
+            "commit"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -7350,6 +7736,72 @@ review = [
         let mut store = world(&text);
         let packet = review_packet_for(&mut store, &config, "T-1", 2, "abc1234", WORKTREE).unwrap();
         assert!(packet.contains("`T-1#2 review: {what}`"), "{packet}");
+    }
+
+    /// T-480: a rework's review packet leads with the captain's rework and the
+    /// delta between the two candidates, above the goal. The packet of attempt
+    /// 1 is unchanged.
+    #[test]
+    fn the_rework_review_packet_leads_with_the_rework_and_the_delta() {
+        let mut store = world(CONFIG);
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.rework_note =
+                    Some("F1 [P1, blocking]: the parser drops the second line".into());
+                tx.update_task(&task)?;
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 2,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Submitted,
+                    candidate: Some("def5678".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0 + 20,
+                    updated: T0 + 20,
+                })
+            })
+            .unwrap();
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let packet =
+            review_packet_for(&mut store, &config, "T-1", 2, "def5678", "/wt/review").unwrap();
+        assert!(
+            packet.contains("F1 [P1, blocking]: the parser drops the second line"),
+            "the captain's rework: {packet}"
+        );
+        assert!(
+            packet.contains("git diff abc1234..def5678"),
+            "the delta between the two candidates: {packet}"
+        );
+        let rework_at = packet.find("Rework (attempt 2").expect("a rework block");
+        let goal_at = packet.find("Goal: the goal").expect("the goal");
+        assert!(
+            rework_at < goal_at,
+            "the rework comes above the goal: {packet}"
+        );
+        assert!(
+            packet.contains("Diff to review: `git fetch origin && git diff origin/dev...def5678`"),
+            "the whole change is still named: {packet}"
+        );
+
+        // Attempt 1 is unchanged: no rework block and no delta between
+        // candidates.
+        let packet =
+            review_packet_for(&mut store, &config, "T-1", 1, "abc1234", "/wt/review").unwrap();
+        assert!(packet.starts_with("Review T-1 attempt 1"), "{packet}");
+        assert!(!packet.contains("Rework ("), "{packet}");
+        assert!(!packet.contains("git diff abc1234.."), "{packet}");
+        assert!(packet.contains("Goal: the goal"), "{packet}");
     }
 
     /// T-438: the packet names the exact push of the review branch onto the
@@ -9004,6 +9456,174 @@ review = [
         let action: serde_json::Value = serde_json::from_str(action.as_deref().unwrap()).unwrap();
         assert_eq!(action["action"], "resume");
         assert_eq!(action["session_ref"], session);
+    }
+
+    /// T-480: a rework's review goes to the seat that reviewed attempt 1 and
+    /// waits for it while that seat is busy — never another free seat — so
+    /// rule V1 resumes its conversation.
+    #[test]
+    fn a_rework_review_waits_for_the_seat_that_reviewed_attempt_one() {
+        let mut store = world(CONFIG_TWO_SLOTS);
+        let mut herdr = FakeHerdr::new();
+        // Tick 1: the review of attempt 1 runs on review-1.
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        assert_eq!(report.started, vec!["p:review-1".to_string()]);
+        let session = store
+            .read(|tx| tx.get_meta(&session_key("p", "T-1")))
+            .unwrap()
+            .filter(|session| !session.is_empty())
+            .unwrap_or_else(|| "sess-r".to_string());
+        store
+            .write(|tx| {
+                tx.add_round_session(
+                    &gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-1".into(),
+                        attempt: 1,
+                        role: "review".into(),
+                    },
+                    &session,
+                )
+            })
+            .unwrap();
+        let pane = store
+            .read(|tx| tx.get_binding("p:review-1", 1))
+            .unwrap()
+            .unwrap()
+            .pane_id;
+        // The review fails: the seat waits for the next review, its agent
+        // still in the turn that follows the hand-in.
+        store
+            .write(|tx| {
+                judged(tx, "T-1", 1, "p:review-1", false)?;
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.state = AttemptState::Rejected;
+                attempt.updated = T0 + 20;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Ready;
+                task.rework_note = Some("F1: the parser drops the second line".into());
+                task.updated = T0 + 20;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        assert_eq!(
+            standby_after_verdict(&mut store, "p", T0 + 20).unwrap(),
+            vec!["p:review-1".to_string()]
+        );
+        herdr.set_status(&pane, gear_herdr::AgentStatus::Working);
+        // The seat's current conversation is not the review's any more (it ran
+        // another job in between): V1 resumes the review's own session.
+        store
+            .write(|tx| tx.set_binding_session_ref("p:review-1", 1, "sess-other"))
+            .unwrap();
+        // A second free review seat: the rework must not go there while the
+        // seat that reviewed attempt 1 lives.
+        store
+            .write(|tx| {
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "review-2",
+                    SeatRole::Temp,
+                    "w9:p2",
+                    "codex",
+                    T0,
+                )?;
+                tx.set_seat_state("p:review-2", SeatState::Standby, None, T0)?;
+                tx.set_meta(&path_key("p:review-2"), "/fake-review-2")?;
+                tx.set_meta(&repo_key("p:review-2"), "/repo")
+            })
+            .unwrap();
+        herdr.add_agent("w9:p2", "codex", gear_herdr::AgentStatus::Idle);
+        // Attempt 2 is handed in.
+        store
+            .write(|tx| {
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 21)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 21)?;
+                gear_app::tasks::submit_result(tx, "p", "T-1", 2, 1, "def5678", "report", T0 + 21)
+            })
+            .unwrap();
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 22,
+        )
+        .unwrap();
+        assert_eq!(report.waiting, vec!["T-1".to_string()], "{report:?}");
+        assert!(report.started.is_empty(), "{report:?}");
+        assert!(
+            !store
+                .read(|tx| tx.ops_of_seat_kind("p:review-2", OpKind::Deliver))
+                .unwrap()
+                .iter()
+                .any(|op| op.task.as_deref() == Some("T-1")),
+            "the free seat took no packet while the earlier seat was busy"
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat("p:review-2"))
+                .unwrap()
+                .unwrap()
+                .task_id,
+            None
+        );
+        // The seat that reviewed attempt 1 ends its turn: the review of the
+        // rework starts on it, with the resume of its conversation.
+        herdr.set_status(&pane, gear_herdr::AgentStatus::Idle);
+        let mut open = None;
+        for tick in T0 + 23..T0 + 30 {
+            start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", tick).unwrap();
+            open = store
+                .read(|tx| tx.open_round_of_seat("p:review-1"))
+                .unwrap();
+            if open.as_ref().is_some_and(|round| round.attempt == 2) {
+                break;
+            }
+        }
+        let open = open.expect("the review of attempt 2 opens on the earlier seat");
+        assert_eq!(
+            (open.task.as_str(), open.attempt, open.role.as_str()),
+            ("T-1", 2, "review")
+        );
+        let action = store
+            .read(|tx| tx.get_meta("engine.review_action.p.T-1.2"))
+            .unwrap();
+        let action: serde_json::Value =
+            serde_json::from_str(action.as_deref().expect("the action is recorded")).unwrap();
+        assert_eq!(action["action"], "resume");
+        assert_eq!(action["session_ref"], session);
+        // The seat holds the rework and its round is brought up in the
+        // earlier review's conversation; the packet follows once the resume
+        // has run.
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&pending_review_key("p:review-1")))
+                .unwrap()
+                .as_deref(),
+            Some("T-1"),
+            "the earlier seat is reserved for the rework"
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat("p:review-2"))
+                .unwrap()
+                .unwrap()
+                .task_id,
+            None,
+            "the second free seat was never used"
+        );
     }
 
     #[test]

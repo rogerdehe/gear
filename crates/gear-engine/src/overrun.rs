@@ -124,7 +124,10 @@ fn item(tx: &Tx<'_>, round: &RoundRow, body: &str, urgent: bool, now: Ts) -> Gea
     Ok(())
 }
 
-fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool> {
+/// Account one round at `now` (T-406): its clock, its pause, and the
+/// overrun question. Also called when a round is closed (T-458, `rounds`),
+/// so a round's clock reaches its end and not only the last tick.
+pub(crate) fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool> {
     // How many rounds a tick looked at (T-406's tests).
     #[cfg(test)]
     PROCESSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -136,10 +139,13 @@ fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool> {
     };
     let times = tx.attempt_times(&round.project, &round.task, round.attempt)?;
     let review = round.role == "review";
+    // T-458: a round reopened for a parked attempt that goes on counts from
+    // the window's own start, never from the attempt's first start (the time
+    // the lane worked on another task is not this round's).
     let start = if review {
         Some(round.start_at)
     } else {
-        times.started
+        times.started.map(|started| started.max(round.start_at))
     };
     let Some(start) = start else { return Ok(false) };
     let verdict = if review {

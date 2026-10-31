@@ -52,6 +52,7 @@ mod app_reply;
 mod app_select_batch;
 mod app_send;
 mod backoff_home_contract;
+mod bar_contract;
 mod base_gate;
 mod cancel_contract;
 mod captain_handover_contract;

@@ -194,7 +194,8 @@ fn an_unknown_attempt_is_closed_too() {
 #[test]
 fn a_finished_task_cannot_be_cancelled_and_an_idle_one_gets_no_line() {
     let mut s = world();
-    let text = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-2 [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: -\nstate: cancelled\n";
+    // T-461: a cancel line changes the state only, so it repeats the dep.
+    let text = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-2 [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: T-1\nstate: cancelled\n";
     let (env, fp) = cap();
     apply(
         &mut s,

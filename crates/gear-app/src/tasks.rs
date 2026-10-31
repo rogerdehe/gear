@@ -69,10 +69,19 @@ pub fn start_attempt(
             seat.state.as_str()
         )));
     }
-    if !tx.in_progress_attempts_of_seat(seat_id)?.is_empty() {
-        return Err(forbidden(format!(
-            "seat {seat_id} already has an attempt in progress"
-        )));
+    // T-458: an attempt whose task is in a declared wait is parked — a lane
+    // that reported blocked takes its next startable task (M5: the attempt
+    // stayed Started, so the engine assigned nothing for about 40 minutes).
+    // The parked attempt comes back when its wait ends.
+    for attempt in tx.in_progress_attempts_of_seat(seat_id)? {
+        let waited = tx
+            .get_task(project, &attempt.task)?
+            .is_some_and(|task| task.wait_on.is_some());
+        if !waited {
+            return Err(forbidden(format!(
+                "seat {seat_id} already has an attempt in progress"
+            )));
+        }
     }
 
     let n = tx

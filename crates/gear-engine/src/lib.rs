@@ -329,7 +329,12 @@ pub fn tick(
     // 1. observe: one agents() call for the whole session. If it fails, every
     //    project is marked and nothing at all is decided this tick.
     let step = std::time::Instant::now();
-    let Ok(agents) = observe::snapshot(herdr) else {
+    let agents = observe::snapshot(herdr);
+    // T-458: a failed observation is timed too. It used to return before the
+    // step was named, so a slow Herdr read that failed was missing from the
+    // tick's slow-step report (T-386 review F1).
+    note_slow(&mut report, "observe", step);
+    let Ok(agents) = agents else {
         // No evidence of continuous work across a failed observation.
         for project in &projects {
             store.write(|tx| busy::observation_lost(tx, project))?;
@@ -337,7 +342,6 @@ pub fn tick(
         report.observe_failed = projects;
         return Ok(report);
     };
-    note_slow(&mut report, "observe", step);
 
     // 0c. names (T-134): Herdr clears an agent's name when it re-detects the
     //     occupant, and a prompt to an unnamed agent is refused. Read every
@@ -1877,6 +1881,36 @@ review=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high
                 "{line}"
             );
         }
+    }
+
+    /// T-458: a **failed** observation that took the time is named too (T-386
+    /// review F1). The tick returns early on a failed Herdr read, and the step
+    /// used to return before it was timed.
+    #[test]
+    fn a_slow_failed_observation_is_named_in_the_report() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", NOW)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.agents_fail = true;
+        herdr.agents_delay = Some(std::time::Duration::from_millis(250));
+        let cfg = EngineCfg::default();
+        let report = tick(&mut store, &mut herdr, &cfg, NOW + 1).unwrap();
+        assert_eq!(report.observe_failed, vec!["p".to_string()]);
+        let line = report
+            .slow
+            .iter()
+            .find(|line| line.starts_with("observe: "))
+            .unwrap_or_else(|| panic!("a failed observation over the budget is named: {report:?}"));
+        let ms = line
+            .rsplit_once(": ")
+            .and_then(|(_, ms)| ms.trim_end_matches(" ms").parse::<u128>().ok())
+            .unwrap_or_else(|| panic!("{line}"));
+        assert!(ms > 200, "{line}");
     }
 }
 
