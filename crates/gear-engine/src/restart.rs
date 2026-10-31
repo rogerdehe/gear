@@ -3230,7 +3230,15 @@ switch_grace_min = 10
             "{packet}"
         );
         assert!(packet.contains("old-session"), "{packet}");
-        assert!(packet.contains("Branch: work"), "{packet}");
+        // T-513: the handover names the branch of the task the lane holds, and
+        // says which branch the worktree is on when the two differ.
+        assert!(packet.contains("Branch: heat/t1"), "{packet}");
+        assert!(
+            packet.contains(
+                "The worktree is on work; this task's branch is heat/t1: switch to it before you go on."
+            ),
+            "{packet}"
+        );
         assert!(packet.contains("Uncommitted changes: src/a.rs"), "{packet}");
         assert!(packet.contains("Untracked files: new.txt"), "{packet}");
         assert!(packet.contains("handovers/heat-"), "{packet}");

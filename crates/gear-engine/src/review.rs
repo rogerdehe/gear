@@ -183,7 +183,7 @@ pub fn start_reviews_with_tips(
     // "every temp seat is in use" notice covers only a full quota, and a
     // hand-in that reached no reviewer at all said nothing (another project's
     // T-117: 70 minutes Submitted while seats were free).
-    tell_captain_of_a_review_stall(store, project, now)?;
+    tell_captain_of_a_review_stall(store, project, &config, now)?;
     Ok(report)
 }
 
@@ -3734,17 +3734,70 @@ fn review_stall_key(task: &str, attempt: i64) -> String {
     format!("engine.review_stall.{task}.{attempt}")
 }
 
+/// The key that remembers the first tick a reviewer could take a hand-in
+/// (T-514): the stall counts from there, not from the hand-in.
+fn review_free_since_key(task: &str, attempt: i64) -> String {
+    format!("engine.review_free_since.{task}.{attempt}")
+}
+
+/// The value of that key while every reviewer held another task's review: a
+/// seat that frees later starts the count then (T-514).
+const BUSY_SEEN: &str = "-";
+
+/// Whether a reviewer could take a hand-in right now (T-514): a temp seat free
+/// for it — a warm `Standby` seat with no review in flight, or a `Released`
+/// one — or fewer temp seats holding a slot than the effective count, so a
+/// new one can be started. A seat that is starting, working or parked on
+/// another task holds its slot and takes no second job.
+fn reviewer_free_for_a_hand_in(tx: &Tx<'_>, project: &str, quota: i64) -> GearResult<bool> {
+    let mut occupying = 0;
+    for seat in tx.seats_of_project(project)? {
+        if seat.role != SeatRole::Temp || seat.state == SeatState::Retired {
+            continue;
+        }
+        let in_flight = tx
+            .get_meta(&pending_review_key(&seat.id))?
+            .is_some_and(|value| !value.is_empty());
+        if occupies_quota(seat.state) || seat.state == SeatState::Unknown {
+            // A warm seat with no job of its own takes this hand-in.
+            if !in_flight && seat.state == SeatState::Standby {
+                return Ok(true);
+            }
+            occupying += 1;
+            continue;
+        }
+        // Released, or any other state outside the quota: free when nothing is
+        // queued on it.
+        if !in_flight {
+            return Ok(true);
+        }
+    }
+    Ok(occupying < quota)
+}
+
 /// T-376: ring the captain, once per attempt, for every hand-in that has
 /// waited `REVIEW_STALL_S` without a reviewer's packet: no Confirmed `Deliver`
 /// op of a temp seat exists for that task and attempt, so the packet never
 /// reached a reviewer. The message names the seats (their state and task) so
 /// the captain can look at the reviewer panes, or settle the attempt himself.
-fn tell_captain_of_a_review_stall(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
+fn tell_captain_of_a_review_stall(
+    store: &mut Store,
+    project: &str,
+    config: &ProjectConfig,
+    now: Ts,
+) -> GearResult<()> {
     let hand_ins = tasks_to_review(store, project)?;
     if hand_ins.is_empty() {
         return Ok(());
     }
+    // T-514: the reviewer count in effect, as the hand-in pass reads it.
+    let quota = i64::from(crate::release::effective_temps(
+        store,
+        project,
+        config.quota.temps,
+    )?);
     store.write(|tx| {
+        let reviewer_free = reviewer_free_for_a_hand_in(tx, project, quota)?;
         // No captain: nobody to tell.
         let Some(captain) = tx.captain_of(project)? else {
             return Ok(());
@@ -3775,11 +3828,9 @@ fn tell_captain_of_a_review_stall(store: &mut Store, project: &str, now: Ts) -> 
             else {
                 continue;
             };
-            if now - handed_in < REVIEW_STALL_S {
-                continue;
-            }
             // A packet the reviewer confirmed reached a reviewer: the hand-in
-            // is not stalled, whatever the tick's report says.
+            // is not stalled, whatever the tick's report says — and the count
+            // of a later hand-in of the same attempt starts over (T-514).
             let reached = tx
                 .ops_in_state(project, OpState::Confirmed)?
                 .into_iter()
@@ -3792,6 +3843,7 @@ fn tell_captain_of_a_review_stall(store: &mut Store, project: &str, now: Ts) -> 
                             .is_ok_and(|seat| seat.is_some_and(|seat| seat.role == SeatRole::Temp))
                 });
             if reached {
+                tx.set_meta(&review_free_since_key(&task.task, task.attempt), "")?;
                 continue;
             }
             // T-480: a rework's review waits for the seat that reviewed the
@@ -3813,6 +3865,38 @@ fn tell_captain_of_a_review_stall(store: &mut Store, project: &str, now: Ts) -> 
                 if waits_for_its_reviewer {
                     continue;
                 }
+            }
+            // T-514: the 20 minutes count from the first tick a reviewer could
+            // take this hand-in. While every seat is on another task's review
+            // the hand-in is next in line, not stalled: nothing rings, and the
+            // count starts again once a seat frees.
+            let free_key = review_free_since_key(&task.task, task.attempt);
+            let free_since = if reviewer_free {
+                match tx.get_meta(&free_key)?.as_deref() {
+                    // The count is already running.
+                    Some(value) if !value.is_empty() && value != BUSY_SEEN => {
+                        value.parse::<i64>().unwrap_or(now)
+                    }
+                    // A seat was busy on an earlier tick: the count starts now.
+                    Some(BUSY_SEEN) => {
+                        tx.set_meta(&free_key, &now.to_string())?;
+                        now
+                    }
+                    // A seat was free from the hand-in on: the count is the
+                    // hand-in's, as before (T-514).
+                    _ => {
+                        tx.set_meta(&free_key, &handed_in.to_string())?;
+                        handed_in
+                    }
+                }
+            } else {
+                // Every seat is on another task's review: nothing rings, and
+                // the count of a later free seat starts when it frees.
+                tx.set_meta(&free_key, BUSY_SEEN)?;
+                continue;
+            };
+            if now - free_since < REVIEW_STALL_S {
+                continue;
             }
             tx.insert_message(&NewMessage {
                 meta: None,
@@ -9005,21 +9089,222 @@ review = [
         assert!(empty.is_empty(), "a second message was added: {empty:?}");
     }
 
-    /// T-376: a hand-in that waits 20 minutes without its review packet
-    /// reaching a reviewer rings the captain — once per attempt, on
-    /// `review-stall:<task>:<attempt>`, naming the seats. 19 minutes is not
-    /// yet a stall, 21 is.
+    /// T-514: two reviewers busy with other tasks' reviews (their packets
+    /// confirmed) and a hand-in 30 minutes old: the hand-in is next in line,
+    /// not stalled, so nothing rings.
     #[test]
-    fn a_review_stall_rings_the_captain_once_per_attempt() {
+    fn a_hand_in_queued_behind_busy_reviewers_does_not_ring_the_captain() {
         let mut store = world(CONFIG_TWO_SLOTS);
         let mut herdr = FakeHerdr::new();
         store
             .write(|tx| {
                 testing::seed_temp_seat(tx, "p", "review-1", "T-9", "wt9:p1", "codex", T0)?;
                 testing::seed_temp_seat(tx, "p", "review-2", "T-8", "wt8:p1", "codex", T0)?;
+                for (seat, task) in [("p:review-1", "T-9"), ("p:review-2", "T-8")] {
+                    let op = tx.insert_op(&gear_store::NewOp {
+                        project: "p".into(),
+                        seat: seat.into(),
+                        generation: 1,
+                        kind: OpKind::Deliver,
+                        task: Some(task.into()),
+                        attempt: Some(1),
+                        ref_msg: None,
+                        plan_version: None,
+                        payload: serde_json::json!({"text": "the review packet"}),
+                        created: T0 + 60,
+                    })?;
+                    tx.set_op_state(
+                        "p",
+                        &op.id,
+                        OpState::Confirmed,
+                        Some(&format!("view {seat}/1 @ 61")),
+                        T0 + 61,
+                    )?;
+                }
                 Ok(())
             })
             .unwrap();
+
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 30 * 60,
+        )
+        .unwrap();
+
+        assert!(
+            thread(&mut store, "review-stall:T-1:1").is_empty(),
+            "a hand-in queued behind busy reviewers is not a stall"
+        );
+        assert!(store
+            .read(|tx| tx.get_meta("engine.review_stall.T-1.1"))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta("engine.review_free_since.T-1.1"))
+                .unwrap()
+                .as_deref(),
+            Some(BUSY_SEEN),
+            "no seat was free, so the count has not started"
+        );
+    }
+
+    /// T-514: a seat frees at 31 minutes and the packet is still not
+    /// confirmed: the count starts there and one item rings 20 minutes later,
+    /// on `review-stall:<task>:<attempt>`, naming the seats.
+    #[test]
+    fn a_seat_that_frees_starts_the_stall_count_and_rings_twenty_minutes_later() {
+        let mut store = world(CONFIG_TWO_SLOTS);
+        let mut herdr = FakeHerdr::new();
+        let (first, last) = store
+            .write(|tx| {
+                let first =
+                    testing::seed_temp_seat(tx, "p", "review-1", "T-9", "wt9:p1", "codex", T0)?;
+                let last =
+                    testing::seed_temp_seat(tx, "p", "review-2", "T-8", "wt8:p1", "codex", T0)?;
+                for (seat, task) in [("p:review-1", "T-9"), ("p:review-2", "T-8")] {
+                    let op = tx.insert_op(&gear_store::NewOp {
+                        project: "p".into(),
+                        seat: seat.into(),
+                        generation: 1,
+                        kind: OpKind::Deliver,
+                        task: Some(task.into()),
+                        attempt: Some(1),
+                        ref_msg: None,
+                        plan_version: None,
+                        payload: serde_json::json!({"text": "the review packet"}),
+                        created: T0 + 60,
+                    })?;
+                    tx.set_op_state(
+                        "p",
+                        &op.id,
+                        OpState::Confirmed,
+                        Some(&format!("view {seat}/1 @ 61")),
+                        T0 + 61,
+                    )?;
+                }
+                Ok((first, last))
+            })
+            .unwrap();
+
+        // Both seats busy: nothing rings, no count.
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 30 * 60,
+        )
+        .unwrap();
+        assert!(thread(&mut store, "review-stall:T-1:1").is_empty());
+
+        // review-2 frees at 31 minutes — it is warm and idle, but its agent is
+        // still working, so the packet cannot reach it this tick.
+        let freed = T0 + 31 * 60;
+        herdr.add_agent("wt8:p1", "codex", gear_herdr::AgentStatus::Working);
+        store
+            .write(|tx| {
+                tx.set_seat_task(&last.id, "")?;
+                tx.set_meta(&pending_review_key(&last.id), "")?;
+                tx.set_seat_state(&last.id, SeatState::Standby, None, freed)
+                    .map(|_| ())
+            })
+            .unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", freed).unwrap();
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta("engine.review_free_since.T-1.1"))
+                .unwrap()
+                .as_deref(),
+            Some(freed.to_string().as_str()),
+            "the count starts at the first tick a reviewer was free"
+        );
+        assert!(thread(&mut store, "review-stall:T-1:1").is_empty());
+
+        // 19 minutes later: still not a stall.
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            freed + 19 * 60,
+        )
+        .unwrap();
+        assert!(
+            thread(&mut store, "review-stall:T-1:1").is_empty(),
+            "19 minutes with a free seat is not yet a stall"
+        );
+
+        // 21 minutes after the seat freed — 51 after the hand-in — one item.
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            freed + 21 * 60,
+        )
+        .unwrap();
+        let told = thread(&mut store, "review-stall:T-1:1");
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].recipient, "p:captain");
+        assert_eq!(told[0].kind, MsgKind::System);
+        assert_eq!(told[0].state, MsgState::Open);
+        assert!(told[0].urgent);
+        assert_eq!(told[0].task.as_deref(), Some("T-1"));
+        assert_eq!(told[0].attempt, Some(1));
+        assert_eq!(
+            told[0].body,
+            "T-1 attempt 1 was handed in 52 min ago and no reviewer has its packet: the seats are \
+             p:review-1: active, T-9; p:review-2: standby, ; look at the reviewer panes, or settle \
+             it in # Verdicts after reading the candidate yourself"
+        );
+
+        // It rings once: a second tick adds none.
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            freed + 22 * 60,
+        )
+        .unwrap();
+        assert_eq!(
+            thread(&mut store, "review-stall:T-1:1").len(),
+            1,
+            "a second message was added"
+        );
+        let _ = first;
+    }
+
+    /// T-514 as it was before: a seat free from the hand-in on and no packet
+    /// 20 minutes later rings as today. 19 minutes is not yet a stall, 21 is.
+    #[test]
+    fn a_hand_in_with_a_seat_free_from_the_start_rings_as_before() {
+        let mut store = world(CONFIG_TWO_SLOTS);
+        let mut herdr = FakeHerdr::new();
+        // One seat holds the project's slot and one is warm, but its agent is
+        // still working: the packet cannot reach it, so the hand-in waits — a
+        // reviewer was free for it from the hand-in on.
+        store
+            .write(|tx| {
+                testing::seed_temp_seat(tx, "p", "review-1", "T-9", "wt9:p1", "codex", T0)?;
+                let warm =
+                    testing::seed_temp_seat(tx, "p", "review-2", "T-8", "wt8:p1", "codex", T0)?;
+                tx.set_seat_task(&warm.id, "")?;
+                tx.set_meta(&pending_review_key(&warm.id), "")?;
+                tx.set_seat_state(&warm.id, SeatState::Standby, None, T0)
+                    .map(|_| ())
+            })
+            .unwrap();
+        herdr.add_agent("wt8:p1", "codex", gear_herdr::AgentStatus::Working);
 
         // 19 minutes: the hand-in waits, and nothing rings yet.
         start_reviews(
@@ -9051,11 +9336,12 @@ review = [
         assert!(told[0].urgent);
         assert_eq!(told[0].task.as_deref(), Some("T-1"));
         assert_eq!(told[0].attempt, Some(1));
-        assert_eq!(
-            told[0].body,
-            "T-1 attempt 1 was handed in 21 min ago and no reviewer has its packet: the seats are \
-             p:review-1: active, T-9; p:review-2: active, T-8; look at the reviewer panes, or settle \
-             it in # Verdicts after reading the candidate yourself"
+        assert!(
+            told[0]
+                .body
+                .starts_with("T-1 attempt 1 was handed in 21 min ago"),
+            "{}",
+            told[0].body
         );
         assert!(store
             .read(|tx| tx.get_meta("engine.review_stall.T-1.1"))

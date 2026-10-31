@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1050 -->
+<!-- gear-plan project=gear base=1054 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -143,6 +143,9 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-10-31 18:50 T-509 pass (audit S4, all points met); F1 fixed by hand: docs/releases/v0.6.3.md said S4 was omp usage; it now names the plan tools and where they shipped; the T-509 record merged by hand until T-512 | why: a release record must say what the station delivered | else: -
 - station M-7317: keep course — projected 1161m of 1200m; S1, S3, S4 audits passed; four fix tasks on both lanes, S2 re-audit, S5 and goal audits, then the v0.6.4 tag
 - 2026-10-31 18:58 T-510 pass (audit S5, six points met, no finding); point 6 (audit tasks) has the record-merge gap found live and fixed by T-512; record merged by hand until T-512 | why: - | else: -
+- 2026-10-31 19:05 T-511 fail (audit of goal clauses 2-3): F1, a false review-stall item behind busy reviewers, is T-514; the captain adds T-515 (another project's false overrun items for finished direction checks, same clause); both join T-511's deps in this apply and the clause is audited again | why: user: a gap goes back onto the fix path | else: -
+- station M-7352: keep course — projected 1164m of 1200m; T-512, T-513 merged; T-514, T-515 in review; then the S2 and goal re-audits and the v0.6.4 tag
+- station M-7354: keep course — projected 1167m of 1200m; T-512/T-513 merging, T-514/T-515 in review, then two re-audits and the tag
 
 # Queue
 
@@ -464,7 +467,7 @@ estimate: 30
 audit: true
 goal: [S5] Audit goal. Audit, no code change: check the promise below against origin/dev end to end in normal use, as a user and a captain meet it, not task by task. Use the code, its tests, the gear CLI (`gear report`, `gear queue`, `gear friction --all`, `gear plan show`) and, where a run is needed, a temp GEAR_DB and a temp git repo; never open the live store files. The voyage goal is in the packet: a gap you see outside this slice is a finding too. Promise: the voyage's clauses (2) and (3): the voyage never stops (while some lane has a task it can start, no lane sits idle) and the voyage report shows no false stall item; every captain hand fix or recovery is a decision line in gear/voyages/M6/plan.md. Read `gear report` for M6 and the plan's decision lines, and list each idle stretch and each stall item with whether it was false.
 accept: One line per point of the promise: met or not, with the evidence (a command and its output, or a file and line). Every gap is a finding with how it shows in normal use.
-deps: T-452, T-464, T-470, T-473, T-485, T-492, T-501, T-502, T-503, T-505
+deps: T-452, T-464, T-470, T-473, T-485, T-492, T-501, T-502, T-503, T-505, T-514, T-515
 estimate: 30
 
 ## T-512 [now] lane=mast milestone=M6 station=S5 required
