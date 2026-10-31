@@ -46,7 +46,10 @@ fn lane_gets_worktree_env_and_unattended_args() {
     );
     assert_eq!(
         plan.env_command,
-        "export GEAR_CTX=harbor:heat:1; export GEAR_DB=/state/gear.db"
+        format!(
+            "export GEAR_CTX=harbor:heat:1; export GEAR_DB=/state/gear.db; {}",
+            gear_engine::onboard::EDITOR_ENV
+        )
     );
     assert_eq!(
         (plan.agent_name.as_str(), plan.kind.as_str()),
@@ -73,7 +76,10 @@ fn captain_has_no_worktree_and_resume_appends_args() {
     assert!(plan.worktree.is_none());
     assert_eq!(
         plan.env_command,
-        "export GEAR_CTX=harbor:captain:3; export GEAR_DB=/db"
+        format!(
+            "export GEAR_CTX=harbor:captain:3; export GEAR_DB=/db; {}",
+            gear_engine::onboard::EDITOR_ENV
+        )
     );
     assert_eq!(
         plan.args,

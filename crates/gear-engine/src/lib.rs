@@ -20,6 +20,7 @@ pub mod busy;
 pub mod captain_quota;
 pub mod composer;
 pub mod delivery;
+pub mod dialog;
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
@@ -193,6 +194,9 @@ pub struct TickReport {
     pub busy_lanes: Vec<String>,
     /// Seats rung for being blocked by a dialog for too long (lesson 7b).
     pub blocked: Vec<String>,
+    /// Seats whose dialog the engine closed this tick (T-468): a lane's or a
+    /// reviewer's at once, a captain's after ten unanswered minutes.
+    pub dialogs: Vec<String>,
     /// Seats whose own guardrails refused one of their actions (T-113).
     pub guardrails: Vec<String>,
     /// Seats whose agent was renamed back to its seat name this tick (T-134).
@@ -433,6 +437,15 @@ pub fn tick(
                 let _ = herdr.send_keys(&pane, &["esc".into()]);
             }
             note_slow(report, "busy interrupt", step);
+            // A dialog never holds a seat (M6 S2, T-468): a lane's or a
+            // reviewer's blocking screen is closed in the same tick and the
+            // seat is told to ask the captain instead; a captain's dialog
+            // nobody answers is cancelled after ten minutes.
+            let step = std::time::Instant::now();
+            report
+                .dialogs
+                .extend(dialog::check(store, herdr, &observed, &profiles, now)?);
+            note_slow(report, "dialogs", step);
             // A seat blocked by a dialog for minutes reaches the captain (lesson
             // 7b): the agent waits on a dialog nobody sees.
             let step = std::time::Instant::now();

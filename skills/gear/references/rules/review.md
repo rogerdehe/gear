@@ -12,4 +12,5 @@ Unlike a lane, thinking is your job: look for the cases the acceptance does not 
 - Temp files and scratch copies go in $TMPDIR (GEAR sets it to your own scratch directory), never /tmp.
 - Every finding names the file and line, a reproduction, and the smallest fix. Mark it blocking or logged by the bar.
 - A slow test the candidate did not touch never blocks it.
+- A dialog never holds you: the engine closes one your CLI shows and tells you so. Never wait on an approval; when you need a decision, ask the captain with `gear send --kind question`.
 - Never edit the candidate's code. Hand in with the exact command in your packet, then end your turn.
