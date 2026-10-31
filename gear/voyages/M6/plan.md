@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=982 -->
+<!-- gear-plan project=gear base=983 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -88,6 +88,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7013: keep course — 33 done, projected 870m of 1020m (hull 172m, mast 225m)
 - 2026-11-01 05:40 hand-fix: the binary-changed notice waits 10 minutes after the rebuild before it reaches a captain (gear-cli BinaryWatch); make gate passed; both engines restarted | why: user: the stale notice kept ringing another project's captain on every restart, right before that project departs
 - station M-7021: move — projected 885m of 1020m; hull runs dry in ~21 min (M-7023) while mast holds 225m: T-497 and T-498 (Antigravity CLI profile and usage) go to hull
+- 2026-11-01 06:00 staff: T-491 (v0.5 upgrade test) moves to mast | why: mast runs dry in ~17 min (M-7028; its releases wait for their stations) while hull holds the T-487 rework, T-488, T-492, T-497 and T-498
 
 # Queue
 
@@ -301,7 +302,7 @@ goal: [S5] The captain skill covers several projects: skills/gear/references/cap
 accept: The skill tests pass: make check CRATE=gear-cli TESTS='test(skill)'.
 estimate: 15
 
-## T-491 [now] lane=hull milestone=M6 station=S5 required
+## T-491 [now] lane=mast milestone=M6 station=S5 required
 goal: [S5] A project on v0.5.x upgrades to v0.6 with no hand step: its store (schema of v0.5.6) migrates when the new engine or any gear command first opens it, its gear.toml of v0.5 loads unchanged (every new field has a default), its running voyage, seats and open items carry on, and docs/releases notes say "Upgrading: install, restart the engine". An end-to-end test opens a store made by the v0.5.6 schema with a voyage in progress and a v0.5-shaped config (a fixture committed with the test), runs one engine tick and `gear` and finds the voyage, seats and items intact. Change crates/gear-store migrations if anything is missing and the test, no other design.
 accept: Store and engine tests: the v0.5.6 fixture migrates to the current schema with no loss of tasks, attempts, seats, messages or plan versions; one tick and the home page run on it; a second open is a no-op. Run make check CRATE=gear-store and CRATE=gear-engine.
 estimate: 45
