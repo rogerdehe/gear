@@ -422,7 +422,7 @@ impl Profile {
 /// without the user configuring anything.
 pub fn builtins() -> BTreeMap<String, Profile> {
     let mut table = BTreeMap::new();
-    for kind in ["opencode", "claude", "codex", "grok", "pi", "omp"] {
+    for kind in ["opencode", "claude", "codex", "grok", "pi", "omp", "agy"] {
         if let Some(profile) = builtin(kind) {
             table.insert(kind.to_string(), profile);
         }
@@ -822,6 +822,54 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             exit_command: Some("/quit".into()),
             verified: true,
         }),
+        // agy (Antigravity CLI, a Google agent; checked 2026-10-31 against
+        // `agy --help` and a live start in a Herdr pane, agy 1.4.12 — the
+        // packet names 1.2.13, this machine has 1.4.12): unattended
+        // `--dangerously-skip-permissions` (agy's own flag; it does not
+        // answer the project-trust dialog, which the profile's dialog
+        // markers do); model `--model <id>` and reasoning `--effort
+        // low|medium|high|xhigh|max` (the effort is the chain entry's args,
+        // like pi's thinking level); resume `--conversation <id>`. Herdr
+        // reports the conversation id as `agent_session` after the first
+        // turn (live: kind `id`, source `herdr:antigravity_cli`), so
+        // session_ref is true. It exits on ctrl+c twice (live: the first
+        // shows `press ctrl+c again to exit`, the second returns to the
+        // shell); there is no `/quit` command. Its screens: busy
+        // `Generating...` with `esc to cancel`; the startup project-trust
+        // dialog (`Do you trust the contents of this project?`, Enter takes
+        // the preselected `Yes, I trust this folder`); the usage panel's
+        // `Quota exhausted`; a retried request shows `<what>, retrying in
+        // <n>s`. agy has no system-prompt flag, so it takes the role rules
+        // the way grok and opencode do — in its packet (instructions_args
+        // empty). It has no `/new` or `/compact` slash command, so both are
+        // empty.
+        "agy" => Some(Profile {
+            kind: "agy".into(),
+            busy_markers: vec!["Generating...".into()],
+            ratelimit_markers: vec![],
+            quota_markers: vec!["Quota exhausted".into()],
+            quota_bar: None,
+            auth_markers: vec![],
+            backoff_markers: vec![", retrying in ".into()],
+            blocked_markers: vec![],
+            error_markers: vec![],
+            dialogs: vec![Dialog {
+                markers: vec!["Do you trust the contents of this project?".into()],
+                keys: vec!["enter".into()],
+            }],
+            new_session: String::new(),
+            compact: String::new(),
+            usage_log: None,
+            tail_lines: 16,
+            confirm_rounds: 2,
+            unattended_args: vec!["--dangerously-skip-permissions".into()],
+            instructions_args: vec![],
+            session_ref: true,
+            resume_args: Some(vec!["--conversation".into(), "{session}".into()]),
+            exit_keys: vec!["ctrl+c".into(), "ctrl+c".into()],
+            exit_command: None,
+            verified: true,
+        }),
         // Only kinds with a verified SOP are built in (design/04).
         _ => None,
     }
@@ -925,6 +973,48 @@ mod tests {
         assert!(builtins().contains_key("omp"));
     }
 
+    /// T-497: agy starts unattended with its own flag, takes the model as
+    /// `--model` and the effort from the chain entry, and resumes with
+    /// `--conversation`; Herdr reports its conversation id after a turn. A
+    /// fresh worktree opens agy's project-trust dialog, which the profile
+    /// answers with Enter (the preselected "Yes, I trust this folder"), and
+    /// agy exits on ctrl+c twice. It has no system-prompt flag, so the rules
+    /// reach it in its packet like grok's and opencode's.
+    #[test]
+    fn the_agy_profile_starts_unattended_and_resumes_with_its_conversation() {
+        let agy = builtin("agy").unwrap();
+        assert_eq!(agy.kind, "agy");
+        assert_eq!(
+            agy.unattended_args,
+            vec!["--dangerously-skip-permissions".to_string()]
+        );
+        assert!(
+            agy.instructions_args.is_empty(),
+            "agy has no system-prompt flag: the rules go in its packet"
+        );
+        assert!(agy.session_ref, "Herdr reports agy's conversation id");
+        assert_eq!(
+            agy.resume_args,
+            Some(vec!["--conversation".to_string(), "{session}".to_string()])
+        );
+        assert_eq!(
+            agy.exit_keys,
+            vec!["ctrl+c".to_string(), "ctrl+c".to_string()]
+        );
+        assert!(agy.exit_command.is_none());
+        assert!(agy.verified);
+
+        // The project-trust dialog of a fresh worktree, as agy draws it.
+        let trust =
+            "Do you trust the contents of this project?\n\n> Yes, I trust this folder\n  No, exit";
+        let dialog = agy.dialog(trust).expect("the trust dialog");
+        assert_eq!(dialog.keys, vec!["enter".to_string()]);
+
+        // The signs agy's own screens carry (1.4.12): a retried request and
+        // the usage panel's spent quota.
+        assert!(agy.backoff("Rate limited, retrying in 5s"));
+        assert!(classify_screen(&agy, "Quota exhausted").contains(&ScreenFlag::Quota));
+    }
     /// T-195: the rules file's path goes into the args.
     #[test]
     fn the_rules_file_is_rendered_into_the_args() {
