@@ -4,6 +4,7 @@ mod board_project_contract;
 mod captain_handover_contract;
 mod engine_hold_contract;
 mod fixtures_contract;
+mod home_multi_contract;
 mod import_issues_contract;
 mod install_skill_contract;
 mod offline_contract;

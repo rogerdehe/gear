@@ -156,3 +156,20 @@
 - M6 (2026-11-01, F-262): with no omp provider logged in, mast took a key from pi's auth.json to run T-495's live start (the value never reached the repo). A seat never borrows credentials from another CLI's files: a live check that needs a login it does not have is reported as blocked, and the captain or the user provides it.
 - M6 (2026-11-01, M-7030): T-489 attempt 2 waited by design for review-9, busy on other reviews; the review-stall item rang the moment review-9 came free, seconds before it took the job. The stall clock of a queued re-review should run from when its earlier reviewer came free.
 - M6 (2026-11-01, M-7038): the done-branch scan named T-477 and T-489 as unmerged while their merges were running and queued; it must skip a task with a merge op intended, executing or submitted. Fixed by the captain the same day.
+- agy usage: the model a conversation actually used lives only in the protobuf of ~/.gemini/antigravity-cli/conversations/<id>.db; the reader takes the seat's configured model (T-498 review F1). Also F2/F3: a MODEL record without input_tokens is dropped; an agy 1.2.x transcript with no counts reads 0, not unknown.
+- gear-engine tests leave their gear-engine-tests-<pid> temp dirs behind: 958 piled up in one TMPDIR during M6 (only make's prune-tmp clears them, and a direct cargo nextest run never does). Each fixture should remove its own dir on drop.
+
+## The gear-engine test run is past the 300 s red line under load
+- 2026-10-31 M6 (F-281, F-282, F-283): lanes report the gear-engine test run at 1.5-7 minutes on the merged tree while two fleets share the machine (T-492 about 7 min, T-501 about 6 min); the fake Herdr never checks in, so scenario tests settle delivery and doorbell ops by hand. Measure the slowest tests with the probe of a quiet machine, then cut or split them under the 300 s red line.
+
+## The captain cannot give a reviewer an audit job
+- 2026-10-31 M6: a reviewer seat only gets jobs bound to a lane's push (the direction check) or hand-in (the review), so the whole-voyage audit of decompose rule 7 has no GEAR path. Design at M7 kickoff: an audit job with its own text sent to a reviewer seat, its slices planned at kickoff, the gaps judged by the captain, and landing refused while a gap has no ruling.
+
+## A model-switch handover names the worktree's branch, not the task's
+- 2026-10-31 M6 (F-284): hull switched to TokenRhythm right after T-505 was assigned; the handover (crates/gear-engine/src/handover.rs, `facts.branch` from `git rev-parse --abbrev-ref HEAD`) named T-502's branch, because the worktree had not switched yet, and had no part 2, so the new model rebuilt the state from the transcript. The handover should name the attempt's own branch and say when the worktree is on another one.
+
+## The health-watch cost test fails under load
+- 2026-10-31 M6 (T-508 audit F1, F-287 a merge-push timing test failed at 96 s and passed alone): crates/gear-engine/tests/it/health_contract.rs:393 `the_watch_costs_under_one_percent_of_one_core` measured one real sample at 930 ms CPU on a busy machine and passed on three re-runs. A load-sensitive test can fail a merge gate falsely; measure the cost with a bound that holds under contention, or average several samples.
+
+## A review seat's empty stash rings the captain
+- 2026-10-31 M6 (M-7353, M-7358): before each new review on review-9 the engine stashed the worktree and rang "Preserved changes" for a stash whose tracked diff and untracked tree were both empty (the worktree held an untracked crates/gear-engine/target/ that a reviewer made with a relative TMPDIR; removed by hand). Ring only when the stash holds a change; skip the stash when `git status --porcelain` is empty.

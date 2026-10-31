@@ -1486,10 +1486,16 @@ fn view_tasks(
                 Style::fg(Color::Warn).and_bold(),
             );
         }
-        if row.text.is_empty() {
+        if row.spans.is_empty() {
             continue;
         }
-        canvas.put_styled(info_x, at, &row.text, row.style);
+        // The text column, piece by piece: the id and the title, the stage
+        // words in the stage's own colour, the time (T-502).
+        let mut x = info_x;
+        for span in &row.spans {
+            canvas.put_styled(x, at, &span.text, span.style);
+            x += span.text.chars().count();
+        }
     }
     picks.into_iter().map(|(at, _)| at).collect()
 }

@@ -1187,7 +1187,16 @@ fn the_git_graph_has_the_rows_of_the_prototype_m5_voyage() {
     let first = &rows[0];
     assert_eq!(first.task.as_deref(), Some("T-267"));
     assert_eq!(glyph(first, 9), Some('○'));
-    assert_eq!(first.style, Style::fg(Color::Dim));
+    // T-502: a waiting row stays dim; the two spaces between the title and
+    // the stage are the row's own.
+    for span in [0, 1, 3, 4] {
+        assert_eq!(
+            first.spans[span].style,
+            Style::fg(Color::Dim),
+            "{:?}",
+            first.spans
+        );
+    }
     assert!(
         first.text.starts_with("T-267  release v0.5.0"),
         "{:?}",
@@ -1232,7 +1241,7 @@ fn the_git_graph_has_the_rows_of_the_prototype_m5_voyage() {
     assert_eq!(glyph(fork, 15), Some('╮'));
     assert_eq!(glyph(fork, 16), None);
     assert_eq!(fork.text, "       starts +2h09m after T-261");
-    assert_eq!(fork.style, Style::fg(Color::Dim));
+    assert_eq!(fork.spans[0].style, Style::fg(Color::Dim));
 
     // The merge of T-261, below its lane's line: dev joins the branch.
     let merge = &rows[8];
@@ -1266,7 +1275,12 @@ fn the_git_graph_has_the_rows_of_the_prototype_m5_voyage() {
     let working = &rows[6];
     assert_eq!(working.task.as_deref(), Some("T-264"));
     assert_eq!(glyph(working, 15), Some('◉'));
-    assert_eq!(working.style, Style::bold());
+    assert_eq!(working.spans[0].style, Style::bold());
+    // T-502: the stage words carry the stage's colour, bold while live.
+    assert_eq!(
+        working.spans[3].style,
+        Style::fg(Stage::Working.color()).and_bold()
+    );
 
     // The last two rows are the forks of T-257 and T-258: they started at the
     // same minute, so they keep the plan's order (hull first, then mast).
@@ -1351,7 +1365,8 @@ fn a_task_that_started_and_waits_again_keeps_its_row() {
     );
     assert_eq!(rows[0].task.as_deref(), Some("T-3"));
     assert_eq!(glyph(&rows[0], 9), Some('○'));
-    assert_eq!(rows[0].style, Style::bold());
+    // T-502: queued is not a live stage, so the row is dim again.
+    assert_eq!(rows[0].spans[0].style, Style::fg(Color::Dim));
     assert_eq!(glyph(&rows[1], 3), Some('├'));
     assert_eq!(rows[1].task, None);
     assert_eq!(rows[1].text, "       starts +0h01m");

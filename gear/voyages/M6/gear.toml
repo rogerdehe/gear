@@ -19,7 +19,7 @@ pane = "w2:p2"
 kind = "claude"
 profile = "claude"
 
-# M6: two lanes on DeepSeek V4.1 Flash on the self-hosted hk-dgx-1, thinking high, 600K context; one lane if two are too slow, TokenRhythm if one is.
+# M6: two lanes on DeepSeek V4.1 Flash on TokenRhythm, thinking high, 600K context (user, 2026-10-31: the self-hosted hk-dgx-1 is left to the other project).
 [[lanes]]
 name = "hull"
 duty = "M6 engine, model and usage: crates/gear-engine, gear-model, gear-usage"
@@ -27,7 +27,7 @@ owns = ["crates/gear-engine/", "crates/gear-model/", "crates/gear-usage/"]
 kind = "pi"
 profile = "pi"
 models = [
-  { model = "hk-dgx-1/DeepSeek-V4.1-Flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 600 },
+  { model = "tokenrhythm/deepseek-v4.1-flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 600 },
 ]
 
 [[lanes]]
@@ -37,7 +37,7 @@ owns = ["crates/gear-app/", "crates/gear-store/", "crates/gear-cli/", "crates/ge
 kind = "pi"
 profile = "pi"
 models = [
-  { model = "hk-dgx-1/DeepSeek-V4.1-Flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 600 },
+  { model = "tokenrhythm/deepseek-v4.1-flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 600 },
 ]
 
 # GEAR lanes run pi without pi-lens (uninstalled 2026-10-28).
@@ -50,7 +50,7 @@ profile = "pi"
 
 [models]
 lanes = [
-  { model = "hk-dgx-1/DeepSeek-V4.1-Flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 600 },
+  { model = "tokenrhythm/deepseek-v4.1-flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 600 },
 ]
 # The reviewer never runs the model it reviews.
 review = [

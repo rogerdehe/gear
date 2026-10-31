@@ -14,6 +14,7 @@
 //! under its reviewer reaches it while it works, and ends that turn at once.
 
 use gear_model::{MsgKind, Ts};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One waiting message a doorbell would name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,7 +93,7 @@ pub struct DoorbellAction {
 pub fn decide(inputs: &[DoorbellInput], cooldown_s: i64, now: Ts) -> Vec<DoorbellAction> {
     inputs
         .iter()
-        .filter(|input| rings(input, cooldown_s, now))
+        .filter(|input| may_ring(input, cooldown_s, now))
         .map(|input| {
             let named = named(input);
             DoorbellAction {
@@ -105,6 +106,137 @@ pub fn decide(inputs: &[DoorbellInput], cooldown_s: i64, now: Ts) -> Vec<Doorbel
             }
         })
         .collect()
+}
+
+/// One seat a joined ring covers (T-487): its items, in the order they were
+/// named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RingSeat {
+    pub project: String,
+    pub seat: String,
+    pub generation: i64,
+    /// The ids this seat contributes to the ring.
+    pub covers: Vec<String>,
+}
+
+/// One ring for a pane (T-487). A pane that holds several captain seats (one
+/// captain over several projects) gets one ring, not one per project: its text
+/// names each project's items, urgent first. The op is recorded under the
+/// first ringing seat; every other seat gets its own op, already submitted, so
+/// its items are covered and its slot is held without a second prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ring {
+    pub pane_id: String,
+    /// The seat the ring's own op is recorded under.
+    pub project: String,
+    pub seat: String,
+    pub generation: i64,
+    pub text: String,
+    /// Every seat the ring covers, with its own ids. Each seat's ids stay in
+    /// its own entry (T-487 F2): the ids of two projects are never written
+    /// into one list, where per-project ids like `M-1` would collide.
+    pub seats: Vec<RingSeat>,
+}
+
+/// The rings this tick sends: the inputs of seats that may be rung, grouped by
+/// pane, with the items of every seat bound to the pane joined into one text
+/// (T-487). A project in `resting` (outside its working hours) adds nothing;
+/// the other projects' rings go on. The idle, at-once and cooldown rules are
+/// the ones [`decide`] applies, per seat.
+pub fn rings(
+    inputs: &[DoorbellInput],
+    resting: &BTreeSet<String>,
+    cooldown_s: i64,
+    now: Ts,
+) -> Vec<Ring> {
+    let mut by_pane: BTreeMap<&str, Vec<&DoorbellInput>> = BTreeMap::new();
+    for input in inputs {
+        if resting.contains(&input.project) {
+            continue;
+        }
+        by_pane.entry(&input.pane_id).or_default().push(input);
+    }
+    let mut rings = Vec::new();
+    for (pane, group) in by_pane {
+        let ringing: Vec<&DoorbellInput> = group
+            .into_iter()
+            .filter(|input| may_ring(input, cooldown_s, now))
+            .collect();
+        if ringing.is_empty() {
+            continue;
+        }
+        let mut seats: Vec<RingSeat> = Vec::new();
+        let mut lines: Vec<(bool, String)> = Vec::new();
+        let mut all: Vec<DoorbellItem> = Vec::new();
+        for input in &ringing {
+            let named = named(input);
+            let urgent = named.iter().filter(|item| item.urgent).count();
+            let ids: Vec<&str> = named.iter().map(|item| item.id.as_str()).collect();
+            let line = if urgent > 0 {
+                format!(
+                    "- {}: {} item(s) ({} urgent): {}",
+                    input.project,
+                    named.len(),
+                    urgent,
+                    ids.join(" ")
+                )
+            } else {
+                format!(
+                    "- {}: {} item(s): {}",
+                    input.project,
+                    named.len(),
+                    ids.join(" ")
+                )
+            };
+            lines.push((urgent > 0, line));
+            seats.push(RingSeat {
+                project: input.project.clone(),
+                seat: input.seat.clone(),
+                generation: input.generation,
+                covers: ids.iter().map(|id| (*id).to_string()).collect(),
+            });
+            all.extend(named);
+        }
+        let text = if ringing.len() == 1 {
+            let input = ringing[0];
+            with_goal(text(&all, input.no_task), input.goal.as_deref())
+        } else {
+            // Urgent items first: a project with urgent items leads.
+            lines.sort_by_key(|(urgent, _)| !*urgent);
+            let urgent_total = all.iter().filter(|item| item.urgent).count();
+            let mut text = format!(
+                "GEAR: {} item(s) waiting for you across {} projects{}:\n",
+                all.len(),
+                ringing.len(),
+                if urgent_total > 0 {
+                    format!(" ({urgent_total} urgent)")
+                } else {
+                    String::new()
+                }
+            );
+            for (_, line) in &lines {
+                text.push_str(line);
+                text.push('\n');
+            }
+            text.push_str("Run the command `gear` (no arguments) in your own shell; it shows only your items. An item of another project: `gear reply <project>:<M-n>`.");
+            for input in &ringing {
+                if let Some(goal) = &input.goal {
+                    text.push('\n');
+                    text.push_str(goal);
+                }
+            }
+            text
+        };
+        rings.push(Ring {
+            pane_id: pane.to_string(),
+            project: ringing[0].project.clone(),
+            seat: ringing[0].seat.clone(),
+            generation: ringing[0].generation,
+            text,
+            seats,
+        });
+    }
+    rings
 }
 
 /// Must this message be typed into the pane even while the agent works? (T-130)
@@ -224,7 +356,7 @@ pub fn goal_line(tx: &gear_store::Tx<'_>, project: &str) -> gear_model::GearResu
 }
 
 /// Whether this seat may be rung right now.
-fn rings(input: &DoorbellInput, cooldown_s: i64, now: Ts) -> bool {
+fn may_ring(input: &DoorbellInput, cooldown_s: i64, now: Ts) -> bool {
     if input.waiting.is_empty() {
         return false; // nothing to show
     }

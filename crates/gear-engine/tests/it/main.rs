@@ -71,6 +71,7 @@ pub fn temp(name: &str) -> std::path::PathBuf {
     })
 }
 
+mod audit_contract;
 mod backoff_contract;
 mod cancel_tick_contract;
 mod config_profile_onboard;
@@ -109,10 +110,12 @@ mod blocked_delivery_contract;
 mod branch_templates_contract;
 mod busy_contract;
 mod captain_quota_contract;
+mod day_contract;
 mod dead_temp_slot_contract;
 mod delivery_grace_contract;
 mod guardrails_contract;
 mod hand_in_notifications;
+mod handover_branch_contract;
 mod health_contract;
 mod lane_nudge_contract;
 mod lane_restart_generation_contract;
@@ -125,12 +128,14 @@ mod ready_state_contract;
 mod remote_contract;
 mod reviewer_quota_contract;
 mod rework_mid_turn_contract;
+mod ring_contract;
 mod rounds_contract;
 mod session_dispatch_contract;
 mod station_contract;
 mod targeting_contract;
 mod tz_hours_contract;
 mod undelivered_delivery_contract;
+mod upgrade_contract;
 mod waits_contract;
 
 /// A scratch home with the GEAR skill installed for every kind (T-83): `init`

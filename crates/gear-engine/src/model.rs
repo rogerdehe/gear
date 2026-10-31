@@ -73,15 +73,23 @@ pub(crate) fn writer_model(config: &ProjectConfig, writer_seat: &str) -> Option<
 /// from the writer's **current** model (17 §0: the reviewer never runs the
 /// model it reviews). `None` when the chain is empty — then the model is not
 /// managed.
-pub(crate) fn review_entry<'a>(
+/// The entry a review of a task runs on (T-500): the `review-model:` the
+/// captain named for it, when that names an entry of the review chain; else
+/// the first entry that differs from the writer's model (T-35). Every review
+/// of the task — first review and re-review — runs on the entry this returns.
+pub(crate) fn review_entry_for<'a>(
     config: &'a ProjectConfig,
     writer_model: Option<&str>,
+    wanted: Option<&str>,
 ) -> Option<&'a ModelEntry> {
-    config
-        .models
-        .review
-        .iter()
-        .filter(|entry| !entry.model().is_empty())
+    let chain = review_chain(config);
+    if let Some(wanted) = wanted.filter(|model| !model.is_empty()) {
+        if let Some(entry) = chain.iter().find(|entry| entry.model() == wanted) {
+            return Some(*entry);
+        }
+    }
+    chain
+        .into_iter()
         .find(|entry| Some(entry.model()) != writer_model)
 }
 
@@ -144,6 +152,14 @@ pub(crate) fn model_start(kind: &str, model: &str) -> Option<ModelStart> {
         // of the chain entry (`--thinking <level>`), never a constant here
         // (T-35): the entry's args follow the model flag.
         "pi" => Some(ModelStart {
+            env: String::new(),
+            args: vec!["--model".to_string(), model.to_string()],
+        }),
+        // agy (Antigravity CLI 1.4.12) takes the model as a start flag
+        // (`--model <id>`; `agy --help`). The reasoning level is a property
+        // of the chain entry (`--effort low|medium|high|xhigh|max`), never a
+        // constant here (T-35), like pi's `--thinking`.
+        "agy" => Some(ModelStart {
             env: String::new(),
             args: vec!["--model".to_string(), model.to_string()],
         }),
@@ -258,6 +274,28 @@ mod tests {
         assert_eq!(
             claude.args,
             vec!["--model".to_string(), "claude-opus-4".to_string()]
+        );
+    }
+
+    #[test]
+    fn agy_takes_the_model_and_the_effort_from_the_entry() {
+        // T-497: agy `--model <id>`; the reasoning effort is the chain
+        // entry's (`--effort low|medium|high|xhigh|max`), like pi's thinking.
+        let agy = model_start("agy", "gemini-3.8-flash-high").unwrap();
+        assert_eq!(agy.env, "", "agy needs no environment line");
+        assert_eq!(
+            agy.args,
+            vec!["--model".to_string(), "gemini-3.8-flash-high".to_string()]
+        );
+        let entry = entry("gemini-3.8-flash-high", Some("agy"), &["--effort", "high"]);
+        assert_eq!(
+            entry_args("agy", &entry).unwrap(),
+            vec![
+                "--model".to_string(),
+                "gemini-3.8-flash-high".to_string(),
+                "--effort".to_string(),
+                "high".to_string(),
+            ]
         );
     }
 

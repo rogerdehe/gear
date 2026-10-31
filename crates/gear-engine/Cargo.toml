@@ -18,3 +18,5 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# T-491: the v0.5.6 store fixture is SQL, applied with rusqlite.
+rusqlite = { workspace = true }

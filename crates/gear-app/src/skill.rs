@@ -124,6 +124,7 @@ pub enum SkillAgent {
     Grok,
     Pi,
     Omp,
+    Agy,
 }
 
 impl SkillAgent {
@@ -134,6 +135,7 @@ impl SkillAgent {
         SkillAgent::Grok,
         SkillAgent::Pi,
         SkillAgent::Omp,
+        SkillAgent::Agy,
     ];
 
     /// The name the user writes.
@@ -145,6 +147,7 @@ impl SkillAgent {
             SkillAgent::Grok => "grok",
             SkillAgent::Pi => "pi",
             SkillAgent::Omp => "omp",
+            SkillAgent::Agy => "agy",
         }
     }
 
@@ -157,6 +160,7 @@ impl SkillAgent {
             "grok" => Ok(SkillAgent::Grok),
             "pi" => Ok(SkillAgent::Pi),
             "omp" => Ok(SkillAgent::Omp),
+            "agy" => Ok(SkillAgent::Agy),
             other => {
                 let known = SkillAgent::ALL
                     .iter()
@@ -185,6 +189,11 @@ impl SkillAgent {
     /// like pi, and `omp config path` names its agent directory
     /// `~/.omp/agent` (omp 18.12.6), so the skill goes to
     /// `~/.omp/agent/skills/<name>/SKILL.md`.
+    /// agy (Antigravity CLI 1.4.12) loads global skills from
+    /// `~/.gemini/antigravity-cli/skills/<name>/SKILL.md` (agy's `/skills`
+    /// and its customizations guide: workspace skills live under
+    /// `_agents/skills/`, global ones under the CLI's config directory), so
+    /// the skill goes to `~/.gemini/antigravity-cli/skills/<name>/SKILL.md`.
     pub fn skills_root(self, home: &Path) -> PathBuf {
         match self {
             SkillAgent::Claude => home.join(".claude").join("skills"),
@@ -193,6 +202,7 @@ impl SkillAgent {
             SkillAgent::Grok => home.join(".grok").join("skills"),
             SkillAgent::Pi => home.join(".pi").join("agent").join("skills"),
             SkillAgent::Omp => home.join(".omp").join("agent").join("skills"),
+            SkillAgent::Agy => home.join(".gemini").join("antigravity-cli").join("skills"),
         }
     }
 }
@@ -326,6 +336,12 @@ mod tests {
         assert_eq!(
             SkillAgent::Omp.skills_root(&home),
             home.join(".omp").join("agent").join("skills")
+        );
+        // agy's global skills are `~/.gemini/antigravity-cli/skills`
+        // (agy 1.4.12 `/skills` and customizations guide).
+        assert_eq!(
+            SkillAgent::Agy.skills_root(&home),
+            home.join(".gemini").join("antigravity-cli").join("skills")
         );
         std::fs::remove_dir_all(&home).ok();
     }
