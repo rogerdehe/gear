@@ -456,7 +456,8 @@ pub fn check(
             continue;
         };
         let body = format!(
-            "{reason}. Look at its pane, fix the cause, then start the seat again (NeedsCheck → Queued). Machine: load {:.2} on {} cores, {} MB free of {} MB.",
+            "{reason}. Look at its pane, fix the cause, then start it again (`- retry {}` in the plan for a lane; a reviewer is released and started for its next job). Machine: load {:.2} on {} cores, {} MB free of {} MB.",
+            obs.seat.name,
             reading.machine.load5,
             reading.machine.cores,
             reading.machine.mem_free_kb / 1024,

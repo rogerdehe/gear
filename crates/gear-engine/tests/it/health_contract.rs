@@ -176,7 +176,7 @@ fn a_seat_over_the_safe_line_is_stopped_and_the_captain_told() {
     assert_eq!(item[0].state, MsgState::Open);
     assert!(item[0].urgent);
     assert!(item[0].body.contains("heat"), "{}", item[0].body);
-    assert!(item[0].body.contains("NeedsCheck"), "{}", item[0].body);
+    assert!(item[0].body.contains("- retry heat"), "{}", item[0].body);
     assert!(
         items(&mut w, "health:machine:p").is_empty(),
         "an internal cause is not the machine's item"
