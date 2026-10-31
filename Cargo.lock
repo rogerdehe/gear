@@ -245,6 +245,7 @@ dependencies = [
  "gear-store",
  "gear-usage",
  "libc",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "toml",
