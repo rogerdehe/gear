@@ -75,7 +75,7 @@ fn depart(s: &mut Store) {
                 # Milestone M1: delivery v0.1.0\n\
                 done: users install it\n\
                 bar: block only loop breaks\n\
-                eta: 8h\n\
+                eta: 8h\ndepart: now\n\
                 # Queue\n\
                 ## NEW [must] lane=heat milestone=M1\n\
                 goal: G\naccept: a\nestimate: 30\ndeps: -\n";

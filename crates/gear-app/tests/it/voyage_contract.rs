@@ -105,8 +105,15 @@ fn run_confirmed(
     apply(s, &env, Some(&fp), None, &draft, text, rid, now)
 }
 
-/// A draft with one milestone block (body as given) and two tasks on it.
+/// A draft with one milestone block (body as given) and two tasks on it. A
+/// body without a `depart:` line gets `depart: now` (T-473): these voyages
+/// depart.
 fn plan(base: i64, body: &str) -> String {
+    let body = if body.contains("depart:") {
+        body.to_string()
+    } else {
+        format!("{body}\ndepart: now\n")
+    };
     format!(
         "<!-- gear-plan project=p base={base} -->\n# Milestone M1: delivery v0.1.0\n{body}\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n"
     )
@@ -502,7 +509,7 @@ fn a_departed_voyages_title_and_stations_need_the_users_confirmation() {
     let departure = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: delivery v0.1.0\n\
                      done: users install v0.1.0 without Rust\n\
                      bar: block only loop breaks and data loss; log the rest\n\
-                     eta: 8h\n\
+                     eta: 8h\ndepart: now\n\
                      station S1: the board matches the prototype\n\
                      station S2: released as v0.5.0\n\
                      # Queue\n\
@@ -691,7 +698,7 @@ fn an_untouched_old_milestone_keeps_applying() {
     let mut s = world();
     // A first plan with the block and one task on M1: the words are stored and
     // the voyage departs.
-    let text = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    let text = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\ndepart: now\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, text, "r1", NOW).unwrap();
     let tasks = s.read(|tx| tx.tasks_of_project("p")).unwrap();
     assert_eq!(tasks.len(), 1);
@@ -726,11 +733,11 @@ fn an_untouched_old_milestone_keeps_applying() {
     assert_eq!(voyage.done.as_deref(), Some("users install it"));
 }
 
-/// R1 (review): a milestone whose block was applied earlier departs when its
-/// first **tasks** are created — a queue-only apply, no repeated block — and a
+/// T-473: a block with tasks and no `depart:` line does not depart; a later
+/// block that names `depart: now` departs with the tasks it has then, and a
 /// later block/task addition never moves the departure.
 #[test]
-fn the_departure_is_the_first_task_creation_even_without_the_block() {
+fn a_block_with_tasks_and_no_depart_line_does_not_depart() {
     let mut s = world();
     // base 0: only the queue, one task on M1, and no M1 block — refused, and
     // nothing is written (T-333, T-442): a task sails on a voyage the file
@@ -751,29 +758,41 @@ fn the_departure_is_the_first_task_creation_even_without_the_block() {
         "nothing was written"
     );
 
-    // base 0 with the block: the milestone departs with its first task.
+    // base 0 with the block and no `depart:` line: the task is created, the
+    // milestone does not depart.
     let with_block = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, with_block, "r1", NOW).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
         (voyage.departure, voyage.departure_tasks),
-        (Some(NOW), Some(1))
+        (None, None),
+        "no depart: line, no departure"
+    );
+
+    // base 1: the block names `depart: now` and a second task — it departs now,
+    // with the tasks it has then (the user confirmed the departure, T-461).
+    let depart = "<!-- gear-plan project=p base=1 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\ndepart: now\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
+    run_confirmed(&mut s, depart, "r2", NOW + 10).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks),
+        (Some(NOW + 10), Some(2))
     );
     assert!(s
         .read(|tx| render_task_packet(tx, "p", "T-1"))
         .unwrap()
-        .contains("with 1 tasks"));
+        .contains("with 2 tasks"));
 
-    // base 1: the block again plus a second task — the words update (the user
-    // asked for the change and confirmed it, T-410), the departure stays.
-    let more = "<!-- gear-plan project=p base=1 -->\n# Milestone M1: release v2\ndone: users install v2\nbar: keep it simple\neta: 9h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
-    run_confirmed(&mut s, more, "r2", NOW + 20).unwrap();
+    // base 2: the block again plus a third task, no `depart:` line — the
+    // departure stays where it was set.
+    let more = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [could] lane=heat milestone=M1\ngoal: C\naccept: c\nestimate: 30\ndeps: -\n";
+    run(&mut s, more, "r3", NOW + 20).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
         (voyage.departure, voyage.departure_tasks),
-        (Some(NOW), Some(1))
+        (Some(NOW + 10), Some(2)),
+        "a later block never moves the departure"
     );
-    assert_eq!(voyage.done.as_deref(), Some("users install v2"));
 }
 
 /// T-333: the block of a milestone the draft names but does not describe comes
@@ -782,7 +801,7 @@ fn the_departure_is_the_first_task_creation_even_without_the_block() {
 fn the_words_the_store_keeps_are_written_back_into_the_file() {
     let mut s = world();
     // base 0: the block, one station and one task on M1.
-    let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\nstation S1: install and log in\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\ndepart: now\nstation S1: install and log in\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, first, "r1", NOW).unwrap();
 
     // base 1: a queue that names M1 and says nothing about it. The words are in
@@ -792,7 +811,7 @@ fn the_words_the_store_keeps_are_written_back_into_the_file() {
     assert_eq!(
         result.milestone_blocks,
         vec![
-            "# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\nstation S1: install and log in\n"
+            "# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\ndepart: now\nstation S1: install and log in\n"
                 .to_string()
         ]
     );
@@ -908,7 +927,7 @@ fn a_task_moved_to_a_milestone_no_plan_describes_is_refused() {
 #[test]
 fn a_task_moved_to_a_milestone_the_store_describes_is_applied() {
     let mut s = world();
-    let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\ndepart: now\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, first, "r1", NOW).unwrap();
     let second = "<!-- gear-plan project=p base=1 -->\n# Milestone M2: the next one\ndone: users install v2\nbar: it holds\neta: 4h\n# Queue\n## NEW [should] lane=heat milestone=M2\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
     run_confirmed(&mut s, second, "r2", NOW + 10).unwrap();
@@ -1006,12 +1025,12 @@ fn editing_a_grandfathered_milestone_keeps_its_historical_departure() {
     let mut s = world();
     // T-1 is created on M1 with the block: the departure is fixed then (T-333:
     // a plan that names a milestone carries its block).
-    let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it early\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it early\nbar: block only loop breaks\neta: 8h\ndepart: now\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, first, "r1", NOW).unwrap();
     // Much later the block arrives together with T-2: the words of a voyage
     // that departed without them come with the user's confirmation (T-410),
     // since no stored field is exempt from the guard.
-    let block = "<!-- gear-plan project=p base=1 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
+    let block = "<!-- gear-plan project=p base=1 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\ndepart: now\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
     let err = run(&mut s, block, "r2-bare", NOW + 100).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
@@ -1118,7 +1137,7 @@ fn voyage_report_starts_home_and_matches_both_board_views() {
     use gear_store::{AttemptRow, AttemptStep};
     let mut s = world();
     lift_the_cap(&mut s, 120);
-    let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M2: course\ndone: ship the voyage\nbar: stable\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\nestimate: 60\ndeps: -\n";
+    let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M2: course\ndone: ship the voyage\nbar: stable\neta: 8h\ndepart: now\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\nestimate: 60\ndeps: -\n";
     run(&mut s, first, "r1", NOW).unwrap();
     let more = "<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: B\naccept: b\nestimate: 90\ndeps: -\n";
     run(&mut s, more, "r2", NOW + 60).unwrap();
@@ -1397,7 +1416,7 @@ fn an_emptied_milestone_loses_its_departure_and_a_reused_id_starts_again() {
     );
 
     // The trial is moved to M0: M1 loses every task and with them its departure.
-    let moved = "<!-- gear-plan project=p base=1 -->\n# Milestone M0: the trial\ndone: the trial runs\nbar: it holds\neta: 4h\n# Queue\n## T-1 [must] lane=heat milestone=M0\n## T-2 [should] lane=heat milestone=M0\n";
+    let moved = "<!-- gear-plan project=p base=1 -->\n# Milestone M0: the trial\ndone: the trial runs\nbar: it holds\neta: 4h\ndepart: now\n# Queue\n## T-1 [must] lane=heat milestone=M0\n## T-2 [should] lane=heat milestone=M0\n";
     run_confirmed(&mut s, moved, "r2", NOW + 100).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
@@ -1418,7 +1437,7 @@ fn an_emptied_milestone_loses_its_departure_and_a_reused_id_starts_again() {
 
     // The real voyage reuses M1: its departure is its own first task, not the
     // trial's, and its scope is the new tasks' estimates.
-    let reuse = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: delivery v0.2.0\ndone: users install v0.2.0\nbar: block only loop breaks\neta: 3h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: C\naccept: c\nestimate: 45\ndeps: -\n";
+    let reuse = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: delivery v0.2.0\ndone: users install v0.2.0\nbar: block only loop breaks\neta: 3h\ndepart: now\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: C\naccept: c\nestimate: 45\ndeps: -\n";
     run_confirmed(&mut s, reuse, "r3", NOW + 200).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
@@ -1440,7 +1459,7 @@ fn an_emptied_milestone_loses_its_departure_and_a_reused_id_starts_again() {
 #[test]
 fn a_voyage_id_need_not_start_with_m() {
     let mut s = world();
-    let text = "<!-- gear-plan project=p base=0 -->\n# Milestone sprint-3: the third sprint\ndone: users install v0.1.0 without Rust\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=sprint-3\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    let text = "<!-- gear-plan project=p base=0 -->\n# Milestone sprint-3: the third sprint\ndone: users install v0.1.0 without Rust\nbar: block only loop breaks\neta: 8h\ndepart: now\n# Queue\n## NEW [must] lane=heat milestone=sprint-3\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, text, "r1", NOW).unwrap();
 
     let voyage = s
@@ -1488,7 +1507,7 @@ fn a_voyage_id_need_not_start_with_m() {
 /// `M10`, though the id alone would put `M10` first both times.
 #[test]
 fn the_snapshot_lists_the_voyages_by_departure_not_by_id() {
-    let block = "<!-- gear-plan project=p base={base} -->\n# Milestone {id}: voyage {id}\ndone: it ships\nbar: stable\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone={id}\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    let block = "<!-- gear-plan project=p base={base} -->\n# Milestone {id}: voyage {id}\ndone: it ships\nbar: stable\neta: 8h\ndepart: now\n# Queue\n## NEW [must] lane=heat milestone={id}\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     let (env, fp) = cap();
     for (first, second) in [("M10", "M9"), ("M9", "M10")] {
         let mut s = world();
@@ -1664,7 +1683,7 @@ fn the_captain_home_page_carries_the_goal_and_the_current_station() {
     let mut s = world();
     let text = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: delivery v0.1.0\n\
                 done: users install v0.1.0 without Rust\n\
-                bar: block only loop breaks and data loss; log the rest\neta: 8h\n\
+                bar: block only loop breaks and data loss; log the rest\neta: 8h\ndepart: now\n\
                 station S1: reliability fixes\n\
                 station S2: the board shows the stations\n\
                 # Queue\n\
