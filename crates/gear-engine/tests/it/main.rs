@@ -132,6 +132,7 @@ mod station_contract;
 mod targeting_contract;
 mod tz_hours_contract;
 mod undelivered_delivery_contract;
+mod upgrade_contract;
 mod waits_contract;
 
 /// A scratch home with the GEAR skill installed for every kind (T-83): `init`
