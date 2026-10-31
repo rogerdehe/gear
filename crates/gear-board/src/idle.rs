@@ -194,11 +194,10 @@ pub fn idle_reason(
 /// within [`HELP_LIMIT_S`] is the help. A reply of the lane — any message of
 /// it with `reply_to` the instruction — ends it.
 ///
-/// An instruction the captain sent while the lane worked on the task it names
-/// is not help (T-463): when an attempt of that task by this seat started
-/// before the instruction and was handed in, merged or ended after it, the
-/// instruction was part of that work and does not keep the lane busy once the
-/// attempt is over.
+/// An instruction the captain sent while the lane worked is not help (T-463):
+/// when an attempt of the lane by this seat started before the instruction and
+/// was handed in, merged or ended after it, the instruction was part of that
+/// work and does not keep the lane busy once the attempt is over.
 pub fn helping(tx: &Tx<'_>, project: &str, seat: &SeatRow, now: Ts) -> GearResult<Option<Helping>> {
     if seat.role != SeatRole::Lane || !tx.in_progress_attempts_of_seat(&seat.id)?.is_empty() {
         return Ok(None);
@@ -213,11 +212,15 @@ pub fn helping(tx: &Tx<'_>, project: &str, seat: &SeatRow, now: Ts) -> GearResul
         .filter(|message| message.sender == captain.id)
         .collect();
     instructions.sort_by(|a, b| (b.created, &b.id).cmp(&(a.created, &a.id)));
+    let spans = work_spans(tx, project, seat)?;
     for instruction in instructions {
         if has_reply(tx, project, &seat.id, &instruction)? {
             continue;
         }
-        if sent_while_working(tx, project, &seat.id, &instruction)? {
+        if spans
+            .iter()
+            .any(|&(start, end)| start < instruction.created && end > instruction.created)
+        {
             continue;
         }
         let lane = match instruction.task.as_deref() {
@@ -235,46 +238,38 @@ pub fn helping(tx: &Tx<'_>, project: &str, seat: &SeatRow, now: Ts) -> GearResul
     Ok(None)
 }
 
-/// Did the captain send the instruction while the lane worked on the task it
-/// names, with that work going on past the instruction (T-463)?
-///
-/// The attempt is the one of the instruction's task by this seat: its start is
-/// before the instruction and its hand-in, merge or end (the settle of a
-/// closed attempt) is after it. An instruction without a task never matches.
-fn sent_while_working(
-    tx: &Tx<'_>,
-    project: &str,
-    seat_id: &str,
-    instruction: &MessageRow,
-) -> GearResult<bool> {
-    let Some(task) = instruction.task.as_deref() else {
-        return Ok(false);
-    };
-    for attempt in tx.attempts_of_task(project, task)? {
-        if attempt.seat != seat_id {
+/// The times the lane worked on a task (T-463): every attempt of one of the
+/// lane's tasks by this seat, from its start to its hand-in, merge or end (the
+/// settle of a closed attempt).
+fn work_spans(tx: &Tx<'_>, project: &str, seat: &SeatRow) -> GearResult<Vec<(Ts, Ts)>> {
+    let mut spans = Vec::new();
+    for task in tx.tasks_of_project(project)? {
+        if task.lane.as_deref() != Some(seat.name.as_str()) {
             continue;
         }
-        let times = tx.attempt_times(project, task, attempt.n)?;
-        let start = times.started.unwrap_or(attempt.started);
-        if start >= instruction.created {
-            continue;
-        }
-        let end = [
-            times.handed_in,
-            times.merged,
-            times.settled,
-            // A closed attempt has its end in the row when no step wrote it
-            // (an abandoned attempt).
-            attempt.state.is_terminal().then_some(attempt.updated),
-        ]
-        .into_iter()
-        .flatten()
-        .max();
-        if end.is_some_and(|end| end > instruction.created) {
-            return Ok(true);
+        for attempt in tx.attempts_of_task(project, &task.id)? {
+            if attempt.seat != seat.id {
+                continue;
+            }
+            let times = tx.attempt_times(project, &task.id, attempt.n)?;
+            let start = times.started.unwrap_or(attempt.started);
+            let end = [
+                times.handed_in,
+                times.merged,
+                times.settled,
+                // A closed attempt has its end in the row when no step wrote
+                // it (an abandoned attempt).
+                attempt.state.is_terminal().then_some(attempt.updated),
+            ]
+            .into_iter()
+            .flatten()
+            .max();
+            if let Some(end) = end {
+                spans.push((start, end));
+            }
         }
     }
-    Ok(false)
+    Ok(spans)
 }
 
 /// Did the lane answer the instruction?

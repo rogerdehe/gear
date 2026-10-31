@@ -668,3 +668,30 @@ fn an_instruction_sent_before_the_attempt_started_is_still_help() {
     assert_eq!(help.text(), "helping mast: Read the log of T-2 and …");
     assert_eq!(help.since, T0 + 60);
 }
+
+#[test]
+fn an_instruction_without_a_task_sent_during_a_handed_in_attempt_is_no_help() {
+    // T-463 (B): any instruction the captain sent while this seat worked is
+    // part of that work, whatever task it names.
+    let mut store = world_with_captain();
+    task_on(&mut store, "T-2", LANE, 1, TaskState::Verifying);
+    attempt(&mut store, "T-2", 1, AttemptState::Submitted);
+    store
+        .write(|tx| {
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::Started, T0)?;
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::HandedIn, T0 + 120)?;
+            Ok(())
+        })
+        .unwrap();
+    message(
+        &mut store,
+        MsgKind::Instruction,
+        "p:captain",
+        None,
+        "Check the quota line",
+        None,
+        T0 + 60,
+    );
+
+    assert_eq!(help_of(&mut store, T0 + 200), None);
+}
