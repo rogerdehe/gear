@@ -282,6 +282,12 @@ fn sync_home_worktree(
     path: &str,
     now: Ts,
 ) -> Result<(), String> {
+    // A path git cannot read is not a worktree GEAR can move (a fixture's
+    // fake path, a worktree removed under it): nothing is changed and no item
+    // is made — the packet's dirty notice stays the fallback.
+    if common_dir(path).is_none() {
+        return Ok(());
+    }
     let dir = std::path::Path::new(path);
     let remote = config.conventions.remote.trim();
     let base = format!("{remote}/{}", worktree.base);
