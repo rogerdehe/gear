@@ -74,7 +74,7 @@ fn depart(s: &mut Store) {
     let text = "<!-- gear-plan project=p base=0 -->\n\
                 # Milestone M1: delivery\n\
                 done: (1) users install it; (2) the board shows it\n\
-                bar: block only loop breaks\neta: 8h\n\
+                bar: block only loop breaks\neta: 8h\ndepart: now\n\
                 # Decisions\n\
                 - 2026-10-27 10:05 confirmed: milestone M1 departs | why: the user said depart\n\
                 # Queue\n\
@@ -153,7 +153,7 @@ fn a_new_milestones_departure_needs_the_flag_and_its_confirmed_line() {
     let mut s = world();
     depart(&mut s);
     let block = "# Milestone M2: the next one\n\
-                 done: users install v2\nbar: it holds\neta: 4h\n\
+                 done: users install v2\nbar: it holds\neta: 4h\ndepart: now\n\
                  # Queue\n\
                  ## NEW [must] lane=heat milestone=M2\n\
                  goal: C\naccept: c\nestimate: 30\ndeps: -\n";
@@ -192,7 +192,7 @@ fn a_move_between_milestones_needs_the_flag_and_its_confirmed_line() {
     let mut s = world();
     depart(&mut s);
     let second = "# Milestone M2: the next one\n\
-                  done: users install v2\nbar: it holds\neta: 4h\n\
+                  done: users install v2\nbar: it holds\neta: 4h\ndepart: now\n\
                   # Decisions\n\
                   - 2026-10-27 10:30 confirmed: milestone M2 departs | why: the user asked for the next voyage\n\
                   # Queue\n\
@@ -357,7 +357,7 @@ fn the_goal_check_reaches_the_meta_the_board_reads() {
 fn ten_tasks(s: &mut Store) {
     let mut text = String::from(
         "<!-- gear-plan project=p base=0 -->\n\
-         # Milestone M1: delivery\ndone: it ships\nbar: stable\neta: 8h\n\
+         # Milestone M1: delivery\ndone: it ships\nbar: stable\neta: 8h\ndepart: now\n\
          # Decisions\n\
          - 2026-10-27 10:05 confirmed: milestone M1 departs | why: the user said depart\n\
          # Queue\n",
