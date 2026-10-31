@@ -158,3 +158,6 @@
 - M6 (2026-11-01, M-7038): the done-branch scan named T-477 and T-489 as unmerged while their merges were running and queued; it must skip a task with a merge op intended, executing or submitted. Fixed by the captain the same day.
 - agy usage: the model a conversation actually used lives only in the protobuf of ~/.gemini/antigravity-cli/conversations/<id>.db; the reader takes the seat's configured model (T-498 review F1). Also F2/F3: a MODEL record without input_tokens is dropped; an agy 1.2.x transcript with no counts reads 0, not unknown.
 - gear-engine tests leave their gear-engine-tests-<pid> temp dirs behind: 958 piled up in one TMPDIR during M6 (only make's prune-tmp clears them, and a direct cargo nextest run never does). Each fixture should remove its own dir on drop.
+
+## The gear-engine test run is past the 300 s red line under load
+- 2026-10-31 M6 (F-281, F-282, F-283): lanes report the gear-engine test run at 1.5-7 minutes on the merged tree while two fleets share the machine (T-492 about 7 min, T-501 about 6 min); the fake Herdr never checks in, so scenario tests settle delivery and doorbell ops by hand. Measure the slowest tests with the probe of a quiet machine, then cut or split them under the 300 s red line.
