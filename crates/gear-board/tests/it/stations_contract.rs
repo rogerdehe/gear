@@ -144,7 +144,10 @@ fn attempt(
 }
 
 fn board(store: &mut Store) -> gear_board::ProjectBoard {
-    let options = gear_board::Options { project: Some("p".into()), ..Default::default() };
+    let options = gear_board::Options {
+        project: Some("p".into()),
+        ..Default::default()
+    };
     gear_board::build(store, &options, NOW)
         .unwrap()
         .projects
@@ -169,7 +172,10 @@ fn the_stations_are_reached_now_and_next() {
     // S1 is merged whole; S2 is the work now (one task left, 30 minutes of
     // estimate); S3 is the next one.
     assert_eq!(
-        stations.iter().map(|station| station.state).collect::<Vec<_>>(),
+        stations
+            .iter()
+            .map(|station| station.state)
+            .collect::<Vec<_>>(),
         vec![StationState::Reached, StationState::Now, StationState::Next]
     );
     let s1 = station(&stations, "S1");
@@ -226,7 +232,9 @@ fn a_voyage_with_every_station_reached_has_nothing_left() {
         })
         .unwrap();
     let stations = store.read(|tx| progress(tx, "p", "M5")).unwrap();
-    assert!(stations.iter().all(|station| station.state == StationState::Reached));
+    assert!(stations
+        .iter()
+        .all(|station| station.state == StationState::Reached));
     let line = store.read(|tx| course(tx, "p", "M5")).unwrap();
     assert_eq!(line, "all 3 stations reached · 0 tasks left in the voyage");
 }
@@ -246,7 +254,10 @@ fn a_voyage_without_stations_says_what_is_left() {
 #[test]
 fn the_goal_text_carries_the_done_the_bar_and_the_course() {
     let mut store = world();
-    let text = store.read(|tx| goal_text(tx, "p", "M5")).unwrap().expect("a goal");
+    let text = store
+        .read(|tx| goal_text(tx, "p", "M5"))
+        .unwrap()
+        .expect("a goal");
     assert!(
         text.starts_with("Your goal, voyage M5: done: users install it · bar: an error in normal use blocks the task · station S2 (1 of 3 reached): the board shows the stations · 1 tasks left in S2 · 2 tasks left in the voyage. Judge every decision against it."),
         "{text}"
@@ -256,9 +267,7 @@ fn the_goal_text_carries_the_done_the_bar_and_the_course() {
 #[test]
 fn a_voyage_without_its_done_has_no_goal_text() {
     let mut store = world();
-    store
-        .write(|tx| voyage(tx, None))
-        .unwrap();
+    store.write(|tx| voyage(tx, None)).unwrap();
     assert_eq!(store.read(|tx| goal_text(tx, "p", "M5")).unwrap(), None);
     // A voyage that is not there has none either.
     assert_eq!(store.read(|tx| goal_text(tx, "p", "M9")).unwrap(), None);

@@ -62,7 +62,11 @@ impl Repos {
         git(&repo, &["commit", "-q", "-m", "the work"]);
         let candidate = git(&repo, &["rev-parse", "HEAD"]);
         git(&repo, &["push", "-q", "origin", "dev"]);
-        Repos { _root: root, repo, candidate }
+        Repos {
+            _root: root,
+            repo,
+            candidate,
+        }
     }
 
     /// The integration branch moves on: a commit on top of the candidate.
@@ -80,7 +84,12 @@ impl Repos {
     fn unrelated_with_the_same_tree(&self) -> String {
         git(
             &self.repo,
-            &["commit-tree", &format!("{}^{{tree}}", self.candidate), "-m", "unrelated"],
+            &[
+                "commit-tree",
+                &format!("{}^{{tree}}", self.candidate),
+                "-m",
+                "unrelated",
+            ],
         )
     }
 
@@ -136,7 +145,15 @@ fn world(repos: &Repos, candidate: &str) -> Store {
         let mut project = testing::seed_project(tx, "p", "sess", NOW)?;
         project.config_toml = config(&repos.repo);
         tx.update_project(&project)?;
-        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "captain",
+            SeatRole::Captain,
+            CAP_PANE,
+            "codex",
+            NOW,
+        )?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
         for id in ["T-1", "T-2"] {
             tx.insert_task(&gear_store::TaskRow {
@@ -178,16 +195,7 @@ fn world(repos: &Repos, candidate: &str) -> Store {
         // T-1's work is handed in.
         gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, NOW)?;
         gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, NOW)?;
-        gear_app::tasks::submit_result(
-            tx,
-            "p",
-            "T-1",
-            1,
-            1,
-            candidate,
-            "ops/reports/T-1.md",
-            NOW,
-        )?;
+        gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, candidate, "ops/reports/T-1.md", NOW)?;
         // T-2 is merged: its merge landed the work. The task is Done and its
         // merge op is confirmed (contract v3 of T-165: both are needed).
         gear_app::tasks::start_attempt(tx, "p", "T-2", "p:heat", 1, NOW)?;
@@ -208,7 +216,13 @@ fn world(repos: &Repos, candidate: &str) -> Store {
             payload: serde_json::json!({"branch": "heat/t2", "candidate": "c2"}),
             created: NOW,
         })?;
-        tx.set_op_state("p", &merge.id, gear_model::OpState::Confirmed, Some("merged T-2 into dev"), NOW + 10)?;
+        tx.set_op_state(
+            "p",
+            &merge.id,
+            gear_model::OpState::Confirmed,
+            Some("merged T-2 into dev"),
+            NOW + 10,
+        )?;
         tx.set_attempt_time("p", "T-2", 1, AttemptStep::Merged, NOW + 10)
     })
     .unwrap();
@@ -218,17 +232,38 @@ fn world(repos: &Repos, candidate: &str) -> Store {
 fn cap() -> (Env, Fingerprint) {
     (
         Env {
-            ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "captain".into(),
+                generation: 1,
+            }),
             pane_id: Some(CAP_PANE.into()),
             admin: false,
         },
-        Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None },
+        Fingerprint {
+            pane_id: CAP_PANE.into(),
+            kind: Some("codex".into()),
+            session_ref: None,
+        },
     )
 }
 
-fn run(s: &mut Store, text: &str, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+fn run(
+    s: &mut Store,
+    text: &str,
+    rid: &str,
+) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), None, &parse(text).unwrap(), text, rid, NOW + 20)
+    apply(
+        s,
+        &env,
+        Some(&fp),
+        None,
+        &parse(text).unwrap(),
+        text,
+        rid,
+        NOW + 20,
+    )
 }
 
 /// A pass that names the task whose merge landed the work: the task is
@@ -311,7 +346,9 @@ fn an_attribution_added_after_the_pass_marks_the_merged_time() {
     let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
     assert_eq!(times.merged, None, "no merge named the work yet");
     assert!(
-        s.read(|tx| tx.get_meta("integrated-by:p:T-1")).unwrap().is_none(),
+        s.read(|tx| tx.get_meta("integrated-by:p:T-1"))
+            .unwrap()
+            .is_none(),
         "no attribution yet"
     );
 
@@ -426,7 +463,13 @@ fn a_pass_naming_a_done_task_without_a_confirmed_merge_is_refused() {
             .into_iter()
             .find(|op| op.kind == gear_model::OpKind::Merge)
             .expect("the merge op");
-        tx.set_op_state("p", &op.id, gear_model::OpState::Failed, Some("the gate said no"), NOW + 11)
+        tx.set_op_state(
+            "p",
+            &op.id,
+            gear_model::OpState::Failed,
+            Some("the gate said no"),
+            NOW + 11,
+        )
     })
     .unwrap();
     let text = format!(

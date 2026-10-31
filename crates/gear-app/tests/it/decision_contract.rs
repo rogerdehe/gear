@@ -15,7 +15,15 @@ fn world() -> Store {
     let mut s = Store::open_in_memory().unwrap();
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", NOW)?;
-        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "captain",
+            SeatRole::Captain,
+            CAP_PANE,
+            "codex",
+            NOW,
+        )?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
         Ok(())
     })
@@ -25,17 +33,42 @@ fn world() -> Store {
 
 fn cap() -> (Env, Fingerprint) {
     (
-        Env { ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }), pane_id: Some(CAP_PANE.into()), admin: false },
-        Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None },
+        Env {
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "captain".into(),
+                generation: 1,
+            }),
+            pane_id: Some(CAP_PANE.into()),
+            admin: false,
+        },
+        Fingerprint {
+            pane_id: CAP_PANE.into(),
+            kind: Some("codex".into()),
+            session_ref: None,
+        },
     )
 }
 
 /// Apply a plan file with the base the store holds.
-fn run(s: &mut Store, body: &str, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+fn run(
+    s: &mut Store,
+    body: &str,
+    rid: &str,
+) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     let base = s.read(|tx| tx.plan_version("p")).unwrap();
     let text = format!("<!-- gear-plan project=p base={base} -->\n{body}");
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), None, &parse(&text).unwrap(), &text, rid, NOW)
+    apply(
+        s,
+        &env,
+        Some(&fp),
+        None,
+        &parse(&text).unwrap(),
+        &text,
+        rid,
+        NOW,
+    )
 }
 
 fn decisions(s: &mut Store) -> Vec<DecisionRow> {
@@ -172,7 +205,12 @@ fn each_gear_entry_appears_once() {
         "r2",
     )
     .unwrap();
-    run(&mut s, "# Staff\n- hold heat reason=waiting for the user\n", "r3").unwrap();
+    run(
+        &mut s,
+        "# Staff\n- hold heat reason=waiting for the user\n",
+        "r3",
+    )
+    .unwrap();
 
     let logged = decisions(&mut s);
     let kinds: Vec<&str> = logged.iter().map(|d| d.kind.as_str()).collect();
@@ -191,7 +229,11 @@ fn each_gear_entry_appears_once() {
         "r4",
     )
     .unwrap();
-    assert_eq!(decisions(&mut s).len(), before, "each GEAR entry appears once");
+    assert_eq!(
+        decisions(&mut s).len(),
+        before,
+        "each GEAR entry appears once"
+    );
 }
 
 /// §7.4: a pass over a failed review is an override, with the why the captain
@@ -229,7 +271,10 @@ fn a_pass_over_a_failed_review_is_an_override() {
     .unwrap();
 
     let logged = decisions(&mut s);
-    let over = logged.iter().find(|d| d.kind == "override").expect("an override");
+    let over = logged
+        .iter()
+        .find(|d| d.kind == "override")
+        .expect("an override");
     assert_eq!(over.what, "T-1 attempt 1 passed over a failed review");
     assert_eq!(over.why.as_deref(), Some("the review missed the edge case"));
 }
@@ -264,15 +309,31 @@ profile = "opencode"
 gate = "make test"
 "#;
     let mut s = Store::open_in_memory().unwrap();
-    let env = Env { ctx: None, pane_id: None, admin: true };
-    gear_app::admin::init_with_home(&mut s, &env, CONFIG, Some(crate::skill_home()), false, NOW).unwrap();
+    let env = Env {
+        ctx: None,
+        pane_id: None,
+        admin: true,
+    };
+    gear_app::admin::init_with_home(&mut s, &env, CONFIG, Some(crate::skill_home()), false, NOW)
+        .unwrap();
 
     // The first init registers the project: nothing was re-applied, so the
     // log has no entry yet.
-    assert!(s.read(|tx| tx.decisions_of("harbor", "")).unwrap().is_empty());
+    assert!(s
+        .read(|tx| tx.decisions_of("harbor", ""))
+        .unwrap()
+        .is_empty());
 
     // A re-apply is a config change, and GEAR records it.
-    gear_app::admin::init_with_home(&mut s, &env, CONFIG, Some(crate::skill_home()), false, NOW + 1).unwrap();
+    gear_app::admin::init_with_home(
+        &mut s,
+        &env,
+        CONFIG,
+        Some(crate::skill_home()),
+        false,
+        NOW + 1,
+    )
+    .unwrap();
     let logged = s.read(|tx| tx.decisions_of("harbor", "")).unwrap();
     assert_eq!(logged.len(), 1, "{logged:?}");
     assert_eq!(logged[0].kind, "config");
@@ -281,7 +342,15 @@ gate = "make test"
     assert!(!logged[0].star);
 
     // And again: the next config version, and its own entry.
-    gear_app::admin::init_with_home(&mut s, &env, CONFIG, Some(crate::skill_home()), false, NOW + 2).unwrap();
+    gear_app::admin::init_with_home(
+        &mut s,
+        &env,
+        CONFIG,
+        Some(crate::skill_home()),
+        false,
+        NOW + 2,
+    )
+    .unwrap();
     let logged = s.read(|tx| tx.decisions_of("harbor", "")).unwrap();
     assert_eq!(logged.len(), 2, "{logged:?}");
     assert_eq!(logged[1].what, "config v3");
@@ -347,7 +416,11 @@ fn a_cancelled_task_takes_the_why_of_the_line_that_names_it() {
         .find(|decision| decision.kind == "cut" && decision.source == "gear")
         .expect("the automatic cut");
     assert_eq!(cut.what, "T-1 cancelled");
-    assert_eq!(cut.why.as_deref(), Some("one reason"), "T-1 does not name T-10");
+    assert_eq!(
+        cut.why.as_deref(),
+        Some("one reason"),
+        "T-1 does not name T-10"
+    );
 
     // Only T-10 is named: the cut has no why of its own.
     let mut s = world_with_two_tasks();
@@ -461,7 +534,9 @@ fn a_moved_task_is_recorded_in_the_voyage_it_left() {
     .unwrap();
 
     // The same task, now on M2.
-    let moved = format!("{voyages}# Queue\n## T-1 [must] lane=heat milestone=M2\ngoal: A\naccept: a\ndeps: -\n");
+    let moved = format!(
+        "{voyages}# Queue\n## T-1 [must] lane=heat milestone=M2\ngoal: A\naccept: a\ndeps: -\n"
+    );
     run(&mut s, &moved, "r2").unwrap();
 
     let logged = s.read(|tx| tx.decisions_of("p", "M1")).unwrap();

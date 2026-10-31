@@ -53,11 +53,26 @@ pub struct QueueItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StaffItem {
     /// `- temp R-4 task=T-45 profile=opencode-review [resume]`
-    Temp { line: usize, id: String, task: String, profile: Option<String>, resume: bool },
+    Temp {
+        line: usize,
+        id: String,
+        task: String,
+        profile: Option<String>,
+        resume: bool,
+    },
     /// `- park heat until=<RFC3339>` | `- park media until-task=T-12`
-    Park { line: usize, lane: String, until: Option<String>, until_task: Option<String> },
+    Park {
+        line: usize,
+        lane: String,
+        until: Option<String>,
+        until_task: Option<String>,
+    },
     /// `- hold wire reason=<text>`
-    Hold { line: usize, lane: String, reason: String },
+    Hold {
+        line: usize,
+        lane: String,
+        reason: String,
+    },
     /// `- retire prompts`
     Retire { line: usize, lane: String },
     /// `- retry heat`: a parked (NeedsCheck) or lost (Unknown) lane goes back
@@ -68,7 +83,12 @@ pub enum StaffItem {
     /// `- release review-1`: a reviewer seat in Standby is released (T-140).
     Release { line: usize, name: String },
     /// `- rebind heat repo=backend owns=[src/, tests/]`.
-    Rebind { line: usize, lane: String, repo: String, owns: Vec<String> },
+    Rebind {
+        line: usize,
+        lane: String,
+        repo: String,
+        owns: Vec<String>,
+    },
     /// `- rebind heat cancel`: withdraw a pending rebind (T-305).
     RebindCancel { line: usize, lane: String },
     /// `- remerge T-<n>`: retry the task's failed merge (T-92).
@@ -174,16 +194,14 @@ pub fn milestone_stations(body: &str) -> Result<Vec<gear_store::VoyageStation>, 
     let mut stations: Vec<gear_store::VoyageStation> = Vec::new();
     for line in body.lines() {
         let line = line.trim();
-        let Some(rest) = line.strip_prefix("station ") else { continue };
+        let Some(rest) = line.strip_prefix("station ") else {
+            continue;
+        };
         let (id, needs) = match rest.split_once(':') {
             Some((id, needs)) => (id.trim(), needs.trim()),
             None => ("", ""),
         };
-        let refused = || {
-            format!(
-                "station <id>: <what reaching it needs>, got {line:?}"
-            )
-        };
+        let refused = || format!("station <id>: <what reaching it needs>, got {line:?}");
         if id.is_empty() || id.split_whitespace().count() != 1 || needs.is_empty() {
             return Err(refused());
         }
@@ -210,7 +228,12 @@ pub fn parse(text: &str) -> GearResult<Draft> {
     let first = lines
         .iter()
         .position(|line| !line.trim().is_empty())
-        .ok_or_else(|| bad(1, "the draft is empty; the `<!-- gear-plan … -->` header is missing"))?;
+        .ok_or_else(|| {
+            bad(
+                1,
+                "the draft is empty; the `<!-- gear-plan … -->` header is missing",
+            )
+        })?;
     let (project, base) = parse_header(lines[first].trim()).ok_or_else(|| {
         bad(
             first + 1,
@@ -265,7 +288,10 @@ pub fn parse(text: &str) -> GearResult<Draft> {
                     .trim_end_matches(':')
                     .to_string();
                 if id.is_empty() {
-                    return Err(bad(line_no, "a voyage header needs an id, e.g. `# Voyage M2: …`"));
+                    return Err(bad(
+                        line_no,
+                        "a voyage header needs an id, e.g. `# Voyage M2: …`",
+                    ));
                 }
                 if seen_milestones.contains(&id) {
                     return Err(bad(line_no, format!("milestone {id} appears twice")));
@@ -282,7 +308,10 @@ pub fn parse(text: &str) -> GearResult<Draft> {
                     match section_line(&lines, &mut index) {
                         Some((text, line_no)) => {
                             let entry = text.strip_prefix("- ").ok_or_else(|| {
-                                bad(line_no, format!("a decision line starts with `- `, got {text:?}"))
+                                bad(
+                                    line_no,
+                                    format!("a decision line starts with `- `, got {text:?}"),
+                                )
                             })?;
                             draft.decisions.push(entry.trim().to_string());
                         }
@@ -325,12 +354,7 @@ pub fn parse(text: &str) -> GearResult<Draft> {
                     }
                 }
             }
-            other => {
-                return Err(bad(
-                    index + 1,
-                    format!("unknown section `# {other}`"),
-                ))
-            }
+            other => return Err(bad(index + 1, format!("unknown section `# {other}`"))),
         }
     }
 
@@ -512,13 +536,19 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
     } else if is_task_id(id) {
         Some(id.to_string())
     } else {
-        return Err(bad(line, format!("a queue block header needs `T-<n>` or `NEW`, got {id:?}")));
+        return Err(bad(
+            line,
+            format!("a queue block header needs `T-<n>` or `NEW`, got {id:?}"),
+        ));
     };
     let priority_token = tokens
         .next()
         .ok_or_else(|| bad(line, "a queue block header needs a priority in brackets"))?;
     let priority = parse_priority(priority_token).ok_or_else(|| {
-        bad(line, format!("unknown priority {priority_token:?}, expected [now|must|should|could|wont]"))
+        bad(
+            line,
+            format!("unknown priority {priority_token:?}, expected [now|must|should|could|wont]"),
+        )
     })?;
     let mut lane = None;
     let mut milestone = None;
@@ -546,7 +576,10 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
                 return Err(bad(line, "repeated `station=` in one queue block header"));
             }
         } else {
-            return Err(bad(line, format!("unknown queue block header field {token:?}")));
+            return Err(bad(
+                line,
+                format!("unknown queue block header field {token:?}"),
+            ));
         }
     }
     Ok(QueueItem {
@@ -578,9 +611,12 @@ fn parse_queue_field(
     line: usize,
     seen: &mut Vec<&'static str>,
 ) -> GearResult<()> {
-    let (name, value) = text
-        .split_once(':')
-        .ok_or_else(|| bad(line, format!("a queue field is `<name>: <value>`, got {text:?}")))?;
+    let (name, value) = text.split_once(':').ok_or_else(|| {
+        bad(
+            line,
+            format!("a queue field is `<name>: <value>`, got {text:?}"),
+        )
+    })?;
     let name = name.trim();
     let value = value.trim();
     let field: &'static str = match name {
@@ -598,7 +634,10 @@ fn parse_queue_field(
         other => return Err(bad(line, format!("unknown queue field {other:?}"))),
     };
     if seen.contains(&field) {
-        return Err(bad(line, format!("repeated queue field `{field}` in one block")));
+        return Err(bad(
+            line,
+            format!("repeated queue field `{field}` in one block"),
+        ));
     }
     seen.push(field);
     match field {
@@ -607,16 +646,26 @@ fn parse_queue_field(
         "evidence-files" => item.evidence_files = comma_list(value),
         "evidence-due" => {
             item.evidence_due = Some(value.parse::<u32>().map_err(|_| {
-                bad(line, format!("`evidence-due` is a number of minutes, got {value:?}"))
+                bad(
+                    line,
+                    format!("`evidence-due` is a number of minutes, got {value:?}"),
+                )
             })?)
         }
         "estimate" => {
             item.estimate = Some(value.parse::<u32>().map_err(|_| {
-                bad(line, format!("`estimate` is a number of minutes, got {value:?}"))
+                bad(
+                    line,
+                    format!("`estimate` is a number of minutes, got {value:?}"),
+                )
             })?)
         }
         "deps" => {
-            item.deps = if value == "-" { Vec::new() } else { comma_list(value) }
+            item.deps = if value == "-" {
+                Vec::new()
+            } else {
+                comma_list(value)
+            }
         }
         "state" => {
             if value != "ready" && value != "cancelled" {
@@ -629,14 +678,20 @@ fn parse_queue_field(
         }
         "followup-of" => {
             if !is_task_id(value) {
-                return Err(bad(line, format!("`followup-of` needs a task id, got {value:?}")));
+                return Err(bad(
+                    line,
+                    format!("`followup-of` needs a task id, got {value:?}"),
+                ));
             }
             item.followup_of = Some(value.to_string());
         }
         "reopen" => item.reopen = Some(value.to_string()),
         "issue" => {
             item.issue = Some(parse_issue(value).ok_or_else(|| {
-                bad(line, format!("`issue` is a GitHub issue number as `#<n>`, got {value:?}"))
+                bad(
+                    line,
+                    format!("`issue` is a GitHub issue number as `#<n>`, got {value:?}"),
+                )
             })?)
         }
         "mechanical" => {
@@ -821,15 +876,21 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
 
 /// `- T-29 attempt=2 contract=3 candidate=abc1234 pass evidence=<path>`
 fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
-    let rest = text
-        .strip_prefix("- ")
-        .ok_or_else(|| bad(line, format!("a verdict line starts with `- `, got {text:?}")))?;
+    let rest = text.strip_prefix("- ").ok_or_else(|| {
+        bad(
+            line,
+            format!("a verdict line starts with `- `, got {text:?}"),
+        )
+    })?;
     let mut tokens = rest.split_whitespace();
     let task = tokens
         .next()
         .ok_or_else(|| bad(line, "a verdict line needs a task id"))?;
     if !is_task_id(task) {
-        return Err(bad(line, format!("a verdict line needs a task id, got {task:?}")));
+        return Err(bad(
+            line,
+            format!("a verdict line needs a task id, got {task:?}"),
+        ));
     }
     let attempt = number_field(tokens.next(), "attempt", line)?;
     let contract = number_field(tokens.next(), "contract", line)?;
@@ -879,14 +940,20 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
             }
             "estimate" => {
                 let minutes = value.trim().parse::<i64>().map_err(|_| {
-                    bad(line, format!("`estimate=` takes a number of minutes, got {value:?}"))
+                    bad(
+                        line,
+                        format!("`estimate=` takes a number of minutes, got {value:?}"),
+                    )
                 })?;
                 estimate = Some(minutes);
             }
             "integrated-by" => {
                 let task = value.trim();
                 if !is_task_id(task) {
-                    return Err(bad(line, format!("`integrated-by=` takes a task id, got {task:?}")));
+                    return Err(bad(
+                        line,
+                        format!("`integrated-by=` takes a task id, got {task:?}"),
+                    ));
                 }
                 integrated_by = Some(task.to_string());
             }
@@ -900,7 +967,10 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
         match key.as_str() {
             "rework" => {
                 if value.trim().is_empty() {
-                    return Err(bad(line, "a `fail` verdict needs a non-empty rework reason"));
+                    return Err(bad(
+                        line,
+                        "a `fail` verdict needs a non-empty rework reason",
+                    ));
                 }
                 rework = Some(value.trim().to_string());
             }
@@ -1042,19 +1112,18 @@ fn key_value_fields(head: &str, line: usize) -> GearResult<Vec<(String, String)>
 ///
 /// A line without a closing quote is refused.
 fn find_closing_quote(rest: &str, line: usize) -> GearResult<usize> {
-    rest.rfind('"').ok_or_else(|| {
-        bad(
-            line,
-            "a verdict line's quoted value has no closing quote",
-        )
-    })
+    rest.rfind('"')
+        .ok_or_else(|| bad(line, "a verdict line's quoted value has no closing quote"))
 }
 
 fn number_field(token: Option<&str>, name: &str, line: usize) -> GearResult<i64> {
     let token = token.ok_or_else(|| bad(line, format!("a verdict line needs `{name}=<n>`")))?;
-    let value = token
-        .strip_prefix(&format!("{name}="))
-        .ok_or_else(|| bad(line, format!("a verdict line needs `{name}=<n>`, got {token:?}")))?;
+    let value = token.strip_prefix(&format!("{name}=")).ok_or_else(|| {
+        bad(
+            line,
+            format!("a verdict line needs `{name}=<n>`, got {token:?}"),
+        )
+    })?;
     value
         .parse::<i64>()
         .map_err(|_| bad(line, format!("`{name}=` takes a number, got {value:?}")))
@@ -1093,7 +1162,6 @@ fn parse_review(text: &str, line: usize) -> GearResult<ReviewLine> {
         text: rest.trim().to_string(),
     })
 }
-
 
 /// Rewrite a draft after a successful apply, so the file stays the current
 /// plan of its voyage (T-34):
@@ -1191,7 +1259,11 @@ pub fn rewrite_applied(
     // The dropped section may have been the last one: do not leave the blank
     // lines that separated it behind.
     if dropping {
-        while lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+        while lines
+            .last()
+            .map(|line| line.trim().is_empty())
+            .unwrap_or(false)
+        {
             lines.pop();
         }
     }
@@ -1234,7 +1306,11 @@ pub fn rewrite_applied(
             None => {
                 // No later section: the blocks close the file, after an empty
                 // line.
-                if lines.last().map(|line| !line.trim().is_empty()).unwrap_or(false) {
+                if lines
+                    .last()
+                    .map(|line| !line.trim().is_empty())
+                    .unwrap_or(false)
+                {
                     lines.push(String::new());
                 }
                 for block in blocks {
@@ -1253,7 +1329,9 @@ pub fn rewrite_applied(
 /// Is this line the `# <name>` section header (not `# <name>s`, not a
 /// value line)?
 fn is_section_named(line: &str, name: &str) -> bool {
-    let Some(rest) = line.strip_prefix("# ") else { return false };
+    let Some(rest) = line.strip_prefix("# ") else {
+        return false;
+    };
     rest == name || rest.starts_with(&format!("{name} "))
 }
 
@@ -1269,28 +1347,50 @@ mod tests {
         err.detail
     }
 
-
     #[test]
     fn an_applied_draft_is_rewritten_in_place() {
         let text = format!(
             "{HEADER}# Goal\nthe goal\n\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\ndeps: -\n\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\ndeps: T-1\n\n# Verdicts\n- T-9 attempt=1 contract=1 candidate=abc pass evidence=x\n\n# Staff\n- hold heat reason=test\n"
         );
-        let rewritten = rewrite_applied(&text, 7, &["T-1".to_string(), "T-2".to_string()], &[], &[]);
-        assert!(rewritten.starts_with("<!-- gear-plan project=p base=7 -->"), "{rewritten}");
-        assert!(rewritten.contains("## T-1 [must] lane=heat milestone=M1"), "{rewritten}");
-        assert!(rewritten.contains("## T-2 [should] lane=heat milestone=M1"), "{rewritten}");
+        let rewritten =
+            rewrite_applied(&text, 7, &["T-1".to_string(), "T-2".to_string()], &[], &[]);
+        assert!(
+            rewritten.starts_with("<!-- gear-plan project=p base=7 -->"),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains("## T-1 [must] lane=heat milestone=M1"),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains("## T-2 [should] lane=heat milestone=M1"),
+            "{rewritten}"
+        );
         assert!(!rewritten.contains("NEW"), "{rewritten}");
         assert!(!rewritten.contains("# Verdicts"), "{rewritten}");
         assert!(!rewritten.contains("T-9 attempt"), "{rewritten}");
         // Everything else is untouched, including the sections after the
         // dropped one.
         assert!(rewritten.contains("# Goal\nthe goal"), "{rewritten}");
-        assert!(rewritten.contains("goal: A\naccept: a\ndeps: -"), "{rewritten}");
-        assert!(rewritten.contains("# Staff\n- hold heat reason=test"), "{rewritten}");
+        assert!(
+            rewritten.contains("goal: A\naccept: a\ndeps: -"),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains("# Staff\n- hold heat reason=test"),
+            "{rewritten}"
+        );
         // And the result still parses as a draft with those ids.
         let again = parse(&rewritten).unwrap();
         assert_eq!(again.base, 7);
-        assert_eq!(again.queue.iter().map(|item| item.id.clone()).collect::<Vec<_>>(), vec![Some("T-1".into()), Some("T-2".into())]);
+        assert_eq!(
+            again
+                .queue
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>(),
+            vec![Some("T-1".into()), Some("T-2".into())]
+        );
         assert!(again.verdicts.is_empty(), "the verdicts are gone");
     }
 
@@ -1306,7 +1406,10 @@ mod tests {
         let rewritten = rewrite_applied(&text, 2, &[], &[3], &[]);
         assert!(!rewritten.contains("remerge"), "{rewritten}");
         assert!(rewritten.contains("- hold heat reason=test"), "{rewritten}");
-        assert!(rewritten.contains("# Staff"), "the section keeps a line: {rewritten}");
+        assert!(
+            rewritten.contains("# Staff"),
+            "the section keeps a line: {rewritten}"
+        );
 
         // A section that keeps nothing goes with its lines: no empty section
         // and no second one.
@@ -1336,12 +1439,24 @@ mod tests {
         );
         let block = "# Milestone M2: two\ndone: m2\nbar: b2\neta: 2h\nstation S1: the first step needs it\n";
         let rewritten = rewrite_applied(&text, 3, &["T-1".to_string()], &[], &[block.to_string()]);
-        let os = rewritten.find("# Milestone M2: two").expect("the block is there");
-        let first = rewritten.find("# Milestone M1: one").expect("the M1 block is there");
+        let os = rewritten
+            .find("# Milestone M2: two")
+            .expect("the block is there");
+        let first = rewritten
+            .find("# Milestone M1: one")
+            .expect("the M1 block is there");
         let queue = rewritten.find("# Queue").expect("the queue is there");
-        let decisions = rewritten.find("# Decisions").expect("the decisions are there");
-        assert!(first < os, "the block joins the goal and the voyages: {rewritten}");
-        assert!(os < queue, "the block goes before the first later section: {rewritten}");
+        let decisions = rewritten
+            .find("# Decisions")
+            .expect("the decisions are there");
+        assert!(
+            first < os,
+            "the block joins the goal and the voyages: {rewritten}"
+        );
+        assert!(
+            os < queue,
+            "the block goes before the first later section: {rewritten}"
+        );
         assert!(queue < decisions, "{rewritten}");
         assert!(
             rewritten.contains("station S1: the first step needs it\n\n# Queue"),
@@ -1356,7 +1471,9 @@ mod tests {
     fn a_written_back_block_closes_a_file_with_no_later_section() {
         // T-333: with no section after the goal and the milestones, the block
         // is appended at the end, after an empty line.
-        let text = format!("{HEADER}# Goal\nthe goal\n\n# Milestone M1: one\ndone: m1\nbar: b1\neta: 1h\n");
+        let text = format!(
+            "{HEADER}# Goal\nthe goal\n\n# Milestone M1: one\ndone: m1\nbar: b1\neta: 1h\n"
+        );
         let block = "# Milestone M2: two\ndone: m2\nbar: b2\neta: 2h\n";
         let rewritten = rewrite_applied(&text, 2, &[], &[], &[block.to_string()]);
         assert!(
@@ -1398,7 +1515,10 @@ mod tests {
         let from_voyage = parse(&voyage).unwrap();
         let from_milestone = parse(&milestone).unwrap();
         assert_eq!(from_voyage.milestones, from_milestone.milestones);
-        assert_eq!(from_voyage.milestones, vec![("M2: A".to_string(), body.trim().to_string())]);
+        assert_eq!(
+            from_voyage.milestones,
+            vec![("M2: A".to_string(), body.trim().to_string())]
+        );
         let (done, bar, eta) = milestone_fields(&from_voyage.milestones[0].1);
         assert_eq!(done.as_deref(), Some("users log in"));
         assert_eq!(bar.as_deref(), Some("block only a broken login"));

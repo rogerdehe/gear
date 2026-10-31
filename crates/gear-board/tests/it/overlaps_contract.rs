@@ -17,7 +17,15 @@ fn world() -> Store {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "claude",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
             Ok(())
         })
@@ -37,7 +45,10 @@ fn seed_overlap(store: &mut Store, key: &str, task: &str, integration: &str, fil
 }
 
 fn options() -> Options {
-    Options { project: Some("p".into()), ..Options::default() }
+    Options {
+        project: Some("p".into()),
+        ..Options::default()
+    }
 }
 
 #[test]
@@ -69,13 +80,22 @@ fn one_overlap_is_one_line_on_the_board_and_in_the_frame() {
     let overlaps = integration_overlaps(&mut store, "p").unwrap();
     assert_eq!(overlaps.len(), 1);
     assert_eq!(overlaps[0].task, "T-2");
-    assert_eq!(overlaps[0].files, vec!["crates/gear-board/src/lib.rs".to_string()]);
+    assert_eq!(
+        overlaps[0].files,
+        vec!["crates/gear-board/src/lib.rs".to_string()]
+    );
 }
 
 #[test]
 fn an_overlap_of_a_child_repo_names_its_repo() {
     let mut store = world();
-    seed_overlap(&mut store, "parallel:p:web:integration:T-3", "T-3", "dev", &["a.rs"]);
+    seed_overlap(
+        &mut store,
+        "parallel:p:web:integration:T-3",
+        "T-3",
+        "dev",
+        &["a.rs"],
+    );
 
     let board = build(&mut store, &options(), T0 + 60).unwrap();
     let text = render(&board, View::Lanes);
@@ -90,9 +110,17 @@ fn an_overlap_of_a_child_repo_names_its_repo() {
 #[test]
 fn a_cleared_overlap_shows_nothing() {
     let mut store = world();
-    seed_overlap(&mut store, "parallel:p:integration:T-2", "T-2", "dev", &["a.rs"]);
+    seed_overlap(
+        &mut store,
+        "parallel:p:integration:T-2",
+        "T-2",
+        "dev",
+        &["a.rs"],
+    );
     // The scan clears the key when the overlap is gone.
-    store.write(|tx| tx.set_meta("parallel:p:integration:T-2", "")).unwrap();
+    store
+        .write(|tx| tx.set_meta("parallel:p:integration:T-2", ""))
+        .unwrap();
 
     let board = build(&mut store, &options(), T0 + 60).unwrap();
     let text = render(&board, View::Lanes);
@@ -107,7 +135,13 @@ fn a_cleared_overlap_shows_nothing() {
 #[test]
 fn an_overlap_never_waits_for_the_captain() {
     let mut store = world();
-    seed_overlap(&mut store, "parallel:p:integration:T-2", "T-2", "dev", &["a.rs"]);
+    seed_overlap(
+        &mut store,
+        "parallel:p:integration:T-2",
+        "T-2",
+        "dev",
+        &["a.rs"],
+    );
 
     let board = build(&mut store, &options(), T0 + 60).unwrap();
     // The captain's inbox is empty: an overlap is an information line.

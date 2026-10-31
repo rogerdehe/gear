@@ -181,7 +181,9 @@ pub fn idle_reason(
     }
 
     // The task is queued and nobody gave it to the lane.
-    Ok(Some(IdleReason::Undelivered { task: next.id.clone() }))
+    Ok(Some(IdleReason::Undelivered {
+        task: next.id.clone(),
+    }))
 }
 
 /// The instruction of the captain the lane still has to answer, if any
@@ -191,12 +193,7 @@ pub fn idle_reason(
 /// has a captain; then the newest unanswered captain instruction to the seat
 /// within [`HELP_LIMIT_S`] is the help. A reply of the lane — any message of
 /// it with `reply_to` the instruction — ends it.
-pub fn helping(
-    tx: &Tx<'_>,
-    project: &str,
-    seat: &SeatRow,
-    now: Ts,
-) -> GearResult<Option<Helping>> {
+pub fn helping(tx: &Tx<'_>, project: &str, seat: &SeatRow, now: Ts) -> GearResult<Option<Helping>> {
     if seat.role != SeatRole::Lane || !tx.in_progress_attempts_of_seat(&seat.id)?.is_empty() {
         return Ok(None);
     }
@@ -267,7 +264,10 @@ pub fn describe(reason: &IdleReason, tx: &Tx<'_>, project: &str) -> String {
             format!("waiting for {on} ({})", lane_and_stage(tx, project, on))
         }
         IdleReason::DepWait { task, on } => {
-            format!("next {task} waits for {on} ({})", lane_and_stage(tx, project, on))
+            format!(
+                "next {task} waits for {on} ({})",
+                lane_and_stage(tx, project, on)
+            )
         }
         IdleReason::Undelivered { task } => format!("next {task} is ready but not delivered"),
         IdleReason::NoWork => "nothing left planned".to_string(),
@@ -470,7 +470,11 @@ fn civil_from_days(days: i64) -> (i64, i64) {
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let shifted_month = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
-    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 };
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
     (month, day)
 }
 

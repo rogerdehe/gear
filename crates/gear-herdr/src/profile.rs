@@ -159,7 +159,9 @@ pub fn validate_template(profile: &Profile, template: &str) -> Result<(), String
                 continue;
             }
             if template.contains(marker.as_str()) {
-                return Err(format!("template must not contain the {kind} marker: {marker}"));
+                return Err(format!(
+                    "template must not contain the {kind} marker: {marker}"
+                ));
             }
         }
     }
@@ -168,7 +170,9 @@ pub fn validate_template(profile: &Profile, template: &str) -> Result<(), String
 
 /// Literal substring match of `line` against a marker list.
 fn matches_any(markers: &[String], line: &str) -> bool {
-    markers.iter().any(|m| !m.is_empty() && line.contains(m.as_str()))
+    markers
+        .iter()
+        .any(|m| !m.is_empty() && line.contains(m.as_str()))
 }
 
 /// Built-in profile for an agent kind, from the verified facts in
@@ -667,9 +671,18 @@ mod tests {
     /// one-line TOML string that reads back to the same text.
     #[test]
     fn rules_render_on_one_line_and_parse_back() {
-        let text = "Rule one: \"quote\" and \\ backslash.\n\tTab, `code` and $HOME.\r\nVoyage done: x\n";
-        let args = render_rules(&["-c".into(), "developer_instructions={rules_toml}".into()], "/r.md", text);
-        assert!(!args[1].contains('\n') && !args[1].contains('\r'), "{:?}", args[1]);
+        let text =
+            "Rule one: \"quote\" and \\ backslash.\n\tTab, `code` and $HOME.\r\nVoyage done: x\n";
+        let args = render_rules(
+            &["-c".into(), "developer_instructions={rules_toml}".into()],
+            "/r.md",
+            text,
+        );
+        assert!(
+            !args[1].contains('\n') && !args[1].contains('\r'),
+            "{:?}",
+            args[1]
+        );
         let value: toml::Table = toml::from_str(&args[1]).unwrap();
         assert_eq!(value["developer_instructions"].as_str().unwrap(), text);
     }
@@ -688,7 +701,10 @@ mod tests {
     fn the_built_in_profiles_carry_the_rules_where_the_cli_allows_it() {
         assert_eq!(
             builtin("pi").unwrap().instructions_args,
-            vec!["--append-system-prompt".to_string(), "{rules_file}".to_string()]
+            vec![
+                "--append-system-prompt".to_string(),
+                "{rules_file}".to_string()
+            ]
         );
         assert_eq!(
             builtin("claude").unwrap().instructions_args,
@@ -735,9 +751,16 @@ mod tests {
         // One TOML pair naming the file, short enough to be typed into a
         // shell whatever the rules' length (a typed line is cut near 1024 bytes).
         let parsed: toml::Table = toml::from_str(&args[1]).expect("the argument is TOML");
-        let value = parsed.get("developer_instructions").and_then(toml::Value::as_str).unwrap();
+        let value = parsed
+            .get("developer_instructions")
+            .and_then(toml::Value::as_str)
+            .unwrap();
         assert!(value.contains("/tmp/gear/rules/review.md"), "{value}");
-        assert!(args[1].len() < 300 && !args[1].contains('\n'), "{}", args[1]);
+        assert!(
+            args[1].len() < 300 && !args[1].contains('\n'),
+            "{}",
+            args[1]
+        );
     }
 
     /// T-195: a project's config may set the args.
@@ -745,7 +768,10 @@ mod tests {
     fn a_config_patch_overrides_the_rules_args() {
         let pi = builtin("pi").unwrap();
         let patch = ProfilePatch {
-            instructions_args: Some(vec!["--system-prompt".to_string(), "{rules_file}".to_string()]),
+            instructions_args: Some(vec![
+                "--system-prompt".to_string(),
+                "{rules_file}".to_string(),
+            ]),
             ..ProfilePatch::default()
         };
         let patched = pi.patched(&patch, "pi");
@@ -788,7 +814,10 @@ mod tests {
             assert!(profile.backoff_markers.is_empty(), "{kind}");
             assert!(!profile.backoff(CODEX_RETRYING), "{kind}");
         }
-        assert_eq!(builtin("codex").unwrap().backoff_markers, vec!["Reconnecting...".to_string()]);
+        assert_eq!(
+            builtin("codex").unwrap().backoff_markers,
+            vec!["Reconnecting...".to_string()]
+        );
     }
 
     #[test]
@@ -810,7 +839,9 @@ mod tests {
         let profile = builtin("opencode").unwrap().patched(&patch, "opencode");
         assert!(profile.backoff("waiting for provider: 30 s"));
         // The built-in is untouched.
-        assert!(!builtin("opencode").unwrap().backoff("waiting for provider: 30 s"));
+        assert!(!builtin("opencode")
+            .unwrap()
+            .backoff("waiting for provider: 30 s"));
     }
 
     /// T-76: the codex start args carry the folder the agent runs in, so its
@@ -832,7 +863,10 @@ mod tests {
         // No placeholder survives, and no kind without it changes.
         assert!(!args.iter().any(|arg| arg.contains("{repo_root}")));
         let claude = builtin("claude").unwrap();
-        assert_eq!(render_args(&claude.unattended_args, "/x"), claude.unattended_args);
+        assert_eq!(
+            render_args(&claude.unattended_args, "/x"),
+            claude.unattended_args
+        );
     }
 
     #[test]

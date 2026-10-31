@@ -38,7 +38,11 @@ fn kickoff_starts_no_engine_and_opens_no_store() {
         .output()
         .expect("run gear");
 
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("GEAR kickoff"),
         "the kickoff printed: {}",
@@ -52,7 +56,10 @@ fn kickoff_starts_no_engine_and_opens_no_store() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     entries.sort();
-    assert!(entries == vec!["bin".to_string()], "kickoff created {entries:?}");
+    assert!(
+        entries == vec!["bin".to_string()],
+        "kickoff created {entries:?}"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

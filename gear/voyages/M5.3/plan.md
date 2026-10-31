@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=902 -->
+<!-- gear-plan project=gear base=903 -->
 # Goal
 A short trial voyage of the self-hosted lane model: two lanes on pi with hk-dgx-1/DeepSeek-V4.1-Flash-1017 (thinking high) each deliver small, well-bounded tasks taken from M6's first station, through review and the merge gate, so we learn before M6 whether that model and its machine carry two lanes at once. No release: the merged work ships with M6's first release.
 
@@ -23,6 +23,7 @@ eta: 2h
 - 2026-10-30 13:13 hand-fix: crates/gear-engine/src/merge.rs other_candidates skips cancelled tasks (commit 94c314e8, engine merge tests pass); both engines restarted on it at 18:13:36Z | why: another project's T-396 carried the code of its cancelled T-391 and its merge waited for T-391 for good
 - station M-6497: keep course — T-450 in review, T-451 (10 min) after it; projected finish 13:36, before M6's 14:00 departure
 - 2026-10-30 13:37 note: voyage report (gear report voyage): 8 tasks merged in 1h59m against the 2h eta, no rework round. Done (1) met: T-444 to T-451 merged (T-451's merge running at the time of writing). Done (2) not met: both lanes ran on hk-dgx-1 at the same time with no model error (hull 660K in / 128K out tokens, mast 375K / 68K; T-447 took 9 min of work against 25), but the captain had to clear one stall: at departure a needless restart typed the seat's environment line into the live pi of both lanes, so their gear calls failed with STALE_GENERATION until each was told its generation; the cause was GEAR's (T-447 fixed it), not the model's. Done (3) met: both engines ran the departure-time build from 12:28 local (6828a4cd), then 94c314e8. Scope grew from 40 to 175 min: T-447 (the root fix), T-448 to T-451 (departure time and working hours), moved from M6 at the user's word. Hand fixes: the lanes' generation, the engines on the new build, and the merge wait for a cancelled task (another project's T-396). Friction F-228 to F-230: two lessons, one not worth it. Lanes idle about half the voyage (hull 1h07m, mast 1h28m) while tasks waited for review and merge
+- station M-6510: land — every task merged; no separate release, the work ships with M6's v0.6.0
 
 # Queue
 

@@ -67,15 +67,20 @@ pub struct LaneProjection {
 
 impl VoyageReport {
     pub fn pace(&self) -> Option<f64> {
-        (self.measured_estimate_min > 0).then(|| {
-            self.measured_actual_min as f64 / self.measured_estimate_min as f64
-        })
+        (self.measured_estimate_min > 0)
+            .then(|| self.measured_actual_min as f64 / self.measured_estimate_min as f64)
     }
 
     /// Exactly five lines per active milestone, shared by every text surface.
     pub fn lines(&self) -> Vec<String> {
-        let pace = self.pace().map(|p| format!("{p:.2}x")).unwrap_or_else(|| "-".into());
-        let slowest = self.slowest.as_ref().map(|(id, min)| format!("{id} {min}m"))
+        let pace = self
+            .pace()
+            .map(|p| format!("{p:.2}x"))
+            .unwrap_or_else(|| "-".into());
+        let slowest = self
+            .slowest
+            .as_ref()
+            .map(|(id, min)| format!("{id} {min}m"))
             .unwrap_or_else(|| "-".into());
         // The departure time says why nothing moves while the voyage waits
         // for it (T-449); without one the line is unchanged. While the fleet
@@ -83,18 +88,41 @@ impl VoyageReport {
         // instead: it is what the seat waits for.
         let waits = match self.off_hours_until {
             Some(until) => format!(" · off hours until {}", crate::idle::clock(until)),
-            None => self.departs_at
+            None => self
+                .departs_at
                 .map(|at| format!(" · departs at {}", crate::idle::clock(at)))
                 .unwrap_or_default(),
         };
         vec![
-            format!("Voyage {} {} · done: {}{waits}", self.milestone, self.title,
-                self.done.as_deref().unwrap_or("-")),
-            format!("  elapsed {} / eta {}", minutes(self.elapsed_min), self.eta.as_deref().unwrap_or("-")),
-            format!("  pace {pace} · projected finish {} from departure", minutes(self.projected_min)),
-            format!("  scope now {} / departure {}", minutes(self.scope_min), minutes(self.departure_scope_min)),
-            format!("  rework {} {} · slowest {slowest}", self.rework_rounds,
-                if self.rework_rounds == 1 { "round" } else { "rounds" }),
+            format!(
+                "Voyage {} {} · done: {}{waits}",
+                self.milestone,
+                self.title,
+                self.done.as_deref().unwrap_or("-")
+            ),
+            format!(
+                "  elapsed {} / eta {}",
+                minutes(self.elapsed_min),
+                self.eta.as_deref().unwrap_or("-")
+            ),
+            format!(
+                "  pace {pace} · projected finish {} from departure",
+                minutes(self.projected_min)
+            ),
+            format!(
+                "  scope now {} / departure {}",
+                minutes(self.scope_min),
+                minutes(self.departure_scope_min)
+            ),
+            format!(
+                "  rework {} {} · slowest {slowest}",
+                self.rework_rounds,
+                if self.rework_rounds == 1 {
+                    "round"
+                } else {
+                    "rounds"
+                }
+            ),
         ]
     }
 }
@@ -104,8 +132,12 @@ impl VoyageReport {
 /// The same rule as `gear_app::config::departs_at`; gear-board reads the
 /// stored config itself because gear-app already depends on gear-board.
 fn departs_at(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Ts>> {
-    let Some(row) = tx.get_project(project)? else { return Ok(None) };
-    let Ok(config) = row.config_toml.parse::<toml::Value>() else { return Ok(None) };
+    let Some(row) = tx.get_project(project)? else {
+        return Ok(None);
+    };
+    let Ok(config) = row.config_toml.parse::<toml::Value>() else {
+        return Ok(None);
+    };
     let Some(at) = config
         .get("schedule")
         .and_then(|schedule| schedule.get("depart_at"))
@@ -113,7 +145,9 @@ fn departs_at(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Ts>> {
     else {
         return Ok(None);
     };
-    let Some(at) = crate::idle::rfc3339(at) else { return Ok(None) };
+    let Some(at) = crate::idle::rfc3339(at) else {
+        return Ok(None);
+    };
     Ok((now < at).then_some(at))
 }
 
@@ -123,8 +157,12 @@ fn departs_at(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Ts>> {
 /// rule as `gear_app::config::off_hours_until`; gear-board reads the stored
 /// config itself because gear-app already depends on gear-board.
 fn off_hours_until(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Ts>> {
-    let Some(row) = tx.get_project(project)? else { return Ok(None) };
-    let Ok(config) = row.config_toml.parse::<toml::Value>() else { return Ok(None) };
+    let Some(row) = tx.get_project(project)? else {
+        return Ok(None);
+    };
+    let Ok(config) = row.config_toml.parse::<toml::Value>() else {
+        return Ok(None);
+    };
     let Some(hours) = config
         .get("schedule")
         .and_then(|schedule| schedule.get("hours"))
@@ -231,33 +269,58 @@ pub fn reports(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<VoyageRepo
 
 /// Also measure finished voyages, so a station can include the final third
 /// completion. Consumers decide which historical voyages they are watching.
-pub fn reports_including_finished(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<VoyageReport>> {
+pub fn reports_including_finished(
+    tx: &Tx<'_>,
+    project: &str,
+    now: Ts,
+) -> GearResult<Vec<VoyageReport>> {
     build_reports(tx, project, now, true)
 }
 
-fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) -> GearResult<Vec<VoyageReport>> {
+fn build_reports(
+    tx: &Tx<'_>,
+    project: &str,
+    now: Ts,
+    include_finished: bool,
+) -> GearResult<Vec<VoyageReport>> {
     let tasks = tx.tasks_of_project(project)?;
     let departs_at = departs_at(tx, project, now)?;
     let off_hours_until = off_hours_until(tx, project, now)?;
     let mut reports = Vec::new();
     for voyage in tx.voyages_of_project(project)? {
-        let scope: Vec<_> = tasks.iter().filter(|t| {
-            t.milestone.as_deref() == Some(&voyage.milestone)
-                && !matches!(t.state, TaskState::Draft | TaskState::Cancelled | TaskState::Failed)
-        }).collect();
+        let scope: Vec<_> = tasks
+            .iter()
+            .filter(|t| {
+                t.milestone.as_deref() == Some(&voyage.milestone)
+                    && !matches!(
+                        t.state,
+                        TaskState::Draft | TaskState::Cancelled | TaskState::Failed
+                    )
+            })
+            .collect();
         if !include_finished && !scope.iter().any(|t| !t.state.is_terminal()) {
             continue;
         }
         let mut r = VoyageReport {
-            milestone: voyage.milestone, title: voyage.title, done: voyage.done, eta: voyage.eta,
+            milestone: voyage.milestone,
+            title: voyage.title,
+            done: voyage.done,
+            eta: voyage.eta,
             departs_at,
             off_hours_until,
             elapsed_min: voyage.departure.map(|start| (now - start).max(0) / 60),
-            measured_actual_min: 0, measured_estimate_min: 0,
-            remaining_estimate_min: Some(0), projected_min: None, projected_at: None,
-            scope_min: Some(0), departure_scope_min: voyage.departure_estimate_min,
-            rework_rounds: 0, slowest: None, slowest_lane: None,
-            lanes: Vec::new(), burn_up: Vec::new(),
+            measured_actual_min: 0,
+            measured_estimate_min: 0,
+            remaining_estimate_min: Some(0),
+            projected_min: None,
+            projected_at: None,
+            scope_min: Some(0),
+            departure_scope_min: voyage.departure_estimate_min,
+            rework_rounds: 0,
+            slowest: None,
+            slowest_lane: None,
+            lanes: Vec::new(),
+            burn_up: Vec::new(),
         };
         // Every lane of the voyage, with its own pace (§10.7 row B4).
         let mut lanes: BTreeMap<String, LaneProjection> = BTreeMap::new();
@@ -298,7 +361,10 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
                 projected_min: None,
             });
             if let Some(actual) = actual {
-                if r.slowest.as_ref().is_none_or(|(_, longest)| actual > *longest) {
+                if r.slowest
+                    .as_ref()
+                    .is_none_or(|(_, longest)| actual > *longest)
+                {
                     r.slowest = Some((task.id.clone(), actual));
                 }
             }
@@ -310,7 +376,10 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
                 *lane_started = Some(lane_started.map_or(started, |first| first.min(started)));
             }
             if task.state == TaskState::Done {
-                let closed = rounds.iter().filter_map(|(_, t)| t.handed_in).max()
+                let closed = rounds
+                    .iter()
+                    .filter_map(|(_, t)| t.handed_in)
+                    .max()
                     .or_else(|| rounds.iter().filter_map(|(_, t)| t.last()).max());
                 if let Some(closed) = closed {
                     *lane_closed = Some(lane_closed.map_or(closed, |last| last.max(closed)));
@@ -378,7 +447,10 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
             (r.elapsed_min, r.slowest_lane.as_ref().map(|(_, min)| *min))
         {
             r.projected_min = Some(elapsed + slowest);
-            r.projected_at = voyage.departure.zip(r.projected_min).map(|(start, min)| start + min * 60);
+            r.projected_at = voyage
+                .departure
+                .zip(r.projected_min)
+                .map(|(start, min)| start + min * 60);
         }
         // The burn-up is cumulative: the scope done so far, hour by hour (the
         // prototype's BURN = [0, 0, 95, 170, 260, 330]). The hours without
@@ -413,16 +485,24 @@ pub fn estimate_of(tx: &Tx<'_>, project: &str, task: &TaskRow) -> GearResult<Opt
     if let Some(minutes) = task.estimate_min {
         return Ok(Some(minutes));
     }
-    Ok(tx.get_contract(project, &task.id, task.contract_version)?
+    Ok(tx
+        .get_contract(project, &task.id, task.contract_version)?
         .and_then(|contract| estimate_from_goal(&contract.goal)))
 }
 
 pub fn estimate_from_goal(goal: &str) -> Option<i64> {
     let rest = goal.split_once("Estimate:")?.1.trim_start();
-    let number: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let number: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
     let value: f64 = number.parse().ok()?;
-    let unit: String = rest[number.len()..].trim_start().chars()
-        .take_while(char::is_ascii_alphabetic).collect::<String>().to_ascii_lowercase();
+    let unit: String = rest[number.len()..]
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_alphabetic)
+        .collect::<String>()
+        .to_ascii_lowercase();
     let minutes = match unit.as_str() {
         "h" | "hr" | "hrs" | "hour" | "hours" => value * 60.0,
         "m" | "min" | "mins" | "minute" | "minutes" => value,

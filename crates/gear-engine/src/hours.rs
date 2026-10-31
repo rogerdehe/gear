@@ -53,8 +53,14 @@ struct Schedule {
 fn voyage_eta(store: &mut Store, project: &str) -> GearResult<Option<String>> {
     let mut latest: Option<(Ts, Option<String>)> = None;
     for voyage in store.read(|tx| tx.voyages_of_project(project))? {
-        let Some(departure) = voyage.departure else { continue };
-        if latest.as_ref().map(|(at, _)| departure > *at).unwrap_or(true) {
+        let Some(departure) = voyage.departure else {
+            continue;
+        };
+        if latest
+            .as_ref()
+            .map(|(at, _)| departure > *at)
+            .unwrap_or(true)
+        {
             latest = Some((departure, voyage.eta));
         }
     }
@@ -157,18 +163,45 @@ pub fn tick(
                 &mut report,
             )?;
         } else if let Some(end) = gear_app::config::hours_end(&schedule.config, now) {
-            notice(store, project, &schedule.config, true, end, now, &mut report)?;
+            notice(
+                store,
+                project,
+                &schedule.config,
+                true,
+                end,
+                now,
+                &mut report,
+            )?;
         }
-        come_back(store, herdr, cfg, profiles, project, &schedule.config, now, &mut report)?;
+        come_back(
+            store,
+            herdr,
+            cfg,
+            profiles,
+            project,
+            &schedule.config,
+            now,
+            &mut report,
+        )?;
         return Ok(report);
     }
-    let Some(end) = schedule.depart_end else { return Ok(report) };
+    let Some(end) = schedule.depart_end else {
+        return Ok(report);
+    };
     // T-448: before the departure the fleet is not started yet.
     if schedule.depart_at.is_some_and(|at| now < at) {
         return Ok(report);
     }
     if now < end {
-        notice(store, project, &schedule.config, false, end, now, &mut report)?;
+        notice(
+            store,
+            project,
+            &schedule.config,
+            false,
+            end,
+            now,
+            &mut report,
+        )?;
     } else {
         rest(
             store,
@@ -226,7 +259,8 @@ fn notice(
         let task = match seat.role {
             SeatRole::Lane => {
                 let open = store.read(|tx| tx.open_attempts_of_seat(&seat.id))?;
-                open.first().map(|attempt| (attempt.task.clone(), Some(attempt.n)))
+                open.first()
+                    .map(|attempt| (attempt.task.clone(), Some(attempt.n)))
             }
             SeatRole::Temp => {
                 let pending = store
@@ -237,7 +271,9 @@ fn notice(
             }
             _ => None,
         };
-        let Some((task, attempt)) = task else { continue };
+        let Some((task, attempt)) = task else {
+            continue;
+        };
         if seat.role == SeatRole::Temp && seat.state != SeatState::Active {
             continue;
         }
@@ -260,7 +296,9 @@ fn notice(
                 created: now,
             })
         })?;
-        report.events.push(format!("{}: told the working hours end", seat.id));
+        report
+            .events
+            .push(format!("{}: told the working hours end", seat.id));
     }
     if let Some(captain) = store.read(|tx| tx.captain_of(project))? {
         let line = match hours
@@ -315,7 +353,9 @@ fn rest(
 ) -> GearResult<()> {
     let key = release_key(project);
     let released = crate::quota::meta_get(store, &key)?;
-    let marker = next_start.map(|start| start.to_string()).unwrap_or_else(|| until.to_string());
+    let marker = next_start
+        .map(|start| start.to_string())
+        .unwrap_or_else(|| until.to_string());
     let release_lanes = released.as_deref() != Some(marker.as_str());
     if release_lanes {
         let seats = store.read(|tx| tx.seats_of_project(project))?;
@@ -327,7 +367,11 @@ fn rest(
             }
             // A final rest (`depart_at` plus the eta) never comes back: its
             // wait is past every clock, so no comeback can fire.
-            let until = if next_start.is_some() { until } else { i64::MAX };
+            let until = if next_start.is_some() {
+                until
+            } else {
+                i64::MAX
+            };
             let task = store
                 .read(|tx| tx.open_attempts_of_seat(&seat.id))?
                 .first()
@@ -356,12 +400,19 @@ fn rest(
                 now,
             )?;
             if !parked {
-                report.events.push(format!("{}: cannot park for the working hours", seat.id));
+                report
+                    .events
+                    .push(format!("{}: cannot park for the working hours", seat.id));
                 continue;
             }
-            report.events.push(format!("{}: parked for the working hours until {until}", seat.id));
+            report.events.push(format!(
+                "{}: parked for the working hours until {until}",
+                seat.id
+            ));
             let Some(profile) = profiles.get(&seat.profile) else {
-                report.events.push(format!("{}: no profile; its agent stays", seat.id));
+                report
+                    .events
+                    .push(format!("{}: no profile; its agent stays", seat.id));
                 continue;
             };
             match crate::quota::release_for_wait(
@@ -408,9 +459,16 @@ fn rest(
             now,
             "hours",
         ) {
-            Ok(true) => report.events.push(format!("{}: reviewer released for the working hours", seat.id)),
-            Ok(false) => report.events.push(format!("{}: reviewer is leaving", seat.id)),
-            Err(error) => report.events.push(format!("{}: reviewer release failed: {error}", seat.id)),
+            Ok(true) => report.events.push(format!(
+                "{}: reviewer released for the working hours",
+                seat.id
+            )),
+            Ok(false) => report
+                .events
+                .push(format!("{}: reviewer is leaving", seat.id)),
+            Err(error) => report
+                .events
+                .push(format!("{}: reviewer release failed: {error}", seat.id)),
         }
     }
     crate::quota::meta_set(store, &key, &marker)?;
@@ -440,12 +498,10 @@ fn come_back(
         if wait.kind != "hours" || wait.until > now || wait.until == i64::MAX {
             continue;
         }
-        let released = crate::quota::meta_get(
-            store,
-            &crate::quota::meta_key("wait_released", &seat.id),
-        )?
-        .as_deref()
-            == Some("1");
+        let released =
+            crate::quota::meta_get(store, &crate::quota::meta_key("wait_released", &seat.id))?
+                .as_deref()
+                == Some("1");
         if !released {
             // Its agent stayed in the pane: the source wake continues it.
             continue;
@@ -560,7 +616,15 @@ on_quota = {{ lanes = "wait", review = "wait" }}
                     start_at: T0,
                 })?;
                 tx.add_round_session(&round, "ses_lane")?;
-                testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w9:p1", "claude", T0)?;
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "captain",
+                    SeatRole::Captain,
+                    "w9:p1",
+                    "claude",
+                    T0,
+                )?;
                 if with_reviewer {
                     testing::seed_temp_seat(tx, "p", "review-1", "T-2", REVIEW_PANE, "pi", T0)?;
                 }
@@ -657,9 +721,9 @@ on_quota = {{ lanes = "wait", review = "wait" }}
             .calls
             .iter()
             .filter_map(|call| match call {
-                gear_herdr::fake::Call::AgentStart { kind, pane, args, .. } => {
-                    Some((kind.clone(), pane.clone(), args.clone()))
-                }
+                gear_herdr::fake::Call::AgentStart {
+                    kind, pane, args, ..
+                } => Some((kind.clone(), pane.clone(), args.clone())),
                 _ => None,
             })
             .collect()
@@ -692,16 +756,32 @@ on_quota = {{ lanes = "wait", review = "wait" }}
         let report = tick(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", notice).unwrap();
         let lane = messages(&mut store, "p:heat");
         assert_eq!(lane.len(), 1, "{lane:?}");
-        assert!(lane[0].body.starts_with("Working hours end at 18:00:"), "{:?}", lane[0].body);
-        assert!(lane[0].body.contains("you continue at 10:00"), "{:?}", lane[0].body);
+        assert!(
+            lane[0].body.starts_with("Working hours end at 18:00:"),
+            "{:?}",
+            lane[0].body
+        );
+        assert!(
+            lane[0].body.contains("you continue at 10:00"),
+            "{:?}",
+            lane[0].body
+        );
         let reviewer = messages(&mut store, "p:review-1");
         assert_eq!(reviewer.len(), 1, "{reviewer:?}");
         assert_eq!(reviewer[0].body, lane[0].body);
         let captain = captain_lines(&mut store);
         assert_eq!(captain.len(), 1, "{captain:?}");
-        assert!(captain[0].body.contains("the fleet rests until 10:00"), "{:?}", captain[0].body);
+        assert!(
+            captain[0].body.contains("the fleet rests until 10:00"),
+            "{:?}",
+            captain[0].body
+        );
         assert_eq!(captain[0].state, gear_model::MsgState::Info);
-        assert!(report.events.iter().any(|line| line.contains("captain:")), "{:?}", report.events);
+        assert!(
+            report.events.iter().any(|line| line.contains("captain:")),
+            "{:?}",
+            report.events
+        );
 
         tick(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", notice + 1).unwrap();
         assert_eq!(messages(&mut store, "p:heat").len(), 1, "one notice");
@@ -720,38 +800,74 @@ on_quota = {{ lanes = "wait", review = "wait" }}
         herdr.add_agent(REVIEW_PANE, "pi", AgentStatus::Idle);
         let cfg = cfg();
         let end = local(18, 0);
-        let next = gear_app::config::off_hours_until(&gear_app::config::latest(&mut store, "p").unwrap(), end).unwrap();
+        let next = gear_app::config::off_hours_until(
+            &gear_app::config::latest(&mut store, "p").unwrap(),
+            end,
+        )
+        .unwrap();
         assert_eq!(gear_board::idle::clock(next), "10:00");
 
         let report = tick(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", end).unwrap();
         let lane = seat(&mut store, "p:heat");
         assert_eq!(lane.state, SeatState::Parked);
-        assert!(lane.state_reason.as_deref().unwrap_or_default().contains("hours"), "{lane:?}");
-        let wait = crate::quota::load_wait(&mut store, "p:heat").unwrap().expect("the hours wait");
+        assert!(
+            lane.state_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("hours"),
+            "{lane:?}"
+        );
+        let wait = crate::quota::load_wait(&mut store, "p:heat")
+            .unwrap()
+            .expect("the hours wait");
         assert_eq!(wait.kind, "hours");
         assert_eq!(wait.until, next);
         assert!(wait.pause, "the round's clock takes the pause");
         assert_eq!(
-            crate::quota::meta_get(&mut store, &crate::quota::meta_key("wait_released", "p:heat"))
-                .unwrap()
-                .as_deref(),
+            crate::quota::meta_get(
+                &mut store,
+                &crate::quota::meta_key("wait_released", "p:heat")
+            )
+            .unwrap()
+            .as_deref(),
             Some("1")
         );
         assert_eq!(exits(&herdr), 1, "{:?}", herdr.calls);
         // The pane and its session are kept: only the agent went.
-        let binding = store.read(|tx| tx.get_binding("p:heat", 1)).unwrap().unwrap();
+        let binding = store
+            .read(|tx| tx.get_binding("p:heat", 1))
+            .unwrap()
+            .unwrap();
         assert_eq!(binding.status, gear_store::BindingStatus::Active);
         assert_eq!(binding.session_ref.as_deref(), Some("ses_lane"));
-        assert!(deliveries(&mut store).is_empty(), "{:?}", deliveries(&mut store));
+        assert!(
+            deliveries(&mut store).is_empty(),
+            "{:?}",
+            deliveries(&mut store)
+        );
         assert!(resting(&mut store, "p", end).unwrap());
         // The reviewer is on its way out, not reviewing any more.
-        assert!(matches!(seat(&mut store, "p:review-1").state, SeatState::Releasing | SeatState::Released));
-        assert!(report.events.iter().any(|line| line.contains("p:review-1: reviewer")), "{:?}", report.events);
+        assert!(matches!(
+            seat(&mut store, "p:review-1").state,
+            SeatState::Releasing | SeatState::Released
+        ));
+        assert!(
+            report
+                .events
+                .iter()
+                .any(|line| line.contains("p:review-1: reviewer")),
+            "{:?}",
+            report.events
+        );
 
         // A second tick at rest releases nothing again.
         let report = tick(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", end + 60).unwrap();
         assert_eq!(exits(&herdr), 1, "{:?}", herdr.calls);
-        assert!(!report.events.iter().any(|line| line.contains("parked")), "{:?}", report.events);
+        assert!(
+            !report.events.iter().any(|line| line.contains("parked")),
+            "{:?}",
+            report.events
+        );
     }
 
     /// T-450 (3): at the next start the lane comes back in the same pane with
@@ -774,13 +890,32 @@ on_quota = {{ lanes = "wait", review = "wait" }}
         assert_eq!(starts.len(), 1, "{:?}", herdr.calls);
         let (kind, pane, args) = &starts[0];
         assert_eq!((kind.as_str(), pane.as_str()), ("pi", PANE));
-        assert!(args.windows(2).any(|pair| pair == ["--session", "ses_lane"]), "{args:?}");
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--session", "ses_lane"]),
+            "{args:?}"
+        );
         let lane = seat(&mut store, "p:heat");
         assert_eq!(lane.state, SeatState::Active);
         assert_eq!(lane.generation, 2);
-        assert!(deliveries(&mut store).iter().any(|text| text.starts_with("Continue T-1")), "{:?}", deliveries(&mut store));
-        assert!(crate::quota::load_wait(&mut store, "p:heat").unwrap().is_none());
-        assert!(report.events.iter().any(|line| line.contains("restarted on pi")), "{:?}", report.events);
+        assert!(
+            deliveries(&mut store)
+                .iter()
+                .any(|text| text.starts_with("Continue T-1")),
+            "{:?}",
+            deliveries(&mut store)
+        );
+        assert!(crate::quota::load_wait(&mut store, "p:heat")
+            .unwrap()
+            .is_none());
+        assert!(
+            report
+                .events
+                .iter()
+                .any(|line| line.contains("restarted on pi")),
+            "{:?}",
+            report.events
+        );
     }
 
     /// T-450 (4): with `depart_at` and no hours, the end is `depart_at` plus
@@ -815,22 +950,44 @@ on_quota = {{ lanes = "wait", review = "wait" }}
         let end = depart + 7200;
 
         // Before the departure nothing happens (T-448 owns that window).
-        let report = tick(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", depart - 60).unwrap();
+        let report = tick(
+            &mut store,
+            &mut herdr,
+            &cfg,
+            &cfg.profiles,
+            "p",
+            depart - 60,
+        )
+        .unwrap();
         assert!(report.events.is_empty(), "{:?}", report.events);
         assert!(messages(&mut store, "p:heat").is_empty());
 
         // The notice, 15 min before the end.
-        tick(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", end - 15 * 60).unwrap();
+        tick(
+            &mut store,
+            &mut herdr,
+            &cfg,
+            &cfg.profiles,
+            "p",
+            end - 15 * 60,
+        )
+        .unwrap();
         let lane = messages(&mut store, "p:heat");
         assert_eq!(lane.len(), 1, "{lane:?}");
-        assert!(lane[0].body.starts_with("Working hours end at"), "{:?}", lane[0].body);
+        assert!(
+            lane[0].body.starts_with("Working hours end at"),
+            "{:?}",
+            lane[0].body
+        );
         assert_eq!(captain_lines(&mut store).len(), 1);
 
         // At the end: parked and released, and the wait never ends.
         tick(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", end).unwrap();
         let lane = seat(&mut store, "p:heat");
         assert_eq!(lane.state, SeatState::Parked);
-        let wait = crate::quota::load_wait(&mut store, "p:heat").unwrap().expect("the final wait");
+        let wait = crate::quota::load_wait(&mut store, "p:heat")
+            .unwrap()
+            .expect("the final wait");
         assert_eq!(wait.kind, "hours");
         assert_eq!(wait.until, i64::MAX);
         assert_eq!(exits(&herdr), 1, "{:?}", herdr.calls);
@@ -838,7 +995,15 @@ on_quota = {{ lanes = "wait", review = "wait" }}
 
         // Nothing comes back later.
         herdr.add_shell(PANE);
-        tick(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", end + 86_400).unwrap();
+        tick(
+            &mut store,
+            &mut herdr,
+            &cfg,
+            &cfg.profiles,
+            "p",
+            end + 86_400,
+        )
+        .unwrap();
         assert!(agent_starts(&herdr).is_empty(), "{:?}", herdr.calls);
         assert_eq!(seat(&mut store, "p:heat").state, SeatState::Parked);
     }

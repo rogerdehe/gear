@@ -20,8 +20,20 @@ const LANE: &str = "w1:p2";
 
 fn cap() -> (Env, Fingerprint) {
     (
-        Env { ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }), pane_id: Some(CAP.into()), admin: false },
-        Fingerprint { pane_id: CAP.into(), kind: Some("codex".into()), session_ref: None },
+        Env {
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "captain".into(),
+                generation: 1,
+            }),
+            pane_id: Some(CAP.into()),
+            admin: false,
+        },
+        Fingerprint {
+            pane_id: CAP.into(),
+            kind: Some("codex".into()),
+            session_ref: None,
+        },
     )
 }
 
@@ -79,7 +91,8 @@ fn world() -> (Store, FakeHerdr, EngineCfg) {
     herdr.add_agent(LANE, "opencode", AgentStatus::Idle);
     let mut cfg = EngineCfg::default();
     for kind in ["opencode", "codex"] {
-        cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        cfg.profiles
+            .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
     }
     (s, herdr, cfg)
 }
@@ -87,7 +100,17 @@ fn world() -> (Store, FakeHerdr, EngineCfg) {
 fn cancel(s: &mut Store) {
     let text = "<!-- gear-plan project=p base=0 -->\n# Queue\n## T-1 [must] lane=heat\ngoal: g\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n";
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), None, &parse(text).unwrap(), text, "cancel-1", T0 + 5).unwrap();
+    apply(
+        s,
+        &env,
+        Some(&fp),
+        None,
+        &parse(text).unwrap(),
+        text,
+        "cancel-1",
+        T0 + 5,
+    )
+    .unwrap();
 }
 
 fn t2_attempt(s: &mut Store) -> Option<gear_model::AttemptState> {
@@ -109,5 +132,9 @@ fn a_cancelled_task_frees_the_lane_and_the_next_task_is_delivered() {
 
     // The next tick delivers the next ready task to the now free lane.
     tick(&mut s, &mut herdr, &cfg, T0 + 10).unwrap();
-    assert_eq!(t2_attempt(&mut s), Some(gear_model::AttemptState::Delivered), "the free lane takes the next task");
+    assert_eq!(
+        t2_attempt(&mut s),
+        Some(gear_model::AttemptState::Delivered),
+        "the free lane takes the next task"
+    );
 }

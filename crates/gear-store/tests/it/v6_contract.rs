@@ -7,8 +7,8 @@
 
 use gear_model::{AttemptState, ErrorCode, MsgKind, MsgState, SeatRole, TaskState};
 use gear_store::{
-    testing, AttemptRow, NewDecision, NewFriction, NewMessage, NewRound, RoundKey, RoundTokens, Store,
-    TaskRow, DEFAULT_REVIEW_BUDGET_MIN, SCHEMA_VERSION,
+    testing, AttemptRow, NewDecision, NewFriction, NewMessage, NewRound, RoundKey, RoundTokens,
+    Store, TaskRow, DEFAULT_REVIEW_BUDGET_MIN, SCHEMA_VERSION,
 };
 use rusqlite::Connection;
 
@@ -178,30 +178,47 @@ fn a_round(store: &mut Store, task: &str, attempt: i64, role: &str, start_at: i6
 }
 
 #[test]
-fn a_v5_store_migrates_to_v6_with_the_new_columns_null() {    let dir = tempfile::tempdir().unwrap();
+fn a_v5_store_migrates_to_v6_with_the_new_columns_null() {
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("gear.db");
     a_store_of_v5(&path);
 
     // The store is of v5 before it is opened.
     let conn = Connection::open(&path).unwrap();
     let version: String = conn
-        .query_row("SELECT value FROM meta WHERE key='schema_version'", [], |row| row.get(0))
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(version, "5");
 
     // Opening it carries it up to v6.
     let mut store = Store::open(&path).unwrap();
     assert_eq!(
-        store.read(|tx| tx.get_meta("schema_version")).unwrap().as_deref(),
+        store
+            .read(|tx| tx.get_meta("schema_version"))
+            .unwrap()
+            .as_deref(),
         Some(SCHEMA_VERSION.to_string().as_str())
     );
 
     // The rows are still there.
-    let task = store.read(|tx| tx.get_task(PROJECT, "T-1")).unwrap().unwrap();
+    let task = store
+        .read(|tx| tx.get_task(PROJECT, "T-1"))
+        .unwrap()
+        .unwrap();
     assert_eq!(task.estimate_min, Some(45));
-    let attempt = store.read(|tx| tx.get_attempt(PROJECT, "T-1", 1)).unwrap().unwrap();
+    let attempt = store
+        .read(|tx| tx.get_attempt(PROJECT, "T-1", 1))
+        .unwrap()
+        .unwrap();
     assert_eq!(attempt.seat, "p:hull");
-    let message = store.read(|tx| tx.get_message(PROJECT, "M-1")).unwrap().unwrap();
+    let message = store
+        .read(|tx| tx.get_message(PROJECT, "M-1"))
+        .unwrap()
+        .unwrap();
     assert_eq!(message.body, "hello");
 
     // The new columns are NULL: the migration does not invent values.
@@ -341,7 +358,10 @@ fn the_attempt_session_and_the_sent_time_round_trip() {
         })
         .unwrap();
 
-    let attempt = store.read(|tx| tx.get_attempt(PROJECT, "T-1", 1)).unwrap().unwrap();
+    let attempt = store
+        .read(|tx| tx.get_attempt(PROJECT, "T-1", 1))
+        .unwrap()
+        .unwrap();
     assert_eq!(attempt.session_ref.as_deref(), Some("sess-42"));
     assert_eq!(attempt.session_cli.as_deref(), Some("pi"));
     assert_eq!(attempt.session_action.as_deref(), Some("resume"));
@@ -401,7 +421,10 @@ fn a_round_round_trips_and_a_second_one_of_the_same_key_fails() {
     let round = store.read(|tx| tx.rounds_of_task(PROJECT, "T-1")).unwrap();
     assert_eq!(round.len(), 1);
     let round = &round[0];
-    assert_eq!(round.sessions, vec!["sess-1".to_string(), "sess-2".to_string()]);
+    assert_eq!(
+        round.sessions,
+        vec!["sess-1".to_string(), "sess-2".to_string()]
+    );
     assert_eq!(round.paused_s, 60);
     assert_eq!(round.active_s, 900);
     assert_eq!(round.input, Some(100));
@@ -417,7 +440,10 @@ fn a_round_round_trips_and_a_second_one_of_the_same_key_fails() {
     store.write(|tx| tx.close_round(&key, NOW + 200)).unwrap();
     let round = store.read(|tx| tx.rounds_of_task(PROJECT, "T-1")).unwrap();
     assert_eq!(round[0].end_at, Some(NOW + 200));
-    assert!(store.read(|tx| tx.open_round_of_seat("p:hull")).unwrap().is_none());
+    assert!(store
+        .read(|tx| tx.open_round_of_seat("p:hull"))
+        .unwrap()
+        .is_none());
 
     // One round per (project, task, attempt, role).
     let err = store
@@ -471,7 +497,10 @@ fn the_budget_of_a_rework_round_is_the_estimate_of_the_verdict_or_half_the_estim
     assert_eq!(budget, 30);
 
     // The estimate of the task is read back.
-    let task = store.read(|tx| tx.get_task(PROJECT, "T-1")).unwrap().unwrap();
+    let task = store
+        .read(|tx| tx.get_task(PROJECT, "T-1"))
+        .unwrap()
+        .unwrap();
     assert_eq!(task.rework_estimate_min, Some(30));
 }
 
@@ -622,10 +651,14 @@ fn a_decision_is_logged_once_and_read_back_in_its_order() {
         plan_version: Some(20),
     };
 
-    let written = store.write(|tx| tx.insert_decision_if_new(&decision)).unwrap();
+    let written = store
+        .write(|tx| tx.insert_decision_if_new(&decision))
+        .unwrap();
     assert!(written);
     // The same line again: the key is there, nothing is written.
-    let again = store.write(|tx| tx.insert_decision_if_new(&decision)).unwrap();
+    let again = store
+        .write(|tx| tx.insert_decision_if_new(&decision))
+        .unwrap();
     assert!(!again);
 
     let decisions = store.read(|tx| tx.decisions_of(PROJECT, "M4")).unwrap();
@@ -674,7 +707,13 @@ fn a_pause_opens_and_closes_and_the_project_reads_them_back() {
     store
         .write(|tx| tx.open_pause(PROJECT, "p:hull", "quota", "minimax-cn 5h", NOW + 1))
         .unwrap();
-    assert_eq!(store.read(|tx| tx.pauses_of_project(PROJECT)).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .read(|tx| tx.pauses_of_project(PROJECT))
+            .unwrap()
+            .len(),
+        1
+    );
 
     store
         .write(|tx| tx.close_pause(PROJECT, "p:hull", "quota", NOW + 3600))
@@ -707,8 +746,14 @@ fn a_quota_pause_and_a_declared_wait_of_one_seat_overlap() {
     // Both are there: the quota park is not dropped by the wait.
     let pauses = store.read(|tx| tx.pauses_of_project(PROJECT)).unwrap();
     assert_eq!(pauses.len(), 2, "{pauses:?}");
-    let wait = pauses.iter().find(|pause| pause.kind == "wait").expect("the wait");
-    let quota = pauses.iter().find(|pause| pause.kind == "quota").expect("the quota park");
+    let wait = pauses
+        .iter()
+        .find(|pause| pause.kind == "wait")
+        .expect("the wait");
+    let quota = pauses
+        .iter()
+        .find(|pause| pause.kind == "quota")
+        .expect("the quota park");
     assert_eq!(wait.start_at, NOW);
     assert_eq!(quota.start_at, NOW + 10);
 
@@ -721,8 +766,14 @@ fn a_quota_pause_and_a_declared_wait_of_one_seat_overlap() {
         .unwrap();
     let pauses = store.read(|tx| tx.pauses_of_project(PROJECT)).unwrap();
     assert_eq!(pauses.len(), 2, "{pauses:?}");
-    let wait = pauses.iter().find(|pause| pause.kind == "wait").expect("the wait");
-    let quota = pauses.iter().find(|pause| pause.kind == "quota").expect("the quota park");
+    let wait = pauses
+        .iter()
+        .find(|pause| pause.kind == "wait")
+        .expect("the wait");
+    let quota = pauses
+        .iter()
+        .find(|pause| pause.kind == "quota")
+        .expect("the quota park");
     assert_eq!(wait.end_at, Some(NOW + 100));
     assert_eq!(quota.end_at, Some(NOW + 3610));
     // Both durations survive: an hour of quota wait and 100 s of wait.
@@ -769,12 +820,20 @@ fn a_declared_wait_is_written_and_cleared() {
     store
         .write(|tx| tx.set_task_wait(PROJECT, "T-1", "T-2", "merged"))
         .unwrap();
-    let task = store.read(|tx| tx.get_task(PROJECT, "T-1")).unwrap().unwrap();
+    let task = store
+        .read(|tx| tx.get_task(PROJECT, "T-1"))
+        .unwrap()
+        .unwrap();
     assert_eq!(task.wait_on.as_deref(), Some("T-2"));
     assert_eq!(task.wait_cond.as_deref(), Some("merged"));
 
-    store.write(|tx| tx.clear_task_wait(PROJECT, "T-1")).unwrap();
-    let task = store.read(|tx| tx.get_task(PROJECT, "T-1")).unwrap().unwrap();
+    store
+        .write(|tx| tx.clear_task_wait(PROJECT, "T-1"))
+        .unwrap();
+    let task = store
+        .read(|tx| tx.get_task(PROJECT, "T-1"))
+        .unwrap()
+        .unwrap();
     assert_eq!(task.wait_on, None);
     assert_eq!(task.wait_cond, None);
 }
@@ -809,7 +868,10 @@ fn a_task_keeps_its_repo_base_and_gate() {
             })
         })
         .unwrap();
-    let task = store.read(|tx| tx.get_task(PROJECT, "T-7")).unwrap().unwrap();
+    let task = store
+        .read(|tx| tx.get_task(PROJECT, "T-7"))
+        .unwrap()
+        .unwrap();
     assert_eq!(task.repo.as_deref(), Some("gear"));
     assert_eq!(task.base.as_deref(), Some("dev"));
     assert_eq!(task.gate.as_deref(), Some("make test"));
@@ -829,8 +891,29 @@ fn the_seat_of_a_project_is_readable_next_to_the_new_tables() {
         .unwrap();
     let seats = store.read(|tx| tx.seats_of_project(PROJECT)).unwrap();
     assert!(!seats.is_empty());
-    assert_eq!(store.read(|tx| tx.rounds_of_project(PROJECT)).unwrap().len(), 0);
-    assert_eq!(store.read(|tx| tx.open_frictions(PROJECT)).unwrap().len(), 0);
-    assert_eq!(store.read(|tx| tx.pauses_of_project(PROJECT)).unwrap().len(), 0);
-    assert_eq!(store.read(|tx| tx.decisions_of(PROJECT, "M4")).unwrap().len(), 0);
+    assert_eq!(
+        store
+            .read(|tx| tx.rounds_of_project(PROJECT))
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        store.read(|tx| tx.open_frictions(PROJECT)).unwrap().len(),
+        0
+    );
+    assert_eq!(
+        store
+            .read(|tx| tx.pauses_of_project(PROJECT))
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        store
+            .read(|tx| tx.decisions_of(PROJECT, "M4"))
+            .unwrap()
+            .len(),
+        0
+    );
 }

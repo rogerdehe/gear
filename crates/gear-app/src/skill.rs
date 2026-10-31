@@ -257,14 +257,28 @@ mod tests {
         let written = install(SkillAgent::Claude, &home).unwrap();
         assert_eq!(written.len(), TOPICS.len() + TEMPLATES.len());
         for topic in TOPICS {
-            let path = home.join(".claude").join("skills").join("gear").join(topic.file);
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), topic.text, "{}", path.display());
+            let path = home
+                .join(".claude")
+                .join("skills")
+                .join("gear")
+                .join(topic.file);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                topic.text,
+                "{}",
+                path.display()
+            );
         }
         // The templates travel with the skill too (T-85): a captain copies
         // them into a project's `gear/` directory.
         for (file, text) in TEMPLATES {
             let path = home.join(".claude").join("skills").join("gear").join(file);
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), *text, "{}", path.display());
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                *text,
+                "{}",
+                path.display()
+            );
         }
         std::fs::remove_dir_all(&home).ok();
     }

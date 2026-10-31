@@ -51,22 +51,34 @@ mod tests {
 
     #[test]
     fn the_defaults_name_the_task_and_what_it_carries() {
-        assert_eq!(fill(MERGE_MESSAGE, &[("task", "T-7"), ("source", "origin/mast")]), "merge(T-7): origin/mast");
-        assert_eq!(fill(REVIEW_MESSAGE, &[("task", "T-7"), ("what", "pass")]), "review(T-7): pass");
-        assert_eq!(fill(PLAN_MESSAGE, &[("milestone", "M2"), ("what", "two tasks")]), "M2: two tasks");
+        assert_eq!(
+            fill(MERGE_MESSAGE, &[("task", "T-7"), ("source", "origin/mast")]),
+            "merge(T-7): origin/mast"
+        );
+        assert_eq!(
+            fill(REVIEW_MESSAGE, &[("task", "T-7"), ("what", "pass")]),
+            "review(T-7): pass"
+        );
+        assert_eq!(
+            fill(PLAN_MESSAGE, &[("milestone", "M2"), ("what", "two tasks")]),
+            "M2: two tasks"
+        );
     }
 
     #[test]
     fn every_placeholder_is_filled_in() {
         assert_eq!(
-            fill("{project}/{task} {source} {attempt} {what} {milestone}", &[
-                ("project", "p"),
-                ("task", "T-7"),
-                ("source", "dev"),
-                ("attempt", "2"),
-                ("what", "pass"),
-                ("milestone", "M2"),
-            ]),
+            fill(
+                "{project}/{task} {source} {attempt} {what} {milestone}",
+                &[
+                    ("project", "p"),
+                    ("task", "T-7"),
+                    ("source", "dev"),
+                    ("attempt", "2"),
+                    ("what", "pass"),
+                    ("milestone", "M2"),
+                ]
+            ),
             "p/T-7 dev 2 pass M2"
         );
     }
@@ -74,14 +86,20 @@ mod tests {
     #[test]
     fn a_placeholder_without_a_value_stays_as_it_is() {
         assert_eq!(fill("{task} {who}", &[("task", "T-7")]), "T-7 {who}");
-        assert_eq!(fill("nothing to fill", &[("task", "T-7")]), "nothing to fill");
+        assert_eq!(
+            fill("nothing to fill", &[("task", "T-7")]),
+            "nothing to fill"
+        );
         assert_eq!(fill("plain", &[]), "plain");
     }
 
     #[test]
     fn a_value_is_inserted_literally() {
         // The value is the project's text, not a template: it is not expanded.
-        assert_eq!(fill("{what}", &[("what", "{task}"), ("task", "T-7")]), "{task}");
+        assert_eq!(
+            fill("{what}", &[("what", "{task}"), ("task", "T-7")]),
+            "{task}"
+        );
     }
 
     #[test]

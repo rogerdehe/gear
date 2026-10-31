@@ -52,20 +52,29 @@ pub fn failed(tx: &Tx<'_>, seat: &str) -> GearResult<Option<FailedDelivery>> {
             .to_string()
     };
     let task = text("task");
-    let attempt = record.get("attempt").and_then(|value| value.as_i64()).unwrap_or(0);
+    let attempt = record
+        .get("attempt")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
     if task.is_empty() || attempt < 1 {
         return Ok(None);
     }
     Ok(Some(FailedDelivery {
         task,
         attempt,
-        generation: record.get("generation").and_then(|value| value.as_i64()).unwrap_or(0),
+        generation: record
+            .get("generation")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0),
         session: record
             .get("session")
             .and_then(|value| value.as_str())
             .map(str::to_string)
             .filter(|session| !session.is_empty()),
-        retry_now: record.get("retry_now").and_then(|value| value.as_bool()).unwrap_or(false),
+        retry_now: record
+            .get("retry_now")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
     }))
 }
 

@@ -69,13 +69,19 @@ fn two_builds_with_the_same_now_draw_the_same_frame() {
     let mut store = world();
     let first = gear_board::build(
         &mut store,
-        &gear_board::Options { project: Some("p".into()), ..Default::default() },
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
         now,
     )
     .unwrap();
     let second = gear_board::build(
         &mut store,
-        &gear_board::Options { project: Some("p".into()), ..Default::default() },
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
         now,
     )
     .unwrap();
@@ -84,7 +90,10 @@ fn two_builds_with_the_same_now_draw_the_same_frame() {
     let second_frame = canvas(&second, &crate::screen(Tab::Now, 0, (120, 40)), None).text();
 
     assert_eq!(first.now, now, "the board keeps the now it was built at");
-    assert_eq!(first_frame, second_frame, "the frame depends on the store and now only");
+    assert_eq!(
+        first_frame, second_frame,
+        "the frame depends on the store and now only"
+    );
     let title = first_frame.lines().next().unwrap();
     let clock = idle::clock(now);
     assert!(
@@ -138,49 +147,229 @@ const PENDING: &[Pending] = &[
     //
     // Its projected finish (455 min, slow lane `mast`) against its own
     // forecast (346 min, lane `hull`).
-    Pending { frame: "now-folded", rows: (8, 8), cols: (43, 84), swap: None, by: "prototype data: expected finish" },
-    Pending { frame: "tasks-folded", rows: (8, 8), cols: (43, 84), swap: None, by: "prototype data: expected finish" },
-    Pending { frame: "cost-folded", rows: (8, 8), cols: (43, 84), swap: None, by: "prototype data: expected finish" },
-    Pending { frame: "log-folded", rows: (8, 8), cols: (43, 84), swap: None, by: "prototype data: expected finish" },
-    Pending { frame: "now-open", rows: (13, 13), cols: (51, 136), swap: None, by: "prototype data: expected finish" },
-    Pending { frame: "tasks-open", rows: (13, 13), cols: (51, 136), swap: None, by: "prototype data: expected finish" },
-    Pending { frame: "cost-open", rows: (13, 13), cols: (51, 136), swap: None, by: "prototype data: expected finish" },
-    Pending { frame: "log-open", rows: (13, 13), cols: (51, 136), swap: None, by: "prototype data: expected finish" },
+    Pending {
+        frame: "now-folded",
+        rows: (8, 8),
+        cols: (43, 84),
+        swap: None,
+        by: "prototype data: expected finish",
+    },
+    Pending {
+        frame: "tasks-folded",
+        rows: (8, 8),
+        cols: (43, 84),
+        swap: None,
+        by: "prototype data: expected finish",
+    },
+    Pending {
+        frame: "cost-folded",
+        rows: (8, 8),
+        cols: (43, 84),
+        swap: None,
+        by: "prototype data: expected finish",
+    },
+    Pending {
+        frame: "log-folded",
+        rows: (8, 8),
+        cols: (43, 84),
+        swap: None,
+        by: "prototype data: expected finish",
+    },
+    Pending {
+        frame: "now-open",
+        rows: (13, 13),
+        cols: (51, 136),
+        swap: None,
+        by: "prototype data: expected finish",
+    },
+    Pending {
+        frame: "tasks-open",
+        rows: (13, 13),
+        cols: (51, 136),
+        swap: None,
+        by: "prototype data: expected finish",
+    },
+    Pending {
+        frame: "cost-open",
+        rows: (13, 13),
+        cols: (51, 136),
+        swap: None,
+        by: "prototype data: expected finish",
+    },
+    Pending {
+        frame: "log-open",
+        rows: (13, 13),
+        cols: (51, 136),
+        swap: None,
+        by: "prototype data: expected finish",
+    },
     // Its stations carry the prototype's own minutes from the departure: S1
     // reached at 3h00m, S2 planned by 5h30m, S3 by 8h00m. The board reads them
     // from its data instead (a reached station's last merge, a station ahead
     // placed by its minutes left), so only the three `<hm>` cells differ: the
     // rectangle spans them, the words and the layout match.
-    Pending { frame: "now-open", rows: (10, 12), cols: (52, 71), swap: None, by: "prototype data: station times" },
-    Pending { frame: "tasks-open", rows: (10, 12), cols: (52, 71), swap: None, by: "prototype data: station times" },
-    Pending { frame: "cost-open", rows: (10, 12), cols: (52, 71), swap: None, by: "prototype data: station times" },
-    Pending { frame: "log-open", rows: (10, 12), cols: (52, 71), swap: None, by: "prototype data: station times" },
+    Pending {
+        frame: "now-open",
+        rows: (10, 12),
+        cols: (52, 71),
+        swap: None,
+        by: "prototype data: station times",
+    },
+    Pending {
+        frame: "tasks-open",
+        rows: (10, 12),
+        cols: (52, 71),
+        swap: None,
+        by: "prototype data: station times",
+    },
+    Pending {
+        frame: "cost-open",
+        rows: (10, 12),
+        cols: (52, 71),
+        swap: None,
+        by: "prototype data: station times",
+    },
+    Pending {
+        frame: "log-open",
+        rows: (10, 12),
+        cols: (52, 71),
+        swap: None,
+        by: "prototype data: station times",
+    },
     // Its `finished` clocks are 11 min before departure + WHEN's merge minute.
-    Pending { frame: "tasks-folded", rows: (23, 23), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
-    Pending { frame: "tasks-folded", rows: (26, 26), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
-    Pending { frame: "tasks-folded", rows: (30, 30), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
-    Pending { frame: "tasks-folded", rows: (33, 33), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
-    Pending { frame: "tasks-folded", rows: (35, 35), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
-    Pending { frame: "tasks-open", rows: (31, 31), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
-    Pending { frame: "tasks-open", rows: (34, 34), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
-    Pending { frame: "tasks-open", rows: (38, 38), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
-    Pending { frame: "tasks-open", rows: (41, 41), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
-    Pending { frame: "tasks-open", rows: (43, 43), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
+    Pending {
+        frame: "tasks-folded",
+        rows: (23, 23),
+        cols: (144, 158),
+        swap: None,
+        by: "prototype data: merge clocks",
+    },
+    Pending {
+        frame: "tasks-folded",
+        rows: (26, 26),
+        cols: (144, 158),
+        swap: None,
+        by: "prototype data: merge clocks",
+    },
+    Pending {
+        frame: "tasks-folded",
+        rows: (30, 30),
+        cols: (144, 158),
+        swap: None,
+        by: "prototype data: merge clocks",
+    },
+    Pending {
+        frame: "tasks-folded",
+        rows: (33, 33),
+        cols: (144, 158),
+        swap: None,
+        by: "prototype data: merge clocks",
+    },
+    Pending {
+        frame: "tasks-folded",
+        rows: (35, 35),
+        cols: (144, 158),
+        swap: None,
+        by: "prototype data: merge clocks",
+    },
+    Pending {
+        frame: "tasks-open",
+        rows: (31, 31),
+        cols: (144, 158),
+        swap: None,
+        by: "prototype data: merge clocks",
+    },
+    Pending {
+        frame: "tasks-open",
+        rows: (34, 34),
+        cols: (144, 158),
+        swap: None,
+        by: "prototype data: merge clocks",
+    },
+    Pending {
+        frame: "tasks-open",
+        rows: (38, 38),
+        cols: (144, 158),
+        swap: None,
+        by: "prototype data: merge clocks",
+    },
+    Pending {
+        frame: "tasks-open",
+        rows: (41, 41),
+        cols: (144, 158),
+        swap: None,
+        by: "prototype data: merge clocks",
+    },
+    Pending {
+        frame: "tasks-open",
+        rows: (43, 43),
+        cols: (144, 158),
+        swap: None,
+        by: "prototype data: merge clocks",
+    },
     // T-267 is queued although T-263 and T-266 are not merged. Its row is the
     // first of the waiting ones, the newest first (T-362's regeneration of the
     // Tasks frames).
-    Pending { frame: "tasks-folded", rows: (15, 15), cols: (92, 122), swap: None, by: "prototype data: T-267 stage" },
-    Pending { frame: "tasks-open", rows: (23, 23), cols: (92, 122), swap: None, by: "prototype data: T-267 stage" },
+    Pending {
+        frame: "tasks-folded",
+        rows: (15, 15),
+        cols: (92, 122),
+        swap: None,
+        by: "prototype data: T-267 stage",
+    },
+    Pending {
+        frame: "tasks-open",
+        rows: (23, 23),
+        cols: (92, 122),
+        swap: None,
+        by: "prototype data: T-267 stage",
+    },
     // The prototype colours lane `mast` blue by name, the board colours lanes
     // by their order: its blue is the board's magenta, bold for bold. Every
     // frame that draws lanes needs it now that no view's rows are excluded
     // (T-356; T-355 had dropped the unreachable ones).
-    Pending { frame: "now-folded", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
-    Pending { frame: "now-open", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
-    Pending { frame: "tasks-folded", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
-    Pending { frame: "tasks-open", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
-    Pending { frame: "cost-folded", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
-    Pending { frame: "cost-open", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
+    Pending {
+        frame: "now-folded",
+        rows: (0, 47),
+        cols: (0, 159),
+        swap: Some(('u', 'm')),
+        by: "prototype data: lane colour",
+    },
+    Pending {
+        frame: "now-open",
+        rows: (0, 47),
+        cols: (0, 159),
+        swap: Some(('u', 'm')),
+        by: "prototype data: lane colour",
+    },
+    Pending {
+        frame: "tasks-folded",
+        rows: (0, 47),
+        cols: (0, 159),
+        swap: Some(('u', 'm')),
+        by: "prototype data: lane colour",
+    },
+    Pending {
+        frame: "tasks-open",
+        rows: (0, 47),
+        cols: (0, 159),
+        swap: Some(('u', 'm')),
+        by: "prototype data: lane colour",
+    },
+    Pending {
+        frame: "cost-folded",
+        rows: (0, 47),
+        cols: (0, 159),
+        swap: Some(('u', 'm')),
+        by: "prototype data: lane colour",
+    },
+    Pending {
+        frame: "cost-open",
+        rows: (0, 47),
+        cols: (0, 159),
+        swap: Some(('u', 'm')),
+        by: "prototype data: lane colour",
+    },
 ];
 
 /// The eight frames the prototype draws: `(name, tab, detail)`.
@@ -213,12 +402,21 @@ fn render(tab: Tab, detail: bool) -> Planes {
     let (mut store, now) = crate::golden_fixture::load();
     let mut board = gear_board::build(
         &mut store,
-        &gear_board::Options { project: Some("gear".into()), ..Default::default() },
+        &gear_board::Options {
+            project: Some("gear".into()),
+            ..Default::default()
+        },
         now,
     )
     .unwrap();
     board.engine = EngineState::Running;
-    let screen = Screen { tab, selected: 0, detail, opened: Vec::new(), size: (160, 48) };
+    let screen = Screen {
+        tab,
+        selected: 0,
+        detail,
+        opened: Vec::new(),
+        size: (160, 48),
+    };
     gold::planes(&canvas(&board, &screen, None))
 }
 
@@ -251,7 +449,13 @@ fn plain_line(line: &str) -> String {
 /// and ⚓, one glyph in two columns) take two, everything else one.
 fn terminal_columns(text: &str) -> usize {
     text.chars()
-        .map(|character| if matches!(character, '⛵' | '⚓') { 2 } else { 1 })
+        .map(|character| {
+            if matches!(character, '⛵' | '⚓') {
+                2
+            } else {
+                1
+            }
+        })
         .sum()
 }
 
@@ -282,7 +486,10 @@ fn a_wide_glyph_fills_two_columns_and_its_continuation_is_not_printed() {
     let (mut store, now) = crate::golden_fixture::load();
     let mut board = gear_board::build(
         &mut store,
-        &gear_board::Options { project: Some("gear".into()), ..Default::default() },
+        &gear_board::Options {
+            project: Some("gear".into()),
+            ..Default::default()
+        },
         now,
     )
     .unwrap();
@@ -291,22 +498,39 @@ fn a_wide_glyph_fills_two_columns_and_its_continuation_is_not_printed() {
 
     let row = head_row(&board, size);
     assert_eq!(column_of(&row, "14:32"), 152, "the clock's column: {row:?}");
-    assert_eq!(column_of(&row, "M4.2"), 20, "the second voyage's column: {row:?}");
-    assert!(terminal_columns(&row) <= 160, "the row fits the terminal: {row:?}");
-    assert!(row.contains(" M5 ⛵  "), "the first label keeps its spaces: {row:?}");
+    assert_eq!(
+        column_of(&row, "M4.2"),
+        20,
+        "the second voyage's column: {row:?}"
+    );
+    assert!(
+        terminal_columns(&row) <= 160,
+        "the row fits the terminal: {row:?}"
+    );
+    assert!(
+        row.contains(" M5 ⛵  "),
+        "the first label keeps its spaces: {row:?}"
+    );
 
     // One more voyage, newest first: the row is cut at the terminal's edge, it
     // never grows past it.
     let extra = {
         let project = &mut board.projects[0];
-        let mut extra = project.voyage_list.last().cloned().expect("a voyage of the fixture");
+        let mut extra = project
+            .voyage_list
+            .last()
+            .cloned()
+            .expect("a voyage of the fixture");
         extra.milestone = "M3".into();
         project.voyage_list.push(extra.clone());
         extra
     };
     assert_eq!(extra.milestone, "M3");
     let row = head_row(&board, size);
-    assert!(row.contains(" M3 ⚓ "), "the fourth label is drawn: {row:?}");
+    assert!(
+        row.contains(" M3 ⚓ "),
+        "the fourth label is drawn: {row:?}"
+    );
     assert!(
         terminal_columns(&row) <= 160,
         "the row is {} columns wide: {row:?}",
@@ -325,7 +549,10 @@ fn a_write_over_a_wide_glyph_blanks_it_and_keeps_the_clock_its_column() {
     let (mut store, now) = crate::golden_fixture::load();
     let mut board = gear_board::build(
         &mut store,
-        &gear_board::Options { project: Some("gear".into()), ..Default::default() },
+        &gear_board::Options {
+            project: Some("gear".into()),
+            ..Default::default()
+        },
         now,
     )
     .unwrap();
@@ -334,7 +561,11 @@ fn a_write_over_a_wide_glyph_blanks_it_and_keeps_the_clock_its_column() {
     // clock's columns.
     {
         let project = &mut board.projects[0];
-        let last = project.voyage_list.last().cloned().expect("a voyage of the fixture");
+        let last = project
+            .voyage_list
+            .last()
+            .cloned()
+            .expect("a voyage of the fixture");
         for milestone in ["M3.9", "M3.8", "M3.7", "M3.6x", "M3.5"] {
             let mut extra = last.clone();
             extra.milestone = milestone.into();
@@ -343,7 +574,11 @@ fn a_write_over_a_wide_glyph_blanks_it_and_keeps_the_clock_its_column() {
     }
 
     let row = head_row(&board, (80, 48));
-    assert_eq!(column_of(&row, "14:32"), 72, "the clock's column (W - 8): {row:?}");
+    assert_eq!(
+        column_of(&row, "14:32"),
+        72,
+        "the clock's column (W - 8): {row:?}"
+    );
     assert!(
         terminal_columns(&row) <= 80,
         "the row is {} columns wide: {row:?}",
@@ -362,7 +597,10 @@ fn a_write_over_a_wide_glyph_blanks_it_and_keeps_the_clock_its_column() {
 /// One plane of golden files: `name.txt`, `name.col` or `name.rev`, split on
 /// `\n` with a last empty piece dropped.
 fn plane(name: &str, ext: &str) -> Vec<String> {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../gear/voyages/M5/board/golden/");
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../gear/voyages/M5/board/golden/"
+    );
     let text = std::fs::read_to_string(format!("{dir}{name}.{ext}"))
         .unwrap_or_else(|e| panic!("the golden file {name}.{ext}: {e}"));
     let mut rows: Vec<&str> = text.split('\n').collect();
@@ -374,7 +612,11 @@ fn plane(name: &str, ext: &str) -> Vec<String> {
 
 /// The prototype's frame `name`, read from its golden files.
 fn golden(name: &str) -> Planes {
-    Planes { text: plane(name, "txt"), colour: plane(name, "col"), reverse: plane(name, "rev") }
+    Planes {
+        text: plane(name, "txt"),
+        colour: plane(name, "col"),
+        reverse: plane(name, "rev"),
+    }
 }
 
 /// One cell of a frame: what it draws and how.
@@ -388,7 +630,9 @@ struct Cell {
 /// The cells of three planes, row by row.
 fn cells(planes: &Planes) -> Vec<Vec<Cell>> {
     let plane = |rows: &[String], row: usize| -> Vec<char> {
-        rows.get(row).map(|row| row.chars().collect()).unwrap_or_default()
+        rows.get(row)
+            .map(|row| row.chars().collect())
+            .unwrap_or_default()
     };
     planes
         .text
@@ -400,7 +644,11 @@ fn cells(planes: &Planes) -> Vec<Vec<Cell>> {
             let at = |cells: &[char], c: usize| cells.get(c).copied().unwrap_or(' ');
             text.chars()
                 .enumerate()
-                .map(|(c, text)| Cell { text, colour: at(&colour, c), reverse: at(&reverse, c) })
+                .map(|(c, text)| Cell {
+                    text,
+                    colour: at(&colour, c),
+                    reverse: at(&reverse, c),
+                })
                 .collect()
         })
         .collect()
@@ -415,10 +663,18 @@ fn inside(entry: &Pending, row: usize, col: usize) -> bool {
 
 /// What the pending entries of `frame` say about `(row, col)`: whether a skip
 /// entry holds it, and the colour swap that stands for the prototype's.
-fn pending_at(pending: &[Pending], frame: Frame, row: usize, col: usize) -> (bool, Option<(char, char)>) {
+fn pending_at(
+    pending: &[Pending],
+    frame: Frame,
+    row: usize,
+    col: usize,
+) -> (bool, Option<(char, char)>) {
     let mut skip = false;
     let mut swap = None;
-    for entry in pending.iter().filter(|entry| entry.frame == frame && inside(entry, row, col)) {
+    for entry in pending
+        .iter()
+        .filter(|entry| entry.frame == frame && inside(entry, row, col))
+    {
         match entry.swap {
             None => skip = true,
             Some(pair) => swap = Some(pair),
@@ -430,7 +686,9 @@ fn pending_at(pending: &[Pending], frame: Frame, row: usize, col: usize) -> (boo
 /// Whether the board's `got` cell draws the prototype's `want` cell: the same
 /// character and reverse mark, and its colour — unless `swap` stands for it.
 fn matches(want: &Cell, got: &Cell, swap: Option<(char, char)>) -> bool {
-    want.text == got.text && want.reverse == got.reverse && colour_matches(want.colour, got.colour, swap)
+    want.text == got.text
+        && want.reverse == got.reverse
+        && colour_matches(want.colour, got.colour, swap)
 }
 
 /// Whether the board's `got` colour letter stands for the prototype's `want`
@@ -452,7 +710,10 @@ fn colour_matches(want: char, got: char, swap: Option<(char, char)>) -> bool {
 /// is at its `top + lanes + 3` anchor (T-360), the prototype's where its own
 /// frame draws it.
 fn block_row(planes: &Planes) -> Option<usize> {
-    planes.text.iter().position(|line| line.starts_with(" TO HANDLE ("))
+    planes
+        .text
+        .iter()
+        .position(|line| line.starts_with(" TO HANDLE ("))
 }
 
 /// Where the task's block starts, relative to the prototype's: the number of
@@ -471,12 +732,7 @@ fn block_shift(want: &Planes, got: &Planes) -> Option<(usize, usize)> {
 
 /// Why `frame` fails the gate: the cells that differ and the pending entries
 /// that match now. An empty `Vec` is a pass.
-fn failures(
-    frame: Frame,
-    want: &Planes,
-    got: &Planes,
-    pending: &[Pending],
-) -> Vec<String> {
+fn failures(frame: Frame, want: &Planes, got: &Planes, pending: &[Pending]) -> Vec<String> {
     let (want_cells, got_cells) = (cells(want), cells(got));
     // The task's block is compared at its anchor (T-360, F1 of the review):
     // from its first row on, the board's row is the prototype's less the rows
@@ -523,7 +779,10 @@ fn failures(
     // A "NEW:" entry whose cells match now is stale: its task built the rows
     // and did not remove the entry. The `prototype data` entries are not
     // checked this way: they go when the frames are regenerated.
-    for entry in pending.iter().filter(|entry| entry.frame == frame && entry.by.starts_with("NEW:")) {
+    for entry in pending
+        .iter()
+        .filter(|entry| entry.frame == frame && entry.by.starts_with("NEW:"))
+    {
         let matches_now = (entry.rows.0..=entry.rows.1).all(|row| {
             let got_row = match shift {
                 Some((start, amount)) if row >= start && row < want_cells.len() - 1 => row - amount,
@@ -626,7 +885,13 @@ const RETIRED: &str = "pending NEW: task on probe rows 0-0 matches now: remove t
 
 /// A `NEW:` skip entry over the one cell of the probe frame.
 fn new_entry(swap: Option<(char, char)>) -> Pending {
-    Pending { frame: "probe", rows: (0, 0), cols: (0, 0), swap, by: "NEW: task" }
+    Pending {
+        frame: "probe",
+        rows: (0, 0),
+        cols: (0, 0),
+        swap,
+        by: "NEW: task",
+    }
 }
 
 #[test]
@@ -642,30 +907,56 @@ fn a_new_entry_whose_cell_still_differs_stays() {
     // A skip entry leaves its cell uncompared, so the gate says nothing — and
     // the entry stays: its task has not built the cell yet.
     let problems = failures("probe", &one_cell('u'), &one_cell('m'), &[new_entry(None)]);
-    assert!(problems.is_empty(), "a skip entry hides its cell and is not retired: {problems:?}");
+    assert!(
+        problems.is_empty(),
+        "a skip entry hides its cell and is not retired: {problems:?}"
+    );
 }
 
 #[test]
 fn a_new_swap_entry_is_retired_only_when_the_swap_is_not_needed() {
     // The board draws the prototype's own colour: the entry has nothing left
     // to stand for, so it goes.
-    let problems = failures("probe", &one_cell('u'), &one_cell('u'), &[new_entry(Some(('u', 'm')))]);
+    let problems = failures(
+        "probe",
+        &one_cell('u'),
+        &one_cell('u'),
+        &[new_entry(Some(('u', 'm')))],
+    );
     assert_eq!(problems, vec![RETIRED.to_string()]);
     // The cell still needs the swap: the entry stays (and the cell matches).
-    let problems = failures("probe", &one_cell('u'), &one_cell('m'), &[new_entry(Some(('u', 'm')))]);
-    assert!(problems.is_empty(), "the swap covers the cell and keeps the entry: {problems:?}");
+    let problems = failures(
+        "probe",
+        &one_cell('u'),
+        &one_cell('m'),
+        &[new_entry(Some(('u', 'm')))],
+    );
+    assert!(
+        problems.is_empty(),
+        "the swap covers the cell and keeps the entry: {problems:?}"
+    );
 }
 
 #[test]
 fn a_lane_colour_swap_keeps_the_case() {
     // The review of T-345, F2: the prototype's blue is the board's magenta,
     // bold for bold — `u` stands for `m` and `U` for `M`, never across cases.
-    let cell = |colour| Cell { text: 'x', colour, reverse: '.' };
+    let cell = |colour| Cell {
+        text: 'x',
+        colour,
+        reverse: '.',
+    };
     let swap = Some(('u', 'm'));
     assert!(matches(&cell('u'), &cell('m'), swap), "a plain lane");
     assert!(matches(&cell('U'), &cell('M'), swap), "a bold lane");
-    assert!(!matches(&cell('U'), &cell('m'), swap), "a bold prototype letter needs the bold board letter");
-    assert!(!matches(&cell('u'), &cell('M'), swap), "and a plain one the plain");
+    assert!(
+        !matches(&cell('U'), &cell('m'), swap),
+        "a bold prototype letter needs the bold board letter"
+    );
+    assert!(
+        !matches(&cell('u'), &cell('M'), swap),
+        "and a plain one the plain"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -678,7 +969,10 @@ fn fixture_board() -> (Store, gear_board::Board) {
     let (mut store, now) = crate::golden_fixture::load();
     let mut board = gear_board::build(
         &mut store,
-        &gear_board::Options { project: Some("gear".into()), ..Default::default() },
+        &gear_board::Options {
+            project: Some("gear".into()),
+            ..Default::default()
+        },
         now,
     )
     .unwrap();
@@ -694,14 +988,13 @@ fn fixture_board() -> (Store, gear_board::Board) {
 fn view_differences(tab: Tab, frame: Frame, top: usize, rows: Range) -> Vec<String> {
     let (_, board) = fixture_board();
     let mut canvas = gear_board::frame::Canvas::new(160, 48);
-    let screen =
-        gear_board::frame::Screen {
-            tab,
-            selected: 0,
-            detail: false,
-            opened: Vec::new(),
-            size: (160, 48),
-        };
+    let screen = gear_board::frame::Screen {
+        tab,
+        selected: 0,
+        detail: false,
+        opened: Vec::new(),
+        size: (160, 48),
+    };
     let picks = gear_board::frame::view(&board, &screen, &mut canvas, top);
     // The frame lights the selected row (README change 13).
     if let Some(row) = picks.first() {
@@ -749,7 +1042,10 @@ fn the_to_handle_block_sits_at_its_anchor() {
     let layout = gear_board::frame::layout(&board, &screen);
     let lanes = board.projects[0].lanes.len();
     let got = render(Tab::Now, false);
-    let got_block = got.text.iter().position(|line| line.starts_with(" TO HANDLE ("));
+    let got_block = got
+        .text
+        .iter()
+        .position(|line| line.starts_with(" TO HANDLE ("));
     assert_eq!(
         got_block,
         Some(layout.top + lanes + 3),
@@ -757,7 +1053,10 @@ fn the_to_handle_block_sits_at_its_anchor() {
         got.text.join("\n")
     );
     let want = golden("now-folded");
-    let want_block = want.text.iter().position(|line| line.starts_with(" TO HANDLE ("));
+    let want_block = want
+        .text
+        .iter()
+        .position(|line| line.starts_with(" TO HANDLE ("));
     // The prototype's view starts on row 14; the board's block is that many
     // rows higher until T-356 moves the view (then the difference is zero).
     assert_eq!(
@@ -818,4 +1117,3 @@ fn the_log_view_paints_the_prototype_rows() {
     let open = view_differences(Tab::Log, "log-open", 22, (22, 46));
     assert!(open.is_empty(), "\n{}", open.join("\n"));
 }
-

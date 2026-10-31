@@ -97,7 +97,10 @@ fn the_window_cuts_the_records_at_its_edges() {
 fn a_database_that_cannot_be_read_is_unknown() {
     let home = tempfile::tempdir().unwrap();
     let usage = usage_in(UsageLog::OpencodeDb, SESSION, T12, T14, home.path());
-    assert!(usage.is_none(), "a database that is not there is unknown, not zero");
+    assert!(
+        usage.is_none(),
+        "a database that is not there is unknown, not zero"
+    );
 }
 
 #[test]

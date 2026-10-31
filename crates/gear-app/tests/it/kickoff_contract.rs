@@ -132,7 +132,8 @@ fn the_report_names_the_agents_their_models_and_what_is_missing() {
     // T-83 (trial G06): the report says, per kind, whether the skill is there.
     assert!(text.contains("GEAR skill installed"), "{text}");
     assert!(
-        text.contains("GEAR skill MISSING") && text.contains("gear admin install-skill --agent opencode"),
+        text.contains("GEAR skill MISSING")
+            && text.contains("gear admin install-skill --agent opencode"),
         "{text}"
     );
     assert!(text.contains("Not on PATH: codex"), "{text}");
@@ -151,12 +152,22 @@ fn the_skeleton_is_a_config_the_parser_reads() {
     assert_eq!(config.quota.lanes, 3);
     assert_eq!(config.quota.temps, 2);
     // Lanes run fast models; review runs stronger ones, never the writers'.
-    let lanes: Vec<&str> = config.models.lanes.iter().map(|entry| entry.model()).collect();
+    let lanes: Vec<&str> = config
+        .models
+        .lanes
+        .iter()
+        .map(|entry| entry.model())
+        .collect();
     assert_eq!(
         lanes,
         vec!["deepseek/deepseek-flash", "minimax-cn/MiniMax-M3.1-Flash"]
     );
-    let review: Vec<&str> = config.models.review.iter().map(|entry| entry.model()).collect();
+    let review: Vec<&str> = config
+        .models
+        .review
+        .iter()
+        .map(|entry| entry.model())
+        .collect();
     assert_eq!(
         review,
         vec!["deepseek/deepseek-v4-pro", "minimax-cn/MiniMax-M3"]
@@ -222,7 +233,9 @@ fn a_role_with_one_model_waits_instead_of_falling_back() {
         .map(|issue| issue.field)
         .collect();
     assert!(
-        !issues.iter().any(|field| field == "models.lanes" || field == "models.review"),
+        !issues
+            .iter()
+            .any(|field| field == "models.lanes" || field == "models.review"),
         "{issues:?}"
     );
 }
@@ -234,15 +247,19 @@ fn the_skeleton_asks_the_wait_policy_and_keeps_the_agent() {
     let text = kickoff::skeleton(&inventory());
     let config = gear_app::config::parse(&text).expect("the skeleton is valid gear.toml");
 
-    assert!(
-        text.contains("on_wait = \"keep\""),
-        "{text}"
-    );
+    assert!(text.contains("on_wait = \"keep\""), "{text}");
     assert_eq!(config.models.on_wait, gear_app::config::WaitPolicy::Keep);
     // Right after the quota policy, so the two are read together.
     let lines: Vec<&str> = text.lines().collect();
-    let quota = lines.iter().position(|l| l.starts_with("on_quota = ")).unwrap();
-    assert!(lines[quota + 1].starts_with("on_wait = \"keep\""), "{}", lines[quota + 1]);
+    let quota = lines
+        .iter()
+        .position(|l| l.starts_with("on_quota = "))
+        .unwrap();
+    assert!(
+        lines[quota + 1].starts_with("on_wait = \"keep\""),
+        "{}",
+        lines[quota + 1]
+    );
 }
 
 /// T-42: the skeleton's header tells the user how to register the config:
@@ -254,11 +271,17 @@ fn the_skeleton_header_names_the_config_of_the_project() {
     let header: Vec<&str> = text.lines().take(2).collect();
     let header = header.join("\n");
 
-    assert!(header.contains("gear admin init gear/gear.toml"), "{header}");
+    assert!(
+        header.contains("gear admin init gear/gear.toml"),
+        "{header}"
+    );
     assert!(!header.contains("GEAR_DB"), "{header}");
     // The first line still starts the extraction the README does
     // (`sed -n '/^# gear.toml/,$p'`).
-    assert!(text.lines().next().unwrap().starts_with("# gear.toml"), "{text}");
+    assert!(
+        text.lines().next().unwrap().starts_with("# gear.toml"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -271,7 +294,10 @@ fn an_empty_machine_still_prints_a_skeleton_to_fill_in() {
     assert_eq!(config.models.lanes[0].model(), "TODO");
 
     let report = kickoff::report(&Inventory::default());
-    assert!(report.contains("none — install an agent Herdr can start"), "{report}");
+    assert!(
+        report.contains("none — install an agent Herdr can start"),
+        "{report}"
+    );
     assert!(report.contains("Not on PATH: none"), "{report}");
 }
 
@@ -341,7 +367,10 @@ fn the_skeleton_lists_the_repositories_below_the_root() {
     assert!(!text.contains("# name = \"root\""), "{text}");
     // The skeleton is still a config the parser reads.
     let config = gear_app::config::parse(&text).expect("the skeleton is valid gear.toml");
-    assert!(config.repos.is_empty(), "the repositories are proposals only");
+    assert!(
+        config.repos.is_empty(),
+        "the repositories are proposals only"
+    );
     assert_eq!(config.project.repo, root.path().display().to_string());
 }
 

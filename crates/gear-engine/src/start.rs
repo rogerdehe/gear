@@ -80,7 +80,10 @@ pub fn pending(store: &mut Store, seat_id: &str) -> GearResult<Option<PendingSta
             .to_string()
     };
     let pane = text("pane");
-    let generation = record.get("generation").and_then(|value| value.as_i64()).unwrap_or(0);
+    let generation = record
+        .get("generation")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
     let agent_name = text("agent_name");
     let kind = text("kind");
     // A record without the binding it belongs to cannot be retried safely: the
@@ -103,7 +106,10 @@ pub fn pending(store: &mut Store, seat_id: &str) -> GearResult<Option<PendingSta
         agent_name,
         kind,
         args,
-        tries: record.get("tries").and_then(|value| value.as_i64()).unwrap_or(0),
+        tries: record
+            .get("tries")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0),
     }))
 }
 
@@ -169,7 +175,10 @@ mod tests {
         assert_eq!(pending(&mut store, "toy:heat").unwrap(), None);
 
         set_pending(&mut store, "toy:heat", &pending_start()).unwrap();
-        assert_eq!(pending(&mut store, "toy:heat").unwrap(), Some(pending_start()));
+        assert_eq!(
+            pending(&mut store, "toy:heat").unwrap(),
+            Some(pending_start())
+        );
 
         clear_pending(&mut store, "toy:heat").unwrap();
         assert_eq!(pending(&mut store, "toy:heat").unwrap(), None);

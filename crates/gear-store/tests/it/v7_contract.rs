@@ -81,7 +81,11 @@ fn a_v6_store_migrates_to_v7_with_existing_contracts_null() {
     // The store is of v6 before it is opened.
     let conn = Connection::open(&path).unwrap();
     let version: String = conn
-        .query_row("SELECT value FROM meta WHERE key='schema_version'", [], |row| row.get(0))
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(version, "6");
     drop(conn);
@@ -89,7 +93,10 @@ fn a_v6_store_migrates_to_v7_with_existing_contracts_null() {
     // Opening it carries it up to v7.
     let mut store = Store::open(&path).unwrap();
     assert_eq!(
-        store.read(|tx| tx.get_meta("schema_version")).unwrap().as_deref(),
+        store
+            .read(|tx| tx.get_meta("schema_version"))
+            .unwrap()
+            .as_deref(),
         Some(SCHEMA_VERSION.to_string().as_str())
     );
     assert_eq!(SCHEMA_VERSION, 7);
@@ -120,9 +127,18 @@ fn a_mechanical_contract_round_trips() {
 
     // The reason is read back as it was written; a contract without one stays
     // NULL.
-    let mechanical = store.read(|tx| tx.get_contract(PROJECT, "T-1", 1)).unwrap().unwrap();
-    assert_eq!(mechanical.mechanical.as_deref(), Some("delete three dead fns"));
-    let plain = store.read(|tx| tx.get_contract(PROJECT, "T-2", 1)).unwrap().unwrap();
+    let mechanical = store
+        .read(|tx| tx.get_contract(PROJECT, "T-1", 1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        mechanical.mechanical.as_deref(),
+        Some("delete three dead fns")
+    );
+    let plain = store
+        .read(|tx| tx.get_contract(PROJECT, "T-2", 1))
+        .unwrap()
+        .unwrap();
     assert_eq!(plain.mechanical, None);
 
     // The whole row round-trips: the reason is one column, not a new row.

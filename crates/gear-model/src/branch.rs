@@ -41,7 +41,9 @@ pub fn review_branch(template: &str, project: &str, lane: &str, task: &str) -> S
 /// `template` with `{project}`, `{seat}` filled in: the branch of a seat's own
 /// worktree (T-252). The merge worktree is seat `merge`.
 pub fn expand_seat(template: &str, project: &str, seat: &str) -> String {
-    template.replace("{project}", project).replace("{seat}", seat)
+    template
+        .replace("{project}", project)
+        .replace("{seat}", seat)
 }
 
 /// The number in a task id: the id's trailing run of digits (`T-40` → `40`).
@@ -71,7 +73,10 @@ mod tests {
 
     #[test]
     fn a_review_branch_is_the_projects_review_template() {
-        assert_eq!(review_branch(REVIEW_BRANCH, "p", "heat", "T-40"), "review/t40");
+        assert_eq!(
+            review_branch(REVIEW_BRANCH, "p", "heat", "T-40"),
+            "review/t40"
+        );
         assert_eq!(
             review_branch("b/{project}/review/t{n}", "acme", "heat", "T-40"),
             "b/acme/review/t40"
@@ -84,16 +89,16 @@ mod tests {
             expand("{project}/{lane}/t{n}", "acme", "pay", "T-40"),
             "acme/pay/t40"
         );
-        assert_eq!(expand("task/{project}-{n}", "gear", "mast", "T-7"), "task/gear-7");
+        assert_eq!(
+            expand("task/{project}-{n}", "gear", "mast", "T-7"),
+            "task/gear-7"
+        );
     }
 
     #[test]
     fn a_seat_branch_names_the_project_and_the_seat() {
         assert_eq!(expand_seat(SEAT_BRANCH, "p", "hull"), "p/hull");
-        assert_eq!(
-            expand_seat("{project}-{seat}", "acme", "pay"),
-            "acme-pay"
-        );
+        assert_eq!(expand_seat("{project}-{seat}", "acme", "pay"), "acme-pay");
     }
 
     #[test]

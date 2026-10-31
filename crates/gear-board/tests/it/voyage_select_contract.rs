@@ -4,9 +4,7 @@
 
 use gear_board::{Options, ProjectBoard};
 use gear_model::{AttemptState, SeatRole, SeatState, TaskState};
-use gear_store::{
-    testing, AttemptRow, AttemptStep, NewDecision, Store, TaskRow, VoyageRow,
-};
+use gear_store::{testing, AttemptRow, AttemptStep, NewDecision, Store, TaskRow, VoyageRow};
 
 const NOW: i64 = 1_800_000_000;
 
@@ -30,9 +28,18 @@ fn world_with_m2(sailing: bool) -> Store {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", NOW)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", NOW)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "codex",
+                NOW,
+            )?;
             testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "pi", NOW)?;
-            let old = testing::seed_active_seat(tx, "p", "old", SeatRole::Lane, "w1:p3", "pi", NOW)?;
+            let old =
+                testing::seed_active_seat(tx, "p", "old", SeatRole::Lane, "w1:p3", "pi", NOW)?;
             tx.set_seat_state(&old.id, SeatState::Retired, None, NOW)?;
             voyage(tx, "M1", NOW - 7200)?;
             // M1: one task it merged, and one it cut.
@@ -168,12 +175,7 @@ fn attempt(
 }
 
 /// The line the engine writes when a task leaves a voyage (T-351).
-fn moved(
-    tx: &gear_store::Tx<'_>,
-    task: &str,
-    old: &str,
-    new: &str,
-) -> gear_model::GearResult<()> {
+fn moved(tx: &gear_store::Tx<'_>, task: &str, old: &str, new: &str) -> gear_model::GearResult<()> {
     tx.insert_decision_if_new(&NewDecision {
         project: "p".into(),
         key: format!("move|{task}|{old}|{new}"),
@@ -220,22 +222,38 @@ fn the_board_built_without_a_milestone_shows_the_sailing_voyage_only() {
         .filter(|task| task.actual_min.unwrap_or(0) > 0)
         .map(|task| task.id.as_str())
         .collect();
-    assert!(!listed.contains(&"T-1"), "no task of the landed voyage: {listed:?}");
+    assert!(
+        !listed.contains(&"T-1"),
+        "no task of the landed voyage: {listed:?}"
+    );
     let graphed: Vec<&str> = plan.graph.iter().map(|task| task.id.as_str()).collect();
-    assert!(!graphed.contains(&"T-1"), "no task of the landed voyage: {graphed:?}");
+    assert!(
+        !graphed.contains(&"T-1"),
+        "no task of the landed voyage: {graphed:?}"
+    );
     // The lanes are the sailing voyage's, the retired one included only when
     // it is a lane of the shown voyage.
     let names: Vec<&str> = plan.lanes.iter().map(|lane| lane.lane.as_str()).collect();
     assert_eq!(names, vec!["hull"], "the lanes of M2: {names:?}");
 
     // Every voyage of the project, the newest departure first.
-    let list: Vec<(&str, bool)> =
-        plan.voyage_list.iter().map(|e| (e.milestone.as_str(), e.sailing)).collect();
-    assert_eq!(list, vec![("M2", true), ("M1", false)], "the voyage list: {list:?}");
+    let list: Vec<(&str, bool)> = plan
+        .voyage_list
+        .iter()
+        .map(|e| (e.milestone.as_str(), e.sailing))
+        .collect();
+    assert_eq!(
+        list,
+        vec![("M2", true), ("M1", false)],
+        "the voyage list: {list:?}"
+    );
     let m1 = &plan.voyage_list[1];
     assert_eq!(m1.departure, Some(NOW - 7200));
     assert_eq!(m1.ended, Some(MERGED), "M1 ended at its last merge");
-    assert_eq!(plan.voyage_list[0].ended, None, "a sailing voyage has not ended");
+    assert_eq!(
+        plan.voyage_list[0].ended, None,
+        "a sailing voyage has not ended"
+    );
 
     // The one the board shows is the first of the list.
     let shown = plan.shown.expect("a measured voyage");
@@ -273,11 +291,18 @@ fn the_board_built_for_a_landed_voyage_keeps_its_data() {
     assert_eq!(shown.milestone, "M1");
     assert!(!shown.sailing);
     assert_eq!(shown.ended, Some(MERGED));
-    assert_eq!(plan.voyage_list.first().map(|e| e.milestone.as_str()), Some("M2"));
+    assert_eq!(
+        plan.voyage_list.first().map(|e| e.milestone.as_str()),
+        Some("M2")
+    );
 
     // The decisions are M1's only.
     let whats: Vec<&str> = plan.decisions.iter().map(|d| d.what.as_str()).collect();
-    assert_eq!(whats, vec!["the old lane lands with M1"], "the decisions of M1: {whats:?}");
+    assert_eq!(
+        whats,
+        vec!["the old lane lands with M1"],
+        "the decisions of M1: {whats:?}"
+    );
 }
 
 /// T-353: the first row lists every voyage, the landed ones with ⚓ and the
@@ -290,7 +315,11 @@ fn the_head_lists_every_voyage_and_lights_the_shown_one() {
     let mut store = world();
     let board = gear_board::build(
         &mut store,
-        &Options { project: Some("p".into()), milestone: None, ..Default::default() },
+        &Options {
+            project: Some("p".into()),
+            milestone: None,
+            ..Default::default()
+        },
         NOW,
     )
     .unwrap();
@@ -301,14 +330,32 @@ fn the_head_lists_every_voyage_and_lights_the_shown_one() {
     let head = frame::layout(&board, &screen);
 
     // The two voyages, newest first: M2 sails, M1 landed.
-    let labels: Vec<&str> = head.voyages.iter().map(|(_, _, milestone)| milestone.as_str()).collect();
-    assert_eq!(labels, vec!["M2", "M1"], "the labels of the first row: {labels:?}");
+    let labels: Vec<&str> = head
+        .voyages
+        .iter()
+        .map(|(_, _, milestone)| milestone.as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["M2", "M1"],
+        "the labels of the first row: {labels:?}"
+    );
     let row = text.lines().next().unwrap_or_default();
-    let m2 = row.find("M2").unwrap_or_else(|| panic!("M2's label: {row:?}"));
-    let m1 = row.find("M1").unwrap_or_else(|| panic!("M1's label: {row:?}"));
+    let m2 = row
+        .find("M2")
+        .unwrap_or_else(|| panic!("M2's label: {row:?}"));
+    let m1 = row
+        .find("M1")
+        .unwrap_or_else(|| panic!("M1's label: {row:?}"));
     assert!(m2 < m1, "the newest voyage is the first label: {row:?}");
-    assert!(row[m2..].starts_with("M2 ⛵"), "a sailing voyage carries ⛵: {row:?}");
-    assert!(row[m1..].starts_with("M1 ⚓"), "a landed voyage carries ⚓: {row:?}");
+    assert!(
+        row[m2..].starts_with("M2 ⛵"),
+        "a sailing voyage carries ⛵: {row:?}"
+    );
+    assert!(
+        row[m1..].starts_with("M1 ⚓"),
+        "a landed voyage carries ⚓: {row:?}"
+    );
 
     // The shown voyage's label is in reverse video and bold; the landed one
     // is dim. Each range holds its label's cells, the mark and its
@@ -316,18 +363,37 @@ fn the_head_lists_every_voyage_and_lights_the_shown_one() {
     for (first, last, milestone) in &head.voyages {
         let shown = milestone == "M2";
         let style = canvas.style_at(*first, 0);
-        assert_eq!(style.reverse, shown, "the label of {milestone} on row 0: {text}");
-        assert_eq!(style.bold, shown, "the label of {milestone} on row 0: {text}");
-        assert_eq!(style.fg, if shown { None } else { Some(Color::Dim) }, "{text}");
-        let cells: String = (*first..=*last).map(|column| canvas.char_at(column, 0)).collect();
+        assert_eq!(
+            style.reverse, shown,
+            "the label of {milestone} on row 0: {text}"
+        );
+        assert_eq!(
+            style.bold, shown,
+            "the label of {milestone} on row 0: {text}"
+        );
+        assert_eq!(
+            style.fg,
+            if shown { None } else { Some(Color::Dim) },
+            "{text}"
+        );
+        let cells: String = (*first..=*last)
+            .map(|column| canvas.char_at(column, 0))
+            .collect();
         let mark = if shown { '⛵' } else { '⚓' };
-        assert!(cells.contains(mark), "the cells of {milestone} hold {mark}: {cells:?}");
+        assert!(
+            cells.contains(mark),
+            "the cells of {milestone} hold {mark}: {cells:?}"
+        );
     }
     // The label of the landed voyage is dim, as the prototype draws it.
     let (first, _, _) = head.voyages[1];
     assert_eq!(
         canvas.style_at(first, 0),
-        Style { fg: Some(Color::Dim), bold: false, reverse: false }
+        Style {
+            fg: Some(Color::Dim),
+            bold: false,
+            reverse: false
+        }
     );
 }
 
@@ -356,10 +422,20 @@ fn a_task_that_left_the_voyage_is_named_but_not_counted() {
         .flat_map(|lane| lane.tasks.iter())
         .map(|task| task.id.as_str())
         .collect();
-    assert!(!listed.contains(&"T-1"), "a moved task is M2's now: {listed:?}");
+    assert!(
+        !listed.contains(&"T-1"),
+        "a moved task is M2's now: {listed:?}"
+    );
     let graphed: Vec<&str> = m1.graph.iter().map(|task| task.id.as_str()).collect();
-    assert!(!graphed.contains(&"T-1"), "a moved task is M2's now: {graphed:?}");
-    let lane = m1.lanes.iter().find(|lane| lane.lane == "old").expect("the lane");
+    assert!(
+        !graphed.contains(&"T-1"),
+        "a moved task is M2's now: {graphed:?}"
+    );
+    let lane = m1
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "old")
+        .expect("the lane");
     let ids: Vec<&str> = lane.tasks.iter().map(|task| task.id.as_str()).collect();
     assert!(!ids.contains(&"T-1"), "a moved task is M2's now: {ids:?}");
     assert_eq!(m1.totals.tasks, 0, "M1 has no task left: {:?}", m1.totals);
@@ -401,7 +477,10 @@ fn the_tasks_view_measures_a_landed_voyage_from_its_own_departure() {
 fn a_landed_only_project_measures_the_tasks_view_from_its_departure() {
     let mut store = world_landed();
     let plan = board(&mut store, None);
-    assert_eq!(plan.shown.as_ref().map(|voyage| voyage.milestone.as_str()), Some("M1"));
+    assert_eq!(
+        plan.shown.as_ref().map(|voyage| voyage.milestone.as_str()),
+        Some("M1")
+    );
     assert!(
         plan.shown.as_ref().is_some_and(|voyage| !voyage.sailing),
         "the landed voyage is the one shown"
@@ -447,7 +526,11 @@ fn a_plan_less_milestone_that_departed_later_does_not_hide_the_landed_voyage() {
     let voyage = plan.workload.as_ref().expect("the measured voyage");
     assert_eq!(voyage.milestone, "M1");
     assert_eq!(voyage.title, "voyage M1", "the described voyage's title");
-    assert_eq!(voyage.done.as_deref(), Some("it is delivered"), "its done sentence");
+    assert_eq!(
+        voyage.done.as_deref(),
+        Some("it is delivered"),
+        "its done sentence"
+    );
     // The board shows M1's tasks only, not the one M1.1-cancelled cut.
     let shown = plan.shown.expect("the shown voyage");
     assert_eq!(shown.milestone, "M1");
@@ -458,7 +541,11 @@ fn a_plan_less_milestone_that_departed_later_does_not_hide_the_landed_voyage() {
 
     // The voyage list shows the voyages the plan described only (T-445): the
     // plan-less milestone is not listed, though naming it still shows it.
-    let list: Vec<&str> = plan.voyage_list.iter().map(|e| e.milestone.as_str()).collect();
+    let list: Vec<&str> = plan
+        .voyage_list
+        .iter()
+        .map(|e| e.milestone.as_str())
+        .collect();
     assert_eq!(list, vec!["M1"], "the voyage list: {list:?}");
 
     // A voyage named with a milestone is unchanged: M1.1-cancelled is shown.
@@ -506,15 +593,26 @@ fn the_voyage_list_shows_only_the_voyages_a_plan_described() {
         .unwrap();
 
     let plan = board(&mut store, None);
-    let list: Vec<&str> = plan.voyage_list.iter().map(|e| e.milestone.as_str()).collect();
+    let list: Vec<&str> = plan
+        .voyage_list
+        .iter()
+        .map(|e| e.milestone.as_str())
+        .collect();
     assert_eq!(list, vec!["M1"], "the voyage list: {list:?}");
     // The shown voyage is still chosen as T-441 made it: M1.
-    assert_eq!(plan.shown.as_ref().map(|voyage| voyage.milestone.as_str()), Some("M1"));
+    assert_eq!(
+        plan.shown.as_ref().map(|voyage| voyage.milestone.as_str()),
+        Some("M1")
+    );
 
     // A described voyage that departed later is listed first, M1 after it.
     store.write(|tx| voyage(tx, "M2", NOW - 600)).unwrap();
     let plan = board(&mut store, None);
-    let list: Vec<&str> = plan.voyage_list.iter().map(|e| e.milestone.as_str()).collect();
+    let list: Vec<&str> = plan
+        .voyage_list
+        .iter()
+        .map(|e| e.milestone.as_str())
+        .collect();
     assert_eq!(list, vec!["M2", "M1"], "the voyage list: {list:?}");
 }
 
@@ -530,7 +628,10 @@ fn an_active_voyage_still_wins_over_a_later_departed_plan_less_one() {
         .unwrap();
 
     let plan = board(&mut store, None);
-    assert_eq!(plan.shown.as_ref().map(|voyage| voyage.milestone.as_str()), Some("M2"));
+    assert_eq!(
+        plan.shown.as_ref().map(|voyage| voyage.milestone.as_str()),
+        Some("M2")
+    );
     assert!(
         plan.shown.as_ref().is_some_and(|voyage| voyage.sailing),
         "the sailing voyage is the one shown"

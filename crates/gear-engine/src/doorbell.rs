@@ -193,7 +193,9 @@ fn rings(input: &DoorbellInput, cooldown_s: i64, now: Ts) -> bool {
     let at_once = input.waiting.iter().any(|item| item.at_once);
     match input.status {
         Some(gear_herdr::AgentStatus::Blocked) | None => return false,
-        Some(gear_herdr::AgentStatus::Unknown) => return input.waiting.iter().any(|item| item.urgent && item.at_once),
+        Some(gear_herdr::AgentStatus::Unknown) => {
+            return input.waiting.iter().any(|item| item.urgent && item.at_once)
+        }
         _ => {}
     }
     if !input.idle {
@@ -216,5 +218,12 @@ fn named(input: &DoorbellInput) -> Vec<DoorbellItem> {
     if input.idle {
         return input.waiting.clone();
     }
-    input.waiting.iter().filter(|item| item.at_once && (input.status != Some(gear_herdr::AgentStatus::Unknown) || item.urgent)).cloned().collect()
+    input
+        .waiting
+        .iter()
+        .filter(|item| {
+            item.at_once && (input.status != Some(gear_herdr::AgentStatus::Unknown) || item.urgent)
+        })
+        .cloned()
+        .collect()
 }

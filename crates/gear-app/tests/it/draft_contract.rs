@@ -1,8 +1,8 @@
 //! Contract for gear_app::draft::parse (T-31, design/05). Pure.
 
 use gear_app::draft::{milestone_stations, parse, Priority, StaffItem};
-use gear_store::VoyageStation;
 use gear_model::ErrorCode;
+use gear_store::VoyageStation;
 
 const FULL: &str = r#"<!-- gear-plan project=harbor base=12 -->
 # Goal
@@ -54,26 +54,45 @@ fn full_draft_parses() {
     let d = parse(FULL).unwrap();
     assert_eq!((d.project.as_str(), d.base), ("harbor", 12));
     assert_eq!(d.goal, "Ship login.");
-    assert_eq!(d.milestones, vec![("M2: Login system".to_string(), "Scope; out of scope: SSO.".to_string())]);
-    assert_eq!(d.decisions, vec!["2026-10-21 T-31 jumps to the front".to_string()]);
+    assert_eq!(
+        d.milestones,
+        vec![(
+            "M2: Login system".to_string(),
+            "Scope; out of scope: SSO.".to_string()
+        )]
+    );
+    assert_eq!(
+        d.decisions,
+        vec!["2026-10-21 T-31 jumps to the front".to_string()]
+    );
     assert_eq!(d.queue.len(), 2);
     let a = &d.queue[0];
     assert_eq!(a.id.as_deref(), Some("T-31"));
     assert_eq!(a.priority, Priority::Now);
-    assert_eq!((a.lane.as_deref(), a.milestone.as_deref(), a.required), (Some("heat"), Some("M2"), true));
+    assert_eq!(
+        (a.lane.as_deref(), a.milestone.as_deref(), a.required),
+        (Some("heat"), Some("M2"), true)
+    );
     assert_eq!(a.evidence_files, vec!["notes/T-31-repro.md".to_string()]);
     assert_eq!(a.evidence_due, Some(60));
     assert!(a.deps.is_empty());
     let b = &d.queue[1];
-    assert_eq!((b.id.as_deref(), b.priority, b.required), (None, Priority::Should, false));
+    assert_eq!(
+        (b.id.as_deref(), b.priority, b.required),
+        (None, Priority::Should, false)
+    );
     assert_eq!(b.deps, vec!["T-31".to_string(), "T-12".to_string()]);
     assert_eq!(d.staff.len(), 6);
     assert!(matches!(&d.staff[1], StaffItem::Temp { id, resume: true, .. } if id == "R-2"));
     assert!(matches!(&d.staff[3], StaffItem::Park { until_task: Some(t), .. } if t == "T-12"));
-    assert!(matches!(&d.staff[4], StaffItem::Hold { reason, .. } if reason == "waiting for user authorization"));
+    assert!(
+        matches!(&d.staff[4], StaffItem::Hold { reason, .. } if reason == "waiting for user authorization")
+    );
     assert_eq!(d.verdicts.len(), 2);
     assert!(d.verdicts[0].pass && d.verdicts[0].evidence.as_deref() == Some("logs/T-29-verify.md"));
-    assert!(!d.verdicts[1].pass && d.verdicts[1].rework.as_deref() == Some("Edge cases not covered"));
+    assert!(
+        !d.verdicts[1].pass && d.verdicts[1].rework.as_deref() == Some("Edge cases not covered")
+    );
     assert_eq!((d.reviews[0].id.as_str(), d.reviews[0].plan), ("V-9", 12));
 }
 
@@ -87,7 +106,11 @@ fn sections_are_optional_but_header_is_not() {
 #[test]
 fn errors_name_the_line() {
     let unknown_field = FULL.replace("evidence-due: 60", "owner: bob");
-    assert!(bad_line(&unknown_field).starts_with("line 16: "), "{}", bad_line(&unknown_field));
+    assert!(
+        bad_line(&unknown_field).starts_with("line 16: "),
+        "{}",
+        bad_line(&unknown_field)
+    );
     let bad_state = FULL.replace("deps: -\n", "deps: -\nstate: done\n");
     assert!(bad_line(&bad_state).starts_with("line 18: "));
     let bad_priority = FULL.replace("[now]", "[asap]");
@@ -196,7 +219,10 @@ fn a_quoted_value_keeps_a_literal_field_inside_it() {
 
 #[test]
 fn staff_lines_are_strict() {
-    let park_both = FULL.replace("park media until-task=T-12", "park media until=2026-10-21T15:30Z until-task=T-12");
+    let park_both = FULL.replace(
+        "park media until-task=T-12",
+        "park media until=2026-10-21T15:30Z until-task=T-12",
+    );
     assert!(bad_line(&park_both).starts_with("line 28: "));
     let unknown_verb = FULL.replace("- retire prompts", "- fire prompts");
     assert!(bad_line(&unknown_verb).starts_with("line 30: "));
@@ -207,7 +233,10 @@ fn staff_lines_are_strict() {
 fn release_is_a_staff_line() {
     let d = parse("<!-- gear-plan project=p base=1 -->\n# Staff\n- release heat\n").unwrap();
     assert!(matches!(&d.staff[0], StaffItem::Release { name, .. } if name == "heat"));
-    assert!(bad_line("<!-- gear-plan project=p base=1 -->\n# Staff\n- release\n").contains("`release` needs a lane"));
+    assert!(
+        bad_line("<!-- gear-plan project=p base=1 -->\n# Staff\n- release\n")
+            .contains("`release` needs a lane")
+    );
     assert!(
         bad_line("<!-- gear-plan project=p base=1 -->\n# Staff\n- release heat now\n")
             .contains("`release` takes only a lane")
@@ -235,12 +264,21 @@ fn the_milestone_block_names_the_stations_in_order() {
     assert_eq!(
         stations,
         vec![
-            VoyageStation { id: "S1".into(), needs: "reliability fixes and conventions as configuration, released as v0.5.0".into() },
-            VoyageStation { id: "S2".into(), needs: "the board matches the prototype".into() },
+            VoyageStation {
+                id: "S1".into(),
+                needs: "reliability fixes and conventions as configuration, released as v0.5.0"
+                    .into()
+            },
+            VoyageStation {
+                id: "S2".into(),
+                needs: "the board matches the prototype".into()
+            },
         ]
     );
     // A block without a station line has none.
-    assert!(milestone_stations("done: x\nbar: y\neta: 8h\n").unwrap().is_empty());
+    assert!(milestone_stations("done: x\nbar: y\neta: 8h\n")
+        .unwrap()
+        .is_empty());
 }
 
 /// M5 S3: a repeated id, an empty id and empty needs are refused, naming the line.
@@ -252,8 +290,14 @@ fn a_broken_station_line_is_refused() {
         "station S1:",
     ] {
         let err = milestone_stations(line).unwrap_err();
-        assert!(err.contains(&format!("got {:?}", line.lines().last().unwrap())), "{err}");
-        assert!(err.contains("station <id>: <what reaching it needs>"), "{err}");
+        assert!(
+            err.contains(&format!("got {:?}", line.lines().last().unwrap())),
+            "{err}"
+        );
+        assert!(
+            err.contains("station <id>: <what reaching it needs>"),
+            "{err}"
+        );
     }
 }
 

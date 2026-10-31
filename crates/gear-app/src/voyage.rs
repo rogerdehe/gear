@@ -101,7 +101,15 @@ pub fn build(
     all: bool,
     now: Ts,
 ) -> GearResult<Report> {
-    build_with(store, env, fp, milestone, all, now, &UsageOverrides::default())
+    build_with(
+        store,
+        env,
+        fp,
+        milestone,
+        all,
+        now,
+        &UsageOverrides::default(),
+    )
 }
 
 /// [`build`] with the counted usage of the open rounds (T-207).
@@ -168,7 +176,10 @@ pub fn report_with(
     let time = crate::time::report_with(
         tx,
         project,
-        &crate::time::Filter { task: None, voyage: Some(milestone.to_string()) },
+        &crate::time::Filter {
+            task: None,
+            voyage: Some(milestone.to_string()),
+        },
         now,
         overrides,
     )?;
@@ -301,12 +312,20 @@ fn clauses_of(done: &str) -> Vec<String> {
     }
     if starts.is_empty() {
         let whole = done.trim();
-        return if whole.is_empty() { Vec::new() } else { vec![whole.to_string()] };
+        return if whole.is_empty() {
+            Vec::new()
+        } else {
+            vec![whole.to_string()]
+        };
     }
     let mut clauses: Vec<String> = Vec::new();
     for (index, start) in starts.iter().enumerate() {
         let end = starts.get(index + 1).copied().unwrap_or(bytes.len());
-        let clause = done[*start..end].trim().trim_end_matches(';').trim().to_string();
+        let clause = done[*start..end]
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .to_string();
         if !clause.is_empty() {
             clauses.push(clause);
         }
@@ -438,7 +457,9 @@ fn decision_line(decision: &DecisionLine) -> String {
 
 /// A duration in minutes, or "-" when it is not known.
 fn minutes(value: Option<i64>) -> String {
-    value.map(|value| format!("{value}m")).unwrap_or_else(|| "-".to_string())
+    value
+        .map(|value| format!("{value}m"))
+        .unwrap_or_else(|| "-".to_string())
 }
 
 /// The tasks of a voyage that are done, for the report's own use.

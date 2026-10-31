@@ -55,13 +55,29 @@ impl Repo {
         let root = tempfile::tempdir().unwrap();
         let upstream = root.path().join("upstream.git");
         let work = root.path().join("work");
-        sh(root.path(), &format!("git init -q --bare -b dev {}", upstream.display()));
-        sh(root.path(), &format!("git init -q -b dev {}", work.display()));
+        sh(
+            root.path(),
+            &format!("git init -q --bare -b dev {}", upstream.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git init -q -b dev {}", work.display()),
+        );
         fs::write(work.join("README.md"), "base\n").unwrap();
-        sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm base");
-        sh(&work, &format!("git remote add upstream {}", upstream.display()));
+        sh(
+            &work,
+            "git add -A && git -c user.email=a@b -c user.name=a commit -qm base",
+        );
+        sh(
+            &work,
+            &format!("git remote add upstream {}", upstream.display()),
+        );
         Repo::publish(&work, "dev");
-        Repo { root, upstream, work }
+        Repo {
+            root,
+            upstream,
+            work,
+        }
     }
 
     /// Move `dir`'s HEAD onto `branch` on `upstream`, from the remote's own
@@ -182,7 +198,11 @@ fn world(config: &str) -> Store {
     let mut store = Store::open_in_memory().unwrap();
     admin::init_with_home(
         &mut store,
-        &gear_app::Env { ctx: None, pane_id: None, admin: true },
+        &gear_app::Env {
+            ctx: None,
+            pane_id: None,
+            admin: true,
+        },
         config,
         Some(crate::skill_home()),
         false,
@@ -238,12 +258,20 @@ fn created(herdr: &FakeHerdr, branch: &str) -> (String, String, String, String) 
         .calls
         .iter()
         .find_map(|call| match call {
-            Call::WorktreeCreate { repo, branch: made, base, label } if made == branch => {
-                Some((repo.clone(), made.clone(), base.clone(), label.clone()))
-            }
+            Call::WorktreeCreate {
+                repo,
+                branch: made,
+                base,
+                label,
+            } if made == branch => Some((repo.clone(), made.clone(), base.clone(), label.clone())),
             _ => None,
         })
-        .unwrap_or_else(|| panic!("the engine created the worktree {branch}: {:?}", herdr.calls))
+        .unwrap_or_else(|| {
+            panic!(
+                "the engine created the worktree {branch}: {:?}",
+                herdr.calls
+            )
+        })
 }
 
 /// Wait for the merge to finish; it must be confirmed.
@@ -254,7 +282,8 @@ fn wait_merge(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg) {
         merge_passed(store, herdr, cfg, "p", T0 + 40).unwrap();
         let op = store
             .read(|tx| {
-                Ok(tx.ops_in_state("p", OpState::Confirmed)?
+                Ok(tx
+                    .ops_in_state("p", OpState::Confirmed)?
                     .into_iter()
                     .find(|op| op.kind == OpKind::Merge))
             })
@@ -264,7 +293,8 @@ fn wait_merge(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg) {
         }
         let failed = store
             .read(|tx| {
-                Ok(tx.ops_in_state("p", OpState::Failed)?
+                Ok(tx
+                    .ops_in_state("p", OpState::Failed)?
                     .into_iter()
                     .find(|op| op.kind == OpKind::Merge)
                     .map(|op| op.result))
@@ -324,8 +354,14 @@ fn the_engine_fetches_merges_and_pushes_through_the_projects_remote() {
                 .unwrap_or_default())
         })
         .unwrap();
-    assert!(text.contains("git fetch upstream"), "the packet names the remote: {text}");
-    assert!(text.contains("upstream/dev"), "the packet starts from the remote's branch: {text}");
+    assert!(
+        text.contains("git fetch upstream"),
+        "the packet names the remote: {text}"
+    );
+    assert!(
+        text.contains("upstream/dev"),
+        "the packet starts from the remote's branch: {text}"
+    );
 
     // The lane works, hands in, the reviewer reviews, the review passes.
     let candidate = repo.lane_work("heat/t1");
@@ -333,7 +369,16 @@ fn the_engine_fetches_merges_and_pushes_through_the_projects_remote() {
         .write(|tx| {
             // The dispatch above already started the attempt.
             tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
-            tasks::submit_result(tx, "p", "T-1", 1, 1, &candidate, "gear/voyages/M5/reports/T-1.md", T0)?;
+            tasks::submit_result(
+                tx,
+                "p",
+                "T-1",
+                1,
+                1,
+                &candidate,
+                "gear/voyages/M5/reports/T-1.md",
+                T0,
+            )?;
             Ok(())
         })
         .unwrap();
@@ -362,8 +407,14 @@ fn the_engine_fetches_merges_and_pushes_through_the_projects_remote() {
 
     // What landed is on `upstream`'s integration branch.
     let log = sh(&repo.upstream, "git log --format=%s dev");
-    assert!(log.contains("work"), "the task branch landed on upstream: {log}");
-    assert!(log.contains("review"), "the review branch landed on upstream: {log}");
+    assert!(
+        log.contains("work"),
+        "the task branch landed on upstream: {log}"
+    );
+    assert!(
+        log.contains("review"),
+        "the review branch landed on upstream: {log}"
+    );
     // The branches the merge consumed are closed on `upstream`.
     assert_eq!(
         sh(&repo.upstream, "git branch --list heat/t1"),

@@ -40,13 +40,19 @@ fn seeded(db: &Path, project: &str, session: &str, voyage: Option<&str>) {
 
 /// `gear admin projects …` under `home`, as a caller's process.
 fn projects(home: &Path, args: &[&str]) -> Output {
-    crate::scratch::gear(home, args).output().expect("run gear admin projects")
+    crate::scratch::gear(home, args)
+        .output()
+        .expect("run gear admin projects")
 }
 
 /// The store headers the human output printed: the lines that are not
 /// indented, i.e. the paths.
 fn headers(out: &Output) -> Vec<String> {
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter(|line| !line.starts_with(' '))
@@ -66,7 +72,8 @@ fn shown(path: &Path) -> String {
 /// A registry line for `socket` -> `db`.
 fn register(home: &Path, socket: &str, db: &Path) {
     let registry = home.join(".config/gear/targets.tsv");
-    std::fs::create_dir_all(registry.parent().expect("the registry's directory")).expect("the config dir");
+    std::fs::create_dir_all(registry.parent().expect("the registry's directory"))
+        .expect("the config dir");
     let mut text = std::fs::read_to_string(&registry).unwrap_or_default();
     text.push_str(&format!("{}\t{}\n", socket, db.display()));
     std::fs::write(&registry, text).expect("the registry");
@@ -78,8 +85,10 @@ fn every_store_on_this_machine_is_listed() {
     let shared = home.join(".local/state/gear/gear.db");
     let session_store = home.join(".local/state/gear/s1/gear.db");
     let registered = home.join("elsewhere/reg.db");
-    std::fs::create_dir_all(session_store.parent().expect("the session dir")).expect("the state dir");
-    std::fs::create_dir_all(registered.parent().expect("the registered dir")).expect("the config dir");
+    std::fs::create_dir_all(session_store.parent().expect("the session dir"))
+        .expect("the state dir");
+    std::fs::create_dir_all(registered.parent().expect("the registered dir"))
+        .expect("the config dir");
     // The shared store holds a project in a voyage, a session store one
     // without, the registered one none at all.
     seeded(&shared, "a", "default", Some("M2"));
@@ -103,14 +112,23 @@ fn every_store_on_this_machine_is_listed() {
         "{}\n  a · session default · config v1 · voyage M2",
         shown(&shared)
     );
-    assert!(text.contains(&shared_block), "the shared store said:\n{text}");
+    assert!(
+        text.contains(&shared_block),
+        "the shared store said:\n{text}"
+    );
     let session_block = format!(
         "{}\n  b · session s1 · config v1 · voyage -",
         shown(&session_store)
     );
-    assert!(text.contains(&session_block), "the session store said:\n{text}");
+    assert!(
+        text.contains(&session_block),
+        "the session store said:\n{text}"
+    );
     let registered_block = format!("{}\n  (no projects)", shown(&registered));
-    assert!(text.contains(&registered_block), "the registered store said:\n{text}");
+    assert!(
+        text.contains(&registered_block),
+        "the registered store said:\n{text}"
+    );
 
     std::fs::remove_dir_all(&home).ok();
 }
@@ -127,7 +145,11 @@ fn json_names_every_store_its_projects_and_the_error() {
 
     let out = projects(&home, &["admin", "projects", "--json"]);
 
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     let doc: serde_json::Value = serde_json::from_str(&text).expect("the projects as JSON");
     let stores = doc.as_array().expect("the stores");
@@ -145,7 +167,11 @@ fn json_names_every_store_its_projects_and_the_error() {
             .expect("the store")
     };
     let good = by_path(&shown(&shared));
-    assert_eq!(good["error"], serde_json::Value::Null, "a store that opened has no error");
+    assert_eq!(
+        good["error"],
+        serde_json::Value::Null,
+        "a store that opened has no error"
+    );
     let project = &good["projects"].as_array().expect("the projects")[0];
     assert_eq!(project["id"], "shared-proj");
     assert_eq!(project["session"], "default");
@@ -153,7 +179,10 @@ fn json_names_every_store_its_projects_and_the_error() {
     assert_eq!(project["voyage"], "M2");
     let bad = by_path(&shown(&broken));
     assert!(
-        bad["error"].as_str().expect("an error detail").contains("not a database"),
+        bad["error"]
+            .as_str()
+            .expect("an error detail")
+            .contains("not a database"),
         "the broken store said: {bad}"
     );
     assert_eq!(bad["projects"].as_array().expect("the projects").len(), 0);
@@ -173,11 +202,21 @@ fn a_store_that_does_not_open_is_reported_and_the_others_still_print() {
 
     let out = projects(&home, &["admin", "projects"]);
 
-    assert!(out.status.success(), "a broken store is no failure: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "a broken store is no failure: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     let broken_block = format!("{}\n  cannot read: ", shown(&broken));
-    assert!(text.contains(&broken_block), "the broken store said:\n{text}");
-    assert!(text.contains("shared-proj"), "the good store still printed:\n{text}");
+    assert!(
+        text.contains(&broken_block),
+        "the broken store said:\n{text}"
+    );
+    assert!(
+        text.contains("shared-proj"),
+        "the good store still printed:\n{text}"
+    );
 
     std::fs::remove_dir_all(&home).ok();
 }
@@ -188,8 +227,16 @@ fn it_writes_nothing_and_starts_no_engine() {
     // that of the default store.
     let home = crate::scratch::home("projects-nothing");
     let out = projects(&home, &["admin", "projects"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "", "no store, nothing to say");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "",
+        "no store, nothing to say"
+    );
     assert!(
         !home.join(".local").exists(),
         "the command created {}",
@@ -209,14 +256,24 @@ fn it_writes_nothing_and_starts_no_engine() {
         .env("HERDR_SOCKET_PATH", &socket)
         .output()
         .expect("run gear admin projects");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let dir = store.parent().expect("the store's directory");
     for name in ["engine.lock", "engine.log"] {
-        assert!(!dir.join(name).exists(), "the command started the engine: {}", dir.join(name).display());
+        assert!(
+            !dir.join(name).exists(),
+            "the command started the engine: {}",
+            dir.join(name).display()
+        );
     }
     // The store it read is still the store it was.
     let mut read = Store::open_read_only(&store).expect("the store");
-    let voyage = read.read(|tx| current_voyage(tx, "a-proj")).expect("the voyage");
+    let voyage = read
+        .read(|tx| current_voyage(tx, "a-proj"))
+        .expect("the voyage");
     assert_eq!(voyage, "", "nothing was written");
 
     std::fs::remove_dir_all(&home).ok();
@@ -230,7 +287,11 @@ fn a_home_that_is_not_there_lists_nothing() {
         .env_remove("HOME")
         .output()
         .expect("run gear admin projects");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "[]");
     std::fs::remove_dir_all(&home).ok();
 }

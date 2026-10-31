@@ -52,8 +52,20 @@ fn world() -> Store {
     let departure = now_seconds() - 3600;
     store
         .write(|tx| {
-            attempt(tx, "T-1", departure, departure + 30 * 60, departure + 30 * 60)?;
-            attempt(tx, "T-3", departure, departure + 30 * 60, departure + 60 * 60)?;
+            attempt(
+                tx,
+                "T-1",
+                departure,
+                departure + 30 * 60,
+                departure + 30 * 60,
+            )?;
+            attempt(
+                tx,
+                "T-3",
+                departure,
+                departure + 30 * 60,
+                departure + 60 * 60,
+            )?;
             Ok(())
         })
         .unwrap();
@@ -164,19 +176,38 @@ fn open_attempt(
 #[test]
 fn the_slower_lane_sets_the_finish_and_is_named() {
     let mut store = world();
-    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
+    let board = gear_board::build(
+        &mut store,
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
+        now_seconds(),
+    )
+    .unwrap();
     let voyage = &board.projects[0].voyages[0];
 
     // Each lane at its own pace: hull needs 20 minutes (pace 1.0), deck needs
     // 60 (pace 1.0 on 60 minutes of open estimate). Deck still sets the finish
     // because it has far more work left.
-    let hull = voyage.lanes.iter().find(|lane| lane.lane == "hull").unwrap();
-    let deck = voyage.lanes.iter().find(|lane| lane.lane == "deck").unwrap();
+    let hull = voyage
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "hull")
+        .unwrap();
+    let deck = voyage
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "deck")
+        .unwrap();
     assert_eq!(hull.done_min, 30);
     assert_eq!(hull.left_min, 20);
     assert_eq!(hull.pace, Some(1.0));
     assert_eq!(hull.projected_min, Some(20));
-    assert_eq!(deck.done_min, 30, "the merge tail is not the lane's own time");
+    assert_eq!(
+        deck.done_min, 30,
+        "the merge tail is not the lane's own time"
+    );
     assert_eq!(deck.left_min, 60);
     assert_eq!(deck.pace, Some(1.0));
     assert_eq!(deck.projected_min, Some(60));
@@ -223,13 +254,37 @@ fn a_lane_is_measured_by_its_throughput_not_the_sum_of_its_spans() {
         .unwrap();
     store
         .write(|tx| {
-            attempt(tx, "T-1", departure, departure + 20 * 60, departure + 40 * 60)?;
-            attempt(tx, "T-2", departure + 20 * 60, departure + 40 * 60, departure + 60 * 60)
+            attempt(
+                tx,
+                "T-1",
+                departure,
+                departure + 20 * 60,
+                departure + 40 * 60,
+            )?;
+            attempt(
+                tx,
+                "T-2",
+                departure + 20 * 60,
+                departure + 40 * 60,
+                departure + 60 * 60,
+            )
         })
         .unwrap();
-    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
+    let board = gear_board::build(
+        &mut store,
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
+        now_seconds(),
+    )
+    .unwrap();
     let voyage = &board.projects[0].voyages[0];
-    let hull = voyage.lanes.iter().find(|lane| lane.lane == "hull").unwrap();
+    let hull = voyage
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "hull")
+        .unwrap();
     // From the earliest start (0) to the last hand-in (40): 40 minutes of lane
     // time, where the sum of the spans would be 40 + 40.
     assert_eq!(hull.done_min, 40);
@@ -238,7 +293,11 @@ fn a_lane_is_measured_by_its_throughput_not_the_sum_of_its_spans() {
     assert_eq!(voyage.measured_actual_min, 40);
     assert_eq!(voyage.pace(), Some(40.0 / 60.0));
     // A lane with no done task keeps no pace, and the finish stays unknown.
-    let mast = voyage.lanes.iter().find(|lane| lane.lane == "mast").unwrap();
+    let mast = voyage
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "mast")
+        .unwrap();
     assert_eq!(mast.done_min, 0);
     assert_eq!(mast.pace, None);
     assert_eq!(voyage.slowest_lane, None);
@@ -250,7 +309,15 @@ fn a_lane_is_measured_by_its_throughput_not_the_sum_of_its_spans() {
 #[test]
 fn the_burn_up_is_the_scope_done_so_far() {
     let mut store = world();
-    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
+    let board = gear_board::build(
+        &mut store,
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
+        now_seconds(),
+    )
+    .unwrap();
     let voyage = &board.projects[0].voyages[0];
     // The burn-up is cumulative: hull's 30 minutes in the first hour and
     // deck's 30 minutes in the second, so 30 and 60 (the prototype's
@@ -264,21 +331,45 @@ fn the_burn_up_keeps_the_hours_without_progress() {
     // Three hours later: the voyage is in its fifth hour and nothing was
     // merged since the second.
     let later = now_seconds() + 3 * 3600;
-    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, later).unwrap();
+    let board = gear_board::build(
+        &mut store,
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
+        later,
+    )
+    .unwrap();
     let voyage = &board.projects[0].voyages[0];
     // The hours without progress stay in the series, and the scope done so
     // far is kept.
     assert_eq!(voyage.burn_up.len(), 5, "{:?}", voyage.burn_up);
     assert_eq!(voyage.burn_up[0], 30);
     assert_eq!(voyage.burn_up[1], 60);
-    assert_eq!(*voyage.burn_up.last().unwrap(), 60, "the scope done is kept");
+    assert_eq!(
+        *voyage.burn_up.last().unwrap(),
+        60,
+        "the scope done is kept"
+    );
 }
 
 #[test]
 fn the_lane_panel_shows_what_it_did_and_what_is_left() {
     let mut store = world();
-    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
-    let lane = board.projects[0].lanes.iter().find(|lane| lane.lane == "deck").unwrap();
+    let board = gear_board::build(
+        &mut store,
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
+        now_seconds(),
+    )
+    .unwrap();
+    let lane = board.projects[0]
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "deck")
+        .unwrap();
     let panel = lane_panel(lane, &board.projects[0].graph);
     let text = panel.join("\n");
     assert!(text.contains("lane deck"), "{text}");
@@ -301,10 +392,22 @@ fn an_unmeasured_lane_leaves_the_finish_unknown() {
             task(tx, "T-5", "mast", 5, TaskState::Ready, Some(1000))
         })
         .unwrap();
-    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
+    let board = gear_board::build(
+        &mut store,
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
+        now_seconds(),
+    )
+    .unwrap();
     let voyage = &board.projects[0].voyages[0];
     // The lane is in the report with its work, but it has no pace.
-    let mast = voyage.lanes.iter().find(|lane| lane.lane == "mast").unwrap();
+    let mast = voyage
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "mast")
+        .unwrap();
     assert_eq!(mast.left_min, 1000);
     assert_eq!(mast.pace, None);
     assert_eq!(mast.projected_min, None);
@@ -321,10 +424,25 @@ fn an_open_task_without_an_estimate_leaves_the_finish_unknown() {
     store
         .write(|tx| task(tx, "T-5", "deck", 5, TaskState::Ready, None))
         .unwrap();
-    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
+    let board = gear_board::build(
+        &mut store,
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
+        now_seconds(),
+    )
+    .unwrap();
     let voyage = &board.projects[0].voyages[0];
-    let deck = voyage.lanes.iter().find(|lane| lane.lane == "deck").unwrap();
-    assert!(!deck.left_known, "the open task without an estimate is unknown");
+    let deck = voyage
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "deck")
+        .unwrap();
+    assert!(
+        !deck.left_known,
+        "the open task without an estimate is unknown"
+    );
     assert_eq!(voyage.slowest_lane, None);
     assert_eq!(voyage.projected_min, None);
 }
@@ -345,8 +463,20 @@ fn the_lane_panel_shows_the_running_and_the_queued_work_once() {
             task(tx, "T-6", "deck", 6, TaskState::Ready, Some(15))
         })
         .unwrap();
-    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
-    let lane = board.projects[0].lanes.iter().find(|lane| lane.lane == "deck").unwrap();
+    let board = gear_board::build(
+        &mut store,
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
+        now_seconds(),
+    )
+    .unwrap();
+    let lane = board.projects[0]
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "deck")
+        .unwrap();
     let text = lane_panel(lane, &board.projects[0].graph).join("\n");
     // The running and the reviewing task are in NOW, once each.
     assert_eq!(text.matches("T-4").count(), 1, "{text}");

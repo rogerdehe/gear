@@ -13,8 +13,16 @@ thread_local! {
 pub struct FakeReviewGit;
 impl gear_engine::review::ReviewGit for FakeReviewGit {
     fn run(&self, _path: &str, args: &[&str]) -> Result<String, String> {
-        REVIEW_GIT_CALLS.with(|calls| calls.borrow_mut().push(args.iter().map(|s| (*s).into()).collect()));
-        if REVIEW_GIT_FAIL.with(|fail| fail.get()) { Err("injected Git failure".into()) } else { Ok(String::new()) }
+        REVIEW_GIT_CALLS.with(|calls| {
+            calls
+                .borrow_mut()
+                .push(args.iter().map(|s| (*s).into()).collect())
+        });
+        if REVIEW_GIT_FAIL.with(|fail| fail.get()) {
+            Err("injected Git failure".into())
+        } else {
+            Ok(String::new())
+        }
     }
 }
 
@@ -84,42 +92,42 @@ mod friction_ring_contract;
 mod herdr_outage_contract;
 mod lane_view_contract;
 mod onboard_contract;
-mod park_end_contract;
 mod onboard_run_contract;
+mod park_end_contract;
 mod reviewer_nudge_contract;
 mod settle_review_tick;
 mod slice1_messaging;
 mod slice2_dispatch;
 mod stall_contract;
 
-mod captain_quota_contract;
-mod hand_in_notifications;
-mod station_contract;
-mod undelivered_delivery_contract;
-mod busy_contract;
-mod blocked_contract;
-mod guardrails_contract;
-mod blocked_delivery_contract;
-mod parallel_contract;
-mod project_failure_contract;
-mod branch_templates_contract;
-mod remote_contract;
-mod multi_repo_contract;
-mod reviewer_quota_contract;
-mod pi_lane_contract;
 mod agent_names_contract;
-mod rounds_contract;
-mod waits_contract;
-mod session_dispatch_contract;
-mod ready_state_contract;
-mod rework_mid_turn_contract;
-mod delivery_grace_contract;
-mod targeting_contract;
 mod all_tail_contract;
+mod blocked_contract;
+mod blocked_delivery_contract;
+mod branch_templates_contract;
+mod busy_contract;
+mod captain_quota_contract;
 mod dead_temp_slot_contract;
+mod delivery_grace_contract;
+mod guardrails_contract;
+mod hand_in_notifications;
 mod lane_nudge_contract;
 mod lane_restart_generation_contract;
+mod multi_repo_contract;
+mod parallel_contract;
+mod pi_lane_contract;
+mod project_failure_contract;
 mod quota_wait_resume_contract;
+mod ready_state_contract;
+mod remote_contract;
+mod reviewer_quota_contract;
+mod rework_mid_turn_contract;
+mod rounds_contract;
+mod session_dispatch_contract;
+mod station_contract;
+mod targeting_contract;
+mod undelivered_delivery_contract;
+mod waits_contract;
 
 /// A scratch home with the GEAR skill installed for every kind (T-83): `init`
 /// refuses a kind whose skill is missing, and these fixtures are not about

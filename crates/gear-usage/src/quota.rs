@@ -157,7 +157,9 @@ pub fn reset_from_text(text: &str, now: Ts) -> Option<Ts> {
         if !speaks_of_a_reset(line) {
             continue;
         }
-        let Some(time) = reset_of_line(line, now) else { continue };
+        let Some(time) = reset_of_line(line, now) else {
+            continue;
+        };
         if time > now && time - now <= LONGEST {
             return Some(time);
         }
@@ -190,7 +192,9 @@ fn reset_of_line(line: &str, now: Ts) -> Option<Ts> {
     // 2. `retry-after: <n>` — the seconds HTTP names.
     for (index, word) in words.iter().enumerate() {
         let lower = trim_punctuation(word).to_ascii_lowercase();
-        let Some(rest) = lower.strip_prefix("retry-after") else { continue };
+        let Some(rest) = lower.strip_prefix("retry-after") else {
+            continue;
+        };
         let rest = rest.trim_start_matches(':').trim();
         let seconds = if rest.is_empty() {
             // `Retry-After: 120` — the number is the next word.
@@ -396,8 +400,12 @@ fn opencode_go(body: &str, now: Ts) -> Result<Reading, String> {
         .ok_or("the response of opencode-go has no usage")?;
     let mut windows = Vec::new();
     for name in ["rolling", "weekly", "monthly"] {
-        let Some(entry) = usage.get(name) else { continue };
-        let Some(percent) = entry.get("percent").and_then(Value::as_f64) else { continue };
+        let Some(entry) = usage.get(name) else {
+            continue;
+        };
+        let Some(percent) = entry.get("percent").and_then(Value::as_f64) else {
+            continue;
+        };
         windows.push(Window {
             name: name.to_string(),
             used_percent: percent,
@@ -427,14 +435,22 @@ fn codex(session: &str, now: Ts, home: &Path) -> Result<Reading, String> {
         if value.get("type").and_then(Value::as_str) != Some("event_msg") {
             continue;
         }
-        let Some(payload) = value.get("payload") else { continue };
+        let Some(payload) = value.get("payload") else {
+            continue;
+        };
         if payload.get("type").and_then(Value::as_str) != Some("token_count") {
             continue;
         }
-        let Some(limits) = payload.get("rate_limits") else { continue };
+        let Some(limits) = payload.get("rate_limits") else {
+            continue;
+        };
         for name in ["primary", "secondary"] {
-            let Some(entry) = limits.get(name) else { continue };
-            let Some(used) = entry.get("used_percent").and_then(Value::as_f64) else { continue };
+            let Some(entry) = limits.get(name) else {
+                continue;
+            };
+            let Some(used) = entry.get("used_percent").and_then(Value::as_f64) else {
+                continue;
+            };
             windows.push(Window {
                 name: window_name(name, entry),
                 used_percent: used,

@@ -137,7 +137,8 @@ pub fn submit_review(tx: &Tx<'_>, review: &Review, now: Ts) -> GearResult<()> {
     // One record per attempt: the same verdict again changes nothing, a
     // different one would rewrite a fact the captain may already have seen.
     if let Some(stored) = tx.get_review_verdict(&review.project, &review.task, review.attempt)? {
-        if stored.passed == (review.outcome == Outcome::Pass) && stored.findings == review.findings {
+        if stored.passed == (review.outcome == Outcome::Pass) && stored.findings == review.findings
+        {
             return Ok(());
         }
         return Err(GearError::new(
@@ -306,17 +307,15 @@ fn looks_like_path(arg: &str) -> bool {
 
 /// `./x`, `../x`, `/x`, `~/x`: written as a path.
 fn is_explicit_path(arg: &str) -> bool {
-    arg.starts_with("./")
-        || arg.starts_with("../")
-        || arg.starts_with('/')
-        || arg.starts_with("~/")
+    arg.starts_with("./") || arg.starts_with("../") || arg.starts_with('/') || arg.starts_with("~/")
 }
 
 /// Is this one word a path on its own?
 fn is_path_shaped(word: &str) -> bool {
     is_explicit_path(word)
         || has_text_extension(word)
-        || (word.rsplit('/').next() != Some(word) && looks_like_file_name(word.rsplit('/').next().unwrap_or(word)))
+        || (word.rsplit('/').next() != Some(word)
+            && looks_like_file_name(word.rsplit('/').next().unwrap_or(word)))
 }
 
 /// Does the argument end in a text extension?
@@ -358,7 +357,10 @@ mod findings_tests {
         std::fs::write(&file, "# Findings\n\nP1: the rows drift.\n").unwrap();
         let text = findings_text(file.to_str().unwrap()).unwrap();
         assert!(text.contains("P1: the rows drift"), "{text}");
-        assert!(!text.contains("gear-findings"), "the path is not the findings: {text}");
+        assert!(
+            !text.contains("gear-findings"),
+            "the path is not the findings: {text}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -374,7 +376,10 @@ mod findings_tests {
 
     #[test]
     fn text_is_kept_and_a_missing_file_is_bad_format() {
-        assert_eq!(findings_text("the rows drift right").unwrap(), "the rows drift right");
+        assert_eq!(
+            findings_text("the rows drift right").unwrap(),
+            "the rows drift right"
+        );
         assert_eq!(findings_text("P1 — x\nP2 — y").unwrap(), "P1 — x\nP2 — y");
         assert_eq!(findings_text("n/a").unwrap(), "n/a");
         let err = findings_text("ops/reviews/T-404.md").unwrap_err();
@@ -420,8 +425,15 @@ mod findings_tests {
 
     #[test]
     fn a_long_file_is_cut_with_a_note() {
-        let text = bounded_findings(&vec![b'x'; FINDINGS_MAX + 10], "big.md", FINDINGS_MAX as u64 + 10);
+        let text = bounded_findings(
+            &vec![b'x'; FINDINGS_MAX + 10],
+            "big.md",
+            FINDINGS_MAX as u64 + 10,
+        );
         assert!(text.ends_with("the whole file is at \"big.md\"]"), "{text}");
-        assert!(text.contains(&format!("of {}", FINDINGS_MAX as u64 + 10)), "{text}");
+        assert!(
+            text.contains(&format!("of {}", FINDINGS_MAX as u64 + 10)),
+            "{text}"
+        );
     }
 }

@@ -25,59 +25,141 @@ fn world() -> Store {
         testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
         testing::seed_temp_seat(tx, "p", "r-1", "T-1", TEMP_PANE, "opencode", T0)?;
-        tx.insert_task(&TaskRow { repo: None, base: None, gate: None, rework_estimate_min: None, project: "p".into(), id: "T-1".into(), rank: 1, state: TaskState::Ready, priority: "must".into(),
-            lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
-            wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
-        tx.insert_contract(&ContractRow { project: "p".into(), task: "T-1".into(), version: 1, goal: "g".into(), accept: "a".into(),
-            evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0, mechanical: None, })?;
+        tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: "p".into(),
+            id: "T-1".into(),
+            rank: 1,
+            state: TaskState::Ready,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: None,
+            issue: None,
+            updated: T0,
+        })?;
+        tx.insert_contract(&ContractRow {
+            project: "p".into(),
+            task: "T-1".into(),
+            version: 1,
+            goal: "g".into(),
+            accept: "a".into(),
+            evidence_files: vec![],
+            evidence_due_min: None,
+            body: String::new(),
+            created: T0,
+            mechanical: None,
+        })?;
         start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
         on_delivery_confirmed(tx, "p", "T-1", 1, T0)
-    }).unwrap();
+    })
+    .unwrap();
     s
 }
 
 fn env(seat: &str, pane: &str) -> Env {
-    Env { ctx: Some(GearCtx { project: "p".into(), seat: seat.into(), generation: 1 }), pane_id: Some(pane.into()), admin: false }
+    Env {
+        ctx: Some(GearCtx {
+            project: "p".into(),
+            seat: seat.into(),
+            generation: 1,
+        }),
+        pane_id: Some(pane.into()),
+        admin: false,
+    }
 }
 
 fn fp(pane: &str, kind: &str) -> Fingerprint {
-    Fingerprint { pane_id: pane.into(), kind: Some(kind.into()), session_ref: None }
+    Fingerprint {
+        pane_id: pane.into(),
+        kind: Some(kind.into()),
+        session_ref: None,
+    }
 }
 
 fn review(outcome: Outcome, findings: &str, rid: &str) -> SendArgs {
-    SendArgs { kind: MsgKind::Review, body: findings.into(), task: Some("T-1".into()), attempt: Some(1),
-        contract: None, candidate: None, verdict: Some(outcome), blocking: None, base: None, about: None, to: None, reply_to: None,
+    SendArgs {
+        kind: MsgKind::Review,
+        body: findings.into(),
+        task: Some("T-1".into()),
+        attempt: Some(1),
+        contract: None,
+        candidate: None,
+        verdict: Some(outcome),
+        blocking: None,
+        base: None,
+        about: None,
+        to: None,
+        reply_to: None,
         urgent: false,
         left: None,
         blocker: None,
         on: None,
-        friction: None, request_id: rid.into() }
+        friction: None,
+        request_id: rid.into(),
+    }
 }
 
 #[test]
 fn a_temp_review_is_stored_and_reaches_the_captain() {
     let mut s = world();
 
-    let sent = mail::send(&mut s, &env("r-1", TEMP_PANE), Some(&fp(TEMP_PANE, "opencode")),
-        &review(Outcome::Pass, "P1: the row drifts right", "r1"), T0 + 5).unwrap();
+    let sent = mail::send(
+        &mut s,
+        &env("r-1", TEMP_PANE),
+        Some(&fp(TEMP_PANE, "opencode")),
+        &review(Outcome::Pass, "P1: the row drifts right", "r1"),
+        T0 + 5,
+    )
+    .unwrap();
     assert_eq!(sent.recipient, "p:captain");
 
     // The verdict sits on the attempt's review record.
-    let record = s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().unwrap();
+    let record = s
+        .read(|tx| tx.get_review_verdict("p", "T-1", 1))
+        .unwrap()
+        .unwrap();
     assert!(record.passed);
     assert_eq!(record.findings, "P1: the row drifts right");
     assert_eq!(record.by_seat, "p:r-1");
 
     // A passing review is retained without an action item or home-page work.
-    assert!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap().is_empty());
-    let message = s.read(|tx| tx.get_message("p", &sent.msg_id)).unwrap().unwrap();
-    assert_eq!((message.kind, message.state), (MsgKind::Review, MsgState::Info));
+    assert!(s
+        .read(|tx| tx.actionable_for("p", "p:captain", T0 + 6))
+        .unwrap()
+        .is_empty());
+    let message = s
+        .read(|tx| tx.get_message("p", &sent.msg_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (message.kind, message.state),
+        (MsgKind::Review, MsgState::Info)
+    );
     assert!(message.body.contains("pass") && message.body.contains("P1: the row drifts right"));
-    let home = home::build(&mut s, &env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), T0 + 7).unwrap();
+    let home = home::build(
+        &mut s,
+        &env("captain", CAP_PANE),
+        Some(&fp(CAP_PANE, "codex")),
+        T0 + 7,
+    )
+    .unwrap();
     assert!(!home.text.contains("INBOX"), "{}", home.text);
 
     // The task packet shows the review record.
-    let packet = s.read(|tx| gear_app::plan::render_task_packet(tx, "p", "T-1")).unwrap();
+    let packet = s
+        .read(|tx| gear_app::plan::render_task_packet(tx, "p", "T-1"))
+        .unwrap();
     assert!(packet.contains("## Review"), "{packet}");
     assert!(packet.contains("pass"), "{packet}");
     assert!(packet.contains("P1: the row drifts right"), "{packet}");
@@ -85,29 +167,55 @@ fn a_temp_review_is_stored_and_reaches_the_captain() {
     // Nothing is settled: the attempt and the task keep their state.
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
     assert_eq!(attempt.state, AttemptState::Started);
-    assert_eq!(s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().state, TaskState::Running);
+    assert_eq!(
+        s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().state,
+        TaskState::Running
+    );
 }
 
 #[test]
 fn a_fail_verdict_is_stored_as_a_fail() {
     let mut s = world();
-    mail::send(&mut s, &env("r-1", TEMP_PANE), Some(&fp(TEMP_PANE, "opencode")),
-        &review(Outcome::Fail, "P1: the store forgets the verdict", "r1"), T0 + 5).unwrap();
-    let record = s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().unwrap();
+    mail::send(
+        &mut s,
+        &env("r-1", TEMP_PANE),
+        Some(&fp(TEMP_PANE, "opencode")),
+        &review(Outcome::Fail, "P1: the store forgets the verdict", "r1"),
+        T0 + 5,
+    )
+    .unwrap();
+    let record = s
+        .read(|tx| tx.get_review_verdict("p", "T-1", 1))
+        .unwrap()
+        .unwrap();
     assert!(!record.passed);
-    let inbox = s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap();
+    let inbox = s
+        .read(|tx| tx.actionable_for("p", "p:captain", T0 + 6))
+        .unwrap();
     assert!(inbox[0].body.contains("fail"), "{}", inbox[0].body);
 }
 
 #[test]
 fn a_lane_seat_may_not_hand_in_a_verdict() {
     let mut s = world();
-    let err = mail::send(&mut s, &env("heat", LANE_PANE), Some(&fp(LANE_PANE, "opencode")),
-        &review(Outcome::Pass, "looks fine to me", "r1"), T0 + 5).unwrap_err();
+    let err = mail::send(
+        &mut s,
+        &env("heat", LANE_PANE),
+        Some(&fp(LANE_PANE, "opencode")),
+        &review(Outcome::Pass, "looks fine to me", "r1"),
+        T0 + 5,
+    )
+    .unwrap_err();
     assert_eq!(err.code, ErrorCode::Forbidden);
     // Nothing was written: no record, no item in the captain's inbox.
-    assert!(s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().is_none());
-    assert!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap().is_empty());
+    assert!(s
+        .read(|tx| tx.get_review_verdict("p", "T-1", 1))
+        .unwrap()
+        .is_none());
+    assert!(s
+        .read(|tx| tx.actionable_for("p", "p:captain", T0 + 6))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -116,11 +224,23 @@ fn a_temp_seat_bound_to_another_task_may_not_review() {
     // The reviewer of T-1 names a task it is not bound to.
     let mut args = review(Outcome::Pass, "looks fine to me", "r1");
     args.task = Some("T-2".into());
-    let err = mail::send(&mut s, &env("r-1", TEMP_PANE), Some(&fp(TEMP_PANE, "opencode")),
-        &args, T0 + 5).unwrap_err();
+    let err = mail::send(
+        &mut s,
+        &env("r-1", TEMP_PANE),
+        Some(&fp(TEMP_PANE, "opencode")),
+        &args,
+        T0 + 5,
+    )
+    .unwrap_err();
     assert_eq!(err.code, ErrorCode::NoTarget);
-    assert!(s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().is_none());
-    assert!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap().is_empty());
+    assert!(s
+        .read(|tx| tx.get_review_verdict("p", "T-1", 1))
+        .unwrap()
+        .is_none());
+    assert!(s
+        .read(|tx| tx.actionable_for("p", "p:captain", T0 + 6))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -128,8 +248,14 @@ fn a_review_of_an_unknown_task_is_no_target() {
     let mut s = world();
     let mut args = review(Outcome::Pass, "looks fine to me", "r1");
     args.task = Some("T-9".into());
-    let err = mail::send(&mut s, &env("r-1", TEMP_PANE), Some(&fp(TEMP_PANE, "opencode")),
-        &args, T0 + 5).unwrap_err();
+    let err = mail::send(
+        &mut s,
+        &env("r-1", TEMP_PANE),
+        Some(&fp(TEMP_PANE, "opencode")),
+        &args,
+        T0 + 5,
+    )
+    .unwrap_err();
     assert_eq!(err.code, ErrorCode::NoTarget);
 }
 
@@ -138,8 +264,14 @@ fn a_review_without_a_verdict_is_bad_format() {
     let mut s = world();
     let mut args = review(Outcome::Pass, "looks fine to me", "r1");
     args.verdict = None;
-    let err = mail::send(&mut s, &env("r-1", TEMP_PANE), Some(&fp(TEMP_PANE, "opencode")),
-        &args, T0 + 5).unwrap_err();
+    let err = mail::send(
+        &mut s,
+        &env("r-1", TEMP_PANE),
+        Some(&fp(TEMP_PANE, "opencode")),
+        &args,
+        T0 + 5,
+    )
+    .unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("--verdict"), "{}", err.detail);
 }
@@ -152,17 +284,39 @@ fn the_same_request_id_replays_without_a_second_record() {
     mail::send(&mut s, &env, Some(&fp), &args, T0 + 5).unwrap();
     let again = mail::send(&mut s, &env, Some(&fp), &args, T0 + 6).unwrap();
     assert!(again.replayed);
-    assert_eq!(s.read(|tx| tx.review_verdicts_of_task("p", "T-1")).unwrap().len(), 1);
+    assert_eq!(
+        s.read(|tx| tx.review_verdicts_of_task("p", "T-1"))
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
 fn a_second_different_verdict_for_the_same_attempt_is_refused() {
     let mut s = world();
     let (env, fp) = (env("r-1", TEMP_PANE), fp(TEMP_PANE, "opencode"));
-    mail::send(&mut s, &env, Some(&fp), &review(Outcome::Pass, "P1: the row drifts right", "r1"), T0 + 5).unwrap();
-    let err = mail::send(&mut s, &env, Some(&fp), &review(Outcome::Fail, "P1: wrong", "r2"), T0 + 6).unwrap_err();
+    mail::send(
+        &mut s,
+        &env,
+        Some(&fp),
+        &review(Outcome::Pass, "P1: the row drifts right", "r1"),
+        T0 + 5,
+    )
+    .unwrap();
+    let err = mail::send(
+        &mut s,
+        &env,
+        Some(&fp),
+        &review(Outcome::Fail, "P1: wrong", "r2"),
+        T0 + 6,
+    )
+    .unwrap_err();
     assert_eq!(err.code, ErrorCode::BadTransition);
-    let record = s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().unwrap();
+    let record = s
+        .read(|tx| tx.get_review_verdict("p", "T-1", 1))
+        .unwrap()
+        .unwrap();
     assert!(record.passed, "the first verdict stands");
 }
 
@@ -198,16 +352,29 @@ fn a_findings_path_is_stored_as_its_text() {
 
     // The store holds the file's text, and the rework note and the packet
     // carry the findings — not a path (T-21).
-    let record = s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().unwrap();
-    assert!(record.findings.contains("P1: the row drifts right"), "{}", record.findings);
+    let record = s
+        .read(|tx| tx.get_review_verdict("p", "T-1", 1))
+        .unwrap()
+        .unwrap();
+    assert!(
+        record.findings.contains("P1: the row drifts right"),
+        "{}",
+        record.findings
+    );
     assert!(
         !record.findings.contains(&file.display().to_string()),
         "not the path: {}",
         record.findings
     );
 
-    s.write(|tx| gear_app::tasks::settle_review(tx, "p", "T-1", 1, T0 + 6)).unwrap();
-    let note = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().rework_note.unwrap_or_default();
+    s.write(|tx| gear_app::tasks::settle_review(tx, "p", "T-1", 1, T0 + 6))
+        .unwrap();
+    let note = s
+        .read(|tx| tx.get_task("p", "T-1"))
+        .unwrap()
+        .unwrap()
+        .rework_note
+        .unwrap_or_default();
     assert!(note.contains("P1: the row drifts right"), "{note}");
     let packet = s
         .read(|tx| gear_app::plan::render_task_packet(tx, "p", "T-1"))
@@ -220,7 +387,10 @@ fn a_findings_path_is_stored_as_its_text() {
 #[test]
 fn a_findings_path_that_does_not_exist_stores_nothing() {
     let mut s = world();
-    let before = s.read(|tx| tx.review_verdicts_of_task("p", "T-1")).unwrap().len();
+    let before = s
+        .read(|tx| tx.review_verdicts_of_task("p", "T-1"))
+        .unwrap()
+        .len();
 
     let err = mail::send(
         &mut s,
@@ -232,7 +402,10 @@ fn a_findings_path_that_does_not_exist_stores_nothing() {
     .unwrap_err();
 
     assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
-    let after = s.read(|tx| tx.review_verdicts_of_task("p", "T-1")).unwrap().len();
+    let after = s
+        .read(|tx| tx.review_verdicts_of_task("p", "T-1"))
+        .unwrap()
+        .len();
     assert_eq!(before, after, "nothing is stored");
 }
 
@@ -264,12 +437,16 @@ fn a_missing_path_is_refused_whatever_it_looks_like() {
 
         // No verdict and no message ...
         assert_eq!(
-            s.read(|tx| tx.review_verdicts_of_task("p", "T-1")).unwrap().len(),
+            s.read(|tx| tx.review_verdicts_of_task("p", "T-1"))
+                .unwrap()
+                .len(),
             0,
             "{arg}: a verdict was stored"
         );
         assert_eq!(
-            s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 9)).unwrap().len(),
+            s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 9))
+                .unwrap()
+                .len(),
             0,
             "{arg}: a message was stored"
         );
@@ -277,7 +454,9 @@ fn a_missing_path_is_refused_whatever_it_looks_like() {
         // row with another key would be a conflict, not a fresh request).
         let outcome = s
             .read(|tx| {
-                tx.run_request(&request_id, "another-key", T0 + 6, |_tx| Ok(serde_json::json!({})))
+                tx.run_request(&request_id, "another-key", T0 + 6, |_tx| {
+                    Ok(serde_json::json!({}))
+                })
             })
             .unwrap();
         assert!(
@@ -304,9 +483,20 @@ fn an_existing_file_with_a_space_in_its_name_is_stored_as_its_text() {
     )
     .unwrap();
 
-    let record = s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().unwrap();
-    assert!(record.findings.contains("P1: the header count is stale"), "{}", record.findings);
-    assert!(!record.findings.contains(".md"), "not the path: {}", record.findings);
+    let record = s
+        .read(|tx| tx.get_review_verdict("p", "T-1", 1))
+        .unwrap()
+        .unwrap();
+    assert!(
+        record.findings.contains("P1: the header count is stale"),
+        "{}",
+        record.findings
+    );
+    assert!(
+        !record.findings.contains(".md"),
+        "not the path: {}",
+        record.findings
+    );
 
     std::fs::remove_file(&path).ok();
 }
@@ -344,8 +534,15 @@ fn a_repeated_request_id_replays_even_when_the_file_is_gone() {
     assert_eq!(again.msg_id, first.msg_id);
 
     // Exactly one verdict and one message.
-    assert_eq!(s.read(|tx| tx.review_verdicts_of_task("p", "T-1")).unwrap().len(), 1);
-    let inbox = s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 9)).unwrap();
+    assert_eq!(
+        s.read(|tx| tx.review_verdicts_of_task("p", "T-1"))
+            .unwrap()
+            .len(),
+        1
+    );
+    let inbox = s
+        .read(|tx| tx.actionable_for("p", "p:captain", T0 + 9))
+        .unwrap();
     assert_eq!(inbox.len(), 1, "{inbox:?}");
 }
 
@@ -367,15 +564,24 @@ fn a_huge_findings_file_is_cut_with_a_note() {
     )
     .unwrap();
 
-    let record = s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().unwrap();
-    assert!(record.findings.starts_with(&"x".repeat(64)), "the file's first bytes are stored");
+    let record = s
+        .read(|tx| tx.get_review_verdict("p", "T-1", 1))
+        .unwrap()
+        .unwrap();
+    assert!(
+        record.findings.starts_with(&"x".repeat(64)),
+        "the file's first bytes are stored"
+    );
     assert!(
         record.findings.len() > gear_app::review::FINDINGS_MAX,
         "the stored text is the cut plus the note: {} bytes",
         record.findings.len()
     );
     assert!(
-        record.findings.contains(&format!("findings cut at {} bytes", gear_app::review::FINDINGS_MAX)),
+        record.findings.contains(&format!(
+            "findings cut at {} bytes",
+            gear_app::review::FINDINGS_MAX
+        )),
         "{}",
         &record.findings[record.findings.len().saturating_sub(120)..]
     );

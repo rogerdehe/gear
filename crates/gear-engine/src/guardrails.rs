@@ -30,12 +30,7 @@ fn key(seat: &str) -> String {
 /// is resolved when a later screen read shows no refusal any more. A screen
 /// that was not read (the agent works) changes nothing — a fact that was not
 /// looked at is not a fact that went away.
-pub fn check(
-    tx: &Tx<'_>,
-    project: &str,
-    observed: &[SeatObs],
-    now: Ts,
-) -> GearResult<Vec<String>> {
+pub fn check(tx: &Tx<'_>, project: &str, observed: &[SeatObs], now: Ts) -> GearResult<Vec<String>> {
     let mut rung = Vec::new();
     for obs in observed
         .iter()

@@ -4,29 +4,78 @@
 //! logic, then assert on [`FakeHerdr::calls`].
 
 use crate::{
-    AgentInfo, AgentSession, AgentStatus, HerdrAct, HerdrRead, ObserveError, Outcome,
-    PaneProcess, PaneProcessInfo, Worktree,
+    AgentInfo, AgentSession, AgentStatus, HerdrAct, HerdrRead, ObserveError, Outcome, PaneProcess,
+    PaneProcessInfo, Worktree,
 };
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Call {
-    OpenCodeApi { args: Vec<String> },
-    Prompt { pane: String, target: String, text: String },
-    Rename { pane: String, name: String },
+    OpenCodeApi {
+        args: Vec<String>,
+    },
+    Prompt {
+        pane: String,
+        target: String,
+        text: String,
+    },
+    Rename {
+        pane: String,
+        name: String,
+    },
     /// Herdr `tab.rename` (T-278): the board names its own tab.
-    TabRename { tab_id: String, label: String },
-    PaneRun { pane: String, command: String },
-    AgentStart { name: String, kind: String, pane: String, args: Vec<String> },
-    SendKeys { pane: String, keys: Vec<String> },
-    PaneClose { pane: String },
-    PaneType { pane: String, text: String },
-    SetTitle { pane: String, title: String },
-    Notify { title: String, body: String },
-    WorktreeCreate { repo: String, branch: String, base: String, label: String },
-    WorktreeOpen { repo: String, branch: String, label: String },
-    WorktreeOpenPath { repo: String, path: String, label: String },
-    WorktreeRemove { workspace: String },
+    TabRename {
+        tab_id: String,
+        label: String,
+    },
+    PaneRun {
+        pane: String,
+        command: String,
+    },
+    AgentStart {
+        name: String,
+        kind: String,
+        pane: String,
+        args: Vec<String>,
+    },
+    SendKeys {
+        pane: String,
+        keys: Vec<String>,
+    },
+    PaneClose {
+        pane: String,
+    },
+    PaneType {
+        pane: String,
+        text: String,
+    },
+    SetTitle {
+        pane: String,
+        title: String,
+    },
+    Notify {
+        title: String,
+        body: String,
+    },
+    WorktreeCreate {
+        repo: String,
+        branch: String,
+        base: String,
+        label: String,
+    },
+    WorktreeOpen {
+        repo: String,
+        branch: String,
+        label: String,
+    },
+    WorktreeOpenPath {
+        repo: String,
+        path: String,
+        label: String,
+    },
+    WorktreeRemove {
+        workspace: String,
+    },
 }
 
 /// What the next side-effecting call (of any kind) should return.
@@ -94,14 +143,22 @@ pub struct FakeHerdr {
 
 impl FakeHerdr {
     pub fn new() -> Self {
-        FakeHerdr { prompt_starts_turn: false, ..Default::default() }
+        FakeHerdr {
+            prompt_starts_turn: false,
+            ..Default::default()
+        }
     }
 
     /// Add an empty shell pane (no agent).
     pub fn add_shell(&mut self, pane: &str) {
         self.panes.insert(
             pane.into(),
-            FakePane { agent: None, name: None, screen: String::new(), revision: 0 },
+            FakePane {
+                agent: None,
+                name: None,
+                screen: String::new(),
+                revision: 0,
+            },
         );
     }
 
@@ -194,7 +251,11 @@ impl FakeHerdr {
                 foreground_process_group_id: foreground.first().copied(),
                 foreground_processes: foreground
                     .iter()
-                    .map(|pid| PaneProcess { pid: *pid, name: String::new(), cmdline: None })
+                    .map(|pid| PaneProcess {
+                        pid: *pid,
+                        name: String::new(),
+                        cmdline: None,
+                    })
                     .collect(),
             },
         );
@@ -287,15 +348,28 @@ impl FakeHerdr {
         let pane = format!("{ws}:p1");
         self.add_shell(&pane);
         let path = format!("/fake-worktrees/{}", branch.replace('/', "-"));
-        self.worktrees.insert(branch.into(), (Some(ws.clone()), Some(pane.clone()), path.clone()));
-        Worktree { workspace_id: ws, pane_id: pane, path, branch: branch.into() }
+        self.worktrees.insert(
+            branch.into(),
+            (Some(ws.clone()), Some(pane.clone()), path.clone()),
+        );
+        Worktree {
+            workspace_id: ws,
+            pane_id: pane,
+            path,
+            branch: branch.into(),
+        }
     }
 
     fn act<T>(&mut self, call: Call, ok: impl FnOnce(&mut Self) -> Outcome<T>) -> Outcome<T> {
         self.calls.push(call);
         match self.inject_next.take() {
-            Some(Inject::Refuse { code }) => Outcome::Refused { code, message: "injected".into() },
-            Some(Inject::Uncertain) => Outcome::Uncertain { reason: "injected".into() },
+            Some(Inject::Refuse { code }) => Outcome::Refused {
+                code,
+                message: "injected".into(),
+            },
+            Some(Inject::Uncertain) => Outcome::Uncertain {
+                reason: "injected".into(),
+            },
             None => ok(self),
         }
     }
@@ -325,7 +399,11 @@ impl HerdrRead for FakeHerdr {
         if self.observe_fails || self.agents_fail {
             return Err(ObserveError("injected".into()));
         }
-        Ok(self.panes.iter().filter_map(|(id, p)| Self::info(id, p)).collect())
+        Ok(self
+            .panes
+            .iter()
+            .filter_map(|(id, p)| Self::info(id, p))
+            .collect())
     }
 
     fn agent_get(&mut self, pane_id: &str) -> Result<Option<AgentInfo>, ObserveError> {
@@ -355,20 +433,27 @@ impl HerdrRead for FakeHerdr {
         if !self.panes.contains_key(pane_id) && !self.processes.contains_key(pane_id) {
             return Err(ObserveError(format!("no pane {pane_id}")));
         }
-        Ok(self.processes.get(pane_id).cloned().unwrap_or_else(|| PaneProcessInfo {
-            pane_id: pane_id.to_string(),
-            shell_pid: Some(std::process::id()),
-            tty: None,
-            foreground_process_group_id: None,
-            foreground_processes: Vec::new(),
-        }))
+        Ok(self
+            .processes
+            .get(pane_id)
+            .cloned()
+            .unwrap_or_else(|| PaneProcessInfo {
+                pane_id: pane_id.to_string(),
+                shell_pid: Some(std::process::id()),
+                tty: None,
+                foreground_process_group_id: None,
+                foreground_processes: Vec::new(),
+            }))
     }
 
     fn read_tail(&mut self, pane_id: &str, lines: u32) -> Result<String, ObserveError> {
         if self.observe_fails {
             return Err(ObserveError("injected".into()));
         }
-        let p = self.panes.get(pane_id).ok_or_else(|| ObserveError(format!("no pane {pane_id}")))?;
+        let p = self
+            .panes
+            .get(pane_id)
+            .ok_or_else(|| ObserveError(format!("no pane {pane_id}")))?;
         let all: Vec<&str> = p.screen.lines().collect();
         let start = all.len().saturating_sub(lines as usize);
         Ok(all[start..].join("\n"))
@@ -380,15 +465,22 @@ impl HerdrRead for FakeHerdr {
         if self.observe_fails {
             return Err(ObserveError("injected".into()));
         }
-        let p = self.panes.get(pane_id).ok_or_else(|| ObserveError(format!("no pane {pane_id}")))?;
+        let p = self
+            .panes
+            .get(pane_id)
+            .ok_or_else(|| ObserveError(format!("no pane {pane_id}")))?;
         Ok(p.screen.clone())
     }
 }
 
 impl HerdrAct for FakeHerdr {
     fn opencode_api(&mut self, args: &[String]) -> Result<serde_json::Value, String> {
-        self.calls.push(Call::OpenCodeApi { args: args.to_vec() });
-        self.api_replies.pop_front().unwrap_or_else(|| Err("fake API unavailable".into()))
+        self.calls.push(Call::OpenCodeApi {
+            args: args.to_vec(),
+        });
+        self.api_replies
+            .pop_front()
+            .unwrap_or_else(|| Err("fake API unavailable".into()))
     }
     fn prompt(&mut self, target: &str, text: &str) -> Outcome<()> {
         // The target is an agent name (design §10.1) or a pane id. The call
@@ -416,7 +508,10 @@ impl HerdrAct for FakeHerdr {
             let starts = s.prompt_starts_turn;
             // Herdr refuses a prompt to an agent with no name (T-134):
             // "agent <pane> is not an active named agent".
-            let unnamed = s.panes.get(&pane).is_some_and(|p| p.agent.is_some() && p.name.is_none());
+            let unnamed = s
+                .panes
+                .get(&pane)
+                .is_some_and(|p| p.agent.is_some() && p.name.is_none());
             if unnamed {
                 return Outcome::Refused {
                     code: "agent_unnamed".into(),
@@ -424,10 +519,14 @@ impl HerdrAct for FakeHerdr {
                 };
             }
             match s.panes.get_mut(&pane).and_then(|p| p.agent.as_mut()) {
-                None => Outcome::Refused { code: "agent_not_ready".into(), message: "no agent".into() },
-                Some(a) if a.1 == AgentStatus::Blocked => {
-                    Outcome::Refused { code: "agent_blocked".into(), message: "blocked".into() }
-                }
+                None => Outcome::Refused {
+                    code: "agent_not_ready".into(),
+                    message: "no agent".into(),
+                },
+                Some(a) if a.1 == AgentStatus::Blocked => Outcome::Refused {
+                    code: "agent_blocked".into(),
+                    message: "blocked".into(),
+                },
                 Some(a) => {
                     if starts {
                         a.1 = AgentStatus::Working;
@@ -439,7 +538,10 @@ impl HerdrAct for FakeHerdr {
     }
 
     fn agent_rename(&mut self, pane_id: &str, name: &str) -> Outcome<()> {
-        let call = Call::Rename { pane: pane_id.into(), name: name.into() };
+        let call = Call::Rename {
+            pane: pane_id.into(),
+            name: name.into(),
+        };
         let (pane, name) = (pane_id.to_string(), name.to_string());
         self.act(call, move |s| {
             // Never steal a name another pane holds (T-134).
@@ -453,10 +555,14 @@ impl HerdrAct for FakeHerdr {
                 };
             }
             match s.panes.get_mut(&pane) {
-                None => Outcome::Refused { code: "not_found".into(), message: "no pane".into() },
-                Some(p) if p.agent.is_none() => {
-                    Outcome::Refused { code: "agent_not_found".into(), message: "no agent".into() }
-                }
+                None => Outcome::Refused {
+                    code: "not_found".into(),
+                    message: "no pane".into(),
+                },
+                Some(p) if p.agent.is_none() => Outcome::Refused {
+                    code: "agent_not_found".into(),
+                    message: "no agent".into(),
+                },
                 Some(p) => {
                     p.name = Some(name);
                     p.revision += 1;
@@ -469,34 +575,52 @@ impl HerdrAct for FakeHerdr {
     /// Herdr `tab.rename` (T-278): the board labels its own tab. A tab Herdr
     /// does not know is refused; the board goes on drawing either way.
     fn tab_rename(&mut self, tab_id: &str, label: &str) -> Outcome<()> {
-        let call = Call::TabRename { tab_id: tab_id.into(), label: label.into() };
+        let call = Call::TabRename {
+            tab_id: tab_id.into(),
+            label: label.into(),
+        };
         self.act(call, |_| Outcome::Ok(()))
     }
 
     fn pane_run(&mut self, pane_id: &str, command: &str) -> Outcome<()> {
         let pane = pane_id.to_string();
         let command_owned = command.to_string();
-        self.act(Call::PaneRun { pane: pane_id.into(), command: command.into() }, move |s| {
-            // Design §10.1: a shell command runs only in a pane that hosts no
-            // agent — otherwise it is typed into the agent's input.
-            if s.panes.get(&pane).is_some_and(|p| p.agent.is_some()) {
-                return Outcome::Refused {
-                    code: crate::AGENT_PRESENT.into(),
-                    message: format!("pane {pane} hosts an agent"),
-                };
-            }
-            if s.panes.contains_key(&pane) {
-                // Text + Enter is one submission (the socket path sends the
-                // Enter itself); the screen it produces comes next.
-                s.render_after(&pane, &command_owned);
-                Outcome::Ok(())
-            } else {
-                Outcome::Refused { code: "not_found".into(), message: "no pane".into() }
-            }
-        })
+        self.act(
+            Call::PaneRun {
+                pane: pane_id.into(),
+                command: command.into(),
+            },
+            move |s| {
+                // Design §10.1: a shell command runs only in a pane that hosts no
+                // agent — otherwise it is typed into the agent's input.
+                if s.panes.get(&pane).is_some_and(|p| p.agent.is_some()) {
+                    return Outcome::Refused {
+                        code: crate::AGENT_PRESENT.into(),
+                        message: format!("pane {pane} hosts an agent"),
+                    };
+                }
+                if s.panes.contains_key(&pane) {
+                    // Text + Enter is one submission (the socket path sends the
+                    // Enter itself); the screen it produces comes next.
+                    s.render_after(&pane, &command_owned);
+                    Outcome::Ok(())
+                } else {
+                    Outcome::Refused {
+                        code: "not_found".into(),
+                        message: "no pane".into(),
+                    }
+                }
+            },
+        )
     }
 
-    fn agent_start(&mut self, name: &str, kind: &str, pane_id: &str, args: &[String]) -> Outcome<AgentInfo> {
+    fn agent_start(
+        &mut self,
+        name: &str,
+        kind: &str,
+        pane_id: &str,
+        args: &[String],
+    ) -> Outcome<AgentInfo> {
         let call = Call::AgentStart {
             name: name.into(),
             kind: kind.into(),
@@ -508,7 +632,10 @@ impl HerdrAct for FakeHerdr {
         if let Some((code, left)) = self.refuse_starts.clone() {
             self.calls.push(call);
             self.refuse_starts = (left > 1).then(|| (code.clone(), left - 1));
-            return Outcome::Refused { code, message: "refused".into() };
+            return Outcome::Refused {
+                code,
+                message: "refused".into(),
+            };
         }
         let wanted = name.to_string();
         self.act(call, move |s| {
@@ -524,26 +651,30 @@ impl HerdrAct for FakeHerdr {
                 };
             }
             match s.panes.get_mut(&pane) {
-            None => Outcome::Refused { code: "not_found".into(), message: "no pane".into() },
-            Some(p) if p.agent.is_some() => {
-                Outcome::Refused { code: "pane_not_available".into(), message: "occupied".into() }
-            }
-            Some(p) => {
-                // Herdr reports the session of the agent it started (the codex
-                // uuid), so the fake does too: a caller that resumes a session
-                // needs one to resume.
-                p.agent = Some((kind, AgentStatus::Idle, Some(format!("{name}:session"))));
-                // An agent Herdr started carries the name it was started with
-                // (T-134); a name another pane holds is refused first.
-                p.name = Some(wanted.clone());
-                if let Some(screen) = start_screen {
-                    p.screen = screen;
+                None => Outcome::Refused {
+                    code: "not_found".into(),
+                    message: "no pane".into(),
+                },
+                Some(p) if p.agent.is_some() => Outcome::Refused {
+                    code: "pane_not_available".into(),
+                    message: "occupied".into(),
+                },
+                Some(p) => {
+                    // Herdr reports the session of the agent it started (the codex
+                    // uuid), so the fake does too: a caller that resumes a session
+                    // needs one to resume.
+                    p.agent = Some((kind, AgentStatus::Idle, Some(format!("{name}:session"))));
+                    // An agent Herdr started carries the name it was started with
+                    // (T-134); a name another pane holds is refused first.
+                    p.name = Some(wanted.clone());
+                    if let Some(screen) = start_screen {
+                        p.screen = screen;
+                    }
+                    p.revision += 1;
+                    let p = p.clone();
+                    s.started_agents.push(wanted.clone());
+                    Outcome::Ok(Self::info(&pane, &p).expect("just started"))
                 }
-                p.revision += 1;
-                let p = p.clone();
-                s.started_agents.push(wanted.clone());
-                Outcome::Ok(Self::info(&pane, &p).expect("just started"))
-            }
             }
         })
     }
@@ -551,23 +682,39 @@ impl HerdrAct for FakeHerdr {
     fn send_keys(&mut self, pane_id: &str, keys: &[String]) -> Outcome<()> {
         let pane = pane_id.to_string();
         let first = keys.first().cloned().unwrap_or_default();
-        self.act(Call::SendKeys { pane: pane_id.into(), keys: keys.to_vec() }, move |s| {
-            // Enter submits what was typed: the screen follows the typed text.
-            let typed = if first == "enter" { s.typed.remove(&pane) } else { None };
-            match typed {
-                Some(text) if !text.is_empty() => s.render_after(&pane, &text),
-                _ => s.render_after(&pane, &first),
-            }
-            Outcome::Ok(())
-        })
+        self.act(
+            Call::SendKeys {
+                pane: pane_id.into(),
+                keys: keys.to_vec(),
+            },
+            move |s| {
+                // Enter submits what was typed: the screen follows the typed text.
+                let typed = if first == "enter" {
+                    s.typed.remove(&pane)
+                } else {
+                    None
+                };
+                match typed {
+                    Some(text) if !text.is_empty() => s.render_after(&pane, &text),
+                    _ => s.render_after(&pane, &first),
+                }
+                Outcome::Ok(())
+            },
+        )
     }
 
     fn pane_type(&mut self, pane_id: &str, text: &str) -> Outcome<()> {
         let (pane, typed) = (pane_id.to_string(), text.to_string());
-        self.act(Call::PaneType { pane: pane_id.into(), text: text.into() }, move |s| {
-            s.typed.entry(pane).or_default().push_str(&typed);
-            Outcome::Ok(())
-        })
+        self.act(
+            Call::PaneType {
+                pane: pane_id.into(),
+                text: text.into(),
+            },
+            move |s| {
+                s.typed.entry(pane).or_default().push_str(&typed);
+                Outcome::Ok(())
+            },
+        )
     }
 
     /// Nothing to settle: the fake records the keystrokes and has no TUI to
@@ -576,60 +723,118 @@ impl HerdrAct for FakeHerdr {
 
     fn pane_close(&mut self, pane_id: &str) -> Outcome<()> {
         let pane = pane_id.to_string();
-        self.act(Call::PaneClose { pane: pane_id.into() }, move |s| {
-            s.panes.remove(&pane);
-            // A worktree's only pane closed: its workspace is gone too.
-            for entry in s.worktrees.values_mut() {
-                if entry.1.as_deref() == Some(pane.as_str()) {
-                    entry.0 = None;
-                    entry.1 = None;
+        self.act(
+            Call::PaneClose {
+                pane: pane_id.into(),
+            },
+            move |s| {
+                s.panes.remove(&pane);
+                // A worktree's only pane closed: its workspace is gone too.
+                for entry in s.worktrees.values_mut() {
+                    if entry.1.as_deref() == Some(pane.as_str()) {
+                        entry.0 = None;
+                        entry.1 = None;
+                    }
                 }
-            }
-            Outcome::Ok(())
-        })
+                Outcome::Ok(())
+            },
+        )
     }
 
     fn set_title(&mut self, pane_id: &str, title: &str) -> Outcome<()> {
-        self.act(Call::SetTitle { pane: pane_id.into(), title: title.into() }, |_| Outcome::Ok(()))
+        self.act(
+            Call::SetTitle {
+                pane: pane_id.into(),
+                title: title.into(),
+            },
+            |_| Outcome::Ok(()),
+        )
     }
 
     fn notify(&mut self, title: &str, body: &str) -> Outcome<()> {
-        self.act(Call::Notify { title: title.into(), body: body.into() }, |_| Outcome::Ok(()))
+        self.act(
+            Call::Notify {
+                title: title.into(),
+                body: body.into(),
+            },
+            |_| Outcome::Ok(()),
+        )
     }
 
-    fn worktree_create(&mut self, repo: &str, branch: &str, base: &str, label: &str) -> Outcome<Worktree> {
-        let call = Call::WorktreeCreate { repo: repo.into(), branch: branch.into(), base: base.into(), label: label.into() };
+    fn worktree_create(
+        &mut self,
+        repo: &str,
+        branch: &str,
+        base: &str,
+        label: &str,
+    ) -> Outcome<Worktree> {
+        let call = Call::WorktreeCreate {
+            repo: repo.into(),
+            branch: branch.into(),
+            base: base.into(),
+            label: label.into(),
+        };
         let branch = branch.to_string();
         self.act(call, move |s| {
             if s.worktrees.contains_key(&branch) {
-                return Outcome::Refused { code: "invalid_request".into(), message: "branch exists".into() };
+                return Outcome::Refused {
+                    code: "invalid_request".into(),
+                    message: "branch exists".into(),
+                };
             }
             Outcome::Ok(s.open_worktree(&branch))
         })
     }
 
     fn worktree_open(&mut self, repo: &str, branch: &str, label: &str) -> Outcome<Worktree> {
-        let call = Call::WorktreeOpen { repo: repo.into(), branch: branch.into(), label: label.into() };
+        let call = Call::WorktreeOpen {
+            repo: repo.into(),
+            branch: branch.into(),
+            label: label.into(),
+        };
         let branch = branch.to_string();
         self.act(call, move |s| match s.worktrees.get(&branch).cloned() {
-            None => Outcome::Refused { code: "worktree_not_found".into(), message: "worktree branch not found".into() },
-            Some((Some(ws), Some(pane), path)) => {
-                Outcome::Ok(Worktree { workspace_id: ws, pane_id: pane, path, branch })
-            }
+            None => Outcome::Refused {
+                code: "worktree_not_found".into(),
+                message: "worktree branch not found".into(),
+            },
+            Some((Some(ws), Some(pane), path)) => Outcome::Ok(Worktree {
+                workspace_id: ws,
+                pane_id: pane,
+                path,
+                branch,
+            }),
             Some(_) => Outcome::Ok(s.open_worktree(&branch)),
         })
     }
 
     fn worktree_open_path(&mut self, repo: &str, path: &str, label: &str) -> Outcome<Worktree> {
-        let call = Call::WorktreeOpenPath { repo: repo.into(), path: path.into(), label: label.into() };
+        let call = Call::WorktreeOpenPath {
+            repo: repo.into(),
+            path: path.into(),
+            label: label.into(),
+        };
         let path = path.to_string();
         self.act(call, move |s| {
-            let Some(branch) = s.worktrees.iter().find(|(_, v)| v.2 == path).map(|(k, _)| k.clone()) else {
-                return Outcome::Refused { code: "worktree_not_found".into(), message: "no worktree at that path".into() };
+            let Some(branch) = s
+                .worktrees
+                .iter()
+                .find(|(_, v)| v.2 == path)
+                .map(|(k, _)| k.clone())
+            else {
+                return Outcome::Refused {
+                    code: "worktree_not_found".into(),
+                    message: "no worktree at that path".into(),
+                };
             };
             match s.worktrees.get(&branch).cloned() {
                 Some((Some(ws), Some(pane), path)) if s.panes.contains_key(&pane) => {
-                    Outcome::Ok(Worktree { workspace_id: ws, pane_id: pane, path, branch })
+                    Outcome::Ok(Worktree {
+                        workspace_id: ws,
+                        pane_id: pane,
+                        path,
+                        branch,
+                    })
                 }
                 _ => Outcome::Ok(s.open_worktree(&branch)),
             }
@@ -638,16 +843,28 @@ impl HerdrAct for FakeHerdr {
 
     fn worktree_remove(&mut self, workspace_id: &str) -> Outcome<()> {
         let ws = workspace_id.to_string();
-        self.act(Call::WorktreeRemove { workspace: ws.clone() }, move |s| {
-            let Some(branch) = s.worktrees.iter().find(|(_, v)| v.0.as_deref() == Some(&ws)).map(|(k, _)| k.clone())
-            else {
-                return Outcome::Refused { code: "not_found".into(), message: "no workspace".into() };
-            };
-            if let Some((_, Some(pane), _)) = s.worktrees.remove(&branch) {
-                s.panes.remove(&pane);
-            }
-            Outcome::Ok(())
-        })
+        self.act(
+            Call::WorktreeRemove {
+                workspace: ws.clone(),
+            },
+            move |s| {
+                let Some(branch) = s
+                    .worktrees
+                    .iter()
+                    .find(|(_, v)| v.0.as_deref() == Some(&ws))
+                    .map(|(k, _)| k.clone())
+                else {
+                    return Outcome::Refused {
+                        code: "not_found".into(),
+                        message: "no workspace".into(),
+                    };
+                };
+                if let Some((_, Some(pane), _)) = s.worktrees.remove(&branch) {
+                    s.panes.remove(&pane);
+                }
+                Outcome::Ok(())
+            },
+        )
     }
 }
 
@@ -684,12 +901,24 @@ mod tests {
             o => panic!("{o:?}"),
         };
         assert_eq!(w.path, "/fake-worktrees/data-t1-store");
-        assert!(h.agent_get(&w.pane_id).unwrap().is_none(), "root pane is an empty shell");
-        assert!(matches!(h.worktree_create("/repo", "data/t1-store", "dev", "x"), Outcome::Refused { .. }));
-        assert_eq!(h.worktree_open("/repo", "data/t1-store", "x"), Outcome::Ok(w.clone()));
+        assert!(
+            h.agent_get(&w.pane_id).unwrap().is_none(),
+            "root pane is an empty shell"
+        );
+        assert!(matches!(
+            h.worktree_create("/repo", "data/t1-store", "dev", "x"),
+            Outcome::Refused { .. }
+        ));
+        assert_eq!(
+            h.worktree_open("/repo", "data/t1-store", "x"),
+            Outcome::Ok(w.clone())
+        );
         assert_eq!(h.worktree_remove(&w.workspace_id), Outcome::Ok(()));
         assert!(h.worktree_branches().is_empty());
-        assert!(matches!(h.worktree_open("/repo", "data/t1-store", "x"), Outcome::Refused { .. }));
+        assert!(matches!(
+            h.worktree_open("/repo", "data/t1-store", "x"),
+            Outcome::Refused { .. }
+        ));
     }
 
     #[test]
@@ -698,12 +927,20 @@ mod tests {
         assert_eq!(h.tab_rename("w1:t2", "gear board"), Outcome::Ok(()));
         assert_eq!(
             h.calls,
-            vec![Call::TabRename { tab_id: "w1:t2".into(), label: "gear board".into() }]
+            vec![Call::TabRename {
+                tab_id: "w1:t2".into(),
+                label: "gear board".into()
+            }]
         );
         assert_eq!(h.tab_renames_to("gear board"), vec!["w1:t2"]);
         // A refused rename is recorded too, and the caller may ignore it.
-        h.inject_next = Some(Inject::Refuse { code: "not_found".into() });
-        assert!(matches!(h.tab_rename("w1:t9", "p board"), Outcome::Refused { .. }));
+        h.inject_next = Some(Inject::Refuse {
+            code: "not_found".into(),
+        });
+        assert!(matches!(
+            h.tab_rename("w1:t9", "p board"),
+            Outcome::Refused { .. }
+        ));
     }
 
     #[test]

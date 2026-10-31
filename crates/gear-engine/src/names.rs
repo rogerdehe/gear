@@ -132,9 +132,9 @@ pub fn resolve_target(
         // It lost its name: give it back now; the text goes next tick.
         Some(None) => match herdr.agent_rename(pane_id, name) {
             Outcome::Ok(()) => Target::Renamed,
-            Outcome::Refused { code, message } => {
-                Target::Blocked(format!("the name {name} could not be given to the agent of {pane_id}: {code}: {message}"))
-            }
+            Outcome::Refused { code, message } => Target::Blocked(format!(
+                "the name {name} could not be given to the agent of {pane_id}: {code}: {message}"
+            )),
             Outcome::Uncertain { reason } => Target::Unreadable(reason),
         },
         // The pane is not in Herdr's list: the read is partial, so nothing is
@@ -194,7 +194,10 @@ pub fn restore(
         // asked Herdr to start it and has not confirmed it yet (the review of
         // T-18: an agent Herdr accepted while the seat stayed `Starting`). Its
         // agent carries the seat's name like every other one.
-        if !matches!(binding.status, BindingStatus::Active | BindingStatus::Pending) {
+        if !matches!(
+            binding.status,
+            BindingStatus::Active | BindingStatus::Pending
+        ) {
             continue;
         }
         let name = desired(&seat);
@@ -215,7 +218,8 @@ pub fn restore(
             }
             Ensure::Taken { holder } => {
                 restored.taken.push(seat.id.clone());
-                store.write(|tx| report_taken(tx, project, &seat, &name, holder.as_deref(), now))?;
+                store
+                    .write(|tx| report_taken(tx, project, &seat, &name, holder.as_deref(), now))?;
             }
             Ensure::NoAgent => {}
             Ensure::Failed(reason) => {
@@ -255,7 +259,9 @@ fn report_taken(
     if open {
         return Ok(()); // already said: one item per spell
     }
-    let by = holder.map(|pane| format!(" (pane {pane})")).unwrap_or_default();
+    let by = holder
+        .map(|pane| format!(" (pane {pane})"))
+        .unwrap_or_default();
     tx.insert_message(&NewMessage {
         meta: None,
         project: project.to_string(),

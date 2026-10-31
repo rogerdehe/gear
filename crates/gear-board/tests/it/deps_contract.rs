@@ -17,7 +17,15 @@ fn world() -> Store {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "claude",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
             for (id, rank, state, deps) in [
                 ("T-1", 1, TaskState::Ready, vec![]),
@@ -46,7 +54,8 @@ fn world() -> Store {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                     issue: None,updated: T0,
+                    issue: None,
+                    updated: T0,
                 })?;
             }
             Ok(())
@@ -56,7 +65,10 @@ fn world() -> Store {
 }
 
 fn options() -> Options {
-    Options { project: Some("p".into()), ..Options::default() }
+    Options {
+        project: Some("p".into()),
+        ..Options::default()
+    }
 }
 
 #[test]
@@ -156,7 +168,8 @@ fn the_right_arrow_moves_to_the_next_view() {
 fn the_json_carries_the_tree() {
     let mut store = world();
     let board = build(&mut store, &options(), T0).unwrap();
-    let doc: serde_json::Value = serde_json::from_str(&gear_board::to_json(&board).unwrap()).unwrap();
+    let doc: serde_json::Value =
+        serde_json::from_str(&gear_board::to_json(&board).unwrap()).unwrap();
 
     let deps = doc["projects"][0]["deps"].as_array().expect("the tree");
     assert_eq!(deps.len(), 5);

@@ -99,8 +99,10 @@ impl Scratch {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let path = std::env::temp_dir()
-            .join(format!("gear-base-{tag}-{}-{nanos}-{seq}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "gear-base-{tag}-{}-{nanos}-{seq}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&path).unwrap();
         Scratch { path }
     }
@@ -135,7 +137,10 @@ fn publish(origin: &Path, source: &Path, from: &str, branch: &str) {
 
 /// Delete `branch` in the bare origin's refs (a ref update, not a push).
 fn unpublish(origin: &Path, branch: &str) {
-    git(origin, &["update-ref", "-d", &format!("refs/heads/{branch}")]);
+    git(
+        origin,
+        &["update-ref", "-d", &format!("refs/heads/{branch}")],
+    );
 }
 
 /// The repositories every test starts from, built **once per test file**
@@ -159,7 +164,10 @@ struct Template {
 fn template() -> std::sync::Arc<Template> {
     use std::sync::{Arc, Mutex, OnceLock, Weak};
     static TEMPLATE: OnceLock<Mutex<Weak<Template>>> = OnceLock::new();
-    let mut slot = TEMPLATE.get_or_init(|| Mutex::new(Weak::new())).lock().unwrap();
+    let mut slot = TEMPLATE
+        .get_or_init(|| Mutex::new(Weak::new()))
+        .lock()
+        .unwrap();
     if let Some(template) = slot.upgrade() {
         return template;
     }
@@ -177,7 +185,13 @@ fn template() -> std::sync::Arc<Template> {
         let lane = root.path.join("lane");
         git(&root.path, &["clone", "-q", &url, lane.to_str().unwrap()]);
         let older = git(&lane, &["rev-parse", "origin/dev~1"]);
-        Template { origin, seed, lane, older, _root: root }
+        Template {
+            origin,
+            seed,
+            lane,
+            older,
+            _root: root,
+        }
     });
     *slot = Arc::downgrade(&template);
     template
@@ -195,7 +209,13 @@ fn repos() -> Repos {
     // The seed publishes to *this* test's origin, so `advance_dev` moves only it.
     crate::point_at(&seed, &origin);
     crate::point_at(&lane, &origin);
-    Repos { _root: root, origin, seed, lane, older: template.older.clone() }
+    Repos {
+        _root: root,
+        origin,
+        seed,
+        lane,
+        older: template.older.clone(),
+    }
 }
 
 impl Repos {
@@ -204,8 +224,17 @@ impl Repos {
     /// The origin fetches it from the lane — the fixtures never push (T-108).
     fn candidate(&self, branch: &str, from: &str, text: &str) -> String {
         git(&self.lane, &["switch", "-q", "-c", branch, from]);
-        let commit = commit(&self.lane, &format!("{}.txt", branch.replace('/', "-")), text);
-        publish(&self.origin, &self.lane, &format!("refs/heads/{branch}"), branch);
+        let commit = commit(
+            &self.lane,
+            &format!("{}.txt", branch.replace('/', "-")),
+            text,
+        );
+        publish(
+            &self.origin,
+            &self.lane,
+            &format!("refs/heads/{branch}"),
+            branch,
+        );
         commit
     }
 
@@ -215,7 +244,12 @@ impl Repos {
         let work = format!("work-{branch}");
         git(&self.lane, &["switch", "-q", "-c", &work, from]);
         let commit = commit(&self.lane, &format!("{}.txt", work.replace('/', "-")), text);
-        publish(&self.origin, &self.lane, &format!("refs/heads/{work}"), branch);
+        publish(
+            &self.origin,
+            &self.lane,
+            &format!("refs/heads/{work}"),
+            branch,
+        );
         commit
     }
 
@@ -255,7 +289,12 @@ fn dev_with_ages(r: &Repos, ages: &[i64]) -> Vec<String> {
     publish(&r.origin, &r.seed, "refs/heads/fresh", "dev");
     git(
         &r.lane,
-        &["fetch", "-q", "origin", "+refs/heads/dev:refs/remotes/origin/dev"],
+        &[
+            "fetch",
+            "-q",
+            "origin",
+            "+refs/heads/dev:refs/remotes/origin/dev",
+        ],
     );
     shas
 }
@@ -302,7 +341,8 @@ fn a_candidate_behind_the_integration_branch_is_refused() {
     let err = require_current_base(&r.lane, "origin", "dev", &stale, 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
-        err.detail.contains("merge origin/dev into your branch, build, then hand in again"),
+        err.detail
+            .contains("merge origin/dev into your branch, build, then hand in again"),
         "{}",
         err.detail
     );
@@ -323,7 +363,12 @@ fn a_recent_base_with_a_conflicting_change_is_refused() {
     publish(&r.origin, &r.seed, "refs/heads/fresh", "dev");
     git(
         &r.lane,
-        &["fetch", "-q", "origin", "+refs/heads/dev:refs/remotes/origin/dev"],
+        &[
+            "fetch",
+            "-q",
+            "origin",
+            "+refs/heads/dev:refs/remotes/origin/dev",
+        ],
     );
     // ...and the lane changed it differently.
     git(&r.lane, &["switch", "-q", "-c", "heat/t1", &shas[1]]);
@@ -338,7 +383,8 @@ fn a_recent_base_with_a_conflicting_change_is_refused() {
     let err = require_current_base(&r.lane, "origin", "dev", &candidate, 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
-        err.detail.contains("merge origin/dev into your branch, build, then hand in again"),
+        err.detail
+            .contains("merge origin/dev into your branch, build, then hand in again"),
         "{}",
         err.detail
     );
@@ -355,7 +401,8 @@ fn a_candidate_behind_the_integration_branch_is_refused_without_a_window() {
     let err = require_current_base(&r.lane, "origin", "dev", &candidate, 0).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
-        err.detail.contains("merge origin/dev into your branch, build, then hand in again"),
+        err.detail
+            .contains("merge origin/dev into your branch, build, then hand in again"),
         "{}",
         err.detail
     );
@@ -365,13 +412,23 @@ fn a_candidate_behind_the_integration_branch_is_refused_without_a_window() {
 fn a_failing_fetch_is_refused_not_ignored() {
     let r = repos();
     let candidate = r.candidate("heat/t1", "origin/dev", "my work");
-    git(&r.lane, &["remote", "set-url", "origin", "/nonexistent/nowhere.git"]);
+    git(
+        &r.lane,
+        &["remote", "set-url", "origin", "/nonexistent/nowhere.git"],
+    );
     let err = require_current_base(&r.lane, "origin", "dev", &candidate, 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
-    assert!(err.detail.contains("cannot fetch origin/dev"), "{}", err.detail);
+    assert!(
+        err.detail.contains("cannot fetch origin/dev"),
+        "{}",
+        err.detail
+    );
     // The reason, not only git's boilerplate last line (review F4).
     assert!(
-        err.detail.contains("nowhere.git") || err.detail.contains("does not appear to be a git repository"),
+        err.detail.contains("nowhere.git")
+            || err
+                .detail
+                .contains("does not appear to be a git repository"),
         "{}",
         err.detail
     );
@@ -406,7 +463,11 @@ fn the_integration_branch_is_fetched_through_the_projects_remote() {
     // refused, never accepted unchecked.
     let err = require_current_base(&r.lane, "origin", "dev", &candidate, 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
-    assert!(err.detail.contains("cannot fetch origin/dev"), "{}", err.detail);
+    assert!(
+        err.detail.contains("cannot fetch origin/dev"),
+        "{}",
+        err.detail
+    );
 }
 
 // ---------------------------------------------------------------- the hand-in
@@ -438,7 +499,8 @@ fn world() -> Store {
             wait_cond: None,
             rework_note: None,
             estimate_min: None,
-             issue: None,updated: T0,
+            issue: None,
+            updated: T0,
         })?;
         tx.insert_contract(&ContractRow {
             project: "p".into(),
@@ -462,11 +524,19 @@ fn world() -> Store {
 fn lane() -> (Env, Fingerprint) {
     (
         Env {
-            ctx: Some(GearCtx { project: "p".into(), seat: "heat".into(), generation: 1 }),
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "heat".into(),
+                generation: 1,
+            }),
             pane_id: Some(LANE_PANE.into()),
             admin: false,
         },
-        Fingerprint { pane_id: LANE_PANE.into(), kind: Some("opencode".into()), session_ref: None },
+        Fingerprint {
+            pane_id: LANE_PANE.into(),
+            kind: Some("opencode".into()),
+            session_ref: None,
+        },
     )
 }
 
@@ -499,15 +569,25 @@ fn a_stale_hand_in_stores_nothing() {
     let stale = r.candidate("data/stale", &r.older, "old work");
     let mut s = world();
     let (env, fp) = lane();
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 0 });
+    let gate = Some(BaseGate {
+        worktree: r.lane.clone(),
+        integration: "dev".into(),
+        window_min: 0,
+    });
 
     let err = mail::send(&mut s, &env, Some(&fp), &result(&stale, gate), T0 + 5).unwrap_err();
 
     assert_eq!(err.code, ErrorCode::BadFormat);
     // Nothing was written: no message, the attempt is still being worked on.
-    assert!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap().is_empty());
+    assert!(s
+        .read(|tx| tx.actionable_for("p", "p:captain", T0 + 6))
+        .unwrap()
+        .is_empty());
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
-    assert_eq!((attempt.state, attempt.candidate), (AttemptState::Started, None));
+    assert_eq!(
+        (attempt.state, attempt.candidate),
+        (AttemptState::Started, None)
+    );
 }
 
 /// T-83: a hand-in from a branch nobody pushed is refused — M2.1's T-60 was
@@ -521,25 +601,51 @@ fn an_unpushed_candidate_is_refused() {
     let unpushed = commit(&r.lane, "work.txt", "my work");
     let mut s = world();
     let (env, fp) = lane();
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
+    let gate = Some(BaseGate {
+        worktree: r.lane.clone(),
+        integration: "dev".into(),
+        window_min: 30,
+    });
 
     let err = mail::send(&mut s, &env, Some(&fp), &result(&unpushed, gate), T0 + 5).unwrap_err();
 
     assert_eq!(err.code, ErrorCode::BadFormat);
-    assert!(err.detail.contains("cannot fetch origin/heat/t1"), "{}", err.detail);
-    assert!(err.detail.contains("push the task branch first"), "{}", err.detail);
+    assert!(
+        err.detail.contains("cannot fetch origin/heat/t1"),
+        "{}",
+        err.detail
+    );
+    assert!(
+        err.detail.contains("push the task branch first"),
+        "{}",
+        err.detail
+    );
     assert!(err.detail.contains("heat/t1"), "{}", err.detail);
     // A candidate that is not on a branch that *does* exist is the other
     // refusal: the branch is there, this commit is not on it.
     publish(&r.origin, &r.lane, "refs/remotes/origin/dev", "heat/t1");
     let other = commit(&r.lane, "other.txt", "somewhere else");
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
+    let gate = Some(BaseGate {
+        worktree: r.lane.clone(),
+        integration: "dev".into(),
+        window_min: 30,
+    });
     let err = mail::send(&mut s, &env, Some(&fp), &result(&other, gate), T0 + 5).unwrap_err();
-    assert!(err.detail.contains("is not on refs/remotes/origin/heat/t1"), "{}", err.detail);
+    assert!(
+        err.detail.contains("is not on refs/remotes/origin/heat/t1"),
+        "{}",
+        err.detail
+    );
     // Nothing was written: no message, the attempt is still being worked on.
-    assert!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap().is_empty());
+    assert!(s
+        .read(|tx| tx.actionable_for("p", "p:captain", T0 + 6))
+        .unwrap()
+        .is_empty());
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
-    assert_eq!((attempt.state, attempt.candidate), (AttemptState::Started, None));
+    assert_eq!(
+        (attempt.state, attempt.candidate),
+        (AttemptState::Started, None)
+    );
 }
 
 /// §10.7 row B03-08: a rework hand-in whose candidate does not contain the
@@ -576,17 +682,28 @@ fn a_rework_off_the_earlier_candidate_is_refused() {
     })
     .unwrap();
     let (env, fp) = lane();
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
+    let gate = Some(BaseGate {
+        worktree: r.lane.clone(),
+        integration: "dev".into(),
+        window_min: 30,
+    });
     let mut args = result(&second, gate);
     args.attempt = Some(2);
 
     let err = mail::send(&mut s, &env, Some(&fp), &args, T0 + 5).unwrap_err();
 
     assert_eq!(err.code, ErrorCode::BadFormat);
-    assert!(err.detail.contains(&first), "the refusal names that commit: {}", err.detail);
+    assert!(
+        err.detail.contains(&first),
+        "the refusal names that commit: {}",
+        err.detail
+    );
     // Nothing is stored: the attempt is still being worked on.
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 2)).unwrap().unwrap();
-    assert_eq!((attempt.state, attempt.candidate), (AttemptState::Started, None));
+    assert_eq!(
+        (attempt.state, attempt.candidate),
+        (AttemptState::Started, None)
+    );
 }
 
 /// The other half of B03-08: a rework that keeps the work the reviewer read
@@ -621,7 +738,11 @@ fn a_rework_that_keeps_the_earlier_candidate_is_accepted() {
     })
     .unwrap();
     let (env, fp) = lane();
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
+    let gate = Some(BaseGate {
+        worktree: r.lane.clone(),
+        integration: "dev".into(),
+        window_min: 30,
+    });
     let mut args = result(&second, gate);
     args.attempt = Some(2);
 
@@ -641,14 +762,24 @@ fn a_current_candidate_is_accepted() {
     let current = r.candidate("heat/t1", "origin/dev", "my work");
     let mut s = world();
     let (env, fp) = lane();
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
+    let gate = Some(BaseGate {
+        worktree: r.lane.clone(),
+        integration: "dev".into(),
+        window_min: 30,
+    });
 
     let sent = mail::send(&mut s, &env, Some(&fp), &result(&current, gate), T0 + 5).unwrap();
 
     assert_eq!(sent.recipient, "p:captain");
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
-    assert_eq!((attempt.state, attempt.candidate.as_deref()), (AttemptState::Submitted, Some(current.as_str())));
-    assert_eq!(s.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap().len(), 1);
+    assert_eq!(
+        (attempt.state, attempt.candidate.as_deref()),
+        (AttemptState::Submitted, Some(current.as_str()))
+    );
+    assert_eq!(
+        s.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap().len(),
+        1
+    );
 }
 
 // ---------------------------------------------------------------- R1 fixes
@@ -666,7 +797,11 @@ fn a_restricted_fetch_refspec_cannot_hide_a_stale_candidate() {
     publish(&r.origin, &r.seed, "refs/heads/dev", "other");
     git(
         &r.lane,
-        &["config", "remote.origin.fetch", "+refs/heads/other:refs/remotes/origin/other"],
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/other:refs/remotes/origin/other",
+        ],
     );
 
     // The strict rule (no window): the candidate does not contain the tip the
@@ -674,7 +809,11 @@ fn a_restricted_fetch_refspec_cannot_hide_a_stale_candidate() {
     // only just is accepted).
     let err = require_current_base(&r.lane, "origin", "dev", &stale, 0).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
-    assert!(err.detail.contains("merge origin/dev into your branch"), "{}", err.detail);
+    assert!(
+        err.detail.contains("merge origin/dev into your branch"),
+        "{}",
+        err.detail
+    );
 }
 
 /// F1: a deleted remote integration branch is refused, not verified against a
@@ -687,7 +826,11 @@ fn a_deleted_remote_integration_branch_is_refused() {
 
     let err = require_current_base(&r.lane, "origin", "dev", &candidate, 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
-    assert!(err.detail.contains("cannot fetch origin/dev"), "{}", err.detail);
+    assert!(
+        err.detail.contains("cannot fetch origin/dev"),
+        "{}",
+        err.detail
+    );
 }
 
 /// F2: a committed request replays its receipt even when the remote is now
@@ -698,20 +841,32 @@ fn a_committed_hand_in_replays_its_receipt_after_a_fetch_failure() {
     let current = r.candidate("heat/t1", "origin/dev", "my work");
     let mut s = world();
     let (env, fp) = lane();
-    let gate = || Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
+    let gate = || {
+        Some(BaseGate {
+            worktree: r.lane.clone(),
+            integration: "dev".into(),
+            window_min: 30,
+        })
+    };
 
     let first = mail::send(&mut s, &env, Some(&fp), &result(&current, gate()), T0 + 5).unwrap();
     assert!(!first.replayed);
 
     // The remote goes away; the identical request (same id) must still replay.
-    git(&r.lane, &["remote", "set-url", "origin", "/nonexistent/nowhere.git"]);
+    git(
+        &r.lane,
+        &["remote", "set-url", "origin", "/nonexistent/nowhere.git"],
+    );
     let again = mail::send(&mut s, &env, Some(&fp), &result(&current, gate()), T0 + 6).unwrap();
     assert!(again.replayed, "{again:?}");
     assert_eq!(again.msg_id, first.msg_id);
     assert_eq!(again.thread, first.thread);
 
     // Nothing was stored twice, and the attempt is still the one submitted.
-    assert_eq!(s.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap().len(), 1);
+    assert_eq!(
+        s.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap().len(),
+        1
+    );
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
     assert_eq!(attempt.state, AttemptState::Submitted);
 }
@@ -737,9 +892,14 @@ fn a_long_multibyte_fetch_failure_is_a_bad_format_not_a_panic() {
 
     let err = require_current_base(&r.lane, "origin", "dev", &candidate, 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
-    assert!(err.detail.contains("cannot fetch origin/dev"), "{}", err.detail);
     assert!(
-        err.detail.contains("does not appear to be a git repository")
+        err.detail.contains("cannot fetch origin/dev"),
+        "{}",
+        err.detail
+    );
+    assert!(
+        err.detail
+            .contains("does not appear to be a git repository")
             || err.detail.contains("Could not read from remote repository"),
         "the reason survives: {}",
         err.detail
@@ -757,7 +917,13 @@ fn a_replay_needs_the_live_seat() {
     // (a) no fingerprint: the pane hosts no agent, so there is no seat.
     let mut s = world();
     let (env, fp) = lane();
-    let gate = || Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
+    let gate = || {
+        Some(BaseGate {
+            worktree: r.lane.clone(),
+            integration: "dev".into(),
+            window_min: 30,
+        })
+    };
     let first = mail::send(&mut s, &env, Some(&fp), &result(&current, gate()), T0 + 5).unwrap();
     let err = mail::send(&mut s, &env, None, &result(&current, gate()), T0 + 6).unwrap_err();
     assert_eq!(err.code, ErrorCode::NotRegistered, "{err:?}");
@@ -772,12 +938,16 @@ fn a_replay_needs_the_live_seat() {
     // (c) a void binding: the pane no longer belongs to this generation.
     let mut s = world();
     mail::send(&mut s, &env, Some(&fp), &result(&current, gate()), T0 + 5).unwrap();
-    s.write(|tx| tx.set_binding_status("p:heat", 1, gear_store::BindingStatus::Void)).unwrap();
+    s.write(|tx| tx.set_binding_status("p:heat", 1, gear_store::BindingStatus::Void))
+        .unwrap();
     let err = mail::send(&mut s, &env, Some(&fp), &result(&current, gate()), T0 + 6).unwrap_err();
     assert_eq!(err.code, ErrorCode::StaleGeneration, "{err:?}");
 
     // Nothing was stored twice anywhere; the committed message is still one.
-    assert_eq!(s.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap().len(), 1);
+    assert_eq!(
+        s.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap().len(),
+        1
+    );
     assert_eq!(first.msg_id, "M-1");
 }
 
@@ -851,7 +1021,11 @@ fn world_with_repos() -> Store {
 /// The environment of a seat: the lane `heat` or the lane `pricing`.
 fn seat_env(seat: &str) -> Env {
     Env {
-        ctx: Some(GearCtx { project: "p".into(), seat: seat.into(), generation: 1 }),
+        ctx: Some(GearCtx {
+            project: "p".into(),
+            seat: seat.into(),
+            generation: 1,
+        }),
         pane_id: Some(LANE_PANE.into()),
         admin: false,
     }
@@ -882,16 +1056,31 @@ fn a_branch_deleted_on_the_remote_is_refused() {
     unpublish(&r.origin, "heat/t1");
     let mut s = world();
     let (env, fp) = lane();
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
+    let gate = Some(BaseGate {
+        worktree: r.lane.clone(),
+        integration: "dev".into(),
+        window_min: 30,
+    });
 
     let err = mail::send(&mut s, &env, Some(&fp), &result(&candidate, gate), T0 + 5).unwrap_err();
 
     assert_eq!(err.code, ErrorCode::BadFormat);
-    assert!(err.detail.contains("cannot fetch origin/heat/t1"), "{}", err.detail);
-    assert!(err.detail.contains("push the task branch first"), "{}", err.detail);
+    assert!(
+        err.detail.contains("cannot fetch origin/heat/t1"),
+        "{}",
+        err.detail
+    );
+    assert!(
+        err.detail.contains("push the task branch first"),
+        "{}",
+        err.detail
+    );
     assert!(err.detail.contains("heat/t1"), "{}", err.detail);
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
-    assert_eq!((attempt.state, attempt.candidate), (AttemptState::Started, None));
+    assert_eq!(
+        (attempt.state, attempt.candidate),
+        (AttemptState::Started, None)
+    );
 }
 
 // ---------------------------------------------------------------- a review
@@ -902,19 +1091,29 @@ const REVIEW_PANE: &str = "w1:p3";
 /// verdict.
 fn review_world() -> Store {
     let mut s = world();
-    s.write(|tx| testing::seed_temp_seat(tx, "p", "r-1", "T-1", REVIEW_PANE, "opencode", T0).map(|_| ()))
-        .unwrap();
+    s.write(|tx| {
+        testing::seed_temp_seat(tx, "p", "r-1", "T-1", REVIEW_PANE, "opencode", T0).map(|_| ())
+    })
+    .unwrap();
     s
 }
 
 fn reviewer() -> (Env, Fingerprint) {
     (
         Env {
-            ctx: Some(GearCtx { project: "p".into(), seat: "r-1".into(), generation: 1 }),
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "r-1".into(),
+                generation: 1,
+            }),
             pane_id: Some(REVIEW_PANE.into()),
             admin: false,
         },
-        Fingerprint { pane_id: REVIEW_PANE.into(), kind: Some("opencode".into()), session_ref: None },
+        Fingerprint {
+            pane_id: REVIEW_PANE.into(),
+            kind: Some("opencode".into()),
+            session_ref: None,
+        },
     )
 }
 
@@ -968,13 +1167,32 @@ fn a_review_pushed_to_another_remote_is_refused() {
     commit(&r.lane, "review-T-1.md", "review(T-1): pass");
     // It pushed to the second remote its worktree has, and checked that one.
     let backup = r._root.path.join("backup.git");
-    git(&r._root.path, &["init", "-q", "--bare", "--initial-branch=dev", backup.to_str().unwrap()]);
-    git(&r.lane, &["remote", "add", "backup", backup.to_str().unwrap()]);
-    git(&r.lane, &["push", "-q", "backup", "HEAD:refs/heads/review/t1"]);
+    git(
+        &r._root.path,
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "--initial-branch=dev",
+            backup.to_str().unwrap(),
+        ],
+    );
+    git(
+        &r.lane,
+        &["remote", "add", "backup", backup.to_str().unwrap()],
+    );
+    git(
+        &r.lane,
+        &["push", "-q", "backup", "HEAD:refs/heads/review/t1"],
+    );
 
     let mut s = review_world();
     let (env, fp) = reviewer();
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 0 });
+    let gate = Some(BaseGate {
+        worktree: r.lane.clone(),
+        integration: "dev".into(),
+        window_min: 0,
+    });
 
     let err = in_dir(&r.lane, || {
         mail::send(&mut s, &env, Some(&fp), &review(gate), T0 + 5)
@@ -982,12 +1200,26 @@ fn a_review_pushed_to_another_remote_is_refused() {
     .unwrap_err();
 
     assert_eq!(err.code, ErrorCode::BadFormat);
-    assert!(err.detail.contains("cannot fetch origin/review/t1"), "{}", err.detail);
+    assert!(
+        err.detail.contains("cannot fetch origin/review/t1"),
+        "{}",
+        err.detail
+    );
     // The refusal names the exact push of the review branch.
-    assert!(err.detail.contains("`git push origin review/t1`"), "{}", err.detail);
+    assert!(
+        err.detail.contains("`git push origin review/t1`"),
+        "{}",
+        err.detail
+    );
     // Nothing was stored: no verdict, nothing in the captain's inbox.
-    assert!(s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().is_none());
-    assert!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap().is_empty());
+    assert!(s
+        .read(|tx| tx.get_review_verdict("p", "T-1", 1))
+        .unwrap()
+        .is_none());
+    assert!(s
+        .read(|tx| tx.actionable_for("p", "p:captain", T0 + 6))
+        .unwrap()
+        .is_empty());
 }
 
 /// T-438: the same verdict, pushed to the project's own remote exactly as the
@@ -997,18 +1229,28 @@ fn a_review_pushed_to_the_projects_remote_is_taken() {
     let r = repos();
     git(&r.lane, &["switch", "-q", "-c", "review/t1", "origin/dev"]);
     commit(&r.lane, "review-T-1.md", "review(T-1): pass");
-    git(&r.lane, &["push", "-q", "origin", "HEAD:refs/heads/review/t1"]);
+    git(
+        &r.lane,
+        &["push", "-q", "origin", "HEAD:refs/heads/review/t1"],
+    );
 
     let mut s = review_world();
     let (env, fp) = reviewer();
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 0 });
+    let gate = Some(BaseGate {
+        worktree: r.lane.clone(),
+        integration: "dev".into(),
+        window_min: 0,
+    });
 
     in_dir(&r.lane, || {
         mail::send(&mut s, &env, Some(&fp), &review(gate), T0 + 5)
     })
     .unwrap();
 
-    let record = s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().unwrap();
+    let record = s
+        .read(|tx| tx.get_review_verdict("p", "T-1", 1))
+        .unwrap()
+        .unwrap();
     assert!(record.passed);
     assert_eq!(record.by_seat, "p:r-1");
 }
@@ -1019,7 +1261,10 @@ fn a_review_pushed_to_the_projects_remote_is_taken() {
 fn a_direction_check_is_not_checked_against_a_review_branch() {
     let r = repos();
     // The reviewer's worktree is at a commit nothing has pushed.
-    git(&r.lane, &["switch", "-q", "-c", "direction/t1", "origin/dev"]);
+    git(
+        &r.lane,
+        &["switch", "-q", "-c", "direction/t1", "origin/dev"],
+    );
     commit(&r.lane, "direction.md", "the direction is sound");
 
     let mut s = review_world();
@@ -1051,13 +1296,20 @@ fn a_review_branch_behind_the_reviewers_head_is_refused() {
     let r = repos();
     git(&r.lane, &["switch", "-q", "-c", "review/t1", "origin/dev"]);
     commit(&r.lane, "review-T-1.md", "the review");
-    git(&r.lane, &["push", "-q", "origin", "HEAD:refs/heads/review/t1"]);
+    git(
+        &r.lane,
+        &["push", "-q", "origin", "HEAD:refs/heads/review/t1"],
+    );
     // A second commit the reviewer made after pushing, then not pushed.
     let head = commit(&r.lane, "fixes.md", "and a fix");
 
     let mut s = review_world();
     let (env, fp) = reviewer();
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 0 });
+    let gate = Some(BaseGate {
+        worktree: r.lane.clone(),
+        integration: "dev".into(),
+        window_min: 0,
+    });
 
     let err = in_dir(&r.lane, || {
         mail::send(&mut s, &env, Some(&fp), &review(gate), T0 + 5)
@@ -1065,6 +1317,14 @@ fn a_review_branch_behind_the_reviewers_head_is_refused() {
     .unwrap_err();
 
     assert_eq!(err.code, ErrorCode::BadFormat);
-    assert!(err.detail.contains(&format!("{head} is not on refs/remotes/origin/review/t1")), "{}", err.detail);
-    assert!(s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().is_none());
+    assert!(
+        err.detail
+            .contains(&format!("{head} is not on refs/remotes/origin/review/t1")),
+        "{}",
+        err.detail
+    );
+    assert!(s
+        .read(|tx| tx.get_review_verdict("p", "T-1", 1))
+        .unwrap()
+        .is_none());
 }

@@ -17,9 +17,7 @@ pub mod state;
 
 pub use ctx::GearCtx;
 pub use error::{ErrorCode, GearError, GearResult};
-pub use state::{
-    AttemptState, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState, TaskState,
-};
+pub use state::{AttemptState, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState, TaskState};
 
 /// Unix epoch seconds. All stored times use this; callers inject `now`.
 pub type Ts = i64;

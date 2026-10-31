@@ -98,14 +98,14 @@ fn seat(store: &mut Store, state: SeatState, reason: Option<&str>) {
 
 /// The reason of the lane, and its text.
 fn reason_of(store: &mut Store, now: i64) -> (Option<IdleReason>, String) {
-    let reason = store
-        .read(|tx| idle_reason(tx, "p", LANE, now))
-        .unwrap();
+    let reason = store.read(|tx| idle_reason(tx, "p", LANE, now)).unwrap();
     let text = store
-        .read(|tx| Ok(match &reason {
-            Some(reason) => Some(describe(reason, tx, "p")),
-            None => None,
-        }))
+        .read(|tx| {
+            Ok(match &reason {
+                Some(reason) => Some(describe(reason, tx, "p")),
+                None => None,
+            })
+        })
         .unwrap();
     (reason, text.unwrap_or_default())
 }
@@ -124,7 +124,13 @@ fn a_quota_parked_lane_says_until_when_the_provider_is_back() {
         .unwrap();
 
     let (reason, text) = reason_of(&mut store, T0);
-    assert_eq!(reason, Some(IdleReason::Quota { until: 1_800_003_600 }), "{reason:?}");
+    assert_eq!(
+        reason,
+        Some(IdleReason::Quota {
+            until: 1_800_003_600
+        }),
+        "{reason:?}"
+    );
     assert!(text.starts_with("quota until "), "{text}");
     // The clock of the user: two digits, a colon, two digits.
     let clock = text.trim_start_matches("quota until ");
@@ -136,25 +142,38 @@ fn a_quota_parked_lane_says_until_when_the_provider_is_back() {
 fn a_parked_lane_says_until_when_it_is_let_go() {
     let mut store = world();
     // The plan parks a lane with `until=<RFC 3339>`.
-    seat(&mut store, SeatState::Parked, Some("until=2026-10-27T10:00:00Z"));
+    seat(
+        &mut store,
+        SeatState::Parked,
+        Some("until=2026-10-27T10:00:00Z"),
+    );
 
     let (reason, text) = reason_of(&mut store, T0);
     let Some(IdleReason::Parked { until }) = reason else {
         panic!("{reason:?}");
     };
-    assert!(until.is_some(), "the plan says until when the seat is let go");
+    assert!(
+        until.is_some(),
+        "the plan says until when the seat is let go"
+    );
     assert!(text.starts_with("parked until "), "{text}");
 }
 
 #[test]
 fn a_held_lane_says_why() {
     let mut store = world();
-    seat(&mut store, SeatState::Held, Some("hold: waiting for the user"));
+    seat(
+        &mut store,
+        SeatState::Held,
+        Some("hold: waiting for the user"),
+    );
 
     let (reason, text) = reason_of(&mut store, T0);
     assert_eq!(
         reason,
-        Some(IdleReason::Held { reason: "waiting for the user".into() }),
+        Some(IdleReason::Held {
+            reason: "waiting for the user".into()
+        }),
         "{reason:?}"
     );
     assert_eq!(text, "held: waiting for the user");
@@ -163,13 +182,24 @@ fn a_held_lane_says_why() {
 #[test]
 fn a_lane_that_waits_for_a_task_says_which_one() {
     let mut store = world();
-    task(&mut store, "T-2", 1, TaskState::Running, vec![], Some("T-9"));
+    task(
+        &mut store,
+        "T-2",
+        1,
+        TaskState::Running,
+        vec![],
+        Some("T-9"),
+    );
     task(&mut store, "T-9", 2, TaskState::Ready, vec![], None);
     // The attempt of the task stays Started (§5.3): the wait comes first.
     attempt(&mut store, "T-2", 1, AttemptState::Started);
 
     let (reason, text) = reason_of(&mut store, T0);
-    assert_eq!(reason, Some(IdleReason::Waiting { on: "T-9".into() }), "{reason:?}");
+    assert_eq!(
+        reason,
+        Some(IdleReason::Waiting { on: "T-9".into() }),
+        "{reason:?}"
+    );
     assert_eq!(text, "waiting for T-9 (heat, queued)");
 }
 
@@ -182,7 +212,10 @@ fn a_lane_whose_next_task_waits_for_a_dependency_says_which_one() {
     let (reason, text) = reason_of(&mut store, T0);
     assert_eq!(
         reason,
-        Some(IdleReason::DepWait { task: "T-2".into(), on: "T-9".into() }),
+        Some(IdleReason::DepWait {
+            task: "T-2".into(),
+            on: "T-9".into()
+        }),
         "{reason:?}"
     );
     assert_eq!(text, "next T-2 waits for T-9 (heat, queued)");
@@ -195,7 +228,11 @@ fn a_dependency_that_is_done_is_not_a_wait() {
     task(&mut store, "T-9", 2, TaskState::Done, vec![], None);
 
     let (reason, text) = reason_of(&mut store, T0);
-    assert_eq!(reason, Some(IdleReason::Undelivered { task: "T-2".into() }), "{reason:?}");
+    assert_eq!(
+        reason,
+        Some(IdleReason::Undelivered { task: "T-2".into() }),
+        "{reason:?}"
+    );
     assert_eq!(text, "next T-2 is ready but not delivered");
 }
 
@@ -205,7 +242,11 @@ fn a_lane_with_a_ready_task_that_was_never_delivered_says_which_one() {
     task(&mut store, "T-2", 1, TaskState::Ready, vec![], None);
 
     let (reason, text) = reason_of(&mut store, T0);
-    assert_eq!(reason, Some(IdleReason::Undelivered { task: "T-2".into() }), "{reason:?}");
+    assert_eq!(
+        reason,
+        Some(IdleReason::Undelivered { task: "T-2".into() }),
+        "{reason:?}"
+    );
     assert_eq!(text, "next T-2 is ready but not delivered");
 }
 
@@ -260,7 +301,11 @@ fn the_task_after_the_one_in_review_is_the_next_one() {
     task(&mut store, "T-3", 2, TaskState::Ready, vec![], None);
 
     let (reason, text) = reason_of(&mut store, T0);
-    assert_eq!(reason, Some(IdleReason::Undelivered { task: "T-3".into() }), "{reason:?}");
+    assert_eq!(
+        reason,
+        Some(IdleReason::Undelivered { task: "T-3".into() }),
+        "{reason:?}"
+    );
     assert_eq!(text, "next T-3 is ready but not delivered");
 }
 
@@ -275,7 +320,10 @@ fn the_task_after_the_one_in_review_may_wait_for_a_dependency() {
     let (reason, text) = reason_of(&mut store, T0);
     assert_eq!(
         reason,
-        Some(IdleReason::DepWait { task: "T-3".into(), on: "T-9".into() }),
+        Some(IdleReason::DepWait {
+            task: "T-3".into(),
+            on: "T-9".into()
+        }),
         "{reason:?}"
     );
     assert_eq!(text, "next T-3 waits for T-9 (heat, queued)");
@@ -382,7 +430,10 @@ fn help_of(store: &mut Store, now: i64) -> Option<gear_board::idle::Helping> {
 
 /// The board of the project `p`.
 fn options() -> Options {
-    Options { project: Some("p".into()), ..Options::default() }
+    Options {
+        project: Some("p".into()),
+        ..Options::default()
+    }
 }
 
 #[test]
@@ -414,8 +465,15 @@ fn a_lane_that_helps_says_which_lane_and_what_it_does() {
         .iter()
         .find(|lane| lane.lane == LANE)
         .expect("the lane");
-    assert_eq!(lane.helping.as_deref(), Some("helping mast: Read the log of T-2 and …"));
-    assert!(lane_line(lane).contains("helping mast: Read the log"), "{}", lane_line(lane));
+    assert_eq!(
+        lane.helping.as_deref(),
+        Some("helping mast: Read the log of T-2 and …")
+    );
+    assert!(
+        lane_line(lane).contains("helping mast: Read the log"),
+        "{}",
+        lane_line(lane)
+    );
 }
 
 #[test]

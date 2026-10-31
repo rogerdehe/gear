@@ -87,21 +87,24 @@ impl TaskState {
         use TaskState::*;
         match (self, to) {
             (Draft, Ready) => true,
-            (Ready, Running) => true,                       // delivery confirmed
+            (Ready, Running) => true, // delivery confirmed
             (Running, Waiting | Verifying) => true,
-            (Running, Ready) => true,                       // preempt safe point checked
-            (Waiting, Running) => true,                     // wait cleared: same attempt continues
-            (Waiting, Ready) => true,                       // old attempt settled, re-dispatch
-            (Verifying, Done) => true,                      // verdict pass
-            (Verifying, Ready) => true,                     // verdict fail (rework)
-            (Done, Ready) => true,                          // explicit reopen with reason
+            (Running, Ready) => true,   // preempt safe point checked
+            (Waiting, Running) => true, // wait cleared: same attempt continues
+            (Waiting, Ready) => true,   // old attempt settled, re-dispatch
+            (Verifying, Done) => true,  // verdict pass
+            (Verifying, Ready) => true, // verdict fail (rework)
+            (Done, Ready) => true,      // explicit reopen with reason
             (Draft | Ready | Running | Waiting | Verifying, Cancelled | Failed) => true,
             _ => false,
         }
     }
 
     pub fn is_terminal(self) -> bool {
-        matches!(self, TaskState::Done | TaskState::Failed | TaskState::Cancelled)
+        matches!(
+            self,
+            TaskState::Done | TaskState::Failed | TaskState::Cancelled
+        )
     }
 }
 
@@ -201,14 +204,20 @@ impl SeatState {
     /// States in which an agent is expected to be present in the pane (design/08).
     pub fn expects_agent(self) -> bool {
         use SeatState::*;
-        matches!(self, Active | Standby | Parked | Held | Retiring | Unavailable | Handover)
+        matches!(
+            self,
+            Active | Standby | Parked | Held | Retiring | Unavailable | Handover
+        )
     }
 }
 
 impl MsgState {
     pub fn can_transition(self, to: MsgState) -> bool {
         use MsgState::*;
-        matches!((self, to), (Open, Waiting | Resolved) | (Waiting, Open | Resolved) | (Info, Resolved))
+        matches!(
+            (self, to),
+            (Open, Waiting | Resolved) | (Waiting, Open | Resolved) | (Info, Resolved)
+        )
     }
 }
 
@@ -241,7 +250,10 @@ pub fn require_transition(ok: bool, what: &str, from: &str, to: &str) -> GearRes
     if ok {
         Ok(())
     } else {
-        Err(GearError::new(ErrorCode::BadTransition, format!("{what}: {from} -> {to}")))
+        Err(GearError::new(
+            ErrorCode::BadTransition,
+            format!("{what}: {from} -> {to}"),
+        ))
     }
 }
 
@@ -251,9 +263,15 @@ mod tests {
 
     #[test]
     fn strings_roundtrip() {
-        for s in TaskState::ALL { assert_eq!(s.as_str().parse::<TaskState>().unwrap(), *s); }
-        for s in SeatState::ALL { assert_eq!(s.as_str().parse::<SeatState>().unwrap(), *s); }
-        for s in OpState::ALL { assert_eq!(s.as_str().parse::<OpState>().unwrap(), *s); }
+        for s in TaskState::ALL {
+            assert_eq!(s.as_str().parse::<TaskState>().unwrap(), *s);
+        }
+        for s in SeatState::ALL {
+            assert_eq!(s.as_str().parse::<SeatState>().unwrap(), *s);
+        }
+        for s in OpState::ALL {
+            assert_eq!(s.as_str().parse::<OpState>().unwrap(), *s);
+        }
         assert!("bogus".parse::<MsgKind>().is_err());
     }
 
@@ -277,9 +295,21 @@ mod tests {
     #[test]
     fn captain_never_auto_recovers() {
         use SeatState::*;
-        assert!(!SeatState::can_transition(SeatRole::Captain, Unavailable, Active));
-        assert!(SeatState::can_transition(SeatRole::Captain, Unavailable, Handover));
-        assert!(!SeatState::can_transition(SeatRole::Captain, Active, Missing));
+        assert!(!SeatState::can_transition(
+            SeatRole::Captain,
+            Unavailable,
+            Active
+        ));
+        assert!(SeatState::can_transition(
+            SeatRole::Captain,
+            Unavailable,
+            Handover
+        ));
+        assert!(!SeatState::can_transition(
+            SeatRole::Captain,
+            Active,
+            Missing
+        ));
     }
 
     #[test]
@@ -305,10 +335,18 @@ mod tests {
     #[test]
     fn a_needs_check_temp_may_be_released() {
         use SeatState::*;
-        assert!(SeatState::can_transition(SeatRole::Temp, NeedsCheck, Released));
+        assert!(SeatState::can_transition(
+            SeatRole::Temp,
+            NeedsCheck,
+            Released
+        ));
         // A lane's NeedsCheck is a human's to retry: it is not released by the
         // engine on its own.
-        assert!(!SeatState::can_transition(SeatRole::Lane, NeedsCheck, Released));
+        assert!(!SeatState::can_transition(
+            SeatRole::Lane,
+            NeedsCheck,
+            Released
+        ));
     }
 
     #[test]
@@ -316,7 +354,10 @@ mod tests {
         assert!(OpState::Submitted.holds_delivery_slot());
         assert!(OpState::Unknown.holds_delivery_slot());
         assert!(!OpState::Confirmed.holds_delivery_slot());
-        assert!(!OpState::Confirmed.can_transition(OpState::Failed), "a settled op stays settled");
+        assert!(
+            !OpState::Confirmed.can_transition(OpState::Failed),
+            "a settled op stays settled"
+        );
         // T-97: a delivery that is never confirmed fails past its check
         // budget, which frees the seat's slot — the one way a submitted op
         // ends without being confirmed.

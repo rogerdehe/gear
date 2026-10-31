@@ -8,9 +8,7 @@ use gear_board::frame::lane_panel;
 use gear_board::graph::{git_rows, lines, panel, tasks, GraphRow, GraphTask, Stage};
 use gear_board::style::{lane_color, Color, Style};
 use gear_model::{AttemptState, MsgKind, MsgState, OpKind, OpState, SeatRole, TaskState};
-use gear_store::{
-    testing, AttemptRow, NewMessage, NewOp, NewRound, RoundKey, Store, TaskRow,
-};
+use gear_store::{testing, AttemptRow, NewMessage, NewOp, NewRound, RoundKey, Store, TaskRow};
 
 const T0: i64 = 1_793_016_000; // 2026-10-26T12:00:00Z
 
@@ -240,7 +238,13 @@ fn world() -> Store {
                         session_action: None,
                         sent_at: None,
                     })?;
-                    tx.set_attempt_time("p", task.id, round, gear_store::AttemptStep::Started, started)?;
+                    tx.set_attempt_time(
+                        "p",
+                        task.id,
+                        round,
+                        gear_store::AttemptStep::Started,
+                        started,
+                    )?;
                     tx.set_attempt_time(
                         "p",
                         task.id,
@@ -249,7 +253,13 @@ fn world() -> Store {
                         started + task.actual * 60,
                     )?;
                     if let Some(merged) = task.merged {
-                        tx.set_attempt_time("p", task.id, round, gear_store::AttemptStep::Merged, merged)?;
+                        tx.set_attempt_time(
+                            "p",
+                            task.id,
+                            round,
+                            gear_store::AttemptStep::Merged,
+                            merged,
+                        )?;
                     }
                 }
             }
@@ -272,10 +282,10 @@ fn the_graph_has_the_columns_of_the_prototype() {
     assert_eq!(
         ids,
         vec![
-            "T-148", "T-150", "T-151", "T-141", "T-142", "T-143", "T-144", "T-139", "T-136", "T-135"
-        ]
-        // T-141 passed and T-142 waits for a reviewer: the open tasks follow
-        // the queued ones, in the order of the plan.
+            "T-148", "T-150", "T-151", "T-141", "T-142", "T-143", "T-144", "T-139", "T-136",
+            "T-135"
+        ] // T-141 passed and T-142 waits for a reviewer: the open tasks follow
+          // the queued ones, in the order of the plan.
     );
 
     let lines = lines(&tasks, &lanes, None);
@@ -381,9 +391,7 @@ fn a_dependency_is_marked_as_needed() {
 #[test]
 fn the_task_panel_lists_the_rounds_and_the_dependencies() {
     let mut store = world();
-    let panel = store
-        .read(|tx| panel(tx, "p", "T-139", T0))
-        .unwrap();
+    let panel = store.read(|tx| panel(tx, "p", "T-139", T0)).unwrap();
     let text = panel.join("\n");
     assert!(text.contains("T-139 · lane mast · done"), "{text}");
     assert!(text.contains("rebind a lane to another repo"), "{text}");
@@ -444,9 +452,7 @@ fn the_task_panel_uses_the_rounds_of_the_store_when_there_are_any() {
             )
         })
         .unwrap();
-    let panel = store
-        .read(|tx| panel(tx, "p", "T-141", T0))
-        .unwrap();
+    let panel = store.read(|tx| panel(tx, "p", "T-141", T0)).unwrap();
     let text = panel.join("\n");
     // The round of the store, with its time and its tokens.
     assert!(text.contains("dev   attempt 1"), "{text}");
@@ -723,7 +729,10 @@ fn stage_and_words(store: &mut Store, task: &str) -> (Stage, String) {
             Ok((found, words))
         })
         .unwrap();
-    (found.unwrap_or_else(|| panic!("no task {task}")), words.unwrap_or_default())
+    (
+        found.unwrap_or_else(|| panic!("no task {task}")),
+        words.unwrap_or_default(),
+    )
 }
 
 #[test]
@@ -742,7 +751,11 @@ fn each_stage_comes_from_a_fact_of_the_store() {
         ("T-25", Stage::Rework, "reworking (round 2)"),
         ("T-28", Stage::Passed, "passed, waits to merge"),
         ("T-26", Stage::Merging, "merging (gate running)"),
-        ("T-27", Stage::MergeFailed, "merge failed, waits for the captain"),
+        (
+            "T-27",
+            Stage::MergeFailed,
+            "merge failed, waits for the captain",
+        ),
         ("T-32", Stage::Merged, "merged"),
     ];
     for (task, stage, words) in table {
@@ -779,7 +792,10 @@ fn the_lane_panel_shows_each_task_in_its_stage() {
     let mut store = stage_world();
     let board = gear_board::build(
         &mut store,
-        &gear_board::Options { project: Some("p".into()), ..Default::default() },
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
         T0,
     )
     .unwrap();
@@ -797,17 +813,26 @@ fn the_lane_panel_shows_each_task_in_its_stage() {
     };
     // Handed and Review are told apart: the same `◎` but not the same words.
     assert!(row("T-29").starts_with("  ◎ T-29 "), "{text}");
-    assert!(row("T-29").ends_with("handed in, waits for a reviewer"), "{text}");
+    assert!(
+        row("T-29").ends_with("handed in, waits for a reviewer"),
+        "{text}"
+    );
     assert!(row("T-30").starts_with("  ◎ T-30 "), "{text}");
     assert!(row("T-30").ends_with("in review"), "{text}");
     // A failed merge is not a merge that runs.
     assert!(row("T-27").starts_with("  ✗ T-27 "), "{text}");
-    assert!(row("T-27").ends_with("merge failed, waits for the captain"), "{text}");
+    assert!(
+        row("T-27").ends_with("merge failed, waits for the captain"),
+        "{text}"
+    );
     // The rework says which round it is, and a question is not work.
     assert!(row("T-25").starts_with("  ↺ T-25 "), "{text}");
     assert!(row("T-25").ends_with("reworking (round 2)"), "{text}");
     assert!(row("T-22").starts_with("  ◉ T-22 "), "{text}");
-    assert!(row("T-22").ends_with("waits for the captain's answer"), "{text}");
+    assert!(
+        row("T-22").ends_with("waits for the captain's answer"),
+        "{text}"
+    );
     // The queued work lists what it waits for.
     assert!(row("T-20").contains("needs T-1"), "{text}");
     assert!(text.contains("left: 2 tasks, 40m of estimates"), "{text}");
@@ -861,7 +886,11 @@ fn the_sixteen_stages_have_their_symbols_colours_and_words() {
         ..sample()
     };
     assert_eq!(Stage::words(&failed), "failed (rounds used up)");
-    let moved = GraphTask { stage: Stage::Moved, moved_to: Some("M6".into()), ..sample() };
+    let moved = GraphTask {
+        stage: Stage::Moved,
+        moved_to: Some("M6".into()),
+        ..sample()
+    };
     assert_eq!(Stage::words(&moved), "moved to M6");
 }
 
@@ -1071,15 +1100,27 @@ fn m5() -> Vec<GraphTask> {
 
 /// The character a graph row writes at a column: the last cell there wins.
 fn glyph(row: &GraphRow, x: usize) -> Option<char> {
-    row.cells.iter().rev().find(|(column, _, _)| *column == x).map(|(_, glyph, _)| *glyph)
+    row.cells
+        .iter()
+        .rev()
+        .find(|(column, _, _)| *column == x)
+        .map(|(_, glyph, _)| *glyph)
 }
 
 #[test]
 fn the_git_graph_has_the_rows_of_the_prototype_m5_voyage() {
     let tasks = m5();
-    let lanes: Vec<String> = ["hull", "mast", "keel"].iter().map(|name| name.to_string()).collect();
+    let lanes: Vec<String> = ["hull", "mast", "keel"]
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
     let rows = git_rows(&tasks, &lanes, 0, 160);
-    assert_eq!(rows.len(), 24, "{:?}", rows.iter().map(|row| &row.text).collect::<Vec<_>>());
+    assert_eq!(
+        rows.len(),
+        24,
+        "{:?}",
+        rows.iter().map(|row| &row.text).collect::<Vec<_>>()
+    );
 
     // The first rows are the tasks that have not started, the last to run on
     // top (reverse rank: T-267, T-266, T-265 — the graph reads newest on top
@@ -1107,7 +1148,9 @@ fn the_git_graph_has_the_rows_of_the_prototype_m5_voyage() {
     assert_eq!(last_waiting.task.as_deref(), Some("T-265"));
     assert_eq!(glyph(last_waiting, 21), Some('○'));
     assert!(
-        last_waiting.text.starts_with("T-265  goal-change line with the user's words"),
+        last_waiting
+            .text
+            .starts_with("T-265  goal-change line with the user's words"),
         "{:?}",
         last_waiting.text
     );
@@ -1139,14 +1182,24 @@ fn the_git_graph_has_the_rows_of_the_prototype_m5_voyage() {
     assert_eq!(glyph(merge, 15), Some('╯'));
     let mast = Style::fg(lane_color(&lanes, "mast"));
     assert!(
-        merge.cells.iter().any(|(x, glyph, style)| *x == 15 && *glyph == '╯' && *style == mast),
+        merge
+            .cells
+            .iter()
+            .any(|(x, glyph, style)| *x == 15 && *glyph == '╯' && *style == mast),
         "{:?}",
         merge.cells
     );
-    assert!(merge.text.starts_with("T-261  board: the full width"), "{:?}", merge.text);
+    assert!(
+        merge.text.starts_with("T-261  board: the full width"),
+        "{:?}",
+        merge.text
+    );
     assert!(merge.text.contains("52/45m"), "{:?}", merge.text);
     // The clock of the merge, as the user's clock shows it.
-    let (_, merged_at) = merge.text.rsplit_once("  merged ").expect("the merge clock");
+    let (_, merged_at) = merge
+        .text
+        .rsplit_once("  merged ")
+        .expect("the merge clock");
     assert_eq!(merged_at.len(), 5, "{:?}", merge.text);
     assert_eq!(&merged_at[2..3], ":", "{:?}", merge.text);
 
@@ -1190,13 +1243,25 @@ fn a_waiting_task_hangs_above_the_ones_that_run_before_it() {
     // (T-361 contract v2): T-2 (rank 2) hangs above T-1 (rank 1), nearest the
     // running work.
     let tasks = vec![
-        GraphTask { id: "T-1".into(), rank: 1, ..sample() },
-        GraphTask { id: "T-2".into(), rank: 2, ..sample() },
+        GraphTask {
+            id: "T-1".into(),
+            rank: 1,
+            ..sample()
+        },
+        GraphTask {
+            id: "T-2".into(),
+            rank: 2,
+            ..sample()
+        },
     ];
     let lanes = vec!["hull".to_string()];
     let rows = git_rows(&tasks, &lanes, 0, 120);
     let named: Vec<Option<&str>> = rows.iter().map(|row| row.task.as_deref()).collect();
-    assert_eq!(named, vec![Some("T-2"), Some("T-2"), Some("T-1"), Some("T-1")], "{named:?}");
+    assert_eq!(
+        named,
+        vec![Some("T-2"), Some("T-2"), Some("T-1"), Some("T-1")],
+        "{named:?}"
+    );
     // The row that names the task is its ○ row, the ┆ row under it.
     assert_eq!(glyph(&rows[0], 9), Some('○'));
     assert_eq!(glyph(&rows[1], 9), Some('┆'));
@@ -1219,7 +1284,12 @@ fn a_task_that_started_and_waits_again_keeps_its_row() {
     }];
     let lanes = vec!["hull".to_string()];
     let rows = git_rows(&tasks, &lanes, 0, 120);
-    assert_eq!(rows.len(), 2, "{:?}", rows.iter().map(|row| &row.text).collect::<Vec<_>>());
+    assert_eq!(
+        rows.len(),
+        2,
+        "{:?}",
+        rows.iter().map(|row| &row.text).collect::<Vec<_>>()
+    );
     assert_eq!(rows[0].task.as_deref(), Some("T-3"));
     assert_eq!(glyph(&rows[0], 9), Some('○'));
     assert_eq!(rows[0].style, Style::bold());

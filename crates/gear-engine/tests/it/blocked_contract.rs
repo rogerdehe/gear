@@ -76,7 +76,10 @@ fn a_seat_blocked_for_more_than_two_minutes_rings_the_captain_once() {
     let mut w = world();
     assert!(watch(&mut w, 0).is_empty(), "the timer starts");
     assert!(watch(&mut w, 119).is_empty());
-    assert!(watch(&mut w, 120).is_empty(), "strictly more than two minutes");
+    assert!(
+        watch(&mut w, 120).is_empty(),
+        "strictly more than two minutes"
+    );
     assert_eq!(watch(&mut w, 121), vec!["p:heat"]);
 
     let messages = items(&mut w, "heat");
@@ -85,11 +88,7 @@ fn a_seat_blocked_for_more_than_two_minutes_rings_the_captain_once() {
     assert_eq!(messages[0].kind, MsgKind::System);
     assert_eq!(messages[0].state, MsgState::Open);
     assert!(messages[0].urgent);
-    assert!(
-        messages[0].body.contains("blocked"),
-        "{}",
-        messages[0].body
-    );
+    assert!(messages[0].body.contains("blocked"), "{}", messages[0].body);
     assert!(
         messages[0].body.contains("Update available"),
         "the last screen lines are in the item: {}",
@@ -106,7 +105,10 @@ fn a_seat_blocked_for_more_than_two_minutes_rings_the_captain_once() {
 fn the_engine_tick_rings_the_captain_for_a_blocked_seat() {
     let mut w = world();
     assert!(run(&mut w, 0).blocked.is_empty(), "the timer starts");
-    assert!(run(&mut w, 120).blocked.is_empty(), "strictly more than two minutes");
+    assert!(
+        run(&mut w, 120).blocked.is_empty(),
+        "strictly more than two minutes"
+    );
     let report = run(&mut w, 121);
     assert_eq!(report.blocked, vec!["p:heat"]);
     assert_eq!(items(&mut w, "heat").len(), 1);
@@ -124,7 +126,11 @@ fn a_reviewer_seat_blocked_for_minutes_rings_the_captain_too() {
     assert!(watch(&mut w, 0).is_empty());
     assert_eq!(watch(&mut w, 121), vec!["p:rev-1"]);
     assert_eq!(items(&mut w, "rev-1").len(), 1);
-    assert_eq!(items(&mut w, "heat").len(), 0, "the other seat is not blocked");
+    assert_eq!(
+        items(&mut w, "heat").len(),
+        0,
+        "the other seat is not blocked"
+    );
 }
 
 #[test]
@@ -153,7 +159,10 @@ fn the_timer_and_the_alert_survive_reopening_the_store() {
     w.store = Store::open(&path).unwrap();
     assert_eq!(run(&mut w, 121).blocked, vec!["p:heat"]);
     w.store = Store::open(&path).unwrap();
-    assert!(run(&mut w, 300).blocked.is_empty(), "the same spell does not ring twice");
+    assert!(
+        run(&mut w, 300).blocked.is_empty(),
+        "the same spell does not ring twice"
+    );
     assert_eq!(items(&mut w, "heat").len(), 1);
 }
 

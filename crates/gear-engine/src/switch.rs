@@ -160,17 +160,29 @@ pub(crate) fn plan_target(
     seat_id: &str,
     to: &str,
 ) -> GearResult<Option<(String, gear_app::config::ModelSwitch)>> {
-    if let Some((model, labels)) = config.models.switch.iter().find(|(_, labels)| labels.bar == to) {
+    if let Some((model, labels)) = config
+        .models
+        .switch
+        .iter()
+        .find(|(_, labels)| labels.bar == to)
+    {
         return Ok(Some((model.clone(), labels.clone())));
     }
     let directory = store.read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(seat_id)))?;
-    let chain = config.models.lanes.iter().chain(config.models.review.iter()).chain(config.models.captain.iter());
+    let chain = config
+        .models
+        .lanes
+        .iter()
+        .chain(config.models.review.iter())
+        .chain(config.models.captain.iter());
     for entry in chain {
         let model = entry.model();
         if config.models.switch.contains_key(model) {
             continue;
         }
-        if let Ok(Some(labels)) = crate::opencode::derived_labels(herdr, model, None, directory.as_deref()) {
+        if let Ok(Some(labels)) =
+            crate::opencode::derived_labels(herdr, model, None, directory.as_deref())
+        {
             if labels.bar == to {
                 return Ok(Some((model.to_string(), labels)));
             }
@@ -191,7 +203,9 @@ pub fn pending(store: &mut Store, seat_id: &str) -> GearResult<Option<Pending>> 
     let (Some(step), Some(tries), Some(waited)) = (parts.next(), parts.next(), parts.next()) else {
         return Ok(None);
     };
-    let Some(step) = Step::parse(step) else { return Ok(None) };
+    let Some(step) = Step::parse(step) else {
+        return Ok(None);
+    };
     let to = parts.next().unwrap_or_default().to_string();
     if to.is_empty() {
         return Ok(None);
@@ -243,7 +257,12 @@ pub fn switch_in_place(
     let resumed = pending(store, seat_id)?;
     let mut plan = match resumed.clone() {
         Some(plan) if plan.to == labels.bar => plan,
-        _ => Pending { to: labels.bar.clone(), step: Step::Escape, tries: 0, waited: 0 },
+        _ => Pending {
+            to: labels.bar.clone(),
+            step: Step::Escape,
+            tries: 0,
+            waited: 0,
+        },
     };
     set_pending(store, seat_id, &plan)?;
 
@@ -410,7 +429,10 @@ fn text(herdr: &mut dyn HerdrAct, pane: &str, text: &str) -> bool {
     // Let the TUI take the typed text before the Enter arrives. The wait
     // belongs to the terminal (T-127): a real Herdr sleeps, a fake does not.
     herdr.type_settle();
-    matches!(herdr.send_keys(pane, &["enter".to_string()]), Outcome::Ok(()))
+    matches!(
+        herdr.send_keys(pane, &["enter".to_string()]),
+        Outcome::Ok(())
+    )
 }
 
 /// What a startup model check says about going on (F5).
@@ -447,8 +469,8 @@ pub fn ensure_model(
             // only place one lives, and it overrides this path entirely).
             // The catalogue is per directory: use the seat's own worktree (F2
             // of the T-94 review), like the start path does.
-            let directory = store
-                .read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(&seat.id)))?;
+            let directory =
+                store.read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(&seat.id)))?;
             match crate::opencode::derived_labels(herdr, model, None, directory.as_deref()) {
                 Ok(Some(labels)) => {
                     derived = labels;
@@ -497,28 +519,46 @@ pub fn switch_model(
     now: Ts,
 ) -> GearResult<SwitchOutcome> {
     let resumed = pending(store, seat_id)?;
-    if profile.kind != "opencode" || resumed.as_ref().is_some_and(|p| p.to == labels.bar && p.step != Step::ApiConfirm) {
+    if profile.kind != "opencode"
+        || resumed
+            .as_ref()
+            .is_some_and(|p| p.to == labels.bar && p.step != Step::ApiConfirm)
+    {
         return switch_in_place(store, herdr, seat_id, profile, obs, labels, now);
     }
     if obs.is_some_and(|obs| !obs.idle) {
         return Ok(SwitchOutcome::Waiting);
     }
     let binding = store.read(|tx| {
-        let Some(seat) = tx.get_seat(seat_id)? else { return Ok(None) };
+        let Some(seat) = tx.get_seat(seat_id)? else {
+            return Ok(None);
+        };
         tx.get_binding(seat_id, seat.generation)
     })?;
-    let Some(binding) = binding else { return Ok(SwitchOutcome::Failed) };
+    let Some(binding) = binding else {
+        return Ok(SwitchOutcome::Failed);
+    };
     let Some(session) = binding.session_ref.as_deref().filter(|id| !id.is_empty()) else {
         return switch_in_place(store, herdr, seat_id, profile, obs, labels, now);
     };
     // Herdr can report a launch-pending/unknown agent before the TUI is ready.
     // Record the wait now so onboarding resumes it on the following tick.
-    let mut plan = resumed.clone().filter(|p| p.to == labels.bar)
-        .unwrap_or(Pending { to: labels.bar.clone(), step: Step::ApiConfirm, tries: 0, waited: 0 });
+    let mut plan = resumed
+        .clone()
+        .filter(|p| p.to == labels.bar)
+        .unwrap_or(Pending {
+            to: labels.bar.clone(),
+            step: Step::ApiConfirm,
+            tries: 0,
+            waited: 0,
+        });
     set_pending(store, seat_id, &plan)?;
     match herdr.agent_get(&binding.pane_id) {
         Ok(Some(info)) if info.agent.as_deref() == Some("opencode") => {
-            if !matches!(info.agent_status, gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done) {
+            if !matches!(
+                info.agent_status,
+                gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done
+            ) {
                 if info.agent_status != gear_herdr::AgentStatus::Unknown {
                     return Ok(SwitchOutcome::Waiting);
                 }
@@ -531,9 +571,16 @@ pub fn switch_model(
     // M4 §10.2: the screen never says that an agent is busy — Herdr's state
     // does, and it was read above (idle or done). The screen is still read
     // for the confirmation of the switch.
-    let Ok(screen) = herdr.read_screen(&binding.pane_id) else { return Ok(SwitchOutcome::Waiting) };
+    let Ok(screen) = herdr.read_screen(&binding.pane_id) else {
+        return Ok(SwitchOutcome::Waiting);
+    };
     let directory = meta_get(store, &crate::onboard::worktree_path_key(seat_id))?;
-    let target = match crate::opencode::target(herdr, model, labels.variant.as_deref(), directory.as_deref()) {
+    let target = match crate::opencode::target(
+        herdr,
+        model,
+        labels.variant.as_deref(),
+        directory.as_deref(),
+    ) {
         crate::opencode::Lookup::Target(target) => target,
         // The model is not in a loaded catalogue: a config fault.
         crate::opencode::Lookup::Invalid(_) => {
@@ -559,20 +606,34 @@ pub fn switch_model(
             plan.tries += 1;
             set_pending(store, seat_id, &plan)?;
             let body = serde_json::json!({"model": target});
-            if herdr.opencode_api(&["session.switchModel".into(), "--param".into(),
-                format!("sessionID={session}"), "-d".into(), body.to_string()]).is_err() {
+            if herdr
+                .opencode_api(&[
+                    "session.switchModel".into(),
+                    "--param".into(),
+                    format!("sessionID={session}"),
+                    "-d".into(),
+                    body.to_string(),
+                ])
+                .is_err()
+            {
                 return api_fallback(store, herdr, seat_id, profile, obs, labels, now);
             }
         }
     } else {
         // The API and bar are independent confirmations; a quote in the
         // conversation and a bar showing the wrong effort do not qualify.
-        let variant_ok = labels.variant.as_deref().is_none_or(|variant| screen.lines().any(|line| {
-            confirmed(line, &labels.bar) && line.trim_end().ends_with(&format!("· {variant}"))
-        }));
+        let variant_ok = labels.variant.as_deref().is_none_or(|variant| {
+            screen.lines().any(|line| {
+                confirmed(line, &labels.bar) && line.trim_end().ends_with(&format!("· {variant}"))
+            })
+        });
         if confirmed(&screen, &labels.bar) && variant_ok && !screen.contains(VARIANT_TITLE) {
             clear_pending(store, seat_id)?;
-            return Ok(if resumed.is_some() { SwitchOutcome::Done } else { SwitchOutcome::Already });
+            return Ok(if resumed.is_some() {
+                SwitchOutcome::Done
+            } else {
+                SwitchOutcome::Already
+            });
         }
     }
     plan.waited += 1;
@@ -595,8 +656,13 @@ fn wait_for_agent(store: &mut Store, seat: &str, plan: &mut Pending) -> GearResu
 }
 
 fn api_fallback(
-    store: &mut Store, herdr: &mut dyn HerdrAct, seat: &str, profile: &Profile,
-    obs: Option<&SeatObs>, labels: &ModelSwitch, now: Ts,
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &str,
+    profile: &Profile,
+    obs: Option<&SeatObs>,
+    labels: &ModelSwitch,
+    now: Ts,
 ) -> GearResult<SwitchOutcome> {
     clear_pending(store, seat)?;
     switch_in_place(store, herdr, seat, profile, obs, labels, now)
@@ -679,11 +745,14 @@ mod tests {
     /// An OpenCode screen that is not on the wanted model.
     const OTHER_BAR: &str = "Build auto · MiniMax-M3.1-Flash MiniMax · high";
     /// A picker (SOP: "Search", "Recent", provider groups).
-    const PICKER: &str = "  Search\n  Recent\n  MiniMax-M3.1-Flash  MiniMax\n  DeepSeek V4.1 Flash  OpenCode Go";
+    const PICKER: &str =
+        "  Search\n  Recent\n  MiniMax-M3.1-Flash  MiniMax\n  DeepSeek V4.1 Flash  OpenCode Go";
 
     fn api_world() -> (Store, FakeHerdr) {
         let mut store = world();
-        store.write(|tx| tx.set_binding_session_ref("p:heat", 1, "ses_api")).unwrap();
+        store
+            .write(|tx| tx.set_binding_session_ref("p:heat", 1, "ses_api"))
+            .unwrap();
         let mut herdr = FakeHerdr::new();
         herdr.add_agent_named(PANE, "opencode", gear_herdr::AgentStatus::Idle, "p-heat");
         herdr.set_screen(PANE, OTHER_BAR);
@@ -696,8 +765,17 @@ mod tests {
     }
 
     fn api_switch(store: &mut Store, herdr: &mut FakeHerdr, labels: &ModelSwitch) -> SwitchOutcome {
-        switch_model(store, herdr, "p:heat", &gear_herdr::builtin("opencode").unwrap(),
-            None, labels, "opencode-go/deepseek-v4.1-flash", T0).unwrap()
+        switch_model(
+            store,
+            herdr,
+            "p:heat",
+            &gear_herdr::builtin("opencode").unwrap(),
+            None,
+            labels,
+            "opencode-go/deepseek-v4.1-flash",
+            T0,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -709,22 +787,43 @@ mod tests {
             Ok(serde_json::json!({"data":{"model":{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash"}}})),
             Ok(serde_json::json!({})),
         ]);
-        assert_eq!(api_switch(&mut store, &mut herdr, &labels), SwitchOutcome::Waiting);
-        assert_eq!(pending(&mut store, "p:heat").unwrap().unwrap().step, Step::ApiConfirm);
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels),
+            SwitchOutcome::Waiting
+        );
+        assert_eq!(
+            pending(&mut store, "p:heat").unwrap().unwrap().step,
+            Step::ApiConfirm
+        );
         let target = serde_json::json!({"data":{"model":{"providerID":"opencode-go", "id":"deepseek-v4.1-flash", "variant":"max"}}});
         // API alone is insufficient: the TUI must have rendered the variant.
-        herdr.api_replies.extend([Ok(catalog()), Ok(target.clone())]);
+        herdr
+            .api_replies
+            .extend([Ok(catalog()), Ok(target.clone())]);
         herdr.set_screen(PANE, &format!("┃ Build auto · {} · high", labels.bar));
-        assert_eq!(api_switch(&mut store, &mut herdr, &labels), SwitchOutcome::Waiting);
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels),
+            SwitchOutcome::Waiting
+        );
         herdr.api_replies.extend([Ok(catalog()), Ok(target)]);
         herdr.set_screen(PANE, &format!("┃ Build auto · {} · max", labels.bar));
-        assert_eq!(api_switch(&mut store, &mut herdr, &labels), SwitchOutcome::Done);
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels),
+            SwitchOutcome::Done
+        );
         assert!(pending(&mut store, "p:heat").unwrap().is_none());
-        assert!(herdr.calls.iter().all(|call| matches!(call, Call::OpenCodeApi { .. })));
-        let requests: Vec<_> = herdr.calls.iter().filter_map(|call| match call {
-            Call::OpenCodeApi { args } if args[0] == "session.switchModel" => Some(args),
-            _ => None,
-        }).collect();
+        assert!(herdr
+            .calls
+            .iter()
+            .all(|call| matches!(call, Call::OpenCodeApi { .. })));
+        let requests: Vec<_> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::OpenCodeApi { args } if args[0] == "session.switchModel" => Some(args),
+                _ => None,
+            })
+            .collect();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0][2], "sessionID=ses_api");
         let body: serde_json::Value = serde_json::from_str(&requests[0][4]).unwrap();
@@ -737,40 +836,77 @@ mod tests {
         let mut labels = labels();
         labels.variant = Some("unknown".into());
         herdr.api_replies.push_back(Ok(catalog()));
-        assert_eq!(api_switch(&mut store, &mut herdr, &labels), SwitchOutcome::Failed);
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels),
+            SwitchOutcome::Failed
+        );
         assert_eq!(herdr.calls.len(), 1);
     }
 
     #[test]
     fn failed_api_switch_uses_typed_fallback_only_after_failure() {
         let (mut store, mut herdr) = api_world();
-        herdr.api_replies.extend([Ok(catalog()), Ok(serde_json::json!({"data":{"model":{}}})),
-            Err("service unavailable".into())]);
-        assert_eq!(api_switch(&mut store, &mut herdr, &labels()), SwitchOutcome::Waiting);
-        assert_eq!(api_switch(&mut store, &mut herdr, &labels()), SwitchOutcome::Waiting);
-        assert!(herdr.calls.iter().any(|call| matches!(call, Call::SendKeys { .. })));
-        assert_eq!(herdr.calls.iter().filter(|call| matches!(call, Call::OpenCodeApi { .. })).count(), 3);
+        herdr.api_replies.extend([
+            Ok(catalog()),
+            Ok(serde_json::json!({"data":{"model":{}}})),
+            Err("service unavailable".into()),
+        ]);
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels()),
+            SwitchOutcome::Waiting
+        );
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels()),
+            SwitchOutcome::Waiting
+        );
+        assert!(herdr
+            .calls
+            .iter()
+            .any(|call| matches!(call, Call::SendKeys { .. })));
+        assert_eq!(
+            herdr
+                .calls
+                .iter()
+                .filter(|call| matches!(call, Call::OpenCodeApi { .. }))
+                .count(),
+            3
+        );
     }
 
     #[test]
     fn a_launch_pending_agent_keeps_a_durable_confirmation_wait() {
         let (mut store, mut herdr) = api_world();
         herdr.set_status(PANE, gear_herdr::AgentStatus::Unknown);
-        assert_eq!(api_switch(&mut store, &mut herdr, &labels()), SwitchOutcome::Waiting);
-        assert_eq!(pending(&mut store, "p:heat").unwrap().unwrap().step, Step::ApiConfirm);
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels()),
+            SwitchOutcome::Waiting
+        );
+        assert_eq!(
+            pending(&mut store, "p:heat").unwrap().unwrap().step,
+            Step::ApiConfirm
+        );
         assert!(herdr.calls.is_empty());
         herdr.set_status(PANE, gear_herdr::AgentStatus::Idle);
         herdr.set_screen(PANE, &format!("┃ Build auto · {}", labels().bar));
-        herdr.api_replies.extend([Ok(catalog()), Ok(serde_json::json!({"data":{"model":{
-            "providerID":"opencode-go", "id":"deepseek-v4.1-flash"}}}))]);
-        assert_eq!(api_switch(&mut store, &mut herdr, &labels()), SwitchOutcome::Done);
+        herdr.api_replies.extend([
+            Ok(catalog()),
+            Ok(serde_json::json!({"data":{"model":{
+            "providerID":"opencode-go", "id":"deepseek-v4.1-flash"}}})),
+        ]);
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels()),
+            SwitchOutcome::Done
+        );
     }
 
     #[test]
     fn working_agent_gets_neither_api_calls_nor_keys() {
         let (mut store, mut herdr) = api_world();
         herdr.set_status(PANE, gear_herdr::AgentStatus::Working);
-        assert_eq!(api_switch(&mut store, &mut herdr, &labels()), SwitchOutcome::Waiting);
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels()),
+            SwitchOutcome::Waiting
+        );
         assert!(herdr.calls.is_empty());
     }
 
@@ -880,9 +1016,16 @@ profile = "claude"
     fn run(store: &mut Store, herdr: &mut FakeHerdr, at: Ts) -> SwitchOutcome {
         let profile = gear_herdr::builtin("opencode").unwrap();
         for tick in 0..20 {
-            let outcome =
-                switch_in_place(store, herdr, "p:heat", &profile, Some(&idle()), &labels(), at + tick)
-                    .unwrap();
+            let outcome = switch_in_place(
+                store,
+                herdr,
+                "p:heat",
+                &profile,
+                Some(&idle()),
+                &labels(),
+                at + tick,
+            )
+            .unwrap();
             if outcome != SwitchOutcome::Waiting {
                 return outcome;
             }
@@ -898,7 +1041,12 @@ profile = "claude"
         assert_eq!(run(&mut s, &mut herdr, T0), SwitchOutcome::Done);
         // Each typed line gets its own Enter (L-71: a pasted line is not a
         // command); nothing else is pressed.
-        assert_eq!(keys(&herdr), vec!["esc", "enter", "enter"], "{:?}", keys(&herdr));
+        assert_eq!(
+            keys(&herdr),
+            vec!["esc", "enter", "enter"],
+            "{:?}",
+            keys(&herdr)
+        );
         assert_eq!(
             texts(&herdr),
             vec!["/model", "DeepSeek V4.1 Flash OpenCode Go"],
@@ -911,7 +1059,9 @@ profile = "claude"
             .calls
             .iter()
             .map(|call| match call {
-                Call::SendKeys { keys, .. } => format!("key:{}", keys.first().cloned().unwrap_or_default()),
+                Call::SendKeys { keys, .. } => {
+                    format!("key:{}", keys.first().cloned().unwrap_or_default())
+                }
                 Call::PaneType { text, .. } => format!("run:{text}"),
                 other => format!("{other:?}"),
             })
@@ -927,8 +1077,17 @@ profile = "claude"
             ],
             "{order:?}"
         );
-        assert!(herdr.calls.iter().all(|call| !matches!(call, Call::AgentStart { .. })), "no restart");
-        assert!(pending(&mut s, "p:heat").unwrap().is_none(), "the plan is cleared");
+        assert!(
+            herdr
+                .calls
+                .iter()
+                .all(|call| !matches!(call, Call::AgentStart { .. })),
+            "no restart"
+        );
+        assert!(
+            pending(&mut s, "p:heat").unwrap().is_none(),
+            "the plan is cleared"
+        );
     }
 
     #[test]
@@ -965,16 +1124,16 @@ profile = "claude"
         for line in 0..40 {
             screen.push_str(&format!("  conversation line {line}\n"));
         }
-        herdr.screen_after.push((
-            "DeepSeek V4.1 Flash OpenCode Go".into(),
-            screen.clone(),
-        ));
+        herdr
+            .screen_after
+            .push(("DeepSeek V4.1 Flash OpenCode Go".into(), screen.clone()));
         // The fake matches the first scripted entry for the filter: replace it.
-        herdr.screen_after.retain(|(trigger, _)| trigger != "DeepSeek V4.1 Flash OpenCode Go");
-        herdr.screen_after.push((
-            "DeepSeek V4.1 Flash OpenCode Go".into(),
-            screen.clone(),
-        ));
+        herdr
+            .screen_after
+            .retain(|(trigger, _)| trigger != "DeepSeek V4.1 Flash OpenCode Go");
+        herdr
+            .screen_after
+            .push(("DeepSeek V4.1 Flash OpenCode Go".into(), screen.clone()));
         // After the dialog is answered the bar confirms.
         let mut with_variant = labels();
         with_variant.variant = Some("low".into());
@@ -986,14 +1145,26 @@ profile = "claude"
         let profile = gear_herdr::builtin("opencode").unwrap();
         let mut outcome = SwitchOutcome::Waiting;
         for tick in 0..20 {
-            outcome = switch_in_place(&mut s, &mut herdr, "p:heat", &profile, Some(&idle()), &with_variant, T0 + tick).unwrap();
+            outcome = switch_in_place(
+                &mut s,
+                &mut herdr,
+                "p:heat",
+                &profile,
+                Some(&idle()),
+                &with_variant,
+                T0 + tick,
+            )
+            .unwrap();
             if outcome != SwitchOutcome::Waiting {
                 break;
             }
         }
         assert_eq!(outcome, SwitchOutcome::Done);
         let sent = texts(&herdr);
-        assert!(sent.contains(&"low".to_string()), "the variant is answered: {sent:?}");
+        assert!(
+            sent.contains(&"low".to_string()),
+            "the variant is answered: {sent:?}"
+        );
     }
 
     /// F8: an observation that says idle is not enough — the agent may have
@@ -1038,16 +1209,52 @@ profile = "claude"
 
         let profile = gear_herdr::builtin("opencode").unwrap();
         // The escape step, then /model (no picker yet).
-        switch_in_place(&mut s, &mut herdr, "p:heat", &profile, Some(&idle()), &labels(), T0).unwrap();
-        switch_in_place(&mut s, &mut herdr, "p:heat", &profile, Some(&idle()), &labels(), T0 + 1).unwrap();
+        switch_in_place(
+            &mut s,
+            &mut herdr,
+            "p:heat",
+            &profile,
+            Some(&idle()),
+            &labels(),
+            T0,
+        )
+        .unwrap();
+        switch_in_place(
+            &mut s,
+            &mut herdr,
+            "p:heat",
+            &profile,
+            Some(&idle()),
+            &labels(),
+            T0 + 1,
+        )
+        .unwrap();
         assert!(texts(&herdr).contains(&"/model".to_string()));
         // The picker appears only now: the switch waits (no failure) and then
         // types the filter.
         herdr.set_screen(PANE, PICKER);
-        let outcome = switch_in_place(&mut s, &mut herdr, "p:heat", &profile, Some(&idle()), &labels(), T0 + 2).unwrap();
+        let outcome = switch_in_place(
+            &mut s,
+            &mut herdr,
+            "p:heat",
+            &profile,
+            Some(&idle()),
+            &labels(),
+            T0 + 2,
+        )
+        .unwrap();
         assert_eq!(outcome, SwitchOutcome::Waiting);
         assert!(texts(&herdr).contains(&"DeepSeek V4.1 Flash OpenCode Go".to_string()));
-        let outcome = switch_in_place(&mut s, &mut herdr, "p:heat", &profile, Some(&idle()), &labels(), T0 + 3).unwrap();
+        let outcome = switch_in_place(
+            &mut s,
+            &mut herdr,
+            "p:heat",
+            &profile,
+            Some(&idle()),
+            &labels(),
+            T0 + 3,
+        )
+        .unwrap();
         assert_eq!(outcome, SwitchOutcome::Done);
     }
 
@@ -1069,7 +1276,9 @@ profile = "claude"
     fn an_unreadable_catalogue_is_not_reported_as_an_absent_model() {
         let mut s = world();
         let mut herdr = FakeHerdr::new();
-        herdr.api_replies.push_back(Err("service unavailable".into()));
+        herdr
+            .api_replies
+            .push_back(Err("service unavailable".into()));
 
         let seat = idle().seat;
         let profile = gear_herdr::builtin("opencode").unwrap();
@@ -1083,7 +1292,9 @@ profile = "claude"
             T0,
         )
         .unwrap();
-        let ModelGate::Failed(reason) = gate else { panic!("unreadable catalogue must fail: {gate:?}") };
+        let ModelGate::Failed(reason) = gate else {
+            panic!("unreadable catalogue must fail: {gate:?}")
+        };
         assert!(reason.contains("could not be read"), "{reason}");
         assert!(reason.contains("service unavailable"), "{reason}");
         assert!(
@@ -1114,8 +1325,13 @@ profile = "claude"
             T0,
         )
         .unwrap();
-        let ModelGate::Failed(reason) = gate else { panic!("an empty catalogue must fail: {gate:?}") };
-        assert!(reason.contains("the model list is not loaded yet"), "{reason}");
+        let ModelGate::Failed(reason) = gate else {
+            panic!("an empty catalogue must fail: {gate:?}")
+        };
+        assert!(
+            reason.contains("the model list is not loaded yet"),
+            "{reason}"
+        );
         assert!(
             !reason.contains("is not in OpenCode's model list"),
             "an empty list is not an absent model: {reason}"
@@ -1131,7 +1347,16 @@ profile = "claude"
         busy.status = Some(gear_herdr::AgentStatus::Working);
 
         let profile = gear_herdr::builtin("opencode").unwrap();
-        let outcome = switch_in_place(&mut s, &mut herdr, "p:heat", &profile, Some(&busy), &labels(), T0).unwrap();
+        let outcome = switch_in_place(
+            &mut s,
+            &mut herdr,
+            "p:heat",
+            &profile,
+            Some(&busy),
+            &labels(),
+            T0,
+        )
+        .unwrap();
         assert_eq!(outcome, SwitchOutcome::Waiting);
         assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
     }

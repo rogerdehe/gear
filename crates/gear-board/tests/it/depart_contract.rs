@@ -34,7 +34,12 @@ fn utc(ts: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", secs / 3600, secs % 3600 / 60, secs % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        secs / 3600,
+        secs % 3600 / 60,
+        secs % 60
+    )
 }
 
 /// A project with one voyage that has not departed and one open task, so the
@@ -93,7 +98,10 @@ fn world(schedule: Option<&str>) -> Store {
 }
 
 fn drawn(store: &mut Store, now: i64) -> String {
-    let options = Options { project: Some("p".into()), ..Default::default() };
+    let options = Options {
+        project: Some("p".into()),
+        ..Default::default()
+    };
     let board = build(store, &options, now).expect("the board");
     render(&board, View::Lanes)
 }
@@ -101,7 +109,10 @@ fn drawn(store: &mut Store, now: i64) -> String {
 #[test]
 fn the_board_says_when_a_waiting_voyage_departs() {
     let depart = clock_at("14:00");
-    let mut store = world(Some(&format!("[schedule]\ndepart_at = \"{}\"", utc(depart))));
+    let mut store = world(Some(&format!(
+        "[schedule]\ndepart_at = \"{}\"",
+        utc(depart)
+    )));
 
     let text = drawn(&mut store, depart - 600);
 
@@ -111,11 +122,17 @@ fn the_board_says_when_a_waiting_voyage_departs() {
 #[test]
 fn after_the_departure_time_the_voyage_line_is_unchanged() {
     let depart = clock_at("14:00");
-    let mut store = world(Some(&format!("[schedule]\ndepart_at = \"{}\"", utc(depart))));
+    let mut store = world(Some(&format!(
+        "[schedule]\ndepart_at = \"{}\"",
+        utc(depart)
+    )));
 
     let text = drawn(&mut store, depart);
 
-    assert!(text.contains("Voyage M5 the next voyage · done: it sails"), "{text}");
+    assert!(
+        text.contains("Voyage M5 the next voyage · done: it sails"),
+        "{text}"
+    );
     assert!(!text.contains("departs at"), "{text}");
 }
 
@@ -124,7 +141,10 @@ fn without_a_departure_time_the_voyage_line_is_unchanged() {
     let mut store = world(None);
     let text = drawn(&mut store, AROUND);
 
-    assert!(text.contains("Voyage M5 the next voyage · done: it sails"), "{text}");
+    assert!(
+        text.contains("Voyage M5 the next voyage · done: it sails"),
+        "{text}"
+    );
     assert!(!text.contains("departs at"), "{text}");
 }
 
@@ -145,7 +165,10 @@ fn inside_the_hours_the_voyage_line_is_unchanged() {
 
     let text = drawn(&mut store, noon);
 
-    assert!(text.contains("Voyage M5 the next voyage · done: it sails"), "{text}");
+    assert!(
+        text.contains("Voyage M5 the next voyage · done: it sails"),
+        "{text}"
+    );
     assert!(!text.contains("off hours until"), "{text}");
 }
 
@@ -156,7 +179,10 @@ fn without_hours_the_voyage_line_is_unchanged() {
 
     let text = drawn(&mut store, evening);
 
-    assert!(text.contains("Voyage M5 the next voyage · done: it sails"), "{text}");
+    assert!(
+        text.contains("Voyage M5 the next voyage · done: it sails"),
+        "{text}"
+    );
     assert!(!text.contains("off hours until"), "{text}");
 }
 

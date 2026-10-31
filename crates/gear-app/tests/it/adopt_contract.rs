@@ -19,7 +19,15 @@ fn world() -> Store {
     let mut s = Store::open_in_memory().unwrap();
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", NOW)?;
-        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "captain",
+            SeatRole::Captain,
+            CAP_PANE,
+            "codex",
+            NOW,
+        )?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", NOW)?;
         tx.insert_task(&TaskRow {
             repo: None,
@@ -41,7 +49,8 @@ fn world() -> Store {
             wait_cond: None,
             rework_note: None,
             estimate_min: None,
-             issue: None,updated: NOW,
+            issue: None,
+            updated: NOW,
         })?;
         tx.insert_contract(&ContractRow {
             project: "p".into(),
@@ -75,22 +84,38 @@ fn working() -> Store {
 fn cap() -> (Env, Fingerprint) {
     (
         Env {
-            ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "captain".into(),
+                generation: 1,
+            }),
             pane_id: Some(CAP_PANE.into()),
             admin: false,
         },
-        Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None },
+        Fingerprint {
+            pane_id: CAP_PANE.into(),
+            kind: Some("codex".into()),
+            session_ref: None,
+        },
     )
 }
 
 fn lane() -> (Env, Fingerprint) {
     (
         Env {
-            ctx: Some(GearCtx { project: "p".into(), seat: "heat".into(), generation: 1 }),
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "heat".into(),
+                generation: 1,
+            }),
             pane_id: Some(LANE_PANE.into()),
             admin: false,
         },
-        Fingerprint { pane_id: LANE_PANE.into(), kind: Some("opencode".into()), session_ref: None },
+        Fingerprint {
+            pane_id: LANE_PANE.into(),
+            kind: Some("opencode".into()),
+            session_ref: None,
+        },
     )
 }
 
@@ -158,7 +183,9 @@ fn the_view_adopts_the_pending_version_once() {
     assert_eq!((a.adopted_version, a.pending_update), (2, None));
 
     // A second call has nothing left to adopt.
-    let adopted = s.read(|tx| adopt_contract(tx, "p", "T-1", 1, 2, NOW + 30)).unwrap();
+    let adopted = s
+        .read(|tx| adopt_contract(tx, "p", "T-1", 1, 2, NOW + 30))
+        .unwrap();
     assert_eq!(adopted, None);
 }
 
@@ -218,14 +245,25 @@ fn a_handed_in_attempt_keeps_its_submitted_contract() {
     s.write(|tx| submit_result(tx, "p", "T-1", 1, 2, "abc1234", "Report: r", NOW + 17))
         .unwrap();
     let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
-    assert_eq!((a.state, a.adopted_version, a.pending_update), (AttemptState::Submitted, 2, None));
+    assert_eq!(
+        (a.state, a.adopted_version, a.pending_update),
+        (AttemptState::Submitted, 2, None)
+    );
 
     let (env, fp) = lane();
     let page = home::build(&mut s, &env, Some(&fp), NOW + 20).unwrap();
-    assert_eq!(page.view.shown_contract, Some(2), "the page shows the submitted contract");
+    assert_eq!(
+        page.view.shown_contract,
+        Some(2),
+        "the page shows the submitted contract"
+    );
     home::record_view(&mut s, &page.view).unwrap();
     let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
-    assert_eq!((a.adopted_version, a.pending_update), (2, None), "the candidate stays bound to v2");
+    assert_eq!(
+        (a.adopted_version, a.pending_update),
+        (2, None),
+        "the candidate stays bound to v2"
+    );
 }
 
 /// T-63: a page built before the hand-in, and a hand-in that names the old
@@ -245,11 +283,18 @@ fn a_page_built_before_the_hand_in_adopts_after_a_refused_hand_in() {
     assert_eq!(error.code, ErrorCode::BadFormat);
     assert!(error.detail.contains("on contract v2"), "{error:?}");
     let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
-    assert_eq!((a.state, a.adopted_version), (AttemptState::Started, 1), "nothing was written");
+    assert_eq!(
+        (a.state, a.adopted_version),
+        (AttemptState::Started, 1),
+        "nothing was written"
+    );
 
     home::record_view(&mut s, &page.view).unwrap();
     let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
-    assert_eq!((a.state, a.adopted_version, a.pending_update), (AttemptState::Started, 2, None));
+    assert_eq!(
+        (a.state, a.adopted_version, a.pending_update),
+        (AttemptState::Started, 2, None)
+    );
     s.write(|tx| submit_result(tx, "p", "T-1", 1, 2, "abc1234", "Report: r", NOW + 22))
         .unwrap();
     let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();

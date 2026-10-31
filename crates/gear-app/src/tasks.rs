@@ -6,8 +6,8 @@
 
 use gear_model::state::require_transition;
 use gear_model::{
-    AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, OpState,
-    SeatState, TaskState, Ts,
+    AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, OpState, SeatState,
+    TaskState, Ts,
 };
 use gear_store::{AttemptRow, AttemptStep, NewMessage, NewOp, Tx, VerdictRow};
 
@@ -16,7 +16,14 @@ use gear_store::{AttemptRow, AttemptStep, NewMessage, NewOp, Tx, VerdictRow};
 /// Preconditions (else `Forbidden`, detail says which): task Ready; every dep
 /// Done; seat state Active or Standby with `generation` = the seat's current
 /// generation; the seat has no in-progress attempt. The task stays Ready.
-pub fn start_attempt(tx: &Tx<'_>, project: &str, task: &str, seat_id: &str, generation: i64, now: Ts) -> GearResult<AttemptRow> {
+pub fn start_attempt(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    seat_id: &str,
+    generation: i64,
+    now: Ts,
+) -> GearResult<AttemptRow> {
     let task_row = tx.get_task(project, task)?.ok_or_else(|| {
         GearError::new(
             ErrorCode::NoTarget,
@@ -47,9 +54,9 @@ pub fn start_attempt(tx: &Tx<'_>, project: &str, task: &str, seat_id: &str, gene
         }
     }
 
-    let seat = tx.get_seat(seat_id)?.ok_or_else(|| {
-        GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id}"))
-    })?;
+    let seat = tx
+        .get_seat(seat_id)?
+        .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id}")))?;
     if seat.generation != generation {
         return Err(forbidden(format!(
             "seat {seat_id} is at generation {}, the caller has {generation}",
@@ -127,7 +134,10 @@ pub fn carry_attempt_generation(
         if attempt.generation != from_generation {
             continue;
         }
-        if !matches!(attempt.state, AttemptState::Delivered | AttemptState::Started) {
+        if !matches!(
+            attempt.state,
+            AttemptState::Delivered | AttemptState::Started
+        ) {
             continue;
         }
         attempt.generation = to_generation;
@@ -138,7 +148,13 @@ pub fn carry_attempt_generation(
 }
 
 /// Delivery confirmed: attempt Delivered → Started, task Ready → Running.
-pub fn on_delivery_confirmed(tx: &Tx<'_>, project: &str, task: &str, n: i64, now: Ts) -> GearResult<()> {
+pub fn on_delivery_confirmed(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    n: i64,
+    now: Ts,
+) -> GearResult<()> {
     let mut attempt = tx.get_attempt(project, task, n)?.ok_or_else(|| {
         GearError::new(
             ErrorCode::NoTarget,
@@ -263,7 +279,16 @@ pub fn require_rework_contains(
 /// `gear send --kind result`: the exact attempt, under its adopted contract
 /// version (else `BadFormat`). Attempt Started/Stopped/Unknown → Submitted with
 /// candidate and report; task Running → Verifying.
-pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_version: i64, candidate: &str, report: &str, now: Ts) -> GearResult<()> {
+pub fn submit_result(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    n: i64,
+    contract_version: i64,
+    candidate: &str,
+    report: &str,
+    now: Ts,
+) -> GearResult<()> {
     let mut attempt = tx.get_attempt(project, task, n)?.ok_or_else(|| {
         GearError::new(
             ErrorCode::NoTarget,
@@ -303,7 +328,9 @@ pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_ve
     // view is recorded. Both transitions happen in this transaction.
     if attempt.state == AttemptState::Delivered {
         on_delivery_confirmed(tx, project, task, n, now)?;
-        attempt = tx.get_attempt(project, task, n)?.ok_or_else(|| GearError::new(ErrorCode::NoTarget, "attempt disappeared"))?;
+        attempt = tx
+            .get_attempt(project, task, n)?
+            .ok_or_else(|| GearError::new(ErrorCode::NoTarget, "attempt disappeared"))?;
     }
     require_transition(
         AttemptState::can_transition(attempt.state, AttemptState::Submitted),
@@ -349,7 +376,13 @@ pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_ve
     // A restart or compaction can change the binding since check-in.
     if let Some(seat) = tx.get_seat(&attempt.seat)? {
         if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
-            tx.refresh_attempt_session(project, task, n, binding.session_ref.as_deref().filter(|s| !s.is_empty()), &binding.kind)?;
+            tx.refresh_attempt_session(
+                project,
+                task,
+                n,
+                binding.session_ref.as_deref().filter(|s| !s.is_empty()),
+                &binding.kind,
+            )?;
         }
     }
     // The hand-in has its own time (T-38): the dev time ends here, the review
@@ -427,8 +460,8 @@ pub fn verdict_hint(
     let Some(candidate) = attempt_row.candidate.clone() else {
         return Ok(None);
     };
-    let handed_in = attempt_row.state == AttemptState::Submitted
-        && task_row.state == TaskState::Verifying;
+    let handed_in =
+        attempt_row.state == AttemptState::Submitted && task_row.state == TaskState::Verifying;
     // A review fail: the item is the reviewer's verdict on this attempt (a
     // fail; a pass is information), and the attempt is still handed in.
     let review_fail = handed_in
@@ -477,7 +510,11 @@ pub fn verdict_hint(
         ),
         // A failed merge is retried with `- remerge T-<n>` (B5): the work
         // passed, the merge did not — a rework is the other way round.
-        remerge: if merge_failed { Some(task.to_string()) } else { None },
+        remerge: if merge_failed {
+            Some(task.to_string())
+        } else {
+            None
+        },
     }))
 }
 
@@ -621,15 +658,17 @@ pub struct Verdict {
 /// task/attempt/outcome/candidate) after it settled → Ok, nothing written;
 /// a conflicting one → `BadTransition`.
 pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
-    let mut attempt = tx.get_attempt(&v.project, &v.task, v.attempt)?.ok_or_else(|| {
-        GearError::new(
-            ErrorCode::NoTarget,
-            format!(
-                "no attempt {} of task {} in project {}",
-                v.attempt, v.task, v.project
-            ),
-        )
-    })?;
+    let mut attempt = tx
+        .get_attempt(&v.project, &v.task, v.attempt)?
+        .ok_or_else(|| {
+            GearError::new(
+                ErrorCode::NoTarget,
+                format!(
+                    "no attempt {} of task {} in project {}",
+                    v.attempt, v.task, v.project
+                ),
+            )
+        })?;
 
     // The same verdict again settles nothing; a conflicting one is a move the
     // attempt cannot make any more.
@@ -655,7 +694,9 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
         // The one conflict a captain may make (T-90): a pass that already
         // settled this attempt, followed by the fail that reopens the task
         // because its merge failed. The attempt stays accepted below.
-        if settled.passed && !v.pass && settled.candidate == v.candidate
+        if settled.passed
+            && !v.pass
+            && settled.candidate == v.candidate
             && attempt.state == AttemptState::Accepted
         {
             continue;
@@ -698,7 +739,9 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
     // worked to an older one: the captain attests (with review evidence) that
     // the candidate meets the current contract. Needed while contract updates
     // can miss a lane mid-attempt (lesson L-43).
-    let current_contract = tx.get_task(&v.project, &v.task)?.map(|t| t.contract_version);
+    let current_contract = tx
+        .get_task(&v.project, &v.task)?
+        .map(|t| t.contract_version);
     let attested = v.pass && Some(v.contract_version) == current_contract;
     if v.contract_version != attempt.adopted_version && !attested {
         return Err(GearError::new(
@@ -743,9 +786,8 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
     // integration branch. The captain's fail sends the task back — the
     // attempt keeps its accepted state (it did pass), the task reopens for a
     // rework on a new attempt.
-    let reopen = !v.pass
-        && attempt.state == AttemptState::Accepted
-        && task_row.state == TaskState::Done;
+    let reopen =
+        !v.pass && attempt.state == AttemptState::Accepted && task_row.state == TaskState::Done;
 
     let (attempt_state, attempt_name) = if v.pass {
         (AttemptState::Accepted, "accepted")
@@ -829,14 +871,22 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
 /// whose task is already finished (done, failed, cancelled), is obsolete and a
 /// no-op (`Ok`, nothing written) — a second call, a replayed tick or a review
 /// that arrives after a cancellation is safe (review R-67).
-pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: Ts) -> GearResult<()> {
+pub fn settle_review(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    attempt: i64,
+    now: Ts,
+) -> GearResult<()> {
     // The verdict is the whole point: without one there is nothing to settle.
     let review = tx
         .get_review_verdict(project, task, attempt)?
         .ok_or_else(|| {
             GearError::new(
                 ErrorCode::NoTarget,
-                format!("no review verdict for attempt {attempt} of task {task} in project {project}"),
+                format!(
+                    "no review verdict for attempt {attempt} of task {task} in project {project}"
+                ),
             )
         })?;
     let mut attempt_row = tx.get_attempt(project, task, attempt)?.ok_or_else(|| {
@@ -916,7 +966,12 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
     let (attempt_state, attempt_name, task_state, task_name) = if accepted {
         (AttemptState::Accepted, "accepted", TaskState::Done, "done")
     } else {
-        (AttemptState::Rejected, "rejected", TaskState::Ready, "ready")
+        (
+            AttemptState::Rejected,
+            "rejected",
+            TaskState::Ready,
+            "ready",
+        )
     };
     require_transition(
         AttemptState::can_transition(attempt_row.state, attempt_state),
@@ -1251,4 +1306,3 @@ pub fn resolve_review_items(
     })?;
     Ok(())
 }
-

@@ -71,7 +71,12 @@ pub fn gate_for(store: &mut Store, env: &Env) -> GearResult<BaseGate> {
 /// The task branch of a lane (T-252): the project's
 /// `[conventions].task_branch` template with `{project}`, `{lane}` and `{n}`
 /// filled in — `<lane>/t<n>` by default (conventions 17 §3).
-pub fn task_branch(conventions: &crate::config::Conventions, project: &str, lane: &str, task: &str) -> String {
+pub fn task_branch(
+    conventions: &crate::config::Conventions,
+    project: &str,
+    lane: &str,
+    task: &str,
+) -> String {
     gear_model::branch::expand(&conventions.task_branch, project, lane, task)
 }
 

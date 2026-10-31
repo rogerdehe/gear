@@ -2,29 +2,47 @@
 //! Persist the continuous-condition timer and one alert per incident. Submitted
 //! attempts belong to review, so they do not count as lane development work.
 
-use crate::{dispatch, observe::{Presence, SeatObs}};
+use crate::{
+    dispatch,
+    observe::{Presence, SeatObs},
+};
 use gear_herdr::AgentStatus;
 use gear_model::{GearResult, MsgKind, MsgState, SeatRole, SeatState, Ts};
 use gear_store::{NewMessage, SeatRow, Tx};
 
-fn key(seat: &str) -> String { format!("lane-busy-idle:{seat}") }
+fn key(seat: &str) -> String {
+    format!("lane-busy-idle:{seat}")
+}
 
 /// Unknown observation interrupts the timer without claiming recovery or
 /// forgetting an already-issued alert. The next known idle/task/queue state
 /// decides whether that incident has actually ended.
 pub fn observation_lost(tx: &Tx<'_>, project: &str) -> GearResult<()> {
-    for seat in tx.seats_of_project(project)?.iter().filter(|s| s.role == SeatRole::Lane) {
+    for seat in tx
+        .seats_of_project(project)?
+        .iter()
+        .filter(|s| s.role == SeatRole::Lane)
+    {
         tx.set_meta(&format!("{}:since", key(&seat.id)), "")?;
     }
     Ok(())
 }
 
 pub fn check(tx: &Tx<'_>, project: &str, observed: &[SeatObs], now: Ts) -> GearResult<Vec<String>> {
-    let config = tx.get_project(project)?.and_then(|p| gear_app::config::parse(&p.config_toml).ok());
-    let threshold = i64::from(config.map(|c| c.timing.lane_busy_idle_min).unwrap_or(10).max(1)) * 60;
+    let config = tx
+        .get_project(project)?
+        .and_then(|p| gear_app::config::parse(&p.config_toml).ok());
+    let threshold = i64::from(
+        config
+            .map(|c| c.timing.lane_busy_idle_min)
+            .unwrap_or(10)
+            .max(1),
+    ) * 60;
     let mut alerted = Vec::new();
     for obs in observed.iter().filter(|o| o.seat.role == SeatRole::Lane) {
-        let Some(seat) = tx.get_seat(&obs.seat.id)? else { continue; };
+        let Some(seat) = tx.get_seat(&obs.seat.id)? else {
+            continue;
+        };
         let key = key(&seat.id);
         let generation = seat.generation.to_string();
         if tx.get_meta(&format!("{key}:generation"))?.as_deref() != Some(&generation) {
@@ -44,23 +62,48 @@ pub fn check(tx: &Tx<'_>, project: &str, observed: &[SeatObs], now: Ts) -> GearR
         let since = tx.get_meta(&since_key)?.and_then(|s| s.parse::<Ts>().ok());
         let since = match since {
             Some(since) if since <= now => since,
-            _ => { tx.set_meta(&since_key, &now.to_string())?; now }
+            _ => {
+                tx.set_meta(&since_key, &now.to_string())?;
+                now
+            }
         };
-        if now - since <= threshold { continue; }
-        let Some(captain) = tx.captain_of(project)? else { continue; };
-        if tx.get_meta(&format!("{key}:alert"))?.is_some_and(|s| !s.is_empty()) {
-            if !crate::attention::due(tx, project, &format!("lane-busy:{}", seat.id), &captain.id, now)? {
+        if now - since <= threshold {
+            continue;
+        }
+        let Some(captain) = tx.captain_of(project)? else {
+            continue;
+        };
+        if tx
+            .get_meta(&format!("{key}:alert"))?
+            .is_some_and(|s| !s.is_empty())
+        {
+            if !crate::attention::due(
+                tx,
+                project,
+                &format!("lane-busy:{}", seat.id),
+                &captain.id,
+                now,
+            )? {
                 continue;
             }
         }
 
         let message = tx.insert_message(&NewMessage {
             meta: None,
-            project: project.into(), thread: format!("lane-busy:{}", seat.id),
-            task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
-            recipient: captain.id, kind: MsgKind::System, urgent: true,
+            project: project.into(),
+            thread: format!("lane-busy:{}", seat.id),
+            task: None,
+            attempt: None,
+            sender: "engine".into(),
+            sender_gen: 0,
+            recipient: captain.id,
+            kind: MsgKind::System,
+            urgent: true,
             body: format!("lane {} is busy with no task; ready work waits", seat.name),
-            reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
         })?;
         tx.set_meta(&format!("{key}:alert"), &message.id)?;
         alerted.push(seat.id);
@@ -81,7 +124,11 @@ fn qualifies(tx: &Tx<'_>, project: &str, seat: &SeatRow, obs: &SeatObs) -> GearR
         return Ok(false);
     }
     for task in dispatch::ready_tasks_of(tx, seat)? {
-        if !tx.attempts_of_task(project, &task.id)?.iter().any(|a| a.state.occupies_seat()) {
+        if !tx
+            .attempts_of_task(project, &task.id)?
+            .iter()
+            .any(|a| a.state.occupies_seat())
+        {
             return Ok(true);
         }
     }
@@ -105,16 +152,32 @@ pub fn due_interrupts(
     const INTERRUPT_AFTER_S: i64 = 300;
     let mut panes = Vec::new();
     for obs in observed.iter().filter(|o| o.seat.role == SeatRole::Lane) {
-        let Some(seat) = tx.get_seat(&obs.seat.id)? else { continue; };
-        if !qualifies(tx, project, &seat, obs)? { continue; }
+        let Some(seat) = tx.get_seat(&obs.seat.id)? else {
+            continue;
+        };
+        if !qualifies(tx, project, &seat, obs)? {
+            continue;
+        }
         let key = key(&seat.id);
-        let Some(since) = tx.get_meta(&format!("{key}:since"))?.and_then(|s| s.parse::<Ts>().ok())
-        else { continue; };
-        if now - since < INTERRUPT_AFTER_S { continue; }
+        let Some(since) = tx
+            .get_meta(&format!("{key}:since"))?
+            .and_then(|s| s.parse::<Ts>().ok())
+        else {
+            continue;
+        };
+        if now - since < INTERRUPT_AFTER_S {
+            continue;
+        }
         let since = since.to_string();
-        if tx.get_meta(&format!("{key}:interrupted"))?.as_deref() == Some(&since) { continue; }
-        if gear_board::idle::helping(tx, project, &seat, now)?.is_some() { continue; }
-        let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else { continue; };
+        if tx.get_meta(&format!("{key}:interrupted"))?.as_deref() == Some(&since) {
+            continue;
+        }
+        if gear_board::idle::helping(tx, project, &seat, now)?.is_some() {
+            continue;
+        }
+        let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else {
+            continue;
+        };
         tx.set_meta(&format!("{key}:interrupted"), &since)?;
         panes.push(binding.pane_id);
     }
@@ -122,12 +185,23 @@ pub fn due_interrupts(
 }
 
 fn recover(tx: &Tx<'_>, project: &str, key: &str, now: Ts) -> GearResult<()> {
-    if let Some(id) = tx.get_meta(&format!("{key}:alert"))?.filter(|s| !s.is_empty()) {
+    if let Some(id) = tx
+        .get_meta(&format!("{key}:alert"))?
+        .filter(|s| !s.is_empty())
+    {
         if let Some(message) = tx.get_message(project, &id)? {
             if matches!(message.state, MsgState::Open | MsgState::Waiting) {
-                tx.update_message_state(project, &id, MsgState::Resolved,
-                    Some("lane no longer busy without a development attempt while ready work waits"),
-                    None, None, now)?;
+                tx.update_message_state(
+                    project,
+                    &id,
+                    MsgState::Resolved,
+                    Some(
+                        "lane no longer busy without a development attempt while ready work waits",
+                    ),
+                    None,
+                    None,
+                    now,
+                )?;
             }
         }
     }

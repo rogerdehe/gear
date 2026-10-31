@@ -12,10 +12,16 @@ use gear_store::{BindingRow, BindingStatus, MessageRow, SeatRow, Tx};
 /// binding of the seat that is not Void becomes Void, and a Pending binding
 /// (`pane_id`, `kind`, session = the project's Herdr session) is inserted for the
 /// new generation. Returns the new generation.
-pub fn begin_onboard(tx: &Tx<'_>, seat_id: &str, pane_id: &str, kind: &str, now: Ts) -> GearResult<i64> {
-    let seat = tx.get_seat(seat_id)?.ok_or_else(|| {
-        GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id}"))
-    })?;
+pub fn begin_onboard(
+    tx: &Tx<'_>,
+    seat_id: &str,
+    pane_id: &str,
+    kind: &str,
+    now: Ts,
+) -> GearResult<i64> {
+    let seat = tx
+        .get_seat(seat_id)?
+        .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id}")))?;
 
     // A seat starts onboarding from Queued (freshly registered) or from
     // Missing/NeedsCheck (a restart); the model says which is legal for the
@@ -68,10 +74,16 @@ pub fn begin_onboard(tx: &Tx<'_>, seat_id: &str, pane_id: &str, kind: &str, now:
 /// `generation` becomes Active (with `session_ref` when Herdr reported one) and
 /// the seat goes Starting → Active. A generation that is not the seat's current
 /// one → `StaleGeneration`; a binding that is not Pending → `BadTransition`.
-pub fn finish_onboard(tx: &Tx<'_>, seat_id: &str, generation: i64, session_ref: Option<&str>, now: Ts) -> GearResult<()> {
-    let seat = tx.get_seat(seat_id)?.ok_or_else(|| {
-        GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id}"))
-    })?;
+pub fn finish_onboard(
+    tx: &Tx<'_>,
+    seat_id: &str,
+    generation: i64,
+    session_ref: Option<&str>,
+    now: Ts,
+) -> GearResult<()> {
+    let seat = tx
+        .get_seat(seat_id)?
+        .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id}")))?;
 
     // Only the seat's current generation may finish: a call from an older
     // session is stale (design/03).
@@ -132,11 +144,7 @@ fn binding_status_name(status: BindingStatus) -> &'static str {
 /// earlier job's messages from this job's.
 ///
 /// `None` for a seat without a binding of that generation (never onboarded).
-pub fn generation_started(
-    tx: &Tx<'_>,
-    seat_id: &str,
-    generation: i64,
-) -> GearResult<Option<Ts>> {
+pub fn generation_started(tx: &Tx<'_>, seat_id: &str, generation: i64) -> GearResult<Option<Ts>> {
     Ok(tx
         .get_binding(seat_id, generation)?
         .map(|binding| binding.created))

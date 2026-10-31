@@ -19,9 +19,25 @@ fn world() -> Store {
     let mut s = Store::open_in_memory().unwrap();
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", NOW)?;
-        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "captain",
+            SeatRole::Captain,
+            CAP_PANE,
+            "codex",
+            NOW,
+        )?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", NOW)?;
-        testing::seed_active_seat(tx, "p", "pricing", SeatRole::Lane, OTHER_PANE, "opencode", NOW)?;
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "pricing",
+            SeatRole::Lane,
+            OTHER_PANE,
+            "opencode",
+            NOW,
+        )?;
         Ok(())
     })
     .unwrap();
@@ -30,7 +46,11 @@ fn world() -> Store {
 
 fn seat_env(seat: &str, pane: &str) -> Env {
     Env {
-        ctx: Some(GearCtx { project: "p".into(), seat: seat.into(), generation: 1 }),
+        ctx: Some(GearCtx {
+            project: "p".into(),
+            seat: seat.into(),
+            generation: 1,
+        }),
         pane_id: Some(pane.into()),
         admin: false,
     }
@@ -41,7 +61,11 @@ fn captain_env() -> Env {
 }
 
 fn fp(pane: &str, kind: &str) -> Fingerprint {
-    Fingerprint { pane_id: pane.into(), kind: Some(kind.into()), session_ref: None }
+    Fingerprint {
+        pane_id: pane.into(),
+        kind: Some(kind.into()),
+        session_ref: None,
+    }
 }
 
 /// A lane asks the captain a question.
@@ -66,7 +90,15 @@ fn ask(s: &mut Store, seat: &str, pane: &str, body: &str, request_id: &str, now:
         friction: None,
         request_id: request_id.into(),
     };
-    mail::send(s, &seat_env(seat, pane), Some(&fp(pane, "opencode")), &args, now).unwrap().msg_id
+    mail::send(
+        s,
+        &seat_env(seat, pane),
+        Some(&fp(pane, "opencode")),
+        &args,
+        now,
+    )
+    .unwrap()
+    .msg_id
 }
 
 /// The captain raises an item in its own inbox (no `--to`): the captain is
@@ -92,7 +124,9 @@ fn raise_own(s: &mut Store, body: &str, request_id: &str, now: i64) -> String {
         friction: None,
         request_id: request_id.into(),
     };
-    mail::send(s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, now).unwrap().msg_id
+    mail::send(s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, now)
+        .unwrap()
+        .msg_id
 }
 
 /// The captain instructs a lane.
@@ -117,7 +151,9 @@ fn instruct(s: &mut Store, seat: &str, request_id: &str, now: i64) -> String {
         friction: None,
         request_id: request_id.into(),
     };
-    mail::send(s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, now).unwrap().msg_id
+    mail::send(s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, now)
+        .unwrap()
+        .msg_id
 }
 
 fn reply_args(ids: &[&str], mode: ReplyMode, request_id: &str) -> ReplyArgs {
@@ -187,12 +223,21 @@ fn resolve_closes_and_replies() {
     assert!(!r.replayed);
     assert_eq!(state_of(&mut s, &id), MsgState::Resolved);
 
-    let answer = s.read(|tx| tx.get_message("p", &r.replies[0])).unwrap().unwrap();
+    let answer = s
+        .read(|tx| tx.get_message("p", &r.replies[0]))
+        .unwrap()
+        .unwrap();
     assert_eq!(answer.recipient, "p:heat");
     assert_eq!(answer.sender, "p:captain");
     assert_eq!(answer.kind, MsgKind::Reply);
     assert_eq!(answer.state, MsgState::Info);
-    assert_eq!(answer.thread, s.read(|tx| tx.get_message("p", &id)).unwrap().unwrap().thread);
+    assert_eq!(
+        answer.thread,
+        s.read(|tx| tx.get_message("p", &id))
+            .unwrap()
+            .unwrap()
+            .thread
+    );
     assert_eq!(answer.reply_to.as_deref(), Some(id.as_str()));
 }
 
@@ -204,7 +249,14 @@ fn wait_sets_waiting() {
     let mut args = reply_args(&[&id], ReplyMode::Wait, "r1");
     args.wait_on = Some("user".into());
     args.wait_until = Some(NOW + 100);
-    let r = mail::reply(&mut s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, NOW + 1).unwrap();
+    let r = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &args,
+        NOW + 1,
+    )
+    .unwrap();
 
     assert_eq!(r.handled, vec![(id.clone(), "waiting".to_string())]);
     let m = s.read(|tx| tx.get_message("p", &id)).unwrap().unwrap();
@@ -229,11 +281,19 @@ fn note_keeps_state() {
     .unwrap();
 
     assert_eq!(r.handled, vec![(id.clone(), "open".to_string())]);
-    assert_eq!(state_of(&mut s, &id), MsgState::Open, "a note changes no state");
+    assert_eq!(
+        state_of(&mut s, &id),
+        MsgState::Open,
+        "a note changes no state"
+    );
     // T-103: a note is the captain's record on the item, never a message.
     assert!(r.replies.is_empty(), "a note is sent to nobody");
     let item = s.read(|tx| tx.get_message("p", &id)).unwrap().unwrap();
-    assert_eq!(item.result.as_deref(), Some("the answer"), "kept on the item");
+    assert_eq!(
+        item.result.as_deref(),
+        Some("the answer"),
+        "kept on the item"
+    );
     let messages = s.read(|tx| tx.thread_messages("p", &item.thread)).unwrap();
     assert_eq!(messages.len(), 1, "no message was written: {messages:?}");
 }
@@ -243,7 +303,10 @@ fn a_note_reaches_no_seat() {
     // T-103: whatever the mode, a note is not typed into anyone's inbox.
     let mut s = world();
     let id = ask(&mut s, "heat", LANE_PANE, "which schema?", "s1", NOW);
-    let before = s.read(|tx| tx.thread_messages("p", "T-0:1")).map(|m| m.len()).unwrap_or(0);
+    let before = s
+        .read(|tx| tx.thread_messages("p", "T-0:1"))
+        .map(|m| m.len())
+        .unwrap_or(0);
 
     let r = mail::reply(
         &mut s,
@@ -255,7 +318,10 @@ fn a_note_reaches_no_seat() {
     .unwrap();
 
     assert!(r.replies.is_empty());
-    let after = s.read(|tx| tx.thread_messages("p", "T-0:1")).map(|m| m.len()).unwrap_or(0);
+    let after = s
+        .read(|tx| tx.thread_messages("p", "T-0:1"))
+        .map(|m| m.len())
+        .unwrap_or(0);
     assert_eq!(before, after, "no message anywhere");
     // The lane's own batch shows nothing new from the captain.
     let views = s
@@ -273,12 +339,32 @@ fn a_resolve_to_a_released_reviewer_sends_nothing() {
     // is written into a seat that will never read it.
     let mut s = world();
     s.write(|tx| {
-        testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p4", "opencode", NOW)
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "review-1",
+            SeatRole::Temp,
+            "w1:p4",
+            "opencode",
+            NOW,
+        )
     })
     .unwrap();
-    let id = ask(&mut s, "review-1", "w1:p4", "the checkout is held", "s1", NOW);
+    let id = ask(
+        &mut s,
+        "review-1",
+        "w1:p4",
+        "the checkout is held",
+        "s1",
+        NOW,
+    );
     s.write(|tx| {
-        tx.set_seat_state("p:review-1", SeatState::Released, Some("review done"), NOW + 1)
+        tx.set_seat_state(
+            "p:review-1",
+            SeatState::Released,
+            Some("review done"),
+            NOW + 1,
+        )
     })
     .unwrap();
 
@@ -302,10 +388,8 @@ fn a_retiring_lane_still_gets_its_answer() {
     // so the captain's answer to its question must reach it.
     let mut s = world();
     let id = ask(&mut s, "heat", LANE_PANE, "which schema?", "s1", NOW);
-    s.write(|tx| {
-        tx.set_seat_state("p:heat", SeatState::Retiring, Some("retiring"), NOW + 1)
-    })
-    .unwrap();
+    s.write(|tx| tx.set_seat_state("p:heat", SeatState::Retiring, Some("retiring"), NOW + 1))
+        .unwrap();
 
     let r = mail::reply(
         &mut s,
@@ -318,7 +402,10 @@ fn a_retiring_lane_still_gets_its_answer() {
 
     assert_eq!(r.handled, vec![(id.clone(), "resolved".to_string())]);
     assert_eq!(r.replies.len(), 1, "a retiring lane is still live");
-    let answer = s.read(|tx| tx.get_message("p", &r.replies[0])).unwrap().unwrap();
+    let answer = s
+        .read(|tx| tx.get_message("p", &r.replies[0]))
+        .unwrap()
+        .unwrap();
     assert_eq!(answer.recipient, "p:heat");
     assert_eq!(answer.body, "the answer");
 }
@@ -329,17 +416,41 @@ fn a_reused_reviewer_gets_no_answer_to_an_earlier_jobs_item() {
     // the captain's note on the generation-1 item.
     let mut s = world();
     s.write(|tx| {
-        testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p4", "opencode", NOW)
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "review-1",
+            SeatRole::Temp,
+            "w1:p4",
+            "opencode",
+            NOW,
+        )
     })
     .unwrap();
-    let id = ask(&mut s, "review-1", "w1:p4", "the checkout is held", "s1", NOW);
+    let id = ask(
+        &mut s,
+        "review-1",
+        "w1:p4",
+        "the checkout is held",
+        "s1",
+        NOW,
+    );
     s.write(|tx| {
-        tx.set_seat_state("p:review-1", SeatState::Released, Some("review done"), NOW + 1)?;
+        tx.set_seat_state(
+            "p:review-1",
+            SeatState::Released,
+            Some("review done"),
+            NOW + 1,
+        )?;
         gear_app::seats::begin_onboard(tx, "p:review-1", "w1:p4", "opencode", NOW + 2)?;
         Ok(())
     })
     .unwrap();
-    let generation = s.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().generation;
+    let generation = s
+        .read(|tx| tx.get_seat("p:review-1"))
+        .unwrap()
+        .unwrap()
+        .generation;
     assert_eq!(generation, 2, "the seat was reused");
 
     let r = mail::reply(
@@ -351,7 +462,10 @@ fn a_reused_reviewer_gets_no_answer_to_an_earlier_jobs_item() {
     )
     .unwrap();
 
-    assert!(r.replies.is_empty(), "an earlier job's note stays with the job");
+    assert!(
+        r.replies.is_empty(),
+        "an earlier job's note stays with the job"
+    );
     assert_eq!(state_of(&mut s, &id), MsgState::Resolved);
 }
 
@@ -411,35 +525,68 @@ fn answering_its_own_item_sends_the_captain_nothing() {
 
     let mut args = reply_args(&[&resolved, &waited, &other], ReplyMode::Resolve, "r1");
     args.wait_until = Some(NOW + 100);
-    let r = mail::reply(&mut s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, NOW + 3)
-        .unwrap();
+    let r = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &args,
+        NOW + 3,
+    )
+    .unwrap();
 
     assert_eq!(r.handled.len(), 3, "every listed id is still handled");
     assert_eq!(state_of(&mut s, &resolved), MsgState::Resolved);
     assert_eq!(state_of(&mut s, &waited), MsgState::Resolved);
     assert_eq!(r.replies.len(), 1, "only the lane is answered: {r:?}");
-    let answer = s.read(|tx| tx.get_message("p", &r.replies[0])).unwrap().unwrap();
+    let answer = s
+        .read(|tx| tx.get_message("p", &r.replies[0]))
+        .unwrap()
+        .unwrap();
     assert_eq!(answer.recipient, "p:heat");
 
     // Nothing new lands in the captain's own inbox, so no doorbell follows:
     // `messages_to_since` lists exactly the reply/instruction kinds a doorbell
     // counts.
-    let delivered = s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap();
-    assert!(delivered.is_empty(), "no message reaches the captain: {delivered:?}");
+    let delivered = s
+        .read(|tx| tx.messages_to_since("p", "p:captain", 0))
+        .unwrap();
+    assert!(
+        delivered.is_empty(),
+        "no message reaches the captain: {delivered:?}"
+    );
 
     // A wait on its own item is silent the same way.
     let own_wait = raise_own(&mut s, "waiting on the user", "s4", NOW + 4);
     let mut args = reply_args(&[&own_wait], ReplyMode::Wait, "r2");
     args.wait_on = Some("user".into());
     args.wait_until = Some(NOW + 200);
-    let r = mail::reply(&mut s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, NOW + 5)
-        .unwrap();
+    let r = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &args,
+        NOW + 5,
+    )
+    .unwrap();
     assert_eq!(r.handled, vec![(own_wait.clone(), "waiting".to_string())]);
-    assert!(r.replies.is_empty(), "a waiting captain rings nobody: {r:?}");
-    let item = s.read(|tx| tx.get_message("p", &own_wait)).unwrap().unwrap();
+    assert!(
+        r.replies.is_empty(),
+        "a waiting captain rings nobody: {r:?}"
+    );
+    let item = s
+        .read(|tx| tx.get_message("p", &own_wait))
+        .unwrap()
+        .unwrap();
     assert_eq!(item.state, MsgState::Waiting);
-    assert_eq!(item.result.as_deref(), Some("the answer"), "the text is kept on the item");
-    assert!(s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap().is_empty());
+    assert_eq!(
+        item.result.as_deref(),
+        Some("the answer"),
+        "the text is kept on the item"
+    );
+    assert!(s
+        .read(|tx| tx.messages_to_since("p", "p:captain", 0))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -464,9 +611,21 @@ fn one_reply_per_sender_and_thread() {
     let threads: Vec<String> = r
         .replies
         .iter()
-        .map(|id| s.read(|tx| tx.get_message("p", id)).unwrap().unwrap().thread)
+        .map(|id| {
+            s.read(|tx| tx.get_message("p", id))
+                .unwrap()
+                .unwrap()
+                .thread
+        })
         .collect();
-    assert_eq!(threads, vec!["heat:1".to_string(), "heat:2".to_string(), "pricing:1".to_string()]);
+    assert_eq!(
+        threads,
+        vec![
+            "heat:1".to_string(),
+            "heat:2".to_string(),
+            "pricing:1".to_string()
+        ]
+    );
 }
 
 #[test]
@@ -494,7 +653,12 @@ fn answer_reaches_every_thread_of_a_sender() {
     let threads: Vec<String> = r
         .replies
         .iter()
-        .map(|id| s.read(|tx| tx.get_message("p", id)).unwrap().unwrap().thread)
+        .map(|id| {
+            s.read(|tx| tx.get_message("p", id))
+                .unwrap()
+                .unwrap()
+                .thread
+        })
         .collect();
     assert_eq!(threads, vec!["heat:1".to_string(), "heat:2".to_string()]);
 }
@@ -513,7 +677,11 @@ fn repeated_ids_are_handled_once() {
     )
     .unwrap();
 
-    assert_eq!(r.handled, vec![(id.clone(), "resolved".to_string())], "the id is listed once");
+    assert_eq!(
+        r.handled,
+        vec![(id.clone(), "resolved".to_string())],
+        "the id is listed once"
+    );
     assert_eq!(r.replies.len(), 1, "one answer");
     assert_eq!(state_of(&mut s, &id), MsgState::Resolved);
 }
@@ -538,7 +706,14 @@ fn wait_without_time_is_bad_format() {
     // A label without a time is not enough either.
     let mut args = reply_args(&[&id], ReplyMode::Wait, "r2");
     args.wait_on = Some("user".into());
-    let err = mail::reply(&mut s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, NOW + 2).unwrap_err();
+    let err = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &args,
+        NOW + 2,
+    )
+    .unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert_eq!(state_of(&mut s, &id), MsgState::Open, "nothing was written");
 }
@@ -586,7 +761,11 @@ fn foreign_or_closed_id_rejected_atomically() {
     )
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::Forbidden);
-    assert_eq!(state_of(&mut s, &open), MsgState::Open, "the first id is untouched");
+    assert_eq!(
+        state_of(&mut s, &open),
+        MsgState::Open,
+        "the first id is untouched"
+    );
 
     // An unknown id.
     let err = mail::reply(
@@ -627,7 +806,11 @@ fn only_listed_ids_change() {
     .unwrap();
 
     assert_eq!(state_of(&mut s, &listed), MsgState::Resolved);
-    assert_eq!(state_of(&mut s, &other), MsgState::Open, "unlisted messages stay open");
+    assert_eq!(
+        state_of(&mut s, &other),
+        MsgState::Open,
+        "unlisted messages stay open"
+    );
 }
 
 #[test]
@@ -665,52 +848,127 @@ fn reply_is_replayed() {
 #[test]
 fn resolving_information_is_silent_and_replays_without_a_reply() {
     let mut s = world();
-    let id = s.write(|tx| Ok(tx.insert_message(&NewMessage {
-        meta: None,
-        project: "p".into(), thread: "routine:1".into(), task: None, attempt: None,
-        sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
-        kind: MsgKind::Progress, urgent: false, body: "finished a step".into(),
-        reply_to: None, needs_ack: false, state: MsgState::Info, created: NOW,
-    })?.id)).unwrap();
+    let id = s
+        .write(|tx| {
+            Ok(tx
+                .insert_message(&NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: "routine:1".into(),
+                    task: None,
+                    attempt: None,
+                    sender: "p:heat".into(),
+                    sender_gen: 1,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::Progress,
+                    urgent: false,
+                    body: "finished a step".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Info,
+                    created: NOW,
+                })?
+                .id)
+        })
+        .unwrap();
     let args = reply_args(&[&id], ReplyMode::Resolve, "resolve-info");
-    let first = mail::reply(&mut s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, NOW + 1).unwrap();
+    let first = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &args,
+        NOW + 1,
+    )
+    .unwrap();
     assert_eq!(first.handled, vec![(id.clone(), "resolved".into())]);
     assert!(first.replies.is_empty());
     assert_eq!(state_of(&mut s, &id), MsgState::Resolved);
-    let replay = mail::reply(&mut s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, NOW + 2).unwrap();
+    let replay = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &args,
+        NOW + 2,
+    )
+    .unwrap();
     assert!(replay.replayed);
     assert!(replay.replies.is_empty());
-    assert!(s.read(|tx| tx.messages_to_since("p", "p:heat", 0)).unwrap().is_empty());
+    assert!(s
+        .read(|tx| tx.messages_to_since("p", "p:heat", 0))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
 fn resolving_a_legacy_open_result_does_not_echo_to_the_lane() {
     let mut s = world();
-    let id = s.write(|tx| Ok(tx.insert_message(&NewMessage {
-        meta: None,
-        project: "p".into(), thread: "legacy:1".into(), task: None, attempt: None,
-        sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
-        kind: MsgKind::Result, urgent: false, body: "old hand-in".into(),
-        reply_to: None, needs_ack: false, state: MsgState::Open, created: NOW,
-    })?.id)).unwrap();
-    let result = mail::reply(&mut s, &captain_env(), Some(&fp(CAP_PANE, "codex")),
-        &reply_args(&[&id], ReplyMode::Resolve, "resolve-old"), NOW + 1).unwrap();
+    let id = s
+        .write(|tx| {
+            Ok(tx
+                .insert_message(&NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: "legacy:1".into(),
+                    task: None,
+                    attempt: None,
+                    sender: "p:heat".into(),
+                    sender_gen: 1,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::Result,
+                    urgent: false,
+                    body: "old hand-in".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: NOW,
+                })?
+                .id)
+        })
+        .unwrap();
+    let result = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &reply_args(&[&id], ReplyMode::Resolve, "resolve-old"),
+        NOW + 1,
+    )
+    .unwrap();
     assert!(result.replies.is_empty());
     assert_eq!(state_of(&mut s, &id), MsgState::Resolved);
-    assert!(s.read(|tx| tx.messages_to_since("p", "p:heat", 0)).unwrap().is_empty());
+    assert!(s
+        .read(|tx| tx.messages_to_since("p", "p:heat", 0))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
 fn resolving_info_and_a_question_in_one_thread_answers_only_the_question() {
     let mut s = world();
     let info = ask(&mut s, "heat", LANE_PANE, "routine record", "s1", NOW);
-    s.write(|tx| tx.update_message_state("p", &info, MsgState::Info, None, None, None, NOW)).unwrap();
-    let question = insert_question(&mut s, "heat:1", "p:heat", "p:captain", "needs an answer", NOW + 1);
-    let result = mail::reply(&mut s, &captain_env(), Some(&fp(CAP_PANE, "codex")),
-        &reply_args(&[&info, &question], ReplyMode::Resolve, "mixed"), NOW + 2).unwrap();
+    s.write(|tx| tx.update_message_state("p", &info, MsgState::Info, None, None, None, NOW))
+        .unwrap();
+    let question = insert_question(
+        &mut s,
+        "heat:1",
+        "p:heat",
+        "p:captain",
+        "needs an answer",
+        NOW + 1,
+    );
+    let result = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &reply_args(&[&info, &question], ReplyMode::Resolve, "mixed"),
+        NOW + 2,
+    )
+    .unwrap();
     assert_eq!(result.handled.len(), 2);
     assert_eq!(result.replies.len(), 1);
-    let answer = s.read(|tx| tx.get_message("p", &result.replies[0])).unwrap().unwrap();
+    let answer = s
+        .read(|tx| tx.get_message("p", &result.replies[0]))
+        .unwrap()
+        .unwrap();
     assert_eq!(answer.reply_to.as_deref(), Some(question.as_str()));
 }
 
@@ -718,13 +976,24 @@ fn resolving_info_and_a_question_in_one_thread_answers_only_the_question() {
 fn waiting_on_info_is_rejected_without_reopening_it_or_changing_other_items() {
     let mut s = world();
     let info = ask(&mut s, "heat", LANE_PANE, "routine record", "s1", NOW);
-    s.write(|tx| tx.update_message_state("p", &info, MsgState::Info, None, None, None, NOW)).unwrap();
+    s.write(|tx| tx.update_message_state("p", &info, MsgState::Info, None, None, None, NOW))
+        .unwrap();
     let question = ask(&mut s, "heat", LANE_PANE, "a question", "s2", NOW + 1);
     let mut args = reply_args(&[&question, &info], ReplyMode::Wait, "wait-info");
     args.wait_until = Some(NOW + 100);
-    let error = mail::reply(&mut s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, NOW + 2).unwrap_err();
+    let error = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &args,
+        NOW + 2,
+    )
+    .unwrap_err();
     assert_eq!(error.code, ErrorCode::BadTransition);
     assert_eq!(state_of(&mut s, &info), MsgState::Info);
     assert_eq!(state_of(&mut s, &question), MsgState::Open);
-    assert!(s.read(|tx| tx.messages_to_since("p", "p:heat", 0)).unwrap().is_empty());
+    assert!(s
+        .read(|tx| tx.messages_to_since("p", "p:heat", 0))
+        .unwrap()
+        .is_empty());
 }

@@ -6,9 +6,9 @@
 //! pause is open from the departure, and the report is at T0+3660.
 
 use gear_app::time;
+use gear_model::{SeatRole, SeatState, TaskState};
 use gear_store::testing;
 use gear_store::{RoundKey, TaskRow, VoyageRow};
-use gear_model::{SeatRole, SeatState, TaskState};
 
 const T0: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
@@ -80,12 +80,14 @@ fn a_lane_retired_before_the_voyage_is_not_a_lane_of_it() {
     let mut s = world();
     s.write(|tx| {
         // Keel is retired before the voyage departs.
-        tx.set_seat_state("p:keel", SeatState::Retired, None, T0).unwrap();
+        tx.set_seat_state("p:keel", SeatState::Retired, None, T0)
+            .unwrap();
         // The voyage departs an hour later, with its only task on heat.
         tx.upsert_voyage(&voyage(T0 + 60)).unwrap();
         tx.insert_task(&task("T-1", "heat")).unwrap();
         // Heat waits for the quota from the departure, and waits still.
-        tx.open_pause("p", "p:heat", "quota", "minimax-cn 5h", T0 + 60).unwrap();
+        tx.open_pause("p", "p:heat", "quota", "minimax-cn 5h", T0 + 60)
+            .unwrap();
         Ok(())
     })
     .unwrap();
@@ -103,12 +105,22 @@ fn a_lane_retired_before_the_voyage_is_not_a_lane_of_it() {
         "the whole voyage was a quota stop"
     );
     // Keel is no line of the report.
-    let names: Vec<&str> = measured.lanes.iter().map(|lane| lane.lane.as_str()).collect();
-    assert!(!names.contains(&"keel"), "a retired lane is no line: {names:?}");
+    let names: Vec<&str> = measured
+        .lanes
+        .iter()
+        .map(|lane| lane.lane.as_str())
+        .collect();
+    assert!(
+        !names.contains(&"keel"),
+        "a retired lane is no line: {names:?}"
+    );
     assert!(names.contains(&"heat"), "{names:?}");
     // The line of the report says the same.
     let line = time::voyage_work_line(&measured);
-    assert!(line.contains("fleet stopped by quota 1h00m (1 stop)"), "{line}");
+    assert!(
+        line.contains("fleet stopped by quota 1h00m (1 stop)"),
+        "{line}"
+    );
     assert!(line.contains("elapsed without quota stops 0h00m"), "{line}");
     let rendered: Vec<String> = measured.lanes.iter().map(time::lane_line).collect();
     assert!(
@@ -124,9 +136,11 @@ fn a_lane_retired_during_the_voyage_still_shows() {
     let mut s = world();
     s.write(|tx| {
         // A third lane, which works in the voyage and is retired in it.
-        testing::seed_active_seat(tx, "p", "mast", SeatRole::Lane, MAST_PANE, "opencode", T0).unwrap();
+        testing::seed_active_seat(tx, "p", "mast", SeatRole::Lane, MAST_PANE, "opencode", T0)
+            .unwrap();
         // And keel, retired before the voyage, without work in it.
-        tx.set_seat_state("p:keel", SeatState::Retired, None, T0).unwrap();
+        tx.set_seat_state("p:keel", SeatState::Retired, None, T0)
+            .unwrap();
         tx.upsert_voyage(&voyage(T0 + 60)).unwrap();
         tx.insert_task(&task("T-1", "heat")).unwrap();
         tx.insert_task(&task("T-2", "mast")).unwrap();
@@ -148,9 +162,11 @@ fn a_lane_retired_during_the_voyage_still_shows() {
         .unwrap();
         tx.set_round_active(&key, 900).unwrap();
         // And then it was retired, during the voyage.
-        tx.set_seat_state("p:mast", SeatState::Retired, None, T0 + 1200).unwrap();
+        tx.set_seat_state("p:mast", SeatState::Retired, None, T0 + 1200)
+            .unwrap();
         // Heat waits for the quota from the departure, and waits still.
-        tx.open_pause("p", "p:heat", "quota", "minimax-cn 5h", T0 + 60).unwrap();
+        tx.open_pause("p", "p:heat", "quota", "minimax-cn 5h", T0 + 60)
+            .unwrap();
         Ok(())
     })
     .unwrap();
@@ -158,9 +174,20 @@ fn a_lane_retired_during_the_voyage_still_shows() {
     let measured = s
         .read(|tx| time::work_of(tx, "p", "M4", T0 + 3660))
         .unwrap();
-    let names: Vec<&str> = measured.lanes.iter().map(|lane| lane.lane.as_str()).collect();
-    assert!(names.contains(&"mast"), "a lane that worked in the voyage shows: {names:?}");
-    let mast = measured.lanes.iter().find(|lane| lane.lane == "mast").unwrap();
+    let names: Vec<&str> = measured
+        .lanes
+        .iter()
+        .map(|lane| lane.lane.as_str())
+        .collect();
+    assert!(
+        names.contains(&"mast"),
+        "a lane that worked in the voyage shows: {names:?}"
+    );
+    let mast = measured
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "mast")
+        .unwrap();
     assert_eq!(mast.work_s, 900, "its work of the voyage");
     // Keel, retired before the voyage and without work in it, is not one.
     assert!(!names.contains(&"keel"), "{names:?}");

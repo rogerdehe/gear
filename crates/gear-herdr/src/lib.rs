@@ -13,8 +13,8 @@
 //! Only a reply that proves nothing was executed is `Refused`.
 
 pub mod fake;
-pub mod profile;
 pub mod opencode;
+pub mod profile;
 pub mod quota_bar;
 pub use quota_bar::{QuotaBar, QuotaReading};
 
@@ -39,11 +39,7 @@ pub enum Ensured {
 }
 
 /// The other pane that holds `name`, if any.
-fn name_holder(
-    names: &BTreeMap<String, Option<String>>,
-    pane: &str,
-    name: &str,
-) -> Option<String> {
+fn name_holder(names: &BTreeMap<String, Option<String>>, pane: &str, name: &str) -> Option<String> {
     names
         .iter()
         .find(|(other, held)| other.as_str() != pane && held.as_deref() == Some(name))
@@ -207,7 +203,13 @@ pub trait HerdrAct: HerdrRead {
     /// Run a shell command in a shell pane (used to export GEAR_CTX before start).
     fn pane_run(&mut self, pane_id: &str, command: &str) -> Outcome<()>;
     /// Start an agent of `kind` in an available shell pane.
-    fn agent_start(&mut self, name: &str, kind: &str, pane_id: &str, args: &[String]) -> Outcome<AgentInfo>;
+    fn agent_start(
+        &mut self,
+        name: &str,
+        kind: &str,
+        pane_id: &str,
+        args: &[String],
+    ) -> Outcome<AgentInfo>;
     /// Herdr `agent.rename`: give the agent in `pane_id` the name `name`
     /// (T-134). A name another pane holds is refused, never stolen.
     fn agent_rename(&mut self, pane_id: &str, name: &str) -> Outcome<()>;
@@ -232,7 +234,13 @@ pub trait HerdrAct: HerdrRead {
     fn notify(&mut self, title: &str, body: &str) -> Outcome<()>;
     /// Herdr `worktree.create` (never focuses): new branch `branch` cut from
     /// `base` in the repo at `repo`, opened in a new workspace labelled `label`.
-    fn worktree_create(&mut self, repo: &str, branch: &str, base: &str, label: &str) -> Outcome<Worktree>;
+    fn worktree_create(
+        &mut self,
+        repo: &str,
+        branch: &str,
+        base: &str,
+        label: &str,
+    ) -> Outcome<Worktree>;
     /// Herdr `worktree.open` (never focuses): reopen the existing worktree of
     /// `branch` (temp-worker rework / resume).
     fn worktree_open(&mut self, repo: &str, branch: &str, label: &str) -> Outcome<Worktree>;
@@ -267,7 +275,10 @@ impl SocketHerdr {
         client
             .require_supported_protocol()
             .map_err(|e| ObserveError(format!("herdr protocol check failed: {e}")))?;
-        Ok(SocketHerdr { client, socket: socket_path.to_path_buf() })
+        Ok(SocketHerdr {
+            client,
+            socket: socket_path.to_path_buf(),
+        })
     }
 }
 
@@ -337,17 +348,26 @@ impl HerdrRead for SocketHerdr {
     fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo, ObserveError> {
         let value = self
             .client
-            .call("pane.process_info", serde_json::json!({ "pane_id": pane_id }))
+            .call(
+                "pane.process_info",
+                serde_json::json!({ "pane_id": pane_id }),
+            )
             .map_err(|e| ObserveError(format!("pane.process_info failed: {e}")))?;
-        let info = value.get("process_info").cloned().unwrap_or(serde_json::Value::Null);
-        serde_json::from_value(info)
-            .map_err(|e| ObserveError(format!("pane.process_info: {e}")))
+        let info = value
+            .get("process_info")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        serde_json::from_value(info).map_err(|e| ObserveError(format!("pane.process_info: {e}")))
     }
 
     fn read_tail(&mut self, pane_id: &str, lines: u32) -> Result<String, ObserveError> {
         let read = self
             .client
-            .pane_read(pane_id, board_herdr::ReadSource::RecentUnwrapped, Some(lines))
+            .pane_read(
+                pane_id,
+                board_herdr::ReadSource::RecentUnwrapped,
+                Some(lines),
+            )
             .map_err(|e| ObserveError(format!("pane.read failed: {e}")))?;
         Ok(read.text)
     }
@@ -412,7 +432,13 @@ impl HerdrAct for SocketHerdr {
         }
     }
 
-    fn agent_start(&mut self, name: &str, kind: &str, pane_id: &str, args: &[String]) -> Outcome<AgentInfo> {
+    fn agent_start(
+        &mut self,
+        name: &str,
+        kind: &str,
+        pane_id: &str,
+        args: &[String],
+    ) -> Outcome<AgentInfo> {
         let params = board_herdr::AgentStartParams {
             name: name.to_string(),
             kind: kind.to_string(),
@@ -495,13 +521,22 @@ impl HerdrAct for SocketHerdr {
     }
 
     fn notify(&mut self, title: &str, body: &str) -> Outcome<()> {
-        match self.client.notification_show(title, Some(body), board_herdr::NotificationSound::None) {
+        match self
+            .client
+            .notification_show(title, Some(body), board_herdr::NotificationSound::None)
+        {
             Ok(_) => Outcome::Ok(()),
             Err(e) => outcome_from_error(&e),
         }
     }
 
-    fn worktree_create(&mut self, repo: &str, branch: &str, base: &str, label: &str) -> Outcome<Worktree> {
+    fn worktree_create(
+        &mut self,
+        repo: &str,
+        branch: &str,
+        base: &str,
+        label: &str,
+    ) -> Outcome<Worktree> {
         // `focus: false`: GEAR never steals the user's focus.
         let params = json!({
             "cwd": repo,
@@ -561,12 +596,17 @@ impl HerdrAct for SocketHerdr {
 pub fn outcome_from_error<T>(err: &board_herdr::HerdrError) -> Outcome<T> {
     match err {
         board_herdr::HerdrError::Protocol { code, message } if is_refused(code) => {
-            Outcome::Refused { code: code.clone(), message: message.clone() }
+            Outcome::Refused {
+                code: code.clone(),
+                message: message.clone(),
+            }
         }
-        board_herdr::HerdrError::Protocol { code, message } => {
-            Outcome::Uncertain { reason: format!("herdr error [{code}]: {message}") }
-        }
-        other => Outcome::Uncertain { reason: other.to_string() },
+        board_herdr::HerdrError::Protocol { code, message } => Outcome::Uncertain {
+            reason: format!("herdr error [{code}]: {message}"),
+        },
+        other => Outcome::Uncertain {
+            reason: other.to_string(),
+        },
     }
 }
 
@@ -775,21 +815,24 @@ mod tests {
     /// what it needs).
     #[test]
     fn a_detached_worktree_reply_is_named_without_its_branch() {
-        for field in [
-            Value::Null,
-            Value::String(String::new()),
-        ] {
+        for field in [Value::Null, Value::String(String::new())] {
             let mut reply = created_reply();
             reply["worktree"]["branch"] = field.clone();
             let Outcome::Ok(worktree) = worktree_from_reply(&reply) else {
                 panic!("a detached worktree is a named worktree (branch {field:?})");
             };
-            assert_eq!(worktree.branch, "", "detached: no branch holds the checkout");
+            assert_eq!(
+                worktree.branch, "",
+                "detached: no branch holds the checkout"
+            );
             assert_eq!(worktree.pane_id, "w3:p1", "the pane is still named");
         }
         // A reply that names no branch at all (the key is missing) is the same.
         let mut missing = created_reply();
-        missing["worktree"].as_object_mut().unwrap().remove("branch");
+        missing["worktree"]
+            .as_object_mut()
+            .unwrap()
+            .remove("branch");
         let Outcome::Ok(worktree) = worktree_from_reply(&missing) else {
             panic!("a reply without the branch key is detached too");
         };

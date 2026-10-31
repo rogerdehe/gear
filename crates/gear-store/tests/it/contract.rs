@@ -2,7 +2,10 @@
 //! Do not edit these tests to make them pass; report back if one looks wrong.
 
 use gear_model::{ErrorCode, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState};
-use gear_store::{testing, BindingStatus, NewMessage, NewOp, RequestOutcome, Store, ViewRecord, VoyageStation, SCHEMA_VERSION};
+use gear_store::{
+    testing, BindingStatus, NewMessage, NewOp, RequestOutcome, Store, ViewRecord, VoyageStation,
+    SCHEMA_VERSION,
+};
 use serde_json::json;
 
 const NOW: i64 = 1_800_000_000;
@@ -92,13 +95,19 @@ fn rolled_back_write_leaves_nothing() {
 fn request_replay_and_conflict() {
     let mut s = store();
     let first = s
-        .write(|tx| tx.run_request("R1", "p|seat:1|send|hello", NOW, |_| Ok(json!({"id": "M-1"}))))
+        .write(|tx| {
+            tx.run_request("R1", "p|seat:1|send|hello", NOW, |_| {
+                Ok(json!({"id": "M-1"}))
+            })
+        })
         .unwrap();
     assert_eq!(first, RequestOutcome::Executed(json!({"id": "M-1"})));
 
     let again = s
         .write(|tx| {
-            tx.run_request("R1", "p|seat:1|send|hello", NOW, |_| panic!("must not run twice"))
+            tx.run_request("R1", "p|seat:1|send|hello", NOW, |_| {
+                panic!("must not run twice")
+            })
         })
         .unwrap();
     assert_eq!(again, RequestOutcome::Replayed(json!({"id": "M-1"})));
@@ -114,10 +123,14 @@ fn request_replay_and_conflict() {
 fn failed_request_is_not_recorded() {
     let mut s = store();
     let _ = s.write(|tx| {
-        tx.run_request("R2", "k", NOW, |_| Err(gear_model::GearError::new(ErrorCode::NoTarget, "x")))
+        tx.run_request("R2", "k", NOW, |_| {
+            Err(gear_model::GearError::new(ErrorCode::NoTarget, "x"))
+        })
     });
     // Retrying with the same id runs again (nothing was stored).
-    let out = s.write(|tx| tx.run_request("R2", "k", NOW, |_| Ok(json!(1)))).unwrap();
+    let out = s
+        .write(|tx| tx.run_request("R2", "k", NOW, |_| Ok(json!(1))))
+        .unwrap();
     assert_eq!(out, RequestOutcome::Executed(json!(1)));
 }
 
@@ -157,19 +170,55 @@ fn seats_bindings_roundtrip() {
 fn messages_insert_and_actionable_query() {
     let mut s = store();
     s.write(|tx| {
-        tx.insert_message(&msg("p:a", "p:captain", MsgKind::Question, MsgState::Open, NOW))?;
-        tx.insert_message(&msg("p:a", "p:captain", MsgKind::Progress, MsgState::Info, NOW + 1))?;
-        let m3 = tx.insert_message(&msg("p:b", "p:captain", MsgKind::Blocked, MsgState::Open, NOW + 2))?;
-        tx.update_message_state("p", &m3.id, MsgState::Waiting, None, Some("user"), Some(NOW + 100), NOW + 3)?;
+        tx.insert_message(&msg(
+            "p:a",
+            "p:captain",
+            MsgKind::Question,
+            MsgState::Open,
+            NOW,
+        ))?;
+        tx.insert_message(&msg(
+            "p:a",
+            "p:captain",
+            MsgKind::Progress,
+            MsgState::Info,
+            NOW + 1,
+        ))?;
+        let m3 = tx.insert_message(&msg(
+            "p:b",
+            "p:captain",
+            MsgKind::Blocked,
+            MsgState::Open,
+            NOW + 2,
+        ))?;
+        tx.update_message_state(
+            "p",
+            &m3.id,
+            MsgState::Waiting,
+            None,
+            Some("user"),
+            Some(NOW + 100),
+            NOW + 3,
+        )?;
         Ok(())
     })
     .unwrap();
 
-    let now_items = s.read(|tx| tx.actionable_for("p", "p:captain", NOW + 10)).unwrap();
-    assert_eq!(now_items.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["M-1"]);
+    let now_items = s
+        .read(|tx| tx.actionable_for("p", "p:captain", NOW + 10))
+        .unwrap();
+    assert_eq!(
+        now_items.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        vec!["M-1"]
+    );
 
-    let later = s.read(|tx| tx.actionable_for("p", "p:captain", NOW + 100)).unwrap();
-    assert_eq!(later.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["M-1", "M-3"]);
+    let later = s
+        .read(|tx| tx.actionable_for("p", "p:captain", NOW + 100))
+        .unwrap();
+    assert_eq!(
+        later.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        vec!["M-1", "M-3"]
+    );
 
     let m = s.read(|tx| tx.get_message("p", "M-3")).unwrap().unwrap();
     assert_eq!(m.wait_on.as_deref(), Some("user"));
@@ -207,10 +256,14 @@ fn ops_slot_and_states() {
     .unwrap();
     assert_eq!(s.read(|tx| tx.slot_ops("p:captain")).unwrap().len(), 1);
 
-    s.write(|tx| tx.set_op_state("p", "O-1", OpState::Confirmed, None, NOW + 3)).unwrap();
+    s.write(|tx| tx.set_op_state("p", "O-1", OpState::Confirmed, None, NOW + 3))
+        .unwrap();
     assert!(s.read(|tx| tx.slot_ops("p:captain")).unwrap().is_empty());
 
-    let last = s.read(|tx| tx.last_op("p:captain", OpKind::Doorbell)).unwrap().unwrap();
+    let last = s
+        .read(|tx| tx.last_op("p:captain", OpKind::Doorbell))
+        .unwrap()
+        .unwrap();
     assert_eq!(last.state, OpState::Confirmed);
     assert_eq!(last.payload, json!({"msgs": ["M-1"]}));
 }
@@ -230,9 +283,18 @@ fn views_roundtrip() {
         shown_contract: None,
     };
     s.write(|tx| tx.insert_view(&v)).unwrap();
-    assert_eq!(s.read(|tx| tx.views_since("p:captain", 1, NOW)).unwrap(), vec![v.clone()]);
-    assert!(s.read(|tx| tx.views_since("p:captain", 2, NOW)).unwrap().is_empty());
-    assert!(s.read(|tx| tx.views_since("p:captain", 1, NOW + 1)).unwrap().is_empty());
+    assert_eq!(
+        s.read(|tx| tx.views_since("p:captain", 1, NOW)).unwrap(),
+        vec![v.clone()]
+    );
+    assert!(s
+        .read(|tx| tx.views_since("p:captain", 2, NOW))
+        .unwrap()
+        .is_empty());
+    assert!(s
+        .read(|tx| tx.views_since("p:captain", 1, NOW + 1))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -245,11 +307,16 @@ fn concurrent_writers_do_not_duplicate_ids() {
             let path = path.clone();
             std::thread::spawn(move || {
                 let mut s = Store::open(&path).unwrap();
-                (0..25).map(|_| s.write(|tx| tx.next_id("p", 'M')).unwrap()).collect::<Vec<_>>()
+                (0..25)
+                    .map(|_| s.write(|tx| tx.next_id("p", 'M')).unwrap())
+                    .collect::<Vec<_>>()
             })
         })
         .collect();
-    let mut all: Vec<String> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+    let mut all: Vec<String> = handles
+        .into_iter()
+        .flat_map(|h| h.join().unwrap())
+        .collect();
     all.sort();
     all.dedup();
     assert_eq!(all.len(), 100);
@@ -268,14 +335,26 @@ fn raw_writes_on_a_missing_target_are_no_target() {
     .unwrap();
     let code = |r: gear_model::GearResult<()>| r.unwrap_err().code;
     s.write(|tx| {
-        assert_eq!(code(tx.set_seat_state("p:ghost", SeatState::Standby, None, NOW)), ErrorCode::NoTarget);
-        assert_eq!(code(tx.set_seat_generation("p:ghost", 2)), ErrorCode::NoTarget);
-        assert_eq!(code(tx.set_binding_status("p:heat", 9, BindingStatus::Void)), ErrorCode::NoTarget);
+        assert_eq!(
+            code(tx.set_seat_state("p:ghost", SeatState::Standby, None, NOW)),
+            ErrorCode::NoTarget
+        );
+        assert_eq!(
+            code(tx.set_seat_generation("p:ghost", 2)),
+            ErrorCode::NoTarget
+        );
+        assert_eq!(
+            code(tx.set_binding_status("p:heat", 9, BindingStatus::Void)),
+            ErrorCode::NoTarget
+        );
         assert_eq!(
             code(tx.update_message_state("p", "M-404", MsgState::Resolved, None, None, None, NOW)),
             ErrorCode::NoTarget
         );
-        assert_eq!(code(tx.set_op_state("p", "O-404", OpState::Void, None, NOW)), ErrorCode::NoTarget);
+        assert_eq!(
+            code(tx.set_op_state("p", "O-404", OpState::Void, None, NOW)),
+            ErrorCode::NoTarget
+        );
         // the existing rows still update fine
         tx.set_seat_state("p:heat", SeatState::Standby, Some("idle"), NOW)?;
         tx.set_binding_status("p:heat", 1, BindingStatus::Void)?;
@@ -296,14 +375,18 @@ fn project_ids_lists_every_project_in_order() {
         Ok(())
     })
     .unwrap();
-    assert_eq!(s.read(|tx| tx.project_ids()).unwrap(), vec!["alpha".to_string(), "zeta".to_string()]);
+    assert_eq!(
+        s.read(|tx| tx.project_ids()).unwrap(),
+        vec!["alpha".to_string(), "zeta".to_string()]
+    );
 }
 
 /// T-6: a config change is the next config version of the project row.
 #[test]
 fn a_project_row_takes_the_next_config_version() {
     let mut s = store();
-    s.write(|tx| testing::seed_project(tx, "p", "sess", NOW).map(|_| ())).unwrap();
+    s.write(|tx| testing::seed_project(tx, "p", "sess", NOW).map(|_| ()))
+        .unwrap();
     let mut row = s.read(|tx| tx.get_project("p")).unwrap().unwrap();
     assert_eq!(row.config_version, 1);
 
@@ -317,7 +400,14 @@ fn a_project_row_takes_the_next_config_version() {
     let after = s.read(|tx| tx.get_project("p")).unwrap().unwrap();
     assert_eq!(after.config_version, 2);
     assert_eq!(after.config_toml, row.config_toml);
-    assert_eq!((after.quota_lanes, after.quota_temps, after.quota_includes_captain), (5, 2, true));
+    assert_eq!(
+        (
+            after.quota_lanes,
+            after.quota_temps,
+            after.quota_includes_captain
+        ),
+        (5, 2, true)
+    );
     assert_eq!(after.created, NOW, "the creation time does not change");
 
     // A missing project is NoTarget.
@@ -338,10 +428,16 @@ fn a_seat_profile_is_written_and_read_back() {
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)
     })
     .unwrap();
-    s.write(|tx| tx.set_seat_profile("p:heat", "codex")).unwrap();
-    assert_eq!(s.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap().profile, "codex");
+    s.write(|tx| tx.set_seat_profile("p:heat", "codex"))
+        .unwrap();
     assert_eq!(
-        s.write(|tx| tx.set_seat_profile("p:ghost", "codex")).unwrap_err().code,
+        s.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap().profile,
+        "codex"
+    );
+    assert_eq!(
+        s.write(|tx| tx.set_seat_profile("p:ghost", "codex"))
+            .unwrap_err()
+            .code,
         ErrorCode::NoTarget
     );
 }
@@ -351,12 +447,19 @@ fn a_captain_quota_episode_survives_reopening_the_store() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("quota.db");
     let state = gear_store::CaptainQuota {
-        generation: 7, detected_at: 100, reset_at: 200, bar: "5h 100% ↻01:10".into(),
-        wake_op: Some("O-1".into()), views_before_wake: 3, resumed: false,
+        generation: 7,
+        detected_at: 100,
+        reset_at: 200,
+        bar: "5h 100% ↻01:10".into(),
+        wake_op: Some("O-1".into()),
+        views_before_wake: 3,
+        resumed: false,
     };
     {
         let mut store = Store::open(&path).unwrap();
-        store.write(|tx| tx.set_captain_quota("p", Some(&state))).unwrap();
+        store
+            .write(|tx| tx.set_captain_quota("p", Some(&state)))
+            .unwrap();
     }
     let mut store = Store::open(&path).unwrap();
     assert_eq!(store.read(|tx| tx.captain_quota("p")).unwrap(), Some(state));
@@ -458,7 +561,6 @@ fn a_task_station_round_trips_and_clears() {
     // Another task and another project have none.
     assert_eq!(s.read(|tx| tx.task_station("p", "T-2")).unwrap(), None);
     assert_eq!(s.read(|tx| tx.task_station("q", "T-1")).unwrap(), None);
-    s.write(|tx| tx.set_task_station("p", "T-1", None))
-        .unwrap();
+    s.write(|tx| tx.set_task_station("p", "T-1", None)).unwrap();
     assert_eq!(s.read(|tx| tx.task_station("p", "T-1")).unwrap(), None);
 }

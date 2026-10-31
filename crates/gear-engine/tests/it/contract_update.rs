@@ -7,10 +7,10 @@ use gear_app::identity::Fingerprint;
 use gear_app::plan::apply;
 use gear_app::tasks::{on_delivery_confirmed, start_attempt, submit_result};
 use gear_app::Env;
-use gear_model::GearCtx;
 use gear_engine::{tick, EngineCfg};
 use gear_herdr::fake::FakeHerdr;
 use gear_herdr::{builtin, AgentStatus};
+use gear_model::GearCtx;
 use gear_model::{AttemptState, MsgKind, OpKind, SeatRole, TaskState};
 use gear_store::{testing, ContractRow, Store, TaskRow};
 
@@ -45,7 +45,8 @@ fn world() -> Store {
             wait_cond: None,
             rework_note: None,
             estimate_min: None,
-             issue: None,updated: T0,
+            issue: None,
+            updated: T0,
         })?;
         tx.insert_contract(&ContractRow {
             project: "p".into(),
@@ -67,8 +68,15 @@ fn world() -> Store {
 }
 
 fn cfg() -> EngineCfg {
-    let mut c = EngineCfg { db_path: crate::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
-    c.profiles.insert("opencode".into(), builtin("opencode").unwrap());
+    let mut c = EngineCfg {
+        db_path: crate::temp("gear-engine-tests")
+            .join("gear.db")
+            .to_string_lossy()
+            .into_owned(),
+        ..Default::default()
+    };
+    c.profiles
+        .insert("opencode".into(), builtin("opencode").unwrap());
     c
 }
 
@@ -82,22 +90,38 @@ fn idle_herdr() -> FakeHerdr {
 fn cap() -> (Env, Fingerprint) {
     (
         Env {
-            ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "captain".into(),
+                generation: 1,
+            }),
             pane_id: Some(CAP_PANE.into()),
             admin: false,
         },
-        Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None },
+        Fingerprint {
+            pane_id: CAP_PANE.into(),
+            kind: Some("codex".into()),
+            session_ref: None,
+        },
     )
 }
 
 fn lane() -> (Env, Fingerprint) {
     (
         Env {
-            ctx: Some(GearCtx { project: "p".into(), seat: "heat".into(), generation: 1 }),
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "heat".into(),
+                generation: 1,
+            }),
             pane_id: Some(LANE_PANE.into()),
             admin: false,
         },
-        Fingerprint { pane_id: LANE_PANE.into(), kind: Some("opencode".into()), session_ref: None },
+        Fingerprint {
+            pane_id: LANE_PANE.into(),
+            kind: Some("opencode".into()),
+            session_ref: None,
+        },
     )
 }
 
@@ -109,7 +133,10 @@ fn bump(s: &mut Store, base: i64, goal: &str, rid: &str) -> i64 {
     let draft: Draft = parse(&text).unwrap();
     let (env, fp) = cap();
     apply(s, &env, Some(&fp), None, &draft, &text, rid, T0 + 10).unwrap();
-    s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().contract_version
+    s.read(|tx| tx.get_task("p", "T-1"))
+        .unwrap()
+        .unwrap()
+        .contract_version
 }
 
 #[test]
@@ -126,8 +153,13 @@ fn a_bump_is_delivered_once_and_the_view_adopts_it() {
     let delivers = s
         .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Deliver))
         .unwrap();
-    assert!(delivers.is_empty(), "no delivery for a started attempt: {delivers:?}");
-    let notices = s.read(|tx| tx.thread_messages("p", "contract:T-1:2")).unwrap();
+    assert!(
+        delivers.is_empty(),
+        "no delivery for a started attempt: {delivers:?}"
+    );
+    let notices = s
+        .read(|tx| tx.thread_messages("p", "contract:T-1:2"))
+        .unwrap();
     assert_eq!(notices.len(), 1, "one notice: {notices:?}");
     assert_eq!(
         notices[0].body,
@@ -137,7 +169,10 @@ fn a_bump_is_delivered_once_and_the_view_adopts_it() {
     // The doorbell rings it.
     let prompts = herdr.prompts_to(LANE_PANE);
     assert_eq!(prompts.len(), 1, "one doorbell: {prompts:?}");
-    assert!(prompts[0].contains(&notices[0].id), "the doorbell names it: {prompts:?}");
+    assert!(
+        prompts[0].contains(&notices[0].id),
+        "the doorbell names it: {prompts:?}"
+    );
 
     // The lane's view adopts it.
     let (env, fp) = lane();
@@ -153,7 +188,9 @@ fn a_bump_is_delivered_once_and_the_view_adopts_it() {
     let report = tick(&mut s, &mut herdr, &cfg(), T0 + 40).unwrap();
     assert_eq!(report.intended.len(), 0, "{report:?}");
     assert!(herdr.prompts_to(LANE_PANE).is_empty());
-    let notices = s.read(|tx| tx.thread_messages("p", "contract:T-1:2")).unwrap();
+    let notices = s
+        .read(|tx| tx.thread_messages("p", "contract:T-1:2"))
+        .unwrap();
     assert_eq!(notices.len(), 1, "no second notice: {notices:?}");
 }
 
@@ -171,8 +208,13 @@ fn two_bumps_before_the_lane_looks_give_one_delivery_with_the_latest() {
     let delivers = s
         .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Deliver))
         .unwrap();
-    assert!(delivers.is_empty(), "no delivery for a started attempt: {delivers:?}");
-    let notices = s.read(|tx| tx.thread_messages("p", "contract:T-1:3")).unwrap();
+    assert!(
+        delivers.is_empty(),
+        "no delivery for a started attempt: {delivers:?}"
+    );
+    let notices = s
+        .read(|tx| tx.thread_messages("p", "contract:T-1:3"))
+        .unwrap();
     assert_eq!(notices.len(), 1, "one notice: {notices:?}");
     assert!(notices[0].body.contains("v3"), "{}", notices[0].body);
     let prompts = herdr.prompts_to(LANE_PANE);
@@ -196,9 +238,15 @@ fn a_handed_in_attempt_is_not_nudged() {
     let mut herdr = idle_herdr();
     let report = tick(&mut s, &mut herdr, &cfg(), T0 + 20).unwrap();
     assert_eq!(report.intended.len(), 0, "{report:?}");
-    assert!(herdr.prompts_to(LANE_PANE).is_empty(), "a handed-in attempt is not nudged");
+    assert!(
+        herdr.prompts_to(LANE_PANE).is_empty(),
+        "a handed-in attempt is not nudged"
+    );
     assert_eq!(
-        s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+        s.read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap()
+            .state,
         AttemptState::Submitted
     );
 }
@@ -218,12 +266,16 @@ fn a_restart_between_the_bump_and_the_delivery_still_delivers_once() {
 
 #[test]
 fn contract_change_atomically_clears_wait_and_closes_pause() {
-    let mut s=world();
-    s.write(|tx| { tx.set_task_wait("p","T-1","T-2","merged")?; tx.open_pause("p","p:heat","wait","waiting for T-2",T0+5) }).unwrap();
-    bump(&mut s,0,"updated goal","clear-wait");
-    let task=s.read(|tx|tx.get_task("p","T-1")).unwrap().unwrap();
+    let mut s = world();
+    s.write(|tx| {
+        tx.set_task_wait("p", "T-1", "T-2", "merged")?;
+        tx.open_pause("p", "p:heat", "wait", "waiting for T-2", T0 + 5)
+    })
+    .unwrap();
+    bump(&mut s, 0, "updated goal", "clear-wait");
+    let task = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
     assert!(task.wait_on.is_none() && task.wait_cond.is_none());
-    let pauses=s.read(|tx|tx.pauses_of_project("p")).unwrap();
-    let pause=pauses.iter().find(|p|p.kind=="wait").unwrap();
-    assert_eq!(pause.end_at,Some(T0+10));
+    let pauses = s.read(|tx| tx.pauses_of_project("p")).unwrap();
+    let pause = pauses.iter().find(|p| p.kind == "wait").unwrap();
+    assert_eq!(pause.end_at, Some(T0 + 10));
 }

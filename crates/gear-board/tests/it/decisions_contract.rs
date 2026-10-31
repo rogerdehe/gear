@@ -29,7 +29,15 @@ fn world() -> Store {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", NOW)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", NOW)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "codex",
+                NOW,
+            )?;
             testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "pi", NOW)?;
             tx.upsert_voyage(&gear_store::VoyageRow {
                 project: "p".into(),
@@ -93,20 +101,8 @@ fn world() -> Store {
                 updated: departure,
             })?;
             tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, departure)?;
-            tx.set_attempt_time(
-                "p",
-                "T-1",
-                1,
-                AttemptStep::HandedIn,
-                departure + 44 * 60,
-            )?;
-            tx.set_attempt_time(
-                "p",
-                "T-1",
-                1,
-                AttemptStep::Merged,
-                departure + 44 * 60,
-            )?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::HandedIn, departure + 44 * 60)?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Merged, departure + 44 * 60)?;
             // The round of the work, with its tokens and its cost (§4.3).
             let key = RoundKey {
                 project: "p".into(),
@@ -335,14 +331,20 @@ fn the_log_shows_what_changed_the_course_then_every_decision_and_the_frictions()
         text.contains("why: needs token data from T-141 first"),
         "the reason of the decision: {text}"
     );
-    assert!(!text.contains("by kind"), "the count of the kinds is gone: {text}");
+    assert!(
+        !text.contains("by kind"),
+        "the count of the kinds is gone: {text}"
+    );
     // The friction reports, open and closed: unread and read.
     assert!(text.contains("FRICTION REPORTS FROM AGENTS"), "{text}");
     let open = text
         .lines()
         .find(|line| line.contains("the two-repo fixture had no gate script"))
         .unwrap_or_else(|| panic!("an open report: {text}"));
-    assert!(open.contains("unread"), "an open report is unread: {open:?}");
+    assert!(
+        open.contains("unread"),
+        "an open report is unread: {open:?}"
+    );
     let closed = text
         .lines()
         .find(|line| line.contains("scripts/test.sh ran 4 min"))
@@ -423,8 +425,15 @@ fn a_log_without_a_starred_decision_reads_nothing() {
         .iter()
         .position(|line| line.contains("WHAT CHANGED THE COURSE"))
         .unwrap_or_else(|| panic!("the summary: {text}"));
-    assert_eq!(lines[summary + 1].trim(), "nothing", "the empty summary: {text}");
-    assert!(text.contains("ALL DECISIONS (1)"), "the log still lists it: {text}");
+    assert_eq!(
+        lines[summary + 1].trim(),
+        "nothing",
+        "the empty summary: {text}"
+    );
+    assert!(
+        text.contains("ALL DECISIONS (1)"),
+        "the log still lists it: {text}"
+    );
 }
 
 #[test]
@@ -442,7 +451,10 @@ fn the_cost_view_shows_a_lane_with_the_development_and_the_review_apart() {
         .find(|line| line.contains("hull"))
         .expect("the row of the lane");
     assert!(row.contains("▸ hull"), "the lane is closed: {row}");
-    assert!(row.contains("   40m    44m"), "the estimate and the actual time: {row}");
+    assert!(
+        row.contains("   40m    44m"),
+        "the estimate and the actual time: {row}"
+    );
     assert!(row.contains("  1.1x"), "the ratio: {row}");
     assert!(row.contains("512k"), "the development tokens: {row}");
     assert!(row.contains("    0.31"), "the development cost: {row}");
@@ -467,14 +479,31 @@ fn enter_opens_a_lane_and_closes_it() {
     };
 
     let mut out: Vec<u8> = Vec::new();
-    run_with(&mut store, &opts, &mut out, &mut Presses(vec!['3', '\r']), None).unwrap();
+    run_with(
+        &mut store,
+        &opts,
+        &mut out,
+        &mut Presses(vec!['3', '\r']),
+        None,
+    )
+    .unwrap();
     let frame = last_frame(&out);
     // The selected lane is open and its task is under it.
     assert!(frame.contains("▾ hull"), "Enter opens the lane: {frame}");
-    assert!(frame.contains("T-1"), "the lane's task is under it: {frame}");
+    assert!(
+        frame.contains("T-1"),
+        "the lane's task is under it: {frame}"
+    );
 
     let mut out: Vec<u8> = Vec::new();
-    run_with(&mut store, &opts, &mut out, &mut Presses(vec!['3', '\r', '\r']), None).unwrap();
+    run_with(
+        &mut store,
+        &opts,
+        &mut out,
+        &mut Presses(vec!['3', '\r', '\r']),
+        None,
+    )
+    .unwrap();
     let frame = last_frame(&out);
     // A second Enter closes it again.
     assert!(frame.contains("▸ hull"), "Enter closes the lane: {frame}");
@@ -542,7 +571,10 @@ fn a_task_shows_its_development_and_its_review_tokens() {
 
     let board = board(&mut store);
     let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
-    let row = text.lines().find(|line| line.contains("hull")).expect("the row of the lane");
+    let row = text
+        .lines()
+        .find(|line| line.contains("hull"))
+        .expect("the row of the lane");
     assert!(row.contains("1000k"), "the development tokens: {row}");
     assert!(row.contains("200k"), "the review tokens: {row}");
 
@@ -550,8 +582,14 @@ fn a_task_shows_its_development_and_its_review_tokens() {
     let mut screen = crate::screen(Tab::Cost, 0, (120, 40));
     screen.opened = vec!["hull".into()];
     let text = frame(&board, &screen, None);
-    let row = text.lines().find(|line| line.contains("T-1")).expect("the row of the task");
-    assert!(row.contains("1000k"), "the task's development tokens: {row}");
+    let row = text
+        .lines()
+        .find(|line| line.contains("T-1"))
+        .expect("the row of the task");
+    assert!(
+        row.contains("1000k"),
+        "the task's development tokens: {row}"
+    );
     assert!(row.contains("200k"), "the task's review tokens: {row}");
 }
 
@@ -939,8 +977,16 @@ fn two_voyages_with_frictions(old_open: bool) -> Store {
             }
             // Each voyage: a task that is done and carries a report, and a
             // task that leaves the voyage open or finished.
-            let m4_rest = if old_open { TaskState::Ready } else { TaskState::Done };
-            let m5_rest = if old_open { TaskState::Done } else { TaskState::Ready };
+            let m4_rest = if old_open {
+                TaskState::Ready
+            } else {
+                TaskState::Done
+            };
+            let m5_rest = if old_open {
+                TaskState::Done
+            } else {
+                TaskState::Ready
+            };
             for (id, rank, milestone, with_friction) in [
                 ("T-1", 1, "M4", true),
                 ("T-2", 2, "M4", false),
@@ -1031,7 +1077,10 @@ impl Keys for Presses {
 /// The last frame the board drew: the frames are separated by the clear.
 fn last_frame(out: &[u8]) -> String {
     let text = String::from_utf8_lossy(out);
-    text.rsplit("\u{1b}[?2026h\u{1b}[H").next().unwrap_or_default().to_string()
+    text.rsplit("\u{1b}[?2026h\u{1b}[H")
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// T-342 (README change 13): a decision is picked, its reason is not. `Down`
@@ -1081,10 +1130,18 @@ fn down_moves_over_the_reason_of_a_decision() {
         "the third decision is picked, not the why line before it: {frame}"
     );
     assert!(
-        !frame.lines().any(|line| line.contains('›') && line.contains("why:")),
+        !frame
+            .lines()
+            .any(|line| line.contains('›') && line.contains("why:")),
         "a reason is not a pick: {frame}"
     );
     // Both reasons are still drawn, under their decisions.
-    assert!(frame.contains("why: needs token data from T-141 first"), "{frame}");
-    assert!(frame.contains("why: the user asked for it at the kickoff"), "{frame}");
+    assert!(
+        frame.contains("why: needs token data from T-141 first"),
+        "{frame}"
+    );
+    assert!(
+        frame.contains("why: the user asked for it at the kickoff"),
+        "{frame}"
+    );
 }

@@ -15,7 +15,8 @@ use gear_store::{testing, ContractRow, NewMessage, ReviewVerdictRow, Store, Task
 
 const T0: i64 = 1_800_000_000;
 const CANDIDATE: &str = "abc1234";
-const FINDINGS: &str = "P1: the rows drift right on narrow screens\nP2: the header keeps a stale count";
+const FINDINGS: &str =
+    "P1: the rows drift right on narrow screens\nP2: the header keeps a stale count";
 /// Findings with ids, as the review packet asks for (T-23).
 const FINDINGS_WITH_IDS: &str = "F1: the store forgets the verdict\nF2: the wording of a comment";
 
@@ -40,7 +41,8 @@ fn task(id: &str, rank: i64, state: TaskState) -> TaskRow {
         wait_cond: None,
         rework_note: None,
         estimate_min: None,
-         issue: None,updated: T0,
+        issue: None,
+        updated: T0,
     }
 }
 
@@ -65,7 +67,10 @@ fn world_with(passed: bool, findings: &str, blocking: &str) -> Store {
             task("T-1", 7, TaskState::Ready),
             task("T-2", 8, TaskState::Ready),
             task("T-3", 10, TaskState::Ready),
-            TaskRow { lane: Some("pricing".into()), ..task("T-4", 9, TaskState::Ready) },
+            TaskRow {
+                lane: Some("pricing".into()),
+                ..task("T-4", 9, TaskState::Ready)
+            },
         ] {
             tx.insert_task(&row)?;
         }
@@ -84,7 +89,16 @@ fn world_with(passed: bool, findings: &str, blocking: &str) -> Store {
         // T-1 is handed in: Delivered → Started → Submitted, task Verifying.
         start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
         on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
-        submit_result(tx, "p", "T-1", 1, 1, CANDIDATE, "Report: ops/reports/T-1.md", T0 + 1)?;
+        submit_result(
+            tx,
+            "p",
+            "T-1",
+            1,
+            1,
+            CANDIDATE,
+            "Report: ops/reports/T-1.md",
+            T0 + 1,
+        )?;
         // What T-2 stores when the reviewer hands the verdict in.
         tx.insert_review_verdict(&ReviewVerdictRow {
             project: "p".into(),
@@ -129,29 +143,40 @@ fn task_state(s: &mut Store, id: &str) -> TaskState {
 }
 
 fn attempt_state(s: &mut Store) -> AttemptState {
-    s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state
+    s.read(|tx| tx.get_attempt("p", "T-1", 1))
+        .unwrap()
+        .unwrap()
+        .state
 }
 
 fn ops(s: &mut Store) -> Vec<gear_store::OpRow> {
-    s.read(|tx| tx.ops_in_state("p", OpState::Intended)).unwrap()
+    s.read(|tx| tx.ops_in_state("p", OpState::Intended))
+        .unwrap()
 }
 
 fn captain_inbox(s: &mut Store) -> Vec<gear_store::MessageRow> {
-    s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 100)).unwrap()
+    s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 100))
+        .unwrap()
 }
 
 fn settlement_info(s: &mut Store) -> Vec<gear_store::MessageRow> {
-    s.read(|tx| Ok(tx.thread_messages("p", "T-1:1")?.into_iter()
-        .chain(tx.thread_messages("p", "T-1:review")?)
-        .filter(|m| m.kind == MsgKind::System && m.state == MsgState::Info)
-        .collect())).unwrap()
+    s.read(|tx| {
+        Ok(tx
+            .thread_messages("p", "T-1:1")?
+            .into_iter()
+            .chain(tx.thread_messages("p", "T-1:review")?)
+            .filter(|m| m.kind == MsgKind::System && m.state == MsgState::Info)
+            .collect())
+    })
+    .unwrap()
 }
 
 #[test]
 fn a_pass_settles_the_task_and_queues_the_merge() {
     let mut s = world(true);
 
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3))
+        .unwrap();
 
     // The attempt and the task are settled.
     assert_eq!(attempt_state(&mut s), AttemptState::Accepted);
@@ -162,8 +187,20 @@ fn a_pass_settles_the_task_and_queues_the_merge() {
     assert_eq!(intended.len(), 1, "{intended:?}");
     let op = &intended[0];
     assert_eq!(
-        (op.kind, op.state, op.task.as_deref(), op.attempt, op.seat.as_str()),
-        (OpKind::Merge, OpState::Intended, Some("T-1"), Some(1), "p:heat")
+        (
+            op.kind,
+            op.state,
+            op.task.as_deref(),
+            op.attempt,
+            op.seat.as_str()
+        ),
+        (
+            OpKind::Merge,
+            OpState::Intended,
+            Some("T-1"),
+            Some(1),
+            "p:heat"
+        )
     );
     assert_eq!(op.payload["branch"], serde_json::json!("heat/t1"));
     assert_eq!(op.payload["candidate"], serde_json::json!(CANDIDATE));
@@ -172,7 +209,10 @@ fn a_pass_settles_the_task_and_queues_the_merge() {
     assert!(captain_inbox(&mut s).is_empty(), "no action item is left");
     let info = settlement_info(&mut s);
     assert_eq!(info.len(), 1, "{info:?}");
-    assert_eq!((info[0].kind, info[0].state), (MsgKind::System, MsgState::Info));
+    assert_eq!(
+        (info[0].kind, info[0].state),
+        (MsgKind::System, MsgState::Info)
+    );
     assert!(info[0].body.contains("pass"), "{}", info[0].body);
     assert!(info[0].body.contains("merge"), "{}", info[0].body);
 
@@ -180,7 +220,11 @@ fn a_pass_settles_the_task_and_queues_the_merge() {
     let verdicts = s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap();
     assert_eq!(verdicts.len(), 1, "{verdicts:?}");
     assert_eq!(
-        (verdicts[0].passed, verdicts[0].by_seat.as_str(), verdicts[0].candidate.as_str()),
+        (
+            verdicts[0].passed,
+            verdicts[0].by_seat.as_str(),
+            verdicts[0].candidate.as_str()
+        ),
         (true, "p:r-1", CANDIDATE)
     );
 }
@@ -189,7 +233,8 @@ fn a_pass_settles_the_task_and_queues_the_merge() {
 fn a_fail_puts_the_rework_first_in_the_lane_queue() {
     let mut s = world_with(false, FINDINGS_WITH_IDS, "F1");
 
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3))
+        .unwrap();
 
     assert_eq!(attempt_state(&mut s), AttemptState::Rejected);
     assert_eq!(task_state(&mut s, "T-1"), TaskState::Ready);
@@ -198,11 +243,22 @@ fn a_fail_puts_the_rework_first_in_the_lane_queue() {
     let row = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
     let note = row.rework_note.unwrap_or_default();
     assert!(note.contains("F1: the store forgets the verdict"), "{note}");
-    assert!(!note.contains("F2"), "the logged finding is not a rework: {note}");
-    assert!(!note.contains("git show origin/review"), "no pointer at a review branch: {note}");
+    assert!(
+        !note.contains("F2"),
+        "the logged finding is not a rework: {note}"
+    );
+    assert!(
+        !note.contains("git show origin/review"),
+        "no pointer at a review branch: {note}"
+    );
     // The task packet shows the findings of the latest review.
-    let packet = s.read(|tx| gear_app::plan::render_task_packet(tx, "p", "T-1")).unwrap();
-    assert!(packet.contains("F1: the store forgets the verdict"), "the packet carries the findings:\n{packet}");
+    let packet = s
+        .read(|tx| gear_app::plan::render_task_packet(tx, "p", "T-1"))
+        .unwrap();
+    assert!(
+        packet.contains("F1: the store forgets the verdict"),
+        "the packet carries the findings:\n{packet}"
+    );
     // The rework comes before the lane's other ready tasks.
     let ready: Vec<TaskRow> = s.read(|tx| tx.tasks_of_project("p")).unwrap();
     let other_heat: Vec<i64> = ready
@@ -212,8 +268,15 @@ fn a_fail_puts_the_rework_first_in_the_lane_queue() {
         .filter(|t| t.state == TaskState::Ready)
         .map(|t| t.rank)
         .collect();
-    assert!(!other_heat.is_empty(), "the test world has other ready work");
-    assert!(row.rank < *other_heat.iter().min().unwrap(), "{} vs {other_heat:?}", row.rank);
+    assert!(
+        !other_heat.is_empty(),
+        "the test world has other ready work"
+    );
+    assert!(
+        row.rank < *other_heat.iter().min().unwrap(),
+        "{} vs {other_heat:?}",
+        row.rank
+    );
     // No merge op for a fail.
     assert!(ops(&mut s).is_empty());
     // Same line to the captain, no action item.
@@ -226,13 +289,15 @@ fn a_fail_puts_the_rework_first_in_the_lane_queue() {
 #[test]
 fn a_second_call_is_a_no_op() {
     let mut s = world(true);
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3))
+        .unwrap();
     let merge_ops = ops(&mut s).len();
     let info = settlement_info(&mut s).len();
     let task = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
 
     // Again, later: nothing happens.
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 9)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 9))
+        .unwrap();
 
     assert_eq!(ops(&mut s).len(), merge_ops, "no second merge op");
     assert_eq!(
@@ -246,7 +311,9 @@ fn a_second_call_is_a_no_op() {
 #[test]
 fn a_missing_verdict_is_no_target() {
     let mut s = world(true);
-    let err = s.write(|tx| settle_review(tx, "p", "T-2", 1, T0 + 3)).unwrap_err();
+    let err = s
+        .write(|tx| settle_review(tx, "p", "T-2", 1, T0 + 3))
+        .unwrap_err();
     assert_eq!(err.code, ErrorCode::NoTarget);
     assert!(err.detail.contains("review"), "{}", err.detail);
 }
@@ -256,11 +323,19 @@ fn a_missing_verdict_is_no_target() {
 fn reviewer() -> (Env, Fingerprint) {
     (
         Env {
-            ctx: Some(GearCtx { project: "p".into(), seat: "r-1".into(), generation: 1 }),
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "r-1".into(),
+                generation: 1,
+            }),
             pane_id: Some("w1:p3".into()),
             admin: false,
         },
-        Fingerprint { pane_id: "w1:p3".into(), kind: Some("opencode".into()), session_ref: None },
+        Fingerprint {
+            pane_id: "w1:p3".into(),
+            kind: Some("opencode".into()),
+            session_ref: None,
+        },
     )
 }
 
@@ -314,7 +389,8 @@ fn a_pass_on_an_older_contract_is_a_rework() {
     })
     .unwrap();
 
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 5)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 5))
+        .unwrap();
 
     // Not accepted: the attempt is rejected and the task waits for rework.
     assert_eq!(attempt_state(&mut s), AttemptState::Rejected);
@@ -339,11 +415,30 @@ fn duplicate_reviews_leave_no_action_item() {
     let (env, fp) = reviewer();
     // The same review twice, through the public send path, with two ids; the
     // world already carries the first item T-2 wrote.
-    mail::send(&mut s, &env, Some(&fp), &send_review(Outcome::Pass, "r-1"), T0 + 3).unwrap();
-    mail::send(&mut s, &env, Some(&fp), &send_review(Outcome::Pass, "r-2"), T0 + 4).unwrap();
-    assert_eq!(captain_inbox(&mut s).len(), 1, "only the legacy open review needs closing; new passes are info");
+    mail::send(
+        &mut s,
+        &env,
+        Some(&fp),
+        &send_review(Outcome::Pass, "r-1"),
+        T0 + 3,
+    )
+    .unwrap();
+    mail::send(
+        &mut s,
+        &env,
+        Some(&fp),
+        &send_review(Outcome::Pass, "r-2"),
+        T0 + 4,
+    )
+    .unwrap();
+    assert_eq!(
+        captain_inbox(&mut s).len(),
+        1,
+        "only the legacy open review needs closing; new passes are info"
+    );
 
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 5)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 5))
+        .unwrap();
 
     assert!(captain_inbox(&mut s).is_empty(), "every copy is resolved");
     assert_eq!(ops(&mut s).len(), 1, "still one merge");
@@ -351,8 +446,14 @@ fn duplicate_reviews_leave_no_action_item() {
     assert_eq!(info.len(), 1, "one information line");
 
     // A duplicate after the settlement is refused and creates no item.
-    let err = mail::send(&mut s, &env, Some(&fp), &send_review(Outcome::Pass, "r-3"), T0 + 6)
-        .unwrap_err();
+    let err = mail::send(
+        &mut s,
+        &env,
+        Some(&fp),
+        &send_review(Outcome::Pass, "r-3"),
+        T0 + 6,
+    )
+    .unwrap_err();
     assert_eq!(err.code, ErrorCode::BadTransition);
     assert!(captain_inbox(&mut s).is_empty());
     assert_eq!(ops(&mut s).len(), 1);
@@ -371,10 +472,19 @@ fn an_obsolete_review_closes_the_attempt_and_settles_nothing() {
     })
     .unwrap();
 
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 5)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 5))
+        .unwrap();
 
-    assert_eq!(attempt_state(&mut s), AttemptState::Rejected, "the attempt is closed");
-    assert_eq!(task_state(&mut s, "T-1"), TaskState::Cancelled, "the task keeps its state");
+    assert_eq!(
+        attempt_state(&mut s),
+        AttemptState::Rejected,
+        "the attempt is closed"
+    );
+    assert_eq!(
+        task_state(&mut s, "T-1"),
+        TaskState::Cancelled,
+        "the task keeps its state"
+    );
     assert!(ops(&mut s).is_empty(), "nothing is merged");
     assert!(captain_inbox(&mut s).is_empty(), "no action item");
     let info = settlement_info(&mut s);
@@ -388,18 +498,36 @@ fn an_obsolete_review_closes_the_attempt_and_settles_nothing() {
 fn a_fail_without_a_blocking_finding_goes_to_the_captain() {
     let mut s = world_with(false, FINDINGS_WITH_IDS, "");
 
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3))
+        .unwrap();
 
-    assert_eq!(attempt_state(&mut s), AttemptState::Submitted, "nothing is settled");
-    assert_eq!(task_state(&mut s, "T-1"), TaskState::Verifying, "the task stays Verifying");
+    assert_eq!(
+        attempt_state(&mut s),
+        AttemptState::Submitted,
+        "nothing is settled"
+    );
+    assert_eq!(
+        task_state(&mut s, "T-1"),
+        TaskState::Verifying,
+        "the task stays Verifying"
+    );
     assert!(ops(&mut s).is_empty(), "no merge, no rework");
     // One action item for the captain.
     let inbox = captain_inbox(&mut s);
     assert_eq!(inbox.len(), 1, "{inbox:?}");
-    assert!(inbox[0].body.contains("fail without blocking findings"), "{}", inbox[0].body);
+    assert!(
+        inbox[0].body.contains("fail without blocking findings"),
+        "{}",
+        inbox[0].body
+    );
     // A second settlement adds none.
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 4)).unwrap();
-    assert_eq!(captain_inbox(&mut s).len(), 1, "one action item, not one per tick");
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 4))
+        .unwrap();
+    assert_eq!(
+        captain_inbox(&mut s).len(),
+        1,
+        "one action item, not one per tick"
+    );
 }
 
 /// T-23 F1 (the rework of attempt 1): a fail whose findings report a failed
@@ -411,14 +539,30 @@ fn a_fail_reporting_a_failed_mechanical_fact_is_never_a_pass() {
     let findings = "Mechanical acceptance: `cargo test --workspace` FAILED: a contract test fails";
     let mut s = world_with(false, findings, "");
 
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3))
+        .unwrap();
 
-    assert_eq!(attempt_state(&mut s), AttemptState::Submitted, "nothing is settled");
-    assert_eq!(task_state(&mut s, "T-1"), TaskState::Verifying, "the task stays Verifying");
-    assert!(ops(&mut s).is_empty(), "no merge for a candidate known to fail");
+    assert_eq!(
+        attempt_state(&mut s),
+        AttemptState::Submitted,
+        "nothing is settled"
+    );
+    assert_eq!(
+        task_state(&mut s, "T-1"),
+        TaskState::Verifying,
+        "the task stays Verifying"
+    );
+    assert!(
+        ops(&mut s).is_empty(),
+        "no merge for a candidate known to fail"
+    );
     let inbox = captain_inbox(&mut s);
     assert_eq!(inbox.len(), 1, "{inbox:?}");
-    assert!(inbox[0].body.contains("fail without blocking findings"), "{}", inbox[0].body);
+    assert!(
+        inbox[0].body.contains("fail without blocking findings"),
+        "{}",
+        inbox[0].body
+    );
 }
 
 /// T-23 F2 (the rework of attempt 1): a fail on an attempt that adopted an
@@ -449,9 +593,14 @@ fn a_fail_on_an_older_contract_is_never_a_pass() {
     })
     .unwrap();
 
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 5)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 5))
+        .unwrap();
 
-    assert_eq!(attempt_state(&mut s), AttemptState::Submitted, "nothing is settled");
+    assert_eq!(
+        attempt_state(&mut s),
+        AttemptState::Submitted,
+        "nothing is settled"
+    );
     assert_eq!(task_state(&mut s, "T-1"), TaskState::Verifying);
     assert!(ops(&mut s).is_empty(), "the old candidate is not merged");
     let inbox = captain_inbox(&mut s);
@@ -491,7 +640,8 @@ fn the_rework_rounds_are_capped() {
     })
     .unwrap();
 
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3))
+        .unwrap();
 
     // Nothing is settled: the task stays Verifying and the attempt handed in.
     assert_eq!(attempt_state(&mut s), AttemptState::Submitted);
@@ -502,8 +652,13 @@ fn the_rework_rounds_are_capped() {
     assert_eq!(inbox.len(), 1, "{inbox:?}");
     assert!(inbox[0].body.contains("cap"), "{}", inbox[0].body);
     // A second settlement does not add another one.
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 4)).unwrap();
-    assert_eq!(captain_inbox(&mut s).len(), 1, "one action item, not one per tick");
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 4))
+        .unwrap();
+    assert_eq!(
+        captain_inbox(&mut s).len(),
+        1,
+        "one action item, not one per tick"
+    );
 }
 
 /// T-23: a restart between storing the review and settling it must not settle
@@ -512,16 +667,27 @@ fn the_rework_rounds_are_capped() {
 fn a_restart_between_the_review_and_the_settlement_does_not_double_settle() {
     let mut s = world_with(false, FINDINGS_WITH_IDS, "F1");
 
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3))
+        .unwrap();
     let merges = ops(&mut s).len();
-    let notes = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().rework_note.clone();
+    let notes = s
+        .read(|tx| tx.get_task("p", "T-1"))
+        .unwrap()
+        .unwrap()
+        .rework_note
+        .clone();
 
     // The engine restarts and settles again.
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 400)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 400))
+        .unwrap();
 
     assert_eq!(ops(&mut s).len(), merges, "no second merge");
     assert_eq!(
-        s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().rework_note.clone(),
+        s.read(|tx| tx.get_task("p", "T-1"))
+            .unwrap()
+            .unwrap()
+            .rework_note
+            .clone(),
         notes,
         "the same rework, not a second one"
     );
@@ -549,7 +715,8 @@ fn fail_world(estimate_min: Option<i64>, count: usize) -> Store {
 
 /// The budget the next round of T-1 gets (§5.1, attempt 2 is a rework).
 fn rework_budget(s: &mut Store) -> i64 {
-    s.read(|tx| tx.round_budget_min("p", "T-1", 2, "rework", None)).unwrap()
+    s.read(|tx| tx.round_budget_min("p", "T-1", 2, "rework", None))
+        .unwrap()
 }
 
 /// T-312: a rework round's budget grows with the blocking findings it carries
@@ -557,17 +724,24 @@ fn rework_budget(s: &mut Store) -> i64 {
 #[test]
 fn a_rework_budget_grows_with_its_blocking_findings() {
     let mut s = fail_world(Some(30), 5);
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
-    assert_eq!(rework_budget(&mut s), 40, "five blocking findings are 40 min");
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3))
+        .unwrap();
+    assert_eq!(
+        rework_budget(&mut s),
+        40,
+        "five blocking findings are 40 min"
+    );
 
     // One finding is below half of 30: the old rule still wins.
     let mut s = fail_world(Some(30), 1);
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3))
+        .unwrap();
     assert_eq!(rework_budget(&mut s), 15, "half of 30 is still the floor");
 
     // A long task keeps its half: two findings are 16, half of 100 is 50.
     let mut s = fail_world(Some(100), 2);
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3))
+        .unwrap();
     assert_eq!(rework_budget(&mut s), 50, "half of 100 beats 8 per finding");
 }
 
@@ -575,10 +749,12 @@ fn a_rework_budget_grows_with_its_blocking_findings() {
 #[test]
 fn a_rework_budget_without_an_estimate_starts_from_the_default() {
     let mut s = fail_world(None, 4);
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3))
+        .unwrap();
     // Half of the default 30 is 15; four findings are 32.
     assert_eq!(
-        rework_budget(&mut s), 32,
+        rework_budget(&mut s),
+        32,
         "eight minutes per finding, above half the default budget"
     );
 }
@@ -590,7 +766,11 @@ fn a_captains_fail_verdict_keeps_its_own_minutes() {
     let mut s = fail_world(Some(30), 2);
     let text = "<!-- gear-plan project=p base=0 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc1234 fail estimate=25 rework=\"handle the edge case\"\n";
     let env = Env {
-        ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+        ctx: Some(GearCtx {
+            project: "p".into(),
+            seat: "captain".into(),
+            generation: 1,
+        }),
         pane_id: Some("w1:p1".into()),
         admin: false,
     };
@@ -612,8 +792,15 @@ fn a_captains_fail_verdict_keeps_its_own_minutes() {
     .unwrap();
 
     assert_eq!(
-        s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().rework_estimate_min,
+        s.read(|tx| tx.get_task("p", "T-1"))
+            .unwrap()
+            .unwrap()
+            .rework_estimate_min,
         Some(25)
     );
-    assert_eq!(rework_budget(&mut s), 25, "the captain's minutes win over 8 per finding");
+    assert_eq!(
+        rework_budget(&mut s),
+        25,
+        "the captain's minutes win over 8 per finding"
+    );
 }

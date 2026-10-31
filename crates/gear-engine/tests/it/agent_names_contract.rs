@@ -35,7 +35,15 @@ fn world() -> World {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "codex",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
             Ok(())
         })
@@ -50,7 +58,11 @@ fn world() -> World {
         profiles: gear_herdr::builtins(),
         ..Default::default()
     };
-    cfg.profiles.get_mut("opencode").unwrap().new_session.clear();
+    cfg.profiles
+        .get_mut("opencode")
+        .unwrap()
+        .new_session
+        .clear();
     World { store, herdr, cfg }
 }
 
@@ -62,7 +74,8 @@ impl World {
         let seat = self
             .store
             .write(|tx| {
-                let seat = testing::seed_temp_seat(tx, "p", "review-1", "T-7", REV_PANE, "codex", T0)?;
+                let seat =
+                    testing::seed_temp_seat(tx, "p", "review-1", "T-7", REV_PANE, "codex", T0)?;
                 tx.insert_task(&TaskRow {
                     repo: None,
                     base: None,
@@ -162,12 +175,20 @@ impl World {
 #[test]
 fn an_unnamed_lane_agent_is_renamed_in_one_tick() {
     let mut w = world();
-    assert_eq!(w.name(LANE_PANE), None, "the state Herdr leaves after a restart");
+    assert_eq!(
+        w.name(LANE_PANE),
+        None,
+        "the state Herdr leaves after a restart"
+    );
 
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
 
     assert_eq!(w.name(LANE_PANE), Some("p-heat"));
-    assert_eq!(w.herdr.renames_to("p-heat"), vec![LANE_PANE], "one rename, to the seat's name");
+    assert_eq!(
+        w.herdr.renames_to("p-heat"),
+        vec![LANE_PANE],
+        "one rename, to the seat's name"
+    );
     assert!(report.renamed.contains(&"p:heat".to_string()), "{report:?}");
     // The captain's agent is a seat too, and got its name back in the same tick.
     assert_eq!(w.name(CAP_PANE), Some("p-captain"));
@@ -175,7 +196,11 @@ fn an_unnamed_lane_agent_is_renamed_in_one_tick() {
     // Named now: no second call.
     let before = w.herdr.renames_to("p-heat").len();
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 20).unwrap();
-    assert_eq!(w.herdr.renames_to("p-heat").len(), before, "a named agent gets no call");
+    assert_eq!(
+        w.herdr.renames_to("p-heat").len(),
+        before,
+        "a named agent gets no call"
+    );
 }
 
 #[test]
@@ -187,7 +212,10 @@ fn a_correctly_named_agent_gets_no_rename() {
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
 
     assert!(
-        w.herdr.calls.iter().all(|call| !matches!(call, Call::Rename { .. })),
+        w.herdr
+            .calls
+            .iter()
+            .all(|call| !matches!(call, Call::Rename { .. })),
         "{:?}",
         w.herdr.calls
     );
@@ -242,7 +270,11 @@ fn a_cleared_reviewer_is_restored_to_its_task_name_before_delivery() {
     // next tick — the name is in place before any text is typed.
     execute_intended(&mut w.store, &mut w.herdr, "p", T0 + 10).unwrap();
 
-    assert_eq!(w.name(REV_PANE), Some("p-review-t7"), "the agent carries its task name");
+    assert_eq!(
+        w.name(REV_PANE),
+        Some("p-review-t7"),
+        "the agent carries its task name"
+    );
     assert!(
         w.herdr.prompts_to(REV_PANE).is_empty(),
         "nothing is typed while the agent has no name: {:?}",
@@ -286,14 +318,25 @@ fn a_cleared_reviewer_is_restored_to_its_task_name_before_delivery() {
 #[test]
 fn a_name_held_by_another_pane_is_reported_once_and_never_stolen() {
     let mut w = world();
-    w.herdr.add_agent_named(OTHER_PANE, "opencode", AgentStatus::Idle, "p-heat");
+    w.herdr
+        .add_agent_named(OTHER_PANE, "opencode", AgentStatus::Idle, "p-heat");
 
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
 
     assert_eq!(w.name(LANE_PANE), None, "the seat's agent is not named");
-    assert_eq!(w.name(OTHER_PANE), Some("p-heat"), "and the holder keeps its name");
-    assert!(w.herdr.renames_to("p-heat").is_empty(), "nothing was stolen");
-    assert!(report.name_taken.contains(&"p:heat".to_string()), "{report:?}");
+    assert_eq!(
+        w.name(OTHER_PANE),
+        Some("p-heat"),
+        "and the holder keeps its name"
+    );
+    assert!(
+        w.herdr.renames_to("p-heat").is_empty(),
+        "nothing was stolen"
+    );
+    assert!(
+        report.name_taken.contains(&"p:heat".to_string()),
+        "{report:?}"
+    );
 
     // One item for the captain, in its own thread, naming the holder.
     let items = w.name_items();
@@ -329,19 +372,33 @@ fn a_captain_whose_name_another_pane_holds_gets_one_item_and_its_name_back() {
     for now in [T0 + 10, T0 + 20] {
         let names = names::read(&mut w.herdr).unwrap();
         let restored = names::restore(&mut w.store, &mut w.herdr, "p", &names, now).unwrap();
-        assert!(restored.taken.contains(&"p:captain".to_string()), "{restored:?}");
+        assert!(
+            restored.taken.contains(&"p:captain".to_string()),
+            "{restored:?}"
+        );
     }
 
     assert_eq!(w.name(CAP_PANE), None, "the seat's agent is not named");
-    assert_eq!(w.name(OTHER_PANE), Some("p-captain"), "the holder keeps its name");
-    assert!(w.herdr.renames_to("p-captain").is_empty(), "nothing was stolen");
+    assert_eq!(
+        w.name(OTHER_PANE),
+        Some("p-captain"),
+        "the holder keeps its name"
+    );
+    assert!(
+        w.herdr.renames_to("p-captain").is_empty(),
+        "nothing was stolen"
+    );
 
     // One item for the captain, in the captain's own thread — not none.
     let items = w
         .store
         .read(|tx| tx.thread_messages("p", "name:p:captain"))
         .unwrap();
-    assert_eq!(items.len(), 1, "one item over two passes, not every tick: {items:?}");
+    assert_eq!(
+        items.len(),
+        1,
+        "one item over two passes, not every tick: {items:?}"
+    );
     assert_eq!(items[0].recipient, "p:captain");
     assert_eq!(items[0].state, MsgState::Open);
     assert!(items[0].body.contains("p-captain"), "{}", items[0].body);
@@ -382,7 +439,11 @@ fn a_delivery_to_a_pane_whose_agent_lost_its_name_names_it_and_delivers_in_the_s
         .unwrap_or_else(|| panic!("no delivery: {:?}", w.herdr.calls));
     assert!(renamed_at < prompt_at, "named first: {:?}", w.herdr.calls);
     assert_eq!(
-        w.herdr.calls.iter().filter(|call| matches!(call, Call::Prompt { pane, .. } if pane == LANE_PANE)).count(),
+        w.herdr
+            .calls
+            .iter()
+            .filter(|call| matches!(call, Call::Prompt { pane, .. } if pane == LANE_PANE))
+            .count(),
         1,
         "exactly one prompt: {:?}",
         w.herdr.calls
@@ -390,9 +451,15 @@ fn a_delivery_to_a_pane_whose_agent_lost_its_name_names_it_and_delivers_in_the_s
     assert_eq!(w.name(LANE_PANE), Some("p-heat"));
 
     let said = w.herdr.prompts_to(LANE_PANE);
-    assert!(said[0].contains(&task), "the task is delivered, not lost to an unnamed agent: {said:?}");
     assert!(
-        report.executed.iter().any(|(_, state)| state == "submitted"),
+        said[0].contains(&task),
+        "the task is delivered, not lost to an unnamed agent: {said:?}"
+    );
+    assert!(
+        report
+            .executed
+            .iter()
+            .any(|(_, state)| state == "submitted"),
         "{report:?}"
     );
 }
@@ -413,8 +480,15 @@ fn a_name_freed_in_the_same_pass_is_named_to_the_seat_that_asks_for_it() {
     let review9 = w
         .store
         .write(|tx| {
-            let seat =
-                testing::seed_active_seat(tx, "p", "review-9", SeatRole::Temp, REV9_PANE, "codex", T0)?;
+            let seat = testing::seed_active_seat(
+                tx,
+                "p",
+                "review-9",
+                SeatRole::Temp,
+                REV9_PANE,
+                "codex",
+                T0,
+            )?;
             tx.set_seat_state(&seat.id, SeatState::Standby, Some("verdict in"), T0)?;
             Ok(seat)
         })
@@ -433,7 +507,10 @@ fn a_name_freed_in_the_same_pass_is_named_to_the_seat_that_asks_for_it() {
     let restored = names::restore(&mut w.store, &mut w.herdr, "p", &names, T0 + 10).unwrap();
 
     assert!(restored.renamed.contains(&review9.id), "{restored:?}");
-    assert!(restored.renamed.contains(&"p:review-11".to_string()), "{restored:?}");
+    assert!(
+        restored.renamed.contains(&"p:review-11".to_string()),
+        "{restored:?}"
+    );
     assert!(restored.taken.is_empty(), "no name was taken: {restored:?}");
     assert_eq!(
         w.name(REV9_PANE),
@@ -488,7 +565,10 @@ fn a_name_held_by_a_pane_of_no_seat_is_still_reported_once() {
     for now in [T0 + 10, T0 + 20] {
         let names = names::read(&mut w.herdr).unwrap();
         let restored = names::restore(&mut w.store, &mut w.herdr, "p", &names, now).unwrap();
-        assert!(restored.taken.contains(&"p:review-11".to_string()), "{restored:?}");
+        assert!(
+            restored.taken.contains(&"p:review-11".to_string()),
+            "{restored:?}"
+        );
     }
 
     assert_eq!(w.name(REV11_PANE), None, "nothing was stolen");

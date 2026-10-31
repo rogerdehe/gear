@@ -54,7 +54,10 @@ impl DaemonSessions {
     /// no value).
     pub fn from_vars(vars: impl Fn(&str) -> Option<String>) -> DaemonSessions {
         let read = |name: &str| vars(name).filter(|value| !value.is_empty());
-        DaemonSessions { opencode: read("OPENCODE_SESSION_ID"), codex: read("CODEX_THREAD_ID") }
+        DaemonSessions {
+            opencode: read("OPENCODE_SESSION_ID"),
+            codex: read("CODEX_THREAD_ID"),
+        }
     }
 }
 
@@ -122,8 +125,14 @@ pub fn observe_via(
         };
         // T-314: a refusal has to be traceable afterwards — which Herdr door
         // was asked, and the ancestry that was matched against its panes.
-        let asked = herdr.socket().unwrap_or_else(|| "an unnamed Herdr".to_string());
-        let ancestry = ancestors.iter().map(|pid| pid.to_string()).collect::<Vec<_>>().join(" < ");
+        let asked = herdr
+            .socket()
+            .unwrap_or_else(|| "an unnamed Herdr".to_string());
+        let ancestry = ancestors
+            .iter()
+            .map(|pid| pid.to_string())
+            .collect::<Vec<_>>()
+            .join(" < ");
         return Err(GearError::new(
             ErrorCode::NotRegistered,
             format!(
@@ -154,7 +163,10 @@ pub fn require_seat(
     })?;
     let seat_id = ctx.seat_id();
     let seat = tx.get_seat(&seat_id)?.ok_or_else(|| {
-        GearError::new(ErrorCode::NotRegistered, format!("seat {seat_id} is not registered"))
+        GearError::new(
+            ErrorCode::NotRegistered,
+            format!("seat {seat_id} is not registered"),
+        )
     })?;
     // The generation is fixed at onboarding: an old session may never write.
     if seat.generation != ctx.generation {
@@ -169,7 +181,10 @@ pub fn require_seat(
     let binding = tx.get_binding(&seat_id, ctx.generation)?.ok_or_else(|| {
         GearError::new(
             ErrorCode::StaleGeneration,
-            format!("seat {seat_id} has no binding for generation {}", ctx.generation),
+            format!(
+                "seat {seat_id} has no binding for generation {}",
+                ctx.generation
+            ),
         )
     })?;
     if binding.status != BindingStatus::Active {
@@ -251,7 +266,11 @@ pub fn require_seat(
 /// Classify without failing (for read-only paths like `gear --all`).
 pub fn classify(tx: &Tx<'_>, env: &Env, fp: Option<&Fingerprint>) -> GearResult<Caller> {
     if env.ctx.is_none() {
-        return Ok(if env.admin { Caller::Admin } else { Caller::Anonymous });
+        return Ok(if env.admin {
+            Caller::Admin
+        } else {
+            Caller::Anonymous
+        });
     }
     match require_seat(tx, env, fp, None, None) {
         Ok((ctx, seat)) => Ok(Caller::Seat { ctx, seat }),
@@ -271,12 +290,20 @@ pub fn fingerprint_of(info: &AgentInfo) -> Fingerprint {
 
 /// Roles as a readable list, for error details.
 fn role_list(roles: &[SeatRole]) -> String {
-    roles.iter().map(|r| r.as_str()).collect::<Vec<_>>().join(", ")
+    roles
+        .iter()
+        .map(|r| r.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// States as a readable list, for error details.
 fn state_list(states: &[SeatState]) -> String {
-    states.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+    states
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The process ids this caller runs under, nearest first: its own pid, then
@@ -367,13 +394,11 @@ fn parent_from_pidinfo(pid: u32) -> Option<u32> {
 /// its foreground processes is one of the caller's ancestors. Both sides are
 /// OS facts — no environment variable can put a pid in a parent chain.
 pub fn claims_pane(info: &PaneProcessInfo, ancestors: &[u32]) -> bool {
-    let pane_pids = std::iter::once(info.shell_pid)
-        .flatten()
-        .chain(
-            info.foreground_processes
-                .iter()
-                .filter_map(|process| Some(process.pid)),
-        );
+    let pane_pids = std::iter::once(info.shell_pid).flatten().chain(
+        info.foreground_processes
+            .iter()
+            .filter_map(|process| Some(process.pid)),
+    );
     pane_pids.into_iter().any(|pid| ancestors.contains(&pid))
 }
 
@@ -422,7 +447,6 @@ pub fn caller_pane(
         .map(str::to_string)
 }
 
-
 /// The seat whose **active** binding is on `pane` (T-126): the pane a caller
 /// runs in, and the store's answer to which seat that is. `None` when no seat
 /// is bound there (an unmanaged agent, the user's own shell).
@@ -435,10 +459,14 @@ pub fn seat_bound_to(tx: &Tx<'_>, pane: &str) -> GearResult<Option<SeatRow>> {
             let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else {
                 continue;
             };
-            if binding.status == BindingStatus::Active && binding.pane_id == pane
-                && best.as_ref().is_none_or(|(created, _)| binding.created > *created) {
-                    best = Some((binding.created, seat));
-                }
+            if binding.status == BindingStatus::Active
+                && binding.pane_id == pane
+                && best
+                    .as_ref()
+                    .is_none_or(|(created, _)| binding.created > *created)
+            {
+                best = Some((binding.created, seat));
+            }
         }
     }
     Ok(best.map(|(_, seat)| seat))
@@ -505,8 +533,8 @@ pub fn resolve_env(
     if env.ctx.is_some() {
         return Ok(env.clone());
     }
-    let pane = caller_pane(herdr, ancestors, env.pane_id.as_deref())
-        .or(daemon_pane(store, herdr, true)?);
+    let pane =
+        caller_pane(herdr, ancestors, env.pane_id.as_deref()).or(daemon_pane(store, herdr, true)?);
     let Some(pane) = pane else {
         if any_agent_pane(herdr) {
             return Err(GearError::new(
@@ -519,7 +547,11 @@ pub fn resolve_env(
     let seat = store.read(|tx| seat_bound_to(tx, &pane))?;
     let Some(seat) = seat else {
         // The pane holds no seat: the caller stays anonymous, with its pane.
-        return Ok(Env { ctx: None, pane_id: Some(pane), admin: env.admin });
+        return Ok(Env {
+            ctx: None,
+            pane_id: Some(pane),
+            admin: env.admin,
+        });
     };
     Ok(Env {
         ctx: Some(GearCtx {
@@ -602,7 +634,10 @@ fn prove_daemon_session(
     fp: &Fingerprint,
     daemon: &DaemonSessions,
 ) -> GearResult<Option<(String, String)>> {
-    let ctx = env.ctx.as_ref().expect("a claim: no context, no daemon proof");
+    let ctx = env
+        .ctx
+        .as_ref()
+        .expect("a claim: no context, no daemon proof");
     let seat = ctx.seat_id();
     let binding = tx.get_binding(&seat, ctx.generation)?;
     let kind = binding
@@ -617,7 +652,11 @@ fn prove_daemon_session(
         .and_then(|binding| binding.session_ref.as_deref())
         .into_iter()
         .chain(fp.session_ref.as_deref())
-        .chain(round.iter().flat_map(|round| round.sessions.iter().map(String::as_str)));
+        .chain(
+            round
+                .iter()
+                .flat_map(|round| round.sessions.iter().map(String::as_str)),
+        );
     for session in sessions {
         let session = session.trim();
         if !session.is_empty() && !known.iter().any(|known| known.as_str() == session) {
@@ -790,19 +829,18 @@ pub fn whoami(
                 }
                 None => "the seat of the caller is not bound to a pane".to_string(),
             }),
-            Some(ctx) => match store.read(|tx| {
-                require_seat(tx, &effective, fingerprint.as_ref(), None, None)
-            }) {
+            Some(ctx) => match store
+                .read(|tx| require_seat(tx, &effective, fingerprint.as_ref(), None, None))
+            {
                 Ok(_) => None,
                 Err(error) => {
                     // The claim failed: name the seat the pane really has, so
                     // the caller sees both what it claimed and what is true.
                     let claimed = ctx.seat_id();
                     Some(match seat.as_deref() {
-                        Some(real) if real != claimed => format!(
-                            "{} (the seat of that pane is {real})",
-                            error.detail
-                        ),
+                        Some(real) if real != claimed => {
+                            format!("{} (the seat of that pane is {real})", error.detail)
+                        }
                         _ => error.detail,
                     })
                 }
@@ -834,7 +872,9 @@ pub fn report_claim(
     };
     let real = real_pane(herdr, ancestors);
     let claimed = env.pane_id.clone().unwrap_or_else(|| "no pane".to_string());
-    let real_label = real.clone().unwrap_or_else(|| "a pane this session does not know".to_string());
+    let real_label = real
+        .clone()
+        .unwrap_or_else(|| "a pane this session does not know".to_string());
     store.write(|tx| {
         let Some(captain) = tx.captain_of(&ctx.project)? else {
             return Ok(false);

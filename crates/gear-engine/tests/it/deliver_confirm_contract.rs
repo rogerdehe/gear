@@ -9,28 +9,81 @@ const T0: i64 = 1_800_000_000;
 
 fn world() -> (Store, String) {
     let mut s = Store::open_in_memory().unwrap();
-    let id = s.write(|tx| {
-        testing::seed_project(tx, "p", "sess", T0)?;
-        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
-        tx.insert_task(&TaskRow { repo: None, base: None, gate: None, rework_estimate_min: None, project: "p".into(), id: "T-7".into(), rank: 1, state: TaskState::Ready, priority: "must".into(),
-            lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
-            wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
-        tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 1, goal: "g".into(), accept: "a".into(),
-            evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0, mechanical: None, })?;
-        start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
-        let op = tx.insert_op(&NewOp { project: "p".into(), seat: "p:heat".into(), generation: 1, kind: OpKind::Deliver,
-            task: Some("T-7".into()), attempt: Some(1), ref_msg: None, plan_version: None,
-            payload: serde_json::json!({"text": "New task T-7"}), created: T0 + 10 })?;
-        tx.set_op_state("p", &op.id, OpState::Executing, None, T0 + 10)?;
-        tx.set_op_state("p", &op.id, OpState::Submitted, None, T0 + 11)?;
-        Ok(op.id)
-    }).unwrap();
+    let id = s
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: "T-7".into(),
+                rank: 1,
+                state: TaskState::Ready,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: None,
+                issue: None,
+                updated: T0,
+            })?;
+            tx.insert_contract(&ContractRow {
+                project: "p".into(),
+                task: "T-7".into(),
+                version: 1,
+                goal: "g".into(),
+                accept: "a".into(),
+                evidence_files: vec![],
+                evidence_due_min: None,
+                body: String::new(),
+                created: T0,
+                mechanical: None,
+            })?;
+            start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
+            let op = tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: OpKind::Deliver,
+                task: Some("T-7".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({"text": "New task T-7"}),
+                created: T0 + 10,
+            })?;
+            tx.set_op_state("p", &op.id, OpState::Executing, None, T0 + 10)?;
+            tx.set_op_state("p", &op.id, OpState::Submitted, None, T0 + 11)?;
+            Ok(op.id)
+        })
+        .unwrap();
     (s, id)
 }
 
 fn view(s: &mut Store, ts: i64, task: Option<&str>, attempt: Option<i64>) {
-    s.write(|tx| tx.insert_view(&ViewRecord { project: "p".into(), seat: "p:heat".into(), generation: 1, ts,
-        shown_msgs: vec![], shown_ops: vec![], shown_task: task.map(String::from), shown_attempt: attempt, shown_contract: attempt.map(|_| 1) })).unwrap();
+    s.write(|tx| {
+        tx.insert_view(&ViewRecord {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            ts,
+            shown_msgs: vec![],
+            shown_ops: vec![],
+            shown_task: task.map(String::from),
+            shown_attempt: attempt,
+            shown_contract: attempt.map(|_| 1),
+        })
+    })
+    .unwrap();
 }
 
 #[test]
@@ -39,21 +92,42 @@ fn a_view_of_the_task_confirms_the_delivery_and_starts_the_attempt() {
     view(&mut s, T0 + 20, Some("T-7"), Some(1));
     let (confirmed, flagged) = confirm_pending(&mut s, "p", 3, T0 + 30).unwrap();
     assert_eq!((confirmed, flagged), (vec![op.clone()], vec![]));
-    assert_eq!(s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state, OpState::Confirmed);
-    assert_eq!(s.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap().state, AttemptState::Started);
-    assert_eq!(s.read(|tx| tx.get_task("p", "T-7")).unwrap().unwrap().state, TaskState::Running);
+    assert_eq!(
+        s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state,
+        OpState::Confirmed
+    );
+    assert_eq!(
+        s.read(|tx| tx.get_attempt("p", "T-7", 1))
+            .unwrap()
+            .unwrap()
+            .state,
+        AttemptState::Started
+    );
+    assert_eq!(
+        s.read(|tx| tx.get_task("p", "T-7")).unwrap().unwrap().state,
+        TaskState::Running
+    );
 }
 
 #[test]
 fn views_without_the_task_or_too_early_do_not_confirm() {
     let (mut s, op) = world();
-    view(&mut s, T0 + 5, Some("T-7"), Some(1));   // before the op
-    view(&mut s, T0 + 20, None, None);            // home without the task
-    view(&mut s, T0 + 21, Some("T-7"), Some(2));  // other attempt
+    view(&mut s, T0 + 5, Some("T-7"), Some(1)); // before the op
+    view(&mut s, T0 + 20, None, None); // home without the task
+    view(&mut s, T0 + 21, Some("T-7"), Some(2)); // other attempt
     let (confirmed, _) = confirm_pending(&mut s, "p", 3, T0 + 30).unwrap();
     assert!(confirmed.is_empty());
-    assert_eq!(s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state, OpState::Submitted);
-    assert_eq!(s.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap().state, AttemptState::Delivered);
+    assert_eq!(
+        s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state,
+        OpState::Submitted
+    );
+    assert_eq!(
+        s.read(|tx| tx.get_attempt("p", "T-7", 1))
+            .unwrap()
+            .unwrap()
+            .state,
+        AttemptState::Delivered
+    );
 }
 
 /// The world of the T-407 tests: the same fixture under a task of its own, so
@@ -64,15 +138,54 @@ fn probe_world(task: &str) -> (Store, String) {
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
-            tx.insert_task(&TaskRow { repo: None, base: None, gate: None, rework_estimate_min: None, project: "p".into(), id: task.into(), rank: 1, state: TaskState::Ready, priority: "must".into(),
-                lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
-                wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
-            tx.insert_contract(&ContractRow { project: "p".into(), task: task.into(), version: 1, goal: "g".into(), accept: "a".into(),
-                evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0, mechanical: None, })?;
+            tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: task.into(),
+                rank: 1,
+                state: TaskState::Ready,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: None,
+                issue: None,
+                updated: T0,
+            })?;
+            tx.insert_contract(&ContractRow {
+                project: "p".into(),
+                task: task.into(),
+                version: 1,
+                goal: "g".into(),
+                accept: "a".into(),
+                evidence_files: vec![],
+                evidence_due_min: None,
+                body: String::new(),
+                created: T0,
+                mechanical: None,
+            })?;
             start_attempt(tx, "p", task, "p:heat", 1, T0)?;
-            let op = tx.insert_op(&NewOp { project: "p".into(), seat: "p:heat".into(), generation: 1, kind: OpKind::Deliver,
-                task: Some(task.into()), attempt: Some(1), ref_msg: None, plan_version: None,
-                payload: serde_json::json!({"text": format!("New task {task}")}), created: T0 + 10 })?;
+            let op = tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: OpKind::Deliver,
+                task: Some(task.into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({"text": format!("New task {task}")}),
+                created: T0 + 10,
+            })?;
             tx.set_op_state("p", &op.id, OpState::Executing, None, T0 + 10)?;
             tx.set_op_state("p", &op.id, OpState::Submitted, None, T0 + 11)?;
             Ok(op.id)
@@ -113,7 +226,10 @@ fn a_delivery_that_was_never_read_logs_failed() {
     let (mut s, _) = probe_world("T-708");
     let (confirmed, flagged) = confirm_pending(&mut s, "p", 3, T0 + 191).unwrap();
     assert!(confirmed.is_empty());
-    assert!(flagged.is_empty(), "the lane's own retry comes first: {flagged:?}");
+    assert!(
+        flagged.is_empty(),
+        "the lane's own retry comes first: {flagged:?}"
+    );
     let log: Vec<String> = gear_engine::ops::probe_log()
         .into_iter()
         .filter(|line| line.starts_with("probe deliver T-708 "))
@@ -140,15 +256,28 @@ fn a_typed_delivery_logs_its_typed_and_enter_boundaries() {
     // The packet of T-709 is still to be typed: an Intended op.
     let op = s
         .write(|tx| {
-            tx.insert_op(&NewOp { project: "p".into(), seat: "p:heat".into(), generation: 1, kind: OpKind::Deliver,
-                task: Some("T-709".into()), attempt: Some(1), ref_msg: None, plan_version: None,
-                payload: serde_json::json!({"text": "New task T-709"}), created: T0 + 100 })
+            tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: OpKind::Deliver,
+                task: Some("T-709".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({"text": "New task T-709"}),
+                created: T0 + 100,
+            })
         })
         .unwrap();
     let mut h = FakeHerdr::new();
     h.add_agent_named("w1:p2", "opencode", AgentStatus::Idle, "p-heat");
     let executed = gear_engine::ops::execute_intended(&mut s, &mut h, "p", T0 + 130).unwrap();
-    assert_eq!(executed, vec![(op.id.clone(), OpState::Submitted.as_str().to_string())], "the packet was typed");
+    assert_eq!(
+        executed,
+        vec![(op.id.clone(), OpState::Submitted.as_str().to_string())],
+        "the packet was typed"
+    );
     let log: Vec<String> = gear_engine::ops::probe_log()
         .into_iter()
         .filter(|line| line.starts_with("probe deliver T-709 "))

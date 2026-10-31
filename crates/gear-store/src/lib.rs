@@ -9,7 +9,8 @@
 //! Herdr or git while holding a [`Tx`].
 
 use gear_model::{
-    AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState, TaskState, Ts,
+    AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, OpState, SeatRole,
+    SeatState, TaskState, Ts,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::path::Path;
@@ -682,11 +683,9 @@ impl Store {
     /// nothing — it creates no file, applies no schema and migrates nothing.
     /// A database of another schema version is read as it is.
     pub fn open_read_only(path: &Path) -> GearResult<Store> {
-        let conn = rusqlite::Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .map_err(map_sqlite)?;
+        let conn =
+            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(map_sqlite)?;
         let store = Store { conn };
         store
             .conn
@@ -853,9 +852,11 @@ impl Store {
             return Ok(Version::Unstamped);
         }
         let stored: Option<String> = conn
-            .query_row("SELECT value FROM meta WHERE key='schema_version'", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
             .optional()
             .map_err(map_sqlite)?;
         match stored {
@@ -956,7 +957,10 @@ impl<'s> Tx<'s> {
                 .map_err(map_sqlite)?;
             let mut rows = stmt.query(params![request_id]).map_err(map_sqlite)?;
             match rows.next().map_err(map_sqlite)? {
-                Some(row) => Some((row.get(0).map_err(map_sqlite)?, row.get(1).map_err(map_sqlite)?)),
+                Some(row) => Some((
+                    row.get(0).map_err(map_sqlite)?,
+                    row.get(1).map_err(map_sqlite)?,
+                )),
                 None => None,
             }
         };
@@ -1167,7 +1171,11 @@ impl<'s> Tx<'s> {
     pub fn get_seat(&self, seat_id: &str) -> GearResult<Option<SeatRow>> {
         let row: Option<SeatRow> = self
             .tx
-            .query_row(&seat_select(" WHERE id=?1"), params![seat_id], seat_from_row)
+            .query_row(
+                &seat_select(" WHERE id=?1"),
+                params![seat_id],
+                seat_from_row,
+            )
             .optional()
             .map_err(map_sqlite)?;
         Ok(row)
@@ -1178,7 +1186,9 @@ impl<'s> Tx<'s> {
             .tx
             .prepare_cached(&seat_select(" WHERE project=?1 ORDER BY id"))
             .map_err(map_sqlite)?;
-        let rows = stmt.query_map(params![project], seat_from_row).map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], seat_from_row)
+            .map_err(map_sqlite)?;
         let mut seats = Vec::new();
         for row in rows {
             seats.push(row.map_err(map_sqlite)?);
@@ -1318,7 +1328,11 @@ impl<'s> Tx<'s> {
                 params![seat_id, generation, binding_status_str(status)],
             )
             .map_err(map_sqlite)?;
-        require_written(changed, "binding", &format!("{seat_id} generation {generation}"))
+        require_written(
+            changed,
+            "binding",
+            &format!("{seat_id} generation {generation}"),
+        )
     }
 
     /// Raw write of the binding's session ref: the agent session Herdr
@@ -1336,7 +1350,11 @@ impl<'s> Tx<'s> {
                 params![seat_id, generation, session_ref],
             )
             .map_err(map_sqlite)?;
-        require_written(changed, "binding", &format!("{seat_id} generation {generation}"))
+        require_written(
+            changed,
+            "binding",
+            &format!("{seat_id} generation {generation}"),
+        )
     }
 
     // ---- messages
@@ -1426,7 +1444,15 @@ impl<'s> Tx<'s> {
                  SET state=?3, result=?4, wait_on=?5, wait_until=?6,
                      resolved=CASE WHEN ?3='resolved' THEN ?7 ELSE resolved END
                  WHERE project=?1 AND id=?2",
-                params![project, id, state.as_str(), result, wait_on, wait_until, now],
+                params![
+                    project,
+                    id,
+                    state.as_str(),
+                    result,
+                    wait_on,
+                    wait_until,
+                    now
+                ],
             )
             .map_err(map_sqlite)?;
         require_written(changed, "message", &format!("{id} in project {project}"))
@@ -1447,25 +1473,43 @@ impl<'s> Tx<'s> {
 
     /// Promote an open action item without changing its body or lifecycle.
     pub fn mark_message_urgent(&self, project: &str, id: &str) -> GearResult<()> {
-        let changed = self.tx.execute(
-            "UPDATE messages SET urgent=1 WHERE project=?1 AND id=?2",
-            params![project, id],
-        ).map_err(map_sqlite)?;
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE messages SET urgent=1 WHERE project=?1 AND id=?2",
+                params![project, id],
+            )
+            .map_err(map_sqlite)?;
         require_written(changed, "message", &format!("{id} in project {project}"))
     }
 
     /// Set the current urgency of an existing item.
     pub fn set_message_urgent(&self, project: &str, id: &str, urgent: bool) -> GearResult<()> {
-        let changed = self.tx.execute("UPDATE messages SET urgent=?3 WHERE project=?1 AND id=?2", params![project, id, urgent]).map_err(map_sqlite)?;
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE messages SET urgent=?3 WHERE project=?1 AND id=?2",
+                params![project, id, urgent],
+            )
+            .map_err(map_sqlite)?;
         require_written(changed, "message", &format!("{id} in project {project}"))
     }
 
     /// Progress messages for one attempt, in their recorded order.
-    pub fn progress_of_attempt(&self, project: &str, task: &str, attempt: i64) -> GearResult<Vec<MessageRow>> {
+    pub fn progress_of_attempt(
+        &self,
+        project: &str,
+        task: &str,
+        attempt: i64,
+    ) -> GearResult<Vec<MessageRow>> {
         let mut stmt = self.tx.prepare_cached(&message_select(" WHERE project=?1 AND task=?2 AND attempt=?3 AND kind='progress' ORDER BY created, id")).map_err(map_sqlite)?;
-        let rows = stmt.query_map(params![project, task, attempt], message_from_row).map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, task, attempt], message_from_row)
+            .map_err(map_sqlite)?;
         let mut result = Vec::new();
-        for row in rows { result.push(row.map_err(map_sqlite)?); }
+        for row in rows {
+            result.push(row.map_err(map_sqlite)?);
+        }
         Ok(result)
     }
 
@@ -1568,10 +1612,17 @@ impl<'s> Tx<'s> {
     }
 
     /// Direction results for one task attempt.
-    pub fn direction_results_of_attempt(&self, project: &str, task: &str, attempt: i64) -> GearResult<Vec<MessageRow>> {
+    pub fn direction_results_of_attempt(
+        &self,
+        project: &str,
+        task: &str,
+        attempt: i64,
+    ) -> GearResult<Vec<MessageRow>> {
         let mut stmt = self.tx.prepare_cached(&message_select(" WHERE project=?1 AND task=?2 AND attempt=?3 AND kind='result' AND CASE WHEN json_valid(meta) THEN json_extract(meta, '$.direction') = 1 ELSE 0 END ORDER BY created, id"))
             .map_err(map_sqlite)?;
-        let rows = stmt.query_map(params![project, task, attempt], message_from_row).map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, task, attempt], message_from_row)
+            .map_err(map_sqlite)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
     }
 
@@ -1580,21 +1631,28 @@ impl<'s> Tx<'s> {
         let raw = self.get_meta(&format!("engine.captain_quota.{project}"))?;
         match raw.filter(|raw| !raw.is_empty()) {
             Some(raw) => serde_json::from_str(&raw).map(Some).map_err(|error| {
-                GearError::new(ErrorCode::BadFormat, format!("captain quota state: {error}"))
+                GearError::new(
+                    ErrorCode::BadFormat,
+                    format!("captain quota state: {error}"),
+                )
             }),
             None => Ok(None),
         }
     }
 
     pub fn set_captain_quota(&self, project: &str, state: Option<&CaptainQuota>) -> GearResult<()> {
-        let raw = state.map(serde_json::to_string).transpose()
+        let raw = state
+            .map(serde_json::to_string)
+            .transpose()
             .map_err(|error| GearError::new(ErrorCode::BadFormat, error.to_string()))?
             .unwrap_or_default();
         self.set_meta(&format!("engine.captain_quota.{project}"), &raw)
     }
 
     pub fn captain_quota_paused(&self, project: &str) -> GearResult<bool> {
-        Ok(self.captain_quota(project)?.is_some_and(|state| !state.resumed))
+        Ok(self
+            .captain_quota(project)?
+            .is_some_and(|state| !state.resumed))
     }
 
     /// The seats of the project that wait for their provider (T-75): their
@@ -1647,7 +1705,12 @@ impl<'s> Tx<'s> {
     }
 
     /// Views by `seat` at `generation` with `ts >= since`, oldest first.
-    pub fn views_since(&self, seat: &str, generation: i64, since: Ts) -> GearResult<Vec<ViewRecord>> {
+    pub fn views_since(
+        &self,
+        seat: &str,
+        generation: i64,
+        since: Ts,
+    ) -> GearResult<Vec<ViewRecord>> {
         let mut stmt = self
             .tx
             .prepare_cached(
@@ -1793,7 +1856,9 @@ impl<'s> Tx<'s> {
     pub fn ops_in_state(&self, project: &str, state: OpState) -> GearResult<Vec<OpRow>> {
         let mut stmt = self
             .tx
-            .prepare_cached(&op_select(" WHERE project=?1 AND state=?2 ORDER BY created, id"))
+            .prepare_cached(&op_select(
+                " WHERE project=?1 AND state=?2 ORDER BY created, id",
+            ))
             .map_err(map_sqlite)?;
         let rows = stmt
             .query_map(params![project, state.as_str()], op_from_row)
@@ -2026,7 +2091,12 @@ impl<'s> Tx<'s> {
         Ok(())
     }
 
-    pub fn get_contract(&self, project: &str, task: &str, version: i64) -> GearResult<Option<ContractRow>> {
+    pub fn get_contract(
+        &self,
+        project: &str,
+        task: &str,
+        version: i64,
+    ) -> GearResult<Option<ContractRow>> {
         let row: Option<ContractRow> = self
             .tx
             .query_row(
@@ -2223,25 +2293,32 @@ impl<'s> Tx<'s> {
 
     /// The step times of one attempt. A step that has not happened is None.
     pub fn attempt_times(&self, project: &str, task: &str, n: i64) -> GearResult<AttemptTimes> {
-        let row: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
-            self.tx
-                .query_row(
-                    "SELECT delivered_at, started_at, handed_in_at, verdict_at, settled_at, merged_at
+        let row: Option<(
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+        )> = self
+            .tx
+            .query_row(
+                "SELECT delivered_at, started_at, handed_in_at, verdict_at, settled_at, merged_at
                      FROM attempts WHERE project=?1 AND task=?2 AND n=?3",
-                    params![project, task, n],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                            row.get(5)?,
-                        ))
-                    },
-                )
-                .optional()
-                .map_err(map_sqlite)?;
+                params![project, task, n],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(map_sqlite)?;
         Ok(row.map_or_else(AttemptTimes::default, |t| AttemptTimes {
             delivered: t.0,
             started: t.1,
@@ -2393,28 +2470,33 @@ impl<'s> Tx<'s> {
     /// Preserve the first known departure estimate. Callers recover historical
     /// values from the departure plan, never from today's edited scope.
     pub fn set_voyage_departure_estimate(
-        &self, project: &str, milestone: &str, minutes: i64,
+        &self,
+        project: &str,
+        milestone: &str,
+        minutes: i64,
     ) -> GearResult<()> {
-        self.tx.execute(
-            "UPDATE voyages SET departure_estimate_min=?3
+        self.tx
+            .execute(
+                "UPDATE voyages SET departure_estimate_min=?3
              WHERE project=?1 AND milestone=?2 AND departure_estimate_min IS NULL",
-            params![project, milestone, minutes],
-        ).map_err(map_sqlite)?;
+                params![project, milestone, minutes],
+            )
+            .map_err(map_sqlite)?;
         Ok(())
     }
 
     /// Empty a voyage's departure: a milestone that lost every task no longer
     /// has one, so a reused milestone id starts its clock when its new tasks
     /// come (T-239). `upsert_voyage` cannot do this: it COALESCEs the columns.
-    pub fn clear_voyage_departure(
-        &self, project: &str, milestone: &str,
-    ) -> GearResult<()> {
-        self.tx.execute(
-            "UPDATE voyages
+    pub fn clear_voyage_departure(&self, project: &str, milestone: &str) -> GearResult<()> {
+        self.tx
+            .execute(
+                "UPDATE voyages
              SET departure=NULL, departure_tasks=NULL, departure_estimate_min=NULL
              WHERE project=?1 AND milestone=?2",
-            params![project, milestone],
-        ).map_err(map_sqlite)?;
+                params![project, milestone],
+            )
+            .map_err(map_sqlite)?;
         Ok(())
     }
 
@@ -2616,13 +2698,22 @@ impl<'s> Tx<'s> {
     /// Refresh the attempt's session from its current binding, including an
     /// unknown session after a replacement has not reported one yet.
     pub fn refresh_attempt_session(
-        &self, project: &str, task: &str, n: i64, session_ref: Option<&str>, cli: &str,
+        &self,
+        project: &str,
+        task: &str,
+        n: i64,
+        session_ref: Option<&str>,
+        cli: &str,
     ) -> GearResult<()> {
         let changed = self.tx.execute(
             "UPDATE attempts SET session_ref=?4, session_cli=?5 WHERE project=?1 AND task=?2 AND n=?3",
             params![project, task, n, session_ref, cli],
         ).map_err(map_sqlite)?;
-        require_written(changed, "attempt", &format!("{task} attempt {n} in project {project}"))
+        require_written(
+            changed,
+            "attempt",
+            &format!("{task} attempt {n} in project {project}"),
+        )
     }
 
     /// What the engine did before the packet (§3.2): keep | new | compact |
@@ -2850,9 +2941,13 @@ impl<'s> Tx<'s> {
     pub fn rounds_of_task(&self, project: &str, task: &str) -> GearResult<Vec<RoundRow>> {
         let mut stmt = self
             .tx
-            .prepare_cached(&round_select(" WHERE project=?1 AND task=?2 ORDER BY start_at, role"))
+            .prepare_cached(&round_select(
+                " WHERE project=?1 AND task=?2 ORDER BY start_at, role",
+            ))
             .map_err(map_sqlite)?;
-        let rows = stmt.query_map(params![project, task], round_from_row).map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, task], round_from_row)
+            .map_err(map_sqlite)?;
         let mut rounds = Vec::new();
         for row in rows {
             rounds.push(row.map_err(map_sqlite)?);
@@ -2864,9 +2959,13 @@ impl<'s> Tx<'s> {
     pub fn rounds_of_project(&self, project: &str) -> GearResult<Vec<RoundRow>> {
         let mut stmt = self
             .tx
-            .prepare_cached(&round_select(" WHERE project=?1 ORDER BY start_at, task, role"))
+            .prepare_cached(&round_select(
+                " WHERE project=?1 ORDER BY start_at, task, role",
+            ))
             .map_err(map_sqlite)?;
-        let rows = stmt.query_map(params![project], round_from_row).map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], round_from_row)
+            .map_err(map_sqlite)?;
         let mut rounds = Vec::new();
         for row in rows {
             rounds.push(row.map_err(map_sqlite)?);
@@ -2895,7 +2994,9 @@ impl<'s> Tx<'s> {
                   ORDER BY start_at, task, role",
             ))
             .map_err(map_sqlite)?;
-        let rows = stmt.query_map(params![project], round_from_row).map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], round_from_row)
+            .map_err(map_sqlite)?;
         let mut rounds = Vec::new();
         for row in rows {
             rounds.push(row.map_err(map_sqlite)?);
@@ -2935,7 +3036,9 @@ impl<'s> Tx<'s> {
     pub fn open_frictions(&self, project: &str) -> GearResult<Vec<FrictionRow>> {
         let mut stmt = self
             .tx
-            .prepare_cached(&friction_select(" WHERE project=?1 AND closed_at IS NULL ORDER BY created, id"))
+            .prepare_cached(&friction_select(
+                " WHERE project=?1 AND closed_at IS NULL ORDER BY created, id",
+            ))
             .map_err(map_sqlite)?;
         let rows = stmt
             .query_map(params![project], friction_from_row)
@@ -2964,13 +3067,7 @@ impl<'s> Tx<'s> {
     }
 
     /// Close a friction report with what the captain did about it (§6.4).
-    pub fn close_friction(
-        &self,
-        project: &str,
-        id: &str,
-        outcome: &str,
-        at: Ts,
-    ) -> GearResult<()> {
+    pub fn close_friction(&self, project: &str, id: &str, outcome: &str, at: Ts) -> GearResult<()> {
         let changed = self
             .tx
             .execute(
@@ -3023,7 +3120,9 @@ impl<'s> Tx<'s> {
     pub fn decisions_of(&self, project: &str, voyage: &str) -> GearResult<Vec<DecisionRow>> {
         let mut stmt = self
             .tx
-            .prepare_cached(&decision_select(" WHERE project=?1 AND voyage=?2 ORDER BY seq"))
+            .prepare_cached(&decision_select(
+                " WHERE project=?1 AND voyage=?2 ORDER BY seq",
+            ))
             .map_err(map_sqlite)?;
         let rows = stmt
             .query_map(params![project, voyage], decision_from_row)
@@ -3129,7 +3228,9 @@ impl<'s> Tx<'s> {
                  FROM seat_pauses WHERE project=?1 ORDER BY start_at, seat",
             )
             .map_err(map_sqlite)?;
-        let rows = stmt.query_map(params![project], pause_from_row).map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], pause_from_row)
+            .map_err(map_sqlite)?;
         let mut pauses = Vec::new();
         for row in rows {
             pauses.push(row.map_err(map_sqlite)?);
@@ -4105,7 +4206,11 @@ mod tests {
 
         let seat = s.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
         assert_eq!(seat.task_id, None, "the job binding ended");
-        assert_eq!(seat.state, SeatState::Standby, "the seat is still a standby reviewer");
+        assert_eq!(
+            seat.state,
+            SeatState::Standby,
+            "the seat is still a standby reviewer"
+        );
         assert_eq!(seat.generation, 1, "nothing else moved");
 
         // A seat that does not exist is NoTarget, not a silent write.

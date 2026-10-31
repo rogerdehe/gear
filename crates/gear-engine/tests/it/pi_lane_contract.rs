@@ -72,7 +72,13 @@ confirm_rounds = 2
 
 /// The engine's configuration: the built-ins plus the project's own profiles.
 fn cfg(config_text: &str) -> (EngineCfg, BTreeMap<String, Profile>) {
-    let mut c = EngineCfg { db_path: crate::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
+    let mut c = EngineCfg {
+        db_path: crate::temp("gear-engine-tests")
+            .join("gear.db")
+            .to_string_lossy()
+            .into_owned(),
+        ..Default::default()
+    };
     for (name, profile) in gear_herdr::builtins() {
         c.profiles.insert(name, profile);
     }
@@ -133,7 +139,15 @@ fn active_world(config_text: &str) -> Store {
                 created: T0,
             })?;
             testing::seed_active_seat(tx, "toy", "heat", SeatRole::Lane, PANE, "pi", T0)?;
-            testing::seed_active_seat(tx, "toy", "captain", SeatRole::Captain, "w9:p1", "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "toy",
+                "captain",
+                SeatRole::Captain,
+                "w9:p1",
+                "claude",
+                T0,
+            )?;
             tx.insert_task(&TaskRow {
                 repo: None,
                 base: None,
@@ -179,12 +193,13 @@ fn active_world(config_text: &str) -> Store {
 
 /// The start the engine asked for: (kind, pane, args).
 fn agent_starts(herdr: &FakeHerdr) -> Vec<(String, String, Vec<String>)> {
-    herdr.calls
+    herdr
+        .calls
         .iter()
         .filter_map(|call| match call {
-            Call::AgentStart { kind, pane, args, .. } => {
-                Some((kind.clone(), pane.clone(), args.clone()))
-            }
+            Call::AgentStart {
+                kind, pane, args, ..
+            } => Some((kind.clone(), pane.clone(), args.clone())),
             _ => None,
         })
         .collect()
@@ -194,7 +209,8 @@ fn agent_starts(herdr: &FakeHerdr) -> Vec<(String, String, Vec<String>)> {
 /// command or its keys). The engine closes the agent once — a second key
 /// would land in the shell.
 fn closing_calls(herdr: &FakeHerdr) -> Vec<String> {
-    herdr.calls
+    herdr
+        .calls
         .iter()
         .filter_map(|call| match call {
             Call::Prompt { pane, text, .. } if pane == PANE => Some(format!("command:{text}")),
@@ -253,7 +269,8 @@ fn a_pi_lane_starts_with_its_model() {
     let mut store = queued_world(&text);
     let mut herdr = FakeHerdr::new();
 
-    let active = gear_engine::onboard::onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
+    let active =
+        gear_engine::onboard::onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
     assert_eq!(active, vec!["toy:heat".to_string()]);
 
     let starts = agent_starts(&herdr);
@@ -265,7 +282,12 @@ fn a_pi_lane_starts_with_its_model() {
         vec![
             "--approve".to_string(),
             "--append-system-prompt".to_string(),
-            std::path::Path::new(&cfg.db_path).parent().unwrap().join("rules/lane.md").to_string_lossy().into_owned(),
+            std::path::Path::new(&cfg.db_path)
+                .parent()
+                .unwrap()
+                .join("rules/lane.md")
+                .to_string_lossy()
+                .into_owned(),
             "--model".to_string(),
             FIRST.to_string(),
         ],
@@ -319,7 +341,12 @@ fn a_pi_lane_starts_with_the_arguments_of_its_chain_entry() {
         vec![
             "--approve".to_string(),
             "--append-system-prompt".to_string(),
-            std::path::Path::new(&cfg.db_path).parent().unwrap().join("rules/lane.md").to_string_lossy().into_owned(),
+            std::path::Path::new(&cfg.db_path)
+                .parent()
+                .unwrap()
+                .join("rules/lane.md")
+                .to_string_lossy()
+                .into_owned(),
             "--model".to_string(),
             FIRST.to_string(),
             "--thinking".to_string(),
@@ -345,7 +372,10 @@ fn a_quota_stop_restarts_pi_on_the_next_model() {
 
     // Tick 1: one quota screen is not enough (`confirm_rounds` is 2).
     assert!(tick_quota(&mut store, &mut herdr, &cfg, &profiles, T0 + 10).is_empty());
-    assert!(closing_calls(&herdr).is_empty(), "nothing sent on the first tick");
+    assert!(
+        closing_calls(&herdr).is_empty(),
+        "nothing sent on the first tick"
+    );
 
     // Tick 2: the limit is confirmed — pi is closed with the profile's own
     // exit (its command or its keys), and nothing else happens yet.
@@ -358,7 +388,10 @@ fn a_quota_stop_restarts_pi_on_the_next_model() {
         herdr.calls
     );
     assert!(agent_starts(&herdr).is_empty(), "nothing started yet");
-    assert!(deliveries(&mut store).is_empty(), "no delivery before the agent is up");
+    assert!(
+        deliveries(&mut store).is_empty(),
+        "no delivery before the agent is up"
+    );
 
     // The agent leaves: the pane is a shell again.
     herdr.exit_agent(PANE);
@@ -372,8 +405,7 @@ fn a_quota_stop_restarts_pi_on_the_next_model() {
     assert_eq!(starts[0].0, "pi", "the same CLI, started again");
     assert_eq!(starts[0].1, PANE, "the same pane");
     assert!(
-        starts[0].2.contains(&"--model".to_string())
-            && starts[0].2.contains(&SECOND.to_string()),
+        starts[0].2.contains(&"--model".to_string()) && starts[0].2.contains(&SECOND.to_string()),
         "pi is started on the next model: {:?}",
         starts[0].2
     );
@@ -422,7 +454,10 @@ fn an_exhausted_chain_parks_the_pi_lane() {
     assert_eq!(seat.state, SeatState::Parked);
     let until = T0 + 20 + 5 * 3600;
     assert!(
-        seat.state_reason.as_deref().unwrap_or_default().contains(&until.to_string()),
+        seat.state_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains(&until.to_string()),
         "{:?}",
         seat.state_reason
     );
@@ -431,11 +466,16 @@ fn an_exhausted_chain_parks_the_pi_lane() {
         .read(|tx| tx.actionable_for("toy", "toy:captain", T0 + 30))
         .unwrap();
     assert!(
-        open.iter().any(|m| m.urgent && m.body.contains("parked until")),
+        open.iter()
+            .any(|m| m.urgent && m.body.contains("parked until")),
         "an urgent captain item: {open:?}"
     );
     // Nothing was closed: the agent stays until the chain has an entry again.
-    assert!(agent_starts(&herdr).is_empty(), "no restart: {starts:?}", starts = agent_starts(&herdr));
+    assert!(
+        agent_starts(&herdr).is_empty(),
+        "no restart: {starts:?}",
+        starts = agent_starts(&herdr)
+    );
 }
 
 #[test]
@@ -446,12 +486,18 @@ fn pi_lane_start_injects_its_rules_file() {
     cfg.db_path = dir.path().join("gear.db").to_string_lossy().into();
     let mut store = queued_world(&text);
     let mut herdr = FakeHerdr::new();
-    assert_eq!(gear_engine::onboard::onboard_queued(&mut store, &mut herdr, &cfg, T0+1).unwrap(), vec!["toy:heat"]);
+    assert_eq!(
+        gear_engine::onboard::onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap(),
+        vec!["toy:heat"]
+    );
     let starts = agent_starts(&herdr);
     let args = &starts[0].2;
     let path = dir.path().join("rules/lane.md");
-    assert!(args.windows(2).any(|w| w[0] == "--append-system-prompt" && w[1] == path.to_string_lossy()));
+    assert!(args
+        .windows(2)
+        .any(|w| w[0] == "--append-system-prompt" && w[1] == path.to_string_lossy()));
     let rules = std::fs::read_to_string(path).unwrap();
-    assert!(rules.starts_with(include_str!("../../../../skills/gear/references/rules/lane.md").trim_end()));
+    assert!(rules
+        .starts_with(include_str!("../../../../skills/gear/references/rules/lane.md").trim_end()));
     assert!(rules.ends_with("Voyage done: -\nBar: -\n"));
 }

@@ -107,12 +107,22 @@ fn the_multi_fixture_builds_replaces_and_passes_their_gates() {
 
     // The parent: a repo on dev with a local origin.
     let multi = dir.join("multi");
-    assert!(multi.join(".git").exists(), "the parent is not a repository");
+    assert!(
+        multi.join(".git").exists(),
+        "the parent is not a repository"
+    );
     assert_eq!(git(&multi, &["branch", "--show-current"]), "dev");
     local_remote(&multi);
-    assert_eq!(git(&multi, &["status", "--porcelain"]), "", "the parent has uncommitted work");
+    assert_eq!(
+        git(&multi, &["status", "--porcelain"]),
+        "",
+        "the parent has uncommitted work"
+    );
     // The run replaces the project: nothing of the earlier run is left.
-    assert!(!multi.join("STALE").exists(), "the run did not replace multi/");
+    assert!(
+        !multi.join("STALE").exists(),
+        "the run did not replace multi/"
+    );
 
     // Its two children: own repositories, on their own integration branch,
     // each with its own local origin, inside gitignored paths of the parent.
@@ -122,12 +132,19 @@ fn the_multi_fixture_builds_replaces_and_passes_their_gates() {
         assert_eq!(git(&child, &["branch", "--show-current"]), "feat", "{name}");
         let remote = local_remote(&child);
         assert!(remote.contains(name), "{name}'s origin is {remote}");
-        assert_eq!(git(&child, &["status", "--porcelain"]), "", "{name} has uncommitted work");
+        assert_eq!(
+            git(&child, &["status", "--porcelain"]),
+            "",
+            "{name} has uncommitted work"
+        );
     }
     // The parent ignores the children: each is its own repository.
     let status = git(&multi, &["status", "--porcelain", "--ignored"]);
     for name in ["web", "api"] {
-        assert!(status.contains(&format!("!! {name}/")), "the parent does not ignore {name}/: {status}");
+        assert!(
+            status.contains(&format!("!! {name}/")),
+            "the parent does not ignore {name}/: {status}"
+        );
     }
 
     // Every gate passes, and the children's are their own.
@@ -138,7 +155,10 @@ fn the_multi_fixture_builds_replaces_and_passes_their_gates() {
     // The notes carry the config of the multi-repo fixture.
     let notes = std::fs::read_to_string(dir.join("FIXTURE.md")).expect("FIXTURE.md");
     assert!(notes.contains("[[repos]]"), "FIXTURE.md: {notes}");
-    assert!(notes.contains("integration = \"feat\""), "FIXTURE.md: {notes}");
+    assert!(
+        notes.contains("integration = \"feat\""),
+        "FIXTURE.md: {notes}"
+    );
 }
 
 /// The fixture of the project that already runs: its own ways, and the
@@ -166,8 +186,11 @@ fn the_running_fixture_builds_replaces_and_passes_its_gate() {
         "running/'s origin is {running_origin}"
     );
     assert!(
-        git(&dir.join("origins/running.git"), &["for-each-ref", "--format=%(refname)"])
-            .contains("refs/heads/main"),
+        git(
+            &dir.join("origins/running.git"),
+            &["for-each-ref", "--format=%(refname)"]
+        )
+        .contains("refs/heads/main"),
         "the running fixture's main was not pushed"
     );
     for path in [
@@ -188,9 +211,15 @@ fn the_running_fixture_builds_replaces_and_passes_its_gate() {
     let claude = std::fs::read_to_string(running.join("CLAUDE.md")).expect("CLAUDE.md");
     let agents = std::fs::read_to_string(running.join("AGENTS.md")).expect("AGENTS.md");
     assert!(claude.contains("straight to `main`"), "CLAUDE.md: {claude}");
-    assert!(agents.contains("one change per branch"), "AGENTS.md: {agents}");
+    assert!(
+        agents.contains("one change per branch"),
+        "AGENTS.md: {agents}"
+    );
     // The run replaces the project: nothing of the earlier run is left.
-    assert!(!running.join("STALE").exists(), "the run did not replace running/");
+    assert!(
+        !running.join("STALE").exists(),
+        "the run did not replace running/"
+    );
     gate(&running);
 }
 
@@ -214,12 +243,21 @@ fn the_default_run_builds_both_projects_and_replaces_what_was_there() {
 
     let multi = dir.join("multi");
     let running = dir.join("running");
-    assert!(multi.join(".git").exists(), "the parent is not a repository");
+    assert!(
+        multi.join(".git").exists(),
+        "the parent is not a repository"
+    );
     assert!(running.join(".git").exists(), "running is not a repository");
     assert_eq!(git(&multi, &["branch", "--show-current"]), "dev");
     assert_eq!(git(&running, &["branch", "--show-current"]), "main");
-    assert!(!multi.join("STALE").exists(), "the run did not replace multi/");
-    assert!(!running.join("STALE").exists(), "the run did not replace running/");
+    assert!(
+        !multi.join("STALE").exists(),
+        "the run did not replace multi/"
+    );
+    assert!(
+        !running.join("STALE").exists(),
+        "the run did not replace running/"
+    );
     gate(&multi);
     gate(&running);
 }

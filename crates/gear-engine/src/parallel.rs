@@ -24,17 +24,22 @@
 //! commit ids names one result that never changes, so the second read is the
 //! cache's; an error from git is not a result and is not kept.
 
-use std::{collections::{BTreeMap, BTreeSet, HashMap}, path::{Path, PathBuf}, process::Command};
 use gear_app::config::Repo;
 use gear_model::{GearResult, MsgKind, MsgState, TaskState, Ts};
 use gear_store::{NewMessage, Store, TaskRow, Tx};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 const PERIOD: i64 = 600;
 
 /// The diffs of commit pairs already read (T-435): keyed by the repo and the
 /// two full commit ids of the pair, which never change for a key.
-static DIFFS: std::sync::LazyLock<std::sync::Mutex<HashMap<(PathBuf, String, String), BTreeSet<String>>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+static DIFFS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<(PathBuf, String, String), BTreeSet<String>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// The entries the cache holds before it is cleared (T-435): an engine runs
 /// for weeks, so the map is bounded rather than grown forever.
@@ -125,7 +130,11 @@ fn is_test_file(path: &str) -> bool {
 
 /// The shared files that count: the ones that are not test files.
 fn real_files(files: &[String]) -> Vec<String> {
-    files.iter().filter(|file| !is_test_file(file)).cloned().collect()
+    files
+        .iter()
+        .filter(|file| !is_test_file(file))
+        .cloned()
+        .collect()
 }
 
 pub fn check(store: &mut Store, project: &str, now: Ts) -> GearResult<Check> {
@@ -274,14 +283,22 @@ impl Input {
     /// The repo's name, when it is a child repo: the project root has none,
     /// and its messages read as they always did.
     fn name(&self) -> Option<&str> {
-        if self.key == ROOT { None } else { Some(&self.key) }
+        if self.key == ROOT {
+            None
+        } else {
+            Some(&self.key)
+        }
     }
 }
 
 /// The prefix of the meta of a repo's scan.
 fn prefix_of(project: &str, key: &str) -> String {
     // Keep the pre-multi-repo root namespace and its existing alert IDs.
-    if key == ROOT { format!("parallel:{project}") } else { format!("parallel:{project}:{key}") }
+    if key == ROOT {
+        format!("parallel:{project}")
+    } else {
+        format!("parallel:{project}:{key}")
+    }
 }
 
 /// The scans of one project: one per repo that has tasks (T-53). A task
@@ -289,13 +306,19 @@ fn prefix_of(project: &str, key: &str) -> String {
 /// compared with each other.
 fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
     store.read(|tx| {
-        let Some(row) = tx.get_project(project)? else { return Ok(Vec::new()); };
-        let Ok(config) = gear_app::config::parse(&row.config_toml) else { return Ok(Vec::new()); };
+        let Some(row) = tx.get_project(project)? else {
+            return Ok(Vec::new());
+        };
+        let Ok(config) = gear_app::config::parse(&row.config_toml) else {
+            return Ok(Vec::new());
+        };
         let tasks = tx.tasks_of_project(project)?;
         // The tasks of the project, grouped by the repo of their lane.
         let mut groups: BTreeMap<String, (Repo, Vec<TaskRow>)> = BTreeMap::new();
         for task in &tasks {
-            let Some(lane) = task.lane.as_deref() else { continue };
+            let Some(lane) = task.lane.as_deref() else {
+                continue;
+            };
             let repo = config.repo_of_lane(lane);
             groups
                 .entry(repo_key(&repo))
@@ -308,7 +331,8 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
         // this project's. A project whose config does not parse has no lane
         // repo to compare and is not seen. Another store (another Herdr
         // session) is not in this list either: that is a later view.
-        let others: Vec<(String, gear_app::config::ProjectConfig)> = tx.project_ids()?
+        let others: Vec<(String, gear_app::config::ProjectConfig)> = tx
+            .project_ids()?
             .into_iter()
             .filter(|other| other != project)
             .filter_map(|other| {
@@ -333,12 +357,21 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
                     candidates.insert((project.to_string(), task.id.clone()), candidate.clone());
                     handins.push((project.to_string(), task.id.clone(), n, candidate));
                 }
-                let Some(lane) = task.lane.clone() else { continue };
-                if !open(&task.state) { continue; }
-                let candidate = candidates.get(&(project.to_string(), task.id.clone())).cloned();
+                let Some(lane) = task.lane.clone() else {
+                    continue;
+                };
+                if !open(&task.state) {
+                    continue;
+                }
+                let candidate = candidates
+                    .get(&(project.to_string(), task.id.clone()))
+                    .cloned();
                 entries.push(TaskIn {
-                    project: project.to_string(), task: task.id.clone(), lane,
-                    task_branch: config.conventions.task_branch.clone(), candidate,
+                    project: project.to_string(),
+                    task: task.id.clone(),
+                    lane,
+                    task_branch: config.conventions.task_branch.clone(),
+                    candidate,
                 });
             }
             // The open tasks of every other project whose lane works in this
@@ -346,17 +379,26 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
             // canonicalize, as written where either does not.
             for (other, other_config) in &others {
                 for task in tx.tasks_of_project(other)? {
-                    if !open(&task.state) { continue; }
-                    let Some(lane) = task.lane.clone() else { continue };
-                    if !same_dir(&other_config.repo_of_lane(&lane).path, &repo.path) { continue; }
+                    if !open(&task.state) {
+                        continue;
+                    }
+                    let Some(lane) = task.lane.clone() else {
+                        continue;
+                    };
+                    if !same_dir(&other_config.repo_of_lane(&lane).path, &repo.path) {
+                        continue;
+                    }
                     for (n, candidate) in attempted(tx, other, &task.id)? {
                         candidates.insert((other.clone(), task.id.clone()), candidate.clone());
                         handins.push((other.clone(), task.id.clone(), n, candidate));
                     }
                     let candidate = candidates.get(&(other.clone(), task.id.clone())).cloned();
                     entries.push(TaskIn {
-                        project: other.clone(), task: task.id.clone(), lane,
-                        task_branch: other_config.conventions.task_branch.clone(), candidate,
+                        project: other.clone(),
+                        task: task.id.clone(),
+                        lane,
+                        task_branch: other_config.conventions.task_branch.clone(),
+                        candidate,
                     });
                 }
             }
@@ -365,7 +407,9 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
             // The back-off of this repo: nothing changed and the last scan
             // was recent, so this repo waits for the next period.
             let prefix = prefix_of(project, &key);
-            let last = tx.get_meta(&format!("{prefix}:at"))?.and_then(|s| s.parse::<Ts>().ok());
+            let last = tx
+                .get_meta(&format!("{prefix}:at"))?
+                .and_then(|s| s.parse::<Ts>().ok());
             let unchanged = tx.get_meta(&format!("{prefix}:handins"))?.as_deref() == Some(&handins);
             if unchanged && last.is_some_and(|last| now >= last && now - last < PERIOD) {
                 continue;
@@ -387,7 +431,10 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
 /// Is the task an open change? A draft, cancelled or failed task is not one:
 /// it is not compared with anything.
 fn open(state: &TaskState) -> bool {
-    !matches!(state, TaskState::Draft | TaskState::Cancelled | TaskState::Failed)
+    !matches!(
+        state,
+        TaskState::Draft | TaskState::Cancelled | TaskState::Failed
+    )
 }
 
 /// The candidates of a task, oldest first: the last one is the latest
@@ -415,14 +462,26 @@ fn same_dir(left: &str, right: &str) -> bool {
 /// The key of a repo in the meta: its name, or "-" for the project root (a
 /// repo name never starts with a dash).
 fn repo_key(repo: &Repo) -> String {
-    if repo.name.is_empty() { ROOT.to_string() } else { repo.name.clone() }
+    if repo.name.is_empty() {
+        ROOT.to_string()
+    } else {
+        repo.name.clone()
+    }
 }
 
 fn close(tx: &Tx<'_>, project: &str, key: &str, reason: &str, now: Ts) -> GearResult<()> {
     if let Some(id) = tx.get_meta(&format!("{key}:item"))? {
         if let Some(message) = tx.get_message(project, &id)? {
             if matches!(message.state, MsgState::Open | MsgState::Waiting) {
-                tx.update_message_state(project, &id, MsgState::Resolved, Some(reason), None, None, now)?;
+                tx.update_message_state(
+                    project,
+                    &id,
+                    MsgState::Resolved,
+                    Some(reason),
+                    None,
+                    None,
+                    now,
+                )?;
             }
         }
     }
@@ -432,14 +491,22 @@ fn close(tx: &Tx<'_>, project: &str, key: &str, reason: &str, now: Ts) -> GearRe
 fn scan(input: &Input) -> Result<Findings, String> {
     git(&input.repo, &["rev-parse", "--git-dir"])?;
     let local = revision(&input.repo, &format!("refs/heads/{}", input.integration))?;
-    let remote = revision(&input.repo, &format!("refs/remotes/{}/{}", input.remote, input.integration))?;
+    let remote = revision(
+        &input.repo,
+        &format!("refs/remotes/{}/{}", input.remote, input.integration),
+    )?;
     // Use the containing tip when one is ahead; the remote is authoritative
     // when the local integration ref diverged. No network operation is needed.
     let integration = match (local, remote) {
         (Some(local), Some(remote)) if ancestor(&input.repo, &remote, &local)? => local,
         (_, Some(remote)) => remote,
         (Some(local), None) => local,
-        _ => return Err(format!("integration branch {} is unavailable", input.integration)),
+        _ => {
+            return Err(format!(
+                "integration branch {} is unavailable",
+                input.integration
+            ))
+        }
     };
     let mut branches = Vec::new();
     let mut findings = Findings::default();
@@ -460,29 +527,47 @@ fn scan(input: &Input) -> Result<Findings, String> {
                 }
             }
         }
-        let name = crate::dispatch::task_branch(&task.task_branch, &task.project, &task.lane, &task.task);
+        let name =
+            crate::dispatch::task_branch(&task.task_branch, &task.project, &task.lane, &task.task);
         let local = revision(&input.repo, &format!("refs/heads/{name}"))?;
         let head = match local {
             Some(head) => Some(head),
-            None => revision(&input.repo, &format!("refs/remotes/{}/{name}", input.remote))?,
+            None => revision(
+                &input.repo,
+                &format!("refs/remotes/{}/{name}", input.remote),
+            )?,
         };
-        let Some(head) = head else { continue; };
+        let Some(head) = head else {
+            continue;
+        };
         let files = changed(&input.repo, &integration, &head)?;
-        if files.is_empty() { continue; } // includes already integrated Done branches
-        // An overlap with the integration branch is this project's business:
-        // another project's task that changed the same file is not reported
-        // by this project's scan, its own project reports it (T-281).
+        if files.is_empty() {
+            continue;
+        } // includes already integrated Done branches
+          // An overlap with the integration branch is this project's business:
+          // another project's task that changed the same file is not reported
+          // by this project's scan, its own project reports it (T-281).
         if task.project == input.project {
             let integration_files = changed(&input.repo, &head, &integration)?;
             let shared: Vec<_> = files.intersection(&integration_files).cloned().collect();
             let shared = real_files(&shared);
             if !shared.is_empty() {
-                findings.integration.insert(format!("integration:{}", task.task), Conflict {
-                    left: format!("{} ({})", task.task, task.lane), right: format!("integration {}", input.integration), files: shared,
-                });
+                findings.integration.insert(
+                    format!("integration:{}", task.task),
+                    Conflict {
+                        left: format!("{} ({})", task.task, task.lane),
+                        right: format!("integration {}", input.integration),
+                        files: shared,
+                    },
+                );
             }
         }
-        branches.push(Branch { project: task.project.clone(), task: task.task.clone(), lane: task.lane.clone(), files });
+        branches.push(Branch {
+            project: task.project.clone(),
+            task: task.task.clone(),
+            lane: task.lane.clone(),
+            files,
+        });
     }
     // Deterministic, and the scanned project's own pairs keep the order they
     // always had: by task id.
@@ -490,28 +575,44 @@ fn scan(input: &Input) -> Result<Findings, String> {
     for (index, left) in branches.iter().enumerate() {
         for right in branches.iter().skip(index + 1) {
             // Two tasks are on different lanes when `(project, lane)` differs.
-            if (left.project.as_str(), left.lane.as_str()) == (right.project.as_str(), right.lane.as_str()) {
+            if (left.project.as_str(), left.lane.as_str())
+                == (right.project.as_str(), right.lane.as_str())
+            {
                 continue;
             }
             // A pair with two other projects' tasks is their captains' item,
             // not this one's: at least one side is this project's (T-281).
-            if left.project != input.project && right.project != input.project { continue; }
+            if left.project != input.project && right.project != input.project {
+                continue;
+            }
             let files: Vec<_> = left.files.intersection(&right.files).cloned().collect();
             let files = real_files(&files);
             if !files.is_empty() {
                 // This project's task names the pair, the other side carries
                 // its project: each project's own pass writes its own item.
-                let (main, sibling) = if left.project != input.project { (right, left) } else { (left, right) };
+                let (main, sibling) = if left.project != input.project {
+                    (right, left)
+                } else {
+                    (left, right)
+                };
                 let (key, right) = match sibling.project == input.project {
-                    true => (format!("tasks:{}:{}", main.task, sibling.task), format!("{} ({})", sibling.task, sibling.lane)),
+                    true => (
+                        format!("tasks:{}:{}", main.task, sibling.task),
+                        format!("{} ({})", sibling.task, sibling.lane),
+                    ),
                     false => (
                         format!("tasks:{}:{}/{}", main.task, sibling.project, sibling.task),
                         format!("{} ({}/{})", sibling.task, sibling.project, sibling.lane),
                     ),
                 };
-                findings.pairs.insert(key, Conflict {
-                    left: format!("{} ({})", main.task, main.lane), right, files,
-                });
+                findings.pairs.insert(
+                    key,
+                    Conflict {
+                        left: format!("{} ({})", main.task, main.lane),
+                        right,
+                        files,
+                    },
+                );
             }
         }
     }
@@ -519,23 +620,41 @@ fn scan(input: &Input) -> Result<Findings, String> {
 }
 
 fn revision(repo: &Path, reference: &str) -> Result<Option<String>, String> {
-    let output = Command::new("git").arg("-C").arg(repo)
-        .args(["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")])
-        .output().map_err(|e| e.to_string())?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{reference}^{{commit}}"),
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
     if output.status.success() {
-        Ok(Some(String::from_utf8_lossy(&output.stdout).trim().to_string()))
+        Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ))
     } else if output.status.code() == Some(1) && output.stderr.is_empty() {
         Ok(None)
     } else {
-        Err(format!("cannot read {reference}: {}", String::from_utf8_lossy(&output.stderr).trim()))
+        Err(format!(
+            "cannot read {reference}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     }
 }
 
 fn ancestor(repo: &Path, from: &str, to: &str) -> Result<bool, String> {
-    let output = Command::new("git").arg("-C").arg(repo)
-        .args(["merge-base", "--is-ancestor", from, to]).output().map_err(|e| e.to_string())?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["merge-base", "--is-ancestor", from, to])
+        .output()
+        .map_err(|e| e.to_string())?;
     match output.status.code() {
-        Some(0) => Ok(true), Some(1) => Ok(false),
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
         _ => Err(String::from_utf8_lossy(&output.stderr).into_owned()),
     }
 }
@@ -548,24 +667,50 @@ fn changed(repo: &Path, from: &str, to: &str) -> Result<BTreeSet<String>, String
     if let Some(files) = DIFFS.lock().ok().and_then(|diffs| diffs.get(&key).cloned()) {
         return Ok(files);
     }
-    let output = git(repo, &["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z",
-        &format!("{from}...{to}"), "--"])?;
-    let files: BTreeSet<String> = output.split(|b| *b == 0).filter(|s| !s.is_empty())
-        .map(|s| String::from_utf8_lossy(s).into_owned()).collect();
+    let output = git(
+        repo,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            &format!("{from}...{to}"),
+            "--",
+        ],
+    )?;
+    let files: BTreeSet<String> = output
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect();
     #[cfg(test)]
     DIFF_MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut diffs) = DIFFS.lock() {
-        if diffs.len() >= DIFFS_MAX { diffs.clear(); }
+        if diffs.len() >= DIFFS_MAX {
+            diffs.clear();
+        }
         diffs.insert(key, files.clone());
     }
     Ok(files)
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let output = Command::new("git").arg("-C").arg(repo).args(args)
-        .output().map_err(|e| format!("git {}: {e}", args.join(" ")))?;
-    if output.status.success() { Ok(output.stdout) } else {
-        Err(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim()))
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(format!(
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     }
 }
 
@@ -582,14 +727,25 @@ mod tests {
     const SRC: &str = "src/lib.rs";
 
     fn sh(path: &Path, args: &[&str]) -> String {
-        let output = Command::new("git").arg("-C").arg(path).args(args).output().unwrap();
-        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     fn commit(path: &Path, message: &str, file: &str, text: &str) -> String {
         let full = path.join(file);
-        if let Some(dir) = full.parent() { std::fs::create_dir_all(dir).unwrap(); }
+        if let Some(dir) = full.parent() {
+            std::fs::create_dir_all(dir).unwrap();
+        }
         std::fs::write(full, text).unwrap();
         sh(path, &["add", "--", file]);
         sh(path, &["commit", "-qm", message]);
@@ -620,9 +776,11 @@ mod tests {
     /// both branches, each both ways.
     fn store(repo: &Path) -> Store {
         let mut store = Store::open_in_memory().unwrap();
-        store.write(|tx| {
-            let mut project = testing::seed_project(tx, "p", "sess", T0)?;
-            project.config_toml = format!(r#"
+        store
+            .write(|tx| {
+                let mut project = testing::seed_project(tx, "p", "sess", T0)?;
+                project.config_toml = format!(
+                    r#"
 [project]
 id = "p"
 herdr_session = "sess"
@@ -634,20 +792,47 @@ temps = 0
 pane = "w1:p1"
 kind = "codex"
 profile = "codex"
-"#, serde_json::json!(repo.to_string_lossy()).to_string());
-            tx.update_project(&project)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T0)?;
-            for (n, lane) in [(1, "heat"), (2, "steady")] {
-                tx.insert_task(&TaskRow {
-                    repo: None, base: None, gate: None, rework_estimate_min: None,
-                    project: "p".into(), id: format!("T-{n}"), rank: n, state: TaskState::Running,
-                    priority: "must".into(), lane: Some(lane.into()), milestone: None, required: false,
-                    contract_version: 1, deps: vec![], followup_of: None, wait_on: None,
-                    wait_cond: None, rework_note: None, estimate_min: Some(30), issue: None, updated: T0,
-                })?;
-            }
-            Ok(())
-        }).unwrap();
+"#,
+                    serde_json::json!(repo.to_string_lossy()).to_string()
+                );
+                tx.update_project(&project)?;
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "captain",
+                    SeatRole::Captain,
+                    "w1:p1",
+                    "codex",
+                    T0,
+                )?;
+                for (n, lane) in [(1, "heat"), (2, "steady")] {
+                    tx.insert_task(&TaskRow {
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
+                        project: "p".into(),
+                        id: format!("T-{n}"),
+                        rank: n,
+                        state: TaskState::Running,
+                        priority: "must".into(),
+                        lane: Some(lane.into()),
+                        milestone: None,
+                        required: false,
+                        contract_version: 1,
+                        deps: vec![],
+                        followup_of: None,
+                        wait_on: None,
+                        wait_cond: None,
+                        rework_note: None,
+                        estimate_min: Some(30),
+                        issue: None,
+                        updated: T0,
+                    })?;
+                }
+                Ok(())
+            })
+            .unwrap();
         store
     }
 
@@ -667,18 +852,38 @@ profile = "codex"
         assert_eq!(read, 4, "two task branches, each read both ways");
         // The same commits at the next period: the cache answers, git runs
         // no diff at all.
-        assert!(check(&mut store, "p", T0 + PERIOD).unwrap().problems.is_empty());
-        assert_eq!(DIFF_MISSES.load(Ordering::Relaxed) - before, read, "a repeated scan runs no git diff");
+        assert!(check(&mut store, "p", T0 + PERIOD)
+            .unwrap()
+            .problems
+            .is_empty());
+        assert_eq!(
+            DIFF_MISSES.load(Ordering::Relaxed) - before,
+            read,
+            "a repeated scan runs no git diff"
+        );
         // A new commit on one task branch: its pair is read again, the other
         // branch's pairs are still the cache's.
         sh(&path, &["switch", "-q", "heat/t1"]);
         let second = commit(&path, "heat again", SRC, "heat again\n");
         assert_ne!(first, second);
-        assert!(check(&mut store, "p", T0 + 2 * PERIOD).unwrap().problems.is_empty());
-        assert_eq!(DIFF_MISSES.load(Ordering::Relaxed) - before, read + 2,
-            "only the changed branch's pair is read again");
-        assert!(check(&mut store, "p", T0 + 3 * PERIOD).unwrap().problems.is_empty());
-        assert_eq!(DIFF_MISSES.load(Ordering::Relaxed) - before, read + 2, "the new pair is the cache's too");
+        assert!(check(&mut store, "p", T0 + 2 * PERIOD)
+            .unwrap()
+            .problems
+            .is_empty());
+        assert_eq!(
+            DIFF_MISSES.load(Ordering::Relaxed) - before,
+            read + 2,
+            "only the changed branch's pair is read again"
+        );
+        assert!(check(&mut store, "p", T0 + 3 * PERIOD)
+            .unwrap()
+            .problems
+            .is_empty());
+        assert_eq!(
+            DIFF_MISSES.load(Ordering::Relaxed) - before,
+            read + 2,
+            "the new pair is the cache's too"
+        );
         let diffs = DIFFS.lock().unwrap();
         assert!(diffs.contains_key(&(path.clone(), integration.clone(), first.clone())));
         assert!(diffs.contains_key(&(path.clone(), integration.clone(), second.clone())));

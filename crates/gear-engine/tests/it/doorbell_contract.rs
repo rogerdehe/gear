@@ -1,13 +1,19 @@
 //! Contract for gear_engine::doorbell (T-8, T-130). Pure functions.
 
-use gear_engine::doorbell::{at_once, decide, goal_line, text, DoorbellAction, DoorbellInput, DoorbellItem};
+use gear_engine::doorbell::{
+    at_once, decide, goal_line, text, DoorbellAction, DoorbellInput, DoorbellItem,
+};
 use gear_model::{MsgKind, SeatRole, TaskState};
 use gear_store::{testing, Store, TaskRow, VoyageRow};
 
 const NOW: i64 = 10_000;
 
 fn item(id: &str) -> DoorbellItem {
-    DoorbellItem { id: id.into(), urgent: false, at_once: false }
+    DoorbellItem {
+        id: id.into(),
+        urgent: false,
+        at_once: false,
+    }
 }
 
 fn input(seat: &str) -> DoorbellInput {
@@ -46,9 +52,21 @@ fn rings_an_idle_seat_with_something_to_show() {
 fn urgent_count_and_covers_order_without_duplicates() {
     let mut i = input("captain");
     i.waiting = vec![
-        DoorbellItem { id: "M-3".into(), urgent: true, at_once: true },
-        DoorbellItem { id: "M-1".into(), urgent: false, at_once: false },
-        DoorbellItem { id: "M-7".into(), urgent: false, at_once: false },
+        DoorbellItem {
+            id: "M-3".into(),
+            urgent: true,
+            at_once: true,
+        },
+        DoorbellItem {
+            id: "M-1".into(),
+            urgent: false,
+            at_once: false,
+        },
+        DoorbellItem {
+            id: "M-7".into(),
+            urgent: false,
+            at_once: false,
+        },
     ];
     let out = decide(&[i], 90, NOW);
     assert_eq!(out[0].covers, vec!["M-3", "M-1", "M-7"]);
@@ -77,13 +95,19 @@ fn cooldown_counts_from_last_settled_doorbell() {
     let mut exact = input("b");
     exact.last_settled_at = Some(NOW - 90);
     let out = decide(&[early, exact], 90, NOW);
-    assert_eq!(out.iter().map(|a| a.seat.as_str()).collect::<Vec<_>>(), vec!["p:b"]);
+    assert_eq!(
+        out.iter().map(|a| a.seat.as_str()).collect::<Vec<_>>(),
+        vec!["p:b"]
+    );
 }
 
 #[test]
 fn one_action_per_ringing_input_in_input_order() {
     let out = decide(&[input("z"), input("a")], 90, NOW);
-    assert_eq!(out.iter().map(|a| a.seat.as_str()).collect::<Vec<_>>(), vec!["p:z", "p:a"]);
+    assert_eq!(
+        out.iter().map(|a| a.seat.as_str()).collect::<Vec<_>>(),
+        vec!["p:z", "p:a"]
+    );
 }
 
 // ---------------------------------------------------------------- T-130
@@ -94,7 +118,11 @@ fn a_working_seat_is_rung_at_once_for_an_at_once_message() {
     working.idle = false;
     working.status = Some(gear_herdr::AgentStatus::Working);
     working.last_settled_at = Some(NOW); // inside the cooldown
-    working.waiting = vec![DoorbellItem { id: "M-4".into(), urgent: true, at_once: true }];
+    working.waiting = vec![DoorbellItem {
+        id: "M-4".into(),
+        urgent: true,
+        at_once: true,
+    }];
 
     let out = decide(&[working], 90, NOW);
     assert_eq!(out.len(), 1, "typed while the agent works");
@@ -107,20 +135,40 @@ fn a_working_seat_is_told_only_about_the_at_once_messages() {
     working.idle = false;
     working.status = Some(gear_herdr::AgentStatus::Working);
     working.waiting = vec![
-        DoorbellItem { id: "M-4".into(), urgent: true, at_once: true },
-        DoorbellItem { id: "M-5".into(), urgent: false, at_once: false },
+        DoorbellItem {
+            id: "M-4".into(),
+            urgent: true,
+            at_once: true,
+        },
+        DoorbellItem {
+            id: "M-5".into(),
+            urgent: false,
+            at_once: false,
+        },
     ];
 
     let out = decide(&[working], 90, NOW);
-    assert_eq!(out[0].covers, vec!["M-4"], "a message that can wait is not typed into a running turn");
+    assert_eq!(
+        out[0].covers,
+        vec!["M-4"],
+        "a message that can wait is not typed into a running turn"
+    );
 }
 
 #[test]
 fn an_idle_seat_is_told_about_everything() {
     let mut idle = input("lane");
     idle.waiting = vec![
-        DoorbellItem { id: "M-4".into(), urgent: true, at_once: true },
-        DoorbellItem { id: "M-5".into(), urgent: false, at_once: false },
+        DoorbellItem {
+            id: "M-4".into(),
+            urgent: true,
+            at_once: true,
+        },
+        DoorbellItem {
+            id: "M-5".into(),
+            urgent: false,
+            at_once: false,
+        },
     ];
 
     let out = decide(&[idle], 90, NOW);
@@ -147,12 +195,25 @@ fn at_once_rule_names_the_two_ways_a_message_arrives_while_working() {
 #[test]
 fn the_text_names_every_id_and_the_command_to_run() {
     let items = vec![
-        DoorbellItem { id: "M-12".into(), urgent: false, at_once: false },
-        DoorbellItem { id: "M-13".into(), urgent: false, at_once: false },
+        DoorbellItem {
+            id: "M-12".into(),
+            urgent: false,
+            at_once: false,
+        },
+        DoorbellItem {
+            id: "M-13".into(),
+            urgent: false,
+            at_once: false,
+        },
     ];
     let said = text(&items, false);
     assert!(said.contains("M-12") && said.contains("M-13"), "{said}");
-    assert!(said.contains("Run the command `gear` (no arguments) in your own shell; it shows only your items."), "{said}");
+    assert!(
+        said.contains(
+            "Run the command `gear` (no arguments) in your own shell; it shows only your items."
+        ),
+        "{said}"
+    );
     assert!(!said.contains('\n'), "one line: {said}");
 }
 
@@ -168,7 +229,15 @@ fn voyage_store(stations: Option<&[&str]>, tasks: usize) -> Store {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", NOW)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", NOW)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "codex",
+                NOW,
+            )?;
             testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "pi", NOW)?;
             tx.upsert_voyage(&VoyageRow {
                 project: "p".into(),
@@ -228,7 +297,10 @@ fn voyage_store(stations: Option<&[&str]>, tasks: usize) -> Store {
 #[test]
 fn a_captain_doorbell_ends_with_the_station_and_how_far_it_is() {
     let mut store = voyage_store(Some(&[STATION_GOAL, "then the release"]), 2);
-    let goal = store.read(|tx| goal_line(tx, "p")).unwrap().expect("a goal line");
+    let goal = store
+        .read(|tx| goal_line(tx, "p"))
+        .unwrap()
+        .expect("a goal line");
     let mut captain = input("captain");
     captain.goal = Some(goal.clone());
     let out = decide(&[captain], 90, NOW);
@@ -243,7 +315,10 @@ fn a_captain_doorbell_ends_with_the_station_and_how_far_it_is() {
 #[test]
 fn a_voyage_without_stations_ends_with_how_many_tasks_are_left() {
     let mut store = voyage_store(None, 3);
-    let goal = store.read(|tx| goal_line(tx, "p")).unwrap().expect("a goal line");
+    let goal = store
+        .read(|tx| goal_line(tx, "p"))
+        .unwrap()
+        .expect("a goal line");
     let mut captain = input("captain");
     captain.goal = Some(goal);
     let out = decide(&[captain], 90, NOW);
@@ -287,7 +362,11 @@ fn a_project_with_no_departed_voyage_has_no_goal_line() {
         })
         .unwrap();
     assert_eq!(store.read(|tx| goal_line(tx, "p")).unwrap(), None);
-    assert_eq!(store.read(|tx| goal_line(tx, "absent")).unwrap(), None, "no project at all");
+    assert_eq!(
+        store.read(|tx| goal_line(tx, "absent")).unwrap(),
+        None,
+        "no project at all"
+    );
 }
 
 #[test]

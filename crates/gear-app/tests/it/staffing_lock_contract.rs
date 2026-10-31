@@ -61,7 +61,11 @@ merge_message = "{merge_message}"
 }
 
 fn admin() -> Env {
-    Env { ctx: None, pane_id: None, admin: true }
+    Env {
+        ctx: None,
+        pane_id: None,
+        admin: true,
+    }
 }
 
 /// The captain's plan with one milestone and one open task on it: the voyage
@@ -77,11 +81,19 @@ fn depart(s: &mut Store) {
                 goal: G\naccept: a\nestimate: 30\ndeps: -\n";
     let draft = parse(text).unwrap();
     let env = Env {
-        ctx: Some(GearCtx { project: "harbor".into(), seat: "captain".into(), generation: 1 }),
+        ctx: Some(GearCtx {
+            project: "harbor".into(),
+            seat: "captain".into(),
+            generation: 1,
+        }),
         pane_id: Some(CAP_PANE.into()),
         admin: false,
     };
-    let fp = Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None };
+    let fp = Fingerprint {
+        pane_id: CAP_PANE.into(),
+        kind: Some("codex".into()),
+        session_ref: None,
+    };
     apply(s, &env, Some(&fp), None, &draft, text, "r1", T0 + 1).unwrap();
 }
 
@@ -93,7 +105,15 @@ fn departed() -> Store {
 /// The same, from `config_text` instead of the helper's own config.
 fn departed_with(config_text: &str) -> Store {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), config_text, Some(crate::skill_home()), false, T0).unwrap();
+    init_with_home(
+        &mut s,
+        &admin(),
+        config_text,
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
     depart(&mut s);
     let voyage = s.read(|tx| tx.get_voyage("harbor", "M1")).unwrap().unwrap();
     assert_eq!(voyage.departure, Some(T0 + 1), "the voyage departed");
@@ -117,7 +137,10 @@ fn config_with_effort(effort: &str, context_window_k: Option<u64>) -> String {
 
 /// The config version the store holds.
 fn version(s: &mut Store) -> i64 {
-    s.read(|tx| tx.get_project("harbor")).unwrap().unwrap().config_version
+    s.read(|tx| tx.get_project("harbor"))
+        .unwrap()
+        .unwrap()
+        .config_version
 }
 
 /// The starred `staff` decisions of voyage M1.
@@ -137,8 +160,15 @@ fn a_staffing_change_mid_voyage_is_refused_without_the_users_words() {
     let stored = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
 
     let changed = config(3, "merge({task}): {source}");
-    let err = init_with_home(&mut s, &admin(), &changed, Some(crate::skill_home()), false, T0 + 2)
-        .unwrap_err();
+    let err = init_with_home(
+        &mut s,
+        &admin(),
+        &changed,
+        Some(crate::skill_home()),
+        false,
+        T0 + 2,
+    )
+    .unwrap_err();
     assert_eq!(err.code, ErrorCode::StaffLocked);
     assert!(
         err.detail.contains("quota.temps: 6 → 3"),
@@ -146,7 +176,8 @@ fn a_staffing_change_mid_voyage_is_refused_without_the_users_words() {
         err.detail
     );
     assert!(
-        err.detail.contains("the staffing of voyage M1 was agreed at its kickoff"),
+        err.detail
+            .contains("the staffing of voyage M1 was agreed at its kickoff"),
         "{}",
         err.detail
     );
@@ -192,7 +223,10 @@ fn a_confirmed_change_applies_and_leaves_one_starred_decision() {
     assert_eq!(decision.voyage, "M1");
     assert_eq!(decision.what, "quota.temps: 6 → 3");
     let why = decision.why.as_deref().unwrap_or_default();
-    assert_eq!(why, "confirmed by the user", "no words of the user are kept");
+    assert_eq!(
+        why, "confirmed by the user",
+        "no words of the user are kept"
+    );
 }
 
 /// A change outside the four staffing sections applies without a
@@ -203,8 +237,15 @@ fn a_change_outside_the_staffing_sections_applies_without_words() {
     let before = version(&mut s);
 
     let changed = config(6, "merged({task}): {source}");
-    let r = init_with_home(&mut s, &admin(), &changed, Some(crate::skill_home()), false, T0 + 2)
-        .unwrap();
+    let r = init_with_home(
+        &mut s,
+        &admin(),
+        &changed,
+        Some(crate::skill_home()),
+        false,
+        T0 + 2,
+    )
+    .unwrap();
     assert_eq!(r.config_version, before + 1);
     assert!(staff_decisions(&mut s).is_empty());
 }
@@ -213,15 +254,32 @@ fn a_change_outside_the_staffing_sections_applies_without_words() {
 #[test]
 fn without_a_departed_voyage_every_change_applies_as_before() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), &config(6, "merge({task}): {source}"), Some(crate::skill_home()), false, T0)
-        .unwrap();
+    init_with_home(
+        &mut s,
+        &admin(),
+        &config(6, "merge({task}): {source}"),
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
 
     let changed = config(3, "merge({task}): {source}");
-    let r = init_with_home(&mut s, &admin(), &changed, Some(crate::skill_home()), false, T0 + 1)
-        .unwrap();
+    let r = init_with_home(
+        &mut s,
+        &admin(),
+        &changed,
+        Some(crate::skill_home()),
+        false,
+        T0 + 1,
+    )
+    .unwrap();
     assert_eq!(r.config_version, 2);
     assert_eq!(
-        s.read(|tx| tx.get_project("harbor")).unwrap().unwrap().quota_temps,
+        s.read(|tx| tx.get_project("harbor"))
+            .unwrap()
+            .unwrap()
+            .quota_temps,
         3
     );
     assert!(staff_decisions(&mut s).is_empty());
@@ -236,9 +294,15 @@ fn a_changed_model_argument_is_named_in_the_refusal_and_the_decision() {
     let before = version(&mut s);
 
     let changed = config_with_effort("high", Some(300));
-    let err =
-        init_with_home(&mut s, &admin(), &changed, Some(crate::skill_home()), false, T0 + 2)
-            .unwrap_err();
+    let err = init_with_home(
+        &mut s,
+        &admin(),
+        &changed,
+        Some(crate::skill_home()),
+        false,
+        T0 + 2,
+    )
+    .unwrap_err();
     assert_eq!(err.code, ErrorCode::StaffLocked);
     for expected in [
         "models.lanes:",
@@ -329,8 +393,15 @@ fn a_reordered_lanes_section_is_a_staffing_change() {
     let stored = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
 
     let reordered = two_lane_config(&["keel", "heat"]);
-    let err = init_with_home(&mut s, &admin(), &reordered, Some(crate::skill_home()), false, T0 + 2)
-        .unwrap_err();
+    let err = init_with_home(
+        &mut s,
+        &admin(),
+        &reordered,
+        Some(crate::skill_home()),
+        false,
+        T0 + 2,
+    )
+    .unwrap_err();
     assert_eq!(err.code, ErrorCode::StaffLocked, "{}", err.detail);
     assert!(
         err.detail.contains("lanes: heat, keel → keel, heat"),

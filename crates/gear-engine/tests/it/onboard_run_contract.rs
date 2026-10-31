@@ -4,8 +4,8 @@
 use gear_app::{admin, Env};
 use gear_engine::onboard::onboard_queued;
 use gear_engine::EngineCfg;
-use gear_herdr::fake::{Call, FakeHerdr};
 use gear_herdr::builtin;
+use gear_herdr::fake::{Call, FakeHerdr};
 use gear_model::{SeatRole, SeatState};
 use gear_store::{BindingStatus, SeatRow, Store};
 
@@ -38,15 +38,34 @@ gate = "make test"
 "#;
 
 fn cfg() -> EngineCfg {
-    let mut c = EngineCfg { db_path: crate::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
-    c.profiles.insert("opencode".into(), builtin("opencode").unwrap());
+    let mut c = EngineCfg {
+        db_path: crate::temp("gear-engine-tests")
+            .join("gear.db")
+            .to_string_lossy()
+            .into_owned(),
+        ..Default::default()
+    };
+    c.profiles
+        .insert("opencode".into(), builtin("opencode").unwrap());
     c
 }
 
 #[test]
 fn queued_lane_gets_worktree_env_and_agent() {
     let mut s = Store::open_in_memory().unwrap();
-    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, CONFIG,Some(crate::skill_home()), false, T0).unwrap();
+    admin::init_with_home(
+        &mut s,
+        &Env {
+            ctx: None,
+            pane_id: None,
+            admin: true,
+        },
+        CONFIG,
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
     let mut herdr = FakeHerdr::new();
     let active = onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap();
     assert_eq!(active, vec!["toy:heat".to_string()]);
@@ -58,21 +77,52 @@ fn queued_lane_gets_worktree_env_and_agent() {
     let scratch = "/fake-worktrees/toy-heat/.gear/tmp";
     assert!(herdr.calls.iter().any(|c| matches!(c, Call::PaneRun { command, .. }
         if command == &format!("mkdir -p '{scratch}'; export TMPDIR='{scratch}'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path))), "{:?}", herdr.calls);
-    assert!(herdr.calls.iter().any(|c| matches!(c, Call::AgentStart { name, kind, args, .. }
-        if name == "toy-heat" && kind == "opencode" && args == &vec!["--auto".to_string()])), "{:?}", herdr.calls);
+    assert!(
+        herdr
+            .calls
+            .iter()
+            .any(|c| matches!(c, Call::AgentStart { name, kind, args, .. }
+        if name == "toy-heat" && kind == "opencode" && args == &vec!["--auto".to_string()])),
+        "{:?}",
+        herdr.calls
+    );
     // the captain is bound at init (T-63), not onboarded by the engine
-    assert_eq!(s.read(|tx| tx.get_seat("toy:captain")).unwrap().unwrap().state, SeatState::Active);
+    assert_eq!(
+        s.read(|tx| tx.get_seat("toy:captain"))
+            .unwrap()
+            .unwrap()
+            .state,
+        SeatState::Active
+    );
     // nothing to do on the next run
-    assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 2).unwrap().is_empty());
+    assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 2)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
 fn a_failed_step_parks_the_seat_in_needs_check() {
     let mut s = Store::open_in_memory().unwrap();
-    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, CONFIG,Some(crate::skill_home()), false, T0).unwrap();
+    admin::init_with_home(
+        &mut s,
+        &Env {
+            ctx: None,
+            pane_id: None,
+            admin: true,
+        },
+        CONFIG,
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
     let mut herdr = FakeHerdr::new();
-    herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "worktree_exists".into() });
-    assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap().is_empty());
+    herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse {
+        code: "worktree_exists".into(),
+    });
+    assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1)
+        .unwrap()
+        .is_empty());
     let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
     assert_eq!(seat.state, SeatState::NeedsCheck);
     assert!(seat.state_reason.unwrap_or_default().contains("worktree"));
@@ -85,23 +135,49 @@ fn a_lane_that_cannot_start_on_its_model_rings_the_captain() {
     let mut s = Store::open_in_memory().unwrap();
     let with_models = CONFIG.to_owned()
         + "\n[models]\nlanes = [\"minimax-cn/MiniMax-M3.1-Flash\", \"deepseek/deepseek-flash\"]\n";
-    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, &with_models,Some(crate::skill_home()), false, T0).unwrap();
+    admin::init_with_home(
+        &mut s,
+        &Env {
+            ctx: None,
+            pane_id: None,
+            admin: true,
+        },
+        &with_models,
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
     let mut herdr = FakeHerdr::new();
 
-    assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap().is_empty());
+    assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1)
+        .unwrap()
+        .is_empty());
     let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
     assert_eq!(seat.state, SeatState::NeedsCheck, "{:?}", seat.state_reason);
 
     // The captain is rung: one urgent item naming the seat and the reason.
-    let open = s.read(|tx| tx.actionable_for("toy", "toy:captain", T0 + 2)).unwrap();
+    let open = s
+        .read(|tx| tx.actionable_for("toy", "toy:captain", T0 + 2))
+        .unwrap();
     assert_eq!(open.len(), 1, "one urgent item: {open:?}");
     assert!(open[0].urgent, "{open:?}");
-    assert!(open[0].body.contains("toy:heat"), "it names the seat: {open:?}");
-    assert!(open[0].body.contains("models.switch"), "it names the reason: {open:?}");
+    assert!(
+        open[0].body.contains("toy:heat"),
+        "it names the seat: {open:?}"
+    );
+    assert!(
+        open[0].body.contains("models.switch"),
+        "it names the reason: {open:?}"
+    );
 
     // The seat is never retried, so the captain is not rung again.
-    assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 3).unwrap().is_empty());
-    let open = s.read(|tx| tx.actionable_for("toy", "toy:captain", T0 + 4)).unwrap();
+    assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 3)
+        .unwrap()
+        .is_empty());
+    let open = s
+        .read(|tx| tx.actionable_for("toy", "toy:captain", T0 + 4))
+        .unwrap();
     assert_eq!(open.len(), 1, "the failure was told once: {open:?}");
 }
 
@@ -113,25 +189,65 @@ fn a_startup_switch_timeout_or_removed_labels_rings_once() {
             + "\n[models]\nlanes = [\"deepseek/deepseek-flash\", \"minimax-cn/MiniMax-M3.1-Flash\"]\n";
         let with_labels = without_labels.clone()
             + "\n[models.switch.\"deepseek/deepseek-flash\"]\npicker = \"DeepSeek V4.1 Flash\"\nbar = \"DeepSeek V4.1 Flash\"\n";
-        let env = Env { ctx: None, pane_id: None, admin: true };
-        admin::init_with_home(&mut s, &env, &with_labels,Some(crate::skill_home()), false, T0).unwrap();
+        let env = Env {
+            ctx: None,
+            pane_id: None,
+            admin: true,
+        };
+        admin::init_with_home(
+            &mut s,
+            &env,
+            &with_labels,
+            Some(crate::skill_home()),
+            false,
+            T0,
+        )
+        .unwrap();
         let mut herdr = FakeHerdr::new();
         herdr.start_screen = Some("Build auto · wrong-model · high".into());
-        assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap().is_empty());
-        assert!(gear_engine::switch::pending(&mut s, "toy:heat").unwrap().is_some());
+        assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1)
+            .unwrap()
+            .is_empty());
+        assert!(gear_engine::switch::pending(&mut s, "toy:heat")
+            .unwrap()
+            .is_some());
         if remove_labels {
-            admin::init_with_home(&mut s, &env, &without_labels,Some(crate::skill_home()), false, T0 + 2).unwrap();
+            admin::init_with_home(
+                &mut s,
+                &env,
+                &without_labels,
+                Some(crate::skill_home()),
+                false,
+                T0 + 2,
+            )
+            .unwrap();
         }
         for tick in 0..30 {
-            assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 3 + tick).unwrap().is_empty());
+            assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 3 + tick)
+                .unwrap()
+                .is_empty());
         }
         let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::NeedsCheck);
-        assert!(gear_engine::switch::pending(&mut s, "toy:heat").unwrap().is_none());
-        let open = s.read(|tx| tx.actionable_for("toy", "toy:captain", T0 + 40)).unwrap();
-        assert_eq!(open.len(), 1, "one alert, removed labels={remove_labels}: {open:?}");
-        let reason = if remove_labels { "no [models.switch] labels any more" } else { "did not confirm twice" };
-        assert!(open[0].urgent && open[0].body.contains("toy:heat") && open[0].body.contains(reason));
+        assert!(gear_engine::switch::pending(&mut s, "toy:heat")
+            .unwrap()
+            .is_none());
+        let open = s
+            .read(|tx| tx.actionable_for("toy", "toy:captain", T0 + 40))
+            .unwrap();
+        assert_eq!(
+            open.len(),
+            1,
+            "one alert, removed labels={remove_labels}: {open:?}"
+        );
+        let reason = if remove_labels {
+            "no [models.switch] labels any more"
+        } else {
+            "did not confirm twice"
+        };
+        assert!(
+            open[0].urgent && open[0].body.contains("toy:heat") && open[0].body.contains(reason)
+        );
     }
 }
 
@@ -140,8 +256,20 @@ fn a_startup_switch_timeout_or_removed_labels_rings_once() {
 #[test]
 fn a_lane_added_by_a_config_change_is_onboarded_with_the_latest_config() {
     let mut s = Store::open_in_memory().unwrap();
-    let admin_env = Env { ctx: None, pane_id: None, admin: true };
-    admin::init_with_home(&mut s, &admin_env, CONFIG,Some(crate::skill_home()), false, T0).unwrap();
+    let admin_env = Env {
+        ctx: None,
+        pane_id: None,
+        admin: true,
+    };
+    admin::init_with_home(
+        &mut s,
+        &admin_env,
+        CONFIG,
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
     let mut herdr = FakeHerdr::new();
     assert_eq!(
         onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap(),
@@ -153,13 +281,28 @@ fn a_lane_added_by_a_config_change_is_onboarded_with_the_latest_config() {
         .replace("lanes = 1", "lanes = 2")
         .replace(r#"repo = "/repo""#, r#"repo = "/repo2""#)
         + "\n[[lanes]]\nname = \"pricing\"\nduty = \"prices\"\nowns = [\"lib/\"]\nkind = \"opencode\"\nprofile = \"opencode\"\n";
-    admin::init_with_home(&mut s, &admin_env, &changed,Some(crate::skill_home()), false, T0 + 2).unwrap();
+    admin::init_with_home(
+        &mut s,
+        &admin_env,
+        &changed,
+        Some(crate::skill_home()),
+        false,
+        T0 + 2,
+    )
+    .unwrap();
 
     // The new lane is onboarded; the lane that was there is not touched.
     let active = onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 3).unwrap();
     assert_eq!(active, vec!["toy:pricing".to_string()]);
-    assert!(herdr.calls.iter().any(|c| matches!(c, Call::WorktreeCreate { repo, branch, .. }
-        if repo == "/repo2" && branch == "toy/pricing")), "{:?}", herdr.calls);
+    assert!(
+        herdr
+            .calls
+            .iter()
+            .any(|c| matches!(c, Call::WorktreeCreate { repo, branch, .. }
+        if repo == "/repo2" && branch == "toy/pricing")),
+        "{:?}",
+        herdr.calls
+    );
     let seat = s.read(|tx| tx.get_seat("toy:pricing")).unwrap().unwrap();
     assert_eq!((seat.state, seat.generation), (SeatState::Active, 1));
 }
@@ -171,8 +314,20 @@ fn a_lane_added_by_a_config_change_is_onboarded_with_the_latest_config() {
 #[test]
 fn a_lane_missing_from_the_config_snapshot_is_skipped_not_parked() {
     let mut s = Store::open_in_memory().unwrap();
-    let admin_env = Env { ctx: None, pane_id: None, admin: true };
-    admin::init_with_home(&mut s, &admin_env, CONFIG,Some(crate::skill_home()), false, T0).unwrap();
+    let admin_env = Env {
+        ctx: None,
+        pane_id: None,
+        admin: true,
+    };
+    admin::init_with_home(
+        &mut s,
+        &admin_env,
+        CONFIG,
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
     // The seat a re-init would have committed just before the roster read.
     s.write(|tx| {
         tx.insert_seat(&SeatRow {
@@ -206,7 +361,15 @@ fn a_lane_missing_from_the_config_snapshot_is_skipped_not_parked() {
     // The config change lands; the next tick onboards the lane.
     let changed = CONFIG.replace("lanes = 1", "lanes = 2")
         + "\n[[lanes]]\nname = \"pricing\"\nduty = \"prices\"\nowns = [\"lib/\"]\nkind = \"opencode\"\nprofile = \"opencode\"\n";
-    admin::init_with_home(&mut s, &admin_env, &changed,Some(crate::skill_home()), false, T0 + 2).unwrap();
+    admin::init_with_home(
+        &mut s,
+        &admin_env,
+        &changed,
+        Some(crate::skill_home()),
+        false,
+        T0 + 2,
+    )
+    .unwrap();
     assert_eq!(
         onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 3).unwrap(),
         vec!["toy:pricing".to_string()]
@@ -261,16 +424,31 @@ gate = "make test"
     let home = crate::temp("gear-grok");
     // HOME is process-wide: no other test may onboard a grok lane (or set
     // HOME) in this window.
-    let _home = crate::HOME_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _home = crate::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let previous = std::env::var("HOME").ok();
     std::env::set_var("HOME", &home);
 
     let mut s = Store::open_in_memory().unwrap();
-    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, BOTH,Some(crate::skill_home()), false, T0).unwrap();
+    admin::init_with_home(
+        &mut s,
+        &Env {
+            ctx: None,
+            pane_id: None,
+            admin: true,
+        },
+        BOTH,
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
     let mut herdr = FakeHerdr::new();
     let mut c = cfg();
     c.profiles.insert("grok".into(), builtin("grok").unwrap());
-    c.profiles.insert("claude".into(), builtin("claude").unwrap());
+    c.profiles
+        .insert("claude".into(), builtin("claude").unwrap());
     let active = onboard_queued(&mut s, &mut herdr, &c, T0 + 1).unwrap();
     assert_eq!(active.len(), 2, "{active:?}");
 
@@ -284,16 +462,21 @@ gate = "make test"
     );
     // Its worktree was trusted before the start: one entry, written once.
     let trust = std::fs::read_to_string(home.join(".grok/trusted_folders.toml")).unwrap();
-    assert!(trust.contains("[folders.\"/fake-worktrees/toy-grok1\"]"), "{trust}");
+    assert!(
+        trust.contains("[folders.\"/fake-worktrees/toy-grok1\"]"),
+        "{trust}"
+    );
     assert!(trust.contains("trusted = true"), "{trust}");
     assert_eq!(trust.matches("[folders.").count(), 1, "one entry: {trust}");
 
     // The claude lane: its model as `--model`.
     assert!(
-        herdr.calls.iter().any(|call| matches!(call, Call::AgentStart { name, kind, args, .. }
+        herdr.calls.iter().any(
+            |call| matches!(call, Call::AgentStart { name, kind, args, .. }
             if name == "toy-claude1" && kind == "claude"
                 && args.contains(&"--model".to_string())
-                && args.contains(&"grok-4.7".to_string()))),
+                && args.contains(&"grok-4.7".to_string()))
+        ),
         "{:?}",
         herdr.calls
     );
@@ -317,7 +500,11 @@ fn a_released_lane_whose_agent_is_gone_is_onboarded_and_given_its_task() {
     let mut s = Store::open_in_memory().unwrap();
     admin::init_with_home(
         &mut s,
-        &Env { ctx: None, pane_id: None, admin: true },
+        &Env {
+            ctx: None,
+            pane_id: None,
+            admin: true,
+        },
         CONFIG,
         Some(crate::skill_home()),
         false,
@@ -330,9 +517,17 @@ fn a_released_lane_whose_agent_is_gone_is_onboarded_and_given_its_task() {
     herdr.prompt_starts_turn = true;
     let cfg = cfg();
 
-    let cap = Fingerprint { pane_id: "w1:p1".into(), kind: Some("claude".into()), session_ref: None };
+    let cap = Fingerprint {
+        pane_id: "w1:p1".into(),
+        kind: Some("claude".into()),
+        session_ref: None,
+    };
     let env = Env {
-        ctx: Some(GearCtx { project: "toy".into(), seat: "captain".into(), generation: 1 }),
+        ctx: Some(GearCtx {
+            project: "toy".into(),
+            seat: "captain".into(),
+            generation: 1,
+        }),
         pane_id: Some("w1:p1".into()),
         admin: false,
     };
@@ -359,27 +554,54 @@ fn a_released_lane_whose_agent_is_gone_is_onboarded_and_given_its_task() {
     .unwrap();
     assert_eq!(r.created, vec!["T-1".to_string()]);
     gear_engine::tick(&mut s, &mut herdr, &cfg, T0 + 100).unwrap();
-    assert_eq!(herdr.prompts_to(&binding.pane_id).len(), 0, "a held lane is assigned nothing");
+    assert_eq!(
+        herdr.prompts_to(&binding.pane_id).len(),
+        0,
+        "a held lane is assigned nothing"
+    );
 
     // 3. its agent exits; the store keeps the binding Active
     herdr.exit_agent(&binding.pane_id);
     let binding_now = s.read(|tx| tx.get_binding("toy:heat", 1)).unwrap().unwrap();
-    assert_eq!(binding_now.status, BindingStatus::Active, "an exited agent keeps its binding");
+    assert_eq!(
+        binding_now.status,
+        BindingStatus::Active,
+        "an exited agent keeps its binding"
+    );
 
     // 4. release: no agent in the pane, so the lane goes back to the queue
-    apply(&mut s, &mut herdr, "<!-- gear-plan project=toy base=1 -->\n# Staff\n- release heat\n", "v2", T0 + 200).unwrap();
+    apply(
+        &mut s,
+        &mut herdr,
+        "<!-- gear-plan project=toy base=1 -->\n# Staff\n- release heat\n",
+        "v2",
+        T0 + 200,
+    )
+    .unwrap();
     let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
-    assert_eq!(seat.state, SeatState::Queued, "its agent is gone: {:?}", seat.state_reason);
+    assert_eq!(
+        seat.state,
+        SeatState::Queued,
+        "its agent is gone: {:?}",
+        seat.state_reason
+    );
 
     // 5. the engine onboards it again and delivers its task
     gear_engine::tick(&mut s, &mut herdr, &cfg, T0 + 300).unwrap();
     gear_engine::tick(&mut s, &mut herdr, &cfg, T0 + 400).unwrap();
     let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
     assert_eq!(seat.state, SeatState::Active);
-    let binding = s.read(|tx| tx.get_binding("toy:heat", seat.generation)).unwrap().unwrap();
+    let binding = s
+        .read(|tx| tx.get_binding("toy:heat", seat.generation))
+        .unwrap()
+        .unwrap();
     let prompts = herdr.prompts_to(&binding.pane_id);
     assert_eq!(prompts.len(), 1, "its next task is delivered: {prompts:?}");
-    assert!(prompts[0].starts_with("New task T-1 (contract v1)"), "{}", prompts[0]);
+    assert!(
+        prompts[0].starts_with("New task T-1 (contract v1)"),
+        "{}",
+        prompts[0]
+    );
 }
 
 /// T-285 (T-134 review F3): a seat retried while an unnamed leftover agent
@@ -392,7 +614,11 @@ fn an_unnamed_leftover_agent_is_named_and_asked_to_exit_in_the_same_tick() {
     let mut s = Store::open_in_memory().unwrap();
     admin::init_with_home(
         &mut s,
-        &Env { ctx: None, pane_id: None, admin: true },
+        &Env {
+            ctx: None,
+            pane_id: None,
+            admin: true,
+        },
         CONFIG,
         Some(crate::skill_home()),
         false,
@@ -402,25 +628,43 @@ fn an_unnamed_leftover_agent_is_named_and_asked_to_exit_in_the_same_tick() {
     let mut herdr = FakeHerdr::new();
     // The leftover is a codex agent (its profile exits by the typed `/quit`).
     let mut cfg = cfg();
-    cfg.profiles.insert("codex".into(), builtin("codex").unwrap());
+    cfg.profiles
+        .insert("codex".into(), builtin("codex").unwrap());
 
     assert_eq!(
         onboard_queued(&mut s, &mut herdr, &cfg, T0 + 1).unwrap(),
         vec!["toy:heat".to_string()]
     );
-    let pane = s.read(|tx| tx.get_binding("toy:heat", 1)).unwrap().unwrap().pane_id;
+    let pane = s
+        .read(|tx| tx.get_binding("toy:heat", 1))
+        .unwrap()
+        .unwrap()
+        .pane_id;
 
     // The fixture is re-run: the seat is queued again and a leftover codex
     // agent is in its pane, its name cleared by a Herdr restart.
     herdr.add_agent(&pane, "codex", gear_herdr::AgentStatus::Idle);
-    s.write(|tx| tx.set_seat_state("toy:heat", SeatState::Queued, Some("fixture re-run"), T0 + 2))
-        .unwrap();
+    s.write(|tx| {
+        tx.set_seat_state(
+            "toy:heat",
+            SeatState::Queued,
+            Some("fixture re-run"),
+            T0 + 2,
+        )
+    })
+    .unwrap();
 
-    assert!(onboard_queued(&mut s, &mut herdr, &cfg, T0 + 3).unwrap().is_empty());
+    assert!(onboard_queued(&mut s, &mut herdr, &cfg, T0 + 3)
+        .unwrap()
+        .is_empty());
 
     // Named first, then prompted at that name: a prompt to an unnamed agent is
     // refused, and the command is never typed into the pane.
-    assert_eq!(herdr.agent_name(&pane), Some("toy-heat"), "the leftover is named");
+    assert_eq!(
+        herdr.agent_name(&pane),
+        Some("toy-heat"),
+        "the leftover is named"
+    );
     let renamed_at = herdr
         .calls
         .iter()
@@ -431,7 +675,11 @@ fn an_unnamed_leftover_agent_is_named_and_asked_to_exit_in_the_same_tick() {
         .iter()
         .position(|call| matches!(call, Call::Prompt { pane: p, .. } if p == &pane))
         .unwrap_or_else(|| panic!("the leftover was never asked: {:?}", herdr.calls));
-    assert!(renamed_at < asked_at, "named before it is prompted: {:?}", herdr.calls);
+    assert!(
+        renamed_at < asked_at,
+        "named before it is prompted: {:?}",
+        herdr.calls
+    );
     assert_eq!(herdr.prompts_to(&pane), vec!["/quit"], "{:?}", herdr.calls);
     assert_eq!(
         herdr.prompt_targets(),
@@ -470,7 +718,11 @@ fn a_future_departure_onboards_no_lane_and_dispatches_nothing_until_its_time() {
     let mut s = Store::open_in_memory().unwrap();
     admin::init_with_home(
         &mut s,
-        &Env { ctx: None, pane_id: None, admin: true },
+        &Env {
+            ctx: None,
+            pane_id: None,
+            admin: true,
+        },
         &scheduled,
         Some(crate::skill_home()),
         false,
@@ -482,9 +734,17 @@ fn a_future_departure_onboards_no_lane_and_dispatches_nothing_until_its_time() {
     herdr.prompt_starts_turn = true;
     let cfg = cfg();
 
-    let cap = Fingerprint { pane_id: "w1:p1".into(), kind: Some("claude".into()), session_ref: None };
+    let cap = Fingerprint {
+        pane_id: "w1:p1".into(),
+        kind: Some("claude".into()),
+        session_ref: None,
+    };
     let env = Env {
-        ctx: Some(GearCtx { project: "toy".into(), seat: "captain".into(), generation: 1 }),
+        ctx: Some(GearCtx {
+            project: "toy".into(),
+            seat: "captain".into(),
+            generation: 1,
+        }),
         pane_id: Some("w1:p1".into()),
         admin: false,
     };
@@ -493,29 +753,54 @@ fn a_future_departure_onboards_no_lane_and_dispatches_nothing_until_its_time() {
     let text = "<!-- gear-plan project=toy base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: Fix the login crash\naccept: repro passes\nestimate: 30\ndeps: -\n";
     let draft = gear_app::draft::parse(text).unwrap();
     let agents = herdr.agents().unwrap();
-    gear_app::plan::apply(&mut s, &env, Some(&cap), Some(&agents), &draft, text, "v1", T0 + 1).unwrap();
+    gear_app::plan::apply(
+        &mut s,
+        &env,
+        Some(&cap),
+        Some(&agents),
+        &draft,
+        text,
+        "v1",
+        T0 + 1,
+    )
+    .unwrap();
 
     // Before the departure: the queued lane is not onboarded and the ready
     // task is not delivered.
     gear_engine::tick(&mut s, &mut herdr, &cfg, T0 + 100).unwrap();
     let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
-    assert_eq!(seat.state, SeatState::Queued, "no lane is started before the departure");
+    assert_eq!(
+        seat.state,
+        SeatState::Queued,
+        "no lane is started before the departure"
+    );
     assert!(
-        herdr.calls.iter().all(|call| !matches!(call, Call::AgentStart { .. })),
+        herdr
+            .calls
+            .iter()
+            .all(|call| !matches!(call, Call::AgentStart { .. })),
         "no agent starts: {:?}",
         herdr.calls
     );
     assert_eq!(
-        s.read(|tx| tx.get_task("toy", "T-1")).unwrap().unwrap().state,
+        s.read(|tx| tx.get_task("toy", "T-1"))
+            .unwrap()
+            .unwrap()
+            .state,
         gear_model::TaskState::Ready,
         "the task waits"
     );
     assert!(
-        s.read(|tx| tx.get_attempt("toy", "T-1", 1)).unwrap().is_none(),
+        s.read(|tx| tx.get_attempt("toy", "T-1", 1))
+            .unwrap()
+            .is_none(),
         "no attempt before the departure"
     );
     assert!(
-        herdr.calls.iter().all(|call| !matches!(call, Call::Prompt { .. })),
+        herdr
+            .calls
+            .iter()
+            .all(|call| !matches!(call, Call::Prompt { .. })),
         "nothing is delivered: {:?}",
         herdr.calls
     );
@@ -525,13 +810,27 @@ fn a_future_departure_onboards_no_lane_and_dispatches_nothing_until_its_time() {
     gear_engine::tick(&mut s, &mut herdr, &cfg, T0 + 3600).unwrap();
     gear_engine::tick(&mut s, &mut herdr, &cfg, T0 + 3700).unwrap();
     let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
-    assert_eq!(seat.state, SeatState::Active, "the lane starts at its departure time");
-    let binding = s.read(|tx| tx.get_binding("toy:heat", seat.generation)).unwrap().unwrap();
+    assert_eq!(
+        seat.state,
+        SeatState::Active,
+        "the lane starts at its departure time"
+    );
+    let binding = s
+        .read(|tx| tx.get_binding("toy:heat", seat.generation))
+        .unwrap()
+        .unwrap();
     let prompts = herdr.prompts_to(&binding.pane_id);
     assert_eq!(prompts.len(), 1, "its task is delivered: {prompts:?}");
-    assert!(prompts[0].starts_with("New task T-1 (contract v1)"), "{}", prompts[0]);
+    assert!(
+        prompts[0].starts_with("New task T-1 (contract v1)"),
+        "{}",
+        prompts[0]
+    );
     assert_eq!(
-        s.read(|tx| tx.get_attempt("toy", "T-1", 1)).unwrap().unwrap().state,
+        s.read(|tx| tx.get_attempt("toy", "T-1", 1))
+            .unwrap()
+            .unwrap()
+            .state,
         gear_model::AttemptState::Delivered,
         "one delivery, nobody asked"
     );

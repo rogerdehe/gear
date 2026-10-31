@@ -64,7 +64,15 @@ fn world(root: &Path) -> Store {
         let mut project = tx.get_project("p")?.unwrap();
         project.config_toml = config(root);
         tx.update_project(&project)?;
-        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "captain",
+            SeatRole::Captain,
+            CAP_PANE,
+            "codex",
+            NOW,
+        )?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", NOW)?;
         Ok(())
     })
@@ -88,7 +96,11 @@ fn herdr() -> FakeHerdr {
 /// A caller with no environment at all: the state a plainly started `codex`
 /// (or `claude`) is in.
 fn bare() -> Env {
-    Env { ctx: None, pane_id: None, admin: false }
+    Env {
+        ctx: None,
+        pane_id: None,
+        admin: false,
+    }
 }
 
 /// The whole move: the fresh pane is the captain at generation+1, the old
@@ -100,24 +112,48 @@ fn take_from_a_fresh_pane_with_no_env_makes_it_the_captain() {
     let mut s = world(root.path());
     let mut herdr = herdr();
 
-    let taken = take(&mut s, &bare(), &mut herdr, &NEW_CALLER, root.path(), None, NOW).unwrap();
+    let taken = take(
+        &mut s,
+        &bare(),
+        &mut herdr,
+        &NEW_CALLER,
+        root.path(),
+        None,
+        NOW,
+    )
+    .unwrap();
     assert_eq!(taken.to, NEW_PANE);
     assert_eq!(taken.from.as_deref(), Some(CAP_PANE));
     assert_eq!(taken.generation, 2);
     assert_eq!(taken.kind, "claude", "the CLI that is really in the pane");
 
     let seat = s.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
-    assert_eq!((seat.role, seat.generation, seat.state), (SeatRole::Captain, 2, SeatState::Active));
-    let new = s.read(|tx| tx.get_binding("p:captain", 2)).unwrap().unwrap();
+    assert_eq!(
+        (seat.role, seat.generation, seat.state),
+        (SeatRole::Captain, 2, SeatState::Active)
+    );
+    let new = s
+        .read(|tx| tx.get_binding("p:captain", 2))
+        .unwrap()
+        .unwrap();
     assert_eq!(
         (new.pane_id.as_str(), new.status, new.kind.as_str()),
         (NEW_PANE, BindingStatus::Active, "claude")
     );
-    let old = s.read(|tx| tx.get_binding("p:captain", 1)).unwrap().unwrap();
-    assert_eq!(old.status, BindingStatus::Void, "the old session cannot write");
+    let old = s
+        .read(|tx| tx.get_binding("p:captain", 1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        old.status,
+        BindingStatus::Void,
+        "the old session cannot write"
+    );
 
     // One urgent item, for the captain seat, naming both panes.
-    let items = s.read(|tx| tx.thread_messages("p", "captain:take")).unwrap();
+    let items = s
+        .read(|tx| tx.thread_messages("p", "captain:take"))
+        .unwrap();
     assert_eq!(items.len(), 1, "{items:?}");
     assert!(items[0].urgent, "{items:?}");
     assert_eq!(items[0].recipient, "p:captain");
@@ -128,9 +164,15 @@ fn take_from_a_fresh_pane_with_no_env_makes_it_the_captain() {
     let resolved = resolve_env(&mut s, &bare(), &mut herdr, &NEW_CALLER).unwrap();
     assert_eq!(
         resolved.ctx,
-        Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 2 })
+        Some(GearCtx {
+            project: "p".into(),
+            seat: "captain".into(),
+            generation: 2
+        })
     );
-    let fp = observe(&resolved, &mut herdr, &NEW_CALLER).unwrap().expect("the new agent");
+    let fp = observe(&resolved, &mut herdr, &NEW_CALLER)
+        .unwrap()
+        .expect("the new agent");
     let page = gear_app::home::build(&mut s, &resolved, Some(&fp), NOW + 1).unwrap();
     assert!(page.text.contains("p:captain"), "{}", page.text);
     assert!(
@@ -150,7 +192,16 @@ fn take_names_the_new_captains_agent() {
     let mut herdr = herdr(); // every agent starts unnamed: the M3.1 state
     assert_eq!(herdr.agent_name(NEW_PANE), None);
 
-    let taken = take(&mut s, &bare(), &mut herdr, &NEW_CALLER, root.path(), None, NOW).unwrap();
+    let taken = take(
+        &mut s,
+        &bare(),
+        &mut herdr,
+        &NEW_CALLER,
+        root.path(),
+        None,
+        NOW,
+    )
+    .unwrap();
 
     assert_eq!(taken.named, gear_herdr::Ensured::Renamed);
     assert_eq!(herdr.agent_name(NEW_PANE), Some("p-captain"));
@@ -166,15 +217,37 @@ fn take_never_steals_a_name_another_pane_holds() {
     let mut herdr = herdr();
     herdr.set_agent_name(LANE_PANE, Some("p-captain"));
 
-    let taken = take(&mut s, &bare(), &mut herdr, &NEW_CALLER, root.path(), None, NOW).unwrap();
+    let taken = take(
+        &mut s,
+        &bare(),
+        &mut herdr,
+        &NEW_CALLER,
+        root.path(),
+        None,
+        NOW,
+    )
+    .unwrap();
 
     assert_eq!(
         taken.named,
-        gear_herdr::Ensured::Taken { holder: Some(LANE_PANE.to_string()) }
+        gear_herdr::Ensured::Taken {
+            holder: Some(LANE_PANE.to_string())
+        }
     );
-    assert_eq!(herdr.agent_name(LANE_PANE), Some("p-captain"), "the holder keeps it");
-    assert_eq!(herdr.agent_name(NEW_PANE), None, "and the new captain is not named");
-    assert!(herdr.renames_to("p-captain").is_empty(), "no rename was attempted");
+    assert_eq!(
+        herdr.agent_name(LANE_PANE),
+        Some("p-captain"),
+        "the holder keeps it"
+    );
+    assert_eq!(
+        herdr.agent_name(NEW_PANE),
+        None,
+        "and the new captain is not named"
+    );
+    assert!(
+        herdr.renames_to("p-captain").is_empty(),
+        "no rename was attempted"
+    );
 }
 
 /// A lane's pane is not a captain's (T-126): taking it is refused, nothing
@@ -185,13 +258,25 @@ fn take_from_a_lanes_pane_is_refused() {
     let mut s = world(root.path());
     let mut herdr = herdr();
 
-    let error = take(&mut s, &bare(), &mut herdr, &LANE_CALLER, root.path(), None, NOW).unwrap_err();
+    let error = take(
+        &mut s,
+        &bare(),
+        &mut herdr,
+        &LANE_CALLER,
+        root.path(),
+        None,
+        NOW,
+    )
+    .unwrap_err();
     assert_eq!(error.code, ErrorCode::Forbidden, "{}", error.detail);
     assert!(error.detail.contains(LANE_PANE), "{}", error.detail);
 
     let seat = s.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
     assert_eq!((seat.generation, seat.state), (1, SeatState::Active));
-    assert!(s.read(|tx| tx.thread_messages("p", "captain:take")).unwrap().is_empty());
+    assert!(s
+        .read(|tx| tx.thread_messages("p", "captain:take"))
+        .unwrap()
+        .is_empty());
 }
 
 /// It works whether the old captain's pane still exists or not: the seat's
@@ -204,8 +289,20 @@ fn take_works_when_the_old_captains_pane_is_gone() {
     // The old captain's pane was closed with its agent.
     herdr.exit_agent(CAP_PANE);
 
-    let taken = take(&mut s, &bare(), &mut herdr, &NEW_CALLER, root.path(), None, NOW).unwrap();
-    assert_eq!((taken.from.as_deref(), taken.to.as_str(), taken.generation), (Some(CAP_PANE), NEW_PANE, 2));
+    let taken = take(
+        &mut s,
+        &bare(),
+        &mut herdr,
+        &NEW_CALLER,
+        root.path(),
+        None,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        (taken.from.as_deref(), taken.to.as_str(), taken.generation),
+        (Some(CAP_PANE), NEW_PANE, 2)
+    );
     let seat = s.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
     assert_eq!(seat.generation, 2);
 }
@@ -218,7 +315,16 @@ fn take_needs_an_agent_in_the_pane() {
     let mut s = world(root.path());
     let mut herdr = herdr();
 
-    let error = take(&mut s, &bare(), &mut herdr, &USER_CALLER, root.path(), None, NOW).unwrap_err();
+    let error = take(
+        &mut s,
+        &bare(),
+        &mut herdr,
+        &USER_CALLER,
+        root.path(),
+        None,
+        NOW,
+    )
+    .unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat, "{}", error.detail);
     assert!(error.detail.contains("hosts no agent"), "{}", error.detail);
     let seat = s.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
@@ -237,10 +343,22 @@ fn a_daemon_caller_in_no_pane_takes_the_one_unbound_daemon_pane() {
     herdr.add_agent("w1:p5", "codex", AgentStatus::Idle);
     herdr.set_pane_processes("w1:p5", Some(1_000_001), &[]);
 
-    let taken = take(&mut s, &bare(), &mut herdr, &SERVICE, root.path(), None, NOW).unwrap();
+    let taken = take(
+        &mut s,
+        &bare(),
+        &mut herdr,
+        &SERVICE,
+        root.path(),
+        None,
+        NOW,
+    )
+    .unwrap();
     assert_eq!(taken.to, "w1:p5", "the one daemon pane with no seat");
     assert_eq!(taken.kind, "codex");
-    let new = s.read(|tx| tx.get_binding("p:captain", 2)).unwrap().unwrap();
+    let new = s
+        .read(|tx| tx.get_binding("p:captain", 2))
+        .unwrap()
+        .unwrap();
     assert_eq!(new.pane_id, "w1:p5");
 }
 
@@ -253,7 +371,16 @@ fn take_from_nowhere_names_what_it_needs() {
     let mut herdr = herdr();
     // No ancestry and no HERDR_PANE_ID, and no unbound daemon pane (the one
     // free pane hosts `claude`).
-    let error = take(&mut s, &bare(), &mut herdr, &SERVICE, root.path(), None, NOW).unwrap_err();
+    let error = take(
+        &mut s,
+        &bare(),
+        &mut herdr,
+        &SERVICE,
+        root.path(),
+        None,
+        NOW,
+    )
+    .unwrap_err();
     assert_eq!(error.code, ErrorCode::Forbidden, "{}", error.detail);
     assert!(error.detail.contains("captain take"), "{}", error.detail);
 }
@@ -266,8 +393,26 @@ fn take_outside_the_checkout_finds_the_only_project_and_refuses_an_unknown_name(
     let mut s = world(root.path());
     let mut herdr = herdr();
     let elsewhere = tempfile::tempdir().unwrap();
-    let taken = take(&mut s, &bare(), &mut herdr, &NEW_CALLER, elsewhere.path(), None, NOW).unwrap();
+    let taken = take(
+        &mut s,
+        &bare(),
+        &mut herdr,
+        &NEW_CALLER,
+        elsewhere.path(),
+        None,
+        NOW,
+    )
+    .unwrap();
     assert_eq!(taken.project, "p");
-    let error = take(&mut s, &bare(), &mut herdr, &NEW_CALLER, root.path(), Some("nope"), NOW + 1).unwrap_err();
+    let error = take(
+        &mut s,
+        &bare(),
+        &mut herdr,
+        &NEW_CALLER,
+        root.path(),
+        Some("nope"),
+        NOW + 1,
+    )
+    .unwrap_err();
     assert!(error.detail.contains("Projects: p"), "{}", error.detail);
 }

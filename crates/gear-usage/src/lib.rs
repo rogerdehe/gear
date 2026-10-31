@@ -83,13 +83,7 @@ pub fn usage(log: UsageLog, session_ref: &str, from: Ts, to: Ts) -> Option<Usage
 
 /// The same, with the home folder the logs live in: the tests use it with a
 /// folder of their own, and a caller that knows its home uses it too.
-pub fn usage_in(
-    log: UsageLog,
-    session_ref: &str,
-    from: Ts,
-    to: Ts,
-    home: &Path,
-) -> Option<Usage> {
+pub fn usage_in(log: UsageLog, session_ref: &str, from: Ts, to: Ts, home: &Path) -> Option<Usage> {
     match log {
         UsageLog::PiJsonl => pi_jsonl(&PathBuf::from(session_ref), from, to),
         UsageLog::CodexRollout => codex_rollout(session_ref, from, to, home),
@@ -128,12 +122,18 @@ fn pi_jsonl(path: &Path, from: Ts, to: Ts) -> Option<Usage> {
         if value.get("type").and_then(Value::as_str) != Some("message") {
             continue;
         }
-        let Some(message) = value.get("message") else { continue };
+        let Some(message) = value.get("message") else {
+            continue;
+        };
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
             continue;
         }
-        let Some(usage) = message.get("usage") else { continue };
-        let Some(time) = record_time(&value, message) else { continue };
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
+        let Some(time) = record_time(&value, message) else {
+            continue;
+        };
         if time < from || time >= to {
             continue;
         }
@@ -142,7 +142,12 @@ fn pi_jsonl(path: &Path, from: Ts, to: Ts) -> Option<Usage> {
         totals.cache_read += number(usage, "cacheRead");
         totals.cache_write += number(usage, "cacheWrite");
         totals.reasoning += number(usage, "reasoning");
-        totals.add_cost(usage.get("cost").and_then(|cost| cost.get("total")).and_then(Value::as_f64));
+        totals.add_cost(
+            usage
+                .get("cost")
+                .and_then(|cost| cost.get("total"))
+                .and_then(Value::as_f64),
+        );
         totals.records += 1;
     }
     Some(totals.usage())
@@ -157,14 +162,17 @@ fn pi_last_context(path: &Path) -> Option<i64> {
         if value.get("type").and_then(Value::as_str) != Some("message") {
             continue;
         }
-        let Some(message) = value.get("message") else { continue };
+        let Some(message) = value.get("message") else {
+            continue;
+        };
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
             continue;
         }
-        let Some(usage) = message.get("usage") else { continue };
-        context = Some(
-            number(usage, "input") + number(usage, "cacheRead") + number(usage, "cacheWrite"),
-        );
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
+        context =
+            Some(number(usage, "input") + number(usage, "cacheRead") + number(usage, "cacheWrite"));
     }
     context
 }
@@ -182,21 +190,29 @@ fn codex_rollout(thread: &str, from: Ts, to: Ts, home: &Path) -> Option<Usage> {
         if value.get("type").and_then(Value::as_str) != Some("event_msg") {
             continue;
         }
-        let Some(payload) = value.get("payload") else { continue };
+        let Some(payload) = value.get("payload") else {
+            continue;
+        };
         if payload.get("type").and_then(Value::as_str) != Some("token_count") {
             continue;
         }
-        let Some(info) = payload.get("info") else { continue };
+        let Some(info) = payload.get("info") else {
+            continue;
+        };
         // A count whose info is null or has no object of totals is not a
         // count: it changes neither the totals nor the predecessor (§4.3).
-        let Some(current) = CodexTokens::of(info) else { continue };
+        let Some(current) = CodexTokens::of(info) else {
+            continue;
+        };
         // The first valid total counts against zero: it is the work of the
         // session so far. The predecessor moves before the window is looked
         // at, so a count before the window still moves it.
         let before = previous.unwrap_or_else(CodexTokens::zero);
         let delta = current.difference(before);
         previous = Some(current);
-        let Some(time) = record_time(&value, &value) else { continue };
+        let Some(time) = record_time(&value, &value) else {
+            continue;
+        };
         if time < from || time >= to {
             continue;
         }
@@ -230,14 +246,20 @@ fn codex_last_context(thread: &str, home: &Path) -> Option<i64> {
         if value.get("type").and_then(Value::as_str) != Some("event_msg") {
             continue;
         }
-        let Some(payload) = value.get("payload") else { continue };
+        let Some(payload) = value.get("payload") else {
+            continue;
+        };
         if payload.get("type").and_then(Value::as_str) != Some("token_count") {
             continue;
         }
-        let Some(info) = payload.get("info") else { continue };
+        let Some(info) = payload.get("info") else {
+            continue;
+        };
         // A count whose info is null or has no object of totals is not a
         // count: it changes neither the context nor the predecessor (§4.3).
-        let Some(current) = CodexTokens::of(info) else { continue };
+        let Some(current) = CodexTokens::of(info) else {
+            continue;
+        };
         let before = previous.unwrap_or_else(CodexTokens::zero);
         let delta = current.difference(before);
         previous = Some(current);
@@ -273,8 +295,12 @@ fn claude_jsonl(session: &str, from: Ts, to: Ts, home: &Path) -> Option<Usage> {
         if value.get("type").and_then(Value::as_str) != Some("assistant") {
             continue;
         }
-        let Some(message) = value.get("message") else { continue };
-        let Some(usage) = message.get("usage") else { continue };
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
         // One message, one count (§4.3).
         let id = message
             .get("id")
@@ -285,7 +311,9 @@ fn claude_jsonl(session: &str, from: Ts, to: Ts, home: &Path) -> Option<Usage> {
                 continue;
             }
         }
-        let Some(time) = record_time(&value, &value) else { continue };
+        let Some(time) = record_time(&value, &value) else {
+            continue;
+        };
         if time < from || time >= to {
             continue;
         }
@@ -309,8 +337,12 @@ fn claude_last_context(session: &str, home: &Path) -> Option<i64> {
         if value.get("type").and_then(Value::as_str) != Some("assistant") {
             continue;
         }
-        let Some(message) = value.get("message") else { continue };
-        let Some(usage) = message.get("usage") else { continue };
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
         let id = message
             .get("id")
             .and_then(Value::as_str)
@@ -339,7 +371,9 @@ fn opencode_db(session: &str, from: Ts, to: Ts, home: &Path) -> Option<Usage> {
         if time < from || time >= to {
             continue;
         }
-        let Some(tokens) = data.get("tokens") else { continue };
+        let Some(tokens) = data.get("tokens") else {
+            continue;
+        };
         let cache = tokens.get("cache");
         totals.input += number(tokens, "input");
         totals.output += number(tokens, "output");
@@ -363,7 +397,9 @@ fn opencode_last_context(session: &str, home: &Path) -> Option<i64> {
         if time.is_none() {
             continue;
         }
-        let Some(tokens) = data.get("tokens") else { continue };
+        let Some(tokens) = data.get("tokens") else {
+            continue;
+        };
         let cache = tokens.get("cache");
         context = Some(
             number(tokens, "input")
@@ -377,7 +413,11 @@ fn opencode_last_context(session: &str, home: &Path) -> Option<i64> {
 /// The messages of a session in the OpenCode database: their data and the
 /// time they were completed at.
 fn opencode_messages(home: &Path, session: &str) -> Option<Vec<(Value, Option<Ts>)>> {
-    let path = home.join(".local").join("share").join("opencode").join("opencode.db");
+    let path = home
+        .join(".local")
+        .join("share")
+        .join("opencode")
+        .join("opencode.db");
     let conn = rusqlite::Connection::open_with_flags(
         &path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
@@ -399,7 +439,9 @@ fn opencode_messages(home: &Path, session: &str) -> Option<Vec<(Value, Option<Ts
     let mut messages = Vec::new();
     for row in rows {
         let data = row.ok()?;
-        let Some(data) = json_from_sql(&data) else { continue };
+        let Some(data) = json_from_sql(&data) else {
+            continue;
+        };
         let time = data
             .get("time")
             .and_then(|time| time.get("completed"))
@@ -453,7 +495,9 @@ fn codex_rollout_path(home: &Path, thread: &str) -> Option<PathBuf> {
         if !(-86_400..14 * 86_400).contains(&age) {
             continue;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if !name.starts_with("rollout-") || !name.ends_with(&format!("-{thread}.jsonl")) {
@@ -475,7 +519,9 @@ fn codex_day_dirs(root: &Path) -> Vec<(i64, PathBuf)> {
     for year in entries_of(root) {
         for month in entries_of(&year) {
             for day in entries_of(&month) {
-                let Some(day_epoch) = day_epoch(&day) else { continue };
+                let Some(day_epoch) = day_epoch(&day) else {
+                    continue;
+                };
                 days.push((day_epoch, day));
             }
         }
@@ -498,7 +544,13 @@ fn entries_of(dir: &Path) -> Vec<PathBuf> {
 
 /// The epoch second of a day directory (`YYYY/MM/DD`).
 fn day_epoch(dir: &Path) -> Option<i64> {
-    let year: i64 = dir.parent()?.parent()?.file_name()?.to_str()?.parse().ok()?;
+    let year: i64 = dir
+        .parent()?
+        .parent()?
+        .file_name()?
+        .to_str()?
+        .parse()
+        .ok()?;
     let month: i64 = dir.parent()?.file_name()?.to_str()?.parse().ok()?;
     let day: i64 = dir.file_name()?.to_str()?.parse().ok()?;
     Some(days_from_civil(year, month, day) * 86_400)
@@ -609,9 +661,11 @@ impl CodexTokens {
         CodexTokens {
             input_tokens: self.input_tokens - previous.input_tokens,
             cached_input_tokens: self.cached_input_tokens - previous.cached_input_tokens,
-            cache_write_input_tokens: self.cache_write_input_tokens - previous.cache_write_input_tokens,
+            cache_write_input_tokens: self.cache_write_input_tokens
+                - previous.cache_write_input_tokens,
             output_tokens: self.output_tokens - previous.output_tokens,
-            reasoning_output_tokens: self.reasoning_output_tokens - previous.reasoning_output_tokens,
+            reasoning_output_tokens: self.reasoning_output_tokens
+                - previous.reasoning_output_tokens,
         }
     }
 }
@@ -729,8 +783,16 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_position = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_position + 2) / 5 + 1;
-    let month = if month_position < 10 { month_position + 3 } else { month_position - 9 };
-    (if month <= 2 { year + 1 } else { year }, month as u32, day as u32)
+    let month = if month_position < 10 {
+        month_position + 3
+    } else {
+        month_position - 9
+    };
+    (
+        if month <= 2 { year + 1 } else { year },
+        month as u32,
+        day as u32,
+    )
 }
 
 /// The civil date of a moment in epoch seconds.
@@ -748,7 +810,9 @@ fn now_epoch() -> Ts {
 
 /// The home folder of the user; an empty path when there is none.
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
 }
 
 /// One usage-bearing record, retaining its model for per-record pricing.
@@ -764,16 +828,37 @@ pub fn usage_records(log: UsageLog, session: &str, from: Ts, to: Ts) -> Option<V
 }
 
 /// The record-level reader with an explicit home directory.
-pub fn usage_records_in(log: UsageLog, session: &str, from: Ts, to: Ts, home: &Path) -> Option<Vec<UsageRecord>> {
+pub fn usage_records_in(
+    log: UsageLog,
+    session: &str,
+    from: Ts,
+    to: Ts,
+    home: &Path,
+) -> Option<Vec<UsageRecord>> {
     let mut result = Vec::new();
     if log == UsageLog::OpencodeDb {
         for (data, time) in opencode_messages(home, session)? {
             let Some(time) = time else { continue };
-            if time < from || time >= to { continue }
-            let Some(tokens) = data.get("tokens") else { continue };
+            if time < from || time >= to {
+                continue;
+            }
+            let Some(tokens) = data.get("tokens") else {
+                continue;
+            };
             let cache = tokens.get("cache");
             let model = model_name(&data);
-            result.push(UsageRecord { model, usage: Usage { input: number(tokens,"input"), output: number(tokens,"output"), reasoning: number(tokens,"reasoning"), cache_read: cache.map(|c|number(c,"read")).unwrap_or(0), cache_write: cache.map(|c|number(c,"write")).unwrap_or(0), cost_usd: data.get("cost").and_then(Value::as_f64), records: 1 } });
+            result.push(UsageRecord {
+                model,
+                usage: Usage {
+                    input: number(tokens, "input"),
+                    output: number(tokens, "output"),
+                    reasoning: number(tokens, "reasoning"),
+                    cache_read: cache.map(|c| number(c, "read")).unwrap_or(0),
+                    cache_write: cache.map(|c| number(c, "write")).unwrap_or(0),
+                    cost_usd: data.get("cost").and_then(Value::as_f64),
+                    records: 1,
+                },
+            });
         }
         return Some(result);
     }
@@ -790,33 +875,115 @@ pub fn usage_records_in(log: UsageLog, session: &str, from: Ts, to: Ts, home: &P
         let Some(value) = parse(&line) else { continue };
         match log {
             UsageLog::PiJsonl => {
-                if value.get("type").and_then(Value::as_str) != Some("message") { continue }
-                let Some(message) = value.get("message") else { continue };
-                if message.get("role").and_then(Value::as_str) != Some("assistant") { continue }
-                let Some(u) = message.get("usage") else { continue };
-                let Some(t) = record_time(&value, message) else { continue };
-                if t < from || t >= to { continue }
-                result.push(UsageRecord { model: model_name(message), usage: Usage { input:number(u,"input"), output:number(u,"output"), cache_read:number(u,"cacheRead"), cache_write:number(u,"cacheWrite"), reasoning:number(u,"reasoning"), cost_usd:u.get("cost").and_then(|c|c.get("total")).and_then(Value::as_f64), records:1 } });
+                if value.get("type").and_then(Value::as_str) != Some("message") {
+                    continue;
+                }
+                let Some(message) = value.get("message") else {
+                    continue;
+                };
+                if message.get("role").and_then(Value::as_str) != Some("assistant") {
+                    continue;
+                }
+                let Some(u) = message.get("usage") else {
+                    continue;
+                };
+                let Some(t) = record_time(&value, message) else {
+                    continue;
+                };
+                if t < from || t >= to {
+                    continue;
+                }
+                result.push(UsageRecord {
+                    model: model_name(message),
+                    usage: Usage {
+                        input: number(u, "input"),
+                        output: number(u, "output"),
+                        cache_read: number(u, "cacheRead"),
+                        cache_write: number(u, "cacheWrite"),
+                        reasoning: number(u, "reasoning"),
+                        cost_usd: u
+                            .get("cost")
+                            .and_then(|c| c.get("total"))
+                            .and_then(Value::as_f64),
+                        records: 1,
+                    },
+                });
             }
             UsageLog::ClaudeJsonl => {
-                if value.get("type").and_then(Value::as_str) != Some("assistant") { continue }
-                let Some(message) = value.get("message") else { continue };
-                let Some(u) = message.get("usage") else { continue };
-                if let Some(id) = message.get("id").and_then(Value::as_str).or_else(||value.get("uuid").and_then(Value::as_str)) { if !seen.insert(id.to_owned()) { continue } }
-                let Some(t) = record_time(&value, &value) else { continue };
-                if t < from || t >= to { continue }
-                result.push(UsageRecord { model:model_name(message), usage:Usage {input:number(u,"input_tokens"), output:number(u,"output_tokens"), cache_read:number(u,"cache_read_input_tokens"), cache_write:number(u,"cache_creation_input_tokens"), reasoning:0, cost_usd:None, records:1} });
+                if value.get("type").and_then(Value::as_str) != Some("assistant") {
+                    continue;
+                }
+                let Some(message) = value.get("message") else {
+                    continue;
+                };
+                let Some(u) = message.get("usage") else {
+                    continue;
+                };
+                if let Some(id) = message
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .or_else(|| value.get("uuid").and_then(Value::as_str))
+                {
+                    if !seen.insert(id.to_owned()) {
+                        continue;
+                    }
+                }
+                let Some(t) = record_time(&value, &value) else {
+                    continue;
+                };
+                if t < from || t >= to {
+                    continue;
+                }
+                result.push(UsageRecord {
+                    model: model_name(message),
+                    usage: Usage {
+                        input: number(u, "input_tokens"),
+                        output: number(u, "output_tokens"),
+                        cache_read: number(u, "cache_read_input_tokens"),
+                        cache_write: number(u, "cache_creation_input_tokens"),
+                        reasoning: 0,
+                        cost_usd: None,
+                        records: 1,
+                    },
+                });
             }
             UsageLog::CodexRollout => {
-                if value.get("type").and_then(Value::as_str) == Some("turn_context") { current_model = value.get("payload").and_then(model_name).or(current_model); continue }
-                if value.get("type").and_then(Value::as_str) != Some("event_msg") { continue }
-                let Some(payload) = value.get("payload") else { continue };
-                if payload.get("type").and_then(Value::as_str) != Some("token_count") { continue }
-                let Some(current) = payload.get("info").and_then(CodexTokens::of) else { continue };
-                let delta = current.difference(previous); previous = current;
-                let Some(t) = record_time(&value, &value) else { continue };
-                if t < from || t >= to { continue }
-                result.push(UsageRecord { model:model_name(payload).or_else(||current_model.clone()), usage:Usage {input:delta.input_tokens-delta.cached_input_tokens, output:delta.output_tokens, cache_read:delta.cached_input_tokens, cache_write:delta.cache_write_input_tokens, reasoning:delta.reasoning_output_tokens, cost_usd:None, records:1} });
+                if value.get("type").and_then(Value::as_str) == Some("turn_context") {
+                    current_model = value.get("payload").and_then(model_name).or(current_model);
+                    continue;
+                }
+                if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+                    continue;
+                }
+                let Some(payload) = value.get("payload") else {
+                    continue;
+                };
+                if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+                    continue;
+                }
+                let Some(current) = payload.get("info").and_then(CodexTokens::of) else {
+                    continue;
+                };
+                let delta = current.difference(previous);
+                previous = current;
+                let Some(t) = record_time(&value, &value) else {
+                    continue;
+                };
+                if t < from || t >= to {
+                    continue;
+                }
+                result.push(UsageRecord {
+                    model: model_name(payload).or_else(|| current_model.clone()),
+                    usage: Usage {
+                        input: delta.input_tokens - delta.cached_input_tokens,
+                        output: delta.output_tokens,
+                        cache_read: delta.cached_input_tokens,
+                        cache_write: delta.cache_write_input_tokens,
+                        reasoning: delta.reasoning_output_tokens,
+                        cost_usd: None,
+                        records: 1,
+                    },
+                });
             }
             UsageLog::OpencodeDb => unreachable!(),
         }
@@ -825,18 +992,35 @@ pub fn usage_records_in(log: UsageLog, session: &str, from: Ts, to: Ts, home: &P
 }
 
 fn model_name(value: &Value) -> Option<String> {
-    let model = value.get("model").and_then(Value::as_str).or_else(|| value.get("modelID").and_then(Value::as_str))?;
-    let provider = value.get("provider").and_then(Value::as_str).or_else(||value.get("providerID").and_then(Value::as_str));
-    Some(match provider { Some(p) if !model.contains('/') => format!("{p}/{model}"), _ => model.to_owned() })
+    let model = value
+        .get("model")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("modelID").and_then(Value::as_str))?;
+    let provider = value
+        .get("provider")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("providerID").and_then(Value::as_str));
+    Some(match provider {
+        Some(p) if !model.contains('/') => format!("{p}/{model}"),
+        _ => model.to_owned(),
+    })
 }
 
 /// Prices in USD per million tokens for one model.
 #[derive(Debug, Clone, Copy)]
-pub struct Price { pub input: f64, pub output: f64, pub cache_read: f64, pub cache_write: f64 }
+pub struct Price {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
 
 /// Aggregate tokens and their complete cost for a round window.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RoundUsage { pub usage: Usage, pub cost_source: &'static str }
+pub struct RoundUsage {
+    pub usage: Usage,
+    pub cost_source: &'static str,
+}
 
 /// Count a round without persistence; suitable for live board and report reads.
 /// A session whose log cannot be read is skipped: pi may open a session and
@@ -844,43 +1028,132 @@ pub struct RoundUsage { pub usage: Usage, pub cost_source: &'static str }
 /// round. The token count is unknown only when no session was readable at all.
 /// A missing price makes the complete cost unknown while preserving the token
 /// totals.
-pub fn round_usage(log: UsageLog, sessions: &[String], from: Ts, to: Ts, default_model: Option<&str>, prices: &std::collections::BTreeMap<String, Price>) -> Option<RoundUsage> {
-    if sessions.is_empty() { return None }
+pub fn round_usage(
+    log: UsageLog,
+    sessions: &[String],
+    from: Ts,
+    to: Ts,
+    default_model: Option<&str>,
+    prices: &std::collections::BTreeMap<String, Price>,
+) -> Option<RoundUsage> {
+    if sessions.is_empty() {
+        return None;
+    }
     let mut seen = HashSet::new();
     let mut readable = 0usize;
-    let mut total = Usage {input:0,output:0,cache_read:0,cache_write:0,reasoning:0,cost_usd:None,records:0};
+    let mut total = Usage {
+        input: 0,
+        output: 0,
+        cache_read: 0,
+        cache_write: 0,
+        reasoning: 0,
+        cost_usd: None,
+        records: 0,
+    };
     let (mut cost, mut any_cost, mut known, mut priced) = (0.0, false, true, false);
     for session in sessions {
-        if !seen.insert(session) { continue }
-        let Some(u) = usage(log, session, from, to) else { continue };
-        let Some(records) = usage_records(log, session, from, to) else { continue };
+        if !seen.insert(session) {
+            continue;
+        }
+        let Some(u) = usage(log, session, from, to) else {
+            continue;
+        };
+        let Some(records) = usage_records(log, session, from, to) else {
+            continue;
+        };
         readable += 1;
-        total.input += u.input; total.output += u.output; total.cache_read += u.cache_read; total.cache_write += u.cache_write; total.reasoning += u.reasoning; total.records += u.records;
-        let mut check = Usage {input:0,output:0,cache_read:0,cache_write:0,reasoning:0,cost_usd:None,records:0};
+        total.input += u.input;
+        total.output += u.output;
+        total.cache_read += u.cache_read;
+        total.cache_write += u.cache_write;
+        total.reasoning += u.reasoning;
+        total.records += u.records;
+        let mut check = Usage {
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+            cost_usd: None,
+            records: 0,
+        };
         for record in records {
             let u = record.usage;
-            check.input += u.input; check.output += u.output; check.cache_read += u.cache_read; check.cache_write += u.cache_write; check.reasoning += u.reasoning; check.records += u.records;
-            if let Some(c) = u.cost_usd { check.cost_usd = Some(check.cost_usd.unwrap_or(0.0) + c); }
-            if let Some(amount) = u.cost_usd { cost += amount; any_cost = true; continue }
-            let model = record.model.as_deref().map(|model| {
-                default_model.filter(|full| !model.contains('/') && full.rsplit_once('/').is_some_and(|(_, id)| id == model)).unwrap_or(model)
-            }).or(default_model);
-            let price = model.and_then(|m| prices.get(m).or_else(|| {
-                if m.contains('/') { return None }
-                let mut candidates = prices.iter().filter(|(key, _)| key.rsplit_once('/').is_some_and(|(_, id)| id == m));
-                let (_, price) = candidates.next()?;
-                if candidates.next().is_some() { None } else { Some(price) }
-            }));
+            check.input += u.input;
+            check.output += u.output;
+            check.cache_read += u.cache_read;
+            check.cache_write += u.cache_write;
+            check.reasoning += u.reasoning;
+            check.records += u.records;
+            if let Some(c) = u.cost_usd {
+                check.cost_usd = Some(check.cost_usd.unwrap_or(0.0) + c);
+            }
+            if let Some(amount) = u.cost_usd {
+                cost += amount;
+                any_cost = true;
+                continue;
+            }
+            let model = record
+                .model
+                .as_deref()
+                .map(|model| {
+                    default_model
+                        .filter(|full| {
+                            !model.contains('/')
+                                && full.rsplit_once('/').is_some_and(|(_, id)| id == model)
+                        })
+                        .unwrap_or(model)
+                })
+                .or(default_model);
+            let price = model.and_then(|m| {
+                prices.get(m).or_else(|| {
+                    if m.contains('/') {
+                        return None;
+                    }
+                    let mut candidates = prices
+                        .iter()
+                        .filter(|(key, _)| key.rsplit_once('/').is_some_and(|(_, id)| id == m));
+                    let (_, price) = candidates.next()?;
+                    if candidates.next().is_some() {
+                        None
+                    } else {
+                        Some(price)
+                    }
+                })
+            });
             if let Some(p) = price {
-                cost += (u.input as f64*p.input + u.output as f64*p.output + u.cache_read as f64*p.cache_read + u.cache_write as f64*p.cache_write) / 1_000_000.0;
-                any_cost = true; priced = true;
-            } else { known = false; }
+                cost += (u.input as f64 * p.input
+                    + u.output as f64 * p.output
+                    + u.cache_read as f64 * p.cache_read
+                    + u.cache_write as f64 * p.cache_write)
+                    / 1_000_000.0;
+                any_cost = true;
+                priced = true;
+            } else {
+                known = false;
+            }
         }
         // A live log may change between the total and record reads. Retry
         // later rather than combining tokens and cost from different snapshots.
-        if check != u { return None }
+        if check != u {
+            return None;
+        }
     }
-    if readable == 0 { return None }
-    let cost_source = if any_cost && known { total.cost_usd = Some(cost); if priced { "prices" } else { "agent" } } else { "none" };
-    Some(RoundUsage {usage:total,cost_source})
+    if readable == 0 {
+        return None;
+    }
+    let cost_source = if any_cost && known {
+        total.cost_usd = Some(cost);
+        if priced {
+            "prices"
+        } else {
+            "agent"
+        }
+    } else {
+        "none"
+    };
+    Some(RoundUsage {
+        usage: total,
+        cost_source,
+    })
 }

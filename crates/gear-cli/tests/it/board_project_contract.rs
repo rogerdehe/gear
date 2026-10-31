@@ -40,7 +40,11 @@ fn board(dir: &Path, db: &Path, args: &[&str]) -> Output {
 
 /// The project ids a `gear board --json` printed, in order.
 fn projects_of(out: &Output) -> Vec<String> {
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     let doc: serde_json::Value = serde_json::from_str(&text).expect("the board as JSON");
     doc["projects"]

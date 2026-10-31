@@ -6,8 +6,8 @@
 //!
 //! Do not edit these tests to make them pass; report back if one looks wrong.
 
-use gear_app::{home, mail, Env};
 use gear_app::identity::Fingerprint;
+use gear_app::{home, mail, Env};
 use gear_engine::{tick, EngineCfg};
 use gear_herdr::{fake::FakeHerdr, AgentStatus};
 use gear_model::{ErrorCode, GearCtx, MsgKind, MsgState, OpKind, OpState, SeatRole};
@@ -28,7 +28,15 @@ fn world() -> World {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "codex",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
             Ok(())
         })
@@ -38,7 +46,12 @@ fn world() -> World {
     // prompt.
     herdr.add_agent_named(CAP_PANE, "codex", AgentStatus::Idle, "p-captain");
     herdr.add_agent_named(LANE_PANE, "opencode", AgentStatus::Idle, "p-heat");
-    let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
+    let mut cfg = EngineCfg {
+        tick_s: 4,
+        cooldown_s: 30,
+        doorbell_check_budget: 3,
+        ..Default::default()
+    };
     // Seeded seats use profile name == kind ("codex", "opencode").
     for kind in ["codex", "opencode"] {
         cfg.profiles.insert(kind.to_string(), test_profile(kind));
@@ -74,14 +87,22 @@ fn test_profile(kind: &str) -> gear_herdr::Profile {
 
 fn env(seat: &str, gen: i64, pane: &str) -> Env {
     Env {
-        ctx: Some(GearCtx { project: "p".into(), seat: seat.into(), generation: gen }),
+        ctx: Some(GearCtx {
+            project: "p".into(),
+            seat: seat.into(),
+            generation: gen,
+        }),
         pane_id: Some(pane.into()),
         admin: false,
     }
 }
 
 fn fp(pane: &str, kind: &str) -> Fingerprint {
-    Fingerprint { pane_id: pane.into(), kind: Some(kind.into()), session_ref: None }
+    Fingerprint {
+        pane_id: pane.into(),
+        kind: Some(kind.into()),
+        session_ref: None,
+    }
 }
 
 fn ask(w: &mut World, body: &str, rid: &str, now: i64) -> mail::SendResult {
@@ -105,11 +126,24 @@ fn ask(w: &mut World, body: &str, rid: &str, now: i64) -> mail::SendResult {
         friction: None,
         request_id: rid.into(),
     };
-    mail::send(&mut w.store, &env("heat", 1, LANE_PANE), Some(&fp(LANE_PANE, "opencode")), &args, now).unwrap()
+    mail::send(
+        &mut w.store,
+        &env("heat", 1, LANE_PANE),
+        Some(&fp(LANE_PANE, "opencode")),
+        &args,
+        now,
+    )
+    .unwrap()
 }
 
 fn show_home(w: &mut World, seat: &str, pane: &str, kind: &str, now: i64) -> String {
-    let h = home::build(&mut w.store, &env(seat, 1, pane), Some(&fp(pane, kind)), now).unwrap();
+    let h = home::build(
+        &mut w.store,
+        &env(seat, 1, pane),
+        Some(&fp(pane, kind)),
+        now,
+    )
+    .unwrap();
     home::record_view(&mut w.store, &h.view).unwrap();
     h.text
 }
@@ -123,15 +157,26 @@ fn full_messaging_loop() {
     assert_eq!(sent.recipient, "p:captain");
     assert_eq!(sent.msg_id, "M-1");
     assert!(!sent.replayed);
-    let m1 = w.store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+    let m1 = w
+        .store
+        .read(|tx| tx.get_message("p", "M-1"))
+        .unwrap()
+        .unwrap();
     assert_eq!(m1.state, MsgState::Open);
 
     // 2. engine rings the idle captain once.
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
     let rings = w.herdr.prompts_to(CAP_PANE);
     assert_eq!(rings.len(), 1);
-    assert!(rings[0].contains("gear"), "doorbell points to `gear`: {}", rings[0]);
-    assert!(!rings[0].contains("v2 schema"), "doorbell carries no message body");
+    assert!(
+        rings[0].contains("gear"),
+        "doorbell points to `gear`: {}",
+        rings[0]
+    );
+    assert!(
+        !rings[0].contains("v2 schema"),
+        "doorbell carries no message body"
+    );
 
     // 3. no evidence yet: slot held, no resend even after cooldown.
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 60).unwrap();
@@ -145,11 +190,19 @@ fn full_messaging_loop() {
     // 5. engine confirms the doorbell from the view.
     let rep = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 65).unwrap();
     assert_eq!(rep.confirmed.len(), 1);
-    let ring_op = w.store.read(|tx| tx.last_op("p:captain", OpKind::Doorbell)).unwrap().unwrap();
+    let ring_op = w
+        .store
+        .read(|tx| tx.last_op("p:captain", OpKind::Doorbell))
+        .unwrap()
+        .unwrap();
     assert_eq!(ring_op.state, OpState::Confirmed);
 
     // 6. reading home did not resolve anything.
-    let m1 = w.store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+    let m1 = w
+        .store
+        .read(|tx| tx.get_message("p", "M-1"))
+        .unwrap()
+        .unwrap();
     assert_eq!(m1.state, MsgState::Open);
 
     // 7. captain resolves M-1; reply lands in the worker inbox as Info.
@@ -171,7 +224,11 @@ fn full_messaging_loop() {
     .unwrap();
     assert_eq!(r.handled, vec![("M-1".to_string(), "resolved".to_string())]);
     assert_eq!(r.replies.len(), 1);
-    let reply = w.store.read(|tx| tx.get_message("p", &r.replies[0])).unwrap().unwrap();
+    let reply = w
+        .store
+        .read(|tx| tx.get_message("p", &r.replies[0]))
+        .unwrap()
+        .unwrap();
     assert_eq!(reply.recipient, "p:heat");
     assert_eq!(reply.kind, MsgKind::Reply);
     assert_eq!(reply.state, MsgState::Info);
@@ -187,7 +244,11 @@ fn full_messaging_loop() {
     assert!(text.contains("Use v2"));
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 85).unwrap();
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 200).unwrap();
-    assert_eq!(w.herdr.prompts_to(LANE_PANE).len(), 1, "shown Info reply needs no more doorbells");
+    assert_eq!(
+        w.herdr.prompts_to(LANE_PANE).len(),
+        1,
+        "shown Info reply needs no more doorbells"
+    );
 }
 
 #[test]
@@ -197,7 +258,11 @@ fn send_is_replayed_for_same_request_id() {
     let b = ask(&mut w, "x", "same", T0 + 1);
     assert_eq!(a.msg_id, b.msg_id);
     assert!(b.replayed);
-    assert!(w.store.read(|tx| tx.get_message("p", "M-2")).unwrap().is_none());
+    assert!(w
+        .store
+        .read(|tx| tx.get_message("p", "M-2"))
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -223,19 +288,45 @@ fn stale_generation_and_wrong_pane_are_rejected() {
         friction: None,
         request_id: "r".into(),
     };
-    let e = mail::send(&mut w.store, &env("heat", 2, LANE_PANE), Some(&fp(LANE_PANE, "opencode")), &args, T0)
-        .unwrap_err();
+    let e = mail::send(
+        &mut w.store,
+        &env("heat", 2, LANE_PANE),
+        Some(&fp(LANE_PANE, "opencode")),
+        &args,
+        T0,
+    )
+    .unwrap_err();
     assert_eq!(e.code, ErrorCode::StaleGeneration);
 
-    let e = mail::send(&mut w.store, &env("heat", 1, "w9:p9"), Some(&fp("w9:p9", "opencode")), &args, T0)
-        .unwrap_err();
+    let e = mail::send(
+        &mut w.store,
+        &env("heat", 1, "w9:p9"),
+        Some(&fp("w9:p9", "opencode")),
+        &args,
+        T0,
+    )
+    .unwrap_err();
     assert_eq!(e.code, ErrorCode::NotRegistered);
 
-    let e = mail::send(&mut w.store, &env("heat", 1, LANE_PANE), Some(&fp(LANE_PANE, "claude")), &args, T0)
-        .unwrap_err();
-    assert_eq!(e.code, ErrorCode::NotRegistered, "different agent kind in the pane");
+    let e = mail::send(
+        &mut w.store,
+        &env("heat", 1, LANE_PANE),
+        Some(&fp(LANE_PANE, "claude")),
+        &args,
+        T0,
+    )
+    .unwrap_err();
+    assert_eq!(
+        e.code,
+        ErrorCode::NotRegistered,
+        "different agent kind in the pane"
+    );
 
-    let no_ctx = Env { ctx: None, pane_id: Some(LANE_PANE.into()), admin: false };
+    let no_ctx = Env {
+        ctx: None,
+        pane_id: Some(LANE_PANE.into()),
+        admin: false,
+    };
     let e = mail::send(&mut w.store, &no_ctx, None, &args, T0).unwrap_err();
     assert_eq!(e.code, ErrorCode::NotRegistered);
 }
@@ -277,7 +368,11 @@ fn busy_or_unobservable_captain_is_not_rung() {
     w.herdr.set_status(CAP_PANE, AgentStatus::Idle);
     w.herdr.set_screen(CAP_PANE, "esc interrupt");
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
-    assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 1, "Herdr's state decides");
+    assert_eq!(
+        w.herdr.prompts_to(CAP_PANE).len(),
+        1,
+        "Herdr's state decides"
+    );
 
     w.herdr.set_screen(CAP_PANE, "");
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 15).unwrap();
@@ -288,7 +383,10 @@ fn busy_or_unobservable_captain_is_not_rung() {
     w.herdr.observe_fails = true;
     let rep = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
     assert_eq!(rep.observe_failed, vec!["p".to_string()]);
-    assert!(w.herdr.calls.is_empty(), "no side effects when observation failed");
+    assert!(
+        w.herdr.calls.is_empty(),
+        "no side effects when observation failed"
+    );
 }
 
 #[test]
@@ -302,7 +400,11 @@ fn uncertain_doorbell_is_never_resent() {
     for i in 1..=5 {
         tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5 + i * 60).unwrap();
     }
-    assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 1, "unknown op holds the slot; no resend");
+    assert_eq!(
+        w.herdr.prompts_to(CAP_PANE).len(),
+        1,
+        "unknown op holds the slot; no resend"
+    );
 }
 
 #[test]
@@ -326,8 +428,16 @@ fn reply_only_closes_listed_ids() {
         T0 + 2,
     )
     .unwrap();
-    let m1 = w.store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
-    let m2 = w.store.read(|tx| tx.get_message("p", "M-2")).unwrap().unwrap();
+    let m1 = w
+        .store
+        .read(|tx| tx.get_message("p", "M-1"))
+        .unwrap()
+        .unwrap();
+    let m2 = w
+        .store
+        .read(|tx| tx.get_message("p", "M-2"))
+        .unwrap()
+        .unwrap();
     assert_eq!(m1.state, MsgState::Open);
     assert_eq!(m2.state, MsgState::Resolved);
 }
