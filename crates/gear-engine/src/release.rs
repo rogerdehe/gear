@@ -450,10 +450,214 @@ pub fn release_finished_reviews(
         }
     }
 
-    // The Standby reviewers beyond W are released (§3.6).
-    let idle = release_idle_standby(store, herdr, project, now)?;
-    report.released.extend(idle.released);
-    report.failed.extend(idle.failed);
+    // T-467: a raise owns the sweep until its end condition holds and the
+    // count is back at the configured one. Without a raise the ordinary
+    // sweep of §3.6 runs, now with the role's idle time.
+    match settle_review_raise(store, herdr, project, now)? {
+        RaiseStep::None => {
+            let idle = release_idle_standby(store, herdr, project, now)?;
+            report.released.extend(idle.released);
+            report.failed.extend(idle.failed);
+        }
+        // The raise returned the count this tick: the ordinary sweep resumes
+        // on the next tick, so the count stays at the configured one now.
+        RaiseStep::Active | RaiseStep::Cleared => {}
+    }
+    Ok(report)
+}
+
+/// The raise of the reviewer count a plan line applied (T-467): the count
+/// goes up to `to` while `until` does not hold, then the engine returns it to
+/// the configured count by itself and records both changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReviewRaise {
+    pub from: u32,
+    pub to: u32,
+    pub until: String,
+    pub reason: String,
+    pub at: Ts,
+}
+
+/// The meta key the plan apply writes the raise under (T-467).
+fn raise_key(project: &str) -> String {
+    format!("engine.review_raise.{project}")
+}
+
+/// The raise in effect for `project`, if one was applied and not returned.
+pub(crate) fn review_raise(store: &mut Store, project: &str) -> GearResult<Option<ReviewRaise>> {
+    let Some(raw) = store.read(|tx| tx.get_meta(&raise_key(project)))? else {
+        return Ok(None);
+    };
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(None);
+    };
+    let Some(to) = value["to"].as_u64() else {
+        return Ok(None);
+    };
+    Ok(Some(ReviewRaise {
+        from: value["from"].as_u64().unwrap_or(0) as u32,
+        to: to as u32,
+        until: value["until"].as_str().unwrap_or_default().to_string(),
+        reason: value["reason"].as_str().unwrap_or_default().to_string(),
+        at: value["at"].as_i64().unwrap_or(0),
+    }))
+}
+
+/// The reviewer count in effect (T-467): the raised count while a raise is
+/// active, else the configured one.
+pub(crate) fn effective_temps(
+    store: &mut Store,
+    project: &str,
+    configured: u32,
+) -> GearResult<u32> {
+    Ok(review_raise(store, project)?
+        .map(|raise| raise.to)
+        .unwrap_or(configured))
+}
+
+/// What the raise step of this tick did (T-467).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RaiseStep {
+    /// No raise in effect: the ordinary sweep runs.
+    None,
+    /// A raise is in effect and still owns the sweep (its condition does not
+    /// hold yet, or running reviews keep the count above the configured one).
+    Active,
+    /// The raise ended this tick: the count is back at the configured one.
+    Cleared,
+}
+
+/// Return an ended raise to the configured count (T-467): release the idle
+/// extra seats, never a running review, and record the return when the count
+/// is back. While a raise is in effect the ordinary sweep does not run.
+fn settle_review_raise(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    now: Ts,
+) -> GearResult<RaiseStep> {
+    let Some(raise) = review_raise(store, project)? else {
+        return Ok(RaiseStep::None);
+    };
+    if raise.until != "no-hand-ins-wait" {
+        return Ok(RaiseStep::Active);
+    }
+    if hand_ins_waiting(store, project)? > 0 {
+        return Ok(RaiseStep::Active);
+    }
+    let config = gear_app::config::latest(store, project)?;
+    let configured = config.quota.temps;
+    let idle_min = i64::from(config.quota.reviewer_release_idle_min) * 60;
+    let _ = release_standby_above(store, herdr, project, configured as usize, idle_min, now)?;
+    if temp_seats_in_use(store, herdr, project)? > configured as usize {
+        return Ok(RaiseStep::Active);
+    }
+    store.write(|tx| {
+        tx.set_meta(&raise_key(project), "")?;
+        let voyage = gear_app::plan::current_voyage(tx, project)?;
+        let version = tx.plan_version(project)?;
+        let what = format!(
+            "reviewers back to {configured}: the raise {}->{} ended (no hand-in waits)",
+            raise.from, raise.to
+        );
+        let event = what.clone();
+        let text = format!("staff|{event}|{what}|{}", raise.reason);
+        tx.insert_decision_if_new(&gear_store::NewDecision {
+            project: project.to_string(),
+            key: gear_app::decision::key_of(&text),
+            voyage,
+            at: gear_app::decision::apply_time(now),
+            kind: "staff".to_string(),
+            what,
+            why: Some(raise.reason),
+            alt: None,
+            changes: None,
+            star: false,
+            source: "gear".to_string(),
+            line: None,
+            plan_version: Some(version),
+        })?;
+        Ok(())
+    })?;
+    Ok(RaiseStep::Cleared)
+}
+
+/// The reviewer seats that hold or use a temp slot now: an occupying state,
+/// or a parked seat whose agent still runs (the same count `has_free_slot`
+/// uses in review.rs).
+fn temp_seats_in_use(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+) -> GearResult<usize> {
+    let seats = store.read(|tx| tx.seats_of_project(project))?;
+    let mut count = 0;
+    for seat in seats {
+        if seat.role != SeatRole::Temp {
+            continue;
+        }
+        if crate::review::occupies_quota(seat.state) {
+            count += 1;
+        } else if seat.state == SeatState::Unknown
+            && crate::review::shows_an_agent(store, herdr, &seat)?
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// The standby reviewers with no job, oldest idle first (T-391: a seat with a
+/// pending review has a job and is not idle).
+fn idle_standby(store: &mut Store, project: &str) -> GearResult<Vec<SeatRow>> {
+    let mut idle = Vec::new();
+    for seat in store.read(|tx| tx.seats_of_project(project))? {
+        if seat.role != SeatRole::Temp || seat.state != SeatState::Standby {
+            continue;
+        }
+        let pending = store
+            .read(|tx| tx.get_meta(&format!("engine.review_pending.{}", seat.id)))?
+            .filter(|task| !task.is_empty());
+        if pending.is_some() {
+            continue;
+        }
+        idle.push(seat);
+    }
+    idle.sort_by_key(|seat| seat.state_since);
+    Ok(idle)
+}
+
+/// Release the idle standby reviewers above `floor`, oldest first, never one
+/// that runs a review (T-467). A seat that became idle this tick waits for
+/// the next one.
+fn release_standby_above(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    floor: usize,
+    idle_min: i64,
+    now: Ts,
+) -> GearResult<ReleaseReport> {
+    let mut report = ReleaseReport::default();
+    let in_use = temp_seats_in_use(store, herdr, project)?;
+    let excess = in_use.saturating_sub(floor);
+    if excess == 0 {
+        return Ok(report);
+    }
+    let waiting: Vec<SeatRow> = idle_standby(store, project)?
+        .into_iter()
+        .filter(|seat| seat.state_since < now && now - seat.state_since >= idle_min)
+        .collect();
+    for seat in waiting.into_iter().take(excess) {
+        match release_one(store, herdr, project, &seat, None, now, "idle-standby") {
+            Ok(true) => report.released.push(seat.id.clone()),
+            Ok(false) => {}
+            Err(_) => report.failed.push(seat.id.clone()),
+        }
+    }
     Ok(report)
 }
 
@@ -488,24 +692,7 @@ pub fn release_idle_standby(
     now: Ts,
 ) -> GearResult<ReleaseReport> {
     let mut report = ReleaseReport::default();
-    let mut standby: Vec<SeatRow> = store.read(|tx| {
-        let mut idle = Vec::new();
-        for seat in tx.seats_of_project(project)? {
-            if seat.role != SeatRole::Temp || seat.state != SeatState::Standby {
-                continue;
-            }
-            // It was started for a review that is not handed over yet: it
-            // has a job and waits for it, it is not idle.
-            let pending = tx
-                .get_meta(&format!("engine.review_pending.{}", seat.id))?
-                .filter(|task| !task.is_empty());
-            if pending.is_some() {
-                continue;
-            }
-            idle.push(seat);
-        }
-        Ok(idle)
-    })?;
+    let standby = idle_standby(store, project)?;
     if standby.is_empty() {
         return Ok(report);
     }
@@ -514,17 +701,15 @@ pub fn release_idle_standby(
     if hand_ins_waiting(store, project)? > 0 {
         return Ok(report);
     }
-    // The idle longest goes first: the seat that has been in Standby since
-    // the longest.
-    standby.sort_by_key(|seat| seat.state_since);
+    // T-467: a seat is released only after its role's idle time; a seat that
+    // just got its verdict stays for the next review (M-2603).
+    let config = gear_app::config::latest(store, project)?;
+    let idle_min = i64::from(config.quota.reviewer_release_idle_min) * 60;
     let working = working_lanes(store, project)?;
     let excess = standby.len().saturating_sub(working.max(0) as usize);
-    // The sweep touches only the seats that were already Standby before this
-    // tick: a seat that just got its verdict waits for the next review, and
-    // it stays until the next tick (the captain's decision of M-2603).
     let waiting: Vec<SeatRow> = standby
         .into_iter()
-        .filter(|seat| seat.state_since < now)
+        .filter(|seat| seat.state_since < now && now - seat.state_since >= idle_min)
         .collect();
     for seat in waiting.into_iter().take(excess) {
         // A standby reviewer without a pending review has no job: it is idle,
@@ -546,7 +731,7 @@ pub fn release_idle_standby(
 /// so a reviewer that is only reserved keeps the sweep off (the direction check
 /// of T-424). A lane that is "handed in, waits for a reviewer" is not counted
 /// by [`working_lanes`], so the sweep reads this count too.
-fn hand_ins_waiting(store: &mut Store, project: &str) -> GearResult<usize> {
+pub(crate) fn hand_ins_waiting(store: &mut Store, project: &str) -> GearResult<usize> {
     store.read(|tx| {
         let seats = tx.seats_of_project(project)?;
         let mut waiting = 0;
@@ -1340,6 +1525,9 @@ repo = "/repo"
 [quota]
 lanes = 1
 temps = 2
+# The release tests below use the old immediate release; the idle-time test
+# sets its own value.
+reviewer_release_idle_min = 0
 
 [captain]
 pane = "w9:p1"
@@ -3862,6 +4050,178 @@ profile = "codex"
             log,
             vec!["release p:r-1 gen=1 from=active reason=review done caller=job-gone".to_string()],
             "{log:?}"
+        );
+    }
+
+    /// T-467: a seat stays warm for its role's idle time; the sweep does not
+    /// release it at the moment the lanes stop working.
+    #[test]
+    fn an_idle_reviewer_waits_its_release_idle_min() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = project.config_toml.replace(
+                    "reviewer_release_idle_min = 0",
+                    "reviewer_release_idle_min = 30",
+                );
+                tx.update_project(&project)
+            })
+            .unwrap();
+        store
+            .write(|tx| tx.set_seat_state("p:r-1", SeatState::Standby, Some("review done"), T0))
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat("p:r-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            SeatState::Standby,
+            "inside the idle time the seat stays warm"
+        );
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 30 * 60 + 1).unwrap();
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat("p:r-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            SeatState::Releasing,
+            "after its idle time the seat goes"
+        );
+    }
+
+    /// T-467: a raise the user confirmed returns to the configured count by
+    /// itself when no hand-in waits; only idle extra seats go, and a running
+    /// review is not interrupted.
+    #[test]
+    fn a_raise_returns_to_the_configured_count_without_interrupting_a_review() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = project
+                    .config_toml
+                    .replace("temps = 2", "temps = 4")
+                    .replace(
+                        "reviewer_release_idle_min = 0",
+                        "reviewer_release_idle_min = 1",
+                    );
+                tx.update_project(&project)?;
+                // The running review r-1 holds: T-1 has a handed-in attempt
+                // and no verdict.
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: Some("codex".into()),
+                    session_action: None,
+                    sent_at: Some(T0),
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Submitted,
+                    candidate: Some("abc1234".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })?;
+                // Seven more seats: r-2..r-8, all idle standby.
+                for i in 2..=8 {
+                    let name = format!("r-{i}");
+                    let pane = format!("w2:p{}", i + 1);
+                    testing::seed_active_seat(tx, "p", &name, SeatRole::Temp, &pane, "codex", T0)?;
+                    tx.set_seat_state(
+                        &format!("p:{name}"),
+                        SeatState::Standby,
+                        Some("review done"),
+                        T0,
+                    )?;
+                }
+                // The raise the plan applied: 4 -> 8 until no hand-in waits.
+                tx.set_meta(
+                    "engine.review_raise.p",
+                    &serde_json::json!({
+                        "from": 4, "to": 8, "until": "no-hand-ins-wait",
+                        "reason": "clear the review backlog", "at": T0, "plan_version": 1
+                    })
+                    .to_string(),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        for i in 2..=8 {
+            herdr.add_agent(
+                &format!("w2:p{}", i + 1),
+                "codex",
+                gear_herdr::AgentStatus::Idle,
+            );
+        }
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 61).unwrap();
+
+        let seats = store.read(|tx| tx.seats_of_project("p")).unwrap();
+        let released = seats
+            .iter()
+            .filter(|seat| seat.role == SeatRole::Temp && seat.state == SeatState::Releasing)
+            .count();
+        let standby = seats
+            .iter()
+            .filter(|seat| seat.role == SeatRole::Temp && seat.state == SeatState::Standby)
+            .count();
+        assert_eq!(released, 4, "the four extra seats go: {seats:?}");
+        assert_eq!(standby, 3, "three idle seats stay with the running one");
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat("p:r-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            SeatState::Active,
+            "the running review is not interrupted"
+        );
+        // The four seats are on their way out; the next tick frees their
+        // slots, and only then is the count back at the configured one.
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 62).unwrap();
+        let seats = store.read(|tx| tx.seats_of_project("p")).unwrap();
+        eprintln!(
+            "after second tick: {:?}",
+            seats
+                .iter()
+                .map(|s| (
+                    s.name.clone(),
+                    s.state.as_str(),
+                    s.state_reason.clone(),
+                    s.task_id.clone()
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta("engine.review_raise.p"))
+                .unwrap()
+                .as_deref(),
+            Some(""),
+            "the raise ended"
+        );
+        let decisions = store.read(|tx| tx.decisions_of("p", "")).unwrap();
+        assert!(
+            decisions
+                .iter()
+                .any(|decision| decision.what.contains("reviewers back to 4")),
+            "the return is recorded: {decisions:?}"
         );
     }
 }

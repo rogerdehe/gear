@@ -1003,6 +1003,58 @@ fn apply_queue(
             )?;
             continue;
         }
+        if let StaffItem::Raise {
+            role,
+            to,
+            until,
+            reason,
+            line,
+        } = item
+        {
+            // T-467: the user-confirmed raise of a count for a backlog. It
+            // lives in the store, not in the config, and the engine returns
+            // the count by itself when the end condition holds.
+            let row = tx.get_project(project)?.ok_or_else(|| {
+                GearError::new(ErrorCode::NoTarget, format!("no project {project}"))
+            })?;
+            let config = crate::config::parse(&row.config_toml).map_err(|e| {
+                bad(
+                    *line,
+                    format!("the project config cannot be read: {}", e.detail),
+                )
+            })?;
+            let from = config.quota.temps;
+            if *to <= from {
+                return Err(bad(
+                    *line,
+                    format!("`raise {role}` must be above the configured count {from} (got {to})"),
+                ));
+            }
+            let key = format!("engine.review_raise.{project}");
+            let value = serde_json::json!({
+                "from": from,
+                "to": to,
+                "until": until,
+                "reason": reason,
+                "at": now,
+                "plan_version": applied_version,
+            });
+            tx.set_meta(&key, &value.to_string())?;
+            let message = format!("raise {role} {from}->{to} until={until}: {reason}");
+            staffed.push(message);
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                Some(reason.clone()),
+                &staff_text(item),
+                now,
+            )?;
+            continue;
+        }
         let (lane, verb, target, reason) = match item {
             StaffItem::Park {
                 lane,
@@ -1039,6 +1091,7 @@ fn apply_queue(
             StaffItem::Release { .. } => unreachable!("release is applied above"),
             StaffItem::Rebind { .. } => unreachable!("rebind is applied above"),
             StaffItem::RebindCancel { .. } => unreachable!("rebind is applied above"),
+            StaffItem::Raise { .. } => unreachable!("raise is applied above"),
         };
         let seat_id = format!("{project}:{lane}");
         let seat = tx.get_seat(&seat_id)?.ok_or_else(|| {
@@ -1638,7 +1691,8 @@ pub fn staff_line(item: &StaffItem) -> usize {
         | StaffItem::Release { line, .. }
         | StaffItem::Remerge { line, .. }
         | StaffItem::Rebind { line, .. }
-        | StaffItem::RebindCancel { line, .. } => *line,
+        | StaffItem::RebindCancel { line, .. }
+        | StaffItem::Raise { line, .. } => *line,
     }
 }
 
@@ -4123,6 +4177,13 @@ fn staff_text(item: &StaffItem) -> String {
             lane, repo, owns, ..
         } => format!("rebind {lane} repo={repo} owns=[{}]", owns.join(", ")),
         StaffItem::RebindCancel { lane, .. } => format!("rebind {lane} cancel"),
+        StaffItem::Raise {
+            role,
+            to,
+            until,
+            reason,
+            ..
+        } => format!("raise {role} to={to} until={until} reason={reason}"),
     }
 }
 

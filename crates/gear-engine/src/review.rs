@@ -210,6 +210,13 @@ fn start_hand_in_reviews(
     report: &mut ReviewReport,
     now: Ts,
 ) -> GearResult<()> {
+    // T-467: the reviewer count in effect: a raise the user confirmed, else
+    // the configured `[quota].temps`.
+    let quota = i64::from(crate::release::effective_temps(
+        store,
+        project,
+        config.quota.temps,
+    )?);
     for task in tasks {
         // T-273: a mechanical task is not reviewed. The attempt is settled as
         // a pass in this tick, and the merge gate decides; a task without
@@ -329,24 +336,14 @@ fn start_hand_in_reviews(
                     // room. Otherwise the job waits for a seat instead of
                     // building a cold extra worktree (finding 2 of the T-18
                     // review).
-                    None => {
-                        match seats_free_for_new(store, project, i64::from(config.quota.temps))? {
-                            true => {
-                                create_temp_seat(store, project, &task.task, profile_name, now)?
-                            }
-                            false => {
-                                note_waiting(report, &task.task);
-                                tell_captain(
-                                    store,
-                                    project,
-                                    task,
-                                    "every temp seat is in use",
-                                    now,
-                                )?;
-                                continue;
-                            }
+                    None => match seats_free_for_new(store, project, quota)? {
+                        true => create_temp_seat(store, project, &task.task, profile_name, now)?,
+                        false => {
+                            note_waiting(report, &task.task);
+                            tell_captain(store, project, task, "every temp seat is in use", now)?;
+                            continue;
                         }
-                    }
+                    },
                 },
             },
         };
@@ -368,9 +365,7 @@ fn start_hand_in_reviews(
         //    `[quota].temps`). A `Released` seat used to skip this check, so
         //    several seats recovered by `release_dead_temps` started at once
         //    and passed the quota (F1 of the T-116 review).
-        if !occupies_quota(seat.state)
-            && !has_free_slot(store, herdr, project, i64::from(config.quota.temps))?
-        {
+        if !occupies_quota(seat.state) && !has_free_slot(store, herdr, project, quota)? {
             note_waiting(report, &task.task);
             tell_captain(store, project, task, "every temp seat is in use", now)?;
             continue;
@@ -821,6 +816,12 @@ fn start_direction_checks(
     let Some(temps) = config.temps.as_ref() else {
         return Ok(());
     };
+    // T-467: the same effective count as the hand-in reviews.
+    let quota = i64::from(crate::release::effective_temps(
+        store,
+        project,
+        config.quota.temps,
+    )?);
     for row in store.read(|tx| tx.tasks_of_project(project))? {
         let Some(attempt) = store
             .read(|tx| tx.attempts_of_task(project, &row.id))?
@@ -967,15 +968,13 @@ fn start_direction_checks(
             Some(seat) => seat,
             None => match free_seat(store, herdr, project, &row.id, &kind)? {
                 Some(seat) => take_seat(store, &seat, &row.id, attempt.n, profile_name, now)?,
-                None if seats_free_for_new(store, project, i64::from(config.quota.temps))? => {
+                None if seats_free_for_new(store, project, quota)? => {
                     create_temp_seat(store, project, &row.id, profile_name, now)?
                 }
                 None => continue,
             },
         };
-        if !occupies_quota(seat.state)
-            && !has_free_slot(store, herdr, project, i64::from(config.quota.temps))?
-        {
+        if !occupies_quota(seat.state) && !has_free_slot(store, herdr, project, quota)? {
             continue;
         }
         store.write(|tx| {
@@ -2038,7 +2037,11 @@ fn has_free_slot(
 ///
 /// A pane that cannot be read is not an absence: the seat keeps its slot
 /// (design/08).
-fn shows_an_agent(store: &mut Store, herdr: &mut dyn HerdrAct, seat: &SeatRow) -> GearResult<bool> {
+pub(crate) fn shows_an_agent(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &SeatRow,
+) -> GearResult<bool> {
     let Some(binding) = store.read(|tx| tx.get_binding(&seat.id, seat.generation))? else {
         return Ok(false);
     };
@@ -2052,7 +2055,7 @@ fn shows_an_agent(store: &mut Store, herdr: &mut dyn HerdrAct, seat: &SeatRow) -
 /// The states in which a temp seat occupies the quota (design §3.6): a live
 /// agent (`Active`, `Standby`), one that is starting, and one on its way out
 /// (`Releasing` — its agent is still leaving).
-fn occupies_quota(state: SeatState) -> bool {
+pub(crate) fn occupies_quota(state: SeatState) -> bool {
     matches!(
         state,
         SeatState::Active | SeatState::Standby | SeatState::Starting | SeatState::Releasing
@@ -11506,6 +11509,109 @@ profile = "opencode"
             "T-1",
             "the recorded hand-in comes first"
         );
+    }
+    /// T-467: a raise the plan applied lets the engine start reviewers up to
+    /// the raised count while hand-ins wait.
+    #[test]
+    fn a_raise_starts_reviewers_up_to_the_raised_count() {
+        let config = CONFIG.replace("temps = 1", "temps = 4");
+        let mut store = world(&config);
+        store
+            .write(|tx| {
+                for n in 2..=8 {
+                    let id = format!("T-{n}");
+                    tx.insert_task(&TaskRow {
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
+                        project: "p".into(),
+                        id: id.clone(),
+                        rank: n,
+                        state: TaskState::Verifying,
+                        priority: "must".into(),
+                        lane: Some("heat".into()),
+                        milestone: None,
+                        required: false,
+                        contract_version: 1,
+                        deps: vec![],
+                        followup_of: None,
+                        wait_on: None,
+                        wait_cond: None,
+                        rework_note: None,
+                        estimate_min: None,
+                        issue: None,
+                        updated: T0,
+                    })?;
+                    tx.insert_contract(&ContractRow {
+                        project: "p".into(),
+                        task: id.clone(),
+                        version: 1,
+                        goal: "goal".into(),
+                        accept: "accept".into(),
+                        evidence_files: vec![],
+                        evidence_due_min: None,
+                        body: String::new(),
+                        created: T0,
+                        mechanical: None,
+                    })?;
+                    tx.insert_attempt(&AttemptRow {
+                        session_ref: None,
+                        session_cli: Some("codex".into()),
+                        session_action: None,
+                        sent_at: Some(T0),
+                        project: "p".into(),
+                        task: id,
+                        n: 1,
+                        seat: "p:heat".into(),
+                        generation: 1,
+                        contract_version: 1,
+                        adopted_version: 1,
+                        pending_update: None,
+                        state: AttemptState::Submitted,
+                        candidate: Some(format!("cand{n}")),
+                        report: None,
+                        safe_point: None,
+                        started: T0,
+                        updated: T0,
+                    })?;
+                }
+                tx.set_meta(
+                    "engine.review_raise.p",
+                    &serde_json::json!({
+                        "from": 4, "to": 8, "until": "no-hand-ins-wait",
+                        "reason": "clear the review backlog", "at": T0, "plan_version": 1
+                    })
+                    .to_string(),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        let mut started = 0;
+        for tick in 0..40 {
+            let report = start_reviews(
+                &mut store,
+                &mut herdr,
+                &cfg(),
+                &cfg().profiles,
+                "p",
+                T0 + 10 + tick * 10,
+            )
+            .unwrap();
+            started += report.started.len();
+            if started >= 8 {
+                break;
+            }
+        }
+        assert_eq!(started, 8, "the raised count lets eight reviewers start");
+        let seats = store
+            .read(|tx| tx.seats_of_project("p"))
+            .unwrap()
+            .into_iter()
+            .filter(|seat| seat.role == SeatRole::Temp)
+            .count();
+        assert_eq!(seats, 8, "eight seats exist");
     }
 }
 

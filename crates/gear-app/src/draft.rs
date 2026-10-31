@@ -97,6 +97,17 @@ pub enum StaffItem {
     RebindCancel { line: usize, lane: String },
     /// `- remerge T-<n>`: retry the task's failed merge (T-92).
     Remerge { line: usize, task: String },
+    /// `- raise reviewers to=8 until=no-hand-ins-wait reason=<text>`: the
+    /// user-confirmed raise of the reviewer count for a backlog, with its end
+    /// condition (T-467). The engine returns the count to the configured one
+    /// when the condition holds.
+    Raise {
+        line: usize,
+        role: String,
+        to: u32,
+        until: String,
+        reason: String,
+    },
 }
 
 /// `- T-29 attempt=2 contract=3 candidate=abc1234 pass evidence=<path>`
@@ -882,9 +893,68 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
             }
             Ok(StaffItem::Remerge { line, task: task.to_string() })
         }
+        "raise" => {
+            // `raise reviewers to=8 until=no-hand-ins-wait reason=<text>`.
+            let after = rest["raise".len()..].trim_start();
+            let (role, tail) = after
+                .split_once(char::is_whitespace)
+                .ok_or_else(|| bad(line, "`raise` needs a role, `to=`, `until=` and `reason=`"))?;
+            if role != "reviewers" {
+                return Err(bad(
+                    line,
+                    format!("`raise` raises `reviewers`, got {role:?}"),
+                ));
+            }
+            let reason_at = tail
+                .find("reason=")
+                .ok_or_else(|| bad(line, "`raise` needs `reason=<text>`"))?;
+            let head = &tail[..reason_at];
+            let reason = tail[reason_at + "reason=".len()..].trim();
+            if reason.is_empty() {
+                return Err(bad(line, "`raise` needs a non-empty `reason=`"));
+            }
+            let mut to = None;
+            let mut until = None;
+            for token in head.split_whitespace() {
+                if let Some(value) = token.strip_prefix("to=") {
+                    let count = value.parse::<u32>().map_err(|_| {
+                        bad(line, format!("`to=` needs a count, got {value:?}"))
+                    })?;
+                    if count == 0 {
+                        return Err(bad(line, "`to=` must be at least 1"));
+                    }
+                    if to.replace(count).is_some() {
+                        return Err(bad(line, "repeated `to=` in one `raise` line"));
+                    }
+                } else if let Some(value) = token.strip_prefix("until=") {
+                    if value != "no-hand-ins-wait" {
+                        return Err(bad(
+                            line,
+                            format!(
+                                "`until=` is `no-hand-ins-wait`, got {value:?}"
+                            ),
+                        ));
+                    }
+                    if until.replace(value.to_string()).is_some() {
+                        return Err(bad(line, "repeated `until=` in one `raise` line"));
+                    }
+                } else {
+                    return Err(bad(line, format!("unknown `raise` field {token:?}")));
+                }
+            }
+            let to = to.ok_or_else(|| bad(line, "`raise` needs `to=<count>`"))?;
+            let until = until.ok_or_else(|| bad(line, "`raise` needs `until=no-hand-ins-wait`"))?;
+            Ok(StaffItem::Raise {
+                line,
+                role: role.to_string(),
+                to,
+                until,
+                reason: reason.to_string(),
+            })
+        }
         other => Err(bad(
             line,
-            format!("unknown staff verb {other:?}, expected temp, park, hold, release, retire, retry, rebind or remerge"),
+            format!("unknown staff verb {other:?}, expected temp, park, hold, release, retire, retry, rebind, remerge or raise"),
         )),
     }
 }

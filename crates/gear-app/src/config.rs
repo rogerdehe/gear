@@ -172,10 +172,24 @@ pub struct Quota {
     pub temps: u32,
     #[serde(default)]
     pub includes_captain: bool,
+    /// How long a reviewer seat must be idle before the engine releases it
+    /// (T-467): a seat stays warm for a re-review, then goes. Default 30
+    /// minutes.
+    #[serde(default = "default_release_idle_min")]
+    pub reviewer_release_idle_min: u32,
+    /// The same for a lane (T-467). A lane keeps its pane, worktree and build
+    /// cache; the value is the role's own idle time. Default 30 minutes.
+    #[serde(default = "default_release_idle_min")]
+    pub lane_release_idle_min: u32,
     /// The quota sources of §9.1: the providers whose quota the engine
     /// reads. Empty = the quota comes from the screen alone.
     #[serde(default)]
     pub sources: Vec<QuotaSource>,
+}
+
+/// The default idle time before a seat of a role is released (T-467).
+fn default_release_idle_min() -> u32 {
+    30
 }
 
 /// One quota source of §9.1: a provider whose quota the engine reads.
