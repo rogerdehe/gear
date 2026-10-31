@@ -187,6 +187,21 @@ fn without_hours_the_voyage_line_is_unchanged() {
 }
 
 #[test]
+fn the_board_says_the_rest_on_the_projects_clock() {
+    // T-488: the hours are read in the project's zone, and the wait is shown
+    // on that clock, not the machine's.
+    let mut store = world(Some(
+        "[schedule]\nhours = \"10:00-18:00\"\ntz = \"Asia/Shanghai\"",
+    ));
+    // 08:00 UTC is 16:00 in Shanghai: inside the hours.
+    let text = drawn(&mut store, AROUND);
+    assert!(!text.contains("off hours until"), "{text}");
+    // 12:00 UTC is 20:00 in Shanghai: resting until 10:00 there.
+    let text = drawn(&mut store, AROUND + 4 * 3600);
+    assert!(text.contains("off hours until 10:00"), "{text}");
+}
+
+#[test]
 fn while_the_fleet_rests_the_board_says_the_rest_not_the_departure() {
     let evening = clock_at("19:00");
     let depart = evening + 3 * 3600;

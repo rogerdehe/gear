@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.2"
+version = "0.6.3"
 edition = "2021"
 rust-version = "1.89"
 
@@ -38,6 +38,9 @@ libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tempfile = "3"
+# T-488: IANA time zones for `[schedule].tz` (hours and depart_at read in a
+# project's zone).
+jiff = "0.2"
 
 # T-132: a debug build carries line tables only — enough to name the file and
 # line in a panic or a backtrace, without the type and variable detail nothing
