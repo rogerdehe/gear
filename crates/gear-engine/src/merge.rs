@@ -2615,8 +2615,11 @@ fn close_branches(
     let mut closed = Vec::new();
     let mut left = Vec::new();
     // The review branch: it holds the review of this task and nothing else.
-    let review_ref = format!("{}/{review}", remote.name);
-    if pushed.refs.iter().any(|name| name == &review_ref) && delete_remote(dir, review, remote) {
+    // T-483: it is closed whatever its tip holds. A review branch left by an
+    // earlier attempt of the task does not contain the candidate, and the
+    // merge that lands this attempt still consumed the review; the earlier
+    // attempt's review stays in that attempt's record.
+    if delete_remote(dir, review, remote) {
         closed.push(review.to_string());
     }
     // The branches whose tip is the candidate: the work the review approved.
@@ -7323,6 +7326,43 @@ gate = "{project_gate}"
         assert!(state.has_task_commit());
         // … and the two branches are closed on origin.
         let branches = &state.branches;
+        assert!(!branches.contains("heat/t5"), "{branches}");
+        assert!(!branches.contains("review/t5"), "{branches}");
+    }
+
+    /// T-483: a confirmed merge closes the review branch it merged, whatever
+    /// its tip holds. A review branch left by an earlier attempt of the task
+    /// does not contain the candidate, and it stayed on the remote before
+    /// this (T-457 attempt 2: a merge left `review/t457` behind). The earlier
+    /// attempt's review stays in that attempt's record.
+    #[test]
+    fn a_confirmed_merge_deletes_the_review_branch_of_an_earlier_attempt() {
+        let scratch = Scratch::new("stale-review");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The review branch still points at an earlier attempt's review: a
+        // commit cut from `dev`, not from this attempt's candidate.
+        sh(
+            &scratch.work,
+            "git switch -qc earlier dev && echo earlier > earlier.txt && git add -A \
+             && git -c user.email=a@b -c user.name=a commit -qm earlier-review \
+             && git -C ../origin.git fetch -q \"$(pwd)\" +HEAD:refs/heads/review/t5 \
+             && git fetch -q origin",
+        );
+        assert!(!sh_ok(
+            &scratch.root,
+            &format!("git -C origin.git merge-base --is-ancestor {candidate} review/t5")
+        ));
+
+        let line = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap();
+
+        assert!(line.contains("merged T-5 into dev"), "{line}");
+        assert!(
+            line.contains("closed on origin: ") && line.contains("review/t5"),
+            "{line}"
+        );
+        // Neither the lane branch nor the review branch is on the remote.
+        let branches = scratch.origin_branches();
         assert!(!branches.contains("heat/t5"), "{branches}");
         assert!(!branches.contains("review/t5"), "{branches}");
     }
