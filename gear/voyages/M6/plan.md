@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=949 -->
+<!-- gear-plan project=gear base=950 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -55,6 +55,8 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-10-31 21:10 hand-fix: deleted origin/review/t454 by hand, already in dev | why: the merge left its review branch (same as review/t457); T-483 removes the cause
 - 2026-10-31 21:30 scope: added to S2 (mast): the Tasks tab draws dependency lines beside the lane graph (direct dependencies of unmerged work only) | why: user: the order of the work not yet done must show on the board; he chose lines beside the lane graph | else: -
 - 2026-10-31 21:30 plan: dependencies declared that were missing: each release waits for the release before it and for the tasks added to its station (T-483, T-484, the board task); T-486 and T-487 wait for T-485 | why: the board can draw only the dependencies the plan names
+- station M-6788: keep course — projected 852m of 1020m, lanes within 120m
+- station M-6789: keep course — projected 856m of 1020m with T-494 added (hull 556m, mast 494m)
 
 # Queue
 
