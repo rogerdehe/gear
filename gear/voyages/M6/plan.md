@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=937 -->
+<!-- gear-plan project=gear base=938 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3).
 
@@ -46,6 +46,7 @@ station S4: the captain's plan tools, released as v0.6.3
 - station M-6702: move — projected 809m of 720m, hull the bottleneck (634m against mast's 252m); T-458, T-468, T-472 and T-482 move to mast (hull ~464m, mast ~422m); they touch engine files apart from hull's S1/S2 work, and the second to merge merges dev first
 - station M-6704: keep course — after the move projected 623m of 720m, lanes balanced (hull 443m, mast 411m)
 - 2026-10-31 19:30 lesson: T-469 and T-461 passed their acceptance and failed the merge gate on tests in crates that call the changed one (engine, cli) | why: the captain's acceptance named only the changed crate | else: from now on a contract's acceptance names every crate whose tests use the changed behaviour
+- 2026-10-31 19:45 scope: added to S2 (mast): a CLI cost of 0 with tokens is unknown, not $0.00 | why: the Cost tab showed $0.00 for 6.1 M tokens; pi writes 0 when its provider config has no price | else: -
 
 # Queue
 
@@ -168,6 +169,11 @@ estimate: 40
 goal: [S2] Role charters fit the models the user chose. At kickoff the captain proposes, and the user confirms with the staffing, one charter per role (captain, each lane, reviewers) from the CLI and model each runs: a lane on a fast, simple agent (pi on a flash model) implements the packet without designing, as today's rules/lane.md says; a lane on a strong agent and model (e.g. Claude on Opus) designs inside its own task and owned paths, and still never decides for the whole project; the captain always holds the whole picture. The charter generalises today's fixed rules files (skills/gear/references/rules/lane.md and review.md): it is written into gear.toml per lane and for the reviewers, rendered into the seat's rules file, and given to an agent once per conversation (at a new session, never again in a resumed one). skills/gear/references/captain.md already carries the captain's hand-fix and urgent-fix text (written by the captain on 2026-10-31); leave it as it is.
 accept: gear-app tests: a config with two charters renders two rules files; a resumed session gets no charter again, a new one does. The skill's captain reference and conventions describe the charter, and captain.md still carries its hand-fix paragraph. Run make check CRATE=gear-app and CRATE=gear-cli.
 estimate: 50
+
+## T-484 [now] lane=mast milestone=M6 station=S2 required
+goal: [S2] The board shows a cost it does not know as unknown, never as $0.00. Today pi writes `cost.total: 0` for a model whose provider config names no price (both providers of this fleet), and crates/gear-usage takes that 0 as a known cost, so the Cost tab shows 0.00 for 6 M tokens. Change crates/gear-usage (the round-cost sum) only, no other design: a record whose CLI cost is 0 while its tokens are not is treated as carrying no cost, so the `[prices]` table prices it, and with no price there it counts as unknown (the Cost tab's "unknown" count and "known so far" already exist).
+accept: Usage tests: a pi record with tokens and cost total 0 and no price is unknown; the same record with a `[prices]` entry is priced from it; a record with a real nonzero cost keeps it; a record with no tokens and cost 0 stays 0. Run make check CRATE=gear-usage, CRATE=gear-engine and CRATE=gear-board.
+estimate: 20
 
 ## T-476 [now] lane=mast milestone=M6 station=S2 required
 goal: [S2] Release v0.6.1, station S2's release. Change, no other design: (1) the version is 0.6.1 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.1.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.0 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.0 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.1 and publishes the release; this task does not. The code change is in these files only.
