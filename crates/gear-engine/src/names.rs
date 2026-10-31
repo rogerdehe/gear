@@ -13,12 +13,13 @@
 //!   rename the agent first when it does not carry the seat's name, so delivery
 //!   never fails on a cleared name.
 //!
-//! Names are `<project>-<seat>` (17 §2/§3), the same name `agent.start` gives
-//! — except a temp reviewer, whose agent is named after the task it reviews
-//! (17 §2: `<project>-review-<task>`), not after its warm seat.
+//! Names are `<project>-<seat>` (17 §2/§3), the same name `agent.start` gives.
+//! A reviewer's agent carries its seat's name too (`<project>-review-<k>`,
+//! with the task in its title), never the task's: a warm seat keeps its name
+//! across the tasks it reviews (T-482).
 
 use gear_herdr::{HerdrAct, Outcome};
-use gear_model::{GearResult, MsgKind, MsgState, SeatRole, Ts};
+use gear_model::{GearResult, MsgKind, MsgState, Ts};
 use gear_store::{BindingStatus, NewMessage, SeatRow, Store, Tx};
 use std::collections::BTreeMap;
 
@@ -26,27 +27,15 @@ use std::collections::BTreeMap;
 /// convention, shared with the config's own length check.
 pub use gear_app::config::agent_name;
 
-/// The agent name of a task's reviewer (17 §2): `<project>-review-<task>`,
-/// the task id lowercased without its dash (`gear-review-t134`). This is the
-/// name `review::start_reviewer` starts the agent with, and the name a review
-/// seat's agent must keep (T-134 review F1).
-pub fn review_agent_name(project: &str, task: &str) -> String {
-    format!("{project}-review-{}", task.to_lowercase().replace('-', ""))
-}
-
-/// The name a seat's agent must carry (T-134 review F1) — derived from the
-/// store's seat, never from what Herdr happens to report now (a cleared or
+/// The name a seat's agent must carry (T-134 review F1, T-482) — derived from
+/// the store's seat, never from what Herdr happens to report now (a cleared or
 /// wrong name is exactly what is being repaired).
 ///
-/// - an assigned Temp reviewer: [`review_agent_name`] of the task it reviews,
-///   the name its review started with (the seat's warm name `review-10` is the
-///   *seat's* own name, not its agent's);
-/// - the captain and every lane: [`agent_name`], `<project>-<seat name>`.
+/// Every seat, the captain, a lane and a temp reviewer: [`agent_name`],
+/// `<project>-<seat name>` — a reviewer's seat is long-lived and its agent
+/// keeps the seat's name across the tasks it reviews.
 pub fn desired(seat: &SeatRow) -> String {
-    match (seat.role, seat.task_id.as_deref()) {
-        (SeatRole::Temp, Some(task)) => review_agent_name(&seat.project, task),
-        _ => agent_name(&seat.project, &seat.name),
-    }
+    agent_name(&seat.project, &seat.name)
 }
 
 /// The naming rules are Herdr's: [`gear_herdr::ensure_agent_name`] and
@@ -173,20 +162,11 @@ pub fn restore(
 ) -> GearResult<Restored> {
     let mut restored = Restored::default();
     let seats = store.read(|tx| tx.seats_of_project(project))?;
-    // T-270: two passes, the seats that **give a name back** before the seats
-    // that ask for one. A finished reviewer goes Standby but its agent keeps
-    // the task name until this very tick's restore renames it to its seat name
-    // (`review-9` → `<project>-review-9`); another seat asking for that task
-    // name in the same pass would see it held and the captain got an item the
-    // next tick resolved by itself. Within a pass the order stays as it was (the
-    // store's own `ORDER BY id`).
-    let (own, task_named): (Vec<SeatRow>, Vec<SeatRow>) = seats
-        .into_iter()
-        .partition(|seat| desired(seat) == agent_name(&seat.project, &seat.name));
-    // The names Herdr reported, carried forward through the pass: a rename below
-    // frees the name a later seat asks for.
+    // T-482: every seat's name is its own, so a finished reviewer and the next
+    // job of the same seat ask for the same name and no pass has to give one
+    // back before another asks. The order stays as the store gives it.
     let mut names = names.clone();
-    for seat in own.into_iter().chain(task_named) {
+    for seat in seats {
         let Some(binding) = store.read(|tx| tx.get_binding(&seat.id, seat.generation))? else {
             continue;
         };

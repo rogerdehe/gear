@@ -778,11 +778,7 @@ pub(crate) fn run(
             if let Some(folder) = store.read(|tx| tx.get_meta(&folder_key))? {
                 args = gear_herdr::render_args(&args, &folder);
             }
-            let name = if seat.role == SeatRole::Temp {
-                crate::names::review_agent_name(&seat.project, task)
-            } else {
-                crate::names::desired(seat)
-            };
+            let name = crate::names::desired(seat);
             match herdr.agent_start(&name, &binding.kind, &binding.pane_id, &args) {
                 Outcome::Ok(_) | Outcome::Uncertain { .. } => step(
                     seat,

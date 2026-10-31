@@ -2451,7 +2451,7 @@ mod tests {
     const CAP_PANE: &str = "w1:p1";
     const LANE_PANE: &str = "w1:p2";
     const REVIEW_PANE: &str = "w1:p3";
-    const REVIEW_NAME: &str = "p-review-t1";
+    const REVIEW_NAME: &str = "p-r-1";
 
     /// Captain, one lane (`pi`, queues input while it works) and one temp
     /// reviewer, all with an active binding.
