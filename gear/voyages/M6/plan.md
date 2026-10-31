@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=944 -->
+<!-- gear-plan project=gear base=946 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -51,6 +51,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-10-31 19:55 scope: T-484 v2 prices tokens at the official price (built-in table, peak and off-peak by UTC window, project `[prices]` overrides) | why: user: with no price written, use the maker's official price, which has peak and off-peak rates | else: -
 - station M-6746: keep course — projected 693m of 720m; mast now carries 453m against hull's 332m (T-484 added), so T-472 (S3) goes back to hull (about 392m each)
 - 2026-10-31 20:20 confirmed: eta 12h -> 17h; goal and station S5 added (one captain, several projects; a v0.5 project upgrades painlessly; v0.6.4) | why: user: bring M7's multi-project captain into M6 as a last station; another project stays with its own captain and must upgrade with no pain after M6
+- station M-6769: move — projected 1031m of 1020m, mast the bottleneck (756m against hull's 571m); T-484 (gear-usage, hull's crate) and T-468 (engine) move to hull (about 670m and 655m)
 
 # Queue
 
@@ -164,7 +165,7 @@ goal: [S2] Elastic counts. Within the configured counts (e.g. 2 lanes, 4 reviewe
 accept: Engine and app tests: reviewers raised to 8 start while hand-ins wait; once none wait, idle extra reviewers are released down to 4 and a running review is not interrupted. Run make check CRATE=gear-engine, CRATE=gear-app and CRATE=gear-cli (the crates that use the changed code).
 estimate: 50
 
-## T-468 [now] lane=mast milestone=M6 station=S2 required
+## T-468 [now] lane=hull milestone=M6 station=S2 required
 goal: [S2] Dialogs never block. A lane or reviewer may not stop on a dialog at all: when its agent shows a blocking screen (an approval or a question the CLI asks), the engine closes it at once and tells the seat "Dialogs are not allowed for your role; ask the captain with gear send --kind question." Every other dialog (the captain's to the user) is cancelled when nobody answers it within 10 minutes, and the work goes on as it would have without it. The skill says the captain opens a dialog only for a change the user asked for.
 accept: Engine tests: a blocked lane or reviewer screen is closed in the same tick and the seat gets the text; a captain dialog unanswered for 10 minutes is cancelled. Run make check CRATE=gear-engine.
 estimate: 40
@@ -174,7 +175,7 @@ goal: [S2] Role charters fit the models the user chose. At kickoff the captain p
 accept: gear-app tests: a config with two charters renders two rules files; a resumed session gets no charter again, a new one does. The skill's captain reference and conventions describe the charter, and captain.md still carries its hand-fix paragraph. Run make check CRATE=gear-app and CRATE=gear-cli.
 estimate: 50
 
-## T-484 [now] lane=mast milestone=M6 station=S2 required
+## T-484 [now] lane=hull milestone=M6 station=S2 required
 goal: [S2] The Cost tab shows what the tokens cost at the model maker's official price, peak and off-peak included, and shows a cost it cannot know as unknown, never as $0.00. Today pi writes `cost.total: 0` when its provider config names no price (both providers of this fleet), gear-usage takes that 0 as known, and the tab shows $0.00 for 6.1 M tokens. Change crates/gear-usage and the `[prices]` part of crates/gear-app config, no other design: (1) a record whose CLI cost is 0 while its tokens are not carries no cost; it is priced from the price table, and with no price there it is unknown; (2) GEAR ships a built-in price table of official prices (a TOML file compiled into the binary), and the project's `[prices]` entries override it per model; a model matches case-insensitively on its id without the provider prefix, so `hk-dgx-1/DeepSeek-V4.1-Flash-1017` and `tokenrhythm/deepseek-v4.1-flash-1017` both take the DeepSeek entry; (3) a price may carry a peak rate set and peak windows (weekdays and UTC hours); each record keeps its own time and is priced by the window it falls in, every other time at the base (off-peak) rates; (4) the built-in table starts with DeepSeek's official prices, USD per 1 M tokens, off-peak / peak: deepseek-v4.1-flash-1017: cache hit 0.003 / 0.006, cache miss 0.15 / 0.30, output 0.60 / 1.20; deepseek-v4-pro-0813: cache hit 0.022 / 0.044, cache miss 0.66 / 1.32, output 1.98 / 3.96; peak Monday to Friday 01:00-04:00 and 06:00-10:00 UTC. Chinese public holidays (off-peak all day) are not modelled; the table says so in a comment. The Cost tab's columns and labels stay as they are: the cost is simply the cost, with no note about where the price came from.
 accept: Usage tests: a pi record with tokens and cost 0 and no price is unknown; the same record of a DeepSeek model is priced from the built-in table at the off-peak rate on a Saturday and at the peak rate on a Tuesday 02:00 UTC; a `[prices]` entry overrides the built-in one; a provider-prefixed, differently cased model id matches; a record with a real nonzero CLI cost keeps it; a record with no tokens and cost 0 stays 0. Run make check CRATE=gear-usage, CRATE=gear-app, CRATE=gear-engine and CRATE=gear-board.
 estimate: 45
