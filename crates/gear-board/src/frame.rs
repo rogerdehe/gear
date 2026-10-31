@@ -118,7 +118,10 @@ pub struct Layout {
     pub tab_row: usize,
     /// The columns of every tab on the tab row.
     pub tabs: Vec<(usize, usize, Tab)>,
-    /// The columns of every voyage's label on the first row, and the voyage's
+    /// The row of every voyage's label (T-353): the first row, or the row
+    /// under the project bar when several projects are shown (T-489).
+    pub voyage_row: usize,
+    /// The columns of every voyage's label on the voyage row, and the voyage's
     /// milestone (T-353).
     pub voyages: Vec<(usize, usize, String)>,
 }
@@ -757,6 +760,7 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
     Layout {
         top: tab_row + 3,
         tab_row,
+        voyage_row: shift,
         tabs,
         voyages,
     }

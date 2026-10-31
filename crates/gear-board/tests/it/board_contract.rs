@@ -2769,6 +2769,91 @@ fn the_voyage_keys_and_a_click_on_a_label_pick_the_shown_voyage() {
     );
 }
 
+/// T-489 (review F1): with the project bar shown the voyage labels sit a row
+/// under it, so a click on a label picks the voyage there, and a click on the
+/// bar picks no voyage.
+#[test]
+fn a_click_on_a_voyage_label_works_with_the_project_bar_and_the_bar_picks_none() {
+    use gear_board::frame::{self, Tab};
+
+    let size = (160, 40);
+    let mut store = world_with_two_voyages_and_a_second_project();
+    let opts = Options {
+        project: None,
+        color: false,
+        refresh: Duration::from_millis(1),
+        ..Options::default()
+    };
+    let board = build(&mut store, &opts, now_seconds()).unwrap();
+    assert_eq!(board.projects.len(), 2, "two projects draw the bar");
+    let head = frame::layout(&board, &crate::screen(Tab::Now, 0, size));
+    assert_eq!(head.voyage_row, 1, "the labels sit under the project bar");
+    let (first, _, _) = head.voyages[1];
+    assert_eq!(head.voyages[1].2, "M1", "the older label");
+
+    // The first frame shows the measured voyage, M2, on the row under the
+    // title.
+    let opened = run_events_output_with(&mut store, vec![], size, &opts);
+    let opened = last_frame(opened.as_bytes());
+    assert!(
+        opened.lines().nth(2).unwrap_or_default().contains("M2:"),
+        "{opened}"
+    );
+
+    // A click on the project bar at a column overlapping the M1 label picks
+    // no voyage: the shown voyage stays M2.
+    let bar = Event::Mouse {
+        button: 0,
+        x: (first + 1) as u16,
+        y: 1,
+    };
+    let after_bar = run_events_output_with(&mut store, vec![bar], size, &opts);
+    let after_bar = last_frame(after_bar.as_bytes());
+    assert!(
+        after_bar.lines().nth(2).unwrap_or_default().contains("M2:"),
+        "the bar picks no voyage: {after_bar}"
+    );
+
+    // A click on the M1 label on the voyage row picks M1.
+    let label = Event::Mouse {
+        button: 0,
+        x: (first + 1) as u16,
+        y: (head.voyage_row + 1) as u16,
+    };
+    let clicked = run_events_output_with(&mut store, vec![label], size, &opts);
+    let clicked = last_frame(clicked.as_bytes());
+    assert!(
+        clicked.lines().nth(2).unwrap_or_default().contains("M1:"),
+        "the label picks M1: {clicked}"
+    );
+}
+
+/// The `p` world with a second project: the board draws the project bar.
+fn world_with_two_voyages_and_a_second_project() -> Store {
+    let now = now_seconds();
+    let mut store = world_with_two_voyages();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "q", "sess", now)?;
+            testing::seed_active_seat(tx, "q", "data", SeatRole::Lane, "w1:p2", "opencode", now)?;
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// The board's last frame over the given events, with the given options.
+fn run_events_output_with(
+    store: &mut Store,
+    events: Vec<Event>,
+    size: (usize, usize),
+    opts: &Options,
+) -> String {
+    let mut out: Vec<u8> = Vec::new();
+    run_with(store, opts, &mut out, &mut Events { events, size }, None).unwrap();
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// T-411: ten notches of the wheel move the selection three picks each, the
 /// wheel stops at the first pick, and a page key moves a screenful with the
 /// viewport.

@@ -2685,9 +2685,11 @@ pub fn run_with(
                     // (T-353).
                     let column = x.saturating_sub(1) as usize;
                     let row = y.saturating_sub(1) as usize;
-                    if row == 0 {
-                        // A click on a voyage's label on the first row picks
-                        // that voyage (T-357): the whole board shows it.
+                    if row == layout.voyage_row {
+                        // A click on a voyage's label on the voyage row picks
+                        // that voyage (T-357): the whole board shows it. With
+                        // the project bar shown the labels sit a row lower
+                        // (T-489), so a click on the bar picks no voyage.
                         let picked = layout
                             .voyages
                             .iter()
