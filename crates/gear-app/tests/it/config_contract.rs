@@ -372,6 +372,130 @@ fn the_working_hours_say_when_the_fleet_rests_and_comes_back() {
     assert_eq!(hours_end(&none, local(12, 0)), None);
 }
 
+// ---- [schedule].tz (T-488): hours and a zone-less departure are read in the
+// project's zone.
+
+#[test]
+fn hours_in_a_named_zone_are_read_in_that_zone() {
+    let cfg = parse(&format!(
+        "{MINIMAL}\n[schedule]\nhours = \"10:00-18:00\"\ntz = \"Asia/Shanghai\"\n"
+    ))
+    .unwrap();
+    assert_eq!(validate(&cfg), vec![]);
+    // 03:00 UTC is 11:00 in Shanghai: inside the hours.
+    let inside = gear_app::plan::parse_rfc3339("2027-03-10T03:00:00Z").unwrap();
+    assert_eq!(off_hours_until(&cfg, inside), None, "inside the hours");
+    assert_eq!(
+        hours_end(&cfg, inside),
+        Some(gear_app::plan::parse_rfc3339("2027-03-10T10:00:00Z").unwrap()),
+        "18:00 Shanghai is 10:00 UTC"
+    );
+    // 11:00 UTC is 19:00 in Shanghai: off; the next start is 10:00 there.
+    let off = gear_app::plan::parse_rfc3339("2027-03-10T11:00:00Z").unwrap();
+    assert_eq!(
+        off_hours_until(&cfg, off),
+        Some(gear_app::plan::parse_rfc3339("2027-03-11T02:00:00Z").unwrap()),
+        "10:00 Shanghai next day is 02:00 UTC"
+    );
+}
+
+#[test]
+fn the_same_hours_in_another_zone_are_judged_there() {
+    let cfg = parse(&format!(
+        "{MINIMAL}\n[schedule]\nhours = \"10:00-18:00\"\ntz = \"America/New_York\"\n"
+    ))
+    .unwrap();
+    // 14:00 UTC is 09:00 in New York (EST): off, the next start is 10:00 there.
+    let before = gear_app::plan::parse_rfc3339("2027-03-10T14:00:00Z").unwrap();
+    assert_eq!(
+        off_hours_until(&cfg, before),
+        Some(gear_app::plan::parse_rfc3339("2027-03-10T15:00:00Z").unwrap()),
+        "10:00 EST is 15:00 UTC"
+    );
+    // 16:00 UTC is 11:00 there: inside; the end is 18:00 there.
+    let inside = gear_app::plan::parse_rfc3339("2027-03-10T16:00:00Z").unwrap();
+    assert_eq!(off_hours_until(&cfg, inside), None, "inside the hours");
+    assert_eq!(
+        hours_end(&cfg, inside),
+        Some(gear_app::plan::parse_rfc3339("2027-03-10T23:00:00Z").unwrap()),
+        "18:00 EST is 23:00 UTC"
+    );
+}
+
+#[test]
+fn a_config_without_tz_keeps_local_time() {
+    let cfg = parse(&format!("{MINIMAL}\n[schedule]\nhours = \"10:00-18:00\"\n")).unwrap();
+    assert_eq!(cfg.schedule.as_ref().and_then(|s| s.tz.clone()), None);
+    assert_eq!(off_hours_until(&cfg, local(12, 0)), None, "inside");
+    assert_eq!(
+        off_hours_until(&cfg, local(18, 0))
+            .map(gear_board::idle::clock)
+            .as_deref(),
+        Some("10:00"),
+        "the machine's local time, as today"
+    );
+}
+
+#[test]
+fn a_zone_less_departure_is_read_in_the_projects_zone() {
+    let cfg = parse(&format!(
+        "{MINIMAL}\n[schedule]\ndepart_at = \"2027-01-15T14:00:00\"\ntz = \"America/New_York\"\n"
+    ))
+    .unwrap();
+    let at = gear_app::plan::parse_rfc3339("2027-01-15T19:00:00Z").unwrap();
+    assert_eq!(departs_at(&cfg, at - 1), Some(at), "14:00 EST is 19:00 UTC");
+    assert_eq!(departs_at(&cfg, at), None);
+
+    let plain = parse(&format!(
+        "{MINIMAL}\n[schedule]\ndepart_at = \"2027-01-15T14:00:00\"\n"
+    ))
+    .unwrap();
+    assert_eq!(
+        departs_at(&plain, 0),
+        Some(gear_app::plan::parse_rfc3339("2027-01-15T14:00:00Z").unwrap()),
+        "without a tz a zone-less moment is UTC, as today"
+    );
+
+    let explicit = parse(&format!(
+        "{MINIMAL}\n[schedule]\ndepart_at = \"2027-01-15T14:00:00-05:00\"\ntz = \"Asia/Shanghai\"\n"
+    ))
+    .unwrap();
+    assert_eq!(
+        departs_at(&explicit, 0),
+        Some(gear_app::plan::parse_rfc3339("2027-01-15T19:00:00Z").unwrap()),
+        "a moment with its own zone is absolute"
+    );
+}
+
+#[test]
+fn an_unknown_zone_is_refused_at_load_naming_the_field() {
+    let cfg = parse(&format!(
+        "{MINIMAL}\n[schedule]\nhours = \"10:00-18:00\"\ntz = \"Mars/Olympus\"\n"
+    ))
+    .unwrap();
+    let issues = validate(&cfg);
+    assert_eq!(fields(&issues), vec!["schedule.tz"]);
+    assert!(issues[0].problem.contains("IANA"), "{}", issues[0].problem);
+    for tz in ["Asia/Shanghai", "America/New_York", "UTC"] {
+        let cfg = parse(&format!(
+            "{MINIMAL}\n[schedule]\nhours = \"10:00-18:00\"\ntz = {tz:?}\n"
+        ))
+        .unwrap();
+        assert_eq!(validate(&cfg), vec![], "{tz}");
+    }
+    // A wall clock in the spring-forward gap is read as the time after it.
+    let gap = parse(&format!(
+        "{MINIMAL}\n[schedule]\ndepart_at = \"2027-03-14T02:30:00\"\ntz = \"America/New_York\"\n"
+    ))
+    .unwrap();
+    assert_eq!(validate(&gap), vec![], "a gap is resolved, not refused");
+    assert_eq!(
+        departs_at(&gap, 0),
+        Some(gear_app::plan::parse_rfc3339("2027-03-14T07:30:00Z").unwrap()),
+        "02:30 does not exist; it is read as 03:30 EDT"
+    );
+}
+
 // ---- `[conventions].scratch_dir` (T-413): where a seat's temp files go.
 // Absent, the seat's own worktree holds them.
 

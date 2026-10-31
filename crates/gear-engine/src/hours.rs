@@ -84,10 +84,12 @@ fn schedule_of(store: &mut Store, project: &str) -> GearResult<Option<Schedule>>
             depart_at: None,
         }));
     }
+    // T-488: a zone-less departure is read in the project's zone; a moment
+    // with its own zone is absolute.
     let Some(depart_at) = section
         .depart_at
         .as_deref()
-        .and_then(gear_app::plan::parse_rfc3339)
+        .and_then(|text| gear_app::config::departure(&config, text))
     else {
         return Ok(None);
     };
