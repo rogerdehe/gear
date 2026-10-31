@@ -288,13 +288,13 @@ fn start_hand_in_reviews(
                 if matches!(seat.state, SeatState::Standby | SeatState::Released)
                     || (seat.state == SeatState::Starting && seat.task_id.is_some()) =>
             {
-                take_seat(store, &seat, &task.task, profile_name, now)?
+                take_seat(store, &seat, &task.task, task.attempt, profile_name, now)?
             }
             Some(seat) => seat,
             // A seat that finished its last job is warm: the job takes it
             // rather than building a new worktree (17 §8a).
-            None => match free_seat(store, project, &task.task, &kind)? {
-                Some(seat) => take_seat(store, &seat, &task.task, profile_name, now)?,
+            None => match free_seat(store, herdr, project, &task.task, &kind)? {
+                Some(seat) => take_seat(store, &seat, &task.task, task.attempt, profile_name, now)?,
                 // No warm seat free: a new one only while the quota has room.
                 // Otherwise the job waits for a seat instead of building a
                 // cold extra worktree (finding 2 of the T-18 review).
@@ -830,8 +830,8 @@ fn start_direction_checks(
         };
         let seat = match seat {
             Some(seat) => seat,
-            None => match free_seat(store, project, &row.id, &kind)? {
-                Some(seat) => take_seat(store, &seat, &row.id, profile_name, now)?,
+            None => match free_seat(store, herdr, project, &row.id, &kind)? {
+                Some(seat) => take_seat(store, &seat, &row.id, attempt.n, profile_name, now)?,
                 None if seats_free_for_new(store, project, i64::from(config.quota.temps))? => {
                     create_temp_seat(store, project, &row.id, profile_name, now)?
                 }
@@ -1113,13 +1113,20 @@ fn direction_seat(
 
 /// A seat that finished its last job and holds no live one: a warm worktree
 /// with its build cache waiting for the next review (17 §8a).
+///
+/// T-455 (F-215): a warm seat is free only when its agent is idle and its last
+/// job's verdict or direction result is recorded. Until then the next job
+/// waits or takes another seat, so a review that still runs never has its
+/// worktree switched under it. A released seat has no agent and its job is
+/// over (the release rules decided that): it is free as it was.
 fn free_seat(
     store: &mut Store,
+    herdr: &mut dyn HerdrAct,
     project: &str,
     task: &str,
     kind: &str,
 ) -> GearResult<Option<SeatRow>> {
-    store.read(|tx| {
+    let ordered = store.read(|tx| {
         let mut seats = Vec::new();
         for seat in tx.seats_of_project(project)? {
             let compatible = seat.state != SeatState::Standby
@@ -1141,6 +1148,7 @@ fn free_seat(
                 && matches!(seat.state, SeatState::Standby | SeatState::Released)
                 && seat.name.starts_with("review-")
         };
+        let mut ordered: Vec<SeatRow> = Vec::new();
         // V1: prefer the seat of this task's earlier review on the same CLI.
         for round in tx.rounds_of_task(project, task)?.into_iter().rev() {
             if round.role == "review" && round.cli == kind {
@@ -1149,22 +1157,128 @@ fn free_seat(
                     .filter(available)
                     .find(|seat| seat.id == round.seat)
                 {
-                    return Ok(Some(seat.clone()));
+                    if !ordered.iter().any(|seen| seen.id == seat.id) {
+                        ordered.push(seat.clone());
+                    }
                 }
             }
         }
         // V2: a live standby seat before a released seat.
-        Ok(seats
+        for seat in seats
             .iter()
             .filter(available)
-            .find(|seat| seat.state == SeatState::Standby)
-            .or_else(|| {
-                seats
-                    .iter()
-                    .filter(available)
-                    .find(|seat| seat.state == SeatState::Released)
-            })
-            .cloned())
+            .filter(|seat| seat.state == SeatState::Standby)
+        {
+            if !ordered.iter().any(|seen| seen.id == seat.id) {
+                ordered.push(seat.clone());
+            }
+        }
+        for seat in seats
+            .iter()
+            .filter(available)
+            .filter(|seat| seat.state == SeatState::Released)
+        {
+            if !ordered.iter().any(|seen| seen.id == seat.id) {
+                ordered.push(seat.clone());
+            }
+        }
+        Ok(ordered)
+    })?;
+    for seat in ordered {
+        if !agent_idle(store, herdr, &seat)? {
+            continue;
+        }
+        if seat.state == SeatState::Standby && !last_job_recorded(store, project, &seat)? {
+            continue;
+        }
+        return Ok(Some(seat));
+    }
+    Ok(None)
+}
+
+/// Whether the seat's agent is idle: a seat takes the next job only once its
+/// agent ended its turn (T-455, F-215).
+///
+/// A pane that cannot be read is not known idle (design/08): the next job
+/// waits or takes another seat rather than switch the tree under an agent that
+/// may still work. A seat whose binding is void has no pane of its own: it is
+/// idle.
+fn agent_idle(store: &mut Store, herdr: &mut dyn HerdrAct, seat: &SeatRow) -> GearResult<bool> {
+    let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
+    let Some(binding) = binding.filter(|binding| binding.status != BindingStatus::Void) else {
+        return Ok(true);
+    };
+    match herdr.agent_get(&binding.pane_id) {
+        Ok(None) => Ok(true),
+        Ok(Some(info)) => Ok(matches!(
+            info.agent_status,
+            gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done
+        )),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Whether the seat handed in the job its last packet named: the review
+/// verdict of that attempt, or the direction result of that check, is
+/// recorded (T-455). A seat that never got a packet has no job to wait for.
+fn last_job_recorded(store: &mut Store, project: &str, seat: &SeatRow) -> GearResult<bool> {
+    store.read(|tx| {
+        let Some(op) = tx.last_op(&seat.id, OpKind::Deliver)? else {
+            return Ok(true);
+        };
+        let (Some(task), Some(attempt)) = (op.task.clone(), op.attempt) else {
+            return Ok(true);
+        };
+        // The seat's own latest round of that attempt says which kind of job
+        // it was: a direction check reports a direction result, a review a
+        // verdict.
+        let latest = tx
+            .rounds_of_task(project, &task)?
+            .into_iter()
+            .filter(|round| round.seat == seat.id && round.attempt == attempt)
+            .max_by_key(|round| round.start_at);
+        if latest.is_some_and(|round| round.role == "direction") {
+            let job = tx
+                .get_meta(&direction_key(project, &task, attempt))?
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+            let sha = job.as_ref().and_then(|job| {
+                job["checked_sha"]
+                    .as_str()
+                    .or_else(|| job["sha"].as_str())
+                    .map(str::to_string)
+            });
+            let recorded = tx
+                .direction_results_of_attempt(project, &task, attempt)?
+                .iter()
+                .any(|message| {
+                    if message.sender != seat.id || message.sender_gen != seat.generation {
+                        return false;
+                    }
+                    let Some(sha) = sha.as_deref() else {
+                        return true;
+                    };
+                    message
+                        .meta
+                        .as_deref()
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                        .is_some_and(|meta| meta["direction"] == true && meta["sha"] == sha)
+                });
+            if recorded {
+                return Ok(true);
+            }
+            // A check the engine closed without a result (T-258) is a
+            // recorded ending too: its seat was told the check is closed
+            // (T-444), and the seat comes free with it.
+            return Ok(job.as_ref().is_some_and(|job| {
+                job["checked_sha"].is_string()
+                    && job["state"]
+                        .as_str()
+                        .is_none_or(|state| state != "running" && state != "starting")
+            }));
+        }
+        Ok(tx
+            .get_review_verdict(project, &task, attempt)?
+            .is_some_and(|verdict| verdict.by_seat == seat.id))
     })
 }
 
@@ -1543,20 +1657,67 @@ fn seats_free_for_new(store: &mut Store, project: &str, quota: i64) -> GearResul
 /// Bind a free seat to the new job. The seat keeps its worktree and its
 /// cache; only the job it serves changes. The seat's profile follows the CLI
 /// that runs the review's model (T-35).
+///
+/// T-455 (T-283): a job whose binding the seat loses is told at once — it
+/// stops and ends its turn, instead of judging the old candidate and failing
+/// its hand-in with NO_TARGET.
 fn take_seat(
     store: &mut Store,
     seat: &SeatRow,
     task: &str,
+    attempt: i64,
     profile: &str,
     now: Ts,
 ) -> GearResult<SeatRow> {
     store.write(|tx| {
+        // The job the seat holds now (its binding): the one that loses it
+        // when the new job takes the seat. Its attempt is the one the seat's
+        // last packet named.
+        let old = seat.task_id.clone().filter(|value| !value.is_empty());
+        let old_attempt = match old.as_deref() {
+            Some(old) => tx
+                .last_op(&seat.id, OpKind::Deliver)?
+                .filter(|op| op.task.as_deref() == Some(old))
+                .and_then(|op| op.attempt),
+            None => None,
+        };
         tx.set_meta(&pending_review_key(&seat.id), task)?;
         tx.clear_seat_task(&seat.id)?;
         tx.set_seat_profile(&seat.id, profile)?;
+        if let Some(old) = old.filter(|old| {
+            old != task || old_attempt.is_some_and(|attempted| attempted != attempt)
+        }) {
+            let body = match old_attempt {
+                Some(attempted) if old == task => format!(
+                    "The seat is bound to a new job: {task} attempt {attempt}. Stop the review of {old} attempt {attempted}; end your turn."
+                ),
+                Some(attempted) => format!(
+                    "The seat is bound to a new job: {task} attempt {attempt}. Stop working on {old} attempt {attempted}; end your turn."
+                ),
+                None => format!(
+                    "The seat is bound to a new job: {task} attempt {attempt}. Stop working on {old}; end your turn."
+                ),
+            };
+            tx.insert_message(&NewMessage {
+                meta: None,
+                project: seat.project.clone(),
+                thread: format!("review:{old}:{}", old_attempt.unwrap_or_default()),
+                task: Some(old.clone()),
+                attempt: old_attempt,
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: seat.id.clone(),
+                kind: MsgKind::Instruction,
+                urgent: false,
+                body,
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: now,
+            })?;
+        }
         Ok(())
     })?;
-    let _ = now;
     let mut reserved = seat.clone();
     reserved.task_id = None;
     Ok(reserved)
@@ -3455,6 +3616,26 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
     /// Submitted with a candidate, the task is Verifying).
     fn world(config_toml: &str) -> Store {
         world_mechanical(config_toml, None)
+    }
+
+    /// The verdict the seat handed in for its last review (T-455): a warm seat
+    /// is free only when its last job's hand-in is recorded.
+    fn judged(
+        tx: &gear_store::Tx<'_>,
+        task: &str,
+        attempt: i64,
+        seat: &str,
+        passed: bool,
+    ) -> GearResult<()> {
+        tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+            project: "p".into(),
+            task: task.into(),
+            attempt,
+            passed,
+            findings: if passed { "ok".into() } else { "rework".into() },
+            by_seat: seat.into(),
+            created: T0,
+        })
     }
 
     /// The same world with the contract carrying `mechanical` (T-273): the
@@ -6383,6 +6564,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
     #[test]
     fn reviewer_selection_prefers_the_prior_same_cli_then_standby() {
         let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
         store
             .write(|tx| {
                 testing::seed_active_seat(
@@ -6422,26 +6604,169 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             })
             .unwrap();
         assert_eq!(
-            free_seat(&mut store, "p", "T-1", "codex")
+            free_seat(&mut store, &mut herdr, "p", "T-1", "codex")
                 .unwrap()
                 .unwrap()
                 .id,
             "p:review-2"
         );
         assert_eq!(
-            free_seat(&mut store, "p", "T-1", "claude")
+            free_seat(&mut store, &mut herdr, "p", "T-1", "claude")
                 .unwrap()
                 .unwrap()
                 .id,
             "p:review-2"
         );
         assert_eq!(
-            free_seat(&mut store, "p", "T-2", "codex")
+            free_seat(&mut store, &mut herdr, "p", "T-2", "codex")
                 .unwrap()
                 .unwrap()
                 .id,
             "p:review-1"
         );
+    }
+
+    /// T-455 (F-215): a seat whose agent still works after its verdict gets no
+    /// new job — the next hand-in waits or takes another seat, so the review
+    /// that runs never has its worktree switched under it.
+    #[test]
+    fn a_reviewer_that_still_works_is_not_free_after_its_verdict() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        assert_eq!(
+            start_reviews(
+                &mut store,
+                &mut herdr,
+                &cfg(),
+                &cfg().profiles,
+                "p",
+                T0 + 10
+            )
+            .unwrap()
+            .started,
+            vec!["p:review-1"]
+        );
+        // The verdict is recorded and the seat waits for the next review: its
+        // agent is still in the turn that follows the hand-in.
+        store
+            .write(|tx| {
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: true,
+                    findings: "ok".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0 + 11,
+                })?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        assert_eq!(
+            standby_after_verdict(&mut store, "p", T0 + 11).unwrap(),
+            vec!["p:review-1".to_string()],
+            "the verdict parks the seat"
+        );
+        let binding = store
+            .read(|tx| tx.get_binding("p:review-1", 1))
+            .unwrap()
+            .unwrap();
+        herdr.set_status(&binding.pane_id, gear_herdr::AgentStatus::Working);
+        queue_review_job(&mut store, 2, "heat");
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 12,
+        )
+        .unwrap();
+        assert!(report.started.is_empty(), "{report:?}");
+        assert_eq!(
+            report.waiting,
+            vec!["T-2".to_string()],
+            "the next job waits for the working reviewer"
+        );
+        assert!(
+            !store
+                .read(|tx| tx.ops_of_seat_kind("p:review-1", OpKind::Deliver))
+                .unwrap()
+                .iter()
+                .any(|op| op.task.as_deref() == Some("T-2")),
+            "no packet goes to a seat whose agent still works"
+        );
+        // The agent ends its turn: the seat is idle and takes the job (a new
+        // task needs its conversation switched, which the next ticks do).
+        let mut started = false;
+        for tick in 0..6 {
+            herdr.set_status(&binding.pane_id, gear_herdr::AgentStatus::Idle);
+            let report = start_reviews(
+                &mut store,
+                &mut herdr,
+                &cfg(),
+                &cfg().profiles,
+                "p",
+                T0 + 13 + tick,
+            )
+            .unwrap();
+            if report.started == vec!["p:review-1"] {
+                started = true;
+                break;
+            }
+        }
+        assert!(started, "the idle seat takes the waiting job");
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat("p:review-1"))
+                .unwrap()
+                .unwrap()
+                .task_id
+                .as_deref(),
+            Some("T-2"),
+            "the idle seat takes the waiting job"
+        );
+    }
+
+    /// T-455 (T-283): a seat rebound to a new job tells the job whose binding
+    /// it loses at once, so the reviewer stops instead of judging the old
+    /// candidate and failing its hand-in.
+    #[test]
+    fn a_rebind_tells_the_old_job_to_stop() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.task_id.as_deref(), Some("T-1"));
+        // The same task's next attempt takes the seat: the old job is told.
+        let reserved = take_seat(&mut store, &seat, "T-1", 2, "codex", T0 + 20).unwrap();
+        assert_eq!(reserved.task_id, None);
+        let told = thread(&mut store, "review:T-1:1");
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].recipient, "p:review-1");
+        assert_eq!(told[0].kind, MsgKind::Instruction);
+        assert_eq!(told[0].task.as_deref(), Some("T-1"));
+        assert_eq!(told[0].attempt, Some(1));
+        assert!(
+            told[0].body.contains("T-1 attempt 1") && told[0].body.contains("T-1 attempt 2"),
+            "the notice names the old and the new job: {}",
+            told[0].body
+        );
+        // The seat holds no job now: taking it for the same job again says
+        // nothing more.
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        take_seat(&mut store, &seat, "T-1", 2, "codex", T0 + 21).unwrap();
+        assert_eq!(thread(&mut store, "review:T-1:1").len(), 1);
     }
 
     #[test]
@@ -8781,6 +9106,7 @@ profile = "opencode"
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Done;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
                 tx.clear_seat_task("p:review-1")
             })
@@ -9057,6 +9383,7 @@ profile = "opencode"
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Ready;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", false)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 13)?;
                 tx.clear_seat_task("p:review-1")?;
                 tx.set_meta(&crate::model::model_meta_key("p:heat"), "gpt-6-astra")?;
@@ -9161,6 +9488,7 @@ profile = "opencode"
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Ready;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", false)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
                 tx.clear_seat_task("p:review-1")?;
                 tx.set_meta(&crate::model::model_meta_key("p:heat"), "gpt-6.1-sol")?;
@@ -9287,6 +9615,7 @@ profile = "opencode"
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Done;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
                 tx.clear_seat_task("p:review-1")?;
                 let mut project = tx.get_project("p")?.unwrap();
@@ -9375,6 +9704,7 @@ profile = "opencode"
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Done;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
                 tx.clear_seat_task("p:review-1")
             })
@@ -9439,6 +9769,7 @@ profile = "opencode"
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Done;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
                 tx.clear_seat_task("p:review-1")
             })
@@ -9546,6 +9877,7 @@ profile = "opencode"
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Done;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
                 tx.clear_seat_task("p:review-1")
             })
@@ -9624,12 +9956,14 @@ profile = "opencode"
             T0 + 10,
         )
         .unwrap();
-        // `p:review-1` is warm: its T-1 is done and it stands by for a job.
+        // `p:review-1` is warm: its T-1 is judged and done, and it stands by
+        // for a job.
         store
             .write(|tx| {
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Done;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
                 tx.clear_seat_task("p:review-1")
             })
@@ -9670,7 +10004,7 @@ profile = "opencode"
             crate::release::release_finished_reviews(&mut store, &mut herdr, "p", at).unwrap();
             start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", at).unwrap();
         }
-        let seat = free_seat(&mut store, "p", "T-3", "codex").unwrap();
+        let seat = free_seat(&mut store, &mut herdr, "p", "T-3", "codex").unwrap();
         assert_eq!(
             seat.map(|seat| seat.id).as_deref(),
             Some("p:review-1"),
