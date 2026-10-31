@@ -764,7 +764,8 @@ fn refuse_first_registration_by_an_agent(env: &gear_app::Env) -> GearResult<()> 
 ///
 /// Both forms go on to name the seats the config starts and the model each
 /// one runs (T-261), so a captain sees a wrong model here rather than once the
-/// fleet runs.
+/// fleet runs. A reviewer is named by its review entry's CLI when the entry
+/// names one (T-459): that is the CLI the engine starts it on.
 ///
 /// With `--models` (T-315) it also asks each seat's CLI for the models it
 /// lists and warns, on stderr, about a configured model id that is not among
@@ -807,6 +808,19 @@ fn cmd_admin_init(
             .map(|entry| entry.model().to_string())
             .unwrap_or_else(|| "-".to_string())
     };
+    // T-459: the CLI a reviewer runs on — its entry's own when the entry names
+    // one, else the `[temps]` kind (the engine starts a reviewer on the entry's
+    // CLI, so the seat line must not name a CLI the entry overrides).
+    let review_cli = |parsed: &gear_app::config::ProjectConfig| -> String {
+        parsed
+            .models
+            .review
+            .first()
+            .and_then(|entry| entry.cli())
+            .map(str::to_string)
+            .or_else(|| parsed.temps.as_ref().map(|temps| temps.kind.clone()))
+            .unwrap_or_else(|| "-".to_string())
+    };
     let lane_json = |lanes: &[(String, String, String)]| -> Vec<serde_json::Value> {
         lanes
             .iter()
@@ -829,10 +843,10 @@ fn cmd_admin_init(
             })
             .collect();
         lines.push(match &parsed.temps {
-            Some(temps) => format!(
+            Some(_) => format!(
                 "  reviewers: {} × {} {}",
                 parsed.quota.temps,
-                temps.kind,
+                review_cli(parsed),
                 review_model(parsed)
             ),
             None => "  reviewers: none".to_string(),
@@ -986,6 +1000,7 @@ fn cmd_admin_init(
                     "reviewers": reviewers,
                     "lane_list": lane_json(&lane_list),
                     "review_model": review_model(&parsed),
+                    "review_cli": review_cli(&parsed),
                     "model_warnings": model_warnings,
                     "changes": changes,
                 })
@@ -1100,6 +1115,10 @@ fn cmd_admin_init(
             object.insert(
                 "review_model".to_string(),
                 serde_json::json!(review_model(&parsed)),
+            );
+            object.insert(
+                "review_cli".to_string(),
+                serde_json::json!(review_cli(&parsed)),
             );
         }
         println!("{value}");
