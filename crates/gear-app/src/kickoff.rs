@@ -910,6 +910,38 @@ mod tests {
         );
     }
 
+    /// T-459: a review entry that names a CLI is checked against that CLI's
+    /// list, not against the `[temps]` kind the entry overrides.
+    #[test]
+    fn a_review_entry_naming_a_cli_is_checked_against_its_cli() {
+        let config = project(
+            "pi",
+            "\"tok/deep-1\"",
+            Some("pi"),
+            "{ model = \"gpt-6.1-terra\", cli = \"codex\" }",
+            "codex",
+            "",
+        );
+        let mut asked: Vec<String> = Vec::new();
+        let warnings = model_warnings(&config, &mut |cli| {
+            asked.push(cli.to_string());
+            match cli {
+                "pi" => (vec!["tok/deep-1".to_string()], None),
+                "codex" => (vec!["gpt-6.1-mini".to_string()], None),
+                other => panic!("asked {other}: the review entry names codex"),
+            }
+        });
+        assert_eq!(
+            warnings,
+            vec!["reviewers: model gpt-6.1-terra is not among the models codex lists"]
+        );
+        assert_eq!(
+            asked,
+            vec!["pi", "codex"],
+            "the review entry's CLI, not the temps kind"
+        );
+    }
+
     /// T-315: a CLI that lists none but says why gives one "not checked" line,
     /// however many entries name it.
     #[test]

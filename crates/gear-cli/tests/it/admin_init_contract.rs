@@ -739,6 +739,28 @@ fn config_two_lanes(dir: &Path, repo: &Path) -> PathBuf {
     path
 }
 
+/// A config whose reviewers run a Codex model on a pi `[temps]` seat (T-459):
+/// the review entry names its own CLI, which is the CLI the engine starts.
+fn config_codex_reviewer(dir: &Path, repo: &Path) -> PathBuf {
+    let path = dir.join("gear.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\
+             \n[quota]\nlanes = 1\ntemps = 4\n\
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+             \n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\n\
+             kind = \"pi\"\nprofile = \"pi\"\n\
+             \n[temps]\nkind = \"pi\"\nprofile = \"pi\"\n\
+             \n[models]\nreview = [{{ model = \"gpt-6.1-terra\", cli = \"codex\" }}, {{ model = \"gpt-6.1-luna\", cli = \"codex\" }}]\n\
+             \n[conventions]\ngate = \"make test\"\n",
+            repo = serde_json::json!(repo.to_string_lossy()).to_string()
+        ),
+    )
+    .expect("the config");
+    path
+}
+
 /// T-261: `--check` says which lanes the config starts, with the model each
 /// one runs — its own first `models` entry, else the role chain's first — and
 /// then which reviewers.
@@ -760,6 +782,42 @@ fn check_names_every_lane_and_the_reviewers_with_their_models() {
          \x20 reviewers: 1 × codex review/model\n"
     );
     assert!(!db.exists(), "a check writes nothing");
+}
+
+/// T-459: a reviewer whose review entry names a CLI is named by that CLI, not
+/// by the `[temps]` kind: the engine starts the reviewer on the entry's CLI.
+#[test]
+fn check_and_init_name_a_reviewer_by_its_entrys_cli() {
+    let dir = scratch("check-reviewer-cli");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let path = config_codex_reviewer(&dir, &repo);
+    let db = dir.join("gear.db");
+
+    let o = check_cmd(&dir, &db, &path, None, false, false, false);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let printed = stdout(&o);
+    assert!(
+        printed.contains("  reviewers: 4 × codex gpt-6.1-terra"),
+        "{printed}"
+    );
+    assert!(!printed.contains("× pi"), "{printed}");
+
+    let o = check_cmd(&dir, &db, &path, None, false, true, false);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let parsed: serde_json::Value = serde_json::from_str(stdout(&o).trim()).expect("json");
+    assert_eq!(parsed["review_cli"], serde_json::json!("codex"));
+    assert_eq!(parsed["review_model"], serde_json::json!("gpt-6.1-terra"));
+
+    // The same line on a real init: the packet's acceptance.
+    let o = init(&dir, &db, &path, None, true);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let printed = stdout(&o);
+    assert!(
+        printed.contains("  reviewers: 4 × codex gpt-6.1-terra"),
+        "{printed}"
+    );
+    assert_eq!(config_version(&db), 1, "the project was registered");
 }
 
 /// T-261: the JSON form carries the same lane list and the reviewers' model.
