@@ -230,6 +230,7 @@ dependencies = [
  "gear-store",
  "libc",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

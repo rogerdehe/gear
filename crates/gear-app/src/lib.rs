@@ -16,6 +16,7 @@ pub mod base;
 pub mod captain;
 pub mod charter;
 pub mod config;
+pub mod coverage;
 pub mod decision;
 pub mod draft;
 pub mod friction;
