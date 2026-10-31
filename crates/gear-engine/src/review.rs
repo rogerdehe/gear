@@ -1515,7 +1515,14 @@ fn last_job_recorded(store: &mut Store, project: &str, seat: &SeatRow) -> GearRe
             let job = tx
                 .get_meta(&direction_key(project, &task, attempt))?
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-            let sha = job.as_ref().and_then(|job| {
+            // The check this seat ran is the job record only while the record
+            // still names this seat: a later check of the same attempt (a new
+            // candidate) on another seat rewrites the record, and this seat's
+            // own result then answers for its own job.
+            let own_job = job
+                .as_ref()
+                .is_some_and(|job| job["seat"].as_str().is_none_or(|owner| owner == seat.id));
+            let sha = job.as_ref().filter(|_| own_job).and_then(|job| {
                 job["checked_sha"]
                     .as_str()
                     .or_else(|| job["sha"].as_str())
@@ -3234,6 +3241,7 @@ fn review_packet_for(
         ),
         &commit,
         worktree,
+        &review_recovery_line(store, config, task, attempt)?,
         &rework_section(
             store,
             &config.project.id,
@@ -3433,6 +3441,72 @@ fn agent_name(config: &ProjectConfig, seat: &str) -> String {
 
 /// The packet the reviewer gets: what to review, where the rules are and the
 /// exact command to hand the verdict in.
+/// T-499: the line a re-review's packet carries when it cannot resume the
+/// conversation of the review it continues — the session that review ran in
+/// and the review file it wrote, as T-481 does for a lane. Empty when the
+/// re-review resumes or keeps that conversation, and for attempt 1.
+fn review_recovery_line(
+    store: &mut Store,
+    config: &ProjectConfig,
+    task: &str,
+    attempt: i64,
+) -> GearResult<String> {
+    if attempt < 2 {
+        return Ok(String::new());
+    }
+    let (earlier, milestone) = store.read(|tx| {
+        let round = tx
+            .rounds_of_task(&config.project.id, task)?
+            .into_iter()
+            .rev()
+            .find(|round| round.role == "review" && round.attempt == attempt - 1);
+        let milestone = tx
+            .get_task(&config.project.id, task)?
+            .and_then(|row| row.milestone);
+        Ok((round, milestone))
+    })?;
+    let Some(round) = earlier else {
+        return Ok(String::new());
+    };
+    let action = store
+        .read(|tx| {
+            tx.get_meta(&crate::session::review_action_key(
+                &config.project.id,
+                task,
+                attempt,
+            ))
+        })?
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|json| json["action"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    // `keep`: the agent already runs on the earlier review's conversation;
+    // `resume`: the start resumes it. Everything else starts a new one.
+    if matches!(action.as_str(), "keep" | "resume") {
+        return Ok(String::new());
+    }
+    let file = match milestone {
+        Some(milestone) => format!(
+            "{}/{}.md",
+            gear_model::layout::reviews_dir(
+                &config.conventions.voyage_dir,
+                &config.project.id,
+                &milestone
+            ),
+            task
+        ),
+        None => format!("{task}.md"),
+    };
+    let line = match round.sessions.last() {
+        Some(session) => format!(
+            "The earlier review of this task ran in {} session {session}; its review file is {file}. Read it for reference if your CLI can.\n",
+            round.cli
+        ),
+        None => format!("The earlier review of this task is at {file}; read it for reference.\n"),
+    };
+    Ok(line)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn review_packet(
     task: &str,
     attempt: i64,
@@ -3448,6 +3522,7 @@ fn review_packet(
     branch: &str,
     commit: &str,
     worktree: &str,
+    recovery: &str,
     rework: &str,
 ) -> String {
     // T-282: the task's contract moved past the one this hand-in was made
@@ -3463,7 +3538,7 @@ fn review_packet(
          `pwd` must be the worktree, `git rev-parse --abbrev-ref HEAD` must be the branch, and \
          `git rev-parse HEAD` must be the candidate.\n\
          Run `gear` first (it records that you got this).\n\
-         {rework}\n\
+         {recovery}{rework}\n\
          Contract: v{version} (the version this hand-in was made against)\n\
          {newer}Goal: {goal}\n\
          Accept: {accept}\n\
@@ -9665,6 +9740,433 @@ review = [
         );
     }
 
+    /// T-499: the re-review of a task resumes the conversation of *that*
+    /// task's earlier review, not the seat's latest one. The seat reviews T-1
+    /// attempt 1 in session A, then T-2 in session B; T-1 attempt 2's review
+    /// must start with A.
+    #[test]
+    fn a_rereview_after_another_task_resumes_the_reviews_own_session() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        // T-1 attempt 1's review runs on review-1: session A.
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        let seat = "p:review-1";
+        let a = store
+            .read(|tx| tx.get_meta(&session_key("p", "T-1")))
+            .unwrap()
+            .filter(|session| !session.is_empty())
+            .unwrap_or_else(|| "sess-a".to_string());
+        store
+            .write(|tx| {
+                tx.add_round_session(
+                    &gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-1".into(),
+                        attempt: 1,
+                        role: "review".into(),
+                    },
+                    &a,
+                )?;
+                tx.set_binding_session_ref(seat, 1, &a)
+            })
+            .unwrap();
+        // The verdict fails attempt 1; the seat waits, warm.
+        store
+            .write(|tx| {
+                judged(tx, "T-1", 1, seat, false)?;
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.state = AttemptState::Rejected;
+                attempt.updated = T0 + 20;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Ready;
+                task.rework_note = Some("F1: the parser drops the second line".into());
+                task.updated = T0 + 20;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        assert_eq!(
+            standby_after_verdict(&mut store, "p", T0 + 20).unwrap(),
+            vec![seat.to_string()]
+        );
+        // T-2 is handed in and its review runs on the same seat: session B.
+        store
+            .write(|tx| {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-2".into(),
+                    rank: 2,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0 + 20,
+                })?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-2".into(),
+                    version: 1,
+                    goal: "the other goal".into(),
+                    accept: "the other criteria".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0 + 20,
+                    mechanical: None,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-2", "p:heat", 1, T0 + 21)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-2", 1, T0 + 21)?;
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-2",
+                    1,
+                    1,
+                    "def5678",
+                    "reviews/T-2.md",
+                    T0 + 21,
+                )
+            })
+            .unwrap();
+        let mut t2_open = None;
+        for tick in T0 + 22..T0 + 30 {
+            start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", tick).unwrap();
+            t2_open = store.read(|tx| tx.open_round_of_seat(seat)).unwrap();
+            let active = store
+                .read(|tx| tx.get_seat(seat))
+                .unwrap()
+                .is_some_and(|seat| seat.state == SeatState::Active);
+            if active
+                && t2_open
+                    .as_ref()
+                    .is_some_and(|round| round.task == "T-2" && round.attempt == 1)
+            {
+                break;
+            }
+        }
+        t2_open.expect("the review of T-2 opens on the same seat");
+        let b = "sess-b".to_string();
+        store
+            .write(|tx| {
+                tx.add_round_session(
+                    &gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-2".into(),
+                        attempt: 1,
+                        role: "review".into(),
+                    },
+                    &b,
+                )?;
+                tx.set_binding_session_ref(seat, 1, &b)
+            })
+            .unwrap();
+        // T-2 is judged; the seat waits again.
+        store
+            .write(|tx| {
+                judged(tx, "T-2", 1, seat, true)?;
+                let mut attempt = tx.get_attempt("p", "T-2", 1)?.unwrap();
+                attempt.state = AttemptState::Accepted;
+                attempt.updated = T0 + 25;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-2")?.unwrap();
+                task.state = TaskState::Done;
+                task.updated = T0 + 25;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        assert_eq!(
+            standby_after_verdict(&mut store, "p", T0 + 25).unwrap(),
+            vec![seat.to_string()]
+        );
+        // T-1 attempt 2 is handed in: the re-review starts on the same seat.
+        store
+            .write(|tx| {
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 30)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 30)?;
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-1",
+                    2,
+                    1,
+                    "def5678",
+                    "reports/T-1.md",
+                    T0 + 30,
+                )
+            })
+            .unwrap();
+        let mut open = None;
+        for tick in T0 + 31..T0 + 40 {
+            start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", tick).unwrap();
+            open = store.read(|tx| tx.open_round_of_seat(seat)).unwrap();
+            if open
+                .as_ref()
+                .is_some_and(|round| round.task == "T-1" && round.attempt == 2)
+            {
+                break;
+            }
+        }
+        open.expect("the re-review opens on the earlier seat");
+        let action = store
+            .read(|tx| tx.get_meta("engine.review_action.p.T-1.2"))
+            .unwrap();
+        let action: serde_json::Value =
+            serde_json::from_str(action.as_deref().expect("the action is recorded")).unwrap();
+        assert_eq!(action["action"], "resume", "{action}");
+        assert_eq!(
+            action["session_ref"], a,
+            "the review's own session, not the seat's latest: {action}"
+        );
+        assert_ne!(action["session_ref"], b, "{action}");
+        // Let the first resume of A complete: the runner records it and its
+        // step is done, so the next preparation starts a new resume instead of
+        // reusing the still-open step whose target is A (F2 of the review of
+        // attempt 1: the old test never got past that).
+        let pane = store
+            .read(|tx| tx.get_binding(seat, 1))
+            .unwrap()
+            .unwrap()
+            .pane_id;
+        // The agent that ran T-2 exits (the resume's own exit), so the first
+        // resume of A starts and completes.
+        herdr.exit_agent(&pane);
+        let mut resumed = false;
+        for tick in T0 + 40..T0 + 55 {
+            let seat_row = store.read(|tx| tx.get_seat(seat)).unwrap().unwrap();
+            crate::session::prepare_review_role(
+                &mut store,
+                &mut herdr,
+                &cfg(),
+                &seat_row,
+                "T-1",
+                2,
+                crate::session::Role::Review,
+                tick,
+            )
+            .unwrap();
+            let step = store
+                .read(|tx| tx.get_meta("engine.session_step.p:review-1"))
+                .unwrap();
+            if step.as_deref().is_some_and(|raw| {
+                serde_json::from_str::<serde_json::Value>(raw)
+                    .ok()
+                    .is_some_and(|state| state["step"] == "done")
+            }) {
+                resumed = true;
+                break;
+            }
+        }
+        assert!(resumed, "the first resume of A completes");
+        // The seat still carries B when the re-review's round opens, and the
+        // session bookkeeping records B on that round; the agent then goes
+        // (the exit of the resume). The next preparation must resume A, the
+        // session of the review it continues, never B (the T-472 case).
+        herdr.set_agent_session(&pane, &b);
+        store
+            .write(|tx| {
+                tx.add_round_session(
+                    &gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-1".into(),
+                        attempt: 2,
+                        role: "review".into(),
+                    },
+                    &b,
+                )?;
+                tx.set_binding_session_ref(seat, 1, &b)
+            })
+            .unwrap();
+        herdr.exit_agent(&pane);
+        let seat_row = store.read(|tx| tx.get_seat(seat)).unwrap().unwrap();
+        crate::session::prepare_review_role(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &seat_row,
+            "T-1",
+            2,
+            crate::session::Role::Review,
+            T0 + 60,
+        )
+        .unwrap();
+        // The agent the engine starts again resumes A, never B.
+        let started = starts(&herdr);
+        let last = started.last().expect("the reviewer starts again");
+        assert!(
+            last.1.iter().any(|arg| arg == "resume"),
+            "the start resumes: {:?}",
+            last.1
+        );
+        assert!(
+            last.1.iter().any(|arg| arg == &a),
+            "the start resumes A: {:?}",
+            last.1
+        );
+        assert!(
+            !last.1.iter().any(|arg| arg == &b),
+            "the start does not resume B: {:?}",
+            last.1
+        );
+        let action = store
+            .read(|tx| tx.get_meta("engine.review_action.p.T-1.2"))
+            .unwrap();
+        let action: serde_json::Value =
+            serde_json::from_str(action.as_deref().expect("the action is recorded")).unwrap();
+        assert_eq!(action["action"], "resume", "{action}");
+        assert_eq!(
+            action["session_ref"], a,
+            "the round's own record of B does not override the review's session: {action}"
+        );
+    }
+
+    /// T-499: when the session of the review a re-review continues cannot be
+    /// resumed (here another pane holds it, S3), the re-review starts fresh and
+    /// its packet names that session and the earlier review file, as T-481 does
+    /// for a lane.
+    #[test]
+    fn a_review_whose_earlier_session_is_gone_starts_fresh_with_the_reference_line() {
+        let mut store = world(CONFIG);
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.milestone = Some("M5".into());
+                tx.update_task(&task)
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        let seat = "p:review-1";
+        let a = store
+            .read(|tx| tx.get_meta(&session_key("p", "T-1")))
+            .unwrap()
+            .filter(|session| !session.is_empty())
+            .unwrap_or_else(|| "sess-a".to_string());
+        store
+            .write(|tx| {
+                tx.add_round_session(
+                    &gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-1".into(),
+                        attempt: 1,
+                        role: "review".into(),
+                    },
+                    &a,
+                )?;
+                tx.set_binding_session_ref(seat, 1, &a)
+            })
+            .unwrap();
+        // The seat's conversation moved on to B, and another pane's live agent
+        // holds A: A cannot be resumed (S3).
+        let pane = store
+            .read(|tx| tx.get_binding(seat, 1))
+            .unwrap()
+            .unwrap()
+            .pane_id;
+        herdr.set_agent_session(&pane, "sess-b");
+        store
+            .write(|tx| tx.set_binding_session_ref(seat, 1, "sess-b"))
+            .unwrap();
+        herdr.add_agent("w9:p3", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.set_agent_session("w9:p3", &a);
+        // The verdict fails attempt 1; the seat waits, warm.
+        store
+            .write(|tx| {
+                judged(tx, "T-1", 1, seat, false)?;
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.state = AttemptState::Rejected;
+                attempt.updated = T0 + 20;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Ready;
+                task.rework_note = Some("F1: the parser drops the second line".into());
+                task.updated = T0 + 20;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        assert_eq!(
+            standby_after_verdict(&mut store, "p", T0 + 20).unwrap(),
+            vec![seat.to_string()]
+        );
+        store
+            .write(|tx| {
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 30)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 30)?;
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-1",
+                    2,
+                    1,
+                    "def5678",
+                    "reports/T-1.md",
+                    T0 + 30,
+                )
+            })
+            .unwrap();
+        let mut packet = None;
+        for tick in T0 + 31..T0 + 40 {
+            start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", tick).unwrap();
+            packet = store
+                .read(|tx| tx.ops_of_seat_kind(seat, OpKind::Deliver))
+                .unwrap()
+                .into_iter()
+                .rev()
+                .find(|op| op.task.as_deref() == Some("T-1") && op.attempt == Some(2))
+                .and_then(|op| {
+                    op.payload
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                });
+            if packet.is_some() {
+                break;
+            }
+        }
+        let packet = packet.expect("the re-review's packet");
+        assert!(
+            packet.contains(&format!(
+                "The earlier review of this task ran in codex session {a}; its review file is gear/voyages/M5/reviews/T-1.md."
+            )),
+            "{packet}"
+        );
+        // It starts fresh: the session was not resumed.
+        let action = store
+            .read(|tx| tx.get_meta("engine.review_action.p.T-1.2"))
+            .unwrap();
+        let action: serde_json::Value =
+            serde_json::from_str(action.as_deref().expect("the action is recorded")).unwrap();
+        assert_ne!(action["action"], "resume", "{action}");
+    }
+
     #[test]
     fn a_rereview_resumes_the_jobs_session() {
         // F3 of the T-18 review: a re-review of the same task resumes that
@@ -11976,6 +12478,80 @@ profile = "opencode"
             "the recorded hand-in comes first"
         );
     }
+    /// A seat ran the direction check of T-1 attempt 1 and answered it; a
+    /// later check of the same attempt (a new candidate) on another seat then
+    /// rewrote the task's direction record. The first seat's own result still
+    /// ends its job, so it comes free (another project's re-review waited on
+    /// such a seat for good).
+    #[test]
+    fn a_direction_result_frees_its_seat_after_a_later_check_takes_the_record() {
+        let mut store = world(CONFIG);
+        store
+            .write(|tx| {
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "review-1",
+                    SeatRole::Temp,
+                    "w2:p1",
+                    "codex",
+                    T0,
+                )?;
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    kind: OpKind::Deliver,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "text": "Direction check of T-1 attempt 1." }),
+                    created: T0,
+                })?;
+                tx.insert_round(&gear_store::NewRound {
+                    key: gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-1".into(),
+                        attempt: 1,
+                        role: "direction".into(),
+                    },
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    cli: "codex".into(),
+                    model: None,
+                    start_at: T0,
+                })?;
+                tx.insert_message(&NewMessage {
+                    project: "p".into(),
+                    thread: "T-1:1".into(),
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    sender: "p:review-1".into(),
+                    sender_gen: 1,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::Result,
+                    urgent: false,
+                    body: "direction ok".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Info,
+                    created: T0 + 5,
+                    meta: Some(r#"{"direction":true,"sha":"aaaa"}"#.into()),
+                })?;
+                // A later check of the same attempt, at another candidate, on
+                // another seat, rewrites the record.
+                tx.set_meta(
+                    &direction_key("p", "T-1", 1),
+                    r#"{"seat":"p:review-2","sha":"bbbb","state":"starting"}"#,
+                )?;
+                tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 6)
+            })
+            .unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert!(last_job_recorded(&mut store, "p", &seat).unwrap());
+    }
+
     /// T-467: a raise the plan applied lets the engine start reviewers up to
     /// the raised count while hand-ins wait.
     #[test]

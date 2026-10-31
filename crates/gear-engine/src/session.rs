@@ -526,6 +526,16 @@ pub(crate) fn prepare_review_role(
     facts.open_round_session = round
         .as_ref()
         .and_then(|round| round.sessions.last().cloned());
+    // T-499: a re-review's own round may already carry the session the seat
+    // held from its previous job (the session bookkeeping records the session
+    // a seat carries on its open round, and the seat still carries that one
+    // until the resume runs). The round this one continues is attempt n-1's
+    // review: S1 must resume that session, not the previous job's.
+    if round.is_some() && role == Role::Review && attempt >= 2 {
+        if let Some(session) = facts.earlier_session.clone() {
+            facts.open_round_session = Some(session);
+        }
+    }
 
     let action = match &round {
         None => choose(&facts),
@@ -678,13 +688,21 @@ fn review_facts(
     task: &str,
     attempt: i64,
 ) -> GearResult<Facts> {
-    // The earlier review round of this task on this seat (V1).
+    // The earlier review round this round continues (V1): for a re-review
+    // (attempt n >= 2) that is the seat's round of attempt n-1, never the
+    // seat's latest review round. A seat that reviewed another task in
+    // between holds that task's conversation now, and — once the re-review's
+    // own round exists — its own new round is the latest one, so the latest
+    // round would name the wrong session (T-499: T-472 attempt 2 resumed
+    // T-495's review session). For attempt 1 the latest review round of the
+    // task on this seat is the one it continues (a retried first review).
     let (earlier_seat, earlier_cli, earlier_session) = store.read(|tx| {
-        let round = tx
-            .rounds_of_task(project, task)?
-            .into_iter()
-            .rev()
-            .find(|round| round.role == Role::Review.as_str() && round.seat == seat.id);
+        let rounds = tx.rounds_of_task(project, task)?;
+        let round = rounds.iter().rev().find(|round| {
+            round.role == Role::Review.as_str()
+                && round.seat == seat.id
+                && (attempt < 2 || round.attempt == attempt - 1)
+        });
         Ok(match round {
             Some(round) => (
                 Some(seat.id.clone()),
@@ -869,7 +887,7 @@ fn review_action_json(action: &Action) -> String {
 }
 
 /// The key of a review round's action.
-fn review_action_key(project: &str, task: &str, attempt: i64) -> String {
+pub(crate) fn review_action_key(project: &str, task: &str, attempt: i64) -> String {
     format!("engine.review_action.{project}.{task}.{attempt}")
 }
 
