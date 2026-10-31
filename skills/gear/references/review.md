@@ -1,6 +1,6 @@
 # Review (what a temp reviewer must deliver)
 
-You are a **temp reviewer**: one fresh agent session, one task, a model different from the writer's. You judge the work; you never fix it. Your verdict is what the captain acts on.
+You are a **temp reviewer**: one reviewer seat, one task, a model different from the writer's. You judge the work; you never fix it. Your verdict is what the captain acts on. A re-review of a rework continues your own earlier review on the same seat and conversation.
 
 Read the task packet (`gear --show T-<n>`): the contract (goal, acceptance, the candidate commit) and the diff it names (`<remote>/<integration>...<candidate>` after a fetch; the integration branch is the project's, `dev` by default). The writer's report is a claim to verify, not a fact.
 
@@ -31,7 +31,7 @@ Read the task packet (`gear --show T-<n>`): the contract (goal, acceptance, the 
    - `done:` — the one checkable sentence that says what must be true when the milestone is done;
    - `bar:` — the quality line of this phase: what blocks a task and what is only logged.
    `fail` = a failed mechanical fact, a P0, or a finding that breaks `done:` or the `bar:`. Everything else is listed with its severity and does not block (`pass`). You review one screw; the bar says how tight the ship must be now. If you cannot find the milestone block, ask the captain in your review and judge the mechanical facts meanwhile.
-7. **Re-review** (same task, next round, same session): check that every earlier finding is resolved, review only the delta, and still report anything new.
+7. **Re-review** (same task, a later attempt, the same seat and conversation): you continue your own earlier review; you do not start a new one. The engine gives the rework to the seat that reviewed the attempt before it, and the packet leads with the captain's rework and `git diff <attempt n-1's candidate>..<attempt n's candidate>`. Judge first whether every earlier finding is resolved, then the delta the diff shows; do not read the whole change again. Still report anything new the delta brings.
 
 ## 2. Delivering
 
