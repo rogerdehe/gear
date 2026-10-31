@@ -2,10 +2,11 @@
 //! qualified ids `gear --show` and `gear friction close` take.
 //!
 //! These run the real binary: the page is what the captain reads. The caller
-//! is the pane this test runs in (its ancestry is the pane's shell), so the
-//! test seeds the captains' bindings on that pane and asks Herdr for the
-//! occupant's kind. Without a Herdr socket there is no seat to prove, and the
-//! test does nothing (the rendered-page tests of `gear-app` still run).
+//! is a fixed pane the test seeds the captains' bindings on, and the binary
+//! runs with `GEAR_CTX` and no Herdr at all (`HERDR_PANE_ID` and
+//! `HERDR_SOCKET_PATH` removed): the page takes the caller's pane from the
+//! seat's binding, so the tests need no live pane and pass under `make gate`,
+//! which runs them from the engine outside any pane (T-486 attempt 4).
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -15,15 +16,11 @@ use gear_store::{testing, NewFriction, NewMessage, Store, TaskRow, VoyageRow};
 
 const NOW: i64 = 1_800_000_000;
 
-/// The pane this test runs in, and the kind of agent Herdr reports there.
-fn pane_and_kind() -> Option<(String, String)> {
-    use gear_herdr::HerdrRead;
-    let pane = std::env::var("HERDR_PANE_ID").ok()?;
-    let socket = std::env::var("HERDR_SOCKET_PATH").ok()?;
-    let mut herdr = gear_herdr::SocketHerdr::connect(Path::new(&socket)).ok()?;
-    let info = herdr.agent_get(&pane).ok()??;
-    Some((pane, info.agent?))
-}
+/// The fixed pane and kind the test seeds the captains' bindings on; the
+/// binary finds the caller's pane from the seat's binding, so no live pane or
+/// ancestry proof is needed.
+const PANE: &str = "w1:p1";
+const KIND: &str = "pi";
 
 fn gear(home: &Path, db: &Path, ctx: &str, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_gear"))
@@ -32,14 +29,8 @@ fn gear(home: &Path, db: &Path, ctx: &str, args: &[&str]) -> Output {
         .env("HOME", home)
         .env("GEAR_DB", db)
         .env("GEAR_CTX", ctx)
-        .env(
-            "HERDR_PANE_ID",
-            std::env::var("HERDR_PANE_ID").unwrap_or_default(),
-        )
-        .env(
-            "HERDR_SOCKET_PATH",
-            std::env::var("HERDR_SOCKET_PATH").unwrap_or_default(),
-        )
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_SOCKET_PATH")
         .env_remove("GEAR_ADMIN")
         .output()
         .expect("run gear")
@@ -55,7 +46,7 @@ fn stderr(o: &Output) -> String {
 
 /// Two projects, both captained from `pane`, each with a voyage, a task and
 /// one open item: `a` a normal one, `b` an urgent one.
-fn world(db: &Path, pane: &str, kind: &str) -> Store {
+fn world(db: &Path) -> Store {
     let mut s = Store::open(db).unwrap();
     s.write(|tx| {
         for (project, title, milestone) in [
@@ -63,7 +54,7 @@ fn world(db: &Path, pane: &str, kind: &str) -> Store {
             ("b", "the second voyage", "M2"),
         ] {
             testing::seed_project(tx, project, "sess", NOW)?;
-            testing::seed_active_seat(tx, project, "captain", SeatRole::Captain, pane, kind, NOW)?;
+            testing::seed_active_seat(tx, project, "captain", SeatRole::Captain, PANE, KIND, NOW)?;
             tx.upsert_voyage(&VoyageRow {
                 project: project.into(),
                 milestone: milestone.into(),
@@ -147,12 +138,9 @@ fn world(db: &Path, pane: &str, kind: &str) -> Store {
 
 #[test]
 fn the_page_shows_every_held_project_and_urgent_items_first() {
-    let Some((pane, kind)) = pane_and_kind() else {
-        return;
-    };
     let home = crate::scratch::home("home-multi");
     let db = home.join("gear.db");
-    let _store = world(&db, &pane, &kind);
+    let _store = world(&db);
 
     let out = gear(&home, &db, "a:captain:1", &[]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -175,12 +163,9 @@ fn the_page_shows_every_held_project_and_urgent_items_first() {
 
 #[test]
 fn show_takes_a_qualified_task_id() {
-    let Some((pane, kind)) = pane_and_kind() else {
-        return;
-    };
     let home = crate::scratch::home("home-show");
     let db = home.join("gear.db");
-    let mut s = world(&db, &pane, &kind);
+    let mut s = world(&db);
     s.write(|tx| {
         for (project, goal) in [
             ("a", "the first project's task"),
@@ -224,12 +209,9 @@ fn show_takes_a_qualified_task_id() {
 
 #[test]
 fn friction_close_takes_a_qualified_report_id() {
-    let Some((pane, kind)) = pane_and_kind() else {
-        return;
-    };
     let home = crate::scratch::home("home-friction");
     let db = home.join("gear.db");
-    let _store = world(&db, &pane, &kind);
+    let _store = world(&db);
 
     let out = gear(
         &home,

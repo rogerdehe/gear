@@ -1416,27 +1416,97 @@ fn request_id_at(now_ms: u64, pid: u32) -> String {
 }
 
 fn cmd_home(show: Option<&str>, json: bool) -> GearResult<()> {
+    let mut store = open_store()?;
+    // T-486: a caller that claims no pane (no `HERDR_PANE_ID`) needs no Herdr
+    // for the page — `make gate` runs its tests from the engine, outside any
+    // pane, and a live pane would be refused there. Its pane is its seat's
+    // binding pane, which the page and `--show` use to find the held projects.
+    let (mut herdr, env) = caller_door(&mut store, env_from_process()?)?;
+    let herdr_ref: Option<&mut dyn gear_herdr::HerdrRead> =
+        Some(herdr.as_mut() as &mut dyn gear_herdr::HerdrRead);
     if let Some(target) = show {
-        let env = env_from_process()?;
-        let mut store = open_store()?;
-        let mut herdr = open_herdr()?;
-        let env = resolve_caller(&mut store, &mut herdr, env)?;
-        let out = run_show(&mut store, &env, &mut herdr, target, json)?;
+        let out = run_show(&mut store, &env, herdr_ref, target, json)?;
         println!("{out}");
         return Ok(());
     }
-    let env = env_from_process()?;
-    let mut store = open_store()?;
-    let mut herdr = open_herdr()?;
-    let env = resolve_caller(&mut store, &mut herdr, env)?;
     run_home(
         &mut store,
         &env,
-        &mut herdr,
+        herdr_ref,
         now_ts(),
         json,
         &mut std::io::stdout(),
     )
+}
+
+/// The Herdr door and the caller's env for a command that proves a seat: a
+/// live Herdr when the caller claims a pane (`HERDR_PANE_ID` set), else the
+/// binding-backed reader and the seat's binding pane (T-486), so the command
+/// needs no live pane — `make gate` runs the tests from the engine, outside
+/// any pane. Without a context the door is an empty reader.
+fn caller_door(
+    store: &mut gear_store::Store,
+    env: gear_app::Env,
+) -> GearResult<(Box<dyn gear_herdr::HerdrRead>, gear_app::Env)> {
+    if std::env::var_os("HERDR_PANE_ID").is_some() {
+        let mut herdr = open_herdr()?;
+        let env = resolve_caller(store, &mut herdr, env)?;
+        return Ok((Box::new(herdr), env));
+    }
+    let env = pane_from_binding(store, env)?;
+    let herdr =
+        binding_herdr(store, &env)?.unwrap_or_else(|| Box::new(gear_herdr::fake::FakeHerdr::new()));
+    Ok((herdr, env))
+}
+
+/// The Herdr door for a caller that claims no pane (no `HERDR_PANE_ID`): a
+/// reader that answers for the caller's own seat from the store — the pane
+/// and kind of its active binding, and the process's own ancestry as the
+/// pane's shell — so the home page and `--show` prove the seat against the
+/// binding without a Herdr connection (T-486). `None` when there is no
+/// context or no binding.
+fn binding_herdr(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+) -> GearResult<Option<Box<dyn gear_herdr::HerdrRead>>> {
+    let Some(ctx) = env.ctx.as_ref() else {
+        return Ok(None);
+    };
+    let Some(binding) = store.read(|tx| tx.get_binding(&ctx.seat_id(), ctx.generation))? else {
+        return Ok(None);
+    };
+    let mut herdr = gear_herdr::fake::FakeHerdr::new();
+    herdr.add_agent(
+        &binding.pane_id,
+        &binding.kind,
+        gear_herdr::AgentStatus::Idle,
+    );
+    let shell = gear_app::identity::process_ancestors().first().copied();
+    herdr.set_pane_processes(&binding.pane_id, shell, &[]);
+    if let Some(session) = &binding.session_ref {
+        herdr.set_agent_session(&binding.pane_id, session);
+    }
+    Ok(Some(Box::new(herdr)))
+}
+
+/// The caller's pane when it claims none: the pane its seat's active binding
+/// names, so the home page and `--show` can resolve the projects on that pane
+/// without a Herdr connection (T-486). No context leaves the env as it is.
+fn pane_from_binding(
+    store: &mut gear_store::Store,
+    mut env: gear_app::Env,
+) -> GearResult<gear_app::Env> {
+    if env.pane_id.is_some() {
+        return Ok(env);
+    }
+    let Some(ctx) = env.ctx.as_ref() else {
+        return Ok(env);
+    };
+    let binding = store.read(|tx| tx.get_binding(&ctx.seat_id(), ctx.generation))?;
+    if let Some(binding) = binding {
+        env.pane_id = Some(binding.pane_id);
+    }
+    Ok(env)
 }
 
 /// `gear --show <target>` over injected state: the task packet of a task id.
@@ -1444,11 +1514,14 @@ fn cmd_home(show: Option<&str>, json: bool) -> GearResult<()> {
 fn run_show(
     store: &mut gear_store::Store,
     env: &gear_app::Env,
-    herdr: &mut dyn gear_herdr::HerdrRead,
+    herdr: Option<&mut dyn gear_herdr::HerdrRead>,
     target: &str,
     json: bool,
 ) -> GearResult<String> {
-    let fp = observe_identity(store, env, herdr)?;
+    let fp = match herdr {
+        Some(herdr) => observe_identity(store, env, herdr)?,
+        None => None,
+    };
     let (text, project) = store.read(|tx| {
         // A qualified id `<project>:T-<n>` names the project (T-486); a bare
         // id keeps the caller's own project.
@@ -1524,16 +1597,20 @@ fn is_task_id(target: &str) -> bool {
 fn run_home(
     store: &mut gear_store::Store,
     env: &gear_app::Env,
-    herdr: &mut dyn gear_herdr::HerdrRead,
+    mut herdr: Option<&mut dyn gear_herdr::HerdrRead>,
     now: i64,
     json: bool,
     out: &mut dyn std::io::Write,
 ) -> GearResult<()> {
-    let fp = observe_identity(store, env, herdr)?;
-    let agents = if env.ctx.as_ref().is_some_and(|ctx| ctx.seat == "captain") {
-        herdr.agents().ok()
-    } else {
-        None
+    let fp = match herdr.as_deref_mut() {
+        Some(herdr) => observe_identity(store, env, herdr)?,
+        None => None,
+    };
+    let agents = match herdr.as_deref_mut() {
+        Some(herdr) if env.ctx.as_ref().is_some_and(|ctx| ctx.seat == "captain") => {
+            herdr.agents().ok()
+        }
+        _ => None,
     };
     let home = gear_app::home::build_with_agents(store, env, fp.as_ref(), now, agents.as_deref())?;
     if json {
@@ -1775,11 +1852,9 @@ fn cmd_whoami(json: bool) -> GearResult<()> {
 /// what cost a lane or a reviewer time that the captain could fix, and what
 /// the captain did about it.
 fn cmd_friction(c: FrictionCmd, json: bool) -> GearResult<()> {
-    let env = env_from_process()?;
     let mut store = open_store()?;
-    let mut herdr = open_herdr()?;
-    let env = resolve_caller(&mut store, &mut herdr, env)?;
-    let out = run_friction(&mut store, &env, &mut herdr, &c, now_ts())?;
+    let (mut herdr, env) = caller_door(&mut store, env_from_process()?)?;
+    let out = run_friction(&mut store, &env, herdr.as_mut(), &c, now_ts())?;
     if json {
         println!("{}", serde_json::json!({ "friction": out }));
         return Ok(());
@@ -4410,7 +4485,7 @@ mod tests {
         run_home(
             &mut store,
             &env("captain", CAP_PANE),
-            &mut herdr,
+            Some(&mut herdr as &mut dyn gear_herdr::HerdrRead),
             T0,
             false,
             &mut out,
@@ -9459,7 +9534,7 @@ path="api"
         run_home(
             &mut store,
             &home_env("heat", LANE_PANE),
-            &mut herdr,
+            Some(&mut herdr as &mut dyn gear_herdr::HerdrRead),
             T0 + 2,
             false,
             &mut out,
@@ -9486,7 +9561,7 @@ path="api"
         let result = run_home(
             &mut store,
             &home_env("heat", LANE_PANE),
-            &mut herdr,
+            Some(&mut herdr as &mut dyn gear_herdr::HerdrRead),
             T0 + 2,
             false,
             &mut FailingWriter,
@@ -9578,7 +9653,7 @@ path="api"
         run_home(
             &mut store,
             &home_env("captain", CAP_PANE),
-            &mut herdr,
+            Some(&mut herdr as &mut dyn gear_herdr::HerdrRead),
             depart - 600,
             false,
             &mut out,
@@ -9598,7 +9673,7 @@ path="api"
         run_home(
             &mut store,
             &home_env("captain", CAP_PANE),
-            &mut herdr,
+            Some(&mut herdr as &mut dyn gear_herdr::HerdrRead),
             T0,
             false,
             &mut out,
@@ -9623,7 +9698,7 @@ path="api"
         run_home(
             &mut store,
             &home_env("captain", CAP_PANE),
-            &mut herdr,
+            Some(&mut herdr as &mut dyn gear_herdr::HerdrRead),
             evening,
             false,
             &mut out,
@@ -9644,7 +9719,7 @@ path="api"
         run_home(
             &mut store,
             &home_env("captain", CAP_PANE),
-            &mut herdr,
+            Some(&mut herdr as &mut dyn gear_herdr::HerdrRead),
             noon,
             false,
             &mut out,
@@ -9669,7 +9744,7 @@ path="api"
         run_home(
             &mut store,
             &home_env("captain", CAP_PANE),
-            &mut herdr,
+            Some(&mut herdr as &mut dyn gear_herdr::HerdrRead),
             evening,
             false,
             &mut out,
@@ -9701,7 +9776,7 @@ path="api"
         run_home(
             &mut store,
             &home_env("captain", CAP_PANE),
-            &mut herdr,
+            Some(&mut herdr as &mut dyn gear_herdr::HerdrRead),
             evening,
             false,
             &mut out,
@@ -9765,7 +9840,7 @@ path="api"
         let out = run_show(
             &mut store,
             &env("heat", LANE_PANE),
-            &mut herdr,
+            Some(&mut herdr as &mut dyn gear_herdr::HerdrRead),
             "T-1",
             false,
         )
@@ -9810,7 +9885,7 @@ path="api"
         let out = run_show(
             &mut store,
             &env("heat", LANE_PANE),
-            &mut herdr,
+            Some(&mut herdr as &mut dyn gear_herdr::HerdrRead),
             "T-1",
             false,
         )
@@ -9837,7 +9912,14 @@ path="api"
         let (mut store, mut herdr) = world();
         seed_task(&mut store, "T-1", Some("heat"));
 
-        let out = run_show(&mut store, &env("heat", LANE_PANE), &mut herdr, "T-1", true).unwrap();
+        let out = run_show(
+            &mut store,
+            &env("heat", LANE_PANE),
+            Some(&mut herdr as &mut dyn gear_herdr::HerdrRead),
+            "T-1",
+            true,
+        )
+        .unwrap();
 
         let text: String = serde_json::from_str(&out).unwrap();
         assert!(text.contains("# T-1 — Ship the thing"), "{text}");
@@ -9849,7 +9931,7 @@ path="api"
         let err = run_show(
             &mut store,
             &env("heat", LANE_PANE),
-            &mut herdr,
+            Some(&mut herdr as &mut dyn gear_herdr::HerdrRead),
             "T-9",
             false,
         )
@@ -9865,7 +9947,7 @@ path="api"
             let err = run_show(
                 &mut store,
                 &env("heat", LANE_PANE),
-                &mut herdr,
+                Some(&mut herdr as &mut dyn gear_herdr::HerdrRead),
                 target,
                 false,
             )
