@@ -249,7 +249,12 @@ fn a_fresh_mark_is_parsed_stored_and_shown() {
         s.read(|tx| tx.task_fresh("p", "T-2")).unwrap().as_deref(),
         Some("another subsystem")
     );
-    run_at(&mut s, "# Queue\n## T-2 [should] lane=wire\ndeps: -\n", "r3").unwrap();
+    run_at(
+        &mut s,
+        "# Queue\n## T-2 [should] lane=wire\ndeps: -\n",
+        "r3",
+    )
+    .unwrap();
     assert_eq!(
         s.read(|tx| tx.task_fresh("p", "T-2")).unwrap().as_deref(),
         Some("another subsystem")

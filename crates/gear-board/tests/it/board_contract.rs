@@ -147,7 +147,10 @@ fn the_lane_line_marks_a_new_session_recovery() {
         "runtime · agent unknown · T-2 working · new-session recovery · 1 queued"
     );
     // A lane whose round continues its conversation says nothing extra.
-    assert_eq!(line("data"), "data · agent unknown · T-3 handed in, waits for a reviewer · 0 queued");
+    assert_eq!(
+        line("data"),
+        "data · agent unknown · T-3 handed in, waits for a reviewer · 0 queued"
+    );
 }
 
 /// T-347: the lane line names the task's stage in the words of the board's

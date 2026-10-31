@@ -804,9 +804,7 @@ pub fn project_for(
         // The latest attempt's round, for the new-session recovery mark
         // (T-481).
         let recovery = match tx.attempts_of_task(project, &task.id)?.last() {
-            Some(attempt) => tx
-                .session_recovery(project, &task.id, attempt.n)?
-                .is_some(),
+            Some(attempt) => tx.session_recovery(project, &task.id, attempt.n)?.is_some(),
             None => false,
         };
         let line = TaskBoard {

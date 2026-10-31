@@ -616,8 +616,8 @@ fn lane_facts(
 ) -> GearResult<Facts> {
     // The earlier work: the attempt before this one (a rework), or the last
     // accepted attempt of the task it follows (a follow-up).
-    let (followup_of, fresh, last_round_cli, earlier_seat, earlier_cli, earlier_session) =
-        store.read(|tx| {
+    let (followup_of, fresh, last_round_cli, earlier_seat, earlier_cli, earlier_session) = store
+        .read(|tx| {
             let followup_of = tx
                 .get_task(project, task)?
                 .and_then(|row| row.followup_of.clone());
@@ -1966,6 +1966,8 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
     }
 
     /// The facts of a lane round, with the defaults of a seat that works.
+    /// The facts of a lane round, with the defaults of a seat that works and
+    /// already ran a round on its CLI: the second task on a lane.
     fn lane_facts() -> Facts {
         Facts {
             seat: "p:heat".into(),
@@ -1974,7 +1976,7 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
             attempt: 1,
             followup_of: None,
             fresh: false,
-            last_round_cli: None,
+            last_round_cli: Some("codex".into()),
             earlier_seat: None,
             earlier_cli: None,
             earlier_session: None,
@@ -2075,20 +2077,22 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
         let facts = lane_facts();
         assert_eq!(choose(&facts), Action::Keep);
 
-        // A seat that never ran a round holds no conversation yet: a new one.
+        // A seat that never ran a round but holds a session keeps it: the
+        // conversation the agent was onboarded with.
         let mut facts = facts.clone();
         facts.last_round_cli = None;
-        assert_eq!(choose(&facts), Action::New);
+        assert_eq!(choose(&facts), Action::Keep);
         facts.current_session = None;
         assert_eq!(choose(&facts), Action::New);
 
-        // A follow-up whose earlier attempt ran on another seat: L7 as well.
+        // A follow-up whose earlier attempt ran on another seat: its session
+        // cannot be used, so the lane keeps its own conversation (T-481).
         let mut facts = lane_facts();
         facts.followup_of = Some("T-7".into());
         facts.earlier_seat = Some("p:other".into());
         facts.earlier_cli = Some("codex".into());
         facts.earlier_session = Some("session-a".into());
-        assert_eq!(choose(&facts), Action::New);
+        assert_eq!(choose(&facts), Action::Keep);
 
         facts.earlier_seat = Some("p:heat".into());
         facts.earlier_session = None;
@@ -2367,9 +2371,7 @@ lanes = [{ model = "test-model", context_window_k = 100 }]
             .unwrap();
         assert_eq!(attempt.session_action.as_deref(), Some("new"));
         assert_eq!(
-            store
-                .read(|tx| tx.session_recovery("p", "T-1", 2))
-                .unwrap(),
+            store.read(|tx| tx.session_recovery("p", "T-1", 2)).unwrap(),
             Some(("pi".to_string(), "session-x".to_string())),
             "the round is marked a new-session recovery"
         );
