@@ -2884,6 +2884,9 @@ quota_reset_h = {reset_h}
                 // the seat's worktree is not recorded in this fixture).
                 "-c".to_string(),
                 "projects={\"/repo\"={trust_level=\"trusted\"}}".to_string(),
+                // T-457: a resume runs in the seat's own directory.
+                "-c".to_string(),
+                "tui.resume_cwd=\"current\"".to_string(),
                 "-c".to_string(),
                 gear_herdr::profile::render_rules(
                     &[gear_herdr::profile::CODEX_RULES_ARG.to_string()],

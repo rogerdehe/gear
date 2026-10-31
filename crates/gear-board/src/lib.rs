@@ -29,9 +29,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gear_model::{
-    ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, SeatState, TaskState, Ts,
+    ErrorCode, GearError, GearResult, MsgKind, OpKind, OpState, SeatRole, SeatState, TaskState, Ts,
 };
-use gear_store::{BindingStatus, RoundRow, SeatRow, Store, TaskRow, Tx};
+use gear_store::{BindingStatus, MessageRow, RoundRow, SeatRow, Store, TaskRow, Tx};
 
 use crate::frame::Tab;
 use crate::idle::IdleReason;
@@ -1079,7 +1079,14 @@ pub fn project_for(
                 waiting_on.push(format!("{} {lane} waits for the captain's answer", task.id))
             }
             graph::Stage::Verdict => {
-                waiting_on.push(format!("{} waits for the captain's verdict", task.id))
+                // The review is in and the verdict is the captain's (T-460):
+                // name the item that waits in his inbox, so a finished review
+                // is not read as a stall. A passed review leaves no open item;
+                // then the plain words stay.
+                waiting_on.push(
+                    verdict_wait_of(tx, project, &task.id, now)?
+                        .unwrap_or_else(|| format!("{} waits for the captain's verdict", task.id)),
+                )
             }
             graph::Stage::MergeFailed => {
                 waiting_on.push(format!("{} merge failed, waits for the captain", task.id))
@@ -1187,6 +1194,39 @@ pub fn project_for(
         shown,
         moved_out,
     })
+}
+
+/// The captain's open item about a task whose review is in and waits for the
+/// captain's verdict (T-460): `waits for your verdict (M-<id>)`, with the id of
+/// the item that waits in the captain's inbox.
+///
+/// None when no such item waits — a passed review is information and leaves no
+/// item — and when the project has no captain.
+pub fn verdict_wait_of(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    now: Ts,
+) -> GearResult<Option<String>> {
+    let Some(captain) = tx.captain_of(project)? else {
+        return Ok(None);
+    };
+    // The newest open item about the task: the verdict a reviewer handed in
+    // (kind `review`), or the engine's word that no reviewer will settle it
+    // (`verdict:<task>:<attempt>`, `review-stall:<task>:<attempt>`).
+    let item = tx
+        .actionable_for(project, &captain.id, now)?
+        .into_iter()
+        .rev()
+        .find(|item| item.task.as_deref() == Some(task) && is_verdict_item(item));
+    Ok(item.map(|item| format!("{task} waits for your verdict ({})", item.id)))
+}
+
+/// Whether an open item means "the verdict of this attempt is the captain's".
+fn is_verdict_item(item: &MessageRow) -> bool {
+    item.kind == MsgKind::Review
+        || item.thread.starts_with("verdict:")
+        || item.thread.starts_with("review-stall:")
 }
 
 /// The overlaps of the project with the integration branches (T-188).
