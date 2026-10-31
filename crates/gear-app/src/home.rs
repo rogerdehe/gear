@@ -13,6 +13,9 @@ pub struct Home {
     pub text: String,
     /// What was shown; written by [`record_view`] only after the text was printed.
     pub view: ViewRecord,
+    /// Every project's view, when the page showed several (T-486); one entry
+    /// for a single-project page, equal to `view`.
+    pub views: Vec<ViewRecord>,
 }
 
 /// Build the home page for the caller's seat.
@@ -41,14 +44,35 @@ pub fn build_with_agents(
     now: Ts,
     agents: Option<&[gear_herdr::AgentInfo]>,
 ) -> GearResult<Home> {
-    let (text, view) = store.read(|tx| {
+    let (text, views) = store.read(|tx| {
         let (ctx, seat) = require_seat(tx, env, fp, None, None)?;
         let seat_id = seat.id.clone();
 
+        // A captain whose pane holds more than one project (T-486): every
+        // held project's voyage line and its inbox, urgent items of all
+        // projects first, each item line naming its project. One project
+        // keeps the page of design/13 exactly as it was.
+        if seat.role == SeatRole::Captain {
+            let pane = fp
+                .map(|fp| fp.pane_id.clone())
+                .or_else(|| env.pane_id.clone());
+            let held: Vec<gear_store::SeatRow> = match pane {
+                Some(pane) => crate::identity::captains_on_pane(tx, &pane)?,
+                None => Vec::new(),
+            };
+            if held.len() > 1 {
+                let (text, views) = multi_page(tx, env, &seat, &ctx, &seat_id, now, &held)?;
+                return Ok((text, views));
+            }
+        }
+
         let mut lines: Vec<String> = Vec::new();
         if seat.role == SeatRole::Captain {
-            lines.extend(gear_board::voyage::reports(tx, &ctx.project, now)?
-                .iter().flat_map(|v| v.lines()));
+            lines.extend(
+                gear_board::voyage::reports(tx, &ctx.project, now)?
+                    .iter()
+                    .flat_map(|v| v.lines()),
+            );
             // The voyage's goal, bar and course (T-336): the same one text
             // every captain output uses, right under the voyage report lines.
             let milestone = crate::plan::current_voyage(tx, &ctx.project)?;
@@ -77,10 +101,14 @@ pub fn build_with_agents(
         // A message counts as shown when a recorded view of this seat and
         // generation lists its id. The ids decide, not the timestamps: a
         // message created in the same second as the view must not be lost,
-        // and a message no view ever listed stays unshown.
+        // and a message no view ever listed stays unshown. Only this
+        // project's views count (T-486): a bare id is not unique across
+        // projects.
         let mut already_shown: Vec<String> = Vec::new();
         for view in tx.views_since(&seat_id, ctx.generation, 0)? {
-            already_shown.extend(view.shown_msgs);
+            if view.project == ctx.project {
+                already_shown.extend(view.shown_msgs);
+            }
         }
 
         let mut shown_msgs: Vec<String> = Vec::new();
@@ -121,12 +149,22 @@ pub fn build_with_agents(
 
         if seat.role == SeatRole::Captain {
             // The inbox batch: thread, message ids, the original bodies.
-            let batch = mail::select_batch(tx, &ctx.project, &seat_id, now, mail::BatchLimits::default())?;
+            let batch = mail::select_batch(
+                tx,
+                &ctx.project,
+                &seat_id,
+                now,
+                mail::BatchLimits::default(),
+            )?;
             if !batch.is_empty() {
                 lines.push(String::new());
                 lines.push(format!("INBOX ({} threads)", batch.len()));
                 for thread in &batch {
-                    let ids: Vec<&str> = thread.open.iter().map(|message| message.id.as_str()).collect();
+                    let ids: Vec<&str> = thread
+                        .open
+                        .iter()
+                        .map(|message| message.id.as_str())
+                        .collect();
                     let urgent = if thread.urgent { " [urgent]" } else { "" };
                     lines.push(format!("  {}{urgent} {}", thread.thread, ids.join(" ")));
                     for message in &thread.open {
@@ -160,41 +198,18 @@ pub fn build_with_agents(
             lines.push(String::new());
             lines.push(format!("UNSHOWN ({})", unshown.len()));
             for message in &unshown {
-                lines.push(format!("  {} {}  {}", message.id, message.thread, message.body));
+                lines.push(format!(
+                    "  {} {}  {}",
+                    message.id, message.thread, message.body
+                ));
                 shown_msgs.push(message.id.clone());
             }
         }
 
         // The command that helps the seat move on.
         lines.push(String::new());
-        lines.push(match seat.role {
-            SeatRole::Captain => match shown_msgs.first() {
-                Some(first) => match tx.get_message(&ctx.project, first)? {
-                    Some(message) if crate::station::is_station(&message) => {
-                        let milestone = message.thread.trim_start_matches("station:");
-                        // The voyage's plan file, where the project keeps it
-                        // (T-257): `gear/voyages/<M>/plan.md` by default.
-                        let voyage_dir =
-                            crate::tasks::conventions_of(tx, &ctx.project).voyage_dir;
-                        let plan = gear_model::layout::plan_file(
-                            &voyage_dir,
-                            &ctx.project,
-                            milestone,
-                        );
-                        format!("next: gear plan apply {plan} (# Decisions: station {first}: keep course|time-box|cut|move)")
-                    }
-                    // A review fail (or a failed merge) is settled where it
-                    // can be: by a `# Verdicts` line, not by a reply (T-90).
-                    Some(message) => match crate::tasks::verdict_hint(tx, &ctx.project, &message)? {
-                        Some(hint) => format!("next: {}", verdict_command(&hint)),
-                        None => format!("next: gear reply {first} --resolve -m \"<what was done>\""),
-                    },
-                    None => format!("next: gear reply {first} --resolve -m \"<what was done>\""),
-                },
-                None => "next: gear".to_string(),
-            },
-            _ => "next: gear send --kind progress".to_string(),
-        });
+        let first = shown_msgs.first().map(|id| (id.as_str(), id.as_str()));
+        lines.push(next_command(tx, &ctx.project, first)?);
 
         let view = ViewRecord {
             project: ctx.project.clone(),
@@ -207,9 +222,245 @@ pub fn build_with_agents(
             shown_attempt,
             shown_contract,
         };
-        Ok((lines.join("\n"), view))
+        Ok((lines.join("\n"), vec![view]))
     })?;
-    Ok(Home { text, view })
+    // The caller's own project's view (T-486 F2): a multi-project page has
+    // one view per held project, and `Home.view` is the one of the project
+    // the caller runs in, not the first held one.
+    let caller = env.ctx.as_ref().map(|ctx| ctx.project.clone());
+    let view = caller
+        .as_ref()
+        .and_then(|project| views.iter().find(|view| &view.project == project))
+        .or_else(|| views.first())
+        .cloned()
+        .unwrap_or_else(|| ViewRecord {
+            project: caller.unwrap_or_default(),
+            seat: String::new(),
+            generation: 0,
+            ts: now,
+            shown_msgs: Vec::new(),
+            shown_ops: Vec::new(),
+            shown_task: None,
+            shown_attempt: None,
+            shown_contract: None,
+        });
+    Ok(Home { text, view, views })
+}
+
+/// The page of a captain whose pane holds several projects (T-486): urgent
+/// items of every project first, then each project's voyage line and the
+/// rest of its inbox, every item line carrying the qualified id
+/// (`<project>:M-<n>`) `gear reply` takes. One view per project, so each
+/// project's messages count as shown only there.
+fn multi_page(
+    tx: &Tx<'_>,
+    env: &Env,
+    seat: &gear_store::SeatRow,
+    ctx: &gear_model::GearCtx,
+    seat_id: &str,
+    now: Ts,
+    held: &[gear_store::SeatRow],
+) -> GearResult<(String, Vec<ViewRecord>)> {
+    let _ = env;
+    // Each held project's own captain seat: its messages are addressed to
+    // `<project>:captain`, and its view is recorded under that seat.
+    let mut held: Vec<&gear_store::SeatRow> = held.iter().collect();
+    held.sort_by(|a, b| a.project.cmp(&b.project));
+    held.dedup_by(|a, b| a.project == b.project);
+
+    let mut already: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for held_seat in &held {
+        let mut shown = Vec::new();
+        for view in tx.views_since(&held_seat.id, held_seat.generation, 0)? {
+            if view.project == held_seat.project {
+                shown.extend(view.shown_msgs);
+            }
+        }
+        already.insert(held_seat.project.clone(), shown);
+    }
+
+    let mut batches = Vec::new();
+    for held_seat in &held {
+        let batch = mail::select_batch(
+            tx,
+            &held_seat.project,
+            &held_seat.id,
+            now,
+            mail::BatchLimits::default(),
+        )?;
+        batches.push((held_seat, batch));
+    }
+
+    let mut lines = vec![format!(
+        "seat {seat_id} · {} · generation {}",
+        seat.role.as_str(),
+        ctx.generation
+    )];
+    let mut views: Vec<ViewRecord> = Vec::new();
+    let mut first: Option<(String, String)> = None;
+
+    // 1. Urgent items of all projects, before anything else.
+    let mut urgent_lines: Vec<String> = Vec::new();
+    let mut urgent_threads = 0;
+    for (held_seat, batch) in &batches {
+        let project = &held_seat.project;
+        for thread in batch.iter().filter(|thread| thread.urgent) {
+            urgent_threads += 1;
+            let ids: Vec<String> = thread
+                .open
+                .iter()
+                .map(|message| format!("{project}:{}", message.id))
+                .collect();
+            urgent_lines.push(format!("  {} [urgent] {}", thread.thread, ids.join(" ")));
+            for message in &thread.open {
+                urgent_lines.push(format!("    {}", message.body));
+            }
+            if thread.more > 0 {
+                urgent_lines.push(format!("    +{} more", thread.more));
+            }
+            if first.is_none() {
+                if let Some(message) = thread.open.first() {
+                    first = Some((project.clone(), message.id.clone()));
+                }
+            }
+        }
+    }
+    if urgent_threads > 0 {
+        lines.push(String::new());
+        lines.push(format!("URGENT ({urgent_threads} threads)"));
+        lines.extend(urgent_lines);
+    }
+
+    // 2. Each held project: its voyage line and the rest of its inbox.
+    for (held_seat, batch) in &batches {
+        let project = &held_seat.project;
+        let project_seat = &held_seat.id;
+        let generation = held_seat.generation;
+        let since = crate::seats::generation_since(tx, project_seat, generation)?;
+        lines.push(String::new());
+        lines.push(project.clone());
+        for report in gear_board::voyage::reports(tx, project, now)? {
+            lines.extend(report.lines());
+        }
+        let milestone = crate::plan::current_voyage(tx, project)?;
+        if !milestone.is_empty() {
+            if let Some(goal) = gear_board::stations::goal_text(tx, project, &milestone)? {
+                lines.push(goal);
+            }
+        }
+
+        let mut shown_msgs: Vec<String> = Vec::new();
+        // Urgent items were printed above; their ids still count as shown.
+        for thread in batch.iter().filter(|thread| thread.urgent) {
+            for message in &thread.open {
+                shown_msgs.push(message.id.clone());
+            }
+        }
+        let normal: Vec<&mail::ThreadView> = batch.iter().filter(|thread| !thread.urgent).collect();
+        if !normal.is_empty() {
+            lines.push(format!("INBOX ({} threads)", normal.len()));
+            for thread in normal {
+                let ids: Vec<String> = thread
+                    .open
+                    .iter()
+                    .map(|message| format!("{project}:{}", message.id))
+                    .collect();
+                lines.push(format!("  {} {}", thread.thread, ids.join(" ")));
+                for message in &thread.open {
+                    lines.push(format!("    {}", message.body));
+                    shown_msgs.push(message.id.clone());
+                }
+                if thread.more > 0 {
+                    lines.push(format!("    +{} more", thread.more));
+                }
+                if first.is_none() {
+                    if let Some(message) = thread.open.first() {
+                        first = Some((project.clone(), message.id.clone()));
+                    }
+                }
+            }
+        }
+
+        // Replies and instructions this project's own views have not shown.
+        let project_already = already.get(project).cloned().unwrap_or_default();
+        let unshown: Vec<_> = tx
+            .messages_to_since(project, project_seat, since)?
+            .into_iter()
+            .filter(|message| {
+                !project_already.contains(&message.id)
+                    && !shown_msgs.contains(&message.id)
+                    && crate::seats::message_belongs(held_seat, message, since)
+            })
+            .collect();
+        if !unshown.is_empty() {
+            lines.push(format!("UNSHOWN ({})", unshown.len()));
+            for message in &unshown {
+                lines.push(format!(
+                    "  {project}:{} {}  {}",
+                    message.id, message.thread, message.body
+                ));
+                shown_msgs.push(message.id.clone());
+                if first.is_none() {
+                    first = Some((project.clone(), message.id.clone()));
+                }
+            }
+        }
+
+        views.push(ViewRecord {
+            project: project.clone(),
+            seat: project_seat.clone(),
+            generation,
+            ts: now,
+            shown_msgs,
+            shown_ops: Vec::new(),
+            shown_task: None,
+            shown_attempt: None,
+            shown_contract: None,
+        });
+    }
+
+    lines.push(String::new());
+    lines.push(match &first {
+        Some((project, id)) => {
+            let shown = format!("{project}:{id}");
+            next_command(tx, project, Some((id.as_str(), shown.as_str())))?
+        }
+        None => "next: gear".to_string(),
+    });
+    Ok((lines.join("\n"), views))
+}
+
+/// The command that helps the seat move on (design/13). `first` is the first
+/// shown message: its bare id for the lookup, and the id the page printed
+/// (qualified when the captain holds several projects).
+fn next_command(tx: &Tx<'_>, project: &str, first: Option<(&str, &str)>) -> GearResult<String> {
+    let Some((bare, shown)) = first else {
+        return Ok("next: gear".to_string());
+    };
+    match tx.get_message(project, bare)? {
+        Some(message) if crate::station::is_station(&message) => {
+            let milestone = message.thread.trim_start_matches("station:");
+            // The voyage's plan file, where the project keeps it
+            // (T-257): `gear/voyages/<M>/plan.md` by default.
+            let voyage_dir = crate::tasks::conventions_of(tx, project).voyage_dir;
+            let plan = gear_model::layout::plan_file(&voyage_dir, project, milestone);
+            Ok(format!(
+                "next: gear plan apply {plan} (# Decisions: station {shown}: keep course|time-box|cut|move)"
+            ))
+        }
+        // A review fail (or a failed merge) is settled where it can be:
+        // by a `# Verdicts` line, not by a reply (T-90).
+        Some(message) => match crate::tasks::verdict_hint(tx, project, &message)? {
+            Some(hint) => Ok(format!("next: {}", verdict_command(&hint))),
+            None => Ok(format!(
+                "next: gear reply {shown} --resolve -m \"<what was done>\""
+            )),
+        },
+        None => Ok(format!(
+            "next: gear reply {shown} --resolve -m \"<what was done>\""
+        )),
+    }
 }
 
 /// Persist the view. The CLI calls this **after** printing succeeded; if
