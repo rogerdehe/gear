@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=934 -->
+<!-- gear-plan project=gear base=940 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3).
 
@@ -45,6 +45,9 @@ station S4: the captain's plan tools, released as v0.6.3
 - station M-6669: keep course — projected 651m of 720m, but hull carries 516m against mast's 177m; T-461 (S1) and T-473 (S4), both in gear-app, move back to mast (hull 406m, mast 287m)
 - station M-6702: move — projected 809m of 720m, hull the bottleneck (634m against mast's 252m); T-458, T-468, T-472 and T-482 move to mast (hull ~464m, mast ~422m); they touch engine files apart from hull's S1/S2 work, and the second to merge merges dev first
 - station M-6704: keep course — after the move projected 623m of 720m, lanes balanced (hull 443m, mast 411m)
+- 2026-10-31 19:30 lesson: T-469 and T-461 passed their acceptance and failed the merge gate on tests in crates that call the changed one (engine, cli) | why: the captain's acceptance named only the changed crate | else: from now on a contract's acceptance names every crate whose tests use the changed behaviour
+- 2026-10-31 19:45 scope: added to S2 (mast): a CLI cost of 0 with tokens is unknown, not $0.00 | why: the Cost tab showed $0.00 for 6.1 M tokens; pi writes 0 when its provider config has no price | else: -
+- 2026-10-31 19:55 scope: T-484 v2 prices tokens at the official price (built-in table, peak and off-peak by UTC window, project `[prices]` overrides) | why: user: with no price written, use the maker's official price, which has peak and off-peak rates | else: -
 
 # Queue
 
@@ -86,7 +89,7 @@ estimate: 40
 
 ## T-458 [now] lane=mast milestone=M6 station=S1 required
 goal: [S1] Smaller M5 fleet bugs: a lane that reports blocked gets its next startable task; a held seat may still report a finished hand-in; a repeated confirmed goal/bar/eta change records its second decision; the lost-merge scan runs before the old filters; the slow-step report includes a failed observation.
-accept: One engine or app test per item. Run make check CRATE=gear-engine and CRATE=gear-app.
+accept: One engine or app test per item. Run make check CRATE=gear-engine, CRATE=gear-app and CRATE=gear-cli (the crates that use the changed code).
 estimate: 50
 
 ## T-459 [now] lane=mast milestone=M6 station=S1 required
@@ -155,7 +158,7 @@ estimate: 45
 
 ## T-467 [now] lane=hull milestone=M6 station=S2 required
 goal: [S2] Elastic counts. Within the configured counts (e.g. 2 lanes, 4 reviewers) the engine starts and releases seats by itself as work comes and goes, with nobody asked. Going above them is a config change the user starts and confirms in the one dialog: a plan line raises a count with its reason and end condition (e.g. 4 to 8 reviewers until no hand-in waits for a review); when the condition holds, the engine releases idle extra seats only, never a running review, until the count is back to the configured one, and records both changes; after that it scales within the configured counts as before. A seat is released only after it has been idle for its role's `release_idle_min` (config per role, default 30), not at once when the lanes stop working (today release.rs releases standby reviewers beyond the working lanes at once), so a re-review finds its reviewer warm (the user's seat model, gear/voyages/M4/backlog.md:81).
-accept: Engine and app tests: reviewers raised to 8 start while hand-ins wait; once none wait, idle extra reviewers are released down to 4 and a running review is not interrupted. Run make check CRATE=gear-engine and CRATE=gear-app.
+accept: Engine and app tests: reviewers raised to 8 start while hand-ins wait; once none wait, idle extra reviewers are released down to 4 and a running review is not interrupted. Run make check CRATE=gear-engine, CRATE=gear-app and CRATE=gear-cli (the crates that use the changed code).
 estimate: 50
 
 ## T-468 [now] lane=mast milestone=M6 station=S2 required
@@ -167,6 +170,11 @@ estimate: 40
 goal: [S2] Role charters fit the models the user chose. At kickoff the captain proposes, and the user confirms with the staffing, one charter per role (captain, each lane, reviewers) from the CLI and model each runs: a lane on a fast, simple agent (pi on a flash model) implements the packet without designing, as today's rules/lane.md says; a lane on a strong agent and model (e.g. Claude on Opus) designs inside its own task and owned paths, and still never decides for the whole project; the captain always holds the whole picture. The charter generalises today's fixed rules files (skills/gear/references/rules/lane.md and review.md): it is written into gear.toml per lane and for the reviewers, rendered into the seat's rules file, and given to an agent once per conversation (at a new session, never again in a resumed one). skills/gear/references/captain.md already carries the captain's hand-fix and urgent-fix text (written by the captain on 2026-10-31); leave it as it is.
 accept: gear-app tests: a config with two charters renders two rules files; a resumed session gets no charter again, a new one does. The skill's captain reference and conventions describe the charter, and captain.md still carries its hand-fix paragraph. Run make check CRATE=gear-app and CRATE=gear-cli.
 estimate: 50
+
+## T-484 [now] lane=mast milestone=M6 station=S2 required
+goal: [S2] The Cost tab shows what the tokens cost at the model maker's official price, peak and off-peak included, and shows a cost it cannot know as unknown, never as $0.00. Today pi writes `cost.total: 0` when its provider config names no price (both providers of this fleet), gear-usage takes that 0 as known, and the tab shows $0.00 for 6.1 M tokens. Change crates/gear-usage and the `[prices]` part of crates/gear-app config, no other design: (1) a record whose CLI cost is 0 while its tokens are not carries no cost; it is priced from the price table, and with no price there it is unknown; (2) GEAR ships a built-in price table of official prices (a TOML file compiled into the binary), and the project's `[prices]` entries override it per model; a model matches case-insensitively on its id without the provider prefix, so `hk-dgx-1/DeepSeek-V4.1-Flash-1017` and `tokenrhythm/deepseek-v4.1-flash-1017` both take the DeepSeek entry; (3) a price may carry a peak rate set and peak windows (weekdays and UTC hours); each record keeps its own time and is priced by the window it falls in, every other time at the base (off-peak) rates; (4) the built-in table starts with DeepSeek's official prices, USD per 1 M tokens, off-peak / peak: deepseek-v4.1-flash-1017: cache hit 0.003 / 0.006, cache miss 0.15 / 0.30, output 0.60 / 1.20; deepseek-v4-pro-0813: cache hit 0.022 / 0.044, cache miss 0.66 / 1.32, output 1.98 / 3.96; peak Monday to Friday 01:00-04:00 and 06:00-10:00 UTC. Chinese public holidays (off-peak all day) are not modelled; the table says so in a comment. The Cost tab's columns and labels stay as they are: the cost is simply the cost, with no note about where the price came from.
+accept: Usage tests: a pi record with tokens and cost 0 and no price is unknown; the same record of a DeepSeek model is priced from the built-in table at the off-peak rate on a Saturday and at the peak rate on a Tuesday 02:00 UTC; a `[prices]` entry overrides the built-in one; a provider-prefixed, differently cased model id matches; a record with a real nonzero CLI cost keeps it; a record with no tokens and cost 0 stays 0. Run make check CRATE=gear-usage, CRATE=gear-app, CRATE=gear-engine and CRATE=gear-board.
+estimate: 45
 
 ## T-476 [now] lane=mast milestone=M6 station=S2 required
 goal: [S2] Release v0.6.1, station S2's release. Change, no other design: (1) the version is 0.6.1 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.1.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.0 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.0 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.1 and publishes the release; this task does not. The code change is in these files only.
@@ -197,12 +205,12 @@ estimate: 15
 
 ## T-473 [now] lane=mast milestone=M6 station=S4 required
 goal: [S4] Plan tools: `state: hold` keeps a task out of delivery until set ready; a milestone departs only on an explicit `depart` line; a milestone with no task and no history can be removed; a plan apply warns when two Ready tasks name one file.
-accept: App tests for each. Run make check CRATE=gear-app.
+accept: App tests for each. Run make check CRATE=gear-app, CRATE=gear-engine and CRATE=gear-cli (the crates that use the changed code).
 estimate: 50
 
 ## T-474 [now] lane=hull milestone=M6 station=S4 required
 goal: [S4] Branch hygiene and coverage: a cancelled task's branch is deleted; a merged task's branch is deleted even when its tip moved past the merged candidate (its extra commits listed to the captain first); `gear report coverage` lists accepted attempts not on the integration branch. Direction branches too (another project, 2026-10-31: stale `origin/direction/t-328` and a reviewer still on `direction/t-400`): their name comes from a conventions template like the review branch's, default `{project}/direction/{task}` (today crates/gear-engine/src/review.rs hard-codes `direction/<task>`), and a direction branch, local and on the remote, is deleted when its job closes. A task moved to another lane leaves its old lane's task branch behind (another project's T-199: done on surface, stale `api/t199` left, fully an ancestor of dev): when the task is done, every branch the task branch template gives for any lane that held the task is deleted when it is an ancestor of the integration branch, and listed to the captain otherwise.
-accept: Engine and app tests. Run make check CRATE=gear-engine and CRATE=gear-app.
+accept: Engine and app tests. Run make check CRATE=gear-engine, CRATE=gear-app and CRATE=gear-cli (the crates that use the changed code).
 estimate: 40
 
 ## T-482 [now] lane=mast milestone=M6 station=S4 required
