@@ -103,6 +103,16 @@ pub fn build_with_agents(
                     "task {} attempt {} contract v{} — {}",
                     attempt.task, attempt.n, version, goal
                 ));
+                // A round that could not continue the earlier conversation
+                // because its CLI changed (T-481, design/10 §resume rules):
+                // the seat sees why, and its packet names the session its
+                // earlier work ran in.
+                if tx
+                    .session_recovery(&ctx.project, &attempt.task, attempt.n)?
+                    .is_some()
+                {
+                    lines.push("round: new-session recovery".to_string());
+                }
                 shown_task = Some(attempt.task.clone());
                 shown_attempt = Some(attempt.n);
                 shown_contract = Some(version);

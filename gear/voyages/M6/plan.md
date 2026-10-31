@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=931 -->
+<!-- gear-plan project=gear base=933 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3).
 
@@ -43,6 +43,8 @@ station S4: the captain's plan tools, released as v0.6.3
 - 2026-10-31 18:20 hand-fix: deleted origin/review/t457 by hand | why: T-457 was merged (O-5340) but the merge left its review branch, which rang the 120-min branch item; root cause in the M6 backlog
 - 2026-10-31 18:40 scope: added to S1 after T-480 (hull): a new attempt's review starts from a review branch at its candidate, and a merge deletes the review branch it merged | why: T-457's re-review could not push (F-238) and its merged review branch rang the branch item (M-6655); a review that cannot push is a stalled review, S1's goal | else: -
 - station M-6669: keep course — projected 651m of 720m, but hull carries 516m against mast's 177m; T-461 (S1) and T-473 (S4), both in gear-app, move back to mast (hull 406m, mast 287m)
+- station M-6702: move — projected 809m of 720m, hull the bottleneck (634m against mast's 252m); T-458, T-468, T-472 and T-482 move to mast (hull ~464m, mast ~422m); they touch engine files apart from hull's S1/S2 work, and the second to merge merges dev first
+- station M-6704: keep course — after the move projected 623m of 720m, lanes balanced (hull 443m, mast 411m)
 
 # Queue
 
@@ -82,7 +84,7 @@ goal: [S1] The codex profile handles Codex 0.165's startup screens: after `/new`
 accept: gear-herdr tests with the two screens captured from M5; a real Codex start in a test worktree reaches an empty composer with no dialog left. Run make check CRATE=gear-herdr.
 estimate: 40
 
-## T-458 [now] lane=hull milestone=M6 station=S1 required
+## T-458 [now] lane=mast milestone=M6 station=S1 required
 goal: [S1] Smaller M5 fleet bugs: a lane that reports blocked gets its next startable task; a held seat may still report a finished hand-in; a repeated confirmed goal/bar/eta change records its second decision; the lost-merge scan runs before the old filters; the slow-step report includes a failed observation.
 accept: One engine or app test per item. Run make check CRATE=gear-engine and CRATE=gear-app.
 estimate: 50
@@ -156,7 +158,7 @@ goal: [S2] Elastic counts. Within the configured counts (e.g. 2 lanes, 4 reviewe
 accept: Engine and app tests: reviewers raised to 8 start while hand-ins wait; once none wait, idle extra reviewers are released down to 4 and a running review is not interrupted. Run make check CRATE=gear-engine and CRATE=gear-app.
 estimate: 50
 
-## T-468 [now] lane=hull milestone=M6 station=S2 required
+## T-468 [now] lane=mast milestone=M6 station=S2 required
 goal: [S2] Dialogs never block. A lane or reviewer may not stop on a dialog at all: when its agent shows a blocking screen (an approval or a question the CLI asks), the engine closes it at once and tells the seat "Dialogs are not allowed for your role; ask the captain with gear send --kind question." Every other dialog (the captain's to the user) is cancelled when nobody answers it within 10 minutes, and the work goes on as it would have without it. The skill says the captain opens a dialog only for a change the user asked for.
 accept: Engine tests: a blocked lane or reviewer screen is closed in the same tick and the seat gets the text; a captain dialog unanswered for 10 minutes is cancelled. Run make check CRATE=gear-engine.
 estimate: 40
@@ -182,7 +184,7 @@ goal: [S3] The board near idle: it redraws only what changed and reads the store
 accept: A measured board run before and after; board tests. Run make check CRATE=gear-board.
 estimate: 50
 
-## T-472 [now] lane=hull milestone=M6 station=S3 required
+## T-472 [now] lane=mast milestone=M6 station=S3 required
 goal: [S3] Fleet and machine health watch, costing almost nothing: the CPU and memory of each seat's own processes (children included) and the machine's load, memory and disk, sampled each minute; a seat over the safe line is interrupted and stopped, and the captain is told; a machine short for other reasons is an urgent captain item naming the top processes (never touched).
 accept: Engine tests with injected readings for both cases; the watch's own cost measured under 1 % of one core. Run make check CRATE=gear-engine.
 estimate: 60
@@ -203,7 +205,7 @@ goal: [S4] Branch hygiene and coverage: a cancelled task's branch is deleted; a 
 accept: Engine and app tests. Run make check CRATE=gear-engine and CRATE=gear-app.
 estimate: 40
 
-## T-482 [now] lane=hull milestone=M6 station=S4 required
+## T-482 [now] lane=mast milestone=M6 station=S4 required
 goal: [S4] A user decision the code departs from (audit of 2026-10-31): a reviewer's Herdr agent is named after its seat, `<project>-review-<k>`, with the task in its title (gear/voyages/M1/plan.md:25), not `<project>-review-t<n>` (crates/gear-engine/src/names.rs:29-34; skills/gear/references/conventions.md:19 follows); Change names.rs and conventions.md only, no other design.
 accept: Engine test: a reviewer is named `p-review-1` and keeps the name across tasks. Run make check CRATE=gear-engine TESTS='test(/names/)'.
 estimate: 20
