@@ -1,0 +1,19 @@
+# GEAR's built-in price table (T-484): the model makers' official prices in
+# USD per 1 million tokens, off-peak and peak, with the peak windows in UTC.
+# Read 2026-10-31. Chinese public holidays (off-peak all day) are not
+# modelled: a holiday weekday is priced at its peak rate inside a window.
+#
+# cache hit = cache_read, cache miss = input, output = output; cache_write is
+# charged at the cache-miss rate (a cache write is input that missed).
+
+[[models]]
+id = "deepseek-v4.1-flash-1017"
+off_peak = { input = 0.15, output = 0.60, cache_read = 0.003, cache_write = 0.15 }
+peak = { input = 0.30, output = 1.20, cache_read = 0.006, cache_write = 0.30 }
+peak_windows = ["Mon-Fri 01:00-04:00", "Mon-Fri 06:00-10:00"]
+
+[[models]]
+id = "deepseek-v4-pro-0813"
+off_peak = { input = 0.66, output = 1.98, cache_read = 0.022, cache_write = 0.66 }
+peak = { input = 1.32, output = 3.96, cache_read = 0.044, cache_write = 1.32 }
+peak_windows = ["Mon-Fri 01:00-04:00", "Mon-Fri 06:00-10:00"]
