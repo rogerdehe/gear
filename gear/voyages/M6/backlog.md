@@ -173,3 +173,6 @@
 
 ## A review seat's empty stash rings the captain
 - 2026-10-31 M6 (M-7353, M-7358): before each new review on review-9 the engine stashed the worktree and rang "Preserved changes" for a stash whose tracked diff and untracked tree were both empty (the worktree held an untracked crates/gear-engine/target/ that a reviewer made with a relative TMPDIR; removed by hand). Ring only when the stash holds a change; skip the stash when `git status --porcelain` is empty.
+
+## A lane move does not interrupt the old lane
+- 2026-10-31 M6 (another project's T-435 moved surface → prompt): plan apply closes the old lane's attempt and sends "<task> moved to lane <new>; stop work on it" as a non-urgent instruction (crates/gear-app/src/plan.rs, T-311), which waits for the agent's next idle moment, so a busy old lane keeps working on the moved task. Send it urgent, as the direction-check-closed notice is, so it interrupts the old lane's turn.
