@@ -19,6 +19,22 @@ pub enum ScreenFlag {
     Blocked,
 }
 
+/// A screen a CLI opens that must be answered before its composer takes
+/// text (T-457). Codex 0.165 asks `Where should the new conversation run?`
+/// after `/new`, and on a resume from another directory it asks which
+/// working directory to use. Herdr reports the agent done/idle while the
+/// dialog waits, so nothing but the answer moves it on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Dialog {
+    /// The lines that identify the dialog. They are matched like every other
+    /// marker: inside the profile's tail window, one matching line is enough.
+    pub markers: Vec<String>,
+    /// The keys that answer it, in order. A dialog preselects the choice the
+    /// seat needs (the current worktree; the current directory), so Enter
+    /// takes it.
+    pub keys: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Profile {
     /// Herdr agent kind: `opencode`, `claude`, `codex`, `pi`…
@@ -45,6 +61,11 @@ pub struct Profile {
     /// 6): the agent cannot go on, and the engine reads the quota source to
     /// tell a spent quota from a provider error (§9.2).
     pub error_markers: Vec<String>,
+    /// The startup dialogs this CLI opens (T-457). A dialog's screen is read
+    /// as `Blocked` — Herdr still reports the agent done/idle — and the
+    /// profile's answer keys take it. Empty for the kinds whose dialogs are
+    /// not recorded.
+    pub dialogs: Vec<Dialog>,
     /// The slash command that starts a new session in this CLI, typed into
     /// the pane (§2, §3.4). Empty = the CLI has none.
     pub new_session: String,
@@ -116,6 +137,15 @@ pub fn classify_screen(profile: &Profile, tail: &str) -> BTreeSet<ScreenFlag> {
         if matches_any(&profile.blocked_markers, line) {
             flags.insert(ScreenFlag::Blocked);
         }
+    }
+    // A startup dialog waits on an answer while Herdr reports the agent
+    // done/idle (T-457): it is a blocked screen, not a finished turn.
+    if profile
+        .dialogs
+        .iter()
+        .any(|dialog| window.iter().any(|line| matches_any(&dialog.markers, line)))
+    {
+        flags.insert(ScreenFlag::Blocked);
     }
     flags
 }
@@ -241,6 +271,20 @@ impl Profile {
     /// tail window counts, like every other marker.
     pub fn blocked(&self, screen: &str) -> bool {
         classify_screen(self, screen).contains(&ScreenFlag::Blocked)
+    }
+
+    /// The startup dialog that is open on `screen`, if any (T-457).
+    ///
+    /// Only the tail window counts, like every other marker. The answer keys
+    /// of the returned dialog are the ones to send; see
+    /// [`answer_dialog`](crate::answer_dialog).
+    pub fn dialog(&self, screen: &str) -> Option<&Dialog> {
+        let lines: Vec<&str> = screen.lines().collect();
+        let start = lines.len().saturating_sub(self.tail_lines as usize);
+        let window = &lines[start..];
+        self.dialogs
+            .iter()
+            .find(|dialog| window.iter().any(|line| matches_any(&dialog.markers, line)))
     }
 }
 
@@ -427,6 +471,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             backoff_markers: vec![],
             blocked_markers: vec![],
             error_markers: vec![],
+            dialogs: vec![],
             new_session: "/new".into(),
             compact: "/compact".into(),
             usage_log: Some("opencode-db".into()),
@@ -455,6 +500,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             backoff_markers: vec![],
             blocked_markers: vec![],
             error_markers: vec![],
+            dialogs: vec![],
             new_session: "/clear".into(),
             compact: "/compact".into(),
             usage_log: Some("claude-jsonl".into()),
@@ -530,6 +576,35 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             backoff_markers: vec!["Reconnecting...".into()],
             blocked_markers: vec![],
             error_markers: vec![],
+            // T-457: Codex 0.165's startup screens (the screens captured in
+            // M5, gear/voyages/M6/backlog.md). `/new` asks
+            // `Where should the new conversation run?` with
+            // `1. Use current Git worktree` (keep using the current working
+            // directory) and `2. Create new Git worktree`; the first choice
+            // is preselected, so Enter keeps the seat in its own worktree.
+            // A resume from another directory asks which working directory
+            // to use (`Current = your current working directory` /
+            // `Use session directory (<path>)`); the start args keep that
+            // dialog from showing at all (`tui.resume_cwd="current"`), and
+            // Enter takes the preselected current directory if it does.
+            // Herdr reports the agent done/idle on both screens, so
+            // classify_screen reads them as Blocked.
+            dialogs: vec![
+                Dialog {
+                    markers: vec![
+                        "Where should the new conversation run?".into(),
+                        "Where should the forked conversation run?".into(),
+                    ],
+                    keys: vec!["enter".into()],
+                },
+                Dialog {
+                    markers: vec![
+                        "Choose which working directory to use".into(),
+                        "Current = your current working directory".into(),
+                    ],
+                    keys: vec!["enter".into()],
+                },
+            ],
             new_session: "/new".into(),
             compact: "/compact".into(),
             usage_log: Some("codex-rollout".into()),
@@ -547,6 +622,12 @@ pub fn builtin(kind: &str) -> Option<Profile> {
                 // spelling is silently ignored there (checked live, 0.164.0).
                 "-c".into(),
                 "projects={\"{repo_root}\"={trust_level=\"trusted\"}}".into(),
+                // T-457: a resume from another directory asks which working
+                // directory to use; `current` makes Codex use the directory
+                // it was started in — the seat's own worktree — and never
+                // show the dialog (codex-cli 0.165.0, `tui.resume_cwd`).
+                "-c".into(),
+                "tui.resume_cwd=\"current\"".into(),
             ],
             // T-195: codex takes the rules as a developer instruction, in one
             // TOML value.
@@ -580,6 +661,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             backoff_markers: vec![],
             blocked_markers: vec![],
             error_markers: vec![],
+            dialogs: vec![],
             new_session: String::new(),
             compact: String::new(),
             usage_log: None,
@@ -644,6 +726,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             // provider error, not a spent quota: §9.2 reads the quota source
             // to tell the two apart.
             error_markers: vec!["overloaded_error".into(), "Retry failed after".into()],
+            dialogs: vec![],
             new_session: "/new".into(),
             compact: "/compact".into(),
             usage_log: Some("pi-jsonl".into()),

@@ -38,6 +38,7 @@ fn texts_carry_no_screen_marker() {
         compact: String::new(),
         usage_log: None,
         error_markers: Vec::new(),
+        dialogs: Vec::new(),
         busy_markers: vec!["esc interrupt".into()],
         ratelimit_markers: vec!["rate limit".into()],
         quota_markers: vec![
