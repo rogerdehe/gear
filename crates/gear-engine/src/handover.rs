@@ -43,6 +43,12 @@ pub struct Facts {
     pub new_model: String,
     pub session: Option<String>,
     pub worktree: Option<String>,
+    /// The branch the worktree is on, as Git reports it (T-513). A lane's
+    /// `branch` is its attempt's task branch, which the worktree may not be on
+    /// yet; a reviewer's is this one.
+    pub head: Option<String>,
+    /// The branch the incoming agent works on (T-513): a lane's attempt's task
+    /// branch, else the branch the worktree is on.
     pub branch: Option<String>,
     pub last_commit: Option<String>,
     pub upstream: Option<String>,
@@ -150,6 +156,7 @@ pub fn collect(
         new_model: new_model.to_string(),
         session,
         worktree: worktree.clone(),
+        head: None,
         branch: None,
         last_commit: None,
         upstream: None,
@@ -170,7 +177,21 @@ pub fn collect(
         ),
     };
     if let Some(path) = worktree.as_deref().filter(|path| !path.is_empty()) {
-        facts.branch = run(cfg, path, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        facts.head = run(cfg, path, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        // T-513: a lane's handover names the branch of the task it holds, never
+        // whatever branch the worktree happens to be on — a switch right after
+        // a new task was assigned would otherwise name the previous task's
+        // branch (F-284). A reviewer works on the branch the engine checked out
+        // for it, so its handover names that one.
+        facts.branch = match seat.role {
+            SeatRole::Lane => Some(crate::dispatch::task_branch(
+                &conventions.task_branch,
+                project,
+                &seat.name,
+                &task,
+            )),
+            _ => facts.head.clone(),
+        };
         facts.last_commit = run(cfg, path, &["log", "-1", "--format=%H %s"]);
         facts.stash = run(cfg, path, &["stash", "list", "-1", "--format=%gd %H %gs"]);
         if let Some(upstream) = run(cfg, path, &["rev-parse", "--abbrev-ref", "@{u}"]) {
@@ -336,6 +357,15 @@ fn fact_lines(facts: &Facts) -> String {
         "- Branch: {}.\n",
         facts.branch.as_deref().unwrap_or("could not be read")
     ));
+    // T-513: the worktree still on another branch says so, and names the one
+    // the task is worked on.
+    if let (Some(head), Some(branch)) = (facts.head.as_deref(), facts.branch.as_deref()) {
+        if !head.is_empty() && head != branch {
+            text.push_str(&format!(
+                "- The worktree is on {head}; this task's branch is {branch}: switch to it before you go on.\n"
+            ));
+        }
+    }
     text.push_str(&format!(
         "- Last commit: {}.\n",
         facts.last_commit.as_deref().unwrap_or("could not be read")
