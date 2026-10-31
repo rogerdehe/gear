@@ -2692,6 +2692,13 @@ fn close_branches(
                         commits.join("; ")
                     ));
                 }
+            } else {
+                // The delete did not go through: the branch stays, and the
+                // captain hears of the commits it holds.
+                left.push(format!(
+                    "{task_branch} (commits after the approved candidate, not merged: {})",
+                    commits.join("; ")
+                ));
             }
         }
     }
