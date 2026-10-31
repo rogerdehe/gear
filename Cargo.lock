@@ -247,6 +247,7 @@ dependencies = [
  "gear-model",
  "gear-store",
  "gear-usage",
+ "jiff",
  "libc",
  "serde",
  "serde_json",

@@ -13,6 +13,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 libc = { workspace = true }
+# T-488: IANA zones for `[schedule].tz`.
+jiff = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
