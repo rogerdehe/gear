@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1044 -->
+<!-- gear-plan project=gear base=1045 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -138,6 +138,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-10-31 18:15 T-507 fail (audit S2): the reviewer found all points met and F1 (T-465, T-469 missing from the release notes, fixed by hand in docs/releases/v0.6.0.md); the captain adds a gap the audit missed: F-284, a model switch today handed over the wrong branch (point 1 in normal use); a hull fix task goes into T-507's deps and S2 is audited again | why: user: a gap goes back onto the fix path | else: pass and log F-284
 - 2026-10-31 18:18 recovery: T-507 attempt 2 started at once because T-513 joined its deps in a second apply; failed by hand so the re-audit waits for T-513 | why: the fail and the fix task must go in one apply | else: an S2 re-audit without the fix
 - 2026-10-31 18:30 scope: hull task, a hand-in queued behind busy reviewers rings no review stall | why: M-7294, M-7295 are false stall items (goal clause 3): both reviewers were busy with other audits | else: log it
+- 2026-10-31 18:35 T-514 moved hull → mast: mast has nothing to start after T-512 while hull holds T-513 and T-514 (as T-501 moved before) | why: no lane sits idle while another holds startable work | else: mast idle about 40 min
 
 # Queue
 
@@ -472,7 +473,7 @@ goal: [S2] A model-switch handover names the attempt's own branch. Today crates/
 accept: Engine tests: a lane switched while its worktree is on hull/t1 and its attempt is T-2 gets a handover naming hull/t2 and the switch line; a lane whose worktree is on its own task branch gets no switch line; a reviewer's handover is unchanged. Run make check CRATE=gear-engine and CRATE=gear-cli.
 estimate: 25
 
-## T-514 [now] lane=hull milestone=M6 station=S5 required
+## T-514 [now] lane=mast milestone=M6 station=S5 required
 goal: [S1] A hand-in queued behind busy reviewers is not a review stall. Today `tell_captain_of_a_review_stall` (crates/gear-engine/src/review.rs) rings the captain urgently 20 minutes (`REVIEW_STALL_S`) after the hand-in when no reviewer has its packet, even when every reviewer seat is busy reviewing other tasks and the hand-in is simply next in line (M-7294, M-7295: T-510 and T-511 behind T-508 and T-509). Change, no other design: the 20 minutes count from the first tick a reviewer could take the hand-in (a temp seat free for it, or fewer temp seats than the effective count from `release::effective_temps`), kept in a meta key per task and attempt (`engine.review_free_since.<task>.<attempt>`, cleared when its packet is confirmed); while every seat holds another task's review with a confirmed packet, nothing rings. A hand-in waiting 20 minutes with a seat free still rings as today.
 accept: Engine tests: two seats busy with other confirmed reviews and a third hand-in 30 minutes old: no item; a seat frees and the packet is not confirmed 20 minutes later: one item; a seat free from the hand-in on and no packet after 20 minutes: one item as today. Run make check CRATE=gear-engine and CRATE=gear-cli.
 estimate: 25
