@@ -9715,15 +9715,49 @@ review = [
             "the review's own session, not the seat's latest: {action}"
         );
         assert_ne!(action["session_ref"], b, "{action}");
-        // The seat still carries B when the re-review's round opens, and the
-        // session bookkeeping records B on that round; the agent then goes
-        // (the exit of the resume). The next preparation must resume A, the
-        // session of the review it continues, never B (the T-472 case).
+        // Let the first resume of A complete: the runner records it and its
+        // step is done, so the next preparation starts a new resume instead of
+        // reusing the still-open step whose target is A (F2 of the review of
+        // attempt 1: the old test never got past that).
         let pane = store
             .read(|tx| tx.get_binding(seat, 1))
             .unwrap()
             .unwrap()
             .pane_id;
+        // The agent that ran T-2 exits (the resume's own exit), so the first
+        // resume of A starts and completes.
+        herdr.exit_agent(&pane);
+        let mut resumed = false;
+        for tick in T0 + 40..T0 + 55 {
+            let seat_row = store.read(|tx| tx.get_seat(seat)).unwrap().unwrap();
+            crate::session::prepare_review_role(
+                &mut store,
+                &mut herdr,
+                &cfg(),
+                &seat_row,
+                "T-1",
+                2,
+                crate::session::Role::Review,
+                tick,
+            )
+            .unwrap();
+            let step = store
+                .read(|tx| tx.get_meta("engine.session_step.p:review-1"))
+                .unwrap();
+            if step.as_deref().is_some_and(|raw| {
+                serde_json::from_str::<serde_json::Value>(raw)
+                    .ok()
+                    .is_some_and(|state| state["step"] == "done")
+            }) {
+                resumed = true;
+                break;
+            }
+        }
+        assert!(resumed, "the first resume of A completes");
+        // The seat still carries B when the re-review's round opens, and the
+        // session bookkeeping records B on that round; the agent then goes
+        // (the exit of the resume). The next preparation must resume A, the
+        // session of the review it continues, never B (the T-472 case).
         herdr.set_agent_session(&pane, &b);
         store
             .write(|tx| {
@@ -9749,7 +9783,7 @@ review = [
             "T-1",
             2,
             crate::session::Role::Review,
-            T0 + 40,
+            T0 + 60,
         )
         .unwrap();
         // The agent the engine starts again resumes A, never B.

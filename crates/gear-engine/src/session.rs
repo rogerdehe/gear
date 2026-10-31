@@ -531,7 +531,7 @@ pub(crate) fn prepare_review_role(
     // a seat carries on its open round, and the seat still carries that one
     // until the resume runs). The round this one continues is attempt n-1's
     // review: S1 must resume that session, not the previous job's.
-    if false && role == Role::Review && attempt >= 2 {
+    if round.is_some() && role == Role::Review && attempt >= 2 {
         if let Some(session) = facts.earlier_session.clone() {
             facts.open_round_session = Some(session);
         }
@@ -698,10 +698,11 @@ fn review_facts(
     // task on this seat is the one it continues (a retried first review).
     let (earlier_seat, earlier_cli, earlier_session) = store.read(|tx| {
         let rounds = tx.rounds_of_task(project, task)?;
-        let round = rounds
-            .iter()
-            .rev()
-            .find(|round| round.role == Role::Review.as_str() && round.seat == seat.id && true);
+        let round = rounds.iter().rev().find(|round| {
+            round.role == Role::Review.as_str()
+                && round.seat == seat.id
+                && (attempt < 2 || round.attempt == attempt - 1)
+        });
         Ok(match round {
             Some(round) => (
                 Some(seat.id.clone()),
