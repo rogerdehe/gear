@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=934 -->
+<!-- gear-plan project=gear base=936 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3).
 
@@ -45,6 +45,7 @@ station S4: the captain's plan tools, released as v0.6.3
 - station M-6669: keep course — projected 651m of 720m, but hull carries 516m against mast's 177m; T-461 (S1) and T-473 (S4), both in gear-app, move back to mast (hull 406m, mast 287m)
 - station M-6702: move — projected 809m of 720m, hull the bottleneck (634m against mast's 252m); T-458, T-468, T-472 and T-482 move to mast (hull ~464m, mast ~422m); they touch engine files apart from hull's S1/S2 work, and the second to merge merges dev first
 - station M-6704: keep course — after the move projected 623m of 720m, lanes balanced (hull 443m, mast 411m)
+- 2026-10-31 19:30 lesson: T-469 and T-461 passed their acceptance and failed the merge gate on tests in crates that call the changed one (engine, cli) | why: the captain's acceptance named only the changed crate | else: from now on a contract's acceptance names every crate whose tests use the changed behaviour
 
 # Queue
 
