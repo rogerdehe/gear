@@ -123,6 +123,33 @@ fn the_board_shows_the_totals_and_every_lane_queue() {
     );
 }
 
+/// T-481: a round that could not continue the earlier conversation because
+/// its CLI changed says so on the lane line, as the seat's home page does.
+#[test]
+fn the_lane_line_marks_a_new_session_recovery() {
+    let mut store = world();
+    store
+        .write(|tx| tx.set_session_recovery("p", "T-2", 1, "codex", "session-x"))
+        .unwrap();
+    let board = store
+        .read(|tx| gear_board::project(tx, "p", T0 + 60))
+        .unwrap();
+    let line = |name: &str| {
+        let lane = board
+            .lanes
+            .iter()
+            .find(|lane| lane.lane == name)
+            .expect("the lane");
+        gear_board::lane_line(lane)
+    };
+    assert_eq!(
+        line("runtime"),
+        "runtime · agent unknown · T-2 working · new-session recovery · 1 queued"
+    );
+    // A lane whose round continues its conversation says nothing extra.
+    assert_eq!(line("data"), "data · agent unknown · T-3 handed in, waits for a reviewer · 0 queued");
+}
+
 /// T-347: the lane line names the task's stage in the words of the board's
 /// views, so the board and the captain's home page never disagree.
 #[test]

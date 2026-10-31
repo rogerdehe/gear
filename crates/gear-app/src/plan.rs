@@ -617,6 +617,12 @@ fn apply_queue(
                     updated: now,
                 };
                 tx.insert_task(&task)?;
+                // The `fresh:` mark (T-481): the task is unrelated to what the
+                // lane did before, so its first round starts a new
+                // conversation.
+                if let Some(why) = &item.fresh {
+                    tx.set_task_fresh(project, &id, why)?;
+                }
                 let contract = ContractRow {
                     project: project.to_string(),
                     task: id.clone(),
@@ -667,6 +673,11 @@ fn apply_queue(
                 // field keeps the follow-up the task has.
                 if let Some(followup) = &item.followup_of {
                     task.followup_of = Some(followup.clone());
+                }
+                // The `fresh:` mark (T-481): a draft that names one sets it; a
+                // block without `fresh:` keeps the mark the task has.
+                if let Some(why) = &item.fresh {
+                    tx.set_task_fresh(project, id, why)?;
                 }
                 // The planned time (T-38): the draft may change it; a draft
                 // that says nothing keeps the estimate the task has.
@@ -2586,6 +2597,11 @@ pub fn show(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<String> {
     if let Some(followup) = row.followup_of.as_deref() {
         text.push_str(&format!("followup-of: {followup}\n"));
     }
+    // The `fresh:` mark (T-481): the captain's reason that the task is
+    // unrelated to what the lane did before.
+    if let Some(why) = tx.task_fresh(project, task)? {
+        text.push_str(&format!("fresh: {why}\n"));
+    }
     if let Some(issue) = row.issue {
         text.push_str(&format!("issue: #{issue}\n"));
     }
@@ -3611,6 +3627,9 @@ fn cancel_task(
     now: Ts,
 ) -> GearResult<()> {
     let closed = abandon_open_attempts(tx, project, &task.id, now)?;
+    // The `fresh:` mark of a task is about the round that starts it (T-481):
+    // a cancelled task carries none.
+    tx.clear_task_fresh(project, &task.id)?;
     // The lane that was working on it hears why, in one line.
     let Some(lane) = task.lane.as_deref() else {
         return Ok(());
@@ -4124,6 +4143,17 @@ pub fn render_task_packet(
              (a permission you lacked and worked around, a test or build that took far too long, \
              an unclear contract, a missing tool or fixture, a step that cost much time).\n"
         ));
+    }
+    // A round that could not continue the earlier conversation because its CLI
+    // changed (T-481, design/10 §resume rules): the packet points the lane at
+    // the session its earlier work ran in, so it can read it if its CLI can.
+    if let Some(n) = open_n {
+        if let Some((cli, session)) = tx.session_recovery(project, task, n)? {
+            text.push_str(&format!(
+                "Earlier work on this task ran in {cli} session {session}; \
+                 read it for reference if your CLI can.\n"
+            ));
+        }
     }
     // The project standard (T-84): the writer judges against it too.
     if let Some(line) = crate::standard::line_for(tx, project)? {
