@@ -79,7 +79,12 @@ fn depart(s: &mut Store) {
                 # Queue\n\
                 ## NEW [must] lane=heat milestone=M1\n\
                 goal: G\naccept: a\nestimate: 30\ndeps: -\n";
-    let draft = parse(text).unwrap();
+    let mut draft = parse(text).unwrap();
+    // T-461: the first departure is the user's too.
+    draft.confirmed = true;
+    draft.decisions.push(
+        "2026-10-27 10:05 confirmed: milestone M1 departs | why: the user said depart".to_string(),
+    );
     let env = Env {
         ctx: Some(GearCtx {
             project: "harbor".into(),

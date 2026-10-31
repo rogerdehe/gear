@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=947 -->
+<!-- gear-plan project=gear base=951 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -53,6 +53,11 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-10-31 20:20 confirmed: eta 12h -> 17h; goal and station S5 added (one captain, several projects; a v0.5 project upgrades painlessly; v0.6.4) | why: user: bring M7's multi-project captain into M6 as a last station; another project stays with its own captain and must upgrade with no pain after M6
 - station M-6769: move — projected 1031m of 1020m, mast the bottleneck (756m against hull's 571m); T-484 (gear-usage, hull's crate) and T-468 (engine) move to hull (about 670m and 655m)
 - 2026-10-31 21:10 hand-fix: deleted origin/review/t454 by hand, already in dev | why: the merge left its review branch (same as review/t457); T-483 removes the cause
+- 2026-10-31 21:30 scope: added to S2 (mast): the Tasks tab draws dependency lines beside the lane graph (direct dependencies of unmerged work only) | why: user: the order of the work not yet done must show on the board; he chose lines beside the lane graph | else: -
+- 2026-10-31 21:30 plan: dependencies declared that were missing: each release waits for the release before it and for the tasks added to its station (T-483, T-484, the board task); T-486 and T-487 wait for T-485 | why: the board can draw only the dependencies the plan names
+- station M-6788: keep course — projected 852m of 1020m, lanes within 120m
+- station M-6789: keep course — projected 856m of 1020m with T-494 added (hull 556m, mast 494m)
+- 2026-10-31 21:55 hand-fix: rebuilt and restarted both engines on dev f7c5a16c (no schema change since 94c314e8) | why: S1's merged fixes (T-453, T-454, T-455, T-456, T-458, T-480, T-481, T-483) ran only after a restart; F-245 hit the old review-branch bug T-483 already fixed
 
 # Queue
 
@@ -143,7 +148,7 @@ estimate: 30
 ## T-475 [now] lane=mast milestone=M6 station=S1 required
 goal: [S1] Release v0.6.0, station S1's release. Change, no other design: (1) the version is 0.6.0 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.0.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.5.6 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.5.6 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.0 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.0"; docs/releases/v0.6.0.md lists every task merged on origin/dev since v0.5.6 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-452, T-453, T-454, T-455, T-456, T-457, T-458, T-459, T-460, T-461, T-463, T-480, T-481
+deps: T-452, T-453, T-454, T-455, T-456, T-457, T-458, T-459, T-460, T-461, T-463, T-480, T-481, T-483
 estimate: 15
 
 ## T-464 [now] lane=hull milestone=M6 station=S2 required
@@ -181,10 +186,15 @@ goal: [S2] The Cost tab shows what the tokens cost at the model maker's official
 accept: Usage tests: a pi record with tokens and cost 0 and no price is unknown; the same record of a DeepSeek model is priced from the built-in table at the off-peak rate on a Saturday and at the peak rate on a Tuesday 02:00 UTC; a `[prices]` entry overrides the built-in one; a provider-prefixed, differently cased model id matches; a record with a real nonzero CLI cost keeps it; a record with no tokens and cost 0 stays 0. Run make check CRATE=gear-usage, CRATE=gear-app, CRATE=gear-engine and CRATE=gear-board.
 estimate: 45
 
+## T-494 [now] lane=mast milestone=M6 station=S2 required
+goal: [S2] The Tasks tab draws the dependencies. Today a dependency shows only as text (`waits for ...` in the stage, `needed by ...` on the right, lit up on the selected row), so the order of the work not yet done cannot be seen. Change crates/gear-board (graph.rs and the Tasks tab frame), no other design: (1) a `deps` column right of the lane columns draws, for every task not yet merged, a line from the task to each task it waits for, with box-drawing characters as `git log --graph` does (`┌ ├ ┤ ┬ ┴ └ │ ─`); (2) only direct dependencies are drawn: when A waits for B and B waits for C, the A-C line is left out; a dependency on a merged task is not drawn; (3) the stage keeps `waits for N` as a count, and the right-hand `needed by` text goes; the selected row still lights up its lines; (4) when the lines need more columns than fit, the column is capped and the rest shows as `+N` on the row. Every other part of the tab stays as it is.
+accept: Board tests on the rendered frame: T-3 waits for T-2 and T-2 for T-1 draws two lines and no T-3-T-1 line; a release waiting for four tasks draws one line to each; a dependency on a merged task draws nothing; selecting a row lights its lines; a frame narrower than the lines shows `+N`. Run make check CRATE=gear-board.
+estimate: 50
+
 ## T-476 [now] lane=mast milestone=M6 station=S2 required
 goal: [S2] Release v0.6.1, station S2's release. Change, no other design: (1) the version is 0.6.1 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.1.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.0 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.0 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.1 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.1"; docs/releases/v0.6.1.md lists every task merged on origin/dev since v0.6.0 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-464, T-465, T-466, T-467, T-468, T-469
+deps: T-475, T-464, T-465, T-466, T-467, T-468, T-469, T-484, T-494
 estimate: 15
 
 ## T-470 [now] lane=hull milestone=M6 station=S3 required
@@ -205,7 +215,7 @@ estimate: 60
 ## T-477 [now] lane=mast milestone=M6 station=S3 required
 goal: [S3] Release v0.6.2, station S3's release. Change, no other design: (1) the version is 0.6.2 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.2.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.1 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.1 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.2 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.2"; docs/releases/v0.6.2.md lists every task merged on origin/dev since v0.6.1 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-470, T-471, T-472
+deps: T-476, T-470, T-471, T-472
 estimate: 15
 
 ## T-473 [now] lane=mast milestone=M6 station=S4 required
@@ -226,7 +236,7 @@ estimate: 20
 ## T-478 [now] lane=mast milestone=M6 station=S4 required
 goal: [S4] Release v0.6.3, station S4's release. Change, no other design: (1) the version is 0.6.3 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.3.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.2 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.2 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.3 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.3"; docs/releases/v0.6.3.md lists every task merged on origin/dev since v0.6.2 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-473, T-474, T-482
+deps: T-477, T-473, T-474, T-482
 estimate: 15
 
 ## T-485 [now] lane=mast milestone=M6 station=S5 required
@@ -237,11 +247,13 @@ estimate: 60
 ## T-486 [now] lane=mast milestone=M6 station=S5 required
 goal: [S5] `gear` with no arguments, run by a captain that holds several projects, shows every held project: its voyage line, then its inbox, each item line naming the project (`gear M-6741 ...`), urgent items of all projects first. `gear friction`, `gear reply`, `gear --show` accept the qualified ids. With one project the page reads as today. Change crates/gear-app (home.rs) and crates/gear-cli, no other design.
 accept: Cli tests on the rendered page: two held projects each show their voyage line and items with the project named; an urgent item of the second project is listed above a normal item of the first; one project renders as before. Run make check CRATE=gear-app and CRATE=gear-cli.
+deps: T-485
 estimate: 40
 
 ## T-487 [now] lane=hull milestone=M6 station=S5 required
 goal: [S5] A pane that holds several captain seats gets one doorbell, not one per project: the engine joins the items of every seat bound to that pane into one ring, each line naming its project, urgent first, with the same idle and at-once rules as today. A project outside its working hours rings nothing and its fleet rests, as today; the other projects' rings go on. Change crates/gear-engine (doorbell.rs and the ring path), no other design.
 accept: Engine tests: two projects whose captain seats share a pane get one doorbell naming both projects' items; a project off hours adds nothing to it while the other still rings; a single project rings as today. Run make check CRATE=gear-engine and CRATE=gear-app.
+deps: T-485
 estimate: 45
 
 ## T-488 [now] lane=hull milestone=M6 station=S5 required
@@ -273,5 +285,5 @@ estimate: 40
 ## T-493 [now] lane=mast milestone=M6 station=S5 required
 goal: [S5] Release v0.6.4, station S5's release. Change, no other design: (1) the version is 0.6.4 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.4.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.3 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.3 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.4 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.4"; docs/releases/v0.6.4.md lists every task merged on origin/dev since v0.6.3 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-478, T-485, T-486, T-487, T-488, T-489, T-490, T-491, T-492
+deps: T-478, T-489, T-490, T-491, T-492
 estimate: 15

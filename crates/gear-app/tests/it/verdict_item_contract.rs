@@ -45,16 +45,16 @@ fn apply_plan(
     text: &str,
     rid: &str,
 ) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
-    apply(
-        s,
-        &cap_env(),
-        Some(&fp()),
-        None,
-        &parse(text).unwrap(),
-        text,
-        rid,
-        T0 + 50,
-    )
+    let mut draft = parse(text).unwrap();
+    // T-461: a first voyage's departure is the user's word.
+    if draft.base == 0 {
+        draft.confirmed = true;
+        draft.decisions.push(
+            "2026-10-27 10:05 confirmed: the voyage departs | why: the user said depart"
+                .to_string(),
+        );
+    }
+    apply(s, &cap_env(), Some(&fp()), None, &draft, text, rid, T0 + 50)
 }
 
 const V1: &str = "<!-- gear-plan project=p base=0 -->\n# Milestone M3: delivery\ndone: it ships\nbar: it holds\neta: 8h\n\n# Queue\n## NEW [must] lane=heat milestone=M3\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";

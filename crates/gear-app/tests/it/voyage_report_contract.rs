@@ -651,8 +651,17 @@ fn the_report_lists_the_goal_change_of_its_voyage() {
         "the before and the after: {change}"
     );
     assert!(
-        !text.contains("the light procedure moved to M5"),
+        report
+            .goal_changes
+            .iter()
+            .all(|change| change.kind == "user"),
         "another kind is not a goal change: {text}"
+    );
+    // T-461: the cut is its own part of the report.
+    assert!(
+        text.contains("Cancelled or moved (M1)")
+            && text.contains("the light procedure moved to M5"),
+        "the cut is listed with its line: {text}"
     );
     // `--json` carries the same list.
     let doc = serde_json::to_value(&report).unwrap();
