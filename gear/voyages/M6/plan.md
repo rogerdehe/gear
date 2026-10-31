@@ -1,15 +1,16 @@
-<!-- gear-plan project=gear base=939 -->
+<!-- gear-plan project=gear base=944 -->
 # Goal
-A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3).
+A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
 # Milestone M6: a fleet that needs no nursing
 done: (1) every M6 task merged; (2) the voyage never stops: while some lane has a task it can start, no lane sits idle; (3) every hand fix or hand recovery the captain makes during M6 (a few lines of code, a nudge, a release, an answered dialog) is one decision line saying what and why, and a hand fix's code goes through the merge gate; the voyage report shows no false stall item; (4) the engine and each board stay under 10 % of one core and 50 MB on average over the last station, measured from the probe lines; (5) released at each station, the last as v0.6.x
 bar: DELIVERABLE: an error in normal use blocks the task; edge cases outside normal use are logged
-eta: 12h
+eta: 17h
 station S1: deliveries and reviews never stall, released as v0.6.0
 station S2: models, agents and captains switch with a handover; elastic counts; dialogs never block; role charters fit the chosen models, released as v0.6.1
 station S3: GEAR near idle and the fleet's health watched, released as v0.6.2
 station S4: the captain's plan tools, released as v0.6.3
+station S5: one captain, several projects; a v0.5 project upgrades painlessly, released as v0.6.4
 
 # Decisions
 - 2026-10-30 09:30 scope: done (3) and (4) of the first draft are one rule: a hand fix (the captain's few lines of code) and a hand recovery (a nudge, a release, an answered dialog) are allowed to clear a block at once, each recorded as one decision line; no task, contract or report is required for it, and the captain opens a task only when it judges the cause needs more than a few lines (user: the opening exists for speed, paperwork around it would defeat it); the engine and board target is 10 % of one core and 50 MB (measured 2026-10-30: engines 0-0.5 %, boards 0.4 % to 10 %, all under 30 MB) | why: user | else: no hand recovery in the last station, 3 %
@@ -48,6 +49,8 @@ station S4: the captain's plan tools, released as v0.6.3
 - 2026-10-31 19:30 lesson: T-469 and T-461 passed their acceptance and failed the merge gate on tests in crates that call the changed one (engine, cli) | why: the captain's acceptance named only the changed crate | else: from now on a contract's acceptance names every crate whose tests use the changed behaviour
 - 2026-10-31 19:45 scope: added to S2 (mast): a CLI cost of 0 with tokens is unknown, not $0.00 | why: the Cost tab showed $0.00 for 6.1 M tokens; pi writes 0 when its provider config has no price | else: -
 - 2026-10-31 19:55 scope: T-484 v2 prices tokens at the official price (built-in table, peak and off-peak by UTC window, project `[prices]` overrides) | why: user: with no price written, use the maker's official price, which has peak and off-peak rates | else: -
+- station M-6746: keep course — projected 693m of 720m; mast now carries 453m against hull's 332m (T-484 added), so T-472 (S3) goes back to hull (about 392m each)
+- 2026-10-31 20:20 confirmed: eta 12h -> 17h; goal and station S5 added (one captain, several projects; a v0.5 project upgrades painlessly; v0.6.4) | why: user: bring M7's multi-project captain into M6 as a last station; another project stays with its own captain and must upgrade with no pain after M6
 
 # Queue
 
@@ -172,7 +175,7 @@ accept: gear-app tests: a config with two charters renders two rules files; a re
 estimate: 50
 
 ## T-484 [now] lane=mast milestone=M6 station=S2 required
-goal: [S2] The Cost tab shows what the tokens cost at the model maker's official price, peak and off-peak included, and shows a cost it cannot know as unknown, never as $0.00. Today pi writes `cost.total: 0` when its provider config names no price (both providers of this fleet), gear-usage takes that 0 as known, and the tab shows $0.00 for 6.1 M tokens. Change crates/gear-usage and the `[prices]` part of crates/gear-app config, no other design: (1) a record whose CLI cost is 0 while its tokens are not carries no cost; it is priced from the price table, and with no price there it is unknown; (2) GEAR ships a built-in price table of official prices (a TOML file compiled into the binary), and the project's `[prices]` entries override it per model; a model matches case-insensitively on its id without the provider prefix, so `hk-dgx-1/DeepSeek-V4.1-Flash-1017` and `tokenrhythm/deepseek-v4.1-flash-1017` both take the DeepSeek entry; (3) a price may carry a peak rate set and peak windows (weekdays and UTC hours); each record keeps its own time and is priced by the window it falls in, every other time at the base (off-peak) rates; (4) the built-in table starts with DeepSeek's official prices, USD per 1 M tokens, off-peak / peak: deepseek-v4.1-flash-1017: cache hit 0.003 / 0.006, cache miss 0.15 / 0.30, output 0.60 / 1.20; deepseek-v4-pro-0813: cache hit 0.022 / 0.044, cache miss 0.66 / 1.32, output 1.98 / 3.96; peak Monday to Friday 01:00-04:00 and 06:00-10:00 UTC. Chinese public holidays (off-peak all day) are not modelled; the table says so in a comment.
+goal: [S2] The Cost tab shows what the tokens cost at the model maker's official price, peak and off-peak included, and shows a cost it cannot know as unknown, never as $0.00. Today pi writes `cost.total: 0` when its provider config names no price (both providers of this fleet), gear-usage takes that 0 as known, and the tab shows $0.00 for 6.1 M tokens. Change crates/gear-usage and the `[prices]` part of crates/gear-app config, no other design: (1) a record whose CLI cost is 0 while its tokens are not carries no cost; it is priced from the price table, and with no price there it is unknown; (2) GEAR ships a built-in price table of official prices (a TOML file compiled into the binary), and the project's `[prices]` entries override it per model; a model matches case-insensitively on its id without the provider prefix, so `hk-dgx-1/DeepSeek-V4.1-Flash-1017` and `tokenrhythm/deepseek-v4.1-flash-1017` both take the DeepSeek entry; (3) a price may carry a peak rate set and peak windows (weekdays and UTC hours); each record keeps its own time and is priced by the window it falls in, every other time at the base (off-peak) rates; (4) the built-in table starts with DeepSeek's official prices, USD per 1 M tokens, off-peak / peak: deepseek-v4.1-flash-1017: cache hit 0.003 / 0.006, cache miss 0.15 / 0.30, output 0.60 / 1.20; deepseek-v4-pro-0813: cache hit 0.022 / 0.044, cache miss 0.66 / 1.32, output 1.98 / 3.96; peak Monday to Friday 01:00-04:00 and 06:00-10:00 UTC. Chinese public holidays (off-peak all day) are not modelled; the table says so in a comment. The Cost tab's columns and labels stay as they are: the cost is simply the cost, with no note about where the price came from.
 accept: Usage tests: a pi record with tokens and cost 0 and no price is unknown; the same record of a DeepSeek model is priced from the built-in table at the off-peak rate on a Saturday and at the peak rate on a Tuesday 02:00 UTC; a `[prices]` entry overrides the built-in one; a provider-prefixed, differently cased model id matches; a record with a real nonzero CLI cost keeps it; a record with no tokens and cost 0 stays 0. Run make check CRATE=gear-usage, CRATE=gear-app, CRATE=gear-engine and CRATE=gear-board.
 estimate: 45
 
@@ -192,7 +195,7 @@ goal: [S3] The board near idle: it redraws only what changed and reads the store
 accept: A measured board run before and after; board tests. Run make check CRATE=gear-board.
 estimate: 50
 
-## T-472 [now] lane=mast milestone=M6 station=S3 required
+## T-472 [now] lane=hull milestone=M6 station=S3 required
 goal: [S3] Fleet and machine health watch, costing almost nothing: the CPU and memory of each seat's own processes (children included) and the machine's load, memory and disk, sampled each minute; a seat over the safe line is interrupted and stopped, and the captain is told; a machine short for other reasons is an urgent captain item naming the top processes (never touched).
 accept: Engine tests with injected readings for both cases; the watch's own cost measured under 1 % of one core. Run make check CRATE=gear-engine.
 estimate: 60
@@ -222,4 +225,51 @@ estimate: 20
 goal: [S4] Release v0.6.3, station S4's release. Change, no other design: (1) the version is 0.6.3 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.3.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.2 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.2 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.3 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.3"; docs/releases/v0.6.3.md lists every task merged on origin/dev since v0.6.2 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
 deps: T-473, T-474, T-482
+estimate: 15
+
+## T-485 [now] lane=mast milestone=M6 station=S5 required
+goal: [S5] One captain pane holds the captain seats of several projects. `gear captain take <project> [<project>...]` binds each named project's captain seat to the caller's pane and keeps the seats it already holds; `gear captain release <project>` lets one go. Every project keeps its own fleet, plan, voyage, departure sheet and seats; nothing is shared between projects but the captain's pane. A captain command that acts on one project takes it from a qualified id (`<project>:M-12`, `<project>:T-5`), the plan file's header, or `--project`; with one held project it works as today. Change crates/gear-app (captain.rs, identity.rs, mail.rs and the id parsing) and crates/gear-cli, no other design.
+accept: App and cli tests: a pane takes two projects and holds both seats at their own generations; a release frees one and keeps the other; `gear reply prometheus:M-12` reaches project prometheus's M-12 while project gear also has an M-12; an unqualified id held by two projects is refused with both qualified ids named; with one project every existing command works unchanged. Run make check CRATE=gear-app, CRATE=gear-cli and CRATE=gear-engine.
+estimate: 60
+
+## T-486 [now] lane=mast milestone=M6 station=S5 required
+goal: [S5] `gear` with no arguments, run by a captain that holds several projects, shows every held project: its voyage line, then its inbox, each item line naming the project (`gear M-6741 ...`), urgent items of all projects first. `gear friction`, `gear reply`, `gear --show` accept the qualified ids. With one project the page reads as today. Change crates/gear-app (home.rs) and crates/gear-cli, no other design.
+accept: Cli tests on the rendered page: two held projects each show their voyage line and items with the project named; an urgent item of the second project is listed above a normal item of the first; one project renders as before. Run make check CRATE=gear-app and CRATE=gear-cli.
+estimate: 40
+
+## T-487 [now] lane=hull milestone=M6 station=S5 required
+goal: [S5] A pane that holds several captain seats gets one doorbell, not one per project: the engine joins the items of every seat bound to that pane into one ring, each line naming its project, urgent first, with the same idle and at-once rules as today. A project outside its working hours rings nothing and its fleet rests, as today; the other projects' rings go on. Change crates/gear-engine (doorbell.rs and the ring path), no other design.
+accept: Engine tests: two projects whose captain seats share a pane get one doorbell naming both projects' items; a project off hours adds nothing to it while the other still rings; a single project rings as today. Run make check CRATE=gear-engine and CRATE=gear-app.
+estimate: 45
+
+## T-488 [now] lane=hull milestone=M6 station=S5 required
+goal: [S5] Working hours per project time zone: `[schedule] tz = "<IANA zone>"` (e.g. "Asia/Shanghai", "America/New_York"); `hours` and `depart_at` are read in that zone, and with no `tz` in the machine's local time as today. Two projects whose hours overlap both run in the overlap. Change the `[schedule]` part of crates/gear-app config.rs (gear_app::config::departs_at, off_hours_until) and the engine's use of them, no other design; one time-zone crate added to the workspace.
+accept: App tests: hours 10:00-18:00 in Asia/Shanghai are in at 03:00 UTC and off at 11:00 UTC; the same hours in America/New_York are judged in that zone; no tz keeps local time; an unknown zone is refused at config load naming the field. Engine test: two projects with overlapping hours both deliver in the overlap and only one outside it. Run make check CRATE=gear-app and CRATE=gear-engine.
+estimate: 40
+
+## T-489 [now] lane=mast milestone=M6 station=S5 required
+goal: [S5] The board shows a project bar when the store holds several projects: one line at the top, each project with its state (working or off hours), voyage, station, time used of its eta and open items, the selected one bracketed; `p`, `[` and `]` switch; every tab below (Now, Tasks, Cost, Log) shows only the selected project. With one project there is no bar and the board is as today. Change crates/gear-board, no other design.
+accept: Board tests on the rendered frame: two projects give a bar naming both with their state, `]` selects the second and the Now tab then shows its lanes only; one project renders no bar. Run make check CRATE=gear-board.
+estimate: 45
+
+## T-490 [now] lane=mast milestone=M6 station=S5 required
+goal: [S5] The captain skill covers several projects: skills/gear/references/captain.md gets one paragraph (taking a second project from the same pane; each project its own kickoff and departure sheet; doorbells name the project; when two run at once, urgent items first, then the project whose station is nearer its eta), and departure.md says the sheet's title names the project. No code.
+accept: The skill tests pass: make check CRATE=gear-cli TESTS='test(skill)'.
+estimate: 15
+
+## T-491 [now] lane=hull milestone=M6 station=S5 required
+goal: [S5] A project on v0.5.x upgrades to v0.6 with no hand step: its store (schema of v0.5.6) migrates when the new engine or any gear command first opens it, its gear.toml of v0.5 loads unchanged (every new field has a default), its running voyage, seats and open items carry on, and docs/releases notes say "Upgrading: install, restart the engine". An end-to-end test opens a store made by the v0.5.6 schema with a voyage in progress and a v0.5-shaped config (a fixture committed with the test), runs one engine tick and `gear` and finds the voyage, seats and items intact. Change crates/gear-store migrations if anything is missing and the test, no other design.
+accept: Store and engine tests: the v0.5.6 fixture migrates to the current schema with no loss of tasks, attempts, seats, messages or plan versions; one tick and the home page run on it; a second open is a no-op. Run make check CRATE=gear-store and CRATE=gear-engine.
+estimate: 45
+
+## T-492 [now] lane=hull milestone=M6 station=S5 required
+goal: [S5] End-to-end: one captain pane holds two projects with different working hours in different time zones; an engine runs both on FakeHerdr through a simulated day: each fleet works only in its hours, both work in the overlap, the captain gets one doorbell naming both projects' items, and a reply with a qualified id settles the right project's item. Test only, no product change.
+accept: The scenario test passes. Run make check CRATE=gear-engine.
+deps: T-485, T-486, T-487, T-488
+estimate: 40
+
+## T-493 [now] lane=mast milestone=M6 station=S5 required
+goal: [S5] Release v0.6.4, station S5's release. Change, no other design: (1) the version is 0.6.4 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.4.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.3 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.3 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.4 and publishes the release; this task does not. The code change is in these files only.
+accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.4"; docs/releases/v0.6.4.md lists every task merged on origin/dev since v0.6.3 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+deps: T-478, T-485, T-486, T-487, T-488, T-489, T-490, T-491, T-492
 estimate: 15

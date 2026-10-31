@@ -553,26 +553,76 @@ fn prepare_job_session(
     )
 }
 
+/// The rework text that governs attempt `n >= 2` (T-456): the task's latest
+/// applied rework, shown above the goal because where it differs from the
+/// goal it is the instruction the reviewer judges against. Four M5 rounds
+/// quoted the original goal over the rework that had narrowed it.
+fn rework_section(
+    store: &mut Store,
+    project: &str,
+    task: &str,
+    attempt: i64,
+    candidate: &str,
+    remote: &str,
+) -> GearResult<String> {
+    if attempt < 2 {
+        return Ok(String::new());
+    }
+    let (note, previous) = store.read(|tx| {
+        Ok((
+            tx.get_task(project, task)?
+                .and_then(|row| row.rework_note)
+                .unwrap_or_default(),
+            tx.get_attempt(project, task, attempt - 1)?
+                .and_then(|row| row.candidate),
+        ))
+    })?;
+    let note = note.trim();
+    let body = if note.is_empty() {
+        "(no rework note was written; the verdict of the round before is the instruction)\n"
+    } else {
+        note
+    };
+    // T-480: the rework's review is the continuation of the review of attempt
+    // n-1. The delta between the two candidates is the change to judge first;
+    // the whole change is still named below.
+    let delta = match previous {
+        Some(previous) => format!(
+            "The change to judge first: `git fetch {remote} && git diff {previous}..{candidate}` (two dots: what attempt {attempt} changed since attempt {})\n",
+            attempt - 1
+        ),
+        None => String::new(),
+    };
+    Ok(format!(
+        "\n## Rework (attempt {attempt}, applied to the round before) — where it differs from the goal below, this text governs\n{body}\n{delta}"
+    ))
+}
+
 fn job_packet(
     store: &mut Store,
     config: &ProjectConfig,
     task: &ReviewTask,
     direction: bool,
+    worktree: &str,
 ) -> GearResult<String> {
     if !direction {
-        return review_packet_for(store, config, &task.task, task.attempt, &task.candidate);
+        return review_packet_for(
+            store,
+            config,
+            &task.task,
+            task.attempt,
+            &task.candidate,
+            worktree,
+        );
     }
     let saved = store.read(|tx| tx.get_task(&config.project.id, &task.task))?;
     let repo = saved
         .as_ref()
         .map(|row| config.repo_of_task(row))
         .unwrap_or_else(|| config.repo_of_lane(&task.lane));
-    let branch = gear_model::branch::expand(
-        &config.conventions.task_branch,
-        &config.project.id,
-        &task.lane,
-        &task.task,
-    );
+    // The direction reviewer's own branch, not the lane's (T-456): its worktree
+    // is cut at the candidate on `direction/t<n>`, and the binding names it.
+    let branch = format!("direction/{}", task.task.to_lowercase());
     // The contract the lane works to (T-282): the task's current version, read
     // here so the direction reviewer judges this text and never has to guess
     // which version `gear --show` names for its own view.
@@ -586,9 +636,45 @@ fn job_packet(
         }
         None => (1, String::new(), String::new()),
     };
+    // T-456: a rework round's direction check carries the applied rework above
+    // the goal, as the review packet does.
+    let rework = rework_section(
+        store,
+        &config.project.id,
+        &task.task,
+        task.attempt,
+        &task.candidate,
+        &config.conventions.remote,
+    )?;
     // T-267: the reviewer's first `gear` is what confirms the delivery, so the
     // direction packet asks for it as the review packet does.
-    Ok(format!("Run `gear` first (it records that you got this). Direction check of {} attempt {} at {} (branch {}). Read the contract below and the diff from {}/{}. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task {} --attempt {} --direction \"ok\" when nothing is misread, else --direction \"<up to three problems: the contract sentence misread and what to do instead>\".\n\nContract v{version} (the task's current contract; the lane works to it — judge against this text, not an older version `gear --show` may name):\nGoal: {goal}\nAccept: {accept}", task.task, task.attempt, task.candidate, branch, config.conventions.remote, repo.integration, task.task, task.attempt))
+    Ok(format!(
+        "Direction check of {task} attempt {attempt}. Binding: task {task}, attempt {attempt}, \
+         candidate {candidate}, branch {branch}, worktree {worktree}. Check the binding before \
+         reading: `pwd` must be the worktree, `git rev-parse --abbrev-ref HEAD` must be the \
+         branch, and `git rev-parse HEAD` must be the candidate.\n\
+         Run `gear` first (it records that you got this). Read the contract below and the diff \
+         from {remote}/{integration}. Answer one question: is this work going the way the \
+         contract asks (right files, right approach, contract read correctly)? Do not judge what \
+         is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in \
+         only this command: gear send --kind result --task {task} --attempt {attempt} --direction \
+         \"ok\" when nothing is misread, else --direction \"<up to three problems: the contract \
+         sentence misread and what to do instead>\".\n\
+         {rework}\n\
+         Contract v{version} (the task's current contract; the lane works to it — judge against \
+         this text, not an older version `gear --show` may name):\nGoal: {goal}\nAccept: {accept}",
+        task = task.task,
+        attempt = task.attempt,
+        candidate = task.candidate,
+        branch = branch,
+        worktree = worktree,
+        remote = config.conventions.remote,
+        integration = repo.integration,
+        rework = rework,
+        version = version,
+        goal = goal,
+        accept = accept,
+    ))
 }
 
 /// A direction check passed when the first word of its body is `ok`, in any
@@ -2180,7 +2266,7 @@ fn start_reviewer(
         {
             return Ok(Started::NotYet);
         }
-        let packet = job_packet(store, config, task, direction)?;
+        let packet = job_packet(store, config, task, direction, &path)?;
         store.write(|tx| {
             tx.set_seat_state(&seat.id, SeatState::Active, Some("review assigned"), now)?;
             tx.set_seat_task(&seat.id, &task.task)?;
@@ -2435,7 +2521,7 @@ fn start_reviewer(
         .agent_session
         .as_ref()
         .map(|session| session.value.as_str());
-    let packet = job_packet(store, config, task, direction)?;
+    let packet = job_packet(store, config, task, direction, &path)?;
     store.write(|tx| {
         gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now)?;
         tx.set_seat_task(&seat.id, &task.task)?;
@@ -2816,6 +2902,7 @@ pub(crate) fn job_for_seat(
     let Some(task) = pending.or_else(|| seat.task_id.clone()) else {
         return Ok(None);
     };
+    let worktree = worktree_path(store, &seat.id)?.unwrap_or_default();
     let Some(row) = store.read(|tx| tx.get_project(project))? else {
         return Ok(None);
     };
@@ -2849,7 +2936,7 @@ pub(crate) fn job_for_seat(
         return Ok(Some(ReviewJob {
             task,
             attempt: attempt.n,
-            packet: job_packet(store, &config, &job, true)?,
+            packet: job_packet(store, &config, &job, true, &worktree)?,
         }));
     }
     if store
@@ -2861,7 +2948,7 @@ pub(crate) fn job_for_seat(
     let Some(candidate) = attempt.candidate.clone() else {
         return Ok(None);
     };
-    let packet = review_packet_for(store, &config, &task, attempt.n, &candidate)?;
+    let packet = review_packet_for(store, &config, &task, attempt.n, &candidate, &worktree)?;
     Ok(Some(ReviewJob {
         task,
         attempt: attempt.n,
@@ -2911,6 +2998,7 @@ fn review_packet_for(
     task: &str,
     attempt: i64,
     candidate: &str,
+    worktree: &str,
 ) -> GearResult<String> {
     // The version the hand-in was made against: the attempt's adopted contract
     // (a hand-in must name it, T-8), never an older one the attempt once had
@@ -2947,6 +3035,23 @@ fn review_packet_for(
         };
         Ok((version, goal, accept, done, bar, lane))
     })?;
+    // T-456: the packet names the candidate the attempt was handed in with. A
+    // packet rendered for any other candidate is refused, so a reviewer never
+    // reads and judges a stale commit (M-3715: the seat was rebound while its
+    // old job still reviewed an earlier commit).
+    if let Some(stored) = store
+        .read(|tx| tx.get_attempt(&config.project.id, task, attempt))?
+        .and_then(|row| row.candidate)
+    {
+        if stored != candidate {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "{task} attempt {attempt} was handed in at {stored}, not at {candidate}: the review packet is refused, so no reviewer judges a stale candidate"
+                ),
+            ));
+        }
+    }
     // The diff is against the integration branch of the repo the work is in
     // (T-53): a child repo has its own branch.
     let saved = store.read(|tx| tx.get_task(&config.project.id, task))?;
@@ -2972,24 +3077,6 @@ fn review_packet_for(
             ("attempt", &attempt.to_string()),
         ],
     );
-    // T-480: a rework's review is the continuation of the review of attempt
-    // n-1. The packet leads with the captain's rework and the delta between
-    // the two candidates — the change the reviewer judges first, not the whole
-    // change again.
-    let rework = if attempt >= 2 {
-        store.read(|tx| {
-            let note = tx
-                .get_task(&config.project.id, task)?
-                .and_then(|row| row.rework_note)
-                .map(|note| note.trim().to_string());
-            let previous = tx
-                .get_attempt(&config.project.id, task, attempt - 1)?
-                .and_then(|row| row.candidate);
-            Ok(Some((note, previous)))
-        })?
-    } else {
-        None
-    };
     let packet = review_packet(
         task,
         attempt,
@@ -3009,12 +3096,15 @@ fn review_packet_for(
             task,
         ),
         &commit,
-        rework
-            .as_ref()
-            .map(|(note, _)| note.as_deref().unwrap_or("")),
-        rework
-            .as_ref()
-            .and_then(|(_, previous)| previous.as_deref()),
+        worktree,
+        &rework_section(
+            store,
+            &config.project.id,
+            task,
+            attempt,
+            candidate,
+            &config.conventions.remote,
+        )?,
     );
     // The review's own budget (design §5.1) and what a verdict past it must
     // carry (design §6.2): the reviewer is charged from its own start, and a
@@ -3122,7 +3212,8 @@ fn recover_missing_packets(
                 .unwrap_or_default(),
             candidate: candidate.clone(),
         };
-        let packet = job_packet(store, config, &review_task, direction.is_some())?;
+        let worktree = worktree_path(store, &seat.id)?.unwrap_or_default();
+        let packet = job_packet(store, config, &review_task, direction.is_some(), &worktree)?;
         let generation = seat.generation;
         store.write(|tx| {
             tx.insert_op(&NewOp {
@@ -3220,8 +3311,8 @@ fn review_packet(
     integration: &str,
     branch: &str,
     commit: &str,
-    rework: Option<&str>,
-    previous: Option<&str>,
+    worktree: &str,
+    rework: &str,
 ) -> String {
     // T-282: the task's contract moved past the one this hand-in was made
     // against — the reviewer is told, and still judges the hand-in by its own.
@@ -3230,38 +3321,15 @@ fn review_packet(
     } else {
         String::new()
     };
-    // T-480: the captain's rework and the delta from the attempt before it
-    // come above the goal — they are what this review continues.
-    let rework_block = match rework {
-        Some(note) => {
-            let mut block = format!(
-                "\nRework (attempt {attempt}, from the review of attempt {}):\n",
-                attempt - 1
-            );
-            if note.is_empty() {
-                block.push_str(
-                    "(no rework note was written; the review of that attempt is in its record)\n",
-                );
-            } else {
-                block.push_str(note);
-                block.push('\n');
-            }
-            if let Some(previous) = previous {
-                block.push_str(&format!(
-                    "The change to judge first: `git fetch {remote} && git diff {previous}..{candidate}` \
-                     (two dots: what attempt {attempt} changed since attempt {})\n",
-                    attempt - 1
-                ));
-            }
-            block
-        }
-        None => String::new(),
-    };
     format!(
-        "Review {task} attempt {attempt}. Run `gear` first (it records that you got this).\n\
-         \n\
+        "Review {task} attempt {attempt}. Binding: task {task}, attempt {attempt}, candidate \
+         {candidate}, branch {branch}, worktree {worktree}. Check the binding before reading: \
+         `pwd` must be the worktree, `git rev-parse --abbrev-ref HEAD` must be the branch, and \
+         `git rev-parse HEAD` must be the candidate.\n\
+         Run `gear` first (it records that you got this).\n\
+         {rework}\n\
          Contract: v{version} (the version this hand-in was made against)\n\
-         {newer}{rework_block}Goal: {goal}\n\
+         {newer}Goal: {goal}\n\
          Accept: {accept}\n\
          Done (the milestone's sentence): {done}\n\
          Bar (the quality this phase needs): {bar}\n\
@@ -3615,6 +3683,9 @@ mod tests {
     };
 
     const T0: i64 = 1_800_000_000;
+
+    /// The worktree path a rendered packet names in the tests (T-456).
+    const WORKTREE: &str = "/fake-worktrees/review-t1";
 
     /// The review chain of the test config: the **entry form** (T-35) — the
     /// CLI and the reasoning effort are the entry's.
@@ -4509,7 +4580,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             .unwrap();
 
         let config = gear_app::config::parse(CONFIG).unwrap();
-        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
 
         assert!(
             packet.contains("Contract: v2 (the version this hand-in was made against)"),
@@ -4556,7 +4627,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             lane: "heat".into(),
             candidate: "abc1234".into(),
         };
-        let packet = job_packet(&mut store, &config, &task, true).unwrap();
+        let packet = job_packet(&mut store, &config, &task, true, WORKTREE).unwrap();
 
         assert!(
             packet.contains("Contract v3 (the task's current contract"),
@@ -4568,6 +4639,149 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             !packet.contains("Read the contract (gear --show"),
             "the reviewer is not sent to a version that follows its own view: {packet}"
         );
+    }
+
+    /// T-456: a direction packet's first line names the job a direction check
+    /// and opens with the seat's binding (task, attempt, candidate, branch,
+    /// worktree), the reviewer checks pwd, branch and HEAD against it, and the
+    /// packet gives only the direction command (M-3899: a direction reviewer
+    /// read a packet that said "You implement" and gave the lane's command).
+    #[test]
+    fn a_direction_packet_opens_with_its_binding_and_only_the_direction_command() {
+        let mut store = world(CONFIG);
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let task = ReviewTask {
+            task: "T-1".into(),
+            attempt: 1,
+            writer: "p:heat".into(),
+            lane: "heat".into(),
+            candidate: "8da2ef2".into(),
+        };
+        let packet = job_packet(
+            &mut store,
+            &config,
+            &task,
+            true,
+            "/fake-worktrees/direction-t1",
+        )
+        .unwrap();
+        let first = packet.lines().next().unwrap();
+        assert!(
+            first.starts_with("Direction check of T-1 attempt 1."),
+            "the first line names the job: {first}"
+        );
+        for needle in [
+            "candidate 8da2ef2",
+            "branch direction/t-1",
+            "worktree /fake-worktrees/direction-t1",
+            "`pwd` must be the worktree",
+            "`git rev-parse --abbrev-ref HEAD` must be the branch",
+            "`git rev-parse HEAD` must be the candidate",
+            "gear send --kind result --task T-1 --attempt 1 --direction",
+        ] {
+            assert!(packet.contains(needle), "missing {needle:?} in\n{packet}");
+        }
+        assert!(
+            !packet.contains("gear send --kind review"),
+            "no review command in a direction packet:\n{packet}"
+        );
+        assert!(
+            !packet.contains("--candidate") && !packet.contains("--verdict"),
+            "only the direction command:\n{packet}"
+        );
+        assert!(
+            !packet.contains("You implement"),
+            "a direction check is not a lane packet:\n{packet}"
+        );
+    }
+
+    /// T-456: a review packet for a rework round shows the latest applied
+    /// rework above the goal, as the text that governs where it differs from
+    /// the goal (four M5 rounds quoted the original goal over the rework).
+    #[test]
+    fn a_rework_packet_shows_the_rework_above_the_goal() {
+        let mut store = world(CONFIG);
+        store
+            .write(|tx| {
+                gear_app::tasks::settle(
+                    tx,
+                    &gear_app::tasks::Verdict {
+                        project: "p".into(),
+                        task: "T-1".into(),
+                        attempt: 1,
+                        contract_version: 1,
+                        candidate: "abc1234".into(),
+                        pass: false,
+                        evidence: None,
+                        rework: Some("F1: the rework is missing — add the guard".into()),
+                        integrated_by: None,
+                        by_seat: "p:captain".into(),
+                    },
+                    T0 + 10,
+                )?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 11)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 12)?;
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-1",
+                    2,
+                    1,
+                    "def5678",
+                    "ops/reports/T-1.md",
+                    T0 + 13,
+                )
+            })
+            .unwrap();
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        // The review packet: the rework above the goal.
+        let packet = review_packet_for(&mut store, &config, "T-1", 2, "def5678", WORKTREE).unwrap();
+        let rework_at = packet
+            .find("## Rework (attempt 2")
+            .unwrap_or_else(|| panic!("no rework section:\n{packet}"));
+        let goal_at = packet.find("Goal:").expect("a goal");
+        assert!(rework_at < goal_at, "the rework leads:\n{packet}");
+        let rework = &packet[rework_at..goal_at];
+        assert!(
+            rework.contains("F1: the rework is missing — add the guard"),
+            "{rework}"
+        );
+        assert!(rework.contains("this text governs"), "{rework}");
+
+        // The direction packet of the same round carries it too.
+        let task = ReviewTask {
+            task: "T-1".into(),
+            attempt: 2,
+            writer: "p:heat".into(),
+            lane: "heat".into(),
+            candidate: "def5678".into(),
+        };
+        let direction = job_packet(&mut store, &config, &task, true, WORKTREE).unwrap();
+        let rework_at = direction
+            .find("## Rework (attempt 2")
+            .unwrap_or_else(|| panic!("no rework section:\n{direction}"));
+        let goal_at = direction.find("Goal:").expect("a goal");
+        assert!(rework_at < goal_at, "the rework leads:\n{direction}");
+        assert!(
+            direction[rework_at..goal_at].contains("F1: the rework is missing — add the guard"),
+            "{direction}"
+        );
+    }
+
+    /// T-456: a review packet is refused when it names a candidate that is not
+    /// the attempt's current one, so no reviewer reads and judges a stale
+    /// commit (M-3715: the seat was rebound mid-review).
+    #[test]
+    fn a_review_packet_for_a_stale_candidate_is_refused() {
+        let mut store = world(CONFIG);
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let err =
+            review_packet_for(&mut store, &config, "T-1", 1, "deadbee", WORKTREE).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
+        assert!(err.detail.contains("abc1234"), "{err:?}");
+        assert!(err.detail.contains("deadbee"), "{err:?}");
+        // The attempt's own candidate renders as before.
+        assert!(review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).is_ok());
     }
 
     /// T-282: a hand-in whose task's contract moved past the version it was
@@ -4599,7 +4813,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             })
             .unwrap();
         let config = gear_app::config::parse(CONFIG).unwrap();
-        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
 
         assert!(
             packet.contains("Contract: v2 (the version this hand-in was made against)"),
@@ -4618,7 +4832,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                 tx.update_task(&task)
             })
             .unwrap();
-        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
         assert!(!packet.contains("Newer contract:"), "{packet}");
     }
 
@@ -4628,7 +4842,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
     fn the_reviewer_packet_carries_the_budget_and_the_friction_flag() {
         let mut store = world(CONFIG);
         let config = gear_app::config::parse(CONFIG).unwrap();
-        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
 
         assert!(
             packet.contains("Budget: 30 min. Past it, your hand-in must carry --friction"),
@@ -4958,13 +5172,19 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             .unwrap()
             .to_string();
         // T-267: the reviewer's first `gear` is what confirms the delivery,
-        // so the direction packet asks for it first, as the review packet
-        // does.
+        // so the direction packet asks for it, as the review packet does.
+        // T-456: its first line names the job as a direction check and opens
+        // with the seat's binding.
         assert!(
-            packet.starts_with("Run `gear` first"),
-            "the direction packet asks for `gear` first: {packet}"
+            packet.starts_with("Direction check of T-1 attempt 1."),
+            "the direction packet opens with its kind and binding: {packet}"
         );
-        assert!(packet.contains("Direction check of T-1 attempt 1"));
+        assert!(packet.contains("Run `gear` first"), "{packet}");
+        assert!(
+            packet.contains("Binding: task T-1, attempt 1, candidate ")
+                && packet.contains(", branch direction/t-1, worktree /fake-worktrees/p-review-1."),
+            "the binding names the candidate, the branch and the worktree: {packet}"
+        );
         let failed = store
             .read(|tx| tx.last_op("p:review-1", OpKind::Deliver))
             .unwrap()
@@ -7340,12 +7560,13 @@ review = [
         let config = gear_app::config::parse(&config_text).unwrap();
         let mut store = world(&config_text);
 
-        let without = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        let without =
+            review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
         assert!(!without.contains("Project standard:"), "{without}");
 
         std::fs::create_dir_all(root.path().join("gear")).unwrap();
         std::fs::write(root.path().join("gear/standard.md"), "# Standard\n").unwrap();
-        let with = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        let with = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
         assert!(with.contains("Project standard: "), "{with}");
         assert!(with.contains("the reviewer judges against it"), "{with}");
         // The packet itself is unchanged around it.
@@ -7361,7 +7582,7 @@ review = [
         // The default: `review({task}): {what}`.
         let mut store = world(CONFIG);
         let config = gear_app::config::parse(CONFIG).unwrap();
-        let packet = review_packet_for(&mut store, &config, "T-1", 2, "abc1234").unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 2, "abc1234", WORKTREE).unwrap();
         assert!(
             packet.contains("with the message `review(T-1): {what}`"),
             "{packet}"
@@ -7373,7 +7594,7 @@ review = [
         );
         let config = gear_app::config::parse(&text).unwrap();
         let mut store = world(&text);
-        let packet = review_packet_for(&mut store, &config, "T-1", 2, "abc1234").unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 2, "abc1234", WORKTREE).unwrap();
         assert!(packet.contains("`T-1#2 review: {what}`"), "{packet}");
     }
 
@@ -7412,7 +7633,8 @@ review = [
             })
             .unwrap();
         let config = gear_app::config::parse(CONFIG).unwrap();
-        let packet = review_packet_for(&mut store, &config, "T-1", 2, "def5678").unwrap();
+        let packet =
+            review_packet_for(&mut store, &config, "T-1", 2, "def5678", "/wt/review").unwrap();
         assert!(
             packet.contains("F1 [P1, blocking]: the parser drops the second line"),
             "the captain's rework: {packet}"
@@ -7434,7 +7656,8 @@ review = [
 
         // Attempt 1 is unchanged: no rework block and no delta between
         // candidates.
-        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        let packet =
+            review_packet_for(&mut store, &config, "T-1", 1, "abc1234", "/wt/review").unwrap();
         assert!(packet.starts_with("Review T-1 attempt 1"), "{packet}");
         assert!(!packet.contains("Rework ("), "{packet}");
         assert!(!packet.contains("git diff abc1234.."), "{packet}");
@@ -7449,7 +7672,7 @@ review = [
     fn the_review_packet_names_the_exact_push_of_the_review_branch() {
         let mut store = world(CONFIG);
         let config = gear_app::config::parse(CONFIG).unwrap();
-        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
         assert!(
             packet.contains("`git push origin HEAD:refs/heads/review/t1`"),
             "{packet}"
@@ -7465,7 +7688,7 @@ review = [
         );
         let config = gear_app::config::parse(&text).unwrap();
         let mut store = world(&text);
-        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
         assert!(
             packet.contains("`git push upstream HEAD:refs/heads/b/review/t1`"),
             "{packet}"
@@ -7485,7 +7708,7 @@ review = [
         // The default remote: `origin`.
         let mut store = world(CONFIG);
         let config = gear_app::config::parse(CONFIG).unwrap();
-        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
         assert!(
             packet.contains("Diff to review: `git fetch origin && git diff origin/dev...abc1234`"),
             "{packet}"
@@ -7495,7 +7718,7 @@ review = [
         let text = format!("{CONFIG}\n[conventions]\nremote = \"upstream\"\n");
         let config = gear_app::config::parse(&text).unwrap();
         let mut store = world(&text);
-        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
         assert!(
             packet.contains(
                 "Diff to review: `git fetch upstream && git diff upstream/dev...abc1234`"
