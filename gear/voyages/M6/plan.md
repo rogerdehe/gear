@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=977 -->
+<!-- gear-plan project=gear base=978 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -82,6 +82,8 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-6942: keep course — 27 done, projected 880m of 1020m with the omp and agy tasks (hull 316m, mast 325m)
 - 2026-11-01 04:10 hand-fix: the reviewer nudge counts only review packets, never a direction packet of the same attempt (review.rs nudge_stopped_reviewers, one new test); make gate passed; engines restarted; told review-9 to stop | why: review-9 got 'your verdict on T-489 is not in' with its old direction packet and searched the store for its job (M-6962)
 - 2026-11-01 04:30 hand-fix: remerge T-485 | why: its gate failed on three tests that hit 30 s while the whole suite took 370 s on a machine at load 14 (two lanes, two reviewers and the captain's own gate runs); load, not the change
+- station M-6978: keep course — 30 done, projected 915m of 1020m
+- station M-6980: move — hull 316m against mast 221m; T-496 and T-498 (the omp and agy usage readers) go to mast, right after the profile tasks they follow (hull ~256m, mast ~281m)
 
 # Queue
 
@@ -311,7 +313,7 @@ goal: [S5] omp (oh-my-pi, a fork of pi; omp 18.12.6 on this machine) starts as a
 accept: Tests: the built-in omp profile starts with its unattended and prompt arguments; `gear admin install-skill --agent omp` writes SKILL.md under omp's skills directory and init accepts an omp lane. A real `herdr agent start --kind omp` in a test worktree with the profile's arguments reaches an empty composer with no dialog left (record the command and the screen in the report). Run make check CRATE=gear-herdr, CRATE=gear-app and CRATE=gear-cli.
 estimate: 50
 
-## T-496 [now] lane=hull milestone=M6 station=S5 required
+## T-496 [now] lane=mast milestone=M6 station=S5 required
 goal: [S5] gear-usage reads omp's session log, so an omp seat's tokens, model and cost show on the board. omp (a fork of pi) writes sessions under `~/.omp/agent/sessions/<path>/*.jsonl` (check `omp --help` and its docs). Reuse the pi-jsonl reader when the record shape is the same, else add a small reader; the built-in omp profile names it. Change crates/gear-usage and the omp profile's usage field only, no other design.
 accept: Usage tests on a fixture of a few records from a real local omp run (content redacted): its tokens, model and session are read; a pi fixture still reads as before. Run make check CRATE=gear-usage and CRATE=gear-engine.
 deps: T-495
@@ -322,7 +324,7 @@ goal: [S5] Antigravity CLI (`agy`, 1.2.13 on this machine; Herdr kind `agy`) sta
 accept: Tests: the built-in agy profile starts with its unattended and model arguments and resumes with `--conversation`; `gear admin install-skill --agent agy` writes SKILL.md where agy loads skills and init accepts an agy lane. A real `herdr agent start --kind agy` in a test worktree with the profile's arguments reaches an empty composer with no dialog left (record the command and the screen in the report). Run make check CRATE=gear-herdr, CRATE=gear-app and CRATE=gear-cli.
 estimate: 55
 
-## T-498 [now] lane=hull milestone=M6 station=S5 required
+## T-498 [now] lane=mast milestone=M6 station=S5 required
 goal: [S5] gear-usage reads an agy seat's tokens and model, so its cost shows on the board. agy keeps its data under `~/.gemini/antigravity-cli/` (conversations/, history.jsonl, conversation_summaries.db, cli.log); find where a conversation's token counts live and read them with a small reader the built-in agy profile names. If agy writes no token counts anywhere readable, the seat's usage is unknown (never 0) and the report says so. Change crates/gear-usage and the agy profile's usage field only, no other design.
 accept: Usage tests on a fixture made from a real local agy run (content redacted): its tokens and model are read, or, if agy records none, the record reads as unknown; a pi fixture still reads as before. Run make check CRATE=gear-usage and CRATE=gear-engine.
 deps: T-497
