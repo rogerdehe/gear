@@ -119,6 +119,7 @@ mod handover_branch_contract;
 mod health_contract;
 mod lane_nudge_contract;
 mod lane_restart_generation_contract;
+mod merge_scan_contract;
 mod multi_repo_contract;
 mod parallel_contract;
 mod pi_lane_contract;
