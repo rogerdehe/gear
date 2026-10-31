@@ -1053,6 +1053,11 @@ pub fn settle_review(
         task_row.rank = rework_rank(tx, &task_row)?;
     }
     tx.update_task(&task_row)?;
+    // The `fresh:` mark of a task is about its first round (T-481): a task
+    // that is done carries none.
+    if accepted {
+        tx.clear_task_fresh(project, task)?;
+    }
 
     // A pass is merged by the engine (T-12): the op is Intended here and the
     // merge op's executor knows how to run it. Booked to the lane's seat (the

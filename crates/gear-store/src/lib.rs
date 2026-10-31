@@ -2797,6 +2797,83 @@ impl<'s> Tx<'s> {
         Ok(row)
     }
 
+    /// The last round the seat ran, whatever task it was: the conversation
+    /// the seat holds now was made by that round (T-481).
+    pub fn last_round_of_seat(&self, seat: &str) -> GearResult<Option<RoundRow>> {
+        let row: Option<RoundRow> = self
+            .tx
+            .query_row(
+                &round_select(" WHERE seat=?1 ORDER BY start_at DESC LIMIT 1"),
+                params![seat],
+                round_from_row,
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(row)
+    }
+
+    /// The `fresh:` mark of a task (T-481): the captain's reason that its work
+    /// is unrelated to what the lane did before, so the lane starts a new
+    /// conversation. None when the block carries none.
+    pub fn task_fresh(&self, project: &str, task: &str) -> GearResult<Option<String>> {
+        Ok(self
+            .get_meta(&format!("task_fresh:{project}:{task}"))?
+            .filter(|why| !why.is_empty()))
+    }
+
+    /// Set the `fresh:` mark of a task (T-481).
+    pub fn set_task_fresh(&self, project: &str, task: &str, why: &str) -> GearResult<()> {
+        self.set_meta(&format!("task_fresh:{project}:{task}"), why)
+    }
+
+    /// Clear the `fresh:` mark of a task (T-481): a task that is done or
+    /// cancelled carries none — the mark is about the round that starts it.
+    pub fn clear_task_fresh(&self, project: &str, task: &str) -> GearResult<()> {
+        self.set_meta(&format!("task_fresh:{project}:{task}"), "")
+    }
+
+    /// Mark a round as a new-session recovery (T-481, design/10 §resume rules):
+    /// its earlier work ran on another CLI, so it could not continue that
+    /// conversation. The mark carries that work's CLI and session, which the
+    /// packet points the lane at.
+    pub fn set_session_recovery(
+        &self,
+        project: &str,
+        task: &str,
+        attempt: i64,
+        cli: &str,
+        session: &str,
+    ) -> GearResult<()> {
+        let mark = serde_json::json!({"cli": cli, "session": session});
+        self.set_meta(
+            &format!("engine.session_recovery.{project}.{task}.{attempt}"),
+            &mark.to_string(),
+        )
+    }
+
+    /// The new-session recovery mark of a round (T-481): the CLI and session
+    /// of its earlier work. None when the round continues its conversation.
+    pub fn session_recovery(
+        &self,
+        project: &str,
+        task: &str,
+        attempt: i64,
+    ) -> GearResult<Option<(String, String)>> {
+        let raw = self.get_meta(&format!(
+            "engine.session_recovery.{project}.{task}.{attempt}"
+        ))?;
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let Ok(mark) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return Ok(None);
+        };
+        match (mark["cli"].as_str(), mark["session"].as_str()) {
+            (Some(cli), Some(session)) => Ok(Some((cli.to_string(), session.to_string()))),
+            _ => Ok(None),
+        }
+    }
+
     /// Close a round: the next round's start on the seat, or the seat's
     /// release (§4.1).
     pub fn close_round(&self, key: &RoundKey, end_at: Ts) -> GearResult<()> {

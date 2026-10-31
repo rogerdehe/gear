@@ -473,6 +473,11 @@ pub struct TaskBoard {
     /// words as the board's views.
     pub stage: graph::Stage,
     pub stage_words: String,
+    /// Whether the task's latest round is a new-session recovery (T-481,
+    /// design/10 §resume rules): its earlier work ran on another CLI, so the
+    /// round could not continue that conversation. The board says so, as the
+    /// seat's home page does.
+    pub recovery: bool,
     /// The goal of the task (its title in the frame).
     pub title: String,
     /// The estimate of the task in minutes.
@@ -796,12 +801,19 @@ pub fn project_for(
         // reading for the views and the lane lines.
         let stage = graph::stage_of(tx, project, task)?;
         let stage_words = graph::Stage::words_of(stage, &task.deps, rounds, None);
+        // The latest attempt's round, for the new-session recovery mark
+        // (T-481).
+        let recovery = match tx.attempts_of_task(project, &task.id)?.last() {
+            Some(attempt) => tx.session_recovery(project, &task.id, attempt.n)?.is_some(),
+            None => false,
+        };
         let line = TaskBoard {
             id: task.id.clone(),
             rank: task.rank,
             state: task.state,
             stage,
             stage_words,
+            recovery,
             title: tx
                 .get_contract(project, &task.id, task.contract_version)?
                 .map(|contract| contract.goal)
@@ -1453,7 +1465,16 @@ pub fn lane_line(lane: &LaneBoard) -> String {
         .filter(|task| task.state != TaskState::Cancelled)
         .find(|task| task.stage.is_open());
     let current = current
-        .map(|task| format!("{} {}", task.id, task.stage_words))
+        .map(|task| {
+            let mut text = format!("{} {}", task.id, task.stage_words);
+            // A round that could not continue the earlier conversation because
+            // its CLI changed (T-481, design/10 §resume rules): the board says
+            // so, as the seat's home page does.
+            if task.recovery {
+                text.push_str(" · new-session recovery");
+            }
+            text
+        })
         .unwrap_or_else(|| match &lane.helping {
             // A lane that helps says what it helps on (T-323).
             Some(helping) => helping.clone(),
