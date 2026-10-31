@@ -2903,6 +2903,25 @@ impl<'s> Tx<'s> {
         self.set_meta(&format!("task_review_model:{project}:{task}"), model)
     }
 
+    /// The `audit:` mark of a task (T-505): the task is a voyage audit, run by
+    /// reviewers and never assigned to its lane. None when the block does not
+    /// mark it.
+    pub fn task_audit(&self, project: &str, task: &str) -> GearResult<Option<bool>> {
+        Ok(self
+            .get_meta(&format!("task_audit:{project}:{task}"))?
+            .filter(|mark| !mark.is_empty())
+            .map(|mark| mark != "0" && !mark.eq_ignore_ascii_case("false")))
+    }
+
+    /// Set (or, with `false`, clear) the `audit:` mark of a task (T-505): a
+    /// block that names the field sets it, a block that names none keeps it.
+    pub fn set_task_audit(&self, project: &str, task: &str, audit: bool) -> GearResult<()> {
+        self.set_meta(
+            &format!("task_audit:{project}:{task}"),
+            if audit { "1" } else { "" },
+        )
+    }
+
     /// Mark a round as a new-session recovery (T-481, design/10 §resume rules):
     /// its earlier work ran on another CLI, so it could not continue that
     /// conversation. The mark carries that work's CLI and session, which the

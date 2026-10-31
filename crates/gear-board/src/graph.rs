@@ -319,20 +319,28 @@ fn order(mut tasks: Vec<GraphTask>) -> Vec<GraphTask> {
     ordered
 }
 
+/// One styled piece of a row's text: the id and the title, the stage words and
+/// the time are drawn in their own styles (T-502).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Span {
+    pub text: String,
+    pub style: Style,
+}
+
 /// One row of the git-style graph: the cells of the drawing at their columns,
 /// the task the row is about (a row that is not about a task has none) and the
-/// text after the drawing, which starts at `info_x`.
+/// text after the drawing, which starts at `info_x`, as styled spans.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphRow {
     pub cells: Vec<(usize, char, Style)>,
     /// The task of the row: the row of a waiting task, the stage row of an
     /// open one, the row of a merge; a fork row has none.
     pub task: Option<String>,
-    /// The text after the drawing: the id, the title, what the task is doing
-    /// and its time.
+    /// The text after the drawing, piece by piece: the id, the title, what the
+    /// task is doing and its time.
+    pub spans: Vec<Span>,
+    /// The text of the row, without the styles: what the row says.
     pub text: String,
-    /// The style of the text.
-    pub style: Style,
 }
 
 /// The rows of the git-style graph (the prototype's `view_graph`), newest on
@@ -386,11 +394,12 @@ pub fn git_rows(
         let style = lane_style(task);
         let mut cells = verticals(&live, None);
         cells.push((x, '○', style.and_bold()));
+        let spans = git_info(task, tw);
         rows.push(GraphRow {
             cells,
             task: Some(task.id.clone()),
-            text: git_info(task, tw),
-            style: Style::fg(Color::Dim),
+            text: plain(&spans),
+            spans,
         });
         let mut cells = verticals(&live, None);
         cells.push((x, '┆', style));
@@ -398,7 +407,7 @@ pub fn git_rows(
             cells,
             task: Some(task.id.clone()),
             text: String::new(),
-            style: Style::PLAIN,
+            spans: Vec::new(),
         });
     }
     // The starts and the merges, the newest first; equal minutes keep the
@@ -424,15 +433,18 @@ pub fn git_rows(
             cells.extend((4..x).map(|column| (column, '─', style)));
             cells.push((x, '╯', style));
             live.push(task.id.as_str());
-            let mut text = git_info(task, tw);
+            let mut spans = git_info(task, tw);
             if let Some(finished) = task.finished {
-                text.push_str(&format!("  merged {}", clock(finished)));
+                spans.push(Span {
+                    text: format!("  merged {}", clock(finished)),
+                    style: Style::fg(Color::Dim),
+                });
             }
             rows.push(GraphRow {
                 cells,
                 task: Some(task.id.clone()),
-                text,
-                style: Style::PLAIN,
+                text: plain(&spans),
+                spans,
             });
         } else {
             // The start: the branch leaves dev. A task that started and has
@@ -446,11 +458,12 @@ pub fn git_rows(
                     symbol_of(task.stage),
                     Style::fg(task.stage.color()).and_bold(),
                 ));
+                let spans = git_info(task, tw);
                 rows.push(GraphRow {
                     cells,
                     task: Some(task.id.clone()),
-                    text: git_info(task, tw),
-                    style: Style::bold(),
+                    text: plain(&spans),
+                    spans,
                 });
             }
             let mut cells = verticals(&live, skip);
@@ -465,8 +478,11 @@ pub fn git_rows(
             rows.push(GraphRow {
                 cells,
                 task: None,
-                text,
-                style: Style::fg(Color::Dim),
+                text: text.clone(),
+                spans: vec![Span {
+                    text,
+                    style: Style::fg(Color::Dim),
+                }],
             });
         }
     }
@@ -632,9 +648,28 @@ fn symbol_of(stage: Stage) -> char {
     stage.symbol().chars().next().unwrap_or(' ')
 }
 
-/// The text of a graph row after the drawing: the id, the title, what the task
-/// is doing and its time (the prototype's `info` in `view_graph`).
-fn git_info(task: &GraphTask, tw: usize) -> String {
+/// Whether the stage is live (T-502): the task is being worked on, asked
+/// about, reworked, handed in, reviewed, decided, merged or stuck at the
+/// merge — the rows that stand out.
+pub fn is_live(stage: Stage) -> bool {
+    matches!(
+        stage,
+        Stage::Working
+            | Stage::Asking
+            | Stage::Rework
+            | Stage::Handed
+            | Stage::Review
+            | Stage::Verdict
+            | Stage::Merging
+            | Stage::MergeFailed
+    )
+}
+
+/// The text of a graph row after the drawing, piece by piece (T-502): the id
+/// and the title are bold while the stage is live and dim once the task is
+/// merged; the stage words carry the stage's own colour, bold while the stage
+/// is live; the time is dim for a merged task.
+fn git_info(task: &GraphTask, tw: usize) -> Vec<Span> {
     let estimate = task.est_min.unwrap_or(0);
     let actual = task.actual_min.unwrap_or(0);
     let time = if actual > 0 {
@@ -647,13 +682,49 @@ fn git_info(task: &GraphTask, tw: usize) -> String {
     } else {
         String::new()
     };
-    format!(
-        "{:<7}{:<tw$}  {:<36}{time}{rounds}",
-        task.id,
-        cut(&task.title, tw),
-        cut(&Stage::words(task), 36),
-        tw = tw
-    )
+    let live = is_live(task.stage);
+    let (head, time_style) = if task.stage == Stage::Merged {
+        (Style::fg(Color::Dim), Style::fg(Color::Dim))
+    } else if matches!(task.stage, Stage::Deps | Stage::Queued) {
+        (Style::fg(Color::Dim), Style::fg(Color::Dim))
+    } else if live {
+        (Style::bold(), Style::PLAIN)
+    } else {
+        (Style::PLAIN, Style::PLAIN)
+    };
+    let stage_style = Style::fg(task.stage.color());
+    let stage_style = if live {
+        stage_style.and_bold()
+    } else {
+        stage_style
+    };
+    vec![
+        Span {
+            text: format!("{:<7}", task.id),
+            style: head,
+        },
+        Span {
+            text: format!("{:<tw$}", cut(&task.title, tw), tw = tw),
+            style: head,
+        },
+        Span {
+            text: "  ".to_string(),
+            style: Style::PLAIN,
+        },
+        Span {
+            text: format!("{:<36}", cut(&Stage::words(task), 36)),
+            style: stage_style,
+        },
+        Span {
+            text: format!("{time}{rounds}"),
+            style: time_style,
+        },
+    ]
+}
+
+/// The text of some spans, without the styles.
+fn plain(spans: &[Span]) -> String {
+    spans.iter().map(|span| span.text.as_str()).collect()
 }
 
 /// The lanes of the project, in seat order: one column each.
