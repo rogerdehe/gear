@@ -85,11 +85,16 @@ enum Cmd {
 
 #[derive(Subcommand, Debug)]
 enum CaptainOp {
-    /// Rebind the captain seat to another pane (a new generation).
+    /// Rebind the captain seat to another pane (a new generation), or print
+    /// the handover template with its facts (`--facts`).
     Handover {
         /// The pane the captain's agent runs in now.
-        #[arg(long, value_name = "PANE")]
-        pane: String,
+        #[arg(long, value_name = "PANE", required_unless_present = "facts")]
+        pane: Option<String>,
+        /// Print the handover template with its part 1 facts from the store;
+        /// rebind nothing.
+        #[arg(long)]
+        facts: bool,
     },
     /// Become a project's captain from the agent in this pane: no GEAR_CTX,
     /// no pane id. The project is the one named, else the one whose checkout
@@ -455,8 +460,15 @@ fn run(cli: Cli) -> GearResult<()> {
             op: AdminOp::Projects,
         }) => cmd_admin_projects(cli.json),
         Some(Cmd::Captain {
-            op: CaptainOp::Handover { pane },
-        }) => cmd_captain_handover(&pane, cli.json),
+            op: CaptainOp::Handover { pane, facts },
+        }) => match (facts, pane) {
+            (true, _) => cmd_captain_handover_facts(cli.json),
+            (false, Some(pane)) => cmd_captain_handover(&pane, cli.json),
+            (false, None) => Err(GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                "`gear captain handover` needs --pane <id>, or --facts for the template",
+            )),
+        },
         Some(Cmd::Captain {
             op: CaptainOp::Take { project },
         }) => cmd_captain_take(project.as_deref(), cli.json),
@@ -882,12 +894,12 @@ fn cmd_admin_init(
             return Ok(());
         }
         Err(GearError::new(
-                gear_model::ErrorCode::BadFormat,
-                format!(
-                    "project {} names herdr_session {configured}, but this shell runs in session {name}: its store and engine are this session's; run init from a pane of session {configured}, or fix herdr_session",
-                    parsed.project.id
-                ),
-            ))
+            gear_model::ErrorCode::BadFormat,
+            format!(
+                "project {} names herdr_session {configured}, but this shell runs in session {name}: its store and engine are this session's; run init from a pane of session {configured}, or fix herdr_session",
+                parsed.project.id
+            ),
+        ))
     };
     // T-316: a repository under the system temp directory is a fixture (M4.2
     // #35: a leftover fixture project with empty tokens appeared in the
@@ -2002,6 +2014,75 @@ fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
 ///
 /// A user command: an agent never writes into the user's home. It needs no
 /// store, so it starts no engine.
+/// `gear captain handover --facts`: print the handover template with its part
+/// 1 facts from the store (handover.md part B). Read-only: no engine, no
+/// rebind.
+fn cmd_captain_handover_facts(json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let cwd = std::env::current_dir().map_err(|e| {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot read the working directory: {e}"),
+        )
+    })?;
+    let machine = gear_app::captain::Machine {
+        engine: Some(engine_line()),
+    };
+    let facts = gear_app::captain::handover_facts(&mut store, &env, &cwd, &machine, now_ts())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "project": facts.project,
+                "voyage": facts.voyage,
+                "directory": facts.directory,
+                "document": facts.document,
+                "text": facts.text,
+            })
+        );
+        return Ok(());
+    }
+    println!("{}", facts.text);
+    Ok(())
+}
+
+/// What this caller knows about the engine (handover.md part B): its binary,
+/// its version, whether it runs, and when its lock was last touched.
+fn engine_line() -> String {
+    let db = std::env::var(gear_model::ctx::ENV_DB).ok();
+    let state = gear_board::EngineState::probe(db.as_deref().map(std::path::Path::new));
+    let binary = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let touched = db
+        .as_deref()
+        .and_then(|db| std::path::Path::new(db).parent())
+        .map(|dir| dir.join("engine.lock"))
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| gear_app::plan::utc_date(since.as_secs() as i64));
+    match (state, touched) {
+        (gear_board::EngineState::Running, Some(date)) => format!(
+            "running (its lock is held, last touched {date}) · binary {binary} · gear {}",
+            env!("CARGO_PKG_VERSION")
+        ),
+        (gear_board::EngineState::Running, None) => format!(
+            "running (its lock is held) · binary {binary} · gear {}",
+            env!("CARGO_PKG_VERSION")
+        ),
+        (gear_board::EngineState::Down, Some(date)) => format!(
+            "down (its lock is free, last touched {date}) · binary {binary} · gear {}",
+            env!("CARGO_PKG_VERSION")
+        ),
+        (gear_board::EngineState::Down, None) => format!(
+            "down (its lock is free) · binary {binary} · gear {}",
+            env!("CARGO_PKG_VERSION")
+        ),
+    }
+}
+
 /// `gear captain handover --pane <id>`: rebind the captain seat to another pane
 /// (T-104). Allowed from the captain's own real pane or the user's own terminal
 /// (a shell with no agent); a lane or reviewer asking is refused and the
@@ -2087,6 +2168,11 @@ fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
                 "generation": result.generation,
                 "kind": result.kind,
                 "named": named_line(&result.named),
+                "document": result.document,
+                "previous_pane": result.request.as_ref().map(|request| request.pane.clone()),
+                "previous_session": result.request.as_ref().and_then(|request| request.session_ref.clone()),
+                "asked": result.request.as_ref().map(|request| request.asked),
+                "deadline": result.request.as_ref().map(|request| request.deadline),
             })
         );
         return Ok(());
@@ -2100,6 +2186,21 @@ fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
         result.from.as_deref().unwrap_or("no pane recorded")
     );
     println!("agent name: {}", named_line(&result.named));
+    if let Some(document) = &result.document {
+        println!("previous captain's handover: {document} (read it before the task packet)");
+    } else if let Some(request) = &result.request {
+        println!(
+            "previous captain: pane {} {} · session {} · if no handover arrives within {} minutes, read it and write part 2 yourself",
+            request.pane,
+            if request.asked {
+                "was asked for its handover"
+            } else {
+                "hosts no agent to ask"
+            },
+            request.session_ref.as_deref().unwrap_or("not recorded"),
+            gear_app::captain::HANDOVER_ASK_MIN
+        );
+    }
     println!("run `gear` here: this pane is the captain, no GEAR_CTX needed");
     Ok(())
 }
@@ -3253,8 +3354,13 @@ fn engine_target_ok() -> Result<(), String> {
     let registry = targets_path_in(std::path::Path::new(&home));
     match registered_store(&registry, &socket) {
         Some(reg) if canonical(&reg) == canonical(&db) => Ok(()),
-        Some(reg) => Err(format!("{db} is not this Herdr session's GEAR store ({reg} is); an engine never runs on another store")),
-        None => Err(format!("no GEAR store is registered for this Herdr session ({}): run `gear admin init`", registry.display())),
+        Some(reg) => Err(format!(
+            "{db} is not this Herdr session's GEAR store ({reg} is); an engine never runs on another store"
+        )),
+        None => Err(format!(
+            "no GEAR store is registered for this Herdr session ({}): run `gear admin init`",
+            registry.display()
+        )),
     }
 }
 
@@ -3455,7 +3561,7 @@ fn cmd_admin_start() -> GearResult<()> {
                     return Err(GearError::new(
                         gear_model::ErrorCode::NoTarget,
                         format!("could not start the engine: {e}"),
-                    ))
+                    ));
                 }
             }
         }
@@ -5015,7 +5121,9 @@ path="api"
                 tx.update_project(&project)
             })
             .unwrap();
-        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind heat repo=api owns=[src/, tests/]\n");
+        let path = write_draft(
+            "<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind heat repo=api owns=[src/, tests/]\n",
+        );
         let out = run_plan(
             &mut store,
             &env("captain", CAP_PANE),
@@ -5376,6 +5484,90 @@ path="api"
             .map(|reviewer| reviewer["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, vec!["r-1", "r-2"]);
+    }
+
+    /// T-460: an attempt whose review is in and waits for the captain is
+    /// named with the item that waits in his inbox (`waits for your verdict
+    /// (M-<id>)`), not only by the lane's state: another project's captain
+    /// read a finished review as a stall.
+    #[test]
+    fn queue_names_a_review_that_waits_for_the_captain_with_its_item() {
+        let (mut store, _herdr) = world();
+        store
+            .write(|tx| {
+                let mut handed_in = lane_task("T-1", "heat", gear_model::TaskState::Verifying, &[]);
+                handed_in.estimate_min = Some(30);
+                tx.insert_task(&handed_in)?;
+                // The attempt was handed in and its review is in: a fail.
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: gear_model::AttemptState::Submitted,
+                    candidate: Some("abc1234".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })?;
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: false,
+                    findings: "the check misses the empty file".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0 + 300,
+                })?;
+                // The verdict waits in the captain's inbox: the item the
+                // queue has to name.
+                tx.insert_message(&gear_store::NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: "T-1:1".into(),
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    sender: "p:review-1".into(),
+                    sender_gen: 1,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::Review,
+                    urgent: false,
+                    body: "review fail on T-1 attempt 1\nthe check misses the empty file".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: T0 + 300,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_queue(&mut store, &env("captain", CAP_PANE), false, T0 + 600).unwrap();
+        assert!(
+            out.contains("T-1 waits for your verdict (M-1)"),
+            "the item is named: {out}"
+        );
+        // The lane is still shown as idle, but the verdict is no stall.
+        let heat = out.lines().find(|line| line.starts_with("heat")).unwrap();
+        assert!(heat.contains("idle: nothing left planned"), "{heat}");
+
+        // --json says the same.
+        let json = run_queue(&mut store, &env("captain", CAP_PANE), true, T0 + 600).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed["waiting"],
+            serde_json::json!(["T-1 waits for your verdict (M-1)"]),
+            "{json}"
+        );
     }
 
     #[test]
@@ -8307,8 +8499,35 @@ path="api"
                 // T-76: the folder the agent runs in is trusted.
                 "-c".to_string(),
                 "projects={\"{repo_root}\"={trust_level=\"trusted\"}}".to_string(),
+                // T-457: a resume runs in the seat's own directory and never
+                // shows the working-directory dialog.
+                "-c".to_string(),
+                "tui.resume_cwd=\"current\"".to_string(),
             ]
         );
+        // T-457: Codex 0.165's startup screens are answered, not read as an
+        // idle agent.
+        let dialogs = &codex.dialogs;
+        assert_eq!(dialogs.len(), 2, "the /new and the resume dialog");
+        assert!(
+            dialogs[0]
+                .markers
+                .contains(&"Where should the new conversation run?".to_string()),
+            "the /new dialog's marker"
+        );
+        assert!(
+            dialogs[1]
+                .markers
+                .contains(&"Choose which working directory to use".to_string()),
+            "the resume dialog's marker"
+        );
+        for dialog in dialogs {
+            assert_eq!(
+                dialog.keys,
+                vec!["enter".to_string()],
+                "the preselected choice is taken with Enter"
+            );
+        }
     }
 
     #[test]

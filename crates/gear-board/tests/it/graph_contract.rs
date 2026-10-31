@@ -765,6 +765,65 @@ fn each_stage_comes_from_a_fact_of_the_store() {
     }
 }
 
+/// The board's "to handle" lines of the stage fixture, as the Now view lists
+/// them (T-360).
+fn board_waiting(store: &mut Store) -> Vec<String> {
+    gear_board::build(
+        store,
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
+        moment(12, 30),
+    )
+    .unwrap()
+    .projects[0]
+        .waiting_on
+        .clone()
+}
+
+/// T-460: an attempt whose review is in and waits for the captain is named
+/// with the item that waits in his inbox (`waits for your verdict (M-<id>)`),
+/// not only by its state: another project's captain read a finished review as
+/// a stall. A verdict without an item keeps the plain words.
+#[test]
+fn a_verdict_that_waits_for_the_captain_names_the_item() {
+    let mut store = stage_world();
+    // No item waits yet: the plain words.
+    assert!(
+        board_waiting(&mut store).contains(&"T-31 waits for the captain's verdict".to_string()),
+        "the plain words without an item"
+    );
+    // The reviewer's fail verdict waits in the captain's inbox: the item the
+    // board has to name.
+    store
+        .write(|tx| {
+            tx.insert_message(&NewMessage {
+                meta: None,
+                project: "p".into(),
+                thread: "T-31:1".into(),
+                task: Some("T-31".into()),
+                attempt: Some(1),
+                sender: "p:review-2".into(),
+                sender_gen: 1,
+                recipient: "p:captain".into(),
+                kind: MsgKind::Review,
+                urgent: false,
+                body: "review fail on T-31 attempt 1\nthe check misses".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: moment(12, 21),
+            })
+        })
+        .unwrap();
+    let waiting = board_waiting(&mut store);
+    assert!(
+        waiting.contains(&"T-31 waits for your verdict (M-2)".to_string()),
+        "the item is named: {waiting:?}"
+    );
+}
+
 /// F2 of the T-346 review: a newest attempt that was abandoned counts as no
 /// attempt — it does not resurrect the older one.
 #[test]

@@ -193,6 +193,11 @@ pub fn idle_reason(
 /// has a captain; then the newest unanswered captain instruction to the seat
 /// within [`HELP_LIMIT_S`] is the help. A reply of the lane — any message of
 /// it with `reply_to` the instruction — ends it.
+///
+/// An instruction the captain sent while the lane worked is not help (T-463):
+/// when an attempt of the lane by this seat started before the instruction and
+/// was handed in, merged or ended after it, the instruction was part of that
+/// work and does not keep the lane busy once the attempt is over.
 pub fn helping(tx: &Tx<'_>, project: &str, seat: &SeatRow, now: Ts) -> GearResult<Option<Helping>> {
     if seat.role != SeatRole::Lane || !tx.in_progress_attempts_of_seat(&seat.id)?.is_empty() {
         return Ok(None);
@@ -207,8 +212,15 @@ pub fn helping(tx: &Tx<'_>, project: &str, seat: &SeatRow, now: Ts) -> GearResul
         .filter(|message| message.sender == captain.id)
         .collect();
     instructions.sort_by(|a, b| (b.created, &b.id).cmp(&(a.created, &a.id)));
+    let spans = work_spans(tx, project, seat)?;
     for instruction in instructions {
         if has_reply(tx, project, &seat.id, &instruction)? {
+            continue;
+        }
+        if spans
+            .iter()
+            .any(|&(start, end)| start < instruction.created && end > instruction.created)
+        {
             continue;
         }
         let lane = match instruction.task.as_deref() {
@@ -224,6 +236,41 @@ pub fn helping(tx: &Tx<'_>, project: &str, seat: &SeatRow, now: Ts) -> GearResul
         }));
     }
     Ok(None)
+}
+
+/// The times the lane worked on a task (T-463): every attempt of one of the
+/// lane's tasks by this seat, from its start to the earliest of its hand-in,
+/// merge and settle (the end of the work; a closed attempt's row time stands
+/// in when no step wrote one).
+fn work_spans(tx: &Tx<'_>, project: &str, seat: &SeatRow) -> GearResult<Vec<(Ts, Ts)>> {
+    let mut spans = Vec::new();
+    for task in tx.tasks_of_project(project)? {
+        if task.lane.as_deref() != Some(seat.name.as_str()) {
+            continue;
+        }
+        for attempt in tx.attempts_of_task(project, &task.id)? {
+            if attempt.seat != seat.id {
+                continue;
+            }
+            let times = tx.attempt_times(project, &task.id, attempt.n)?;
+            let start = times.started.unwrap_or(attempt.started);
+            let end = [
+                times.handed_in,
+                times.merged,
+                times.settled,
+                // A closed attempt has its end in the row when no step wrote
+                // it (an abandoned attempt).
+                attempt.state.is_terminal().then_some(attempt.updated),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+            if let Some(end) = end {
+                spans.push((start, end));
+            }
+        }
+    }
+    Ok(spans)
 }
 
 /// Did the lane answer the instruction?

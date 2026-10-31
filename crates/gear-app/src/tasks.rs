@@ -454,6 +454,11 @@ pub fn verdict_hint(
     let Some(task_row) = tx.get_task(project, task)? else {
         return Ok(None);
     };
+    // A cancelled task is settled: a late item about it (a merge that failed
+    // after the cancel) has nothing left to decide and closes by a reply.
+    if task_row.state == TaskState::Cancelled {
+        return Ok(None);
+    }
     let Some(attempt_row) = tx.get_attempt(project, task, attempt)? else {
         return Ok(None);
     };

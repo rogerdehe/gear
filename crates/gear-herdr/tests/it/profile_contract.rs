@@ -18,6 +18,7 @@ fn opencode() -> Profile {
         // T-113: the guardrails refusals of a kind without guardrails.
         blocked_markers: vec![],
         error_markers: vec!["overloaded_error".into()],
+        dialogs: Vec::new(),
         new_session: "/new".into(),
         compact: "/compact".into(),
         usage_log: Some("opencode-db".into()),
