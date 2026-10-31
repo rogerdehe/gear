@@ -4572,6 +4572,24 @@ mod tests {
     // draft the apply reads: without it a departed voyage's eta change is
     // refused, with it the change applies.
     #[test]
+    fn captain_take_takes_several_projects_and_release_names_one() {
+        let cli = Cli::try_parse_from(["gear", "captain", "take", "gear", "prometheus"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Captain {
+                op: CaptainOp::Take { projects },
+            }) => assert_eq!(projects, vec!["gear", "prometheus"]),
+            other => panic!("not a captain take: {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["gear", "captain", "release", "gear"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Captain {
+                op: CaptainOp::Release { project },
+            }) => assert_eq!(project, "gear"),
+            other => panic!("not a captain release: {other:?}"),
+        }
+    }
+
+    #[test]
     fn plan_apply_takes_the_confirmed_flag() {
         let cli = Cli::try_parse_from(["gear", "plan", "apply", "--confirmed", "plan.md"]).unwrap();
         match cli.cmd {
