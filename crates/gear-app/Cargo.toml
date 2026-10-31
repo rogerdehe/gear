@@ -16,6 +16,8 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 # T-131: `proc_pidinfo` reads a parent pid in process on macOS (Linux reads /proc).
 libc = { workspace = true }
+# T-488: IANA zones for `[schedule].tz`.
+jiff = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
