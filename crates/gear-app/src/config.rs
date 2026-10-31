@@ -765,6 +765,12 @@ pub struct Timing {
     /// ran its suite is not a stale base. `0` = a hand-in must contain the
     /// current tip (the strict rule).
     pub handin_base_window_min: u32,
+    /// How long an at-once agent switch lets the outgoing agent wrap up and
+    /// commit before the engine exits it anyway (T-465); default 10 minutes.
+    pub switch_grace_min: u32,
+    /// Whether an agent switch (a new CLI) happens at once instead of at the
+    /// seat's next safe point (T-465); default false = the next safe point.
+    pub switch_at_once: bool,
 }
 
 impl Default for Timing {
@@ -778,6 +784,8 @@ impl Default for Timing {
             lane_busy_idle_min: 10,
             delivery_grace_s: 180,
             handin_base_window_min: 30,
+            switch_grace_min: 10,
+            switch_at_once: false,
         }
     }
 }
