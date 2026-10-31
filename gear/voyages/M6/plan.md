@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=940 -->
+<!-- gear-plan project=gear base=941 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3).
 
@@ -48,6 +48,7 @@ station S4: the captain's plan tools, released as v0.6.3
 - 2026-10-31 19:30 lesson: T-469 and T-461 passed their acceptance and failed the merge gate on tests in crates that call the changed one (engine, cli) | why: the captain's acceptance named only the changed crate | else: from now on a contract's acceptance names every crate whose tests use the changed behaviour
 - 2026-10-31 19:45 scope: added to S2 (mast): a CLI cost of 0 with tokens is unknown, not $0.00 | why: the Cost tab showed $0.00 for 6.1 M tokens; pi writes 0 when its provider config has no price | else: -
 - 2026-10-31 19:55 scope: T-484 v2 prices tokens at the official price (built-in table, peak and off-peak by UTC window, project `[prices]` overrides) | why: user: with no price written, use the maker's official price, which has peak and off-peak rates | else: -
+- station M-6746: keep course — projected 693m of 720m; mast now carries 453m against hull's 332m (T-484 added), so T-472 (S3) goes back to hull (about 392m each)
 
 # Queue
 
@@ -192,7 +193,7 @@ goal: [S3] The board near idle: it redraws only what changed and reads the store
 accept: A measured board run before and after; board tests. Run make check CRATE=gear-board.
 estimate: 50
 
-## T-472 [now] lane=mast milestone=M6 station=S3 required
+## T-472 [now] lane=hull milestone=M6 station=S3 required
 goal: [S3] Fleet and machine health watch, costing almost nothing: the CPU and memory of each seat's own processes (children included) and the machine's load, memory and disk, sampled each minute; a seat over the safe line is interrupted and stopped, and the captain is told; a machine short for other reasons is an urgent captain item naming the top processes (never touched).
 accept: Engine tests with injected readings for both cases; the watch's own cost measured under 1 % of one core. Run make check CRATE=gear-engine.
 estimate: 60
