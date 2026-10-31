@@ -85,11 +85,16 @@ enum Cmd {
 
 #[derive(Subcommand, Debug)]
 enum CaptainOp {
-    /// Rebind the captain seat to another pane (a new generation).
+    /// Rebind the captain seat to another pane (a new generation), or print
+    /// the handover template with its facts (`--facts`).
     Handover {
         /// The pane the captain's agent runs in now.
-        #[arg(long, value_name = "PANE")]
-        pane: String,
+        #[arg(long, value_name = "PANE", required_unless_present = "facts")]
+        pane: Option<String>,
+        /// Print the handover template with its part 1 facts from the store;
+        /// rebind nothing.
+        #[arg(long)]
+        facts: bool,
     },
     /// Become a project's captain from the agent in this pane: no GEAR_CTX,
     /// no pane id. The project is the one named, else the one whose checkout
@@ -455,8 +460,15 @@ fn run(cli: Cli) -> GearResult<()> {
             op: AdminOp::Projects,
         }) => cmd_admin_projects(cli.json),
         Some(Cmd::Captain {
-            op: CaptainOp::Handover { pane },
-        }) => cmd_captain_handover(&pane, cli.json),
+            op: CaptainOp::Handover { pane, facts },
+        }) => match (facts, pane) {
+            (true, _) => cmd_captain_handover_facts(cli.json),
+            (false, Some(pane)) => cmd_captain_handover(&pane, cli.json),
+            (false, None) => Err(GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                "`gear captain handover` needs --pane <id>, or --facts for the template",
+            )),
+        },
         Some(Cmd::Captain {
             op: CaptainOp::Take { project },
         }) => cmd_captain_take(project.as_deref(), cli.json),
@@ -2002,6 +2014,75 @@ fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
 ///
 /// A user command: an agent never writes into the user's home. It needs no
 /// store, so it starts no engine.
+/// `gear captain handover --facts`: print the handover template with its part
+/// 1 facts from the store (handover.md part B). Read-only: no engine, no
+/// rebind.
+fn cmd_captain_handover_facts(json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let cwd = std::env::current_dir().map_err(|e| {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot read the working directory: {e}"),
+        )
+    })?;
+    let machine = gear_app::captain::Machine {
+        engine: Some(engine_line()),
+    };
+    let facts = gear_app::captain::handover_facts(&mut store, &env, &cwd, &machine, now_ts())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "project": facts.project,
+                "voyage": facts.voyage,
+                "directory": facts.directory,
+                "document": facts.document,
+                "text": facts.text,
+            })
+        );
+        return Ok(());
+    }
+    println!("{}", facts.text);
+    Ok(())
+}
+
+/// What this caller knows about the engine (handover.md part B): its binary,
+/// its version, whether it runs, and when its lock was last touched.
+fn engine_line() -> String {
+    let db = std::env::var(gear_model::ctx::ENV_DB).ok();
+    let state = gear_board::EngineState::probe(db.as_deref().map(std::path::Path::new));
+    let binary = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let touched = db
+        .as_deref()
+        .and_then(|db| std::path::Path::new(db).parent())
+        .map(|dir| dir.join("engine.lock"))
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| gear_app::plan::utc_date(since.as_secs() as i64));
+    match (state, touched) {
+        (gear_board::EngineState::Running, Some(date)) => format!(
+            "running (its lock is held, last touched {date}) · binary {binary} · gear {}",
+            env!("CARGO_PKG_VERSION")
+        ),
+        (gear_board::EngineState::Running, None) => format!(
+            "running (its lock is held) · binary {binary} · gear {}",
+            env!("CARGO_PKG_VERSION")
+        ),
+        (gear_board::EngineState::Down, Some(date)) => format!(
+            "down (its lock is free, last touched {date}) · binary {binary} · gear {}",
+            env!("CARGO_PKG_VERSION")
+        ),
+        (gear_board::EngineState::Down, None) => format!(
+            "down (its lock is free) · binary {binary} · gear {}",
+            env!("CARGO_PKG_VERSION")
+        ),
+    }
+}
+
 /// `gear captain handover --pane <id>`: rebind the captain seat to another pane
 /// (T-104). Allowed from the captain's own real pane or the user's own terminal
 /// (a shell with no agent); a lane or reviewer asking is refused and the
@@ -2087,6 +2168,11 @@ fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
                 "generation": result.generation,
                 "kind": result.kind,
                 "named": named_line(&result.named),
+                "document": result.document,
+                "previous_pane": result.request.as_ref().map(|request| request.pane.clone()),
+                "previous_session": result.request.as_ref().and_then(|request| request.session_ref.clone()),
+                "asked": result.request.as_ref().map(|request| request.asked),
+                "deadline": result.request.as_ref().map(|request| request.deadline),
             })
         );
         return Ok(());
@@ -2100,6 +2186,23 @@ fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
         result.from.as_deref().unwrap_or("no pane recorded")
     );
     println!("agent name: {}", named_line(&result.named));
+    if let Some(document) = &result.document {
+        println!(
+            "previous captain's handover: {document} (read it before the task packet)"
+        );
+    } else if let Some(request) = &result.request {
+        println!(
+            "previous captain: pane {} {} · session {} · if no handover arrives within {} minutes, read it and write part 2 yourself",
+            request.pane,
+            if request.asked {
+                "was asked for its handover"
+            } else {
+                "hosts no agent to ask"
+            },
+            request.session_ref.as_deref().unwrap_or("not recorded"),
+            gear_app::captain::HANDOVER_ASK_MIN
+        );
+    }
     println!("run `gear` here: this pane is the captain, no GEAR_CTX needed");
     Ok(())
 }
