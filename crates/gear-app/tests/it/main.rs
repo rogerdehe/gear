@@ -70,6 +70,7 @@ mod plan_apply_contract;
 mod plan_fields_contract;
 mod plan_size_contract;
 mod plan_staff_contract;
+mod plan_tools_contract;
 mod plan_verdicts_contract;
 mod profiles_contract;
 mod queue_contract;

@@ -270,6 +270,8 @@ pub fn count_round(
             .collect::<GearResult<Vec<_>>>()
     })?;
     let end = round.end_at.unwrap_or(now).min(now);
+    // The project's `[prices]` override the built-in table (T-484); the
+    // built-in entries are read by gear-usage itself.
     let mut prices = std::collections::BTreeMap::new();
     if let Some(table) = config
         .as_ref()
@@ -277,26 +279,10 @@ pub fn count_round(
         .and_then(toml::Value::as_table)
     {
         for (model, price) in table {
-            let rate = |key: &str| {
-                price
-                    .get(key)
-                    .and_then(|n| n.as_float().or_else(|| n.as_integer().map(|i| i as f64)))
-            };
-            if let (Some(input), Some(output), Some(cache_read), Some(cache_write)) = (
-                rate("input"),
-                rate("output"),
-                rate("cache_read"),
-                rate("cache_write"),
-            ) {
-                prices.insert(
-                    model.clone(),
-                    gear_usage::Price {
-                        input,
-                        output,
-                        cache_read,
-                        cache_write,
-                    },
-                );
+            if let Ok(price) = price.clone().try_into::<gear_app::config::Price>() {
+                if let Some(price) = price.to_usage() {
+                    prices.insert(model.clone(), price);
+                }
             }
         }
     }

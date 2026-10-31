@@ -48,7 +48,7 @@ fn seed(store: &mut Store, eta: &str, count: usize) {
             Ok(())
         })
         .unwrap();
-    let mut text = format!("<!-- gear-plan project=p base=0 -->\n# Milestone M2: course\ndone: ship it\nbar: stable\neta: {eta}\n# Queue\n");
+    let mut text = format!("<!-- gear-plan project=p base=0 -->\n# Milestone M2: course\ndone: ship it\nbar: stable\neta: {eta}\ndepart: now\n# Queue\n");
     for n in 1..=count {
         let estimate = match n {
             4 => 30,

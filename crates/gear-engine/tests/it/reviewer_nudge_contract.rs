@@ -240,7 +240,7 @@ fn overrun_answer_resets_reviewer_stall_and_starts_a_new_nudge_budget() {
     let mut h = FakeHerdr::new();
     h.add_agent_named("w1:p1", "codex", AgentStatus::Idle, "p-captain");
     h.add_agent_named("w1:p2", "opencode", AgentStatus::Working, "p-heat");
-    h.add_agent_named("w9:p1", "codex", AgentStatus::Idle, "p-review-t7");
+    h.add_agent_named("w9:p1", "codex", AgentStatus::Idle, "p-r-1");
     let mut cfg = gear_engine::EngineCfg::default();
     cfg.cooldown_s = COOLDOWN;
     cfg.profiles = gear_herdr::builtins();
@@ -485,7 +485,7 @@ fn direction_world() -> (Store, SeatRow) {
 /// The seats as a tick sees them, through the Herdr fake.
 fn observed(s: &mut Store, status: gear_herdr::AgentStatus) -> Vec<SeatObs> {
     let mut h = gear_herdr::fake::FakeHerdr::new();
-    h.add_agent_named("w9:p1", "codex", status, "p-review-t7");
+    h.add_agent_named("w9:p1", "codex", status, "p-r-1");
     let agents = gear_engine::observe::snapshot(&mut h).unwrap();
     s.read(|tx| gear_engine::observe::reconcile(tx, &mut h, "p", &agents, &gear_herdr::builtins()))
         .unwrap()

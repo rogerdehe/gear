@@ -202,20 +202,11 @@ fn a_command_left_in_the_composer_holds_the_packet_back() {
         .insert("codex".into(), gear_herdr::builtin("codex").unwrap());
     let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
 
-    // The command is typed with its Enter, but the composer still holds it:
-    // the step waits and the packet is not typed.
+    // The command is typed with its Enter, but the composer still holds it.
+    // T-470: the Enter is tried again in the same call, so the lost first one
+    // no longer costs a tick; the packet is not typed until the composer
+    // emptied and the conversation started.
     let prep = prepare_lane(&mut store, &mut herdr, &cfg, &seat, "T-1", 1, T0 + 1).unwrap();
-    assert_eq!(prep, gear_engine::session::Prep::Wait);
-    let state = store
-        .read(|tx| tx.get_meta("engine.session_step.p:heat"))
-        .unwrap()
-        .unwrap();
-    let state: serde_json::Value = serde_json::from_str(&state).unwrap();
-    assert_eq!(state["step"], "enter", "the Enter did not take: {state}");
-
-    // The next tick submits it again; the composer empties and the step moves
-    // to waiting for the new conversation.
-    let prep = prepare_lane(&mut store, &mut herdr, &cfg, &seat, "T-1", 1, T0 + 2).unwrap();
     assert_eq!(prep, gear_engine::session::Prep::Wait);
     let state: serde_json::Value = serde_json::from_str(
         &store
@@ -224,7 +215,10 @@ fn a_command_left_in_the_composer_holds_the_packet_back() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(state["step"], "wait_action", "{state}");
+    assert_eq!(
+        state["step"], "wait_action",
+        "the retry submitted it: {state}"
+    );
     assert_eq!(
         herdr
             .calls
@@ -233,6 +227,15 @@ fn a_command_left_in_the_composer_holds_the_packet_back() {
             .count(),
         1,
         "the command is typed once"
+    );
+    assert_eq!(
+        herdr
+            .calls
+            .iter()
+            .filter(|call| matches!(call, gear_herdr::fake::Call::SendKeys { keys, .. } if keys == &["enter"]))
+            .count(),
+        2,
+        "the lost Enter gets its retry in the same call"
     );
     // The codex conversation starts empty, so the step goes on: the packet
     // will be typed into an empty composer.

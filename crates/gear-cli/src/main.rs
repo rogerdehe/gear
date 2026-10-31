@@ -3779,9 +3779,13 @@ fn run_engine_with(
 ) -> GearResult<()> {
     // Startup step 3: an op the previous process left Executing becomes
     // Unknown — nothing is re-sent.
-    for (project, id) in gear_engine::ops::recover_on_start(store, clock())? {
+    let started = clock();
+    for (project, id) in gear_engine::ops::recover_on_start(store, started)? {
         writeln!(out, "recovered {project} {id}: unknown").map_err(write_error)?;
     }
+    // A new engine runs the binary on disk: an item an earlier engine left
+    // about a replaced binary is answered by this start.
+    settle_binary_changed(store, started)?;
     let mut done: u64 = 0;
     loop {
         if ticks.is_some_and(|limit| done >= limit) {
@@ -3880,6 +3884,30 @@ fn announce_binary_changed(
                 state: gear_model::MsgState::Open,
                 created: now,
             })?;
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// Close every open `engine:binary-changed` item: the engine starting now
+/// runs the binary on disk, so the restart the item asked for has happened.
+fn settle_binary_changed(store: &mut gear_store::Store, now: i64) -> GearResult<()> {
+    for project in store.read(|tx| tx.project_ids())? {
+        store.write(|tx| {
+            for item in tx.thread_messages(&project, "engine:binary-changed")? {
+                if item.state == gear_model::MsgState::Open {
+                    tx.update_message_state(
+                        &project,
+                        &item.id,
+                        gear_model::MsgState::Resolved,
+                        Some("the engine restarted on the new binary"),
+                        None,
+                        None,
+                        now,
+                    )?;
+                }
+            }
             Ok(())
         })?;
     }
@@ -4377,7 +4405,7 @@ mod tests {
     fn plan_draft_with_milestone() -> String {
         // T-461: a new milestone's departure needs the user's word — the
         // `confirmed:` line in this same draft and `--confirmed` on the apply.
-        "<!-- gear-plan project=p base=0 -->\n# Milestone M2: two\ndone: both ship\nbar: fast\neta: 1h\n\n# Decisions\n- 2026-10-27 10:20 confirmed: M2 departs with its first tasks | why: the user asked for it\n\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"
+        "<!-- gear-plan project=p base=0 -->\n# Milestone M2: two\ndone: both ship\nbar: fast\neta: 1h\ndepart: now\n\n# Decisions\n- 2026-10-27 10:20 confirmed: M2 departs with its first tasks | why: the user asked for it\n\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"
             .to_string()
     }
 
@@ -8667,6 +8695,30 @@ path="api"
             .unwrap();
         assert_eq!(items.len(), 1, "one captain item: {items:?}");
         assert_eq!(items[0].recipient, "p:captain");
+        assert_eq!(items[0].state, gear_model::MsgState::Open);
+        // The next engine runs the new binary: its start closes the item.
+        let mut watch = BinaryWatch::at_start(binary.clone());
+        run_engine_with(
+            &mut store,
+            &mut herdr,
+            &gear_engine::EngineCfg::default(),
+            &mut clock,
+            Some(1),
+            &mut Vec::new(),
+            &|| false,
+            &mut tick,
+            &mut watch,
+        )
+        .unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "engine:binary-changed"))
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].state,
+            gear_model::MsgState::Resolved,
+            "a restart answers it"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

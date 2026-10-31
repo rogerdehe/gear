@@ -210,6 +210,13 @@ fn start_hand_in_reviews(
     report: &mut ReviewReport,
     now: Ts,
 ) -> GearResult<()> {
+    // T-467: the reviewer count in effect: a raise the user confirmed, else
+    // the configured `[quota].temps`.
+    let quota = i64::from(crate::release::effective_temps(
+        store,
+        project,
+        config.quota.temps,
+    )?);
     for task in tasks {
         // T-273: a mechanical task is not reviewed. The attempt is settled as
         // a pass in this tick, and the merge gate decides; a task without
@@ -329,24 +336,14 @@ fn start_hand_in_reviews(
                     // room. Otherwise the job waits for a seat instead of
                     // building a cold extra worktree (finding 2 of the T-18
                     // review).
-                    None => {
-                        match seats_free_for_new(store, project, i64::from(config.quota.temps))? {
-                            true => {
-                                create_temp_seat(store, project, &task.task, profile_name, now)?
-                            }
-                            false => {
-                                note_waiting(report, &task.task);
-                                tell_captain(
-                                    store,
-                                    project,
-                                    task,
-                                    "every temp seat is in use",
-                                    now,
-                                )?;
-                                continue;
-                            }
+                    None => match seats_free_for_new(store, project, quota)? {
+                        true => create_temp_seat(store, project, &task.task, profile_name, now)?,
+                        false => {
+                            note_waiting(report, &task.task);
+                            tell_captain(store, project, task, "every temp seat is in use", now)?;
+                            continue;
                         }
-                    }
+                    },
                 },
             },
         };
@@ -368,9 +365,7 @@ fn start_hand_in_reviews(
         //    `[quota].temps`). A `Released` seat used to skip this check, so
         //    several seats recovered by `release_dead_temps` started at once
         //    and passed the quota (F1 of the T-116 review).
-        if !occupies_quota(seat.state)
-            && !has_free_slot(store, herdr, project, i64::from(config.quota.temps))?
-        {
+        if !occupies_quota(seat.state) && !has_free_slot(store, herdr, project, quota)? {
             note_waiting(report, &task.task);
             tell_captain(store, project, task, "every temp seat is in use", now)?;
             continue;
@@ -821,6 +816,12 @@ fn start_direction_checks(
     let Some(temps) = config.temps.as_ref() else {
         return Ok(());
     };
+    // T-467: the same effective count as the hand-in reviews.
+    let quota = i64::from(crate::release::effective_temps(
+        store,
+        project,
+        config.quota.temps,
+    )?);
     for row in store.read(|tx| tx.tasks_of_project(project))? {
         let Some(attempt) = store
             .read(|tx| tx.attempts_of_task(project, &row.id))?
@@ -967,15 +968,13 @@ fn start_direction_checks(
             Some(seat) => seat,
             None => match free_seat(store, herdr, project, &row.id, &kind)? {
                 Some(seat) => take_seat(store, &seat, &row.id, attempt.n, profile_name, now)?,
-                None if seats_free_for_new(store, project, i64::from(config.quota.temps))? => {
+                None if seats_free_for_new(store, project, quota)? => {
                     create_temp_seat(store, project, &row.id, profile_name, now)?
                 }
                 None => continue,
             },
         };
-        if !occupies_quota(seat.state)
-            && !has_free_slot(store, herdr, project, i64::from(config.quota.temps))?
-        {
+        if !occupies_quota(seat.state) && !has_free_slot(store, herdr, project, quota)? {
             continue;
         }
         store.write(|tx| {
@@ -1467,9 +1466,10 @@ fn last_job_recorded(store: &mut Store, project: &str, seat: &SeatRow) -> GearRe
                         .is_none_or(|state| state != "running" && state != "starting")
             }));
         }
-        Ok(tx
-            .get_review_verdict(project, &task, attempt)?
-            .is_some_and(|verdict| verdict.by_seat == seat.id))
+        // A verdict on that attempt ends the job, whoever recorded it: a
+        // direction check whose round was never written, or a review another
+        // seat finished, must not hold this seat forever.
+        Ok(tx.get_review_verdict(project, &task, attempt)?.is_some())
     })
 }
 
@@ -2038,7 +2038,11 @@ fn has_free_slot(
 ///
 /// A pane that cannot be read is not an absence: the seat keeps its slot
 /// (design/08).
-fn shows_an_agent(store: &mut Store, herdr: &mut dyn HerdrAct, seat: &SeatRow) -> GearResult<bool> {
+pub(crate) fn shows_an_agent(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &SeatRow,
+) -> GearResult<bool> {
     let Some(binding) = store.read(|tx| tx.get_binding(&seat.id, seat.generation))? else {
         return Ok(false);
     };
@@ -2052,7 +2056,7 @@ fn shows_an_agent(store: &mut Store, herdr: &mut dyn HerdrAct, seat: &SeatRow) -
 /// The states in which a temp seat occupies the quota (design §3.6): a live
 /// agent (`Active`, `Standby`), one that is starting, and one on its way out
 /// (`Releasing` — its agent is still leaving).
-fn occupies_quota(state: SeatState) -> bool {
+pub(crate) fn occupies_quota(state: SeatState) -> bool {
     matches!(
         state,
         SeatState::Active | SeatState::Standby | SeatState::Starting | SeatState::Releasing
@@ -2098,7 +2102,7 @@ fn start_reviewer(
         .map(|row| config.repo_of_task(row))
         .unwrap_or_else(|| config.repo_of_lane(&task.lane));
     // The job's branch, and the seat's own anchor (its workspace label is
-    // long-lived; the agent of a job is named after its task).
+    // long-lived; the reviewer's agent carries its seat's name, T-482).
     let branch = if direction {
         format!("direction/{}", task.task.to_lowercase())
     } else {
@@ -2115,7 +2119,7 @@ fn start_reviewer(
         &seat.name,
     );
     let seat_label = worktree_label(config, &seat.name, &repo);
-    let label = agent_name(config, &task.task);
+    let label = agent_name(config, &seat.name);
     let model = entry.map(ModelEntry::model);
 
     // 1. the pane: the seat's, from its binding (an interrupted start or a new
@@ -2412,12 +2416,20 @@ fn start_reviewer(
             Some(&path),
         ) {
             Some(prefix) => format!(
-                "{prefix}export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
-                config.project.id, seat.name, generation, cfg.db_path
+                "{prefix}export GEAR_CTX={}:{}:{}; export GEAR_DB={}; {}",
+                config.project.id,
+                seat.name,
+                generation,
+                cfg.db_path,
+                crate::onboard::EDITOR_ENV
             ),
             None => format!(
-                "export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
-                config.project.id, seat.name, generation, cfg.db_path
+                "export GEAR_CTX={}:{}:{}; export GEAR_DB={}; {}",
+                config.project.id,
+                seat.name,
+                generation,
+                cfg.db_path,
+                crate::onboard::EDITOR_ENV
             ),
         };
         if let Some(start) = model.and_then(|model| model_start(kind, model)) {
@@ -3318,14 +3330,13 @@ fn worktree_label(config: &ProjectConfig, seat: &str, repo: &Repo) -> String {
     }
 }
 
-/// The Herdr agent name (and workspace label) of a task's reviewer:
-/// `<project>-review-<task-id>` — project prefix plus what the agent is for
-/// (kickoff naming rule, 17 §2).
-fn agent_name(config: &ProjectConfig, task: &str) -> String {
-    // One rule with `names::desired` (T-134 review F1): the reviewer's agent
-    // carries the task it reviews, so a name Herdr cleared is restored to the
-    // same name the review started with.
-    crate::names::review_agent_name(&config.project.id, task)
+/// The Herdr agent name of a reviewer: its seat's name, `<project>-review-<k>`
+/// (T-482) — the seat is long-lived, the task under review shows in its title.
+fn agent_name(config: &ProjectConfig, seat: &str) -> String {
+    // One rule with `names::desired` (T-134 review F1): the agent carries the
+    // seat's name, so a name Herdr cleared is restored to the same name the
+    // review started with.
+    crate::names::agent_name(&config.project.id, seat)
 }
 
 /// The packet the reviewer gets: what to review, where the rules are and the
@@ -9013,7 +9024,7 @@ review = [
                 // The engine recorded the start it asked Herdr for.
                 tx.set_meta(
                     &start_key("p:review-1", 1),
-                    &serde_json::json!({ "pane": pane, "kind": "codex", "label": "p-review-t1" })
+                    &serde_json::json!({ "pane": pane, "kind": "codex", "label": "p-review-1" })
                         .to_string(),
                 )?;
                 Ok(())
@@ -9143,7 +9154,8 @@ review = [
     fn two_jobs_on_one_seat_reuse_the_warm_worktree() {
         // T-18: a seat keeps its worktree and its build cache between jobs.
         // The second job takes the released seat, uses the same worktree (no
-        // second worktree_open/create) and its agent is named after its task.
+        // second worktree_open/create) and its agent keeps its seat's name
+        // (T-482).
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
 
@@ -9175,7 +9187,7 @@ review = [
             worktrees_after_first,
             vec![("p/review-1".to_string(), "dev".to_string())]
         );
-        // The job's agent is named after its task.
+        // The job's agent carries its seat's name (T-482).
         let names: Vec<String> = herdr
             .calls
             .iter()
@@ -9184,7 +9196,7 @@ review = [
                 _ => None,
             })
             .collect();
-        assert_eq!(names, vec!["p-review-t1".to_string()]);
+        assert_eq!(names, vec!["p-review-1".to_string()]);
 
         // The job ends (T-17 releases it) and a second task is handed in.
         store
@@ -9311,7 +9323,7 @@ review = [
             .collect();
         assert_eq!(
             names,
-            vec!["p-review-t1".to_string(), "p-review-t2".to_string()]
+            vec!["p-review-1".to_string(), "p-review-1".to_string()]
         );
         // The checkout took the second job's branch at its candidate.
         let checkouts = REVIEW_GIT_CALLS.with(|calls| {
@@ -9456,10 +9468,10 @@ review = [
         )
         .unwrap();
 
-        assert!(
-            report.started.is_empty(),
-            "resume execution waits for T-145"
-        );
+        // T-470: the reviewer's agent was started in the T0+30 call; at T0+35
+        // it is ready, so the resume completes and the review starts in that
+        // same tick (it still never starts before the resume is done).
+        assert_eq!(report.started, vec!["p:review-1".to_string()]);
         let action = store
             .read(|tx| tx.get_meta("engine.review_action.p.T-1.2"))
             .unwrap();
@@ -11516,6 +11528,109 @@ profile = "opencode"
             "T-1",
             "the recorded hand-in comes first"
         );
+    }
+    /// T-467: a raise the plan applied lets the engine start reviewers up to
+    /// the raised count while hand-ins wait.
+    #[test]
+    fn a_raise_starts_reviewers_up_to_the_raised_count() {
+        let config = CONFIG.replace("temps = 1", "temps = 4");
+        let mut store = world(&config);
+        store
+            .write(|tx| {
+                for n in 2..=8 {
+                    let id = format!("T-{n}");
+                    tx.insert_task(&TaskRow {
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
+                        project: "p".into(),
+                        id: id.clone(),
+                        rank: n,
+                        state: TaskState::Verifying,
+                        priority: "must".into(),
+                        lane: Some("heat".into()),
+                        milestone: None,
+                        required: false,
+                        contract_version: 1,
+                        deps: vec![],
+                        followup_of: None,
+                        wait_on: None,
+                        wait_cond: None,
+                        rework_note: None,
+                        estimate_min: None,
+                        issue: None,
+                        updated: T0,
+                    })?;
+                    tx.insert_contract(&ContractRow {
+                        project: "p".into(),
+                        task: id.clone(),
+                        version: 1,
+                        goal: "goal".into(),
+                        accept: "accept".into(),
+                        evidence_files: vec![],
+                        evidence_due_min: None,
+                        body: String::new(),
+                        created: T0,
+                        mechanical: None,
+                    })?;
+                    tx.insert_attempt(&AttemptRow {
+                        session_ref: None,
+                        session_cli: Some("codex".into()),
+                        session_action: None,
+                        sent_at: Some(T0),
+                        project: "p".into(),
+                        task: id,
+                        n: 1,
+                        seat: "p:heat".into(),
+                        generation: 1,
+                        contract_version: 1,
+                        adopted_version: 1,
+                        pending_update: None,
+                        state: AttemptState::Submitted,
+                        candidate: Some(format!("cand{n}")),
+                        report: None,
+                        safe_point: None,
+                        started: T0,
+                        updated: T0,
+                    })?;
+                }
+                tx.set_meta(
+                    "engine.review_raise.p",
+                    &serde_json::json!({
+                        "from": 4, "to": 8, "until": "no-hand-ins-wait",
+                        "reason": "clear the review backlog", "at": T0, "plan_version": 1
+                    })
+                    .to_string(),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        let mut started = 0;
+        for tick in 0..40 {
+            let report = start_reviews(
+                &mut store,
+                &mut herdr,
+                &cfg(),
+                &cfg().profiles,
+                "p",
+                T0 + 10 + tick * 10,
+            )
+            .unwrap();
+            started += report.started.len();
+            if started >= 8 {
+                break;
+            }
+        }
+        assert_eq!(started, 8, "the raised count lets eight reviewers start");
+        let seats = store
+            .read(|tx| tx.seats_of_project("p"))
+            .unwrap()
+            .into_iter()
+            .filter(|seat| seat.role == SeatRole::Temp)
+            .count();
+        assert_eq!(seats, 8, "eight seats exist");
     }
 }
 

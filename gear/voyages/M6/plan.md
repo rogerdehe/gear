@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=955 -->
+<!-- gear-plan project=gear base=973 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -62,6 +62,21 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-6831: keep course — 18 done, projected 841m of 1020m (hull 421m, mast 474m)
 - 2026-10-31 22:40 hand-fix: closed a vim that review-11's `git rebase --continue` opened 59 minutes before, and told it to continue with GIT_EDITOR=true | why: T-469's re-review sat in an editor no one can close; T-468 v2 sets the editor variables for every seat
 - 2026-10-31 23:00 hand-fix: nudged hull to push T-467 (30 min without a push, no answer to the engine's ask; it was working and its tests passed) | why: M-6840
+- 2026-10-31 23:10 hand-fix: released v0.6.0 (dev merged into main as ac611ad7, tag v0.6.0, release workflow), after the skill review added one contract rule to captain.md; both engines restarted on v0.6.0 | why: station S1 reached, done (5)
+- 2026-10-31 23:10 hand-fix: told mast the header layout of T-494 and to push (30 min without a push, weighing column offsets) | why: M-6844
+- station M-6863: keep course — 21 done, projected 828m of 1020m; T-484 (S2) moves to mast, next after T-473, so S2's release is not held by hull's queue (hull ~376m, mast ~324m)
+- station M-6868: keep course — projected 761m of 1020m, lanes even (hull 341m, mast 322m)
+- 2026-11-01 00:20 hand-fix: nudged mast to push T-473 (never pushed, in its final checks) | why: M-6870
+- 2026-11-01 01:10 hand-fix: the no-push alarm counts the lane's answer window from when the ask reached it (a confirmed doorbell), not from when it was written; quiet.rs, tests updated, make gate passed | why: since T-454 an ask to a working lane waits for its next idle moment, so every lane deep in a task raised a false 'no word to the captain' item (M-6840, M-6844, M-6870, M-6888)
+- 2026-11-01 01:10 hand-fix: nudged hull to push T-470 | why: M-6888
+- station M-6900: keep course — projected 802m of 1020m, lanes even (hull 320m, mast 322m)
+- station M-6906: keep course — 24 done, projected 810m of 1020m, lanes even
+- station M-6916: keep course — half the eta used, projected 811m of 1020m; S2's tasks are merged and its release T-476 is in work
+- 2026-11-01 02:00 hand-fix: T-470's report and review named another project's state path and session; reworded as 'another project's log' | why: the repo names no other project
+- 2026-11-01 02:20 scope: added to S5 (mast): omp runs as a lane or reviewer (built-in profile, skill install, usage log) | why: user: add omp support | else: -
+- 2026-11-01 02:45 hand-fix: a standby reviewer is free once the attempt of its last packet has a verdict, whoever wrote it (review.rs last_job_recorded); make gate passed; engines restarted | why: review-11's last packet was T-473's direction check with no direction round, so it waited forever for its own verdict and T-476 had no reviewer (M-6929)
+- 2026-11-01 03:00 scope: added to S5: Antigravity CLI (agy) runs as a lane or reviewer (profile and skill on mast, usage on hull) | why: user: add Antigravity CLI to GEAR's supported CLIs | else: -
+- 2026-11-01 03:20 hand-fix: a new engine closes the open engine:binary-changed items at start (gear-cli run_engine_with); make gate passed | why: the old engine sees the rebuild seconds before it is stopped, so every restart left a stale item in both projects (M-6802, M-6845, another project's M-5343, M-5344)
 
 # Queue
 
@@ -185,7 +200,7 @@ goal: [S2] Role charters fit the models the user chose. At kickoff the captain p
 accept: gear-app tests: a config with two charters renders two rules files; a resumed session gets no charter again, a new one does. The skill's captain reference and conventions describe the charter, and captain.md still carries its hand-fix paragraph. Run make check CRATE=gear-app and CRATE=gear-cli.
 estimate: 50
 
-## T-484 [now] lane=hull milestone=M6 station=S2 required
+## T-484 [now] lane=mast milestone=M6 station=S2 required
 goal: [S2] The Cost tab shows what the tokens cost at the model maker's official price, peak and off-peak included, and shows a cost it cannot know as unknown, never as $0.00. Today pi writes `cost.total: 0` when its provider config names no price (both providers of this fleet), gear-usage takes that 0 as known, and the tab shows $0.00 for 6.1 M tokens. Change crates/gear-usage and the `[prices]` part of crates/gear-app config, no other design: (1) a record whose CLI cost is 0 while its tokens are not carries no cost; it is priced from the price table, and with no price there it is unknown; (2) GEAR ships a built-in price table of official prices (a TOML file compiled into the binary), and the project's `[prices]` entries override it per model; a model matches case-insensitively on its id without the provider prefix, so `hk-dgx-1/DeepSeek-V4.1-Flash-1017` and `tokenrhythm/deepseek-v4.1-flash-1017` both take the DeepSeek entry; (3) a price may carry a peak rate set and peak windows (weekdays and UTC hours); each record keeps its own time and is priced by the window it falls in, every other time at the base (off-peak) rates; (4) the built-in table starts with DeepSeek's official prices, USD per 1 M tokens, off-peak / peak: deepseek-v4.1-flash-1017: cache hit 0.003 / 0.006, cache miss 0.15 / 0.30, output 0.60 / 1.20; deepseek-v4-pro-0813: cache hit 0.022 / 0.044, cache miss 0.66 / 1.32, output 1.98 / 3.96; peak Monday to Friday 01:00-04:00 and 06:00-10:00 UTC. Chinese public holidays (off-peak all day) are not modelled; the table says so in a comment. The Cost tab's columns and labels stay as they are: the cost is simply the cost, with no note about where the price came from.
 accept: Usage tests: a pi record with tokens and cost 0 and no price is unknown; the same record of a DeepSeek model is priced from the built-in table at the off-peak rate on a Saturday and at the peak rate on a Tuesday 02:00 UTC; a `[prices]` entry overrides the built-in one; a provider-prefixed, differently cased model id matches; a record with a real nonzero CLI cost keeps it; a record with no tokens and cost 0 stays 0. Run make check CRATE=gear-usage, CRATE=gear-app, CRATE=gear-engine and CRATE=gear-board.
 estimate: 45
@@ -286,8 +301,30 @@ accept: The scenario test passes. Run make check CRATE=gear-engine.
 deps: T-485, T-486, T-487, T-488
 estimate: 40
 
+## T-495 [now] lane=mast milestone=M6 station=S5 required
+goal: [S5] omp (oh-my-pi, a fork of pi; omp 18.12.6 on this machine) starts as a lane or a reviewer like the five CLIs GEAR knows. Today Herdr starts `--kind omp` and kickoff finds it, but GEAR has no built-in omp profile and `gear admin install-skill` has no omp target. Change crates/gear-herdr (profile.rs: a built-in `omp` profile taken from pi's and corrected where omp differs: its unattended flag (`--auto-approve` or `--approval-mode yolo`), `--append-system-prompt`, `--model`, `--thinking`, its exit keys, quota and back-off markers read from omp's own screens) and crates/gear-app (skill.rs: `SkillAgent::Omp`, skills under omp's agent directory, `~/.omp/agent/skills/` unless omp's docs say otherwise; kickoff lists omp with its models), no other design. Check every path and flag against `omp --help` and omp's docs before writing it, and name what you checked in the report.
+accept: Tests: the built-in omp profile starts with its unattended and prompt arguments; `gear admin install-skill --agent omp` writes SKILL.md under omp's skills directory and init accepts an omp lane. A real `herdr agent start --kind omp` in a test worktree with the profile's arguments reaches an empty composer with no dialog left (record the command and the screen in the report). Run make check CRATE=gear-herdr, CRATE=gear-app and CRATE=gear-cli.
+estimate: 50
+
+## T-496 [now] lane=hull milestone=M6 station=S5 required
+goal: [S5] gear-usage reads omp's session log, so an omp seat's tokens, model and cost show on the board. omp (a fork of pi) writes sessions under `~/.omp/agent/sessions/<path>/*.jsonl` (check `omp --help` and its docs). Reuse the pi-jsonl reader when the record shape is the same, else add a small reader; the built-in omp profile names it. Change crates/gear-usage and the omp profile's usage field only, no other design.
+accept: Usage tests on a fixture of a few records from a real local omp run (content redacted): its tokens, model and session are read; a pi fixture still reads as before. Run make check CRATE=gear-usage and CRATE=gear-engine.
+deps: T-495
+estimate: 25
+
+## T-497 [now] lane=mast milestone=M6 station=S5 required
+goal: [S5] Antigravity CLI (`agy`, 1.2.13 on this machine; Herdr kind `agy`) starts as a lane or a reviewer like the CLIs GEAR knows. Today kickoff finds it and Herdr starts `--kind agy`, but GEAR has no built-in agy profile and `gear admin install-skill` has no agy target. Change crates/gear-herdr (profile.rs: a built-in `agy` profile: unattended `--dangerously-skip-permissions`, `--model`, `--effort` for the reasoning level, `--conversation <id>` to resume, its exit keys and its quota, back-off and dialog markers read from agy's own screens; agy has no system-prompt flag, so the role rules reach it the way GEAR reaches a CLI without one, named in the report) and crates/gear-app (skill.rs: `SkillAgent::Agy` with agy's skills directory, found from agy's docs or `agy plugin`/`~/.gemini/antigravity-cli/`; kickoff lists agy with `agy models`), no other design. Check every flag and path against `agy --help` and agy's docs before writing it, and name what you checked in the report.
+accept: Tests: the built-in agy profile starts with its unattended and model arguments and resumes with `--conversation`; `gear admin install-skill --agent agy` writes SKILL.md where agy loads skills and init accepts an agy lane. A real `herdr agent start --kind agy` in a test worktree with the profile's arguments reaches an empty composer with no dialog left (record the command and the screen in the report). Run make check CRATE=gear-herdr, CRATE=gear-app and CRATE=gear-cli.
+estimate: 55
+
+## T-498 [now] lane=hull milestone=M6 station=S5 required
+goal: [S5] gear-usage reads an agy seat's tokens and model, so its cost shows on the board. agy keeps its data under `~/.gemini/antigravity-cli/` (conversations/, history.jsonl, conversation_summaries.db, cli.log); find where a conversation's token counts live and read them with a small reader the built-in agy profile names. If agy writes no token counts anywhere readable, the seat's usage is unknown (never 0) and the report says so. Change crates/gear-usage and the agy profile's usage field only, no other design.
+accept: Usage tests on a fixture made from a real local agy run (content redacted): its tokens and model are read, or, if agy records none, the record reads as unknown; a pi fixture still reads as before. Run make check CRATE=gear-usage and CRATE=gear-engine.
+deps: T-497
+estimate: 35
+
 ## T-493 [now] lane=mast milestone=M6 station=S5 required
 goal: [S5] Release v0.6.4, station S5's release. Change, no other design: (1) the version is 0.6.4 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.4.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.3 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.3 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.4 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.4"; docs/releases/v0.6.4.md lists every task merged on origin/dev since v0.6.3 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-478, T-489, T-490, T-491, T-492
+deps: T-478, T-489, T-490, T-491, T-492, T-495, T-496, T-497, T-498
 estimate: 15

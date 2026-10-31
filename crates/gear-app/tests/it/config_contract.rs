@@ -56,6 +56,9 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
     assert_eq!(cfg.lanes.len(), 2);
     assert_eq!(cfg.lanes[1].not, vec!["UI".to_string()]);
     assert!(!cfg.quota.includes_captain);
+    // T-467: the idle time before a seat of a role is released, default 30.
+    assert_eq!(cfg.quota.reviewer_release_idle_min, 30);
+    assert_eq!(cfg.quota.lane_release_idle_min, 30);
     assert_eq!(cfg.temps, None);
     assert_eq!(
         cfg.conventions,
@@ -186,6 +189,18 @@ fn owns_overlap_on_path_boundaries_only() {
         vec!["lanes[1].owns"],
         "equal paths overlap"
     );
+}
+
+/// T-467: the per-role idle release times are config values.
+#[test]
+fn the_release_idle_times_are_config() {
+    let text = MINIMAL.replace(
+        "temps = 1",
+        "temps = 4\nreviewer_release_idle_min = 5\nlane_release_idle_min = 90",
+    );
+    let cfg = parse(&text).unwrap();
+    assert_eq!(cfg.quota.reviewer_release_idle_min, 5);
+    assert_eq!(cfg.quota.lane_release_idle_min, 90);
 }
 
 #[test]

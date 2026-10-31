@@ -15,6 +15,7 @@ mod measures_contract;
 mod overlaps_contract;
 mod quiet_contract;
 mod stations_contract;
+mod tasks_deps_contract;
 mod voyage_scope_contract;
 mod voyage_select_contract;
 mod workload_contract;

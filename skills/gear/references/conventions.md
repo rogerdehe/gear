@@ -16,7 +16,7 @@ The one default way of working every GEAR project shares. The captain and every 
 | Lane | one short word from its duty | `engine`, `data` |
 | Agent / workspace | `<project>-<lane>` (≤ 32 chars) | `acme-engine` |
 | Reviewer seat (workspace) | `<project>-review-<k>` | `acme-review-1` |
-| Reviewer agent (one job) | `<project>-review-t<n>` | `acme-review-t12` |
+| Reviewer agent (one job) | `<project>-review-<k>` (its seat's name; the task under review shows in its title, `Review T-<n>`) | `acme-review-1` |
 | Captain | `<project>-captain` | `acme-captain` |
 | Task | `T-<n>` in text, `t<n>` in branches | `T-12`, `engine/t12` |
 
