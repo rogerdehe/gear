@@ -1444,17 +1444,36 @@ fn run_show(
     target: &str,
     json: bool,
 ) -> GearResult<String> {
-    if !is_task_id(target) {
-        return Err(GearError::new(
-            gear_model::ErrorCode::BadFormat,
-            format!("--show {target} is not supported: only a task id (T-n) can be shown"),
-        ));
-    }
     let fp = observe_identity(store, env, herdr)?;
     let (text, project) = store.read(|tx| {
+        // A qualified id `<project>:T-<n>` names the project (T-486); a bare
+        // id keeps the caller's own project.
+        let (_project, task, env) = match target.split_once(':') {
+            Some((prefix, bare)) if !bare.is_empty() && tx.get_project(prefix)?.is_some() => {
+                let env = gear_app::identity::env_of_captain(tx, env, fp.as_ref(), prefix)?;
+                (prefix.to_string(), bare.to_string(), env)
+            }
+            _ => {
+                if !is_task_id(target) {
+                    return Err(GearError::new(
+                        gear_model::ErrorCode::BadFormat,
+                        format!(
+                            "--show {target} is not supported: only a task id (T-n) can be shown"
+                        ),
+                    ));
+                }
+                (String::new(), target.to_string(), env.clone())
+            }
+        };
+        if !is_task_id(&task) {
+            return Err(GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!("--show {target} is not supported: only a task id (T-n) can be shown"),
+            ));
+        }
         // The identity of the home page: a registered seat of the project.
-        let (ctx, _seat) = gear_app::identity::require_seat(tx, env, fp.as_ref(), None, None)?;
-        let text = gear_app::plan::render_task_packet(tx, &ctx.project, target)?;
+        let (ctx, _seat) = gear_app::identity::require_seat(tx, &env, fp.as_ref(), None, None)?;
+        let text = gear_app::plan::render_task_packet(tx, &ctx.project, &task)?;
         Ok((text, ctx.project.clone()))
     })?;
     // The project's own standard travels with its task packets (T-85).
@@ -1543,7 +1562,10 @@ fn run_home(
         writeln!(out, "{}", home.text).map_err(output_error)?;
     }
     out.flush().map_err(output_error)?;
-    gear_app::home::record_view(store, &home.view)
+    for view in &home.views {
+        gear_app::home::record_view(store, view)?;
+    }
+    Ok(())
 }
 
 /// A page that could not be printed is reported, and records no view.
@@ -1770,22 +1792,49 @@ fn run_friction(
     c: &FrictionCmd,
     now: i64,
 ) -> GearResult<String> {
-    let project = env
-        .ctx
-        .as_ref()
-        .map(|ctx| ctx.project.clone())
-        .ok_or_else(|| {
-            GearError::new(
-                gear_model::ErrorCode::NotRegistered,
-                "the friction reports are the captain's: run gear in the captain's pane",
-            )
-        })?;
     match &c.op {
         Some(FrictionOp::Close { id, message }) => {
             let fp = observe_identity(store, env, herdr)?;
-            gear_app::friction::close(store, env, fp.as_ref(), &project, id, message, now)
+            // A qualified report id `<project>:F-<n>` names the project
+            // (T-486); a bare id keeps the caller's own project.
+            let (project, id, env) = match id.split_once(':') {
+                Some((prefix, bare))
+                    if !bare.is_empty() && store.read(|tx| tx.get_project(prefix))?.is_some() =>
+                {
+                    let env = store.read(|tx| {
+                        gear_app::identity::env_of_captain(tx, env, fp.as_ref(), prefix)
+                    })?;
+                    (prefix.to_string(), bare.to_string(), env)
+                }
+                _ => {
+                    let project = env
+                        .ctx
+                        .as_ref()
+                        .map(|ctx| ctx.project.clone())
+                        .ok_or_else(|| {
+                            GearError::new(
+                                gear_model::ErrorCode::NotRegistered,
+                                "the friction reports are the captain's: run gear in the captain's pane",
+                            )
+                        })?;
+                    (project, id.clone(), env.clone())
+                }
+            };
+            gear_app::friction::close(store, &env, fp.as_ref(), &project, &id, message, now)
         }
-        None => gear_app::friction::list(store, &project, c.all),
+        None => {
+            let project = env
+                .ctx
+                .as_ref()
+                .map(|ctx| ctx.project.clone())
+                .ok_or_else(|| {
+                    GearError::new(
+                        gear_model::ErrorCode::NotRegistered,
+                        "the friction reports are the captain's: run gear in the captain's pane",
+                    )
+                })?;
+            gear_app::friction::list(store, &project, c.all)
+        }
     }
 }
 
