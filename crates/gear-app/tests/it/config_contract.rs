@@ -1454,3 +1454,41 @@ fn a_commit_message_template_must_be_usable() {
     assert!(issues[0].problem.contains("merged"), "{issues:?}");
     assert!(issues[0].problem.contains("{task}"), "{issues:?}");
 }
+
+/// T-469: a charter is configuration per lane and for the reviewers. A blank
+/// one is a finding: it would replace the role's fixed rules with nothing.
+#[test]
+fn charters_are_parsed_per_lane_and_for_the_reviewers() {
+    let text = MINIMAL
+        .replace(
+            "owns = [\"src/heat/\", \"tests/heat/\"]",
+            "owns = [\"src/heat/\", \"tests/heat/\"]\ncharter = \"\"\"\nYou implement the packet without designing.\n\"\"\"",
+        )
+        .replace(
+            "[conventions]",
+            "[temps]\nkind = \"codex\"\nprofile = \"codex\"\ncharter = \"\"\"\nYou judge one candidate against its contract.\n\"\"\"\n\n[conventions]",
+        );
+    let cfg = parse(&text).unwrap();
+    assert_eq!(
+        cfg.lanes[0].charter.as_deref(),
+        Some("You implement the packet without designing.\n")
+    );
+    assert_eq!(
+        cfg.lanes[1].charter.as_deref(),
+        None,
+        "a lane without a charter keeps the lane rules"
+    );
+    assert_eq!(
+        cfg.temps.as_ref().unwrap().charter.as_deref(),
+        Some("You judge one candidate against its contract.\n")
+    );
+    assert_eq!(validate(&cfg), vec![]);
+
+    let blank = text
+        .replace("You implement the packet without designing.", "   ")
+        .replace("You judge one candidate against its contract.", " ");
+    assert_eq!(
+        fields(&validate(&parse(&blank).unwrap())),
+        vec!["lanes[0].charter", "temps.charter"]
+    );
+}
