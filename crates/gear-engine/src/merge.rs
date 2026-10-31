@@ -385,7 +385,28 @@ pub fn merge_passed(
     // 1b. an accepted attempt that nothing will merge is named (T-397): no
     //     work sits accepted and unmerged without a word. This comes after the
     //     queue step, so a merge that was just queued is a merge in flight.
-    tell_captain_lost(store, project, &config, now)?;
+    //
+    //     T-516: the scan reads every done task of the project, so it is not on
+    //     every tick (it held a core on a quiet fleet): once every
+    //     `LOST_SCAN_EVERY_S`, and at once in the tick after a merge op of the
+    //     project reached a final state — a merge that failed or landed can
+    //     leave an attempt lost.
+    let last_lost = store.read(|tx| tx.get_meta(&lost_scan_key(project)))?;
+    let last_lost = last_lost
+        .as_deref()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    // A merge op of the project that reached Confirmed or Failed since the last
+    // scan can leave an attempt lost (`last_settled`, written where it settles).
+    let settled = store
+        .read(|tx| tx.get_meta(&settled_key(project)))?
+        .as_deref()
+        .and_then(|value| value.parse::<i64>().ok())
+        .is_some_and(|at| at >= last_lost);
+    if settled || now - last_lost >= LOST_SCAN_EVERY_S {
+        store.write(|tx| tx.set_meta(&lost_scan_key(project), &now.to_string()))?;
+        tell_captain_lost(store, project, &config, now)?;
+    }
 
     // 1c. the task branches on the remote (the branch sweep): a cancelled
     //     task's branches are deleted, and a branch older than the project's
@@ -428,6 +449,7 @@ pub fn merge_passed(
                         Some(&lines),
                         finished.at,
                     )?;
+                    tx.set_meta(&settled_key(project), &finished.at.to_string())?;
                     // T-38's merge time belongs to gate/push completion,
                     // independent of both the launching and collecting tick.
                     if let (Some(attempt), Some(task)) = (op.attempt, op.task.as_deref()) {
@@ -970,7 +992,8 @@ fn fail_merge(
             tx.set_op_state(project, &op.id, OpState::Executing, None, now)?;
         }
         // Unknown from a restart goes straight to Failed.
-        tx.set_op_state(project, &op.id, OpState::Failed, Some(reason), now)
+        tx.set_op_state(project, &op.id, OpState::Failed, Some(reason), now)?;
+        tx.set_meta(&settled_key(project), &now.to_string())
     })?;
     tell_captain_failed(store, project, op, reason, now)
 }
@@ -1279,13 +1302,16 @@ fn neutrino_void(tx: &gear_store::Tx<'_>, project: &str, id: &str, now: Ts) -> G
             Some("the task may not be merged"),
             now,
         )?,
-        OpState::Unknown => tx.set_op_state(
-            project,
-            id,
-            OpState::Failed,
-            Some("the task may not be merged"),
-            now,
-        )?,
+        OpState::Unknown => {
+            tx.set_op_state(
+                project,
+                id,
+                OpState::Failed,
+                Some("the task may not be merged"),
+                now,
+            )?;
+            tx.set_meta(&settled_key(project), &now.to_string())?;
+        }
         _ => {}
     }
     Ok(())
@@ -1310,13 +1336,16 @@ fn void_merged_op(tx: &gear_store::Tx<'_>, project: &str, id: &str, now: Ts) -> 
             Some("the work is already merged"),
             now,
         )?,
-        OpState::Unknown => tx.set_op_state(
-            project,
-            id,
-            OpState::Failed,
-            Some("the work is already merged"),
-            now,
-        )?,
+        OpState::Unknown => {
+            tx.set_op_state(
+                project,
+                id,
+                OpState::Failed,
+                Some("the work is already merged"),
+                now,
+            )?;
+            tx.set_meta(&settled_key(project), &now.to_string())?;
+        }
         _ => {}
     }
     Ok(())
@@ -1503,6 +1532,7 @@ fn confirm_pr_merges(
                 );
                 store.write(|tx| {
                     tx.set_op_state(project, &op.id, OpState::Confirmed, Some(&line), now)?;
+                    tx.set_meta(&settled_key(project), &now.to_string())?;
                     if let (Some(attempt), Some(task)) = (op.attempt, op.task.as_deref()) {
                         tx.set_attempt_time(project, task, attempt, AttemptStep::Merged, now)?;
                     }
@@ -1743,6 +1773,23 @@ fn pr_claim(store: &mut Store, project: &str, op: &OpRow, repo: &Repo) -> GearRe
 /// Void one does not block a retry).
 /// The (task, attempt) of every merge op of `project`, in any state (see
 /// [`merge_op_of`]): Failed and Void count too.
+/// How often the lost-merge scan (step 1b) runs when no merge op settles: it
+/// reads every done task of the project, so not on every tick (T-516).
+const LOST_SCAN_EVERY_S: i64 = 300;
+
+/// When the lost-merge scan last ran for a project.
+fn lost_scan_key(project: &str) -> String {
+    format!("engine.lost_scan.{project}")
+}
+
+/// When a merge op of the project last reached a final state (`Confirmed` or
+/// `Failed`), written where it settles: the lost-merge scan runs at once in the
+/// tick after one does (T-516, F2 of the review of attempt 1 — the step used to
+/// re-read every settled op instead).
+fn settled_key(project: &str) -> String {
+    format!("engine.last_settled.{project}")
+}
+
 fn merge_keys(
     store: &mut Store,
     project: &str,
@@ -4631,6 +4678,12 @@ mod tests {
                 })?;
                 if state != OpState::Intended {
                     tx.set_op_state("p", "O-1", state, Some("gate said no"), now)?;
+                    // T-516: a settled merge op writes the settle time, and the
+                    // lost scan is due in the tick after one. The fixture seeds
+                    // the op directly, so it seeds that word too.
+                    if matches!(state, OpState::Confirmed | OpState::Failed) {
+                        tx.set_meta(&settled_key("p"), &now.to_string())?;
+                    }
                 }
                 Ok(())
             })
@@ -4703,6 +4756,12 @@ mod tests {
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
         let cfg = test_cfg();
         lost_task(&mut store, "abc1234", OpState::Intended, 10);
+        // T-516 (F4 of the review of attempt 1): the scan is due, so this tick
+        // really runs it — the empty inbox means the queued-merge filter held,
+        // not that nothing was read.
+        store
+            .write(|tx| tx.set_meta(&lost_scan_key("p"), &(20 - LOST_SCAN_EVERY_S).to_string()))
+            .unwrap();
 
         merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
         let items = store
@@ -4712,6 +4771,8 @@ mod tests {
             items.is_empty(),
             "a queued merge is not a lost one: {items:?}"
         );
+        let scanned = store.read(|tx| tx.get_meta(&lost_scan_key("p"))).unwrap();
+        assert_eq!(scanned.as_deref(), Some("20"), "the scan ran on this tick");
     }
 
     /// T-397: an attempt that carries its merge time is merged: no item.
@@ -4910,7 +4971,9 @@ mod tests {
             })
             .unwrap();
 
-        merge_passed(&mut store, &mut herdr, &cfg, "p", 21).unwrap();
+        // T-516: the lost scan runs once every `LOST_SCAN_EVERY_S`, so the tick
+        // that resolves the item is one where the scan is due again.
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 21 + LOST_SCAN_EVERY_S).unwrap();
         let items = store
             .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
             .unwrap();
@@ -4969,7 +5032,8 @@ mod tests {
             })
             .unwrap();
 
-        merge_passed(&mut store, &mut herdr, &cfg, "p", 22).unwrap();
+        // T-516: a tick where the lost scan is due again (300 s on).
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 22 + LOST_SCAN_EVERY_S).unwrap();
         let items = store
             .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
             .unwrap();
