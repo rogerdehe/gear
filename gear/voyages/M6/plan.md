@@ -1,11 +1,11 @@
-<!-- gear-plan project=gear base=1025 -->
+<!-- gear-plan project=gear base=1026 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
 # Milestone M6: a fleet that needs no nursing
 done: (1) every M6 task merged; (2) the voyage never stops: while some lane has a task it can start, no lane sits idle; (3) every hand fix or hand recovery the captain makes during M6 (a few lines of code, a nudge, a release, an answered dialog) is one decision line saying what and why, and a hand fix's code goes through the merge gate; the voyage report shows no false stall item; (4) the engine and each board stay under 10 % of one core and 50 MB on average over the last station, measured from the probe lines; (5) released at each station, the last as v0.6.x
 bar: DELIVERABLE: an error in normal use blocks the task; edge cases outside normal use are logged
-eta: 17h
+eta: 20h
 station S1: deliveries and reviews never stall, released as v0.6.0
 station S2: models, agents and captains switch with a handover; elastic counts; dialogs never block; role charters fit the chosen models, released as v0.6.1
 station S3: GEAR near idle and the fleet's health watched, released as v0.6.2
@@ -124,6 +124,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7207: keep course — 900 min, projected 1010m of 1020m after the hk-dgx-1 key outage; hull ends T-492 → T-502, mast T-501 → T-503 → T-493; moving T-503 to hull would make hull the longer lane, so no move.
 - T-501 fail on review F1 (a reviewer would be restarted mid-review on the quota return); F2/F3 logged.
 - hand fix (review.rs last_job_recorded): a direction record counts only for the seat it names; another project's T-424 re-review waited for good on review-3 after a later T-434 check on review-1 rewrote the record review-3's result was matched against. Test: a_direction_result_frees_its_seat_after_a_later_check_takes_the_record; gate 2283 passed.
+- 2026-10-31 confirmed: eta 17h -> 20h | why: user: requirements were added mid-voyage (review model per task, model return, task colours, onboarding fix); 20h covers the S5 reviews, the v0.6.4 release and a whole-voyage check before landing
 
 # Queue
 
