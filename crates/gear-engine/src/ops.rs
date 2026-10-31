@@ -637,7 +637,7 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
     let Some(text) = op.payload.get("text").and_then(serde_json::Value::as_str) else {
         return void("the op carries no text".to_string());
     };
-    let mut urgent = false;
+    let mut cut = false;
     let policy = if op.kind == OpKind::Deliver {
         // T-290: a rework packet (attempt n ≥ 2) that is on its way to a lane
         // whose agent queues input while it works (pi, claude) may go while
@@ -671,7 +671,9 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
                         captain.as_deref(),
                     );
                     unknown &= message.urgent;
-                    urgent |= message.urgent;
+                    // T-454: only a seat's own urgent word cuts a working turn;
+                    // an engine notice waits for the next idle moment instead.
+                    cut |= message.urgent && !crate::doorbell::is_notice(&message.sender);
                 } else {
                     working = false;
                     unknown = false;
@@ -689,10 +691,11 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
         }),
         // T-241: an urgent doorbell for a lane or a reviewer cuts the working
         // turn first (never the captain: its turn is not cut). Deliveries and
-        // every other op never interrupt.
+        // every other op never interrupt. T-454: an engine notice is never
+        // urgent in this sense, so it never cuts a running command.
         interrupt: op.kind == OpKind::Doorbell
             && matches!(seat.role, SeatRole::Lane | SeatRole::Temp)
-            && urgent,
+            && cut,
         policy,
         id: op.id.clone(),
         pane_id: binding.pane_id.clone(),

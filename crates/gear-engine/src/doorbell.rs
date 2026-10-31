@@ -5,6 +5,11 @@
 //! while it works (pi, claude), is typed at once — one doorbell per message,
 //! and the text names the message ids. A working agent of a kind that does
 //! not queue input (opencode, codex) still waits for idle, as before.
+//!
+//! T-454: the engine's own notices (the overrun question, the no-push question,
+//! the think ask) never go into a working agent. Typed into one, a notice stops
+//! the running command (M5: two notices stopped a 9-minute check twice), so a
+//! notice waits for the seat's next idle moment. A seat's word keeps its path.
 
 use gear_model::{MsgKind, Ts};
 
@@ -99,20 +104,37 @@ pub fn decide(inputs: &[DoorbellInput], cooldown_s: i64, now: Ts) -> Vec<Doorbel
 /// An urgent message always (a codex or opencode agent takes it mid-turn too).
 /// A captain instruction only when the agent queues input typed while it works
 /// (pi, claude): it reads the text after the current step, so nothing is lost.
+/// This is a seat's word; an engine notice never goes at once, whatever its
+/// urgency ([`reaches_while_working`], T-454).
 pub fn at_once(urgent: bool, kind: MsgKind, from_captain: bool, queues_input: bool) -> bool {
     urgent || (from_captain && kind == MsgKind::Instruction && queues_input)
+}
+
+/// The sender GEAR's engine writes its own notices under.
+pub const NOTICE_SENDER: &str = "engine";
+
+/// Is this message one of the engine's own notices? A notice is not a seat's
+/// word: it never goes into a working agent (T-454).
+pub fn is_notice(sender: &str) -> bool {
+    sender == NOTICE_SENDER
 }
 
 /// [`at_once`] for one stored message and the seat it is addressed to: the seat
 /// is a lane whose agent kind queues input, and `captain` is the project's
 /// captain (so the message is a captain instruction). Used by the engine tick
 /// and by `gear send` alike, so the two never drift apart.
+///
+/// A notice is the exception (T-454): whatever its urgency it waits for the
+/// seat's next idle moment, so it never stops a command the agent runs.
 pub fn reaches_while_working(
     message: &gear_store::MessageRow,
     seat: &gear_store::SeatRow,
     agent_kind: &str,
     captain: Option<&str>,
 ) -> bool {
+    if is_notice(&message.sender) {
+        return false;
+    }
     let queues_input =
         seat.role == gear_model::SeatRole::Lane && gear_herdr::queues_input(agent_kind);
     at_once(

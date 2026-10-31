@@ -8,7 +8,7 @@
 //! waits for idle. One doorbell per message, never repeated.
 
 use gear_engine::{tick, EngineCfg};
-use gear_herdr::fake::{FakeHerdr, Inject};
+use gear_herdr::fake::{Call, FakeHerdr, Inject};
 use gear_herdr::AgentStatus;
 use gear_model::{MsgKind, MsgState, OpKind, OpState, SeatRole};
 use gear_store::{testing, NewMessage, Store};
@@ -91,6 +91,34 @@ impl World {
     fn doorbell_ops(&mut self) -> Vec<gear_store::OpRow> {
         self.store
             .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Doorbell))
+            .unwrap()
+    }
+
+    /// A notice from the engine to `to`, open — as the quiet, think and
+    /// overrun notices are written (T-454).
+    fn notice(&mut self, to: &str, urgent: bool, at: i64) -> String {
+        self.store
+            .write(|tx| {
+                Ok(tx
+                    .insert_message(&NewMessage {
+                        meta: None,
+                        project: "p".into(),
+                        thread: format!("quiet-lane:{to}"),
+                        task: None,
+                        attempt: None,
+                        sender: "engine".into(),
+                        sender_gen: 0,
+                        recipient: to.into(),
+                        kind: MsgKind::Instruction,
+                        urgent,
+                        body: "No push to heat/t1 for 20 min.".into(),
+                        reply_to: None,
+                        needs_ack: false,
+                        state: MsgState::Open,
+                        created: at,
+                    })?
+                    .id)
+            })
             .unwrap()
     }
 }
@@ -205,4 +233,79 @@ fn the_same_message_is_never_rung_twice() {
     assert_eq!(said.len(), 1, "one doorbell per message: {said:?}");
     assert!(said[0].contains(&id), "{said:?}");
     assert_eq!(w.doorbell_ops().len(), 1);
+}
+
+/// T-454: a notice to a working seat is held and reaches it at its next idle
+/// moment; it never cuts the running command (no escape), even when it is
+/// urgent as the quiet, think and overrun notices are.
+#[test]
+fn a_notice_to_a_working_lane_waits_for_its_idle_moment() {
+    let mut w = world(AgentStatus::Working, AgentStatus::Idle);
+    let id = w.notice("p:heat", true, T0 + 10);
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 20).unwrap();
+
+    assert!(
+        w.herdr.prompts_to(PI_PANE).is_empty(),
+        "a notice waits while the lane works: {:?}",
+        w.herdr.prompts_to(PI_PANE)
+    );
+    assert!(
+        !w.herdr
+            .calls
+            .iter()
+            .any(|c| matches!(c, Call::SendKeys { pane, .. } if pane == PI_PANE)),
+        "a notice does not cut the running turn: {:?}",
+        w.herdr.calls
+    );
+    assert!(
+        w.doorbell_ops().is_empty(),
+        "no doorbell op while the lane works: {:?}",
+        w.doorbell_ops()
+    );
+
+    // The command is over and the lane is idle: the notice reaches it now.
+    w.herdr.set_status(PI_PANE, AgentStatus::Idle);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 40).unwrap();
+
+    let said = w.herdr.prompts_to(PI_PANE);
+    assert_eq!(said.len(), 1, "delivered at the next idle moment: {said:?}");
+    assert!(
+        said[0].contains(&id),
+        "the doorbell names the notice: {said:?}"
+    );
+    let ops = w.doorbell_ops();
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    assert_eq!(ops[0].state, OpState::Submitted);
+}
+
+/// T-454: an urgent captain instruction keeps its path into a working lane
+/// (typed in the same tick, its turn cut first), while a notice to another
+/// working lane waits for idle.
+#[test]
+fn an_urgent_captain_instruction_is_not_held() {
+    let mut w = world(AgentStatus::Working, AgentStatus::Working);
+    let captain_id = w.captain_message("p:wire", MsgKind::Instruction, true, T0 + 10);
+    let notice_id = w.notice("p:heat", true, T0 + 10);
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 20).unwrap();
+
+    let said = w.herdr.prompts_to(LANE_PANE);
+    assert_eq!(
+        said.len(),
+        1,
+        "an urgent captain instruction is typed while the lane works: {said:?}"
+    );
+    assert!(said[0].contains(&captain_id), "{said:?}");
+    assert!(
+        w.herdr.prompts_to(PI_PANE).is_empty(),
+        "the engine's notice to the other working lane is held: {:?}",
+        w.herdr.prompts_to(PI_PANE)
+    );
+
+    w.herdr.set_status(PI_PANE, AgentStatus::Idle);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 40).unwrap();
+    let said = w.herdr.prompts_to(PI_PANE);
+    assert_eq!(said.len(), 1, "the held notice arrives at idle: {said:?}");
+    assert!(said[0].contains(&notice_id), "{said:?}");
 }
