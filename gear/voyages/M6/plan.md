@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=969 -->
+<!-- gear-plan project=gear base=971 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -75,6 +75,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-11-01 02:00 hand-fix: T-470's report and review named another project's state path and session; reworded as 'another project's log' | why: the repo names no other project
 - 2026-11-01 02:20 scope: added to S5 (mast): omp runs as a lane or reviewer (built-in profile, skill install, usage log) | why: user: add omp support | else: -
 - 2026-11-01 02:45 hand-fix: a standby reviewer is free once the attempt of its last packet has a verdict, whoever wrote it (review.rs last_job_recorded); make gate passed; engines restarted | why: review-11's last packet was T-473's direction check with no direction round, so it waited forever for its own verdict and T-476 had no reviewer (M-6929)
+- 2026-11-01 03:00 scope: added to S5: Antigravity CLI (agy) runs as a lane or reviewer (profile and skill on mast, usage on hull) | why: user: add Antigravity CLI to GEAR's supported CLIs | else: -
 
 # Queue
 
@@ -310,8 +311,19 @@ accept: Usage tests on a fixture of a few records from a real local omp run (con
 deps: T-495
 estimate: 25
 
+## T-497 [now] lane=mast milestone=M6 station=S5 required
+goal: [S5] Antigravity CLI (`agy`, 1.2.13 on this machine; Herdr kind `agy`) starts as a lane or a reviewer like the CLIs GEAR knows. Today kickoff finds it and Herdr starts `--kind agy`, but GEAR has no built-in agy profile and `gear admin install-skill` has no agy target. Change crates/gear-herdr (profile.rs: a built-in `agy` profile: unattended `--dangerously-skip-permissions`, `--model`, `--effort` for the reasoning level, `--conversation <id>` to resume, its exit keys and its quota, back-off and dialog markers read from agy's own screens; agy has no system-prompt flag, so the role rules reach it the way GEAR reaches a CLI without one, named in the report) and crates/gear-app (skill.rs: `SkillAgent::Agy` with agy's skills directory, found from agy's docs or `agy plugin`/`~/.gemini/antigravity-cli/`; kickoff lists agy with `agy models`), no other design. Check every flag and path against `agy --help` and agy's docs before writing it, and name what you checked in the report.
+accept: Tests: the built-in agy profile starts with its unattended and model arguments and resumes with `--conversation`; `gear admin install-skill --agent agy` writes SKILL.md where agy loads skills and init accepts an agy lane. A real `herdr agent start --kind agy` in a test worktree with the profile's arguments reaches an empty composer with no dialog left (record the command and the screen in the report). Run make check CRATE=gear-herdr, CRATE=gear-app and CRATE=gear-cli.
+estimate: 55
+
+## T-498 [now] lane=hull milestone=M6 station=S5 required
+goal: [S5] gear-usage reads an agy seat's tokens and model, so its cost shows on the board. agy keeps its data under `~/.gemini/antigravity-cli/` (conversations/, history.jsonl, conversation_summaries.db, cli.log); find where a conversation's token counts live and read them with a small reader the built-in agy profile names. If agy writes no token counts anywhere readable, the seat's usage is unknown (never 0) and the report says so. Change crates/gear-usage and the agy profile's usage field only, no other design.
+accept: Usage tests on a fixture made from a real local agy run (content redacted): its tokens and model are read, or, if agy records none, the record reads as unknown; a pi fixture still reads as before. Run make check CRATE=gear-usage and CRATE=gear-engine.
+deps: T-497
+estimate: 35
+
 ## T-493 [now] lane=mast milestone=M6 station=S5 required
 goal: [S5] Release v0.6.4, station S5's release. Change, no other design: (1) the version is 0.6.4 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.4.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.3 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.3 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.4 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.4"; docs/releases/v0.6.4.md lists every task merged on origin/dev since v0.6.3 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-478, T-489, T-490, T-491, T-492, T-495, T-496
+deps: T-478, T-489, T-490, T-491, T-492, T-495, T-496, T-497, T-498
 estimate: 15
