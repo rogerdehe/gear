@@ -18,6 +18,7 @@ mod attention;
 pub mod blocked;
 pub mod busy;
 pub mod captain_quota;
+pub mod composer;
 pub mod delivery;
 pub mod dispatch;
 pub mod doorbell;
@@ -531,6 +532,23 @@ pub fn tick(
             note_slow(report, "quiet", step);
 
             // 2. confirm: settle Submitted/Unknown doorbells from view evidence.
+            // T-453: first record every seat's agent status and the idle-to-busy
+            // turns it takes: a turn after a delivery was submitted is the
+            // agent showing it took the packet, and the idle episode starts the
+            // window of a text that waited in a working agent's queue.
+            let step = std::time::Instant::now();
+            let _turns = store.write(|tx| ops::note_agent_turns(tx, &observed, now))?;
+            note_slow(report, "agent turns", step);
+            // 2a. a delivery whose text sits unsent in its lane's input box gets
+            //     its Enter back (T-371): the lane is idle, the packet was typed,
+            //     and only the key that submits it was lost. It runs before the
+            //     confirm (T-453): the Enter the window finds still needed goes
+            //     first, then the one resend, then the captain's item.
+            let step = std::time::Instant::now();
+            report
+                .resubmitted
+                .extend(ops::resubmit_unsent(store, herdr, &project, now)?);
+            note_slow(report, "resubmit", step);
             let step = std::time::Instant::now();
             let delivery_grace = gear_app::config::latest(store, &project)
                 .map(|config| i64::from(config.timing.delivery_grace_s))
@@ -557,15 +575,6 @@ pub fn tick(
             report.confirmed.extend(confirmed);
             report.flagged.extend(flagged);
             note_slow(report, "confirm", step);
-
-            // 2a. a delivery whose text sits unsent in its lane's input box gets
-            //     its Enter back (T-371): the lane is idle, the packet was typed,
-            //     and only the key that submits it was lost.
-            let step = std::time::Instant::now();
-            report
-                .resubmitted
-                .extend(ops::resubmit_unsent(store, herdr, &project, now)?);
-            note_slow(report, "resubmit", step);
 
             // 2b. a late check-in (design §10.3): a view that shows the attempt
             //     after its delivery op failed confirms the attempt anyway and
