@@ -348,6 +348,43 @@ fn start_hand_in_reviews(
             },
         };
 
+        // T-501: a reviewer that fell back stays on the model it fell back to
+        // until the model it left resets — its next job takes that entry, and
+        // the warm seat is not released for a model move before the reset
+        // (T-429 below).
+        let (entry, kind, profile_name, profile) =
+            match crate::quota::fallback_review_entry(store, config, &seat, now)? {
+                Some(fallback_entry) => {
+                    let fallback_kind = fallback_entry
+                        .cli()
+                        .unwrap_or(temps.kind.as_str())
+                        .to_string();
+                    let selected = if fallback_kind == temps.kind {
+                        profiles
+                            .get(&temps.profile)
+                            .map(|profile| (temps.profile.clone(), profile))
+                    } else {
+                        profiles
+                            .get(&fallback_kind)
+                            .filter(|profile| profile.kind == fallback_kind)
+                            .or_else(|| {
+                                profiles
+                                    .iter()
+                                    .find(|(_, profile)| profile.kind == fallback_kind)
+                                    .map(|(_, profile)| profile)
+                            })
+                            .map(|profile| (fallback_kind.clone(), profile))
+                    };
+                    match selected {
+                        Some((name, selected)) if selected.verified => {
+                            (Some(fallback_entry), fallback_kind, name, selected)
+                        }
+                        _ => (entry, kind.to_string(), profile_name.to_string(), profile),
+                    }
+                }
+                None => (entry, kind.to_string(), profile_name.to_string(), profile),
+            };
+
         // 2. a seat that is already up needs nothing; a seat that was parked
         //    (unknown, needs check, missing) is never retried (design/10).
         if !matches!(
@@ -372,7 +409,7 @@ fn start_hand_in_reviews(
         }
 
         // The same task can choose another CLI after the writer falls back.
-        store.write(|tx| tx.set_seat_profile(&seat.id, profile_name))?;
+        store.write(|tx| tx.set_seat_profile(&seat.id, &profile_name))?;
         // 4. the reviewer: worktree, environment, agent, review packet.
         match start_reviewer(
             store, herdr, cfg, config, &seat, task, entry, &kind, profile, false, now,
@@ -10657,6 +10694,136 @@ profile = "opencode"
                 .unwrap()
                 .as_deref(),
             Some("gpt-6.1-luna")
+        );
+    }
+
+    /// T-501: a reviewer that fell back keeps the model it fell back to for
+    /// its next job while the model it left has not reset; after the reset its
+    /// next job runs on the first entry again.
+    #[test]
+    fn a_fallen_back_reviewer_takes_its_next_job_on_the_fallback_until_the_reset() {
+        let two = CONFIG.replace(
+            REVIEW_CHAIN,
+            r#"review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] }, { model = "gpt-6.1-luna", cli = "codex" }]"#,
+        );
+        let mut store = world(&two);
+        let mut herdr = FakeHerdr::new();
+        assert_eq!(
+            start_reviews(
+                &mut store,
+                &mut herdr,
+                &cfg(),
+                &cfg().profiles,
+                "p",
+                T0 + 10
+            )
+            .unwrap()
+            .started,
+            vec!["p:review-1"]
+        );
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
+                tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
+                tx.clear_seat_task("p:review-1")?;
+                // The fallback: the seat runs the second review model, and the
+                // model it left resets at T0 + 30.
+                tx.set_meta(&crate::model::model_meta_key("p:review-1"), "gpt-6.1-luna")?;
+                tx.set_meta(
+                    &crate::quota::fallback_meta_key("p:review-1"),
+                    &format!("gpt-6.1-sol|{}", T0 + 30),
+                )
+            })
+            .unwrap();
+        queue_review_job(&mut store, 2, "heat");
+        let _ = crate::release::take_release_log();
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 12,
+        )
+        .unwrap();
+        assert!(
+            crate::release::take_release_log().is_empty(),
+            "the warm seat keeps the fallback before the reset"
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&pending_review_key("p:review-1")))
+                .unwrap()
+                .as_deref(),
+            Some("T-2"),
+            "the warm seat takes the job"
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&crate::model::model_meta_key("p:review-1")))
+                .unwrap()
+                .as_deref(),
+            Some("gpt-6.1-luna"),
+            "it runs the fallback model, not the first entry"
+        );
+
+        // The next job comes after the reset: the warm seat is released and
+        // starts on the first entry again.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-2")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+                judged(tx, "T-2", 1, "p:review-1", true)?;
+                tx.set_meta(&pending_review_key("p:review-1"), "")?;
+                tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 31)?;
+                tx.clear_seat_task("p:review-1")
+            })
+            .unwrap();
+        queue_review_job(&mut store, 3, "heat");
+        let _ = crate::release::take_release_log();
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 32,
+        )
+        .unwrap();
+        assert!(
+            report.started.is_empty(),
+            "the warm seat is not reused on the fallback model: {report:?}"
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat("p:review-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            SeatState::Releasing
+        );
+        crate::release::release_finished_reviews(&mut store, &mut herdr, "p", T0 + 33).unwrap();
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 34,
+        )
+        .unwrap();
+        assert_eq!(report.started, vec!["p:review-1"], "{report:?}");
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&crate::model::model_meta_key("p:review-1")))
+                .unwrap()
+                .as_deref(),
+            Some("gpt-6.1-sol"),
+            "the next job after the reset runs on the first entry"
         );
     }
 

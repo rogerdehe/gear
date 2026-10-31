@@ -165,6 +165,28 @@ pub fn apply_quota_policy_with(
             }
             continue;
         }
+        // T-501: a seat that fell back goes back to the first model of its
+        // chain once the model it left resets — at its next task boundary,
+        // never mid-task. A source that still reads the first model as spent
+        // keeps it on the fallback.
+        if let Some(line) = return_from_fallback(
+            store,
+            herdr,
+            cfg,
+            profiles,
+            project,
+            &config,
+            &sources,
+            seat,
+            profile,
+            Some(obs),
+            now,
+            api,
+            codex_session.as_deref(),
+        )? {
+            report.events.push(line);
+            continue;
+        }
         // A seat parked on quota wakes up when the provider resets: it goes
         // back to the first model of its chain — in place when that model runs
         // on the seat's own CLI, on another CLI when it does not (T-35). A
@@ -361,6 +383,26 @@ pub fn apply_quota_policy_with(
         };
         match next {
             Some(next) => {
+                // T-501: the model the seat leaves comes back at its own
+                // reset; record when that is, so the seat can return at its
+                // next task boundary.
+                let until = fallback_reset(
+                    store,
+                    api,
+                    &sources,
+                    &config,
+                    seat,
+                    current.as_deref(),
+                    Some(obs),
+                    now,
+                    codex_session.as_deref(),
+                )?;
+                set_fallback(
+                    store,
+                    &seat.id,
+                    current.as_deref().unwrap_or_default(),
+                    until,
+                )?;
                 // T-33: the model changes **in place** when the next model runs
                 // on the seat's own CLI — no exit, no restart, the
                 // conversation stays. Without labels the seat is flagged,
@@ -477,6 +519,182 @@ fn next_entry<'a>(chain: &[&'a ModelEntry], current: Option<&str>) -> Option<&'a
         Some(index) => chain.get(index + 1).copied(),
         None => chain.first().copied(),
     }
+}
+
+// ------------------------------------------------- the return from a fallback
+
+/// The meta key of a seat's fallback (T-501): `"<model>|<until>"`, the model
+/// the seat fell back from and when that model resets.
+pub(crate) fn fallback_meta_key(seat: &str) -> String {
+    format!("engine.fallback.{seat}")
+}
+
+/// Whether the seat fell back and the model it left has not reset yet
+/// (T-501): a reviewer's next job stays on the fallback model until then.
+pub(crate) fn fallback_pending(store: &mut Store, seat: &str, now: Ts) -> GearResult<bool> {
+    Ok(fallback_record(store, seat)?.is_some_and(|(_, until)| until > now))
+}
+
+/// The review-chain entry a reviewer that fell back runs on while the model it
+/// left has not reset (T-501): its next job stays on the fallback, not on the
+/// chain's first entry.
+pub(crate) fn fallback_review_entry<'a>(
+    store: &mut Store,
+    config: &'a ProjectConfig,
+    seat: &SeatRow,
+    now: Ts,
+) -> GearResult<Option<&'a ModelEntry>> {
+    if !fallback_pending(store, &seat.id, now)? {
+        return Ok(None);
+    }
+    // The model the seat runs now: the fallback entry, not the chain's first.
+    let Some(model) = meta_get(store, &model_meta_key(&seat.id))? else {
+        return Ok(None);
+    };
+    Ok(crate::model::review_chain(config)
+        .into_iter()
+        .find(|entry| entry.model() == model))
+}
+
+/// The fallback a seat recorded: the model it left and its reset time.
+fn fallback_record(store: &mut Store, seat: &str) -> GearResult<Option<(String, Ts)>> {
+    let Some(value) = meta_get(store, &fallback_meta_key(seat))? else {
+        return Ok(None);
+    };
+    let Some((model, until)) = value.rsplit_once('|') else {
+        return Ok(None);
+    };
+    let Ok(until) = until.trim().parse::<Ts>() else {
+        return Ok(None);
+    };
+    Ok(Some((model.to_string(), until)))
+}
+
+/// Record the fallback: the model the seat left and when it resets. An empty
+/// model clears the record.
+fn set_fallback(store: &mut Store, seat: &str, model: &str, until: Ts) -> GearResult<()> {
+    store.write(|tx| {
+        tx.set_meta(
+            &fallback_meta_key(seat),
+            &if model.is_empty() {
+                String::new()
+            } else {
+                format!("{model}|{until}")
+            },
+        )
+    })
+}
+
+/// When the model a seat falls back from resets (T-501): the quota source's
+/// window reset (+1 min) when a source reads it, else the reset the screen
+/// states (+1 min), else `quota_reset_h` hours.
+fn fallback_reset(
+    store: &mut Store,
+    api: &dyn QuotaApi,
+    sources: &[Source],
+    config: &ProjectConfig,
+    seat: &SeatRow,
+    left: Option<&str>,
+    obs: Option<&SeatObs>,
+    now: Ts,
+    codex_session: Option<&str>,
+) -> GearResult<Ts> {
+    if let Some(left) = left {
+        if let Some(source) = source_for_model(store, sources, seat, left)? {
+            if let Ok(reading) = read_source(store, api, &source, now, now, codex_session) {
+                if let Verdict::Spent { until, .. } =
+                    verdict_of(&reading, now, config.models.quota_reset_h)
+                {
+                    return Ok(until);
+                }
+            }
+        }
+    }
+    if let Some(reset) = obs
+        .and_then(|obs| obs.screen.as_deref())
+        .and_then(|screen| gear_usage::reset_from_text(screen, now))
+    {
+        return Ok(reset + 60);
+    }
+    Ok(now + i64::from(config.models.quota_reset_h.max(1)) * 3600)
+}
+
+/// Bring a seat that fell back to the first model of its chain once the model
+/// it left resets (T-501): only at a task boundary — a handed-in (Submitted)
+/// attempt, or none — never mid-task. A source that still reads the first
+/// model's window as spent keeps the seat on the fallback and moves the time
+/// to the new reset.
+#[allow(clippy::too_many_arguments)]
+fn return_from_fallback(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, Profile>,
+    project: &str,
+    config: &ProjectConfig,
+    sources: &[Source],
+    seat: &SeatRow,
+    profile: &Profile,
+    obs: Option<&SeatObs>,
+    now: Ts,
+    api: &dyn QuotaApi,
+    codex_session: Option<&str>,
+) -> GearResult<Option<String>> {
+    let Some((left, until)) = fallback_record(store, &seat.id)? else {
+        return Ok(None);
+    };
+    if now < until {
+        return Ok(None);
+    }
+    if !matches!(
+        seat.state,
+        SeatState::Active | SeatState::Standby | SeatState::Retiring
+    ) {
+        return Ok(None);
+    }
+    let chain = if seat.role == SeatRole::Temp {
+        crate::model::review_chain(config)
+    } else {
+        crate::model::role_chain(config, &seat.name)
+    };
+    let Some(first) = chain.first().copied() else {
+        return Ok(None);
+    };
+    // Already back (a park returned it, or the seat was started on the first
+    // model): nothing to switch, the record goes.
+    if meta_get(store, &model_meta_key(&seat.id))?.as_deref() == Some(first.model()) {
+        set_fallback(store, &seat.id, "", 0)?;
+        return Ok(None);
+    }
+    // Never mid-task: an attempt the lane works on is not Submitted.
+    let mid_task = store
+        .read(|tx| tx.open_attempts_of_seat(&seat.id))?
+        .iter()
+        .any(|attempt| attempt.state != gear_model::AttemptState::Submitted);
+    if mid_task {
+        return Ok(None);
+    }
+    // The first model's own window: still spent keeps the seat on the
+    // fallback, and the time moves to the new reset.
+    if let Some(source) = source_for_model(store, sources, seat, first.model())? {
+        if let Ok(reading) = read_source(store, api, &source, now, now, codex_session) {
+            if let Verdict::Spent { until: again, .. } =
+                verdict_of(&reading, now, config.models.quota_reset_h)
+            {
+                set_fallback(store, &seat.id, &left, again)?;
+                return Ok(None);
+            }
+        }
+    }
+    set_fallback(store, &seat.id, "", 0)?;
+    change_model(
+        store, herdr, cfg, profiles, project, config, seat, profile, obs, first, now,
+    )?;
+    Ok(Some(format!(
+        "{}: back on {}: quota reset",
+        seat.id,
+        first.model()
+    )))
 }
 
 // ------------------------------------------------------- in place or another CLI
@@ -1623,17 +1841,28 @@ fn source_of(
     store: &mut Store,
     seat: &SeatRow,
 ) -> GearResult<Option<Source>> {
-    if sources.is_empty() {
-        return Ok(None);
-    }
     let Some(model) = current_model(store, &seat.id, chain) else {
         return Ok(None);
     };
+    source_for_model(store, sources, seat, &model)
+}
+
+/// The source of one model's provider (T-501): the same lookup as
+/// [`source_of`], for a model the seat does not run on now.
+fn source_for_model(
+    store: &mut Store,
+    sources: &[Source],
+    seat: &SeatRow,
+    model: &str,
+) -> GearResult<Option<Source>> {
+    if sources.is_empty() {
+        return Ok(None);
+    }
     let cli = store
         .read(|tx| tx.get_binding(&seat.id, seat.generation))?
         .map(|binding| binding.kind)
         .unwrap_or_default();
-    let Some(provider) = provider_of(&model, &cli) else {
+    let Some(provider) = provider_of(model, &cli) else {
         return Ok(None);
     };
     Ok(sources
@@ -2764,6 +2993,241 @@ quota_reset_h = {reset_h}
         // More quota ticks add no second Continue.
         tick_quota(&mut store, &mut herdr, true, T0 + 60);
         assert_eq!(deliveries(&mut store).len(), 1, "one continue only");
+    }
+
+    /// The screens one in-place switch produces: the toast cleared, the
+    /// picker, the bar.
+    fn switch_screens(bar: &str) -> Vec<(String, String)> {
+        vec![
+            ("esc".into(), "  Ask anything…".into()),
+            (
+                "/model".into(),
+                format!("  Search\n  Recent\n  {bar}  OpenCode Go"),
+            ),
+            (bar.into(), format!("Build auto · {bar} · high")),
+        ]
+    }
+
+    /// The model the lane runs on now, from its meta.
+    fn lane_model(store: &mut Store) -> Option<String> {
+        meta_get(store, &model_meta_key("p:heat")).unwrap()
+    }
+
+    /// T-501: a lane that fell back comes back to the first model of its chain
+    /// once the model it left resets — at its next task boundary, never
+    /// mid-task; a source that still reads that window as spent keeps it on
+    /// the fallback.
+    #[test]
+    fn a_fallen_back_lane_returns_to_its_first_model_at_its_next_task_boundary() {
+        let mut text = config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
+            "fallback",
+        );
+        for (model, bar) in [
+            ("minimax-cn/MiniMax-M3.1-Flash", "MiniMax M3.1 Flash"),
+            ("deepseek/deepseek-flash", "DeepSeek V4.1 Flash"),
+        ] {
+            text.push_str(&format!(
+                "\n[models.switch.\"{model}\"]\npicker = \"{bar}\"\nbar = \"{bar}\"\n"
+            ));
+        }
+        let mut store = world(&text);
+        let mut herdr = herdr_with_quota();
+        herdr.screen_after = switch_screens("DeepSeek V4.1 Flash");
+
+        // The fallback: the limit is confirmed and the switch takes its ticks.
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        for tick in 0..4 {
+            tick_quota(&mut store, &mut herdr, true, T0 + 30 + tick);
+        }
+        assert_eq!(
+            lane_model(&mut store).as_deref(),
+            Some("deepseek/deepseek-flash")
+        );
+        // No source and no reset on the screen: `quota_reset_h` hours.
+        assert_eq!(
+            fallback_record(&mut store, "p:heat").unwrap().unwrap().1,
+            T0 + 20 + 5 * 3600,
+            "the reset of the model it left"
+        );
+
+        // The reset passes while the lane is mid-task: nothing moves.
+        tick_quota(&mut store, &mut herdr, false, T0 + 5 * 3600 + 21);
+        assert_eq!(
+            lane_model(&mut store).as_deref(),
+            Some("deepseek/deepseek-flash"),
+            "never mid-task"
+        );
+
+        // Handed in: the next task boundary after the reset returns the lane to
+        // its first model, by the switch the fallback used.
+        store
+            .write(|tx| {
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-1",
+                    1,
+                    1,
+                    "cafe1234",
+                    "the report",
+                    T0 + 5 * 3600 + 30,
+                )
+            })
+            .unwrap();
+        herdr.screen_after = switch_screens("MiniMax M3.1 Flash");
+        let report = tick_quota(&mut store, &mut herdr, false, T0 + 5 * 3600 + 31);
+        assert!(
+            report.events.iter().any(|line| {
+                line == "p:heat: back on minimax-cn/MiniMax-M3.1-Flash: quota reset"
+            }),
+            "{:?}",
+            report.events
+        );
+        for tick in 0..4 {
+            tick_quota(&mut store, &mut herdr, false, T0 + 5 * 3600 + 40 + tick);
+        }
+        assert_eq!(
+            lane_model(&mut store).as_deref(),
+            Some("minimax-cn/MiniMax-M3.1-Flash")
+        );
+        assert!(
+            fallback_record(&mut store, "p:heat").unwrap().is_none(),
+            "the return clears the record"
+        );
+    }
+
+    /// A source that answers with what the test says (T-501).
+    struct FakeSpent {
+        spent: std::cell::Cell<bool>,
+    }
+
+    impl QuotaApi for FakeSpent {
+        fn read(
+            &self,
+            _reader: QuotaReader,
+            _key: &str,
+            _session: Option<&str>,
+            now: Ts,
+        ) -> Result<Reading, String> {
+            let windows = if self.spent.get() {
+                vec![gear_usage::Window {
+                    name: "5h".into(),
+                    used_percent: 100.0,
+                    resets_at: Some(now + 600),
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(Reading {
+                provider: "codex".into(),
+                windows,
+                read_at: now,
+            })
+        }
+    }
+
+    /// One quota tick with the quota readers given (T-501).
+    fn tick_quota_api(
+        store: &mut Store,
+        herdr: &mut FakeHerdr,
+        api: &dyn QuotaApi,
+        quota: bool,
+        now: Ts,
+    ) -> QuotaReport {
+        let seat = lane_seat(store);
+        let obs = observed(&seat, quota);
+        apply_quota_policy_with(store, herdr, &cfg(), &cfg().profiles, "p", &obs, now, api).unwrap()
+    }
+
+    /// T-501: the first model's own window, still spent at the boundary, keeps
+    /// the lane on the fallback and moves the time to the new reset; once it is
+    /// free, the lane returns.
+    #[test]
+    fn a_source_that_still_reads_the_first_model_spent_keeps_the_lane_on_the_fallback() {
+        let mut text = config(
+            r#""codex/gpt-5", "minimax-cn/MiniMax-M3.1-Flash""#,
+            "fallback",
+        );
+        for (model, bar) in [
+            ("codex/gpt-5", "GPT-5 Codex"),
+            ("minimax-cn/MiniMax-M3.1-Flash", "MiniMax M3.1 Flash"),
+        ] {
+            text.push_str(&format!(
+                "\n[models.switch.\"{model}\"]\npicker = \"{bar}\"\nbar = \"{bar}\"\n"
+            ));
+        }
+        let mut store = world(&text);
+        let mut herdr = herdr_with_quota();
+        herdr.screen_after = switch_screens("MiniMax M3.1 Flash");
+
+        // No source yet: the fallback happens on the policy.
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        for tick in 0..4 {
+            tick_quota(&mut store, &mut herdr, true, T0 + 30 + tick);
+        }
+        assert_eq!(
+            lane_model(&mut store).as_deref(),
+            Some("minimax-cn/MiniMax-M3.1-Flash")
+        );
+
+        // The project gets a source for the first model's provider.
+        let mut row = store.read(|tx| tx.get_project("p")).unwrap().unwrap();
+        row.config_toml
+            .push_str("\n[[quota.sources]]\nprovider = \"codex\"\nreader = \"codex\"\n");
+        store.write(|tx| tx.update_project(&row)).unwrap();
+
+        // The task is handed in and the reset has passed, but the source still
+        // reads the first model's window as spent: the lane stays.
+        store
+            .write(|tx| {
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-1",
+                    1,
+                    1,
+                    "cafe1234",
+                    "the report",
+                    T0 + 5 * 3600 + 25,
+                )
+            })
+            .unwrap();
+        let api = FakeSpent {
+            spent: std::cell::Cell::new(true),
+        };
+        let boundary = T0 + 5 * 3600 + 31;
+        let report = tick_quota_api(&mut store, &mut herdr, &api, false, boundary);
+        assert!(report.events.is_empty(), "{:?}", report.events);
+        assert_eq!(
+            lane_model(&mut store).as_deref(),
+            Some("minimax-cn/MiniMax-M3.1-Flash"),
+            "a spent window keeps it on the fallback"
+        );
+        assert_eq!(
+            fallback_record(&mut store, "p:heat").unwrap().unwrap().1,
+            boundary + 660,
+            "the time moves to the new reset"
+        );
+
+        // The window is free: the return happens.
+        api.spent.set(false);
+        herdr.screen_after = switch_screens("GPT-5 Codex");
+        let report = tick_quota_api(&mut store, &mut herdr, &api, false, boundary + 661);
+        assert!(
+            report
+                .events
+                .iter()
+                .any(|line| { line == "p:heat: back on codex/gpt-5: quota reset" }),
+            "{:?}",
+            report.events
+        );
+        for tick in 0..4 {
+            tick_quota_api(&mut store, &mut herdr, &api, false, boundary + 670 + tick);
+        }
+        assert_eq!(lane_model(&mut store).as_deref(), Some("codex/gpt-5"));
     }
 
     /// T-97: the delivery a lane never confirmed is retired by the switch (the
