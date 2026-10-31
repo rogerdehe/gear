@@ -1511,7 +1511,15 @@ fn last_job_recorded(store: &mut Store, project: &str, seat: &SeatRow) -> GearRe
             .into_iter()
             .filter(|round| round.seat == seat.id && round.attempt == attempt)
             .max_by_key(|round| round.start_at);
-        if latest.is_some_and(|round| round.role == "direction") {
+        // A direction job that opened no round on this seat is still a
+        // direction job: its packet says so.
+        let direction = match &latest {
+            Some(round) => round.role == "direction",
+            None => op.payload["text"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("Direction check of ")),
+        };
+        if direction {
             let job = tx
                 .get_meta(&direction_key(project, &task, attempt))?
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
@@ -12855,6 +12863,60 @@ profile = "opencode"
                     &direction_key("p", "T-1", 1),
                     r#"{"seat":"p:review-2","sha":"bbbb","state":"starting"}"#,
                 )?;
+                tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 6)
+            })
+            .unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert!(last_job_recorded(&mut store, "p", &seat).unwrap());
+    }
+
+    /// A direction check that opened no round on its seat (another project's
+    /// T-407 on review-1) is still a direction job: its result frees the
+    /// seat, so the rework review that waits for that seat starts.
+    #[test]
+    fn a_direction_job_without_a_round_is_freed_by_its_result() {
+        let mut store = world(CONFIG);
+        store
+            .write(|tx| {
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "review-1",
+                    SeatRole::Temp,
+                    "w2:p1",
+                    "codex",
+                    T0,
+                )?;
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    kind: OpKind::Deliver,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "text": "Direction check of T-1 attempt 1." }),
+                    created: T0,
+                })?;
+                tx.insert_message(&NewMessage {
+                    project: "p".into(),
+                    thread: "T-1:1".into(),
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    sender: "p:review-1".into(),
+                    sender_gen: 1,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::Result,
+                    urgent: false,
+                    body: "ok".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Info,
+                    created: T0 + 5,
+                    meta: Some(r#"{"direction":true,"sha":"aaaa"}"#.into()),
+                })?;
+                tx.set_meta(&direction_key("p", "T-1", 1), r#"{"checked_sha":"aaaa"}"#)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 6)
             })
             .unwrap();

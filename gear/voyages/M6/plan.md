@@ -151,6 +151,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-10-31 19:30 scope: hull task, the merge step's lost scan runs every 5 min instead of every tick | why: goal clause (4) not met at landing: a 3-minute ps sample shows each engine at 25-41 % of one core and 35 MB (boards 2-3 % and under 20 MB); every tick logs merge 2.1-3.3 s | else: land with (4) open
 - station M-7380: keep course — not ready to land: goal clause (4) failed the landing measure (engines 25-41 % of one core); T-516 fixes it, then v0.6.5, a new measure, and the landing
 - station M-7381: keep course — projected 1168m of 1200m; T-516 on hull, then v0.6.5, a new measure of clause (4) and the landing
+- 2026-10-31 20:35 hand-fix: crates/gear-engine/src/review.rs last_job_recorded reads a deliver op with no round on its seat as a direction job when its packet starts "Direction check of", so its result frees the seat (test a_direction_job_without_a_round_is_freed_by_its_result); make gate passed (2323 tests); both engines restarted on it | why: another project's T-415 attempt 3 waited silently for review-1, whose roundless T-407 direction job was judged as a review that never gets a verdict (M-5874); a GEAR bug stopping another fleet | else: -
 
 # Queue
 
