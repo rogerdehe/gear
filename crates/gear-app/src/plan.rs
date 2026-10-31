@@ -723,10 +723,11 @@ fn apply_queue(
                             // The decision log (design §7.4): a cancelled task
                             // is a cut, and the why is the one the captain
                             // wrote about it.
+                            let cut_voyage = task.milestone.as_deref().unwrap_or(&voyage);
                             record_gear_decision(
                                 tx,
                                 project,
-                                &voyage,
+                                cut_voyage,
                                 applied_version,
                                 "cut",
                                 &format!("{id} cancelled"),
@@ -3756,6 +3757,15 @@ fn cancel_changes_only_state(
         if issue != task.issue {
             changed.push(format!("issue (stored {:?}, got {:?})", task.issue, issue));
         }
+    }
+    // The station is a field too (M5 S3): a block without `station=` clears
+    // it, so a cancel that carries a different one is refused.
+    let stored_station = tx.task_station(project, id)?;
+    if item.station != stored_station {
+        changed.push(format!(
+            "station (stored {:?}, got {:?})",
+            stored_station, item.station
+        ));
     }
     if let Some(contract) = tx.get_contract(project, id, task.contract_version)? {
         if let Some(goal) = &item.goal {
