@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1009 -->
+<!-- gear-plan project=gear base=1010 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -110,6 +110,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - added NEW (S5, hull, after T-500): a seat that fell back on quota returns to its first model at the next task boundary after that model's reset; today a fallback lane stays on the backup for good.
 - T-498 pass over review F1: agy's transcript has no model field and the model sits only in an undocumented protobuf; in normal use the seat's configured model prices the round, so reading it from the blob is an edge case logged to the backlog, not a block (bar: DELIVERABLE).
 - T-501 moved hull → mast, ahead of T-492: mast would sit idle after T-486 until it merges; hull keeps T-500.
+- T-492 back to hull after T-500: by then T-486 should be merged; mast keeps T-486 → T-501 → T-493, so both lanes end near the same time.
 
 # Queue
 
@@ -333,7 +334,7 @@ goal: [S5] A seat that fell back on quota returns to its first model after that 
 accept: Engine tests: a lane that fell back at T with a reset at T+30 min stays on the fallback before the reset, and at its first task boundary after it returns to the first model (not mid-task); a source reading the window still spent keeps it on the fallback; no source and no screen reset uses quota_reset_h; a reviewer's next job after the reset runs on the first entry. Run make check CRATE=gear-engine and CRATE=gear-cli.
 estimate: 55
 
-## T-492 [now] lane=mast milestone=M6 station=S5 required
+## T-492 [now] lane=hull milestone=M6 station=S5 required
 goal: [S5] End-to-end: one captain pane holds two projects with different working hours in different time zones; an engine runs both on FakeHerdr through a simulated day: each fleet works only in its hours, both work in the overlap, the captain gets one doorbell naming both projects' items, and a reply with a qualified id settles the right project's item. Test only, no product change.
 accept: The scenario test passes. Run make check CRATE=gear-engine.
 deps: T-485, T-486, T-487, T-488
