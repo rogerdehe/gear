@@ -113,6 +113,39 @@ fn two_projects_sharing_a_pane_get_one_ring_naming_both() {
 }
 
 #[test]
+fn an_urgent_joined_ring_is_typed_at_once_into_a_working_shared_captain() {
+    // The review's F1: an urgent ring of two projects must reach a shared
+    // captain agent that is working, as a single project's urgent item does.
+    let mut w = world("");
+    w.herdr.set_status(CAP_PANE, AgentStatus::Working);
+    let p_item = captain_item(&mut w, "p", true, T0);
+    // A filler gives q's urgent item a different id than p's M-1.
+    let _filler = captain_item(&mut w, "q", false, T0);
+    let q_item = captain_item(&mut w, "q", true, T0 + 1);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 2).unwrap();
+    let prompts = w.herdr.prompts_to(CAP_PANE);
+    assert_eq!(prompts.len(), 1, "typed at once: {prompts:?}");
+    let text = prompts[0];
+    assert!(text.contains(&p_item) && text.contains(&q_item), "{text}");
+    for (project, item) in [("p", &p_item), ("q", &q_item)] {
+        let ops = doorbells(&mut w, project, "captain");
+        assert_eq!(ops.len(), 1, "{project}: {ops:?}");
+        assert_eq!(ops[0].state, OpState::Submitted, "{project}: {ops:?}");
+        let covers = ops[0]
+            .payload
+            .get("covers")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            covers,
+            vec![serde_json::json!(item)],
+            "{project}: {covers:?}"
+        );
+    }
+}
+
+#[test]
 fn a_project_off_hours_adds_nothing_while_the_other_rings() {
     // q rests: its departure passed and its voyage eta is over.
     let mut w = world("\n[schedule]\ndepart_at = \"2027-01-01T00:00:00Z\"\n");
@@ -133,7 +166,7 @@ fn a_project_off_hours_adds_nothing_while_the_other_rings() {
         })
         .unwrap();
     let p_item = captain_item(&mut w, "p", false, T0);
-    let q_item = captain_item(&mut w, "q", true, T0);
+    let _q_item = captain_item(&mut w, "q", true, T0);
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
     let prompts = w.herdr.prompts_to(CAP_PANE);
     assert_eq!(

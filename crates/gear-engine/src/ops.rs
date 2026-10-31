@@ -319,6 +319,16 @@ pub fn intend_rings(
                 now,
             )?;
         }
+        // T-487 F2: the ring's own op covers the ids of the seat it is
+        // recorded under; another project's ids stay in that seat's own op and
+        // in the ring array, so two projects' per-project ids never share one
+        // list. The ring array still lets the policy read every item (F1).
+        let primary_covers = ring
+            .seats
+            .iter()
+            .find(|entry| entry.seat == ring.seat)
+            .map(|entry| entry.covers.clone())
+            .unwrap_or_default();
         let primary = tx.insert_op(&NewOp {
             project: ring.project.clone(),
             seat: ring.seat.clone(),
@@ -330,7 +340,7 @@ pub fn intend_rings(
             plan_version: None,
             payload: serde_json::json!({
                 "text": ring.text,
-                "covers": ring.covers,
+                "covers": primary_covers,
                 "pane": ring.pane_id,
                 "ring": ring.seats.iter().map(|seat| serde_json::json!({
                     "project": seat.project,
@@ -756,33 +766,84 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
         };
         PromptPolicy::Delivery { working }
     } else {
+        // T-487 F1: a joined ring covers seats of several projects. Each id is
+        // resolved under the project of the ring entry that holds it — reading
+        // another project's id under this seat's project finds nothing, and an
+        // urgent item would then keep the ring from being typed into a working
+        // agent. A plain doorbell (no ring array) reads its ids under the op's
+        // project, as before.
+        let entries = op.payload.get("ring").and_then(|v| v.as_array());
         let ids = op.payload.get("covers").and_then(|v| v.as_array());
-        let mut working = ids.is_some_and(|v| !v.is_empty());
+        let mut working = entries
+            .map(|entries| !entries.is_empty())
+            .unwrap_or_else(|| ids.is_some_and(|v| !v.is_empty()));
         let mut unknown = working;
-        let captain = tx.captain_of(&op.project)?.map(|c| c.id);
-        if let Some(ids) = ids {
-            for id in ids {
-                let message = match id.as_str() {
-                    Some(id) => tx.get_message(&op.project, id)?,
-                    None => None,
-                };
-                if let Some(message) = message {
-                    working &= crate::doorbell::reaches_while_working(
-                        &message,
-                        &seat,
-                        &binding.kind,
-                        captain.as_deref(),
-                    );
-                    unknown &= message.urgent;
-                    // T-454: only a seat's own urgent word cuts a working turn;
-                    // an engine notice waits for the next idle moment instead —
-                    // except the notice that closes a direction check under its
-                    // reviewer (T-444), which must end that turn at once.
-                    cut |= crate::doorbell::ends_direction_check(&message)
-                        || (message.urgent && !crate::doorbell::is_notice(&message.sender));
-                } else {
+        if let Some(entries) = entries {
+            for entry in entries {
+                let project = entry.get("project").and_then(|v| v.as_str());
+                let entry_seat = entry
+                    .get("seat")
+                    .and_then(|v| v.as_str())
+                    .and_then(|id| tx.get_seat(id).ok().flatten());
+                let (Some(project), Some(entry_seat)) = (project, entry_seat) else {
                     working = false;
                     unknown = false;
+                    continue;
+                };
+                let captain = tx.captain_of(project)?.map(|c| c.id);
+                for id in entry
+                    .get("covers")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    let message = match id.as_str() {
+                        Some(id) => tx.get_message(project, id)?,
+                        None => None,
+                    };
+                    if let Some(message) = message {
+                        working &= crate::doorbell::reaches_while_working(
+                            &message,
+                            &entry_seat,
+                            &binding.kind,
+                            captain.as_deref(),
+                        );
+                        unknown &= message.urgent;
+                        // T-454: only a seat's own urgent word cuts a working
+                        // turn; an engine notice waits for the next idle moment
+                        // instead — except the notice that closes a direction
+                        // check under its reviewer (T-444), which must end that
+                        // turn at once.
+                        cut |= crate::doorbell::ends_direction_check(&message)
+                            || (message.urgent && !crate::doorbell::is_notice(&message.sender));
+                    } else {
+                        working = false;
+                        unknown = false;
+                    }
+                }
+            }
+        } else {
+            let captain = tx.captain_of(&op.project)?.map(|c| c.id);
+            if let Some(ids) = ids {
+                for id in ids {
+                    let message = match id.as_str() {
+                        Some(id) => tx.get_message(&op.project, id)?,
+                        None => None,
+                    };
+                    if let Some(message) = message {
+                        working &= crate::doorbell::reaches_while_working(
+                            &message,
+                            &seat,
+                            &binding.kind,
+                            captain.as_deref(),
+                        );
+                        unknown &= message.urgent;
+                        cut |= crate::doorbell::ends_direction_check(&message)
+                            || (message.urgent && !crate::doorbell::is_notice(&message.sender));
+                    } else {
+                        working = false;
+                        unknown = false;
+                    }
                 }
             }
         }

@@ -132,9 +132,9 @@ pub struct Ring {
     pub seat: String,
     pub generation: i64,
     pub text: String,
-    /// Every covered id, in the order named.
-    pub covers: Vec<String>,
-    /// Every seat the ring covers, with its own ids.
+    /// Every seat the ring covers, with its own ids. Each seat's ids stay in
+    /// its own entry (T-487 F2): the ids of two projects are never written
+    /// into one list, where per-project ids like `M-1` would collide.
     pub seats: Vec<RingSeat>,
 }
 
@@ -233,7 +233,6 @@ pub fn rings(
             seat: ringing[0].seat.clone(),
             generation: ringing[0].generation,
             text,
-            covers: all.iter().map(|item| item.id.clone()).collect(),
             seats,
         });
     }
