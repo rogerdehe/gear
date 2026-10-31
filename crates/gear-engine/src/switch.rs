@@ -458,50 +458,81 @@ pub fn ensure_model(
     model: &str,
     now: Ts,
 ) -> GearResult<ModelGate> {
-    // T-94: a model without `[models.switch]` labels takes them from
-    // OpenCode's own catalogue (`<model name> <provider name>`, the text the
-    // picker and the status bar show); an explicit entry still wins.
-    let derived;
-    let labels = match config.models.switch.get(model) {
-        Some(labels) => labels,
-        None => {
-            // The chain names no variant (a `[models.switch]` entry is the
-            // only place one lives, and it overrides this path entirely).
-            // The catalogue is per directory: use the seat's own worktree (F2
-            // of the T-94 review), like the start path does.
-            let directory =
-                store.read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(&seat.id)))?;
-            match crate::opencode::derived_labels(herdr, model, None, directory.as_deref()) {
-                Ok(Some(labels)) => {
-                    derived = labels;
-                    &derived
-                }
-                Ok(None) => {
-                    return Ok(ModelGate::Failed(format!(
-                        "no [models.switch.\"{model}\"] labels (picker, bar) and {model} is not in OpenCode's model list: the agent cannot be put on the chain's model"
-                    )))
-                }
-                // T-307: an unreadable catalogue (a failed call, a reply that
-                // is not a list, an empty list not loaded yet, a provider with
-                // no display name) says nothing about the model. A Waiting
-                // gate would keep a start pending with nothing to end it, so
-                // the seat is flagged with a text that does not send the
-                // captain after a model id that is right.
-                Err(reason) => {
-                    return Ok(ModelGate::Failed(format!(
-                        "OpenCode's model list could not be read ({reason}), so {model} could not be checked; it is not known to be absent: name [models.switch.\"{model}\"] labels (picker, bar), or check `opencode models`"
-                    )))
-                }
-            }
-        }
+    let labels = match labels_for(store, herdr, config, &seat.id, model)? {
+        Ok(labels) => labels,
+        Err(reason) => return Ok(ModelGate::Failed(reason)),
     };
-    match switch_model(store, herdr, &seat.id, profile, None, labels, model, now)? {
+    match switch_model(store, herdr, &seat.id, profile, None, &labels, model, now)? {
         SwitchOutcome::Done | SwitchOutcome::Already => Ok(ModelGate::Ready),
         SwitchOutcome::Waiting => Ok(ModelGate::Waiting),
         SwitchOutcome::Failed => Ok(ModelGate::Failed(format!(
             "the model switch to {model} did not confirm twice"
         ))),
     }
+}
+
+/// The labels that put an agent on `model` (T-94): the config's
+/// `[models.switch]` entry, else OpenCode's own catalogue (`<model name>
+/// <provider name>`, the text the picker and the status bar show), read in the
+/// seat's worktree (F2 of the T-94 review). `Err(reason)` when the model cannot
+/// be named: the caller flags the seat, never restarts it.
+fn labels_for(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    config: &gear_app::config::ProjectConfig,
+    seat_id: &str,
+    model: &str,
+) -> GearResult<Result<ModelSwitch, String>> {
+    if let Some(labels) = config.models.switch.get(model) {
+        return Ok(Ok(labels.clone()));
+    }
+    // The chain names no variant (a `[models.switch]` entry is the only place
+    // one lives, and it overrides this path entirely).
+    let directory = store.read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(seat_id)))?;
+    match crate::opencode::derived_labels(herdr, model, None, directory.as_deref()) {
+        Ok(Some(labels)) => Ok(Ok(labels)),
+        Ok(None) => Ok(Err(format!(
+            "no [models.switch.\"{model}\"] labels (picker, bar) and {model} is not in OpenCode's model list: the agent cannot be put on the chain's model"
+        ))),
+        // T-307: an unreadable catalogue (a failed call, a reply that is not a
+        // list, an empty list not loaded yet, a provider with no display name)
+        // says nothing about the model. A Waiting gate would keep a start
+        // pending with nothing to end it, so the seat is flagged with a text
+        // that does not send the captain after a model id that is right.
+        Err(reason) => Ok(Err(format!(
+            "OpenCode's model list could not be read ({reason}), so {model} could not be checked; it is not known to be absent: name [models.switch.\"{model}\"] labels (picker, bar), or check `opencode models`"
+        ))),
+    }
+}
+
+/// Begin the in-place switch of a seat whose chain head changed model on its
+/// own CLI (T-464): the durable plan is recorded and **no key is sent here**.
+/// The tick's switch step, which resumes a pending plan, takes the first step
+/// in the same tick, so a config change never sends two submissions in one
+/// tick. `Err(reason)` when the model has no labels anywhere: the caller flags
+/// the seat and sends nothing.
+pub fn begin(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat_id: &str,
+    config: &gear_app::config::ProjectConfig,
+    model: &str,
+) -> GearResult<Result<(), String>> {
+    let labels = match labels_for(store, herdr, config, seat_id, model)? {
+        Ok(labels) => labels,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    set_pending(
+        store,
+        seat_id,
+        &Pending {
+            to: labels.bar,
+            step: Step::Escape,
+            tries: 0,
+            waited: 0,
+        },
+    )?;
+    Ok(Ok(()))
 }
 
 /// API first for session-bound OpenCode agents. A durable API confirmation
