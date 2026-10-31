@@ -230,6 +230,14 @@ Close this with `station <id>: land`.",
 /// Only an explicit station decision closes the named action item. The plan
 /// transaction makes a bad reference/action roll back every other plan write.
 pub fn apply_decisions(tx: &Tx<'_>, project: &str, draft: &Draft, now: Ts) -> GearResult<()> {
+    // T-461: the `confirmed:` lines of this same apply, the user's word a
+    // landing over an open clause or a cut needs.
+    let confirmed: Vec<crate::decision::Decision> = draft
+        .decisions
+        .iter()
+        .map(|line| crate::decision::parse(line))
+        .filter(|decision| decision.kind == "confirmed" && !decision.note)
+        .collect();
     for decision in &draft.decisions {
         let Some(rest) = decision.strip_prefix("station ") else {
             continue;
@@ -262,6 +270,13 @@ pub fn apply_decisions(tx: &Tx<'_>, project: &str, draft: &Draft, now: Ts) -> Ge
         if message.state == MsgState::Resolved {
             continue;
         } // retained historical decision
+          // T-461: a landing is the voyage's last act; it is refused while a
+          // done clause is open or the voyage was cut by more than a fifth,
+          // unless the user's word (a `confirmed:` line in this apply) names
+          // the open clauses or the cut.
+        if response == "land" || response.starts_with("land ") {
+            require_land_ready(tx, project, &message, &confirmed, draft.confirmed)?;
+        }
         tx.update_message_state(
             project,
             id,
@@ -273,6 +288,127 @@ pub fn apply_decisions(tx: &Tx<'_>, project: &str, draft: &Draft, now: Ts) -> Ge
         )?;
     }
     Ok(())
+}
+
+/// T-461: whether a landing may close the voyage. The goal check is the one
+/// the board reads (a written check, or the done clauses all open); the cut is
+/// the tasks cancelled or moved out since departure, against the departure's
+/// task count.
+fn require_land_ready(
+    tx: &Tx<'_>,
+    project: &str,
+    message: &MessageRow,
+    confirmed: &[crate::decision::Decision],
+    confirmed_flag: bool,
+) -> GearResult<()> {
+    let milestone = message.thread.strip_prefix("station:").unwrap_or_default();
+    let voyage = tx.get_voyage(project, milestone)?.ok_or_else(|| {
+        bad(format!(
+            "station {} lands voyage {milestone}, but no such voyage is stored",
+            message.id
+        ))
+    })?;
+    let checks = crate::goal::goal_check(tx, project, milestone, voyage.done.as_deref())?;
+    let open: Vec<usize> = checks
+        .iter()
+        .filter(|check| !check.met)
+        .map(|check| check.n)
+        .collect();
+    let cut = cut_tasks(tx, project, milestone, voyage.departure)?;
+    let departure_tasks = voyage.departure_tasks.unwrap_or(0).max(0) as usize;
+    let over = departure_tasks > 0 && cut.len() * 5 > departure_tasks;
+    if open.is_empty() && !over {
+        return Ok(());
+    }
+    let mut reasons: Vec<String> = Vec::new();
+    if !open.is_empty() {
+        reasons.push(format!(
+            "the goal check has open clause{} {}",
+            if open.len() == 1 { "" } else { "s" },
+            open.iter()
+                .map(|n| format!("({n})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if over {
+        reasons.push(format!(
+            "{} of {} departure tasks were cancelled or moved out ({}% > 20%)",
+            cut.len(),
+            departure_tasks,
+            cut.len() * 100 / departure_tasks.max(1)
+        ));
+    }
+    let reasons = reasons.join(" and ");
+    if !confirmed_flag {
+        return Err(bad(format!(
+            "station {}: land is refused: {reasons}; confirm with the user, then apply again with --confirmed and a `confirmed:` line naming the open clauses or the cut",
+            message.id
+        )));
+    }
+    let names = |decision: &crate::decision::Decision| {
+        let text = format!(
+            "{} {}",
+            decision.what,
+            decision.why.clone().unwrap_or_default()
+        );
+        if open.iter().any(|n| !text.contains(&format!("({n})"))) {
+            return false;
+        }
+        if over {
+            let names_cut = text
+                .split_whitespace()
+                .any(|word| word.trim_matches(|c: char| !c.is_alphanumeric() && c != '-') == "cut");
+            let names_task = cut.iter().any(|id| crate::decision::names_task(&text, id));
+            if !names_cut && !names_task {
+                return false;
+            }
+        }
+        true
+    };
+    if !confirmed.iter().any(names) {
+        return Err(bad(format!(
+            "station {}: land is refused: {reasons}; --confirmed is set but no `confirmed:` line names the open clauses or the cut: add `- <time> confirmed: <what changes, before -> after> | why: <the user's reason>` in this same apply",
+            message.id
+        )));
+    }
+    Ok(())
+}
+
+/// The tasks of the voyage cancelled, or moved out of it, since departure
+/// (T-461): the cut the landing counts against the departure's task count.
+fn cut_tasks(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+    departure: Option<Ts>,
+) -> GearResult<Vec<String>> {
+    let mut cut: Vec<String> = Vec::new();
+    let tasks = tx.tasks_of_project(project)?;
+    for task in &tasks {
+        if task.milestone.as_deref() == Some(milestone) && task.state == TaskState::Cancelled {
+            cut.push(task.id.clone());
+        }
+    }
+    let since = departure
+        .map(crate::decision::apply_time)
+        .unwrap_or_default();
+    for decision in tx.decisions_of(project, milestone)? {
+        if decision.kind != "move" || decision.at < since {
+            continue;
+        }
+        let Some(id) = decision.what.split_whitespace().next() else {
+            continue;
+        };
+        // A task moved out and back is in the voyage again: it is no cut.
+        let back = tasks
+            .iter()
+            .any(|task| task.id == id && task.milestone.as_deref() == Some(milestone));
+        if !back && !cut.iter().any(|known| known == id) {
+            cut.push(id.to_string());
+        }
+    }
+    Ok(cut)
 }
 
 fn minutes(value: Option<i64>) -> String {

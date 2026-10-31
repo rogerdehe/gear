@@ -71,6 +71,23 @@ fn run(
     )
 }
 
+/// The same apply, with the user's word for a departure or a move (T-461).
+fn run_confirmed(
+    s: &mut Store,
+    body: &str,
+    rid: &str,
+) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+    let base = s.read(|tx| tx.plan_version("p")).unwrap();
+    let text = format!("<!-- gear-plan project=p base={base} -->\n{body}");
+    let mut draft = parse(&text).unwrap();
+    draft.confirmed = true;
+    draft.decisions.push(
+        "2026-10-27 10:05 confirmed: the voyage departs | why: the user said depart".to_string(),
+    );
+    let (env, fp) = cap();
+    apply(s, &env, Some(&fp), None, &draft, &text, rid, NOW)
+}
+
 fn decisions(s: &mut Store) -> Vec<DecisionRow> {
     s.read(|tx| tx.decisions_of("p", "")).unwrap()
 }
@@ -492,7 +509,7 @@ fn a_staff_line_is_logged_even_when_the_seat_is_already_there() {
 fn a_plan_without_a_milestone_logs_to_the_current_voyage() {
     let mut s = world();
     // A voyage that departs: a milestone block and a task on it.
-    run(
+    run_confirmed(
         &mut s,
         "# Milestone M1: the first voyage\ndone: something\nbar: a bar\neta: 1h\n\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
         "r1",
@@ -506,7 +523,12 @@ fn a_plan_without_a_milestone_logs_to_the_current_voyage() {
         "r2",
     )
     .unwrap();
-    let logged = s.read(|tx| tx.decisions_of("p", "M1")).unwrap();
+    let logged: Vec<DecisionRow> = s
+        .read(|tx| tx.decisions_of("p", "M1"))
+        .unwrap()
+        .into_iter()
+        .filter(|decision| decision.kind != "confirmed")
+        .collect();
     assert_eq!(logged.len(), 1, "{logged:?}");
     assert_eq!(logged[0].kind, "scope");
 
@@ -526,7 +548,7 @@ fn a_plan_without_a_milestone_logs_to_the_current_voyage() {
 fn a_moved_task_is_recorded_in_the_voyage_it_left() {
     let mut s = world();
     let voyages = "# Milestone M1: one\ndone: one\nbar: a bar\neta: 1h\n\n# Milestone M2: two\ndone: two\nbar: a bar\neta: 1h\n\n";
-    run(
+    run_confirmed(
         &mut s,
         &format!("{voyages}# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"),
         "r1",
@@ -537,7 +559,7 @@ fn a_moved_task_is_recorded_in_the_voyage_it_left() {
     let moved = format!(
         "{voyages}# Queue\n## T-1 [must] lane=heat milestone=M2\ngoal: A\naccept: a\ndeps: -\n"
     );
-    run(&mut s, &moved, "r2").unwrap();
+    run_confirmed(&mut s, &moved, "r2").unwrap();
 
     let logged = s.read(|tx| tx.decisions_of("p", "M1")).unwrap();
     let moves: Vec<&DecisionRow> = logged.iter().filter(|d| d.kind == "move").collect();
