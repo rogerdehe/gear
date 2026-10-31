@@ -302,7 +302,7 @@ fn an_unknown_temp_seat_is_released_and_the_next_review_takes_it() {
     assert!(report.started.is_empty());
     assert_eq!(
         starts(&herdr),
-        vec![("p-review-t1".to_string(), "codex".to_string())]
+        vec![("p-review-1".to_string(), "codex".to_string())]
     );
     assert_eq!(temps_in_use(&mut store), 1, "one reviewer, the one slot");
 }
