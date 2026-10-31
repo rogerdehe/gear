@@ -680,3 +680,214 @@ fn codex_model_switch_prices_each_bare_id_and_rejects_ambiguity() {
     assert_eq!(tokens.cost_usd, None);
     assert_eq!(tokens.cost_source, "none");
 }
+
+// ---------------------------------------------------------------------------
+// T-515: a direction check's round ends when the check ends.
+// ---------------------------------------------------------------------------
+
+/// A direction job meta of a task, as `start_direction_checks` writes it.
+fn direction_job(store: &mut Store, task: &str, attempt: i64, state: &str) {
+    store
+        .write(|tx| {
+            tx.set_meta(
+                &format!("engine.direction.p.{task}.{attempt}"),
+                &serde_json::json!({
+                    "seat": LANE,
+                    "generation": 1,
+                    "sha": "abc123",
+                    "state": state,
+                    "branch": format!("direction/{task}"),
+                })
+                .to_string(),
+            )
+        })
+        .unwrap();
+}
+
+/// The result a direction check hands in.
+fn direction_result(store: &mut Store, task: &str, attempt: i64, at: i64, direction: bool) {
+    store
+        .write(|tx| {
+            tx.insert_message(&gear_store::NewMessage {
+                meta: Some(
+                    serde_json::json!({ "direction": direction, "sha": "abc123" }).to_string(),
+                ),
+                project: "p".into(),
+                thread: format!("direction:{task}:{attempt}:abc123"),
+                task: Some(task.into()),
+                attempt: Some(attempt),
+                sender: LANE.into(),
+                sender_gen: 1,
+                recipient: "cat".into(),
+                kind: gear_model::MsgKind::Result,
+                urgent: false,
+                body: "ok".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: gear_model::MsgState::Open,
+                created: at,
+            })
+        })
+        .unwrap();
+}
+
+/// T-515: a direction round whose check handed its result in ends at the
+/// result's time, and the overrun watch raises nothing for it afterwards.
+#[test]
+fn a_direction_round_ends_at_its_results_time() {
+    let mut store = world();
+    round(&mut store, "T-7", 1, "direction", T0);
+    direction_result(&mut store, "T-7", 1, T0 + 40, true);
+    // The check is done: its job holds no state any more.
+    direction_job(&mut store, "T-7", 1, "done");
+
+    let mut herdr = FakeHerdr::new();
+    let report =
+        gear_engine::rounds::tick(&mut store, &mut herdr, &Default::default(), T0 + 200).unwrap();
+    assert_eq!(report.closed, vec!["T-7/1/direction"], "{report:?}");
+    let row = round_of(&mut store, "T-7", 1, "direction");
+    assert_eq!(
+        row.end_at,
+        Some(T0 + 40),
+        "the round ends when its result came in"
+    );
+
+    // Hours later the overrun watch has nothing to ring: the round is closed.
+    gear_engine::overrun::tick(&mut store, &mut herdr, &Default::default(), T0 + 600).unwrap();
+    let items = store
+        .read(|tx| tx.thread_messages("p", "overrun:T-7:direction"))
+        .unwrap();
+    assert!(
+        items.is_empty(),
+        "no overrun item for a finished check: {items:?}"
+    );
+}
+
+/// T-515: a direction round whose check still runs stays open.
+#[test]
+fn a_direction_round_still_running_stays_open() {
+    let mut store = world();
+    round(&mut store, "T-7", 1, "direction", T0);
+    direction_job(&mut store, "T-7", 1, "running");
+
+    let mut herdr = FakeHerdr::new();
+    let report =
+        gear_engine::rounds::tick(&mut store, &mut herdr, &Default::default(), T0 + 200).unwrap();
+    assert!(report.closed.is_empty(), "{report:?}");
+    assert_eq!(round_of(&mut store, "T-7", 1, "direction").end_at, None);
+}
+
+/// T-515: a round of an older generation of a seat that now works another task
+/// ends when the generation changed.
+#[test]
+fn a_round_of_an_older_generation_on_another_task_is_closed() {
+    let mut store = world();
+    // The check ran on generation 168's agent.
+    store
+        .write(|tx| {
+            tx.insert_round(&NewRound {
+                key: RoundKey {
+                    project: "p".into(),
+                    task: "T-407".into(),
+                    attempt: 1,
+                    role: "direction".into(),
+                },
+                seat: LANE.into(),
+                generation: 168,
+                cli: "opencode".into(),
+                model: None,
+                start_at: T0,
+            })
+        })
+        .unwrap();
+    direction_job(&mut store, "T-407", 1, "done");
+    direction_result(&mut store, "T-407", 1, T0 + 40, true);
+    // The seat is at generation 169 now and holds another task.
+    store
+        .write(|tx| {
+            tx.set_seat_state(LANE, SeatState::Active, Some("checking T-420"), T0 + 90)?;
+            tx.set_seat_generation(LANE, 169)
+        })
+        .unwrap();
+
+    let mut herdr = FakeHerdr::new();
+    let report =
+        gear_engine::rounds::tick(&mut store, &mut herdr, &Default::default(), T0 + 300).unwrap();
+    assert!(
+        report.closed.iter().any(|line| line == "T-407/1/direction"),
+        "{report:?}"
+    );
+    let row = round_of(&mut store, "T-407", 1, "direction");
+    assert_eq!(
+        row.end_at,
+        Some(T0 + 40),
+        "the result's time, which is before the generation change"
+    );
+}
+
+/// T-515: a dev round of a lane that still works its attempt stays open, even
+/// after a restart inside the task.
+#[test]
+fn a_dev_round_of_a_lane_on_its_attempt_stays_open() {
+    let mut store = world();
+    round(&mut store, "T-1", 1, "dev", T0);
+    store
+        .write(|tx| {
+            tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: "T-1".into(),
+                rank: 1,
+                state: TaskState::Running,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: None,
+                issue: None,
+                updated: T0,
+            })?;
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: LANE.into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Started,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            tx.set_seat_task(LANE, "T-1")?;
+            // A restart inside the task: the seat is at a newer generation.
+            tx.set_seat_generation(LANE, 2)
+        })
+        .unwrap();
+
+    let mut herdr = FakeHerdr::new();
+    let report =
+        gear_engine::rounds::tick(&mut store, &mut herdr, &Default::default(), T0 + 300).unwrap();
+    assert!(
+        !report.closed.iter().any(|line| line == "T-1/1/dev"),
+        "the lane still works its attempt: {report:?}"
+    );
+    assert_eq!(round_of(&mut store, "T-1", 1, "dev").end_at, None);
+}

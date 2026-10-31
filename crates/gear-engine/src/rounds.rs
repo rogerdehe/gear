@@ -11,7 +11,12 @@
 //!   `/new`, a restart or a resume inside the round is counted in it (once —
 //!   the round keeps the list of the sessions it owns);
 //! - a round ends when the next round on its seat starts, or when the seat is
-//!   released.
+//!   released;
+//! - T-515: a direction check's round ends when the check ends (its job is no
+//!   longer running), and an open round of a seat whose generation moved on
+//!   and which holds no job for that round's task ends when the generation
+//!   changed — a reviewer that handed its direction result in and went Standby
+//!   no longer counts hours it did not work.
 
 use gear_herdr::HerdrAct;
 use gear_model::{GearResult, SeatState, Ts};
@@ -56,6 +61,32 @@ pub fn tick(
                     close_with_clock(tx, round, next.start_at)?;
                     report.closed.push(label(round));
                 }
+            }
+            // 1a. T-515: a direction check's round ends when the check ends. A
+            //     reviewer that sends its direction result and goes Standby
+            //     keeps no open round, so the overrun watch stops counting it
+            //     (M-5705: T-407's round stayed open 91 minutes after its
+            //     result). The round ends at the time of the result, else now.
+            for round in &rounds {
+                if round.end_at.is_some() || round.role != "direction" {
+                    continue;
+                }
+                let job = tx
+                    .get_meta(&crate::review::direction_key(
+                        &round.project,
+                        &round.task,
+                        round.attempt,
+                    ))?
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+                // A job that still runs (or is starting) holds its round open.
+                if job.as_ref().is_some_and(|job| {
+                    matches!(job["state"].as_str(), Some("running" | "starting"))
+                }) {
+                    continue;
+                }
+                let at = direction_result_at(tx, round)?.unwrap_or(now);
+                close_with_clock(tx, round, at)?;
+                report.closed.push(label(round));
             }
             // 1b. T-458: a parked attempt whose wait has ended goes on in a
             //     new window of its round — the resumed work is its own time,
@@ -131,6 +162,34 @@ pub fn tick(
                     report.closed.push(label(&round));
                 }
             }
+            // 3b. T-515: a round whose seat has moved on to another generation
+            //     and holds no job for that round's task ends when the
+            //     generation changed: the work of the old generation is over.
+            //     A round whose attempt is still in progress belongs to the
+            //     seat whatever its generation (a restart inside a task), and
+            //     keeps running.
+            let moved = tx.rounds_of_project(&project)?;
+            for round in &moved {
+                if round.end_at.is_some() || attempt_in_progress(tx, round)? {
+                    continue;
+                }
+                let Some(seat) = tx.get_seat(&round.seat)? else {
+                    continue;
+                };
+                if seat.generation <= round.generation {
+                    continue;
+                }
+                if holds_job_for(tx, &seat, &round.task)? {
+                    continue;
+                }
+                let at = tx
+                    .get_binding(&seat.id, seat.generation)?
+                    .map(|binding| binding.created)
+                    .unwrap_or(now)
+                    .max(round.start_at);
+                close_with_clock(tx, round, at)?;
+                report.closed.push(label(round));
+            }
             Ok(())
         })?;
         let rounds = store.read(|tx| tx.rounds_of_project(&project))?;
@@ -199,6 +258,53 @@ pub(crate) fn close_with_clock(
 ) -> GearResult<()> {
     crate::overrun::process(tx, round, at)?;
     tx.close_round(&key_of(round), at)
+}
+
+/// The time of the direction result a round's check handed in (T-515): the
+/// result the round's seat sent for its attempt, else the last direction result
+/// of that attempt. `None` when the check ended with no result (a closed job).
+fn direction_result_at(tx: &Tx<'_>, round: &gear_store::RoundRow) -> GearResult<Option<Ts>> {
+    let results = tx.direction_results_of_attempt(&round.project, &round.task, round.attempt)?;
+    Ok(results
+        .iter()
+        .filter(|result| result.sender == round.seat)
+        .map(|result| result.created)
+        .max()
+        .or_else(|| results.iter().map(|result| result.created).max()))
+}
+
+/// Whether the seat holds a job for `task` (T-515): the task it works, a review
+/// it was given, or a direction check of that task that still runs. A seat that
+/// holds no job for a round's task has finished that round's work.
+fn holds_job_for(tx: &Tx<'_>, seat: &gear_store::SeatRow, task: &str) -> GearResult<bool> {
+    if seat.task_id.as_deref() == Some(task) {
+        return Ok(true);
+    }
+    let pending = tx
+        .get_meta(&crate::review::pending_review_key(&seat.id))?
+        .filter(|value| !value.is_empty());
+    if pending.as_deref() == Some(task) {
+        return Ok(true);
+    }
+    // A direction job of that task that still runs is the seat's job too.
+    for round in tx.rounds_of_project(&seat.project)? {
+        if round.task != task || round.end_at.is_some() {
+            continue;
+        }
+        let job = tx
+            .get_meta(&crate::review::direction_key(
+                &round.project,
+                &round.task,
+                round.attempt,
+            ))?
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+        if job.as_ref().is_some_and(|job| {
+            job["seat"] == seat.id && matches!(job["state"].as_str(), Some("running" | "starting"))
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// How a round is named in the report.
