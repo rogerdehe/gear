@@ -497,7 +497,15 @@ fn pi_lane_start_injects_its_rules_file() {
         .windows(2)
         .any(|w| w[0] == "--append-system-prompt" && w[1] == path.to_string_lossy()));
     let rules = std::fs::read_to_string(path).unwrap();
-    assert!(rules
-        .starts_with(include_str!("../../../../skills/gear/references/rules/lane.md").trim_end()));
+    // T-469: without a charter the lane gets today's fixed rules, with the
+    // working rules every charter keeps.
+    assert_eq!(
+        rules,
+        gear_app::charter::text(None, SeatRole::Lane, "heat", "-", "-").unwrap()
+    );
+    assert!(
+        rules.contains("- Search only inside your worktree"),
+        "{rules}"
+    );
     assert!(rules.ends_with("Voyage done: -\nBar: -\n"));
 }

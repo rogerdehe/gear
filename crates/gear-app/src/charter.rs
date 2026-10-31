@@ -9,11 +9,13 @@
 //! captain always holds the whole picture.
 //!
 //! The charter generalises the fixed rules files
-//! (`skills/gear/references/rules/lane.md` and `review.md`): those files are the
-//! default charter of a role that names none, and a project's own charter
-//! replaces them. The rendered text is written into the seat's rules file and
-//! given to the agent once per conversation: at a new session, never again in a
-//! resumed one.
+//! (`skills/gear/references/rules/lane.md` and `review.md`). Each holds a
+//! stance — who the seat is and what it may decide — and the GEAR working rules
+//! (asking, pushing, reporting) that every seat keeps. A project's charter
+//! replaces the stance; the working rules are always rendered, charter or not;
+//! a role that names no charter renders as the fixed file does today. The
+//! rendered text is written into the seat's rules file and given to the agent
+//! once per conversation: at a new session, never again in a resumed one.
 //!
 //! The captain's guide (`skills/gear/references/captain.md`) stays as it is:
 //! the captain reads it through the skill, and it carries the captain's own
@@ -26,40 +28,67 @@ use gear_store::Store;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The default lane charter: today's fixed lane rules, used when a lane names
-/// no charter.
-pub const LANE_DEFAULT: &str = include_str!("../../../skills/gear/references/rules/lane.md");
-/// The default reviewer charter: today's fixed reviewer rules, used when the
-/// project names none.
-pub const REVIEW_DEFAULT: &str = include_str!("../../../skills/gear/references/rules/review.md");
+/// The fixed lane rules: the default stance, then the GEAR working rules every
+/// lane keeps.
+pub const LANE_RULES: &str = include_str!("../../../skills/gear/references/rules/lane.md");
+/// The fixed reviewer rules, the same way.
+pub const REVIEW_RULES: &str = include_str!("../../../skills/gear/references/rules/review.md");
+
+/// The line that ends a role's stance in its fixed rules file. What follows are
+/// the working rules every charter keeps; the line itself is never rendered.
+pub const STANCE_END: &str =
+    "<!-- stance end: what follows are the GEAR working rules every charter keeps -->";
 
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 
-/// The charter a role runs on (T-469): the config's own text when it names one,
-/// else the role's default rules. `None` for the captain, whose guide is a
-/// skill topic, not a rules file.
-pub fn charter<'a>(
-    config: Option<&'a ProjectConfig>,
-    role: SeatRole,
-    seat: &str,
-) -> Option<&'a str> {
+/// The fixed rules of a role.
+fn fixed_rules(role: SeatRole) -> Option<&'static str> {
     match role {
-        SeatRole::Lane => Some(
-            config
-                .and_then(|config| config.lanes.iter().find(|lane| lane.name == seat))
-                .and_then(|lane| lane.charter.as_deref())
-                .filter(|charter| !charter.trim().is_empty())
-                .unwrap_or(LANE_DEFAULT),
-        ),
-        SeatRole::Temp => Some(
-            config
-                .and_then(|config| config.temps.as_ref())
-                .and_then(|temps| temps.charter.as_deref())
-                .filter(|charter| !charter.trim().is_empty())
-                .unwrap_or(REVIEW_DEFAULT),
-        ),
+        SeatRole::Lane => Some(LANE_RULES),
+        SeatRole::Temp => Some(REVIEW_RULES),
         SeatRole::Captain => None,
     }
+}
+
+/// The stance and the working rules of a fixed rules file, the marker line
+/// removed. `None` when the file has no marker (it is never rendered then).
+fn split_rules(full: &str) -> Option<(&str, &str)> {
+    let at = full.find(STANCE_END)?;
+    let stance = full[..at].trim_end();
+    let working = full[at + STANCE_END.len()..].trim_start_matches('\n');
+    Some((stance, working))
+}
+
+/// The text of a role's rules file (T-469): its charter — the config's own
+/// stance when it names one, else the fixed stance — followed by the working
+/// rules every seat keeps, then the voyage's done and bar. `None` for the
+/// captain, whose guide is a skill topic, not a rules file.
+pub fn text(
+    config: Option<&ProjectConfig>,
+    role: SeatRole,
+    seat: &str,
+    done: &str,
+    bar: &str,
+) -> Option<String> {
+    let (stance, working) = split_rules(fixed_rules(role)?)?;
+    let stance = match role {
+        SeatRole::Lane => config
+            .and_then(|config| config.lanes.iter().find(|lane| lane.name == seat))
+            .and_then(|lane| lane.charter.as_deref()),
+        SeatRole::Temp => config
+            .and_then(|config| config.temps.as_ref())
+            .and_then(|temps| temps.charter.as_deref()),
+        SeatRole::Captain => None,
+    }
+    .map(str::trim)
+    .filter(|charter| !charter.is_empty())
+    .unwrap_or(stance);
+    Some(format!(
+        "{stance}\n\n{}\nVoyage done: {}\nBar: {}\n",
+        working.trim_end(),
+        done.trim(),
+        bar.trim()
+    ))
 }
 
 /// The file name of a role's rules under the seat's `rules` folder (T-469):
@@ -70,24 +99,6 @@ pub fn file_name(role: SeatRole, seat: &str) -> Option<String> {
         SeatRole::Temp => Some("review.md".to_string()),
         SeatRole::Captain => None,
     }
-}
-
-/// The text of a role's rules file: its charter, then the voyage's done and
-/// bar. `None` for the captain.
-pub fn text(
-    config: Option<&ProjectConfig>,
-    role: SeatRole,
-    seat: &str,
-    done: &str,
-    bar: &str,
-) -> Option<String> {
-    let charter = charter(config, role, seat)?;
-    Some(format!(
-        "{}\nVoyage done: {}\nBar: {}\n",
-        charter.trim_end(),
-        done.trim(),
-        bar.trim()
-    ))
 }
 
 /// The arguments that give a seat's agent its charter (T-469), with the rules
@@ -133,7 +144,7 @@ pub fn arguments(
         .and_then(|v| v.bar.as_deref())
         .unwrap_or("-");
     // A project without a stored config (a store written before one) keeps
-    // the default charters; a config that does not parse is the engine's
+    // the fixed charters; a config that does not parse is the engine's
     // finding elsewhere, not a start's failure.
     let config = store.read(|tx| tx.get_project(project))?;
     let config = config
@@ -262,6 +273,11 @@ gate = "make test"
         gear_herdr::builtin("pi").unwrap()
     }
 
+    /// A working rule of every lane: it is rendered under a charter too.
+    const LANE_WORKING: &str = "- Search only inside your worktree";
+    /// A working rule of every reviewer.
+    const REVIEW_WORKING: &str = "- Read the voyage's goal and bar first";
+
     #[test]
     fn two_charters_render_two_rules_files() {
         let (mut store, dir) = world(TWO_CHARTERS);
@@ -285,6 +301,10 @@ gate = "make test"
         assert_ne!(heat_text, pricing_text);
         assert!(heat_text.starts_with("You implement your packet without designing"));
         assert!(pricing_text.starts_with("You are a strong lane"));
+        // The stance is the charter's; the working rules are always there.
+        assert!(heat_text.contains(LANE_WORKING), "{heat_text}");
+        assert!(pricing_text.contains(LANE_WORKING), "{pricing_text}");
+        assert!(!heat_text.contains("You never design."), "{heat_text}");
         assert!(heat_text.ends_with("Voyage done: land the fleet\nBar: stable\n"));
         assert!(pricing_text.ends_with("Voyage done: land the fleet\nBar: stable\n"));
         let review = arguments(
@@ -304,6 +324,7 @@ gate = "make test"
         );
         let review_text = std::fs::read_to_string(&review_path).unwrap();
         assert!(review_text.starts_with("You judge one candidate"));
+        assert!(review_text.contains(REVIEW_WORKING), "{review_text}");
         assert!(review_text.ends_with("Voyage done: land the fleet\nBar: stable\n"));
         // The captain has no rules file: its guide is a skill topic.
         assert!(arguments(
@@ -346,7 +367,7 @@ gate = "make test"
     }
 
     #[test]
-    fn a_role_without_a_charter_keeps_the_fixed_rules() {
+    fn a_role_without_a_charter_renders_as_today() {
         let config = config::parse(
             r#"
 [project]
@@ -379,16 +400,35 @@ gate = "make test"
 "#,
         )
         .unwrap();
+        let lane = text(Some(&config), SeatRole::Lane, "heat", "-", "-").unwrap();
+        // The fixed file with its marker line removed: today's rules.
+        let fixed = LANE_RULES.replace(&format!("{STANCE_END}\n\n"), "");
         assert_eq!(
-            charter(Some(&config), SeatRole::Lane, "heat"),
-            Some(LANE_DEFAULT)
+            lane,
+            format!("{}\nVoyage done: -\nBar: -\n", fixed.trim_end())
         );
+        let review = text(Some(&config), SeatRole::Temp, "review-1", "-", "-").unwrap();
+        let fixed = REVIEW_RULES.replace(&format!("{STANCE_END}\n\n"), "");
         assert_eq!(
-            charter(Some(&config), SeatRole::Temp, "review-1"),
-            Some(REVIEW_DEFAULT)
+            review,
+            format!("{}\nVoyage done: -\nBar: -\n", fixed.trim_end())
         );
-        assert_eq!(charter(None, SeatRole::Lane, "heat"), Some(LANE_DEFAULT));
-        assert_eq!(charter(Some(&config), SeatRole::Captain, "captain"), None);
+        // Without a stored config the fixed charters are rendered too.
+        assert_eq!(text(None, SeatRole::Lane, "heat", "-", "-").unwrap(), lane);
+        assert_eq!(
+            text(Some(&config), SeatRole::Captain, "captain", "-", "-"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_fixed_rules_hold_a_stance_and_the_working_rules() {
+        for rules in [LANE_RULES, REVIEW_RULES] {
+            let (stance, working) = split_rules(rules).unwrap();
+            assert!(!stance.trim().is_empty());
+            assert!(!working.trim().is_empty());
+            assert!(!stance.contains(STANCE_END));
+        }
     }
 
     #[test]
