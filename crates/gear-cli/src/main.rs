@@ -894,12 +894,12 @@ fn cmd_admin_init(
             return Ok(());
         }
         Err(GearError::new(
-                gear_model::ErrorCode::BadFormat,
-                format!(
-                    "project {} names herdr_session {configured}, but this shell runs in session {name}: its store and engine are this session's; run init from a pane of session {configured}, or fix herdr_session",
-                    parsed.project.id
-                ),
-            ))
+            gear_model::ErrorCode::BadFormat,
+            format!(
+                "project {} names herdr_session {configured}, but this shell runs in session {name}: its store and engine are this session's; run init from a pane of session {configured}, or fix herdr_session",
+                parsed.project.id
+            ),
+        ))
     };
     // T-316: a repository under the system temp directory is a fixture (M4.2
     // #35: a leftover fixture project with empty tokens appeared in the
@@ -2187,9 +2187,7 @@ fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
     );
     println!("agent name: {}", named_line(&result.named));
     if let Some(document) = &result.document {
-        println!(
-            "previous captain's handover: {document} (read it before the task packet)"
-        );
+        println!("previous captain's handover: {document} (read it before the task packet)");
     } else if let Some(request) = &result.request {
         println!(
             "previous captain: pane {} {} · session {} · if no handover arrives within {} minutes, read it and write part 2 yourself",
@@ -3356,8 +3354,13 @@ fn engine_target_ok() -> Result<(), String> {
     let registry = targets_path_in(std::path::Path::new(&home));
     match registered_store(&registry, &socket) {
         Some(reg) if canonical(&reg) == canonical(&db) => Ok(()),
-        Some(reg) => Err(format!("{db} is not this Herdr session's GEAR store ({reg} is); an engine never runs on another store")),
-        None => Err(format!("no GEAR store is registered for this Herdr session ({}): run `gear admin init`", registry.display())),
+        Some(reg) => Err(format!(
+            "{db} is not this Herdr session's GEAR store ({reg} is); an engine never runs on another store"
+        )),
+        None => Err(format!(
+            "no GEAR store is registered for this Herdr session ({}): run `gear admin init`",
+            registry.display()
+        )),
     }
 }
 
@@ -3558,7 +3561,7 @@ fn cmd_admin_start() -> GearResult<()> {
                     return Err(GearError::new(
                         gear_model::ErrorCode::NoTarget,
                         format!("could not start the engine: {e}"),
-                    ))
+                    ));
                 }
             }
         }
@@ -5118,7 +5121,9 @@ path="api"
                 tx.update_project(&project)
             })
             .unwrap();
-        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind heat repo=api owns=[src/, tests/]\n");
+        let path = write_draft(
+            "<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind heat repo=api owns=[src/, tests/]\n",
+        );
         let out = run_plan(
             &mut store,
             &env("captain", CAP_PANE),

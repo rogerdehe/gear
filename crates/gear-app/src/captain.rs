@@ -287,7 +287,10 @@ pub fn take(
                 } else {
                     return Err(GearError::new(
                         ErrorCode::BadFormat,
-                        format!("which project? Ask the user, then run `gear captain take <project>`. {}", project_list(store, herdr)?),
+                        format!(
+                            "which project? Ask the user, then run `gear captain take <project>`. {}",
+                            project_list(store, herdr)?
+                        ),
                     ));
                 }
             }
@@ -522,9 +525,7 @@ fn newest_handover(root: &Path, directory: &str) -> Option<String> {
         .filter(|name| name.starts_with("captain-") && name.ends_with(".md"))
         .collect();
     names.sort();
-    names
-        .pop()
-        .map(|name| format!("{directory}/{name}"))
+    names.pop().map(|name| format!("{directory}/{name}"))
 }
 
 /// The prompt `gear captain take` sends the previous captain: write the
@@ -578,7 +579,9 @@ pub fn handover_facts(
     if milestone.is_empty() {
         return Err(GearError::new(
             ErrorCode::NoTarget,
-            format!("the project {project} has no voyage: a captain handover is a voyage's document"),
+            format!(
+                "the project {project} has no voyage: a captain handover is a voyage's document"
+            ),
         ));
     }
     let voyage = store
@@ -758,7 +761,9 @@ fn render_facts(
     let plan_row = tx.get_plan(project, plan_version)?;
     let mut lines: Vec<String> = Vec::new();
 
-    lines.push(format!("# Captain handover — {project} · voyage {milestone}"));
+    lines.push(format!(
+        "# Captain handover — {project} · voyage {milestone}"
+    ));
     lines.push(String::new());
     lines.push(format!(
         "Write the document from this template at {directory}/captain-{}.md, in three parts as handover.md part B says: the facts below, your own summary, free notes. Commit it before the captain seat moves. The incoming captain reads the whole document before its task packet.",
@@ -766,7 +771,9 @@ fn render_facts(
     ));
     lines.push(String::new());
 
-    lines.push("## 1. Facts (GEAR printed them; check each against the worktree or the store)".to_string());
+    lines.push(
+        "## 1. Facts (GEAR printed them; check each against the worktree or the store)".to_string(),
+    );
     let departure = match voyage.departure {
         Some(departure) => format!(
             "departed {} with {} tasks",
@@ -790,14 +797,7 @@ fn render_facts(
         "- Goal: {}",
         voyage.done.as_deref().unwrap_or("not described yet")
     ));
-    let clauses = crate::voyage::report(
-        tx,
-        project,
-        milestone,
-        false,
-        now,
-    )?
-    .done_clauses;
+    let clauses = crate::voyage::report(tx, project, milestone, false, now)?.done_clauses;
     lines.push(format!(
         "- Done clauses: {}",
         if clauses.is_empty() {
@@ -831,11 +831,7 @@ fn render_facts(
             };
             parts.push(format!(
                 "{} {state}: {} ({} of {} merged, {} min left{reached})",
-                station.id,
-                station.needs,
-                station.merged,
-                station.tasks,
-                station.left_min
+                station.id, station.needs, station.merged, station.tasks, station.left_min
             ));
         }
         lines.push(format!("- Stations: {}", parts.join(" · ")));
@@ -848,12 +844,11 @@ fn render_facts(
     // Staffing (handover.md part B): the seats, their CLIs and models, the
     // quotas, and the role charters (a lane's duty and owned paths).
     lines.push("- Staffing:".to_string());
-    let model_of = |seat: &str| -> String {
+    let model_of = |seat: &str| -> Option<String> {
         tx.get_meta(&format!("engine.model.{seat}"))
             .ok()
             .flatten()
             .filter(|model| !model.is_empty())
-            .unwrap_or_else(|| "unknown".to_string())
     };
     let head = |chain: &[config::ModelEntry]| -> String {
         chain
@@ -868,7 +863,7 @@ fn render_facts(
             seat.id,
             config.captain.kind,
             config.captain.profile,
-            model_of(&seat.id),
+            model_of(&seat.id).unwrap_or_else(|| head(&config.models.captain)),
             seat.state.as_str(),
             binding.as_ref().map(|b| b.pane_id.as_str()).unwrap_or("-"),
             seat.generation
@@ -904,14 +899,17 @@ fn render_facts(
             lane.kind,
             lane.profile,
             match seat {
-                Some(seat) => model_of(&seat.id),
+                Some(seat) => model_of(&seat.id).unwrap_or_else(|| head(chain)),
                 None => head(chain),
             },
             seat.map(|seat| seat.state.as_str()).unwrap_or("no seat"),
             binding.as_ref().map(|b| b.pane_id.as_str()).unwrap_or("-")
         ));
     }
-    let temps: Vec<_> = seats.iter().filter(|seat| seat.role == SeatRole::Temp).collect();
+    let temps: Vec<_> = seats
+        .iter()
+        .filter(|seat| seat.role == SeatRole::Temp)
+        .collect();
     lines.push(format!(
         "  - reviewers: {} seats · model {} · quota temps {}",
         temps.len(),
@@ -923,7 +921,7 @@ fn render_facts(
             "    - {}: seat {} · model {} · pane {}",
             seat.id,
             seat.state.as_str(),
-            model_of(&seat.id),
+            model_of(&seat.id).unwrap_or_else(|| head(&config.models.review)),
             tx.get_binding(&seat.id, seat.generation)?
                 .map(|b| b.pane_id)
                 .unwrap_or_else(|| "-".to_string())
@@ -938,7 +936,10 @@ fn render_facts(
     // captain, and the reworks queued.
     let mut reworks: Vec<String> = Vec::new();
     for task in &tasks {
-        if !matches!(task.state, TaskState::Ready | TaskState::Running | TaskState::Waiting) {
+        if !matches!(
+            task.state,
+            TaskState::Ready | TaskState::Running | TaskState::Waiting
+        ) {
             continue;
         }
         if tx
@@ -1030,7 +1031,11 @@ fn render_facts(
         let other_captain = format!("{id}:captain");
         let pane = tx
             .get_seat(&other_captain)?
-            .and_then(|seat| tx.get_binding(&other_captain, seat.generation).ok().flatten())
+            .and_then(|seat| {
+                tx.get_binding(&other_captain, seat.generation)
+                    .ok()
+                    .flatten()
+            })
             .map(|binding| binding.pane_id);
         let session = tx
             .get_project(&id)?
@@ -1084,7 +1089,10 @@ fn render_facts(
     lines.push("- The user's standing orders this voyage (never quoted), and the reason behind each when known:".to_string());
     lines.push("- Decisions in flight and why (what is decided and not yet in the plan; what was rejected):".to_string());
     lines.push("- What is fragile right now (a lane that loops, a reviewer to watch, a recovery to repeat, a known engine bug and its workaround):".to_string());
-    lines.push("- Promises made (to the user, to other captains: a rebuild, a release, an answer):".to_string());
+    lines.push(
+        "- Promises made (to the user, to other captains: a rebuild, a release, an answer):"
+            .to_string(),
+    );
     lines.push("- The next three things to do, in order:".to_string());
     lines.push("- Lessons this voyage not yet in lessons.md:".to_string());
     lines.push("- Files to read first:".to_string());
@@ -1108,10 +1116,7 @@ fn needs_of(
         ));
     }
     if message.needs_ack {
-        return Ok(format!(
-            "gear send --kind ack --reply-to {}",
-            message.id
-        ));
+        return Ok(format!("gear send --kind ack --reply-to {}", message.id));
     }
     if let Some(hint) = crate::tasks::verdict_hint(tx, project, message)? {
         return Ok(crate::home::verdict_command(&hint));
