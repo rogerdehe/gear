@@ -512,6 +512,15 @@ pub fn execute_intended(
             // intent, which may be much older).
             if matches!(item, Prepared::Run { probe: Some(_), .. }) && state == OpState::Submitted {
                 tx.set_meta(&submitted_key(item.id()), &now.to_string())?;
+                if matches!(
+                    item,
+                    Prepared::Run {
+                        policy: PromptPolicy::Delivery { working: true },
+                        ..
+                    }
+                ) {
+                    tx.set_meta(&aimed_working_key(item.id()), "1")?;
+                }
             }
             // T-407: a delivery that was typed is a finished step in the
             // engine log, and so is the Enter that follows it. `herdr prompt`
@@ -908,6 +917,13 @@ fn submitted_key(op_id: &str) -> String {
     format!("engine.deliver_submitted.{op_id}")
 }
 
+/// The meta key that says a delivery was typed into a working agent (T-453):
+/// its text waits in the input queue, so its window starts when the agent is
+/// idle again.
+fn aimed_working_key(op_id: &str) -> String {
+    format!("engine.deliver_working.{op_id}")
+}
+
 fn status_word(status: AgentStatus) -> &'static str {
     match status {
         AgentStatus::Idle => "idle",
@@ -1191,9 +1207,16 @@ pub fn confirm_pending_with(
                     let idle_since = tx
                         .get_meta(&agent_idle_since_key(&op.seat, op.generation))?
                         .and_then(|value| value.parse::<Ts>().ok());
-                    let window_start = idle_since
-                        .map(|idle| idle.max(op.created))
-                        .unwrap_or(op.created);
+                    let aimed_working = tx
+                        .get_meta(&aimed_working_key(&op.id))?
+                        .is_some_and(|value| !value.is_empty());
+                    let window_start = if aimed_working {
+                        idle_since
+                            .map(|idle| idle.max(op.created))
+                            .unwrap_or(op.created)
+                    } else {
+                        op.created
+                    };
                     if now - window_start < grace_s {
                         continue;
                     }
