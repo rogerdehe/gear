@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=968 -->
+<!-- gear-plan project=gear base=969 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -74,6 +74,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-6916: keep course — half the eta used, projected 811m of 1020m; S2's tasks are merged and its release T-476 is in work
 - 2026-11-01 02:00 hand-fix: T-470's report and review named another project's state path and session; reworded as 'another project's log' | why: the repo names no other project
 - 2026-11-01 02:20 scope: added to S5 (mast): omp runs as a lane or reviewer (built-in profile, skill install, usage log) | why: user: add omp support | else: -
+- 2026-11-01 02:45 hand-fix: a standby reviewer is free once the attempt of its last packet has a verdict, whoever wrote it (review.rs last_job_recorded); make gate passed; engines restarted | why: review-11's last packet was T-473's direction check with no direction round, so it waited forever for its own verdict and T-476 had no reviewer (M-6929)
 
 # Queue
 
