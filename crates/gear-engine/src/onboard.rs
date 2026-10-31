@@ -2210,7 +2210,8 @@ repo = "web"
             ["toy:heat"]
         );
         assert_eq!(start_args(&herdr), ["--auto"]);
-        assert!(dir.path().join("rules/lane.md").is_file());
+        // T-469: a lane's rules file is its own, under `rules/lanes`.
+        assert!(dir.path().join("rules/lanes/heat.md").is_file());
     }
 
     #[test]

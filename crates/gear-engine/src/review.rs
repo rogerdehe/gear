@@ -6853,9 +6853,12 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             value.len() < 400,
             "the typed command must stay short: {value}"
         );
-        assert!(std::fs::read_to_string(&path).unwrap().starts_with(
-            include_str!("../../../skills/gear/references/rules/review.md").trim_end()
-        ));
+        // T-469: the rendered file is the charter's text, without the
+        // stance-end marker line.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            gear_app::charter::text(None, SeatRole::Temp, "review-1", "-", "-").unwrap()
+        );
     }
 
     #[test]
