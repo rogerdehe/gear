@@ -1238,16 +1238,16 @@ fn last_job_recorded(store: &mut Store, project: &str, seat: &SeatRow) -> GearRe
             .filter(|round| round.seat == seat.id && round.attempt == attempt)
             .max_by_key(|round| round.start_at);
         if latest.is_some_and(|round| round.role == "direction") {
-            let sha = tx
+            let job = tx
                 .get_meta(&direction_key(project, &task, attempt))?
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                .and_then(|job| {
-                    job["checked_sha"]
-                        .as_str()
-                        .or_else(|| job["sha"].as_str())
-                        .map(str::to_string)
-                });
-            return Ok(tx
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+            let sha = job.as_ref().and_then(|job| {
+                job["checked_sha"]
+                    .as_str()
+                    .or_else(|| job["sha"].as_str())
+                    .map(str::to_string)
+            });
+            let recorded = tx
                 .direction_results_of_attempt(project, &task, attempt)?
                 .iter()
                 .any(|message| {
@@ -1262,7 +1262,19 @@ fn last_job_recorded(store: &mut Store, project: &str, seat: &SeatRow) -> GearRe
                         .as_deref()
                         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
                         .is_some_and(|meta| meta["direction"] == true && meta["sha"] == sha)
-                }));
+                });
+            if recorded {
+                return Ok(true);
+            }
+            // A check the engine closed without a result (T-258) is a
+            // recorded ending too: its seat was told the check is closed
+            // (T-444), and the seat comes free with it.
+            return Ok(job.as_ref().is_some_and(|job| {
+                job["checked_sha"].is_string()
+                    && job["state"]
+                        .as_str()
+                        .is_none_or(|state| state != "running" && state != "starting")
+            }));
         }
         Ok(tx
             .get_review_verdict(project, &task, attempt)?
@@ -3597,6 +3609,26 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
     /// Submitted with a candidate, the task is Verifying).
     fn world(config_toml: &str) -> Store {
         world_mechanical(config_toml, None)
+    }
+
+    /// The verdict the seat handed in for its last review (T-455): a warm seat
+    /// is free only when its last job's hand-in is recorded.
+    fn judged(
+        tx: &gear_store::Tx<'_>,
+        task: &str,
+        attempt: i64,
+        seat: &str,
+        passed: bool,
+    ) -> GearResult<()> {
+        tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+            project: "p".into(),
+            task: task.into(),
+            attempt,
+            passed,
+            findings: if passed { "ok".into() } else { "rework".into() },
+            by_seat: seat.into(),
+            created: T0,
+        })
     }
 
     /// The same world with the contract carrying `mechanical` (T-273): the
@@ -9064,6 +9096,7 @@ profile = "opencode"
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Done;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
                 tx.clear_seat_task("p:review-1")
             })
@@ -9340,6 +9373,7 @@ profile = "opencode"
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Ready;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", false)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 13)?;
                 tx.clear_seat_task("p:review-1")?;
                 tx.set_meta(&crate::model::model_meta_key("p:heat"), "gpt-6-astra")?;
@@ -9444,6 +9478,7 @@ profile = "opencode"
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Ready;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", false)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
                 tx.clear_seat_task("p:review-1")?;
                 tx.set_meta(&crate::model::model_meta_key("p:heat"), "gpt-6.1-sol")?;
@@ -9570,6 +9605,7 @@ profile = "opencode"
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Done;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
                 tx.clear_seat_task("p:review-1")?;
                 let mut project = tx.get_project("p")?.unwrap();
@@ -9658,6 +9694,7 @@ profile = "opencode"
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Done;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
                 tx.clear_seat_task("p:review-1")
             })
@@ -9722,6 +9759,7 @@ profile = "opencode"
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Done;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
                 tx.clear_seat_task("p:review-1")
             })
@@ -9829,6 +9867,7 @@ profile = "opencode"
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Done;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
                 tx.clear_seat_task("p:review-1")
             })
@@ -9911,18 +9950,10 @@ profile = "opencode"
         // for a job.
         store
             .write(|tx| {
-                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
-                    project: "p".into(),
-                    task: "T-1".into(),
-                    attempt: 1,
-                    passed: true,
-                    findings: "ok".into(),
-                    by_seat: "p:review-1".into(),
-                    created: T0 + 11,
-                })?;
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Done;
                 tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
                 tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
                 tx.clear_seat_task("p:review-1")
             })
