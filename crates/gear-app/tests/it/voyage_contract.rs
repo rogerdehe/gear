@@ -733,11 +733,11 @@ fn an_untouched_old_milestone_keeps_applying() {
     assert_eq!(voyage.done.as_deref(), Some("users install it"));
 }
 
-/// R1 (review): a milestone whose block was applied earlier departs when its
-/// first **tasks** are created — a queue-only apply, no repeated block — and a
+/// T-473: a block with tasks and no `depart:` line does not depart; a later
+/// block that names `depart: now` departs with the tasks it has then, and a
 /// later block/task addition never moves the departure.
 #[test]
-fn the_departure_is_the_first_task_creation_even_without_the_block() {
+fn a_block_with_tasks_and_no_depart_line_does_not_depart() {
     let mut s = world();
     // base 0: only the queue, one task on M1, and no M1 block — refused, and
     // nothing is written (T-333, T-442): a task sails on a voyage the file
@@ -758,29 +758,41 @@ fn the_departure_is_the_first_task_creation_even_without_the_block() {
         "nothing was written"
     );
 
-    // base 0 with the block: the milestone departs with its first task.
-    let with_block = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\ndepart: now\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    // base 0 with the block and no `depart:` line: the task is created, the
+    // milestone does not depart.
+    let with_block = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, with_block, "r1", NOW).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
         (voyage.departure, voyage.departure_tasks),
-        (Some(NOW), Some(1))
+        (None, None),
+        "no depart: line, no departure"
+    );
+
+    // base 1: the block names `depart: now` and a second task — it departs now,
+    // with the tasks it has then (the user confirmed the departure, T-461).
+    let depart = "<!-- gear-plan project=p base=1 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\ndepart: now\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
+    run_confirmed(&mut s, depart, "r2", NOW + 10).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks),
+        (Some(NOW + 10), Some(2))
     );
     assert!(s
         .read(|tx| render_task_packet(tx, "p", "T-1"))
         .unwrap()
-        .contains("with 1 tasks"));
+        .contains("with 2 tasks"));
 
-    // base 1: the block again plus a second task — the words update (the user
-    // asked for the change and confirmed it, T-410), the departure stays.
-    let more = "<!-- gear-plan project=p base=1 -->\n# Milestone M1: release v2\ndone: users install v2\nbar: keep it simple\neta: 9h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
-    run_confirmed(&mut s, more, "r2", NOW + 20).unwrap();
+    // base 2: the block again plus a third task, no `depart:` line — the
+    // departure stays where it was set.
+    let more = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [could] lane=heat milestone=M1\ngoal: C\naccept: c\nestimate: 30\ndeps: -\n";
+    run(&mut s, more, "r3", NOW + 20).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
         (voyage.departure, voyage.departure_tasks),
-        (Some(NOW), Some(1))
+        (Some(NOW + 10), Some(2)),
+        "a later block never moves the departure"
     );
-    assert_eq!(voyage.done.as_deref(), Some("users install v2"));
 }
 
 /// T-333: the block of a milestone the draft names but does not describe comes

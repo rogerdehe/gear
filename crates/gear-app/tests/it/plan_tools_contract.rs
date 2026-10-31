@@ -216,6 +216,28 @@ fn a_milestone_with_no_task_and_no_history_can_be_dropped() {
 }
 
 #[test]
+fn a_dropped_milestone_id_can_be_reused_and_dropped_again() {
+    let mut s = world();
+    let block = "<!-- gear-plan project=p base=0 -->\n# Milestone M3: a spare\ndone: nothing yet\nbar: keep it simple\neta: 2h\n";
+    run(&mut s, block, "r1", NOW).unwrap();
+    let drop = "<!-- gear-plan project=p base=1 -->\n# Staff\n- drop M3\n";
+    run(&mut s, drop, "r2", NOW + 10).unwrap();
+    assert!(s.read(|tx| tx.get_voyage("p", "M3")).unwrap().is_none());
+
+    // The same id again: a new voyage, no inherited history, and it can be
+    // dropped again (F2: the drop's own decision is not attached to the id).
+    let again = "<!-- gear-plan project=p base=2 -->\n# Milestone M3: reused\ndone: something now\nbar: keep it simple\neta: 3h\n";
+    run(&mut s, again, "r3", NOW + 20).unwrap();
+    assert!(s.read(|tx| tx.get_voyage("p", "M3")).unwrap().is_some());
+    let drop_again = "<!-- gear-plan project=p base=3 -->\n# Staff\n- drop M3\n";
+    run(&mut s, drop_again, "r4", NOW + 30).unwrap();
+    assert!(
+        s.read(|tx| tx.get_voyage("p", "M3")).unwrap().is_none(),
+        "the reused id is dropped again"
+    );
+}
+
+#[test]
 fn a_plan_apply_warns_when_two_ready_tasks_on_different_lanes_name_one_file() {
     let mut s = world();
     let text = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: change crates/x/src/y.rs so the parse holds\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [should] lane=data\ngoal: add a test for crates/x/src/y.rs\nevidence-files: crates/x/src/y.rs\naccept: a\nestimate: 30\ndeps: -\n";
@@ -252,5 +274,37 @@ fn a_plan_apply_warns_when_two_ready_tasks_on_different_lanes_name_one_file() {
             .any(|warning| warning.contains("crates/x/src/y.rs")),
         "{:?}",
         result.warnings
+    );
+}
+
+#[test]
+fn a_timed_voyage_departs_at_its_scheduled_depart_at_without_a_depart_line() {
+    let mut s = world();
+    // 2026-10-30T14:00:00Z, the instant the config names.
+    let depart_at = 1_793_368_800;
+    s.write(|tx| {
+        let mut project = tx.get_project("p")?.expect("the project");
+        project.config_toml = "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/repo\"\n\n[quota]\nlanes = 2\ntemps = 0\n\n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\n[schedule]\ndepart_at = \"2026-10-30T14:00:00Z\"\n".into();
+        tx.update_project(&project)
+    })
+    .unwrap();
+    let text = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: the timed one\ndone: it ships\nbar: keep it simple\neta: 2h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    run(&mut s, text, "r1", NOW).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks),
+        (Some(depart_at), Some(1)),
+        "a block without depart: takes [schedule] depart_at"
+    );
+    assert_eq!(voyage.departure_estimate_min, Some(30));
+
+    // A later block never moves it.
+    let more = "<!-- gear-plan project=p base=1 -->\n# Milestone M1: the timed one\ndone: it ships\nbar: keep it simple\neta: 2h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
+    run(&mut s, more, "r2", NOW + 60).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks),
+        (Some(depart_at), Some(1)),
+        "the scheduled departure is set once"
     );
 }

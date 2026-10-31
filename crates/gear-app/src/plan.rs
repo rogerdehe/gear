@@ -191,10 +191,13 @@ pub fn apply(
                     drop_milestone(tx, &ctx.project, draft, milestone, staff_line(item))?;
                     result.staffed.push(format!("drop {milestone}"));
                     let version = tx.plan_version(&ctx.project)?;
+                    // F2: the voyage row is gone; a decision against its id
+                    // would be inherited by a later milestone of the same id.
+                    // Keep the staff line in the append-only log, unattached.
                     record_gear_decision(
                         tx,
                         &ctx.project,
-                        milestone,
+                        "",
                         version,
                         "staff",
                         &staff_text(item),
@@ -3731,12 +3734,6 @@ fn planned_guard(
         .into_iter()
         .map(|task| (task.id.clone(), task))
         .collect();
-    let mut counts_before: BTreeMap<String, usize> = BTreeMap::new();
-    for task in existing.values() {
-        if let Some(milestone) = &task.milestone {
-            *counts_before.entry(milestone.clone()).or_default() += 1;
-        }
-    }
     let mut after: BTreeMap<String, Option<String>> = existing
         .iter()
         .map(|(id, task)| (id.clone(), task.milestone.clone()))
@@ -4280,6 +4277,23 @@ fn why_naming(decisions: &[crate::decision::Decision], task: &str) -> Option<Str
 /// the change applies and a starred decision of kind `user` records it. A
 /// voyage that had not departed before this apply states its words freely; a
 /// departed voyage with no stations yet gets its first list freely too.
+/// T-473 F1: the project's scheduled departure (`[schedule] depart_at`), when
+/// the stored config names one that parses; a block without `depart:` departs
+/// then. A config that cannot be parsed names no schedule.
+fn scheduled_departure(tx: &Tx<'_>, project: &str) -> GearResult<Option<Ts>> {
+    let Some(row) = tx.get_project(project)? else {
+        return Ok(None);
+    };
+    let Ok(config) = crate::config::parse(&row.config_toml) else {
+        return Ok(None);
+    };
+    Ok(config
+        .schedule
+        .as_ref()
+        .and_then(|schedule| schedule.depart_at.as_deref())
+        .and_then(parse_rfc3339))
+}
+
 fn record_voyages(
     tx: &Tx<'_>,
     project: &str,
@@ -4424,7 +4438,14 @@ fn record_voyages(
             updated: now,
         })?;
         tx.set_voyage_stations(project, id, &stations)?;
-        if crate::draft::milestone_depart(body).as_deref() == Some("now") {
+        // T-473: `depart: now` departs at the apply; a block with no `depart:`
+        // line takes the project's `[schedule] depart_at` when the config
+        // names one (F1: a timed voyage keeps its eta and its scheduled end).
+        let departure = match crate::draft::milestone_depart(body).as_deref() {
+            Some("now") => Some(now),
+            _ => scheduled_departure(tx, project)?,
+        };
+        if let Some(at) = departure {
             let voyage = tx.get_voyage(project, id)?;
             if voyage
                 .as_ref()
@@ -4443,7 +4464,7 @@ fn record_voyages(
                         .into_iter()
                         .flatten()
                         .sum();
-                    tx.set_voyage_departure(project, id, now, tasks.len() as i64, now)?;
+                    tx.set_voyage_departure(project, id, at, tasks.len() as i64, now)?;
                     tx.set_voyage_departure_estimate(project, id, estimate)?;
                 }
             }
