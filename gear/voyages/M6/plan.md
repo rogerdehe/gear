@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=980 -->
+<!-- gear-plan project=gear base=981 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -86,6 +86,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-6980: move — hull 316m against mast 221m; T-496 and T-498 (the omp and agy usage readers) go to mast, right after the profile tasks they follow (hull ~256m, mast ~281m)
 - 2026-11-01 05:00 hand-fix: no review-stall item for a rework whose earlier reviewer is busy on another review (review.rs tell_captain_of_a_review_stall); make gate passed; engines restarted | why: T-480 queues the re-review behind that reviewer by design, yet T-472 attempt 2 rang a false stall (M-6996), against done (3)
 - station M-7013: keep course — 33 done, projected 870m of 1020m (hull 172m, mast 225m)
+- 2026-11-01 05:40 hand-fix: the binary-changed notice waits 10 minutes after the rebuild before it reaches a captain (gear-cli BinaryWatch); make gate passed; both engines restarted | why: user: the stale notice kept ringing another project's captain on every restart, right before that project departs
 
 # Queue
 
