@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gear_model::{
-    ErrorCode, GearError, GearResult, MsgKind, OpKind, OpState, SeatRole, SeatState, TaskState, Ts,
+    ErrorCode, GearError, GearResult, MsgKind, OpKind, SeatRole, SeatState, TaskState, Ts,
 };
 use gear_store::{BindingStatus, MessageRow, RoundRow, SeatRow, Store, TaskRow, Tx};
 
@@ -68,6 +68,7 @@ pub mod hook {
 
     thread_local! {
         static BUILDS: Cell<usize> = Cell::new(0);
+        static RENDERS: Cell<usize> = Cell::new(0);
         static STALE_AFTER: Cell<Duration> = Cell::new(super::REBUILD_AFTER);
         static AGENTS_EVERY: Cell<Duration> = Cell::new(super::AGENTS_EVERY);
     }
@@ -83,10 +84,22 @@ pub mod hook {
         BUILDS.with(Cell::get)
     }
 
-    /// Count the builds from zero and put both intervals back to their
-    /// defaults.
+    /// One more frame was rendered; [`run_with`](crate::run_with) counts them.
+    pub(crate) fn rendered() {
+        RENDERS.with(|count| count.set(count.get() + 1));
+    }
+
+    /// The frames [`run_with`](crate::run_with) rendered on this thread since
+    /// the last [`reset`] (T-471).
+    pub fn renders() -> usize {
+        RENDERS.with(Cell::get)
+    }
+
+    /// Count the builds and the renders from zero and put both intervals back
+    /// to their defaults.
     pub fn reset() {
         BUILDS.with(|count| count.set(0));
+        RENDERS.with(|count| count.set(0));
         STALE_AFTER.with(|value| value.set(super::REBUILD_AFTER));
         AGENTS_EVERY.with(|value| value.set(super::AGENTS_EVERY));
     }
@@ -651,9 +664,7 @@ pub fn project_for(
     // The voyage the board measures: the one named, else the active one, else
     // the latest departed one (F5 of the T-166 review).
     let workload = match milestone {
-        Some(milestone) => voyage::reports_including_finished(tx, project, now)?
-            .into_iter()
-            .find(|report| report.milestone == milestone),
+        Some(milestone) => voyage::report_for(tx, project, milestone, now)?,
         None => workload_voyage(tx, project, now)?,
     };
     // The tasks the board shows. A named voyage shows its own tasks and no
@@ -956,10 +967,7 @@ pub fn project_for(
     // The work as a graph (design §8.1), of the tasks the board shows (T-246).
     let graphed: std::collections::BTreeSet<&str> =
         tasks.iter().map(|task| task.id.as_str()).collect();
-    let graph: Vec<graph::GraphTask> = graph::tasks(tx, project, now)?
-        .into_iter()
-        .filter(|task| graphed.contains(task.id.as_str()))
-        .collect();
+    let graph: Vec<graph::GraphTask> = graph::tasks_shown(tx, project, now, &graphed)?;
     let graph_lanes = graph::lanes(tx, project)?;
 
     // The captain's inbox: the items that wait for an answer.
@@ -1011,32 +1019,24 @@ pub fn project_for(
     // home page showed it as a lost message.
     let mut unconfirmed_deliveries = 0;
     let mut unconfirmed: Vec<Unconfirmed> = Vec::new();
-    for state in [
-        OpState::Intended,
-        OpState::Executing,
-        OpState::Submitted,
-        OpState::Unknown,
-    ] {
-        for op in tx.ops_in_state(project, state)? {
-            if op.kind != OpKind::Deliver {
-                continue;
-            }
-            let seat = tx.get_seat(&op.seat)?;
-            let live = seat.as_ref().is_some_and(|seat| {
-                matches!(
-                    seat.state,
-                    SeatState::Active | SeatState::Standby | SeatState::Starting
-                ) && seat.generation == op.generation
+    // Only the Deliver ops that are not settled yet are read (T-471): the
+    // other ops of the project cannot change what this list shows.
+    for op in tx.unsettled_deliveries(project)? {
+        let seat = tx.get_seat(&op.seat)?;
+        let live = seat.as_ref().is_some_and(|seat| {
+            matches!(
+                seat.state,
+                SeatState::Active | SeatState::Standby | SeatState::Starting
+            ) && seat.generation == op.generation
+        });
+        if live {
+            unconfirmed_deliveries += 1;
+            unconfirmed.push(Unconfirmed {
+                op: op.id.clone(),
+                seat: seat.map(|seat| seat.name).unwrap_or_default(),
+                task: op.task.clone(),
+                age_s: (now - op.created).max(0),
             });
-            if live {
-                unconfirmed_deliveries += 1;
-                unconfirmed.push(Unconfirmed {
-                    op: op.id.clone(),
-                    seat: seat.map(|seat| seat.name).unwrap_or_default(),
-                    task: op.task.clone(),
-                    age_s: (now - op.created).max(0),
-                });
-            }
         }
     }
     // The oldest first: the delivery that waits longest is the one that may be
@@ -2271,6 +2271,36 @@ pub fn run(
     result
 }
 
+/// What a frame is rendered from (T-471): the board generation, the tab, the
+/// selection, the header details, the size and the panel. The text is rendered
+/// again only when one of them moved, so a refresh that changes nothing costs
+/// no frame build at all.
+#[derive(PartialEq)]
+struct RenderKey {
+    board: usize,
+    tab: frame::Tab,
+    selected: usize,
+    detail: bool,
+    opened: Vec<String>,
+    size: (usize, usize),
+    panel: Option<Vec<style::Line>>,
+}
+
+impl RenderKey {
+    /// The key of the frame the screen would draw now.
+    fn of(screen: &frame::Screen, panel: Option<&[style::Line]>, board: usize) -> RenderKey {
+        RenderKey {
+            board,
+            tab: screen.tab,
+            selected: screen.selected,
+            detail: screen.detail,
+            opened: screen.opened.clone(),
+            size: screen.size,
+            panel: panel.map(<[style::Line]>::to_vec),
+        }
+    }
+}
+
 /// The frames over injected keys: the board is redrawn every
 /// [`Options::refresh`], `q` leaves it, the arrows and the tab key change the
 /// view, the numbers pick a view, the up and down keys move the selection and
@@ -2284,6 +2314,11 @@ pub fn run(
 /// was built last, and Herdr is asked for its agents at most every
 /// [`AGENTS_EVERY`]. A frame that reads like the last one written is not
 /// written at all (T-403): the screen keeps it.
+///
+/// The frame's text itself is rendered only when one of the things it shows
+/// moved (T-471): the board generation, the tab, the selection, the header
+/// details, the size or the panel. A refresh that changes none of them reuses
+/// the text it rendered last and costs no frame build.
 pub fn run_with(
     store: &mut Store,
     opts: &Options,
@@ -2299,6 +2334,12 @@ pub fn run_with(
         size: keys.size(),
     };
     let mut panel: Option<Vec<style::Line>> = None;
+    // The board generation: it moves whenever the model the frame draws moves,
+    // so a frame that changes none of its inputs is not rendered again (T-471).
+    let mut board_gen: usize = 0;
+    // The frame rendered last, with what it was rendered from (T-471): a
+    // refresh that finds nothing changed reuses it.
+    let mut rendered: Option<(RenderKey, String, Vec<usize>, frame::Layout)> = None;
     // The project the board shows when it was opened without one (T-317):
     // the store is the session's, so its projects are the session's, and `p`
     // walks through them.
@@ -2366,11 +2407,13 @@ pub fn run_with(
                     kept = Some(board);
                     kept_version = version;
                     built_at = std::time::Instant::now();
+                    board_gen += 1;
                     hook::built();
                 }
                 Err(e) => {
                     // The first frame decides whether the board can start at all.
                     kept = None;
+                    rendered = None;
                     if first {
                         return Err(e);
                     }
@@ -2395,25 +2438,39 @@ pub fn run_with(
         let size = keys.size();
         let resized = size != screen.size;
         screen.size = size;
-        // The selection moves over the rows the view paints as picks, and
-        // never leaves them (F4): a view that shrank, or a key pressed at its
-        // end, does not lose the selection.
         // The head of the board says where the tabs and the view are (T-353):
         // the box of the goal and the rows of the header grow and shrink with
         // the voyage's words.
-        let layout = {
+        //
+        // A frame is rendered only when one of its inputs moved (T-471): the
+        // board generation, the tab, the selection, the header details, the
+        // size or the panel. Every other refresh reuses the text rendered last,
+        // so a board that finds nothing changed builds no frame at all.
+        let key = RenderKey::of(&screen, panel.as_deref(), board_gen);
+        let reused = rendered
+            .as_ref()
+            .is_some_and(|(rendered_key, ..)| rendered_key == &key);
+        let (text, picks, layout) = if reused {
+            let (_, text, picks, layout) = rendered.as_ref().expect("just checked");
+            (text.clone(), picks.clone(), layout.clone())
+        } else {
             let board = kept.as_ref().expect("the board was just built or kept");
-            frame::layout(board, &screen)
-        };
-        let mut tall = frame::Canvas::new(screen.size.0, 1000);
-        let picks = {
-            let board = kept.as_ref().expect("the board was just built or kept");
-            frame::view(board, &screen, &mut tall, layout.top)
-        };
-        screen.selected = screen.selected.min(picks.len().saturating_sub(1));
-        let text = {
-            let board = kept.as_ref().expect("the board was just built or kept");
-            frame::canvas(board, &screen, panel.as_deref()).ansi(opts.color)
+            let layout = frame::layout(board, &screen);
+            let mut tall = frame::Canvas::new(screen.size.0, 1000);
+            let picks = frame::view(board, &screen, &mut tall, layout.top);
+            // The selection moves over the rows the view paints as picks, and
+            // never leaves them (F4): a view that shrank, or a key pressed at
+            // its end, does not lose the selection.
+            screen.selected = screen.selected.min(picks.len().saturating_sub(1));
+            let text = frame::canvas(board, &screen, panel.as_deref()).ansi(opts.color);
+            rendered = Some((
+                RenderKey::of(&screen, panel.as_deref(), board_gen),
+                text.clone(),
+                picks.clone(),
+                layout.clone(),
+            ));
+            hook::rendered();
+            (text, picks, layout)
         };
         first = false;
         if resized {
@@ -2487,6 +2544,7 @@ pub fn run_with(
                         let count = board.projects.len();
                         if count > 1 {
                             board.projects.rotate_left(1);
+                            board_gen += 1;
                         }
                         // `shown` names the project shown, not the presses
                         // since the board opened (T-384 rework, F1): kept

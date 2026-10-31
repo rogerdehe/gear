@@ -224,6 +224,13 @@ fn ten_refresh_periods_build_the_board_once() {
         1,
         "nothing changed: one board, ten refreshes"
     );
+    // T-471: the frame text is rendered once, not once per refresh: a refresh
+    // that changes none of the frame's inputs reuses the text.
+    assert_eq!(
+        hook::renders(),
+        1,
+        "nothing changed: one frame rendered, ten refreshes"
+    );
     // The board is not redrawn either: the frame the ten refreshes build says
     // what the first one said, so it is not written again (T-403: rewriting
     // the same frame is what made the page blink).
@@ -284,6 +291,13 @@ fn a_key_press_redraws_without_building_the_board() {
         hook::builds(),
         1,
         "the keys redrew the board, they did not build it"
+    );
+    // T-471: each change renders the frame once; the second `Down` has nowhere
+    // to go, so its frame is reused and not rendered again.
+    assert_eq!(
+        hook::renders(),
+        3,
+        "the first frame, the tab and the one move that changed the selection"
     );
     let drawn = frames(&out);
     assert_eq!(

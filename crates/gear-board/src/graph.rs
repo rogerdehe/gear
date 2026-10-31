@@ -231,9 +231,36 @@ pub struct GraphTask {
 /// first, then the work, then the reviews, then the merged ones (the newest
 /// first).
 pub fn tasks(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<GraphTask>> {
+    tasks_of(tx, project, now, |_| true)
+}
+
+/// The graph of the tasks the board shows (T-471): a board shows one voyage,
+/// so the rows of the other voyages are dropped before their history is read
+/// instead of after. The result is [`tasks`] filtered by `shown`, with the
+/// same rows and the same order.
+pub fn tasks_shown(
+    tx: &Tx<'_>,
+    project: &str,
+    now: Ts,
+    shown: &std::collections::BTreeSet<&str>,
+) -> GearResult<Vec<GraphTask>> {
+    tasks_of(tx, project, now, |id| shown.contains(id))
+}
+
+/// The rows of the graph, keeping the ones `keep` names: a board reads the
+/// history of the rows it shows and of no other row.
+fn tasks_of(
+    tx: &Tx<'_>,
+    project: &str,
+    now: Ts,
+    keep: impl Fn(&str) -> bool,
+) -> GearResult<Vec<GraphTask>> {
     let rows = tx.tasks_of_project(project)?;
     let mut tasks = Vec::new();
     for row in &rows {
+        if !keep(row.id.as_str()) {
+            continue;
+        }
         if row.state == TaskState::Draft {
             // A task that is not in the plan yet is not in the flow.
             continue;

@@ -25,6 +25,7 @@ pub mod doorbell;
 pub mod feed;
 pub mod friction;
 pub mod guardrails;
+pub mod handover;
 pub mod hours;
 pub mod lane_nudge;
 pub mod merge;

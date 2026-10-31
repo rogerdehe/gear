@@ -1356,3 +1356,24 @@ fn a_task_that_started_and_waits_again_keeps_its_row() {
     assert_eq!(rows[1].task, None);
     assert_eq!(rows[1].text, "       starts +0h01m");
 }
+
+/// T-471: the graph of the tasks a board shows reads the history of those
+/// tasks only, and gives the same rows in the same order as the full graph
+/// filtered by them.
+#[test]
+fn the_graph_of_the_shown_tasks_is_the_filtered_full_graph() {
+    let mut store = world();
+    let now = T0 + 3600;
+    let all = store.read(|tx| tasks(tx, "p", now)).unwrap();
+    let shown: std::collections::BTreeSet<&str> =
+        all.iter().take(2).map(|task| task.id.as_str()).collect();
+    let expected: Vec<GraphTask> = all
+        .iter()
+        .filter(|task| shown.contains(task.id.as_str()))
+        .cloned()
+        .collect();
+    let narrowed = store
+        .read(|tx| gear_board::graph::tasks_shown(tx, "p", now, &shown))
+        .unwrap();
+    assert_eq!(narrowed, expected);
+}

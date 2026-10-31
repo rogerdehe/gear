@@ -285,7 +285,7 @@ fn a_pi_lane_starts_with_its_model() {
             std::path::Path::new(&cfg.db_path)
                 .parent()
                 .unwrap()
-                .join("rules/lane.md")
+                .join("rules/lanes/heat.md")
                 .to_string_lossy()
                 .into_owned(),
             "--model".to_string(),
@@ -344,7 +344,7 @@ fn a_pi_lane_starts_with_the_arguments_of_its_chain_entry() {
             std::path::Path::new(&cfg.db_path)
                 .parent()
                 .unwrap()
-                .join("rules/lane.md")
+                .join("rules/lanes/heat.md")
                 .to_string_lossy()
                 .into_owned(),
             "--model".to_string(),
@@ -492,12 +492,20 @@ fn pi_lane_start_injects_its_rules_file() {
     );
     let starts = agent_starts(&herdr);
     let args = &starts[0].2;
-    let path = dir.path().join("rules/lane.md");
+    let path = dir.path().join("rules/lanes/heat.md");
     assert!(args
         .windows(2)
         .any(|w| w[0] == "--append-system-prompt" && w[1] == path.to_string_lossy()));
     let rules = std::fs::read_to_string(path).unwrap();
-    assert!(rules
-        .starts_with(include_str!("../../../../skills/gear/references/rules/lane.md").trim_end()));
+    // T-469: without a charter the lane gets today's fixed rules, with the
+    // working rules every charter keeps.
+    assert_eq!(
+        rules,
+        gear_app::charter::text(None, SeatRole::Lane, "heat", "-", "-").unwrap()
+    );
+    assert!(
+        rules.contains("- Search only inside your worktree"),
+        "{rules}"
+    );
     assert!(rules.ends_with("Voyage done: -\nBar: -\n"));
 }

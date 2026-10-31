@@ -1320,7 +1320,10 @@ mod tests {
     }
 
     #[test]
-    fn pi_session_resume_starts_with_role_rules() {
+    fn pi_session_resume_starts_without_role_rules() {
+        // T-469: a resumed conversation already holds the charter it started
+        // with, so it is given none again; a new session is (see
+        // `a_new_session_starts_with_role_rules`).
         let dir = tempfile::tempdir().unwrap();
         let (mut store, mut herdr, seat, mut config) = pi_world();
         config.db_path = dir.path().join("gear.db").to_string_lossy().into();
@@ -1361,13 +1364,71 @@ mod tests {
                 }
             })
             .unwrap();
-        let path = dir.path().join("rules/lane.md");
+        let path = dir.path().join("rules/lanes/pi-lane.md");
+        assert!(
+            !args
+                .windows(2)
+                .any(|w| w[0] == "--append-system-prompt" && w[1] == path.to_string_lossy()),
+            "a resumed session is given no charter again: {args:?}"
+        );
+        assert!(args.windows(2).any(|w| w == ["--session", "old-session"]));
+    }
+
+    #[test]
+    fn pi_new_session_starts_with_role_rules() {
+        // T-469: a new conversation is given its charter, written for the
+        // lane's model (the fallback start of a session that could not be
+        // resumed).
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, mut herdr, seat, mut config) = pi_world();
+        config.db_path = dir.path().join("gear.db").to_string_lossy().into();
+        herdr.exit_agent("pi:p1");
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    &format!("engine.session_step.{}", seat.id),
+                    &serde_json::json!({
+            "round":"p:T-1:1:dev", "generation":1, "action":"new", "step":"start_fallback",
+            "step_at":T0, "target":""
+        })
+                    .to_string(),
+                )
+            })
+            .unwrap();
+        let action = Action::New;
+        assert_eq!(
+            crate::session_runner::run(
+                &mut store,
+                &mut herdr,
+                &config,
+                &seat,
+                "T-1",
+                1,
+                Role::Dev,
+                &action,
+                false,
+                T0 + 1
+            )
+            .unwrap(),
+            Prep::Wait
+        );
+        let args = herdr
+            .calls
+            .iter()
+            .find_map(|c| {
+                if let gear_herdr::fake::Call::AgentStart { args, .. } = c {
+                    Some(args)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        let path = dir.path().join("rules/lanes/pi-lane.md");
         assert!(
             args.windows(2)
                 .any(|w| w[0] == "--append-system-prompt" && w[1] == path.to_string_lossy()),
-            "{args:?}"
+            "a new session is given its charter: {args:?}"
         );
-        assert!(args.windows(2).any(|w| w == ["--session", "old-session"]));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=951 -->
+<!-- gear-plan project=gear base=956 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -58,6 +58,12 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-6788: keep course — projected 852m of 1020m, lanes within 120m
 - station M-6789: keep course — projected 856m of 1020m with T-494 added (hull 556m, mast 494m)
 - 2026-10-31 21:55 hand-fix: rebuilt and restarted both engines on dev f7c5a16c (no schema change since 94c314e8) | why: S1's merged fixes (T-453, T-454, T-455, T-456, T-458, T-480, T-481, T-483) ran only after a restart; F-245 hit the old review-branch bug T-483 already fixed
+- station M-6828: keep course — projected 858m of 1020m, lanes even (hull 498m, mast 474m); S1's release T-475 is handed in and waits for review
+- station M-6831: keep course — 18 done, projected 841m of 1020m (hull 421m, mast 474m)
+- 2026-10-31 22:40 hand-fix: closed a vim that review-11's `git rebase --continue` opened 59 minutes before, and told it to continue with GIT_EDITOR=true | why: T-469's re-review sat in an editor no one can close; T-468 v2 sets the editor variables for every seat
+- 2026-10-31 23:00 hand-fix: nudged hull to push T-467 (30 min without a push, no answer to the engine's ask; it was working and its tests passed) | why: M-6840
+- 2026-10-31 23:10 hand-fix: released v0.6.0 (dev merged into main as ac611ad7, tag v0.6.0, release workflow), after the skill review added one contract rule to captain.md; both engines restarted on v0.6.0 | why: station S1 reached, done (5)
+- 2026-10-31 23:10 hand-fix: told mast the header layout of T-494 and to push (30 min without a push, weighing column offsets) | why: M-6844
 
 # Queue
 
@@ -172,7 +178,7 @@ accept: Engine and app tests: reviewers raised to 8 start while hand-ins wait; o
 estimate: 50
 
 ## T-468 [now] lane=hull milestone=M6 station=S2 required
-goal: [S2] Dialogs never block. A lane or reviewer may not stop on a dialog at all: when its agent shows a blocking screen (an approval or a question the CLI asks), the engine closes it at once and tells the seat "Dialogs are not allowed for your role; ask the captain with gear send --kind question." Every other dialog (the captain's to the user) is cancelled when nobody answers it within 10 minutes, and the work goes on as it would have without it. The skill says the captain opens a dialog only for a change the user asked for.
+goal: [S2] Dialogs never block. A lane or reviewer may not stop on a dialog at all: when its agent shows a blocking screen (an approval or a question the CLI asks), the engine closes it at once and tells the seat "Dialogs are not allowed for your role; ask the captain with gear send --kind question." Every other dialog (the captain's to the user) is cancelled when nobody answers it within 10 minutes, and the work goes on as it would have without it. The skill says the captain opens a dialog only for a change the user asked for. Also every seat's agent starts with GIT_EDITOR=true, GIT_SEQUENCE_EDITOR=true and EDITOR=true in its environment, so a git command never opens an editor no one can close (2026-10-31: review-11's `git rebase --continue` waited 59 minutes in vim).
 accept: Engine tests: a blocked lane or reviewer screen is closed in the same tick and the seat gets the text; a captain dialog unanswered for 10 minutes is cancelled. Run make check CRATE=gear-engine.
 estimate: 40
 

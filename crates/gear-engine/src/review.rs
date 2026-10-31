@@ -2481,8 +2481,15 @@ fn start_reviewer(
             //    the session of an earlier review of the same task when the
             //    reviewer resumes it (F3).
             let mut args = reviewer_args(store, config, profile, kind, entry, &task.task)?;
-            let rules =
-                crate::rules::arguments(store, &seat.project, seat.role, &cfg.db_path, profile)?;
+            let rules = crate::rules::arguments(
+                store,
+                &seat.project,
+                seat.role,
+                &seat.name,
+                &cfg.db_path,
+                profile,
+                false,
+            )?;
             args.splice(
                 profile.unattended_args.len()..profile.unattended_args.len(),
                 rules,
@@ -7476,9 +7483,12 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             value.len() < 400,
             "the typed command must stay short: {value}"
         );
-        assert!(std::fs::read_to_string(&path).unwrap().starts_with(
-            include_str!("../../../skills/gear/references/rules/review.md").trim_end()
-        ));
+        // T-469: the rendered file is the charter's text, without the
+        // stance-end marker line.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            gear_app::charter::text(None, SeatRole::Temp, "review-1", "-", "-").unwrap()
+        );
     }
 
     #[test]

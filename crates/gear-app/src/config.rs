@@ -229,6 +229,10 @@ pub struct LaneSection {
     /// root.
     #[serde(default)]
     pub repo: Option<String>,
+    /// This lane's charter (T-469): how its agent works on the model it runs,
+    /// written at kickoff for that model. Absent = the lane rules.
+    #[serde(default)]
+    pub charter: Option<String>,
 }
 
 /// One repo of a multi-repo project (T-52): a child repository below
@@ -374,6 +378,10 @@ pub struct Repo {
 pub struct TempsSection {
     pub kind: String,
     pub profile: String,
+    /// The reviewers' charter (T-469): how a reviewer works on its model.
+    /// Absent = the reviewer rules.
+    #[serde(default)]
+    pub charter: Option<String>,
 }
 
 /// The default cap on a task's planned time (T-279): no task is planned for
@@ -765,6 +773,12 @@ pub struct Timing {
     /// ran its suite is not a stale base. `0` = a hand-in must contain the
     /// current tip (the strict rule).
     pub handin_base_window_min: u32,
+    /// How long an at-once agent switch lets the outgoing agent wrap up and
+    /// commit before the engine exits it anyway (T-465); default 10 minutes.
+    pub switch_grace_min: u32,
+    /// Whether an agent switch (a new CLI) happens at once instead of at the
+    /// seat's next safe point (T-465); default false = the next safe point.
+    pub switch_at_once: bool,
 }
 
 impl Default for Timing {
@@ -778,6 +792,8 @@ impl Default for Timing {
             lane_busy_idle_min: 10,
             delivery_grace_s: 180,
             handin_base_window_min: 30,
+            switch_grace_min: 10,
+            switch_at_once: false,
         }
     }
 }
@@ -1349,6 +1365,31 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                 &owns_field,
                 format!("overlaps the paths owned by lane {:?}", other.name),
             ));
+        }
+
+        // A charter (T-469) that is present must say something: a blank one
+        // would replace the lane rules with nothing, so it is a finding.
+        if let Some(charter) = &lane.charter {
+            if charter.trim().is_empty() {
+                issues.push(issue(
+                    &format!("lanes[{index}].charter"),
+                    "a charter is empty after trimming: leave it out to keep the lane rules"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
+    // ---- the reviewers' charter (T-469), the same rule.
+    if let Some(temps) = &cfg.temps {
+        if let Some(charter) = &temps.charter {
+            if charter.trim().is_empty() {
+                issues.push(issue(
+                    "temps.charter",
+                    "a charter is empty after trimming: leave it out to keep the reviewer rules"
+                        .to_string(),
+                ));
+            }
         }
     }
 
