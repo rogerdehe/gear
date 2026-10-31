@@ -141,6 +141,7 @@ pub fn deliver_doorbell_now(
         id: message.to_string(),
         urgent,
         at_once: true,
+        cut: false,
     }];
     // Design §10.4: a lane with no open attempt gets the text that tells it
     // to stop working on earlier things.

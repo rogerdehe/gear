@@ -300,11 +300,13 @@ fn the_taskless_doorbell_text_says_so() {
             id: "M-12".into(),
             urgent: false,
             at_once: false,
+            cut: false,
         },
         DoorbellItem {
             id: "M-13".into(),
             urgent: true,
             at_once: false,
+            cut: false,
         },
     ];
     let said = text(&items, true);

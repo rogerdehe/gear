@@ -24,6 +24,10 @@ pub struct DoorbellItem {
     /// Typed into the pane even while the agent works (T-130): urgent, or a
     /// captain instruction for an agent that queues input.
     pub at_once: bool,
+    /// Cuts a working turn and goes even when the seat holds a delivery slot
+    /// (T-454 v2): only the notice that closes a direction check under its
+    /// reviewer, which ends that turn at once.
+    pub cut: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +80,9 @@ pub struct DoorbellAction {
 /// `at_once` bypasses the idle check and the cooldown: an urgent message (or a
 /// captain instruction for a queueing agent) is typed at once, and the cooldown
 /// is only there to keep ordinary reminders apart. The slot check is not
-/// bypassed: a prompt in the same moment as a delivery is swallowed (T-71).
+/// bypassed: a prompt in the same moment as a delivery is swallowed (T-71) —
+/// except for an item that cuts the turn (T-454 v2: the direction-closed
+/// notice), which ends the turn at once even while a delivery holds the slot.
 ///
 /// A working agent is told only about the messages that must reach it now; the
 /// others wait for idle, as before. An idle agent is told about everything.
@@ -113,7 +119,7 @@ pub fn at_once(urgent: bool, kind: MsgKind, from_captain: bool, queues_input: bo
 }
 
 /// The sender GEAR's engine writes its own notices under.
-pub const NOTICE_SENDER: &str = "engine";
+pub const NOTICE_SENDER: &str = gear_store::ENGINE_SENDER;
 
 /// Is this message one of the engine's own notices? A notice is not a seat's
 /// word: it never goes into a working agent (T-454).
@@ -121,14 +127,13 @@ pub fn is_notice(sender: &str) -> bool {
     sender == NOTICE_SENDER
 }
 
-/// The body the notice that closes a direction check opens with (T-444).
-pub const DIRECTION_CLOSED_NOTICE: &str = "The direction check of ";
-
 /// Is this the notice that ends a direction check under its reviewer (T-444)?
 /// It is the one engine notice that reaches a working agent (T-454 v2): the
-/// reviewer still working on that check ends its turn at once.
+/// reviewer still working on that check ends its turn at once. The body and
+/// its prefix have one definition ([`gear_store::is_direction_closed_notice`]),
+/// so the sender and this reader cannot drift apart.
 pub fn ends_direction_check(message: &gear_store::MessageRow) -> bool {
-    is_notice(&message.sender) && message.body.starts_with(DIRECTION_CLOSED_NOTICE)
+    gear_store::is_direction_closed_notice(message)
 }
 
 /// [`at_once`] for one stored message and the seat it is addressed to: the seat
@@ -223,7 +228,7 @@ fn rings(input: &DoorbellInput, cooldown_s: i64, now: Ts) -> bool {
     if input.waiting.is_empty() {
         return false; // nothing to show
     }
-    if input.slot_busy {
+    if input.slot_busy && !input.waiting.iter().any(|item| item.cut) {
         return false; // a delivery already occupies the seat
     }
     let at_once = input.waiting.iter().any(|item| item.at_once);

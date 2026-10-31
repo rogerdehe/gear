@@ -14,6 +14,7 @@ fn item(id: &str) -> DoorbellItem {
         id: id.into(),
         urgent: false,
         at_once: false,
+        cut: false,
     }
 }
 
@@ -57,16 +58,19 @@ fn urgent_count_and_covers_order_without_duplicates() {
             id: "M-3".into(),
             urgent: true,
             at_once: true,
+            cut: false,
         },
         DoorbellItem {
             id: "M-1".into(),
             urgent: false,
             at_once: false,
+            cut: false,
         },
         DoorbellItem {
             id: "M-7".into(),
             urgent: false,
             at_once: false,
+            cut: false,
         },
     ];
     let out = decide(&[i], 90, NOW);
@@ -123,6 +127,7 @@ fn a_working_seat_is_rung_at_once_for_an_at_once_message() {
         id: "M-4".into(),
         urgent: true,
         at_once: true,
+        cut: false,
     }];
 
     let out = decide(&[working], 90, NOW);
@@ -140,11 +145,13 @@ fn a_working_seat_is_told_only_about_the_at_once_messages() {
             id: "M-4".into(),
             urgent: true,
             at_once: true,
+            cut: false,
         },
         DoorbellItem {
             id: "M-5".into(),
             urgent: false,
             at_once: false,
+            cut: false,
         },
     ];
 
@@ -164,11 +171,13 @@ fn an_idle_seat_is_told_about_everything() {
             id: "M-4".into(),
             urgent: true,
             at_once: true,
+            cut: false,
         },
         DoorbellItem {
             id: "M-5".into(),
             urgent: false,
             at_once: false,
+            cut: false,
         },
     ];
 
@@ -289,11 +298,13 @@ fn the_text_names_every_id_and_the_command_to_run() {
             id: "M-12".into(),
             urgent: false,
             at_once: false,
+            cut: false,
         },
         DoorbellItem {
             id: "M-13".into(),
             urgent: false,
             at_once: false,
+            cut: false,
         },
     ];
     let said = text(&items, false);
