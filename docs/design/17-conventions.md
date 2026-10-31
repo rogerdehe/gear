@@ -152,7 +152,7 @@ Review is asynchronous: the lane has already moved on. The captain fetches the p
 - Read the findings first, count them, then decide. Never announce "clean" before the review output has been read; output present ≠ review finished — confirm the reviewer actually completed.
 - Severity: P0/P1/P2 trigger rework; P3 (style, naming, "could be clearer") never does — it is noted in the verdict only.
 - A new, concrete finding in a later round is normal convergence (a fix can introduce a defect): keep going.
-- The same finding repeated after it was addressed, an architectural/spec-level finding, any P0, or the round cap (`review_max_rounds`, default 3) → stop and escalate to the user; more rounds will not help.
+- The same finding repeated after it was addressed, an architectural/spec-level finding, any P0, or the round cap (`review_max_rounds`, default 3) → stop: the captain decides the next step itself (rewrite the contract, split, cut or take the work another way); more rounds will not help.
 - A small diff in a high-blast-radius area (process lifecycle, persistence, concurrency, an interface everyone implements) is reviewed regardless of size.
 
 **Merge checklist** — all must hold, otherwise the verdict is fail with the missing item named:

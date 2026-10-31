@@ -5,12 +5,15 @@
 //! deck  working T-144 22/45m  · left 4 (175m): …
 //! keel  idle: next T-150 waits for T-142 (hull, review) · left 1 (40m)
 //! mast  idle: nothing left planned · left 0
+//! T-142 waits for your verdict (M-418)
 //! review-1 reviewing T-142 · review-2 standby 3m
 //! ```
 //!
 //! Everything is read from the store, never from the plan file. A lane that
 //! is idle says why, through the one function the board uses
-//! (`gear_board::idle::describe`), and the reviewers are on the last line.
+//! (`gear_board::idle::describe`), and the reviewers are on the last line. An
+//! attempt whose review is in and waits for the captain names the item in his
+//! inbox (T-460), so a finished review is not read as a stall.
 
 use gear_board::idle::{describe, idle_reason};
 use gear_board::Overlap;
@@ -29,6 +32,10 @@ pub struct Queue {
     pub lanes: Vec<Lane>,
     /// The reviewers (the temp seats), in seat order.
     pub reviewers: Vec<Reviewer>,
+    /// The attempts whose review is in and that wait for the captain's
+    /// verdict (T-460), in plan order, each with the id of the item that waits
+    /// in the captain's inbox: `T-142 waits for your verdict (M-418)`.
+    pub waiting: Vec<String>,
     /// The tasks that overlap the integration branch of their repo (T-188):
     /// information lines, never items that wait for the captain.
     pub overlaps: Vec<Overlap>,
@@ -174,10 +181,32 @@ pub fn queue(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Queue> {
         project: project.to_string(),
         lanes,
         reviewers,
+        waiting: verdict_waits(tx, project, &tasks, now)?,
         // The overlaps with the integration branch (T-188): the same
         // information lines the board shows.
         overlaps: gear_board::integration_overlaps_of(tx, project)?,
     })
+}
+
+/// The attempts whose review is in and that wait for the captain's verdict
+/// (T-460), in plan order: the task and the item that waits in his inbox.
+fn verdict_waits(
+    tx: &Tx<'_>,
+    project: &str,
+    tasks: &[gear_store::TaskRow],
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    let mut waiting = Vec::new();
+    for task in tasks {
+        // A task is at the verdict stage only after it was handed in.
+        if task.state != TaskState::Verifying {
+            continue;
+        }
+        if let Some(text) = gear_board::verdict_wait_of(tx, project, &task.id, now)? {
+            waiting.push(text);
+        }
+    }
+    Ok(waiting)
 }
 
 /// The task the lane works on: the one it has an attempt in flight for.
@@ -232,6 +261,11 @@ pub fn render(queue: &Queue) -> String {
     let mut lines: Vec<String> = Vec::new();
     for lane in &queue.lanes {
         lines.push(lane_line(lane));
+    }
+    // The attempts whose review is in and wait for the captain (T-460): the
+    // item that waits in his inbox, before the information lines.
+    for text in &queue.waiting {
+        lines.push(text.clone());
     }
     // The overlaps with the integration branch (T-188): the same lines the
     // board shows, after the lanes.

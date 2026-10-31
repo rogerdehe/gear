@@ -5378,6 +5378,90 @@ path="api"
         assert_eq!(names, vec!["r-1", "r-2"]);
     }
 
+    /// T-460: an attempt whose review is in and waits for the captain is
+    /// named with the item that waits in his inbox (`waits for your verdict
+    /// (M-<id>)`), not only by the lane's state: another project's captain
+    /// read a finished review as a stall.
+    #[test]
+    fn queue_names_a_review_that_waits_for_the_captain_with_its_item() {
+        let (mut store, _herdr) = world();
+        store
+            .write(|tx| {
+                let mut handed_in = lane_task("T-1", "heat", gear_model::TaskState::Verifying, &[]);
+                handed_in.estimate_min = Some(30);
+                tx.insert_task(&handed_in)?;
+                // The attempt was handed in and its review is in: a fail.
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: gear_model::AttemptState::Submitted,
+                    candidate: Some("abc1234".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })?;
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: false,
+                    findings: "the check misses the empty file".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0 + 300,
+                })?;
+                // The verdict waits in the captain's inbox: the item the
+                // queue has to name.
+                tx.insert_message(&gear_store::NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: "T-1:1".into(),
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    sender: "p:review-1".into(),
+                    sender_gen: 1,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::Review,
+                    urgent: false,
+                    body: "review fail on T-1 attempt 1\nthe check misses the empty file".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: T0 + 300,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_queue(&mut store, &env("captain", CAP_PANE), false, T0 + 600).unwrap();
+        assert!(
+            out.contains("T-1 waits for your verdict (M-1)"),
+            "the item is named: {out}"
+        );
+        // The lane is still shown as idle, but the verdict is no stall.
+        let heat = out.lines().find(|line| line.starts_with("heat")).unwrap();
+        assert!(heat.contains("idle: nothing left planned"), "{heat}");
+
+        // --json says the same.
+        let json = run_queue(&mut store, &env("captain", CAP_PANE), true, T0 + 600).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed["waiting"],
+            serde_json::json!(["T-1 waits for your verdict (M-1)"]),
+            "{json}"
+        );
+    }
+
     #[test]
     fn plan_show_prints_a_block_that_parses_back() {
         let (mut store, _herdr) = world();
@@ -8307,8 +8391,35 @@ path="api"
                 // T-76: the folder the agent runs in is trusted.
                 "-c".to_string(),
                 "projects={\"{repo_root}\"={trust_level=\"trusted\"}}".to_string(),
+                // T-457: a resume runs in the seat's own directory and never
+                // shows the working-directory dialog.
+                "-c".to_string(),
+                "tui.resume_cwd=\"current\"".to_string(),
             ]
         );
+        // T-457: Codex 0.165's startup screens are answered, not read as an
+        // idle agent.
+        let dialogs = &codex.dialogs;
+        assert_eq!(dialogs.len(), 2, "the /new and the resume dialog");
+        assert!(
+            dialogs[0]
+                .markers
+                .contains(&"Where should the new conversation run?".to_string()),
+            "the /new dialog's marker"
+        );
+        assert!(
+            dialogs[1]
+                .markers
+                .contains(&"Choose which working directory to use".to_string()),
+            "the resume dialog's marker"
+        );
+        for dialog in dialogs {
+            assert_eq!(
+                dialog.keys,
+                vec!["enter".to_string()],
+                "the preselected choice is taken with Enter"
+            );
+        }
     }
 
     #[test]

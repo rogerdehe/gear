@@ -17,6 +17,7 @@ fn profile(kind: &str) -> Profile {
         compact: String::new(),
         usage_log: None,
         error_markers: Vec::new(),
+        dialogs: Vec::new(),
         busy_markers: vec!["esc interrupt".into()],
         ratelimit_markers: vec!["Error: Rate limit exceeded".into()],
         quota_markers: vec![],

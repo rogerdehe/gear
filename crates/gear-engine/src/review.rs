@@ -7232,6 +7232,9 @@ review = [
                     "-c".to_string(),
                     "projects={\"/fake-worktrees/p-review-1\"={trust_level=\"trusted\"}}"
                         .to_string(),
+                    // T-457: a resume runs in the reviewer's own worktree.
+                    "-c".to_string(),
+                    "tui.resume_cwd=\"current\"".to_string(),
                     "-c".to_string(),
                     gear_herdr::profile::render_rules(
                         &[gear_herdr::profile::CODEX_RULES_ARG.to_string()],
