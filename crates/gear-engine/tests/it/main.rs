@@ -129,6 +129,7 @@ mod rounds_contract;
 mod session_dispatch_contract;
 mod station_contract;
 mod targeting_contract;
+mod tz_hours_contract;
 mod undelivered_delivery_contract;
 mod upgrade_contract;
 mod waits_contract;
