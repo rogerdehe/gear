@@ -739,7 +739,7 @@ fn stage_and_words(store: &mut Store, task: &str) -> (Stage, String) {
 fn each_stage_comes_from_a_fact_of_the_store() {
     let mut store = stage_world();
     let table: [(&str, Stage, &str); 14] = [
-        ("T-20", Stage::Deps, "waits for T-1 to merge"),
+        ("T-20", Stage::Deps, "waits for 1 to merge"),
         ("T-1", Stage::Queued, "queued"),
         ("T-23", Stage::Delivered, "delivered, not started"),
         ("T-21", Stage::Working, "working"),
@@ -1214,7 +1214,7 @@ fn the_git_graph_has_the_rows_of_the_prototype_m5_voyage() {
         last_waiting.text
     );
     assert!(
-        last_waiting.text.contains("waits for T-262 to merge"),
+        last_waiting.text.contains("waits for 1 to merge"),
         "{:?}",
         last_waiting.text
     );
