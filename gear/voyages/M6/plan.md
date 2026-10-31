@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=961 -->
+<!-- gear-plan project=gear base=962 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -69,6 +69,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-11-01 00:20 hand-fix: nudged mast to push T-473 (never pushed, in its final checks) | why: M-6870
 - 2026-11-01 01:10 hand-fix: the no-push alarm counts the lane's answer window from when the ask reached it (a confirmed doorbell), not from when it was written; quiet.rs, tests updated, make gate passed | why: since T-454 an ask to a working lane waits for its next idle moment, so every lane deep in a task raised a false 'no word to the captain' item (M-6840, M-6844, M-6870, M-6888)
 - 2026-11-01 01:10 hand-fix: nudged hull to push T-470 | why: M-6888
+- station M-6900: keep course — projected 802m of 1020m, lanes even (hull 320m, mast 322m)
 
 # Queue
 
