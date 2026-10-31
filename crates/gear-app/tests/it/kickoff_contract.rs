@@ -39,6 +39,16 @@ const OMP_MODELS: &str = r#"{"models":[
   {"provider":"minimax","kind":"chat","id":"MiniMax-M2","selector":"minimax/MiniMax-M2"}
 ]}"#;
 
+/// A captured `agy models` (agy 1.4.12), trimmed to what the parser reads:
+/// one `<id>\t<name>` line per model after a fetching line.
+const AGY_MODELS: &str = "\
+Fetching available models...
+gemini-3.8-flash-high\tGemini 3.8 Flash (High)
+gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)
+claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)
+gemini-3.8-flash-high\tGemini 3.8 Flash (High)
+";
+
 /// A captured `~/.codex/models_cache.json`, trimmed to what the parser reads.
 const CODEX_CACHE: &str = r#"{
   "fetched_at": "2026-10-23T04:15:50.630332Z",
@@ -95,6 +105,25 @@ fn opencode_models_are_the_ids_as_printed() {
         ],
         "blank lines, comments and repeats are dropped"
     );
+}
+
+/// T-497: agy lists its models as `<id>\t<name>` lines; the id its
+/// `--model` takes is the first field, the fetching line lists none.
+#[test]
+fn agy_models_are_the_ids() {
+    let models = kickoff::parse_agy_models(AGY_MODELS);
+
+    assert_eq!(
+        models,
+        vec![
+            "gemini-3.8-flash-high",
+            "gemini-3.8-flash-medium",
+            "claude-sonnet-4-6",
+        ],
+        "the fetching line and the duplicate list nothing"
+    );
+    assert!(kickoff::parse_agy_models("").is_empty());
+    assert!(kickoff::parse_agy_models("Fetching available models...").is_empty());
 }
 
 #[test]

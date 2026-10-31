@@ -227,9 +227,52 @@ pub fn models_of(kind: &str) -> (Vec<String>, Option<String>) {
                 Some(format!("cannot run `omp models --json`: {e}")),
             ),
         },
+        // agy lists its chat models as `<id>\t<name>` lines after a
+        // `Fetching available models...` line (`agy models`); the id is what
+        // `--model` takes.
+        "agy" => match Command::new("agy").arg("models").output() {
+            Ok(out) if out.status.success() => {
+                let models = parse_agy_models(&String::from_utf8_lossy(&out.stdout));
+                if models.is_empty() {
+                    (
+                        Vec::new(),
+                        Some("no model listed by `agy models`".to_string()),
+                    )
+                } else {
+                    (models, None)
+                }
+            }
+            Ok(out) => (
+                Vec::new(),
+                Some(format!("`agy models` exited {}", out.status)),
+            ),
+            Err(e) => (Vec::new(), Some(format!("cannot run `agy models`: {e}"))),
+        },
         // The other CLIs do not print their models.
         _ => (Vec::new(), Some("no model list from this CLI".to_string())),
     }
+}
+
+/// The model ids `agy models` lists (T-497): one `<id>\t<name>` line per
+/// model, after a `Fetching available models...` line; the id is the first
+/// field, the one `--model` takes. Lines without a tab (the fetching line)
+/// list nothing.
+pub fn parse_agy_models(text: &str) -> Vec<String> {
+    let mut models = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let Some((id, _name)) = line.split_once('\t') else {
+            continue;
+        };
+        let id = id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if !models.iter().any(|seen| seen == id) {
+            models.push(id.to_string());
+        }
+    }
+    models
 }
 
 /// The model ids `omp models --json` lists (T-495): each entry's `selector`
