@@ -23,11 +23,13 @@ install: ## a source checkout's gear on PATH: release build, then a link in $(PR
 	mkdir -p $(PREFIX)/bin
 	ln -sf $(CURDIR)/target/release/gear $(PREFIX)/bin/gear
 
-check: prune-tmp ## the light run for lanes and reviewers: one crate, jobs from build-slot; TESTS=<nextest filter> runs only the tests it matches
+check: prune-tmp ## the light run for lanes and reviewers: rustfmt check, then one crate, jobs from build-slot; TESTS=<nextest filter> runs only the tests it matches
 	@test -n "$(CRATE)" || { echo "usage: make check CRATE=<crate>"; exit 1; }
+	cargo fmt --all --check
 	tools/build-slot/build-slot.sh cargo nextest run -p $(CRATE) --no-fail-fast $(if $(strip $(TESTS)),-E '$(TESTS)')
 
-gate: prune-tmp ## the merge gate on the shared machine: workspace build and the whole suite, each sized by build-slot at least 4 jobs, at normal priority (the test run measures the machine after the build)
+gate: prune-tmp ## the merge gate on the shared machine: rustfmt check, workspace build and the whole suite, each sized by build-slot at least 4 jobs, at normal priority (the test run measures the machine after the build)
+	cargo fmt --all --check
 	BUILD_SLOT_MIN=4 BUILD_SLOT_PRIORITY=normal tools/build-slot/build-slot.sh cargo build --workspace --all-targets && BUILD_SLOT_MIN=4 BUILD_SLOT_PRIORITY=normal tools/build-slot/build-slot.sh scripts/test.sh
 
 full: prune-tmp ## full speed for one person alone on the machine: no caps
