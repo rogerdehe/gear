@@ -767,6 +767,54 @@ pub struct Price {
     pub output: f64,
     pub cache_read: f64,
     pub cache_write: f64,
+    /// The maker's peak rates and their windows (T-484); absent = flat.
+    #[serde(default)]
+    pub peak: Option<PeakPrice>,
+}
+
+/// The peak rates of one price and the UTC windows they apply in.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeakPrice {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+    /// `Mon-Fri 01:00-04:00`; at least one window.
+    pub windows: Vec<String>,
+}
+
+impl Price {
+    /// The price as gear-usage reads it; None when a window cannot be parsed
+    /// (the config check names it, so a registered project never gets here).
+    pub fn to_usage(&self) -> Option<gear_usage::Price> {
+        let peak = match &self.peak {
+            Some(peak) => {
+                let windows = peak
+                    .windows
+                    .iter()
+                    .map(|window| gear_usage::parse_window(window))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(gear_usage::Peak {
+                    rates: gear_usage::Rates {
+                        input: peak.input,
+                        output: peak.output,
+                        cache_read: peak.cache_read,
+                        cache_write: peak.cache_write,
+                    },
+                    windows,
+                })
+            }
+            None => None,
+        };
+        Some(gear_usage::Price {
+            input: self.input,
+            output: self.output,
+            cache_read: self.cache_read,
+            cache_write: self.cache_write,
+            peak,
+        })
+    }
 }
 
 /// Defaults: tick_s 4, cooldown_s 90, sample_min 20, review_timer_min 45.
@@ -1197,6 +1245,35 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                     &format!("prices.{model}.{field}"),
                     "must be a finite non-negative rate".to_string(),
                 ));
+            }
+        }
+        if let Some(peak) = &price.peak {
+            for (field, value) in [
+                ("input", peak.input),
+                ("output", peak.output),
+                ("cache_read", peak.cache_read),
+                ("cache_write", peak.cache_write),
+            ] {
+                if !value.is_finite() || value < 0.0 {
+                    issues.push(issue(
+                        &format!("prices.{model}.peak.{field}"),
+                        "must be a finite non-negative rate".to_string(),
+                    ));
+                }
+            }
+            if peak.windows.is_empty() {
+                issues.push(issue(
+                    &format!("prices.{model}.peak.windows"),
+                    "must name at least one window".to_string(),
+                ));
+            }
+            for window in &peak.windows {
+                if gear_usage::parse_window(window).is_none() {
+                    issues.push(issue(
+                        &format!("prices.{model}.peak.windows"),
+                        format!("{window:?} is not a window like \"Mon-Fri 01:00-04:00\""),
+                    ));
+                }
             }
         }
     }
