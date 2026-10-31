@@ -9467,10 +9467,10 @@ review = [
         )
         .unwrap();
 
-        assert!(
-            report.started.is_empty(),
-            "resume execution waits for T-145"
-        );
+        // T-470: the reviewer's agent was started in the T0+30 call; at T0+35
+        // it is ready, so the resume completes and the review starts in that
+        // same tick (it still never starts before the resume is done).
+        assert_eq!(report.started, vec!["p:review-1".to_string()]);
         let action = store
             .read(|tx| tx.get_meta("engine.review_action.p.T-1.2"))
             .unwrap();

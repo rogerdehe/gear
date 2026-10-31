@@ -297,8 +297,10 @@ version = "0.6.0"
 dependencies = [
  "gear-model",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
+ "toml",
 ]
 
 [[package]]
