@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1012 -->
+<!-- gear-plan project=gear base=1013 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -112,6 +112,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - T-501 moved hull → mast, ahead of T-492: mast would sit idle after T-486 until it merges; hull keeps T-500.
 - T-492 back to hull after T-500: by then T-486 should be merged; mast keeps T-486 → T-501 → T-493, so both lanes end near the same time.
 - added NEW (S5, hull, after T-492): the Tasks tab colours each row's stage by state and dims merged rows, so working/in review/reworking stand out (the user could not tell them apart at a glance).
+- T-499 fail: the fix shipped disabled (`if false`, `&& true`) and its test passes without it; rework to enable both edits and a test that fails on dev.
 
 # Queue
 
