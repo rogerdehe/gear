@@ -861,13 +861,105 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
     if let Some((by, merged_at)) = integrated_at {
         mark_integrated_by(tx, &v.project, &v.task, v.attempt, &by, merged_at)?;
     }
-    // T-505: an audit passes over the integration branch it checked, so its
-    // pass is a merge with no merge op: the attempt carries the merge time, and
-    // the tasks that depend on the audit start as they do after a merge.
+    // T-512: an audit passes over the integration branch it checked, but its
+    // review record is the reviewer's commit on the review branch: the pass
+    // queues the same Intended merge op an ordinary pass queues, so the gate
+    // lands that record and records the merge time. The candidate is already
+    // on the integration branch, so what the op merges is the review branch
+    // (T-505: a task depending on the audit starts only after that merge).
     if v.pass && tx.task_audit(&v.project, &v.task)?.is_some() {
-        tx.set_attempt_time(&v.project, &v.task, v.attempt, AttemptStep::Merged, now)?;
+        let attempt_row = tx
+            .get_attempt(&v.project, &v.task, v.attempt)?
+            .ok_or_else(|| {
+                GearError::new(
+                    ErrorCode::NoTarget,
+                    format!(
+                        "no attempt {} of task {} in project {}",
+                        v.attempt, v.task, v.project
+                    ),
+                )
+            })?;
+        queue_merge(
+            tx,
+            &v.project,
+            &task_row,
+            &attempt_row,
+            MergeBranch::Review,
+            now,
+        )?;
     }
     Ok(())
+}
+
+/// The branch an accepted pass's merge op lands (T-512).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeBranch {
+    /// An ordinary pass: the lane's task branch, and the review branch the
+    /// executor derives from the project's conventions.
+    Task,
+    /// An audit's pass: the reviewer's record on the review branch. The audit
+    /// has no task branch (its candidate is already on the integration
+    /// branch), so the op names the review branch as the branch it lands.
+    Review,
+}
+
+/// Queue the Intended `merge` op an accepted pass needs (T-12): booked to the
+/// lane's seat (the branch is the lane's), or to the captain for a task
+/// without a lane seat. The op never exists for an attempt that is still open,
+/// so the caller settles the attempt first.
+fn queue_merge(
+    tx: &Tx<'_>,
+    project: &str,
+    task_row: &gear_store::TaskRow,
+    attempt_row: &gear_store::AttemptRow,
+    which: MergeBranch,
+    now: Ts,
+) -> GearResult<String> {
+    let task = task_row.id.clone();
+    let conventions = conventions_of(tx, project);
+    let lane = task_row.lane.clone().unwrap_or_default();
+    let review =
+        gear_model::branch::review_branch(&conventions.review_branch, project, &lane, &task);
+    let branch = match (which, task_row.lane.as_deref()) {
+        (MergeBranch::Task, Some(_)) => Some(crate::base::task_branch(
+            &conventions,
+            project,
+            &lane,
+            &task,
+        )),
+        (MergeBranch::Review, _) => Some(review.clone()),
+        (MergeBranch::Task, None) => None,
+    };
+    let anchor = match task_row.lane.as_deref() {
+        Some(lane) => tx.get_seat(&format!("{project}:{lane}"))?,
+        None => None,
+    };
+    let anchor = match anchor {
+        Some(seat) => seat,
+        None => tx.captain_of(project)?.ok_or_else(|| {
+            GearError::new(
+                ErrorCode::NoTarget,
+                format!("project {project} has no captain to book the merge op"),
+            )
+        })?,
+    };
+    let op = tx.insert_op(&NewOp {
+        project: project.to_string(),
+        seat: anchor.id,
+        generation: anchor.generation,
+        kind: OpKind::Merge,
+        task: Some(task.clone()),
+        attempt: Some(attempt_row.n),
+        ref_msg: None,
+        plan_version: None,
+        payload: serde_json::json!({
+            "branch": branch,
+            "candidate": attempt_row.candidate,
+            "review": review,
+        }),
+        created: now,
+    })?;
+    Ok(op.id)
 }
 
 /// Settle a handed-in attempt from the review verdict stored for it (T-13):
@@ -1091,44 +1183,14 @@ pub fn settle_review(
     // branch is the lane's), or to the captain for a task without a lane seat.
     let mut merge_op = None;
     if accepted {
-        let anchor = match task_row.lane.as_deref() {
-            Some(lane) => tx.get_seat(&format!("{project}:{lane}"))?,
-            None => None,
-        };
-        let anchor = match anchor {
-            Some(seat) => seat,
-            None => tx.captain_of(project)?.ok_or_else(|| {
-                GearError::new(
-                    ErrorCode::NoTarget,
-                    format!("project {project} has no captain to book the merge op"),
-                )
-            })?,
-        };
-        let branch = match task_row.lane.as_deref() {
-            Some(lane) => Some(crate::base::task_branch(
-                &conventions_of(tx, project),
-                project,
-                lane,
-                task,
-            )),
-            None => None,
-        };
-        let op = tx.insert_op(&NewOp {
-            project: project.to_string(),
-            seat: anchor.id,
-            generation: anchor.generation,
-            kind: OpKind::Merge,
-            task: Some(task.to_string()),
-            attempt: Some(attempt),
-            ref_msg: None,
-            plan_version: None,
-            payload: serde_json::json!({
-                "branch": branch,
-                "candidate": attempt_row.candidate,
-            }),
-            created: now,
-        })?;
-        merge_op = Some(op.id);
+        merge_op = Some(queue_merge(
+            tx,
+            project,
+            &task_row,
+            &attempt_row,
+            MergeBranch::Task,
+            now,
+        )?);
     }
 
     // The captain is told, not asked: every review item of this attempt stops

@@ -1,8 +1,8 @@
 //! The `audit:` mark of a task (T-505): a voyage audit is planned as a queue
 //! task that reviewers run against the integration branch. The field is stored
 //! as `fresh:` is, shown by `gear plan show`, and the captain's verdict on an
-//! audit attempt is a merge with no merge op (a pass) or a task back on Ready
-//! (a fail).
+//! audit attempt queues the merge of the reviewer's record (a pass, T-512) or
+//! puts the task back on Ready (a fail).
 
 use gear_app::draft::parse;
 use gear_app::identity::Fingerprint;
@@ -244,35 +244,110 @@ fn the_audit_field_is_true_or_false() {
     );
 }
 
-#[test]
-fn a_captain_pass_marks_the_audit_done_and_merged_with_no_merge_op() {
-    let mut s = world();
+/// The audit of the tests: one audit task handed in at `candidate`.
+fn an_audit(s: &mut Store, candidate: &str) {
     run(
-        &mut s,
+        s,
         "# Queue\n## NEW [must] lane=heat\ngoal: the voyage holds end to end\naccept: each promise met\nestimate: 30\naudit: true\ndeps: -\n",
         "r1",
     )
     .unwrap();
-    handed_in_audit(&mut s, "T-1", "abc1234");
+    handed_in_audit(s, "T-1", candidate);
+}
+
+/// T-512: the audit's pass settles as an ordinary pass does — attempt
+/// Accepted, task Done and one Intended `merge` op for its review branch — so
+/// the merge gate lands the reviewer's record and records the merge time. The
+/// attempt has no merge time until that op merges.
+#[test]
+fn a_captain_pass_queues_the_merge_of_the_audits_review_branch() {
+    let mut s = world();
+    an_audit(&mut s, "abc1234");
     rule(&mut s, "T-1", true, "abc1234");
 
     let task = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
     assert_eq!(task.state, TaskState::Done);
-    assert!(
-        s.read(|tx| gear_app::tasks::merged_at(tx, "p", "T-1"))
-            .unwrap()
-            .is_some(),
-        "the audit is merged at the candidate it checked"
-    );
-    let merge_ops = s
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!(attempt.state, AttemptState::Accepted);
+    let ops = s
         .read(|tx| tx.ops_in_state("p", OpState::Intended))
         .unwrap()
         .into_iter()
         .filter(|op| op.kind == OpKind::Merge)
-        .count();
-    assert_eq!(merge_ops, 0, "an audit pass merges with no merge op");
-    let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
-    assert_eq!(attempt.state, AttemptState::Accepted);
+        .collect::<Vec<_>>();
+    assert_eq!(ops.len(), 1, "one merge op: {ops:?}");
+    assert_eq!(ops[0].task.as_deref(), Some("T-1"));
+    assert_eq!(ops[0].attempt, Some(1));
+    assert_eq!(ops[0].seat, "p:heat", "the merge follows the audit's lane");
+    assert_eq!(
+        ops[0].payload["branch"].as_str(),
+        Some("review/t1"),
+        "the op lands the review branch"
+    );
+    assert_eq!(
+        ops[0].payload["review"].as_str(),
+        Some("review/t1"),
+        "the review branch is named"
+    );
+    assert_eq!(
+        ops[0].payload["candidate"].as_str(),
+        Some("abc1234"),
+        "the candidate the audit checked stays the candidate"
+    );
+    assert!(
+        s.read(|tx| gear_app::tasks::merged_at(tx, "p", "T-1"))
+            .unwrap()
+            .is_none(),
+        "no merge time until the merge op merges"
+    );
+    assert!(
+        s.read(|tx| tx.attempt_times("p", "T-1", 1))
+            .unwrap()
+            .merged
+            .is_none(),
+        "the attempt carries no merge time yet"
+    );
+}
+
+/// T-512: a task depending on the audit starts only after the audit's merge
+/// op merges: the engine's dependant gate reads `merged_at`, which the merge
+/// gate writes when the op confirms.
+#[test]
+fn a_task_depending_on_the_audit_starts_only_after_its_merge() {
+    let mut s = world();
+    an_audit(&mut s, "abc1234");
+    run(
+        &mut s,
+        "# Queue\n## NEW [must] lane=heat\ngoal: the next piece\naccept: it works\nestimate: 20\ndeps: T-1\n",
+        "r2",
+    )
+    .unwrap();
+    rule(&mut s, "T-1", true, "abc1234");
+    assert!(
+        s.read(|tx| gear_app::tasks::merged_at(tx, "p", "T-1"))
+            .unwrap()
+            .is_none(),
+        "the dependant waits: the merge op has not merged"
+    );
+
+    // The merge gate confirms the op and records the merge time.
+    let op = s
+        .read(|tx| tx.ops_in_state("p", OpState::Intended))
+        .unwrap()
+        .into_iter()
+        .find(|op| op.kind == OpKind::Merge)
+        .unwrap();
+    s.write(|tx| {
+        tx.set_op_state("p", &op.id, OpState::Confirmed, Some("merged"), NOW + 30)?;
+        tx.set_attempt_time("p", "T-1", 1, gear_store::AttemptStep::Merged, NOW + 30)
+    })
+    .unwrap();
+    assert_eq!(
+        s.read(|tx| gear_app::tasks::merged_at(tx, "p", "T-1"))
+            .unwrap(),
+        Some(NOW + 30),
+        "the dependant may start once the audit's record landed"
+    );
 }
 
 #[test]
@@ -297,6 +372,13 @@ fn a_captain_fail_puts_the_audit_back_on_ready() {
             .is_none(),
         "nothing merged"
     );
+    let merge_ops = s
+        .read(|tx| tx.ops_in_state("p", OpState::Intended))
+        .unwrap()
+        .into_iter()
+        .filter(|op| op.kind == OpKind::Merge)
+        .count();
+    assert_eq!(merge_ops, 0, "a fail queues no merge");
 }
 
 #[test]
