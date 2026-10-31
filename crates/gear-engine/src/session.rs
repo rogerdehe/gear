@@ -805,15 +805,10 @@ fn create_round(
     if let Some(open) = tx.open_round_of_seat(&seat.id)? {
         let same = open.attempt == key.attempt && open.role == key.role && open.task == key.task;
         if !same {
-            tx.close_round(
-                &RoundKey {
-                    project: open.project.clone(),
-                    task: open.task.clone(),
-                    attempt: open.attempt,
-                    role: open.role.clone(),
-                },
-                now,
-            )?;
+            // T-458: the seat's round ends at this one's start, with its clock
+            // reaching that moment (the overrun pass would otherwise only
+            // account it up to the last tick).
+            crate::rounds::close_with_clock(tx, &open, now)?;
         }
     }
     tx.insert_round(&NewRound {

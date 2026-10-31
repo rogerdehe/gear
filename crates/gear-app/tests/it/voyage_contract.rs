@@ -439,6 +439,50 @@ fn a_departed_voyage_changes_only_with_the_users_confirmation() {
     );
 }
 
+/// T-458: the same confirmed change a second time is a decision of its own
+/// (T-410 review F1): the decision key held only the field and the two texts,
+/// so a voyage whose eta went 8h → 10h → 8h → 10h recorded the last change
+/// only once.
+#[test]
+fn a_repeated_confirmed_change_records_its_second_decision() {
+    let mut s = world();
+    run(&mut s, &plan(0, FULL), "r1", NOW).unwrap();
+    let steps = ["10h", "8h", "10h"];
+    for (n, eta) in steps.into_iter().enumerate() {
+        let base = s.read(|tx| tx.plan_version("p")).unwrap();
+        let body = format!(
+            "done: users install v0.1.0 without Rust\nbar: block only loop breaks and data loss; log the rest\neta: {eta}\n"
+        );
+        run_confirmed(
+            &mut s,
+            &plan(base, &body),
+            &format!("r-{n}"),
+            NOW + 100 + n as i64,
+        )
+        .unwrap();
+    }
+    let decisions = s.read(|tx| tx.decisions_of("p", "M1")).unwrap();
+    let confirmed: Vec<_> = decisions.iter().filter(|d| d.kind == "user").collect();
+    assert_eq!(confirmed.len(), 3, "{decisions:?}");
+    for (decision, what) in confirmed.iter().zip([
+        "eta of M1 changed from \"8h\" to \"10h\"",
+        "eta of M1 changed from \"10h\" to \"8h\"",
+        "eta of M1 changed from \"8h\" to \"10h\"",
+    ]) {
+        assert!(decision.star, "the confirmation is starred: {decision:?}");
+        assert_eq!(decision.what, what);
+        assert_eq!(decision.why.as_deref(), Some("confirmed by the user"));
+    }
+    assert_eq!(
+        s.read(|tx| tx.get_voyage("p", "M1"))
+            .unwrap()
+            .unwrap()
+            .eta
+            .as_deref(),
+        Some("10h")
+    );
+}
+
 /// T-331: the `title` and the stations of a departed voyage are guarded like
 /// `done:`, `bar:` and `eta:` (T-410): refused without the user's confirmation,
 /// applied with it and recorded as a starred decision.

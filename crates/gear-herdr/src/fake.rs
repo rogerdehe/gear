@@ -139,6 +139,9 @@ pub struct FakeHerdr {
     /// The Herdr socket this fake stands in for, named in an identity refusal
     /// (T-314). `None` by default: an unnamed Herdr.
     pub socket: Option<String>,
+    /// How long `agents()` takes before it answers (T-458): a test can make
+    /// the observation slow without a real Herdr.
+    pub agents_delay: Option<std::time::Duration>,
 }
 
 impl FakeHerdr {
@@ -396,6 +399,9 @@ impl HerdrRead for FakeHerdr {
     }
 
     fn agents(&mut self) -> Result<Vec<AgentInfo>, ObserveError> {
+        if let Some(delay) = self.agents_delay {
+            std::thread::sleep(delay);
+        }
         if self.observe_fails || self.agents_fail {
             return Err(ObserveError("injected".into()));
         }

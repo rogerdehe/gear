@@ -2918,6 +2918,28 @@ impl<'s> Tx<'s> {
         )
     }
 
+    /// Reopen a closed round as a new window (T-458): a parked attempt whose
+    /// wait has ended goes on, and a seat has one live round. The window
+    /// starts now; the sessions the round owns stay with it.
+    pub fn reopen_round(&self, key: &RoundKey, start_at: Ts) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE rounds SET start_at=?5, end_at=NULL, active_s=0, paused_s=0
+                 WHERE project=?1 AND task=?2 AND attempt=?3 AND role=?4",
+                params![key.project, key.task, key.attempt, key.role, start_at],
+            )
+            .map_err(map_sqlite)?;
+        require_written(
+            changed,
+            "round",
+            &format!(
+                "{} attempt {} {} in project {}",
+                key.task, key.attempt, key.role, key.project
+            ),
+        )
+    }
+
     /// Add a session the seat ran in during the round's window (§4.3). A
     /// session that is already listed is not added twice.
     pub fn add_round_session(&self, key: &RoundKey, session_ref: &str) -> GearResult<()> {
