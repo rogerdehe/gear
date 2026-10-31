@@ -268,6 +268,84 @@ fn open_worktree_item(
         .map_err(|e| e.detail)
 }
 
+/// T-503: put a lane's home worktree on the fresh integration branch before
+/// its first delivery: fetch the remote, archive anything the worktree holds
+/// (never discard it), then move the home branch to `<remote>/<integration>`.
+/// A clean worktree on its home branch at the tip is left as it is. A failed
+/// step leaves the worktree as it was and names the step in one captain item;
+/// the lane still starts (the packet's dirty notice is the fallback).
+fn sync_home_worktree(
+    store: &mut Store,
+    seat: &SeatRow,
+    config: &gear_app::config::ProjectConfig,
+    worktree: &WorktreeStep,
+    path: &str,
+    now: Ts,
+) -> Result<(), String> {
+    let dir = std::path::Path::new(path);
+    let remote = config.conventions.remote.trim();
+    let base = format!("{remote}/{}", worktree.base);
+    let fail = |store: &mut Store, step: &str, detail: &str| -> Result<(), String> {
+        let body = format!(
+            "the home worktree {path} could not be put on {base}: {step} failed ({detail}); the lane starts as it is"
+        );
+        open_worktree_item(store, &seat.project, &seat.name, &body, now)
+    };
+    // 1. the fresh integration branch comes from the remote.
+    if let Err(detail) = git(dir, &["fetch", remote]) {
+        return fail(store, &format!("git fetch {remote}"), &detail);
+    }
+    // 2. what the worktree holds is archived, never discarded.
+    let dirty = match git(dir, &["status", "--porcelain"]) {
+        Ok(out) => out,
+        Err(detail) => return fail(store, "git status", &detail),
+    };
+    let paths = dirty.lines().filter(|line| !line.trim().is_empty()).count();
+    let branch_now = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+    let head = git(dir, &["rev-parse", "HEAD"]).unwrap_or_default();
+    let tip = match git(dir, &["rev-parse", &base]) {
+        Ok(tip) => tip,
+        Err(detail) => return fail(store, &format!("git rev-parse {base}"), &detail),
+    };
+    // A clean worktree on its home branch at the integration tip is left as
+    // it is: nothing to archive, nothing to move.
+    if paths == 0 && branch_now.trim() == worktree.branch && head.trim() == tip.trim() {
+        return Ok(());
+    }
+    let mut archived = None;
+    if paths > 0 {
+        let branch = format!("gear/archive/{}-{}", seat.name, now);
+        if let Err(detail) = git(dir, &["switch", "-c", &branch]) {
+            return fail(store, &format!("git switch -c {branch}"), &detail);
+        }
+        if let Err(detail) = git(dir, &["add", "-A"]) {
+            return fail(store, "git add -A", &detail);
+        }
+        let message = format!("gear: {} home worktree at onboarding", seat.id);
+        if let Err(detail) = git(dir, &["commit", "-m", &message]) {
+            return fail(store, "git commit", &detail);
+        }
+        archived = Some(branch);
+    }
+    // 3. the home branch at the remote's integration tip.
+    if let Err(detail) = git(dir, &["switch", "-C", &worktree.branch, &base]) {
+        return fail(
+            store,
+            &format!("git switch -C {} {base}", worktree.branch),
+            &detail,
+        );
+    }
+    // 4. one captain item names the archive branch and the path count.
+    if let Some(branch) = archived {
+        let body = format!(
+            "the home worktree {path} held {paths} changed paths at onboarding; they are kept on {branch} (\"gear: {} home worktree at onboarding\"), and the home branch {} is now at {base}",
+            seat.id, worktree.branch
+        );
+        open_worktree_item(store, &seat.project, &seat.name, &body, now)?;
+    }
+    Ok(())
+}
+
 /// Run `git <args>` in `dir`; the trimmed stdout, or the stderr as the error.
 fn git(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
     let output = std::process::Command::new("git")
@@ -789,6 +867,21 @@ fn onboard_seat(
     store
         .write(|tx| tx.set_meta(&format!("engine.onboard_exit.{}", seat.id), ""))
         .map_err(|e| e.detail)?;
+
+    // 3c. T-503: the lane's first task starts from a clean home worktree on
+    //    the fresh integration branch. A reused worktree may sit on a stale
+    //    home branch, or hold what a lane left behind: those changes are
+    //    archived, never discarded, and the home branch is put at the
+    //    remote's integration tip. Only a seat with no open attempt is moved
+    //    — a lane that is mid-task keeps its checkout. A failed git step
+    //    leaves the worktree as it was and names the step in the captain
+    //    item; the lane still starts.
+    let no_open_attempt = store
+        .read(|tx| Ok(tx.open_attempts_of_seat(&seat.id)?.is_empty()))
+        .map_err(|e| format!("open attempts: {}", e.detail))?;
+    if no_open_attempt {
+        sync_home_worktree(store, seat, config, &worktree, &created.path, now)?;
+    }
 
     // 4. the seat moves to Starting with a pending binding for the pane. The
     //    seat's profile follows the CLI that runs its model (T-35). A start
@@ -2499,5 +2592,274 @@ repo = "web"
             "{line}"
         );
         assert!(own.is_dir(), "{line}");
+    }
+
+    /// Run `command` in `dir` with `sh` and return its trimmed stdout; a
+    /// failure panics with stderr.
+    fn sh(dir: &std::path::Path, command: &str) -> String {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|e| panic!("{command} in {}: {e}", dir.display()));
+        assert!(
+            out.status.success(),
+            "{command}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// T-503: a real repository with a bare `origin` holding `dev` at two
+    /// commits, the lane's home branch `toy/heat` at the first one, and a
+    /// linked worktree of that branch. Returns (the repository, the worktree).
+    fn t503_repo(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = crate::testtmp::temp(name);
+        let origin = root.join("origin.git");
+        sh(&root, "git init -q --bare origin.git");
+        sh(&root, "git init -q -b dev work");
+        let work = root.join("work");
+        std::fs::write(work.join("a.txt"), "one\n").unwrap();
+        std::fs::write(work.join("b.txt"), "keep\n").unwrap();
+        sh(
+            &work,
+            "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev",
+        );
+        sh(
+            &work,
+            &format!("git remote add origin {}", origin.display()),
+        );
+        sh(&work, "git push -q origin dev");
+        // The home branch stays at the first commit while `dev` moves on.
+        sh(&work, "git branch toy/heat dev");
+        std::fs::write(work.join("a.txt"), "two\n").unwrap();
+        sh(
+            &work,
+            "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev2 && git push -q origin dev",
+        );
+        sh(&work, "git worktree add -q ../toy-wt toy/heat");
+        let worktree = root.join("toy-wt");
+        (work, worktree)
+    }
+
+    /// The project of the T-503 tests: one lane in the real repository, with
+    /// `origin` as its remote and the default home branch `toy/heat`.
+    fn t503_config(repo: &std::path::Path) -> String {
+        format!(
+            r#"
+[project]
+id = "toy"
+herdr_session = "sess"
+repo = "{repo}"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+"#,
+            repo = repo.display()
+        )
+    }
+
+    /// The lane's project with a captain (so its items have a recipient) and
+    /// the recorded home-worktree path.
+    fn t503_world(repo: &std::path::Path, worktree: &std::path::Path) -> Store {
+        let mut store = world(&t503_config(repo));
+        store
+            .write(|tx| {
+                tx.insert_seat(&SeatRow {
+                    id: "toy:captain".into(),
+                    project: "toy".into(),
+                    role: SeatRole::Captain,
+                    name: "captain".into(),
+                    profile: "claude".into(),
+                    generation: 0,
+                    state: SeatState::Active,
+                    state_since: T0,
+                    state_reason: None,
+                    task_id: None,
+                })?;
+                tx.set_meta(&worktree_path_key("toy:heat"), &worktree.to_string_lossy())
+            })
+            .unwrap();
+        store
+    }
+
+    /// T-503: a reused home worktree that holds modified, deleted and untracked
+    /// files onboards onto `<remote>/<integration>` with a clean tree; the
+    /// changes are on `gear/archive/<lane>-<ts>` and one captain item names the
+    /// branch and the path count.
+    #[test]
+    fn a_reused_home_worktree_with_changes_is_archived_and_moved_to_the_integration_tip() {
+        let (repo, worktree) = t503_repo("gear-onboard-t503-dirty");
+        std::fs::write(worktree.join("a.txt"), "changed\n").unwrap();
+        std::fs::remove_file(worktree.join("b.txt")).unwrap();
+        std::fs::write(worktree.join("new.txt"), "new\n").unwrap();
+        let mut store = t503_world(&repo, &worktree);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w1:p2");
+        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+
+        assert_eq!(
+            onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
+            ["toy:heat"]
+        );
+
+        assert_eq!(sh(&worktree, "git status --porcelain"), "");
+        assert_eq!(sh(&worktree, "git rev-parse --abbrev-ref HEAD"), "toy/heat");
+        assert_eq!(
+            sh(&worktree, "git rev-parse HEAD"),
+            sh(&repo, "git rev-parse origin/dev")
+        );
+        let archive = format!("gear/archive/heat-{}", T0 + 1);
+        assert_eq!(sh(&worktree, &format!("git show {archive}:new.txt")), "new");
+        assert_eq!(
+            sh(&worktree, &format!("git show {archive}:a.txt")),
+            "changed"
+        );
+        assert_eq!(
+            sh(&worktree, &format!("git log -1 --format=%s {archive}")),
+            "gear: toy:heat home worktree at onboarding"
+        );
+        let messages = store
+            .read(|tx| tx.thread_messages("toy", "worktree:heat"))
+            .unwrap();
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].body.contains(&archive),
+            "the item names the archive branch: {}",
+            messages[0].body
+        );
+        assert!(
+            messages[0].body.contains("3 changed paths"),
+            "the item names the path count: {}",
+            messages[0].body
+        );
+    }
+
+    /// T-503: a clean home branch behind the integration tip is moved to it
+    /// with no item.
+    #[test]
+    fn a_clean_home_worktree_behind_the_tip_is_moved_with_no_item() {
+        let (repo, worktree) = t503_repo("gear-onboard-t503-behind");
+        let mut store = t503_world(&repo, &worktree);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w1:p2");
+        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+
+        assert_eq!(
+            onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
+            ["toy:heat"]
+        );
+
+        assert_eq!(sh(&worktree, "git status --porcelain"), "");
+        assert_eq!(sh(&worktree, "git rev-parse --abbrev-ref HEAD"), "toy/heat");
+        assert_eq!(
+            sh(&worktree, "git rev-parse HEAD"),
+            sh(&repo, "git rev-parse origin/dev")
+        );
+        assert!(
+            store
+                .read(|tx| tx.thread_messages("toy", "worktree:heat"))
+                .unwrap()
+                .is_empty(),
+            "a clean worktree that moved needs no item"
+        );
+    }
+
+    /// T-503: a clean home worktree already at the tip is left untouched.
+    #[test]
+    fn a_clean_home_worktree_at_the_tip_is_left_as_it_is() {
+        let (repo, worktree) = t503_repo("gear-onboard-t503-tip");
+        sh(
+            &worktree,
+            "git fetch -q origin && git reset -q --hard origin/dev",
+        );
+        let reflog = sh(&worktree, "git reflog show --format=%H toy/heat | wc -l");
+        let mut store = t503_world(&repo, &worktree);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w1:p2");
+        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+
+        assert_eq!(
+            onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
+            ["toy:heat"]
+        );
+
+        assert_eq!(sh(&worktree, "git status --porcelain"), "");
+        assert_eq!(sh(&worktree, "git rev-parse --abbrev-ref HEAD"), "toy/heat");
+        assert_eq!(
+            sh(&worktree, "git rev-parse HEAD"),
+            sh(&repo, "git rev-parse origin/dev")
+        );
+        assert_eq!(
+            sh(&worktree, "git reflog show --format=%H toy/heat | wc -l"),
+            reflog,
+            "the home branch was not moved"
+        );
+        assert!(
+            store
+                .read(|tx| tx.thread_messages("toy", "worktree:heat"))
+                .unwrap()
+                .is_empty(),
+            "a worktree already at the tip needs no item"
+        );
+    }
+
+    /// T-503: a git step that fails leaves the worktree as it was and names the
+    /// step in the captain item; the lane still starts.
+    #[test]
+    fn a_failed_fetch_leaves_the_worktree_as_it_was_and_names_the_step() {
+        let (repo, worktree) = t503_repo("gear-onboard-t503-fetch");
+        std::fs::write(worktree.join("a.txt"), "changed\n").unwrap();
+        let head = sh(&worktree, "git rev-parse HEAD");
+        sh(&repo, "git remote remove origin");
+        let mut store = t503_world(&repo, &worktree);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w1:p2");
+        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+
+        assert_eq!(
+            onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
+            ["toy:heat"],
+            "the lane still starts"
+        );
+
+        assert_eq!(
+            sh(&worktree, "git status --porcelain"),
+            "M a.txt",
+            "the change is still there"
+        );
+        assert_eq!(sh(&worktree, "git rev-parse HEAD"), head);
+        assert_eq!(sh(&worktree, "git rev-parse --abbrev-ref HEAD"), "toy/heat");
+        let messages = store
+            .read(|tx| tx.thread_messages("toy", "worktree:heat"))
+            .unwrap();
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].body.contains("git fetch origin failed"),
+            "the item names the step: {}",
+            messages[0].body
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat("toy:heat"))
+                .unwrap()
+                .unwrap()
+                .state,
+            SeatState::Active
+        );
     }
 }
