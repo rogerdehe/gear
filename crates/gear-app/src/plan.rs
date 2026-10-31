@@ -1003,6 +1003,58 @@ fn apply_queue(
             )?;
             continue;
         }
+        if let StaffItem::Raise {
+            role,
+            to,
+            until,
+            reason,
+            line,
+        } = item
+        {
+            // T-467: the user-confirmed raise of a count for a backlog. It
+            // lives in the store, not in the config, and the engine returns
+            // the count by itself when the end condition holds.
+            let row = tx.get_project(project)?.ok_or_else(|| {
+                GearError::new(ErrorCode::NoTarget, format!("no project {project}"))
+            })?;
+            let config = crate::config::parse(&row.config_toml).map_err(|e| {
+                bad(
+                    *line,
+                    format!("the project config cannot be read: {}", e.detail),
+                )
+            })?;
+            let from = config.quota.temps;
+            if *to <= from {
+                return Err(bad(
+                    *line,
+                    format!("`raise {role}` must be above the configured count {from} (got {to})"),
+                ));
+            }
+            let key = format!("engine.review_raise.{project}");
+            let value = serde_json::json!({
+                "from": from,
+                "to": to,
+                "until": until,
+                "reason": reason,
+                "at": now,
+                "plan_version": applied_version,
+            });
+            tx.set_meta(&key, &value.to_string())?;
+            let message = format!("raise {role} {from}->{to} until={until}: {reason}");
+            staffed.push(message);
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                Some(reason.clone()),
+                &staff_text(item),
+                now,
+            )?;
+            continue;
+        }
         let (lane, verb, target, reason) = match item {
             StaffItem::Park {
                 lane,
@@ -1039,6 +1091,7 @@ fn apply_queue(
             StaffItem::Release { .. } => unreachable!("release is applied above"),
             StaffItem::Rebind { .. } => unreachable!("rebind is applied above"),
             StaffItem::RebindCancel { .. } => unreachable!("rebind is applied above"),
+            StaffItem::Raise { .. } => unreachable!("raise is applied above"),
         };
         let seat_id = format!("{project}:{lane}");
         let seat = tx.get_seat(&seat_id)?.ok_or_else(|| {
@@ -1638,7 +1691,8 @@ pub fn staff_line(item: &StaffItem) -> usize {
         | StaffItem::Release { line, .. }
         | StaffItem::Remerge { line, .. }
         | StaffItem::Rebind { line, .. }
-        | StaffItem::RebindCancel { line, .. } => *line,
+        | StaffItem::RebindCancel { line, .. }
+        | StaffItem::Raise { line, .. } => *line,
     }
 }
 
@@ -3648,11 +3702,26 @@ fn require_confirmed_changes(
     departing: &BTreeSet<String>,
     moved: &[(String, String, String)],
 ) -> GearResult<()> {
-    if departing.is_empty() && moved.is_empty() {
+    // T-467: a raise of a count is the user's change too: it needs the same
+    // `--confirmed` and `confirmed:` line as a departure or a move.
+    let raises: Vec<(String, u32, String)> = draft
+        .staff
+        .iter()
+        .filter_map(|item| match item {
+            StaffItem::Raise {
+                role, to, until, ..
+            } => Some((role.clone(), *to, until.clone())),
+            _ => None,
+        })
+        .collect();
+    if departing.is_empty() && moved.is_empty() && raises.is_empty() {
         return Ok(());
     }
     if !draft.confirmed {
-        let what = if !departing.is_empty() {
+        let what = if !raises.is_empty() {
+            let (role, to, until) = &raises[0];
+            format!("the raise of {role} to {to} until {until} in this apply")
+        } else if !departing.is_empty() {
             format!(
                 "milestone {} departs in this apply",
                 departing.iter().cloned().collect::<Vec<_>>().join(", ")
@@ -3664,18 +3733,35 @@ fn require_confirmed_changes(
         return Err(GearError::new(
             ErrorCode::BadFormat,
             format!(
-                "{what}: a departure and a move between milestones are the user's; confirm it with them, then apply again with --confirmed and a `confirmed:` line in # Decisions"
+                "{what}: a raise, a departure and a move between milestones are the user's; confirm it with them, then apply again with --confirmed and a `confirmed:` line in # Decisions"
             ),
         ));
     }
-    if confirmed_decisions(draft).is_empty() {
+    let confirmed = confirmed_decisions(draft);
+    if confirmed.is_empty() {
         return Err(GearError::new(
             ErrorCode::BadFormat,
             format!(
                 "this apply changes {} but # Decisions carries no `confirmed:` line: add `- <time> confirmed: <what changes, before -> after> | why: <the user's reason>` in this same apply",
-                guarded_summary(departing, moved)
+                guarded_summary(departing, moved, &raises)
             ),
         ));
+    }
+    for (role, to, until) in &raises {
+        // The captain's line names the role and the raised count; its
+        // `until ...` wording is the captain's own, so it is not matched
+        // word for word against the staff line's end condition.
+        let named = confirmed.iter().any(|decision| {
+            decision.what.contains(role.as_str()) && decision.what.contains(&to.to_string())
+        });
+        if !named {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "the raise of {role} to {to} until {until} needs its own `confirmed:` line: add `- <time> confirmed: {role} <from> -> {to} until {until} | why: <the user's reason>` in this same apply"
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -3696,8 +3782,12 @@ fn confirmed_decisions(draft: &Draft) -> Vec<crate::decision::Decision> {
 fn guarded_summary(
     departing: &std::collections::BTreeSet<String>,
     moved: &[(String, String, String)],
+    raises: &[(String, u32, String)],
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
+    for (role, to, until) in raises {
+        parts.push(format!("the raise of {role} to {to} until {until}"));
+    }
     if !departing.is_empty() {
         parts.push(format!(
             "the departure of {}",
@@ -4123,6 +4213,13 @@ fn staff_text(item: &StaffItem) -> String {
             lane, repo, owns, ..
         } => format!("rebind {lane} repo={repo} owns=[{}]", owns.join(", ")),
         StaffItem::RebindCancel { lane, .. } => format!("rebind {lane} cancel"),
+        StaffItem::Raise {
+            role,
+            to,
+            until,
+            reason,
+            ..
+        } => format!("raise {role} to={to} until={until} reason={reason}"),
     }
 }
 
