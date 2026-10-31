@@ -27,6 +27,7 @@ pub mod feed;
 pub mod friction;
 pub mod guardrails;
 pub mod handover;
+pub mod health;
 pub mod hours;
 pub mod lane_nudge;
 pub mod merge;
@@ -103,6 +104,9 @@ pub struct EngineCfg {
     pub remote: std::sync::Arc<dyn merge::Remote>,
     /// Executor for review worktree Git operations.
     pub review_git: std::sync::Arc<dyn review::ReviewGit>,
+    /// The machine and process reader of the health watch (T-472). Production
+    /// is `health::SystemRead`; a test injects its own readings.
+    pub health: std::sync::Arc<dyn health::Read>,
     /// The wait between two attempts of a merge that failed for a reason that
     /// can clear: the engine sleeps, doubling from 2 s up to 30 s (T-61). A
     /// field so a test injects a hook that never touches the clock (T-127).
@@ -125,6 +129,7 @@ impl Default for EngineCfg {
             model_list_poll_ms: 500,
             remote: std::sync::Arc::new(merge::GitRemote),
             review_git: std::sync::Arc::new(review::RealReviewGit),
+            health: std::sync::Arc::new(health::Silent),
             merge_retry_wait: merge::RetryWait::backoff(),
         }
     }
@@ -197,6 +202,9 @@ pub struct TickReport {
     /// Seats whose dialog the engine closed this tick (T-468): a lane's or a
     /// reviewer's at once, a captain's after ten unanswered minutes.
     pub dialogs: Vec<String>,
+    /// The health watch's actions (T-472): the seats it stopped, and the
+    /// captain items it opened or resolved.
+    pub health: Vec<String>,
     /// Seats whose own guardrails refused one of their actions (T-113).
     pub guardrails: Vec<String>,
     /// Seats whose agent was renamed back to its seat name this tick (T-134).
@@ -446,6 +454,19 @@ pub fn tick(
                 .dialogs
                 .extend(dialog::check(store, herdr, &observed, &profiles, now)?);
             note_slow(report, "dialogs", step);
+            // The fleet and machine health watch (T-472): once a minute, the
+            // seats' own CPU and memory and the machine's load, memory and
+            // disk. A seat over the safe line is stopped and the captain told;
+            // a machine short for another reason gets one urgent item naming
+            // the top processes. Between samples this is one meta read.
+            let step = std::time::Instant::now();
+            let health = health::check(store, herdr, cfg, &project, &observed, &profiles, now)?;
+            report
+                .health
+                .extend(health.stopped.iter().map(|seat| format!("{seat}:stopped")));
+            report.health.extend(health.items);
+            report.health.extend(health.notes);
+            note_slow(report, "health", step);
             // A seat blocked by a dialog for minutes reaches the captain (lesson
             // 7b): the agent waits on a dialog nobody sees.
             let step = std::time::Instant::now();

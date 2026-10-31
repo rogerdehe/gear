@@ -161,9 +161,9 @@ fn a_codex_model_at_capacity_is_neither_a_quota_nor_an_auth_stop() {
 
 #[test]
 fn unverified_kinds_are_not_built_in() {
-    // `codex` left this list with T-5: its SOP is verified
-    // (`gear --skill agent:codex`), so it is built in like `opencode`.
-    for kind in ["nope", "omp"] {
+    // `codex` left this list with T-5 and `omp` with T-495: their SOPs are
+    // verified, so they are built in like `opencode`.
+    for kind in ["nope"] {
         assert!(builtin(kind).is_none(), "{kind}");
     }
 }

@@ -96,13 +96,20 @@ enum CaptainOp {
         #[arg(long)]
         facts: bool,
     },
-    /// Become a project's captain from the agent in this pane: no GEAR_CTX,
-    /// no pane id. The project is the one named, else the one whose checkout
-    /// holds the working directory, else the only registered one; with several,
-    /// it lists them so you can ask the user which.
+    /// Become the captain of one or more projects from the agent in this
+    /// pane: no GEAR_CTX, no pane id. Every named project's captain seat is
+    /// bound to this pane and the seats it already holds are kept; with no
+    /// project named, the one whose checkout holds the working directory,
+    /// else the only registered one (with several, it lists them).
     Take {
-        /// The project to captain (see the list `gear captain take` prints).
-        project: Option<String>,
+        /// The projects to captain (see the list `gear captain take` prints).
+        projects: Vec<String>,
+    },
+    /// Let one project's captain go from this pane; the other seats the pane
+    /// holds stay.
+    Release {
+        /// The project to release.
+        project: String,
     },
 }
 
@@ -242,6 +249,9 @@ enum ReportOp {
         #[arg(long)]
         voyage: Option<String>,
     },
+    /// The captain's coverage report (T-474): the accepted attempts whose
+    /// candidate is not on the integration branch — accepted and never landed.
+    Coverage,
     /// The voyage report of the project (design §7.5): the voyage's lines,
     /// its `done:` sentence clause by clause, its time and tokens, the ★
     /// decisions, the friction reports and the tasks that took more than one
@@ -433,6 +443,7 @@ fn run(cli: Cli) -> GearResult<()> {
         Some(Cmd::Queue { json }) => cmd_queue(json),
         Some(Cmd::Report { op }) => match op {
             ReportOp::Time { task, voyage } => cmd_report_time(task, voyage, cli.json),
+            ReportOp::Coverage => cmd_report_coverage(cli.json),
             ReportOp::Voyage { voyage, all } => cmd_report_voyage(voyage, all, cli.json),
         },
         Some(Cmd::Run) => cmd_run(),
@@ -470,8 +481,11 @@ fn run(cli: Cli) -> GearResult<()> {
             )),
         },
         Some(Cmd::Captain {
-            op: CaptainOp::Take { project },
-        }) => cmd_captain_take(project.as_deref(), cli.json),
+            op: CaptainOp::Take { projects },
+        }) => cmd_captain_take(&projects, cli.json),
+        Some(Cmd::Captain {
+            op: CaptainOp::Release { project },
+        }) => cmd_captain_release(&project, cli.json),
         Some(Cmd::Whoami) => cmd_whoami(cli.json),
     }
 }
@@ -1785,6 +1799,113 @@ fn run_friction(
 /// took more than one round.
 ///
 /// Read-only, so it starts no engine.
+fn cmd_report_coverage(json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let env = resolve_caller(&mut store, &mut herdr, env)?;
+    let out = run_report_coverage(&mut store, &env, &mut herdr, json)?;
+    println!("{out}");
+    Ok(())
+}
+
+/// `gear report coverage` body, over injected state (T-474). The git check is
+/// the production one: the integration branch is fetched from the project's
+/// remote once per repo, then `merge-base --is-ancestor` answers each candidate.
+fn run_report_coverage(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+    json: bool,
+) -> GearResult<String> {
+    let fp = observe_identity(store, env, herdr)?;
+    let git = GitOnIntegration::default();
+    let report = gear_app::coverage::build(store, env, fp.as_ref(), &|repo, remote, sha| {
+        git.contains(repo, remote, sha)
+    })?;
+    if json {
+        return serde_json::to_string(&report).map_err(json_error);
+    }
+    Ok(gear_app::coverage::render(&report))
+}
+
+/// Whether a commit is on a repo's integration branch (T-474): the branch is
+/// fetched from the remote once per repo, then `merge-base --is-ancestor`
+/// answers. A repo the fetch cannot reach falls back to the remote-tracking
+/// ref; a candidate whose ancestry cannot be read is reported as off, so the
+/// captain looks instead of trusting a silent yes.
+#[derive(Debug, Default)]
+struct GitOnIntegration {
+    fetched: std::cell::RefCell<std::collections::BTreeMap<String, Option<String>>>,
+}
+
+impl GitOnIntegration {
+    fn contains(&self, repo: &gear_app::config::Repo, remote: &str, sha: &str) -> bool {
+        let integration = {
+            let mut fetched = self.fetched.borrow_mut();
+            fetched
+                .entry(repo.path.clone())
+                .or_insert_with(|| {
+                    let fetched = std::process::Command::new("git")
+                        .args([
+                            "-C",
+                            &repo.path,
+                            "fetch",
+                            "--quiet",
+                            remote,
+                            &repo.integration,
+                        ])
+                        .output();
+                    let head = fetched
+                        .ok()
+                        .filter(|output| output.status.success())
+                        .and_then(|_| {
+                            std::process::Command::new("git")
+                                .args(["-C", &repo.path, "rev-parse", "FETCH_HEAD"])
+                                .output()
+                                .ok()
+                                .filter(|output| output.status.success())
+                                .map(|output| {
+                                    String::from_utf8_lossy(&output.stdout).trim().to_string()
+                                })
+                        });
+                    head.or_else(|| {
+                        std::process::Command::new("git")
+                            .args([
+                                "-C",
+                                &repo.path,
+                                "rev-parse",
+                                &format!("refs/remotes/{remote}/{}", repo.integration),
+                            ])
+                            .output()
+                            .ok()
+                            .filter(|output| output.status.success())
+                            .map(|output| {
+                                String::from_utf8_lossy(&output.stdout).trim().to_string()
+                            })
+                    })
+                    .filter(|sha| !sha.is_empty())
+                })
+                .clone()
+        };
+        let Some(integration) = integration else {
+            return false;
+        };
+        std::process::Command::new("git")
+            .args([
+                "-C",
+                &repo.path,
+                "merge-base",
+                "--is-ancestor",
+                sha,
+                &integration,
+            ])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+}
+
 fn cmd_report_voyage(voyage: Option<String>, all: bool, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
@@ -2008,7 +2129,7 @@ fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
     Ok(())
 }
 
-/// `gear admin install-skill --agent <claude|codex|opencode|grok|pi>`: write the
+/// `gear admin install-skill --agent <claude|codex|opencode|grok|pi|omp>`: write the
 /// skill (SKILL.md and its references) into the directory the agent CLI loads
 /// its skills from, and say where it was written.
 ///
@@ -2129,10 +2250,13 @@ fn cmd_captain_handover(pane: &str, json: bool) -> GearResult<()> {
     Ok(())
 }
 
-fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
+fn cmd_captain_take(projects: &[String], json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
-    let mut herdr = match project.and_then(session_socket_of) {
+    let mut herdr = match projects
+        .first()
+        .and_then(|project| session_socket_of(project))
+    {
         Some(path) => gear_herdr::SocketHerdr::connect(&path).map_err(|e| {
             GearError::new(
                 gear_model::ErrorCode::NotRegistered,
@@ -2148,60 +2272,103 @@ fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
             format!("cannot read the working directory: {e}"),
         )
     })?;
-    let result = gear_app::captain::take(
+    let taken = gear_app::captain::take_all(
         &mut store,
         &env,
         &mut herdr,
         &ancestors,
         &cwd,
-        project,
+        projects,
         now_ts(),
     )?;
+    if json {
+        let values: Vec<serde_json::Value> = taken
+            .iter()
+            .map(|result| {
+                serde_json::json!({
+                    "project": result.project,
+                    "captain": result.captain,
+                    "from": result.from,
+                    "to": result.to,
+                    "generation": result.generation,
+                    "kind": result.kind,
+                    "named": named_line(&result.named),
+                    "document": result.document,
+                    "previous_pane": result.request.as_ref().map(|request| request.pane.clone()),
+                    "previous_session": result.request.as_ref().and_then(|request| request.session_ref.clone()),
+                    "asked": result.request.as_ref().map(|request| request.asked),
+                    "deadline": result.request.as_ref().map(|request| request.deadline),
+                })
+            })
+            .collect();
+        if values.len() == 1 {
+            println!("{}", values[0]);
+        } else {
+            println!("{}", serde_json::Value::Array(values));
+        }
+        return Ok(());
+    }
+    for result in &taken {
+        println!(
+            "captain of {} taken by pane {} (generation {}, {}); it left {}",
+            result.project,
+            result.to,
+            result.generation,
+            result.kind,
+            result.from.as_deref().unwrap_or("no pane recorded")
+        );
+        println!("agent name: {}", named_line(&result.named));
+        if let Some(document) = &result.document {
+            println!("previous captain's handover: {document} (read it before the task packet)");
+        } else if let Some(request) = &result.request {
+            println!(
+                "previous captain: pane {} {} · session {} · if no handover arrives within {} minutes, read it and write part 2 yourself",
+                request.pane,
+                if request.asked {
+                    "was asked for its handover"
+                } else {
+                    "hosts no agent to ask"
+                },
+                request.session_ref.as_deref().unwrap_or("not recorded"),
+                gear_app::captain::HANDOVER_ASK_MIN
+            );
+        }
+    }
+    println!("run `gear` here: this pane is the captain, no GEAR_CTX needed");
+    Ok(())
+}
+
+/// `gear captain release <project>`: let one project's captain go.
+fn cmd_captain_release(project: &str, json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = match session_socket_of(project) {
+        Some(path) => gear_herdr::SocketHerdr::connect(&path).map_err(|e| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                format!("cannot reach herdr at {}: {}", path.display(), e.0),
+            )
+        })?,
+        None => open_herdr()?,
+    };
+    let ancestors = gear_app::identity::process_ancestors();
+    let released =
+        gear_app::captain::release(&mut store, &env, &mut herdr, &ancestors, project, now_ts())?;
     if json {
         println!(
             "{}",
             serde_json::json!({
-                "project": result.project,
-                "captain": result.captain,
-                "from": result.from,
-                "to": result.to,
-                "generation": result.generation,
-                "kind": result.kind,
-                "named": named_line(&result.named),
-                "document": result.document,
-                "previous_pane": result.request.as_ref().map(|request| request.pane.clone()),
-                "previous_session": result.request.as_ref().and_then(|request| request.session_ref.clone()),
-                "asked": result.request.as_ref().map(|request| request.asked),
-                "deadline": result.request.as_ref().map(|request| request.deadline),
+                "project": released.project,
+                "captain": released.captain,
+                "pane": released.pane,
             })
         );
-        return Ok(());
-    }
-    println!(
-        "captain of {} taken by pane {} (generation {}, {}); it left {}",
-        result.project,
-        result.to,
-        result.generation,
-        result.kind,
-        result.from.as_deref().unwrap_or("no pane recorded")
-    );
-    println!("agent name: {}", named_line(&result.named));
-    if let Some(document) = &result.document {
-        println!("previous captain's handover: {document} (read it before the task packet)");
-    } else if let Some(request) = &result.request {
+    } else {
         println!(
-            "previous captain: pane {} {} · session {} · if no handover arrives within {} minutes, read it and write part 2 yourself",
-            request.pane,
-            if request.asked {
-                "was asked for its handover"
-            } else {
-                "hosts no agent to ask"
-            },
-            request.session_ref.as_deref().unwrap_or("not recorded"),
-            gear_app::captain::HANDOVER_ASK_MIN
+            "released the captain of {} from pane {}; the other seats this pane holds stay",
+            released.project, released.pane
         );
     }
-    println!("run `gear` here: this pane is the captain, no GEAR_CTX needed");
     Ok(())
 }
 
@@ -2515,6 +2682,11 @@ fn run_plan(
     let mut draft = gear_app::draft::parse(&text)?;
     draft.confirmed = confirmed;
     let fp = observe_identity(store, env, herdr)?;
+    // T-485: a captain pane may hold several projects; the plan file's header
+    // names the one this apply acts on, so the caller is resolved as that
+    // project's captain (the header is checked against it below).
+    let env = store
+        .read(|tx| gear_app::identity::env_of_captain(tx, env, fp.as_ref(), &draft.project))?;
     // T-133 (review F1): a `- release` of a **lane** must know whether the
     // lane's agent is really in its pane, and only the session can say so. The
     // agents are read here, before the write transaction (Herdr is never
@@ -2558,7 +2730,7 @@ fn run_plan(
     };
     let result = gear_app::plan::apply(
         store,
-        env,
+        &env,
         fp.as_ref(),
         agents.as_deref(),
         &draft,
@@ -3619,6 +3791,9 @@ fn engine_cfg(db_path: &str) -> gear_engine::EngineCfg {
     // the captain's judgement (the engine settles passes only).
     cfg.auto_settle = true;
     cfg.profiles = builtin_profiles();
+    // T-472: the running engine reads the machine and the fleet's own
+    // processes; a test's EngineCfg keeps the silent reader.
+    cfg.health = std::sync::Arc::new(gear_engine::health::SystemRead::new());
     cfg
 }
 
@@ -4005,7 +4180,7 @@ mod tests {
     use super::*;
     use gear_herdr::fake::FakeHerdr;
     use gear_herdr::AgentStatus;
-    use gear_model::{GearCtx, MsgKind, MsgState, OpKind, OpState, SeatRole};
+    use gear_model::{GearCtx, MsgKind, MsgState, OpKind, OpState, SeatRole, TaskState};
     use gear_store::{testing, BindingRow, ContractRow, SeatRow, Store, TaskRow};
     use std::collections::BTreeMap;
 
@@ -4538,6 +4713,24 @@ mod tests {
     // T-410: `gear plan apply --confirmed` parses, and the flag reaches the
     // draft the apply reads: without it a departed voyage's eta change is
     // refused, with it the change applies.
+    #[test]
+    fn captain_take_takes_several_projects_and_release_names_one() {
+        let cli = Cli::try_parse_from(["gear", "captain", "take", "gear", "prometheus"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Captain {
+                op: CaptainOp::Take { projects },
+            }) => assert_eq!(projects, vec!["gear", "prometheus"]),
+            other => panic!("not a captain take: {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["gear", "captain", "release", "gear"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Captain {
+                op: CaptainOp::Release { project },
+            }) => assert_eq!(project, "gear"),
+            other => panic!("not a captain release: {other:?}"),
+        }
+    }
+
     #[test]
     fn plan_apply_takes_the_confirmed_flag() {
         let cli = Cli::try_parse_from(["gear", "plan", "apply", "--confirmed", "plan.md"]).unwrap();
@@ -5922,6 +6115,133 @@ path="api"
         )
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::Forbidden);
+    }
+
+    /// T-474: `gear report coverage` lists the accepted attempts whose
+    /// candidate is not on the integration branch; the production git check
+    /// answers from a real repository.
+    #[test]
+    fn the_coverage_report_lists_an_accepted_candidate_that_never_landed() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        let run = |dir: &std::path::Path, args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        run(
+            root.path(),
+            &["init", "-q", "--bare", origin.to_str().unwrap()],
+        );
+        run(
+            root.path(),
+            &["init", "-q", "-b", "dev", work.to_str().unwrap()],
+        );
+        run(&work, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        run(
+            &work,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        run(&work, &["push", "-q", "origin", "dev"]);
+        let landed = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&work)
+            .output()
+            .unwrap();
+        let landed = String::from_utf8_lossy(&landed.stdout).trim().to_string();
+        // A candidate that was accepted and never merged.
+        run(&work, &["checkout", "-q", "-b", "heat/t2"]);
+        run(&work, &["commit", "-q", "--allow-empty", "-m", "lost"]);
+        run(&work, &["push", "-q", "origin", "heat/t2"]);
+        let lost = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&work)
+            .output()
+            .unwrap();
+        let lost = String::from_utf8_lossy(&lost.stdout).trim().to_string();
+        run(&work, &["checkout", "-q", "dev"]);
+
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = format!(
+                    "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"{}\"\n\n[quota]\nlanes = 1\ntemps = 0\n\n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\nkind = \"opencode\"\nprofile = \"opencode\"\n",
+                    work.display()
+                );
+                tx.update_project(&project)?;
+                for (id, rank, candidate) in
+                    [("T-1", 1, landed.as_str()), ("T-2", 2, lost.as_str())]
+                {
+                    tx.insert_task(&TaskRow {
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
+                        project: "p".into(),
+                        id: id.into(),
+                        rank,
+                        state: TaskState::Done,
+                        priority: "must".into(),
+                        lane: Some("heat".into()),
+                        milestone: Some("M6".into()),
+                        required: true,
+                        contract_version: 1,
+                        deps: vec![],
+                        followup_of: None,
+                        wait_on: None,
+                        wait_cond: None,
+                        rework_note: None,
+                        estimate_min: None,
+                        issue: None,
+                        updated: T0,
+                    })?;
+                    tx.insert_attempt(&gear_store::AttemptRow {
+                        project: "p".into(),
+                        task: id.into(),
+                        n: 1,
+                        seat: "p:heat".into(),
+                        generation: 1,
+                        contract_version: 1,
+                        adopted_version: 1,
+                        pending_update: None,
+                        state: gear_model::AttemptState::Accepted,
+                        candidate: Some(candidate.into()),
+                        report: None,
+                        safe_point: None,
+                        started: T0,
+                        updated: T0,
+                        session_ref: None,
+                        session_cli: None,
+                        session_action: None,
+                        sent_at: None,
+                    })?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let out =
+            run_report_coverage(&mut store, &env("captain", CAP_PANE), &mut herdr, false).unwrap();
+        assert!(out.contains("Coverage report · project p"), "{out}");
+        assert!(out.contains("2 accepted attempt(s) checked"), "{out}");
+        assert!(out.contains("1 not on it"), "{out}");
+        assert!(
+            out.contains("T-2 attempt 1: candidate") && out.contains(&lost),
+            "{out}"
+        );
+        assert!(
+            !out.contains("T-1 attempt"),
+            "the landed one is not listed: {out}"
+        );
     }
 
     /// T-171: `gear report voyage` is the captain's landing report (design
