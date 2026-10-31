@@ -142,6 +142,29 @@ const PENDING: &[Pending] = &[
     // exclusion is left for the header. Row 47 (the footer) is compared from
     // the start: T-341 drew it.
 
+    // T-494: the Tasks tab has a deps column right of the lanes, and the task
+    // text follows it. The prototype has no deps column, so its Tasks frames
+    // cannot match the view's right side; the lane graph left of the column is
+    // still compared.
+    // T-494: the Tasks tab has a deps column right of the lanes, the task text
+    // follows it, the stage's dependency words are a count and the right-hand
+    // dependency text is gone. The prototype has none of these, so its Tasks
+    // frames cannot match the view's right side; the lane graph left of the
+    // deps column is still compared.
+    Pending {
+        frame: "tasks-folded",
+        rows: (14, 46),
+        cols: (25, 159),
+        swap: None,
+        by: "T-494: the deps column and the task text after it",
+    },
+    Pending {
+        frame: "tasks-open",
+        rows: (22, 46),
+        cols: (25, 159),
+        swap: None,
+        by: "T-494: the deps column and the task text after it",
+    },
     // (6) The prototype's constants contradict its own formulas, so no store
     // can give both.
     //
@@ -1006,7 +1029,10 @@ fn view_differences(tab: Tab, frame: Frame, top: usize, rows: Range) -> Vec<Stri
     let data: Vec<Pending> = PENDING
         .iter()
         .copied()
-        .filter(|entry| entry.frame == frame && entry.by.starts_with("prototype data"))
+        .filter(|entry| {
+            entry.frame == frame
+                && (entry.by.starts_with("prototype data") || entry.by.starts_with("T-494"))
+        })
         .collect();
     let mut problems = Vec::new();
     for row in rows.0..=rows.1 {
