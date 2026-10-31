@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=996 -->
+<!-- gear-plan project=gear base=998 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -100,6 +100,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-11-01 08:20 hand-fix: restarted both engines on v0.6.3 (the earlier restart was interrupted) | why: another project's M-5348, a real notice after the 10-minute grace
 - 2026-11-01 08:40 scope: added to S5 (hull): a re-review resumes the conversation of the review it continues | why: the user's design (a rework's review continues its own earlier review); measured: re-reviews go to the right seat and take ~2 min, but run in the seat's latest session, not attempt 1's | else: -
 - 2026-11-01 08:55 scope: added to S5 (hull): reviewer seats may run different models (`seats` on a review entry) | why: user: reviewers need to support different models, in M6 | else: -
+- station M-7114: keep course — 75% eta, projected 893m of 1020m; hull takes T-500 right after T-499 since T-492 waits on T-486, mast has T-498 after its T-486 rework, so no lane runs dry.
 
 # Queue
 
