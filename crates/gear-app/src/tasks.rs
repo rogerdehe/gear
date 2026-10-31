@@ -865,13 +865,7 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
     // pass is a merge with no merge op: the attempt carries the merge time, and
     // the tasks that depend on the audit start as they do after a merge.
     if v.pass && tx.task_audit(&v.project, &v.task)?.is_some() {
-        tx.set_attempt_time(
-            &v.project,
-            &v.task,
-            v.attempt,
-            AttemptStep::Merged,
-            now,
-        )?;
+        tx.set_attempt_time(&v.project, &v.task, v.attempt, AttemptStep::Merged, now)?;
     }
     Ok(())
 }
@@ -958,9 +952,8 @@ pub fn settle_review(
     // puts the task back on Ready so the captain can add the fix tasks to its
     // deps; both are plan `# Verdicts` lines.
     if tx.task_audit(project, task)?.is_some() {
-        let line = format!(
-            "{task}: audit review is in — the captain rules (the task stays Verifying)"
-        );
+        let line =
+            format!("{task}: audit review is in — the captain rules (the task stays Verifying)");
         resolve_review_items(tx, project, task, attempt, &line, now)?;
         tell_captain_cap(tx, project, task, attempt, &line, now)?;
         return Ok(());
