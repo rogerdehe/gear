@@ -51,6 +51,10 @@ pub struct QueueItem {
     /// `fresh: a new parser`. The lane starts a new conversation instead of
     /// keeping the one it has.
     pub fresh: Option<String>,
+    /// The model every review of this task runs on (T-500):
+    /// `review-model: gpt-6.1-sol`. It names an entry of `[models] review`
+    /// and must differ from the lane's model.
+    pub review_model: Option<String>,
 }
 
 /// One `# Staff` line.
@@ -633,6 +637,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
         issue: None,
         mechanical: None,
         fresh: None,
+        review_model: None,
     })
 }
 
@@ -664,6 +669,7 @@ fn parse_queue_field(
         "issue" => "issue",
         "mechanical" => "mechanical",
         "fresh" => "fresh",
+        "review-model" => "review-model",
         other => return Err(bad(line, format!("unknown queue field {other:?}"))),
     };
     if seen.contains(&field) {
@@ -744,6 +750,15 @@ fn parse_queue_field(
                 ));
             }
             item.fresh = Some(value.to_string());
+        }
+        "review-model" => {
+            if value.is_empty() {
+                return Err(bad(
+                    line,
+                    "`review-model` needs the model of an entry in [models] review",
+                ));
+            }
+            item.review_model = Some(value.to_string());
         }
         _ => unreachable!("the field was matched above"),
     }

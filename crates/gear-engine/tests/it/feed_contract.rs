@@ -1391,3 +1391,50 @@ fn one_startable_task_keeps_the_lanes_talking() {
     assert_eq!(deck[0].body, "lane deck is IDLE: no next task to dispatch (its agent may still be finishing a turn); plan a task for it or move one to it");
     assert_eq!(changes.len(), 2, "{changes:?}");
 }
+
+/// The runway counts each task's own estimate, not the lane's average: a lane
+/// whose past attempts were short (reworks) and that holds a long current task
+/// and a long queued one is not running dry.
+#[test]
+fn the_runway_counts_the_tasks_estimates_before_the_lanes_average() {
+    use gear_store::{AttemptRow, AttemptStep};
+    let mut w = world(AgentStatus::Working, 2);
+    startable_elsewhere(&mut w);
+    measured_history(&mut w);
+    w.store
+        .write(|tx| {
+            let mut current = tx.get_task("p", "T-1")?.unwrap();
+            current.state = TaskState::Running;
+            current.estimate_min = Some(120);
+            tx.update_task(&current)?;
+            let mut queued = tx.get_task("p", "T-2")?.unwrap();
+            queued.estimate_min = Some(90);
+            tx.update_task(&queued)?;
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Started,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0 - 40 * 60,
+                updated: T0,
+            })?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T0 - 40 * 60)
+        })
+        .unwrap();
+    // The average (30 min) alone would say ~30 min left; the estimates say
+    // 80 + 90 min.
+    feed::keep_lanes_fed(&mut w.store, "p", T0).unwrap();
+    assert!(items(&mut w.store, "heat").is_empty());
+}

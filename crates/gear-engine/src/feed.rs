@@ -108,6 +108,11 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
         // Ready work, less what a delivery already took: a task with a
         // Delivered/started attempt is not available any more (R4).
         let mut ready = 0;
+        // The planned minutes of the ready tasks that have an estimate, and
+        // how many have none: the runway counts a task's own estimate, and
+        // the lane's average only for a task without one.
+        let mut ready_planned = 0;
+        let mut ready_unplanned = 0;
         for task in dispatch::ready_tasks_of(tx, &seat)? {
             let taken = tx
                 .attempts_of_task(project, &task.id)?
@@ -115,6 +120,10 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
                 .any(|attempt| attempt.state.occupies_seat());
             if !taken {
                 ready += 1;
+                match task.estimate_min {
+                    Some(minutes) if minutes > 0 => ready_planned += minutes * 60,
+                    _ => ready_unplanned += 1,
+                }
             }
         }
         let current = tx.in_progress_attempts_of_seat(&seat.id)?;
@@ -131,11 +140,16 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
         let average = average_task_seconds(tx, project, &seat.id)?;
         let horizon = match average {
             Some(average) => {
-                let mut seconds = ready as i64 * average;
+                let mut seconds = ready_planned + ready_unplanned * average;
                 for attempt in &current {
                     let times = tx.attempt_times(project, &attempt.task, attempt.n)?;
                     let elapsed = times.started.map(|start| (now - start).max(0)).unwrap_or(0);
-                    seconds += (average - elapsed).max(0);
+                    let planned = tx
+                        .get_task(project, &attempt.task)?
+                        .and_then(|task| task.estimate_min)
+                        .filter(|minutes| *minutes > 0)
+                        .map_or(average, |minutes| minutes * 60);
+                    seconds += (planned - elapsed).max(0);
                 }
                 Some(seconds)
             }

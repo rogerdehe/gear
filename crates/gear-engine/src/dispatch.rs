@@ -295,7 +295,7 @@ pub fn assign_text(task: &str, version: i64, branch: &str, packet: &str) -> Stri
 /// started a task on the previous task's branch, so the candidate carried
 /// another task or work landed on a handed-in branch).
 ///
-/// `New task <task> (contract v<version>). Branch: <branch>. Start it from the integration branch: git fetch <remote> && git switch -c <branch> <remote>/<integration> (if it exists already: git switch <branch>). Run `gear` first (…). …`
+/// `New task <task> (contract v<version>). Branch: <branch>. Before you read any repository file, start it from the integration branch: git fetch <remote> && git switch -c <branch> <remote>/<integration> (if it exists already: git switch <branch>). Run `gear` first (…). …`
 ///
 /// The remote is the project's `[conventions].remote` (T-262): a team that
 /// calls it `upstream` reads its branches from there.
@@ -308,7 +308,7 @@ pub fn first_attempt_text(
     packet: &str,
 ) -> String {
     format!(
-        "New task {task} (contract v{version}). Branch: {branch}. Start it from the integration branch: git fetch {remote} && git switch -c {branch} {remote}/{integration} (if it exists already: git switch {branch}). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+        "New task {task} (contract v{version}). Branch: {branch}. Before you read any repository file, start it from the integration branch: git fetch {remote} && git switch -c {branch} {remote}/{integration} (if it exists already: git switch {branch}). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
     )
 }
 
@@ -1312,7 +1312,7 @@ mod tests {
         let text = assign_delivery_text(&mut store, "T-1", 1);
         assert!(
             text.contains(
-                "Branch: heat/t1. Start it from the integration branch: git fetch origin && git switch -c heat/t1 origin/trunk (if it exists already: git switch heat/t1)."
+                "Branch: heat/t1. Before you read any repository file, start it from the integration branch: git fetch origin && git switch -c heat/t1 origin/trunk (if it exists already: git switch heat/t1)."
             ),
             "{text}"
         );
@@ -1401,7 +1401,7 @@ mod tests {
     fn the_two_packet_writings() {
         assert_eq!(
             first_attempt_text("T-1", 1, "heat/t1", "origin", "dev", "`gear --show T-1`"),
-            "New task T-1 (contract v1). Branch: heat/t1. Start it from the integration branch: git fetch origin && git switch -c heat/t1 origin/dev (if it exists already: git switch heat/t1). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+            "New task T-1 (contract v1). Branch: heat/t1. Before you read any repository file, start it from the integration branch: git fetch origin && git switch -c heat/t1 origin/dev (if it exists already: git switch heat/t1). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
         );
         assert_eq!(
             assign_text("T-1", 1, "heat/t1", "`gear --show T-1`"),
@@ -1551,7 +1551,7 @@ mod tests {
         );
         // The command that starts the branch is still there, after the notice.
         assert!(
-            text.contains("heat/t1. Start it from the integration branch: git fetch origin"),
+            text.contains("heat/t1. Before you read any repository file, start it from the integration branch: git fetch origin"),
             "{text}"
         );
         // The record is spent: a rework check of the same meta finds nothing.

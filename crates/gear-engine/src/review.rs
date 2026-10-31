@@ -258,7 +258,9 @@ fn start_hand_in_reviews(
         //    chain that differs from the writer's **current** model (T-35).
         //    Without a review chain the model is not managed.
         let writer = writer_current_model(store, config, &task.writer)?;
-        let entry = crate::model::review_entry(config, writer.as_deref());
+        let review_model = store.read(|tx| tx.task_review_model(project, &task.task))?;
+        let entry =
+            crate::model::review_entry_for(config, writer.as_deref(), review_model.as_deref());
         if entry.is_none() && !config.models.review.is_empty() {
             note_waiting(report, &task.task);
             tell_captain(
@@ -1011,7 +1013,9 @@ fn start_direction_checks(
             sha
         };
         let writer = writer_current_model(store, config, &attempt.seat)?;
-        let entry = crate::model::review_entry(config, writer.as_deref());
+        let review_model = store.read(|tx| tx.task_review_model(project, &row.id))?;
+        let entry =
+            crate::model::review_entry_for(config, writer.as_deref(), review_model.as_deref());
         if entry.is_none() && !config.models.review.is_empty() {
             continue;
         }
@@ -3116,8 +3120,11 @@ pub(crate) fn seat_current_model(
         Some(writer) => writer_current_model(store, config, &writer)?,
         None => None,
     };
-    Ok(crate::model::review_entry(config, writer_model.as_deref())
-        .map(|entry| entry.model().to_string()))
+    let review_model = store.read(|tx| tx.task_review_model(project, &task))?;
+    Ok(
+        crate::model::review_entry_for(config, writer_model.as_deref(), review_model.as_deref())
+            .map(|entry| entry.model().to_string()),
+    )
 }
 
 /// The review packet of an attempt: the contract's goal and accept, the
@@ -7753,6 +7760,179 @@ review = [
         // The reviewer never runs the model it reviews: not gpt-6.1-sol.
         assert!(
             !starts[0].1.contains(&"gpt-6.1-sol".to_string()),
+            "{starts:?}"
+        );
+    }
+
+    /// The project with two review entries: a codex one and a claude one.
+    const CONFIG_TWO_REVIEWS: &str = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 1
+
+[captain]
+pane = "w1:p9"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[temps]
+kind = "codex"
+profile = "codex"
+
+[models]
+lanes = ["minimax-cn/MiniMax-M3.1-Flash"]
+review = [
+  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] },
+  { model = "claude-sonnet-5-5", cli = "claude", args = ["--effort", "high"] },
+]
+"#;
+
+    /// T-500: a task whose block carries `review-model:` is reviewed on that
+    /// entry and its CLI — first review and re-review — while a task without
+    /// the field takes the chain's first entry.
+    #[test]
+    fn a_task_review_model_runs_its_first_review_and_its_re_review() {
+        let mut store = world(CONFIG_TWO_REVIEWS);
+        store
+            .write(|tx| tx.set_task_review_model("p", "T-1", "claude-sonnet-5-5"))
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 20,
+        )
+        .unwrap();
+
+        assert_eq!(report.started, vec!["p:review-1".to_string()]);
+        let starts = starts(&herdr);
+        assert_eq!(starts.len(), 1, "{starts:?}");
+        assert_eq!(starts[0].0, "claude", "the CLI of the named entry");
+        assert!(
+            starts[0].1.contains(&"claude-sonnet-5-5".to_string()),
+            "{starts:?}"
+        );
+        assert!(
+            !starts[0].1.contains(&"gpt-6.1-sol".to_string()),
+            "not the chain's first entry: {starts:?}"
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&crate::model::model_meta_key("p:review-1")))
+                .unwrap()
+                .as_deref(),
+            Some("claude-sonnet-5-5")
+        );
+
+        // The review fails; the task reworks and hands in attempt 2.
+        store
+            .write(|tx| {
+                judged(tx, "T-1", 1, "p:review-1", false)?;
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.state = AttemptState::Rejected;
+                attempt.updated = T0 + 30;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Ready;
+                task.rework_note = Some("F1: the parser drops the second line".into());
+                task.updated = T0 + 30;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        assert_eq!(
+            standby_after_verdict(&mut store, "p", T0 + 30).unwrap(),
+            vec!["p:review-1".to_string()]
+        );
+        store
+            .write(|tx| {
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 31)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 31)?;
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-1",
+                    2,
+                    1,
+                    "def5678",
+                    "ops/reports/T-1.md",
+                    T0 + 31,
+                )
+            })
+            .unwrap();
+        let mut round = None;
+        for tick in T0 + 32..T0 + 45 {
+            start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", tick).unwrap();
+            round = store
+                .read(|tx| tx.open_round_of_seat("p:review-1"))
+                .unwrap();
+            if round
+                .as_ref()
+                .is_some_and(|round| round.task == "T-1" && round.attempt == 2)
+            {
+                break;
+            }
+        }
+        let round = round.expect("the re-review opens on the seat");
+        assert_eq!(round.cli, "claude", "the re-review runs on the same entry");
+        assert_eq!(round.model.as_deref(), Some("claude-sonnet-5-5"));
+    }
+
+    /// T-500: a task without `review-model:` behaves as today: the first entry
+    /// of the review chain that differs from the writer's model.
+    #[test]
+    fn a_task_without_a_review_model_takes_the_chains_first_entry() {
+        let mut store = world(CONFIG_TWO_REVIEWS);
+        let mut herdr = FakeHerdr::new();
+
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 20,
+        )
+        .unwrap();
+
+        let starts = starts(&herdr);
+        assert_eq!(starts.len(), 1, "{starts:?}");
+        assert_eq!(starts[0].0, "codex");
+        assert!(
+            starts[0].1.contains(&"gpt-6.1-sol".to_string()),
             "{starts:?}"
         );
     }
