@@ -67,9 +67,9 @@ fn world() -> World {
 }
 
 impl World {
-    /// A reviewer seat `review-1` on task T-7 (the seat is warm, the agent is
-    /// named after the task it reviews: `<project>-review-t7`), with the packet
-    /// delivery still to do.
+    /// A reviewer seat `review-1` on task T-7 (the seat is warm and its agent
+    /// carries the seat's name, `<project>-review-1`; the task is in its
+    /// title), with the packet delivery still to do.
     fn reviewer(&mut self) -> gear_store::SeatRow {
         let seat = self
             .store
@@ -222,14 +222,14 @@ fn a_correctly_named_agent_gets_no_rename() {
     assert!(report.renamed.is_empty(), "{report:?}");
 }
 
-/// F1 of the T-134 review: a reviewer's agent is named after the task it
-/// reviews (`<project>-review-<task>`, the name its review started with), not
-/// after its warm seat — so a correctly named reviewer is left alone.
+/// F1 of the T-134 review, T-482: a reviewer's agent is named after its seat
+/// (`<project>-review-<k>`, the name its review started with), not after the
+/// task — so a correctly named reviewer is left alone.
 #[test]
 fn a_correctly_named_reviewer_gets_no_rename() {
     let mut w = world();
     let seat = w.reviewer();
-    w.herdr.set_agent_name(REV_PANE, Some("p-review-t7"));
+    w.herdr.set_agent_name(REV_PANE, Some("p-review-1"));
 
     // The tick's own step (restore), with the names Herdr reports now.
     let names = names::read(&mut w.herdr).unwrap();
@@ -238,7 +238,7 @@ fn a_correctly_named_reviewer_gets_no_rename() {
     assert!(!restored.renamed.contains(&seat.id), "{restored:?}");
     assert_eq!(
         w.name(REV_PANE),
-        Some("p-review-t7"),
+        Some("p-review-1"),
         "the reviewer keeps the name its review started with"
     );
     assert!(
@@ -251,18 +251,18 @@ fn a_correctly_named_reviewer_gets_no_rename() {
     );
 }
 
-/// F1: a cleared reviewer is restored to its **task-based** name before the
-/// delivery — not to its warm seat's name, and the packet still goes out.
+/// F1, T-482: a cleared reviewer is restored to its **seat's** name before the
+/// delivery, and the packet still goes out.
 #[test]
-fn a_cleared_reviewer_is_restored_to_its_task_name_before_delivery() {
+fn a_cleared_reviewer_is_restored_to_its_seat_name_before_delivery() {
     let mut w = world();
     let seat = w.reviewer();
     w.packet(&seat);
     assert_eq!(w.name(REV_PANE), None, "Herdr cleared the name");
     assert_eq!(
         names::desired(&seat),
-        "p-review-t7",
-        "the seat's agent is named after the task it reviews"
+        "p-review-1",
+        "the seat's agent is named after its seat"
     );
 
     // The delivery path makes sure of the name before it types. T-149: the
@@ -272,8 +272,8 @@ fn a_cleared_reviewer_is_restored_to_its_task_name_before_delivery() {
 
     assert_eq!(
         w.name(REV_PANE),
-        Some("p-review-t7"),
-        "the agent carries its task name"
+        Some("p-review-1"),
+        "the agent carries its seat's name"
     );
     assert!(
         w.herdr.prompts_to(REV_PANE).is_empty(),
@@ -281,8 +281,8 @@ fn a_cleared_reviewer_is_restored_to_its_task_name_before_delivery() {
         w.herdr.prompts_to(REV_PANE)
     );
     assert!(
-        w.herdr.renames_to("p-review-1").is_empty(),
-        "the warm seat's name is never the agent's name: {:?}",
+        !w.herdr.renames_to("p-review-1").is_empty(),
+        "the agent is renamed to its seat's name: {:?}",
         w.herdr.calls
     );
 
@@ -293,8 +293,8 @@ fn a_cleared_reviewer_is_restored_to_its_task_name_before_delivery() {
         .herdr
         .calls
         .iter()
-        .position(|call| matches!(call, Call::Rename { name, .. } if name == "p-review-t7"))
-        .unwrap_or_else(|| panic!("no task-based rename: {:?}", w.herdr.calls));
+        .position(|call| matches!(call, Call::Rename { name, .. } if name == "p-review-1"))
+        .unwrap_or_else(|| panic!("no seat-based rename: {:?}", w.herdr.calls));
     let prompt_at = w
         .herdr
         .calls
@@ -302,15 +302,15 @@ fn a_cleared_reviewer_is_restored_to_its_task_name_before_delivery() {
         .position(|call| matches!(call, Call::Prompt { pane, .. } if pane == REV_PANE))
         .unwrap_or_else(|| panic!("no packet: {:?}", w.herdr.calls));
     assert!(renamed_at < prompt_at, "named first: {:?}", w.herdr.calls);
-    assert_eq!(w.name(REV_PANE), Some("p-review-t7"));
+    assert_eq!(w.name(REV_PANE), Some("p-review-1"));
     assert!(
         w.herdr.prompts_to(REV_PANE)[0].contains("Review T-7"),
         "{:?}",
         w.herdr.prompts_to(REV_PANE)
     );
     assert!(
-        w.herdr.renames_to("p-review-1").is_empty(),
-        "the warm seat's name is never the agent's name: {:?}",
+        !w.herdr.renames_to("p-review-1").is_empty(),
+        "the agent is renamed to its seat's name: {:?}",
         w.herdr.calls
     );
 }
@@ -464,13 +464,11 @@ fn a_delivery_to_a_pane_whose_agent_lost_its_name_names_it_and_delivers_in_the_s
     );
 }
 
-/// A finished reviewer that went Standby still carries the task's name until
-/// restore gives it its seat name back, while another seat takes that task's
-/// review in the same tick (T-270). One pass must give the name back before the
-/// other seat asks for it, so the captain gets no item the next tick resolves
-/// by itself.
+/// T-482: a finished reviewer (Standby) and a seat starting a new review in
+/// the same tick each keep their own seat's name; the old task-based name a
+/// finished reviewer still carried is given back and nobody's name is taken.
 #[test]
-fn a_name_freed_in_the_same_pass_is_named_to_the_seat_that_asks_for_it() {
+fn each_reviewer_keeps_its_seat_name_across_tasks() {
     const REV9_PANE: &str = "w1:p8";
     const REV11_PANE: &str = "w1:p7";
     let mut w = world();
@@ -493,12 +491,14 @@ fn a_name_freed_in_the_same_pass_is_named_to_the_seat_that_asks_for_it() {
             Ok(seat)
         })
         .unwrap();
-    // review-11 starts the review of T-1: its agent's name is p-review-t1.
+    // review-11 starts the review of T-1: its agent's name is its seat's,
+    // p-review-11.
     w.store
         .write(|tx| testing::seed_temp_seat(tx, "p", "review-11", "T-1", REV11_PANE, "codex", T0))
         .unwrap();
-    // The ids order review-11 before review-9, so one pass in id order would
-    // see the name held.
+    // review-9 still carries the old task-based name p-review-t1; restore
+    // gives it its seat name back. review-11 asks for p-review-11, which
+    // nobody holds.
     w.herdr
         .add_agent_named(REV9_PANE, "codex", AgentStatus::Idle, "p-review-t1");
     w.herdr.add_agent(REV11_PANE, "codex", AgentStatus::Idle);
@@ -519,24 +519,23 @@ fn a_name_freed_in_the_same_pass_is_named_to_the_seat_that_asks_for_it() {
     );
     assert_eq!(
         w.name(REV11_PANE),
-        Some("p-review-t1"),
+        Some("p-review-11"),
         "the new reviewer got the name it asks for"
     );
-    let freed_at = w
-        .herdr
-        .calls
-        .iter()
-        .position(|call| matches!(call, Call::Rename { pane, .. } if pane == REV9_PANE))
-        .unwrap_or_else(|| panic!("no rename of the finished reviewer: {:?}", w.herdr.calls));
-    let asked_at = w
-        .herdr
-        .calls
-        .iter()
-        .position(|call| matches!(call, Call::Rename { pane, .. } if pane == REV11_PANE))
-        .unwrap_or_else(|| panic!("no rename of the new reviewer: {:?}", w.herdr.calls));
     assert!(
-        freed_at < asked_at,
-        "the name is given back before the other seat asks for it: {:?}",
+        w.herdr
+            .calls
+            .iter()
+            .any(|call| matches!(call, Call::Rename { pane, .. } if pane == REV9_PANE)),
+        "the finished reviewer is renamed: {:?}",
+        w.herdr.calls
+    );
+    assert!(
+        w.herdr
+            .calls
+            .iter()
+            .any(|call| matches!(call, Call::Rename { pane, .. } if pane == REV11_PANE)),
+        "the new reviewer is named: {:?}",
         w.herdr.calls
     );
     // No item for the captain: there is nothing the next tick would resolve.
@@ -560,7 +559,7 @@ fn a_name_held_by_a_pane_of_no_seat_is_still_reported_once() {
     w.herdr.add_agent(REV11_PANE, "codex", AgentStatus::Idle);
     // The name is held by a pane that is nobody's seat.
     w.herdr
-        .add_agent_named(OTHER_PANE, "opencode", AgentStatus::Idle, "p-review-t1");
+        .add_agent_named(OTHER_PANE, "opencode", AgentStatus::Idle, "p-review-11");
 
     for now in [T0 + 10, T0 + 20] {
         let names = names::read(&mut w.herdr).unwrap();
@@ -572,7 +571,7 @@ fn a_name_held_by_a_pane_of_no_seat_is_still_reported_once() {
     }
 
     assert_eq!(w.name(REV11_PANE), None, "nothing was stolen");
-    assert_eq!(w.name(OTHER_PANE), Some("p-review-t1"));
+    assert_eq!(w.name(OTHER_PANE), Some("p-review-11"));
     let items = w
         .store
         .read(|tx| tx.thread_messages("p", "name:p:review-11"))
