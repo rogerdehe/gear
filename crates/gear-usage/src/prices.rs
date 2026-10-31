@@ -158,16 +158,32 @@ impl Price {
 
 /// The price of a model: a project's override first (matched on the same id),
 /// then the built-in table.
+///
+/// A full key that names the model exactly (case-insensitively) wins; else the
+/// entries are matched on the id without the provider prefix. Two different
+/// overrides for one id make the price ambiguous, and an ambiguous price is
+/// unknown (the old rule for a bare id).
 pub fn price_for(model: &str, overrides: &BTreeMap<String, Price>) -> Option<Price> {
-    let id = model_id(model);
-    let mut found = None;
-    for (key, price) in overrides {
-        if model_id(key) == id {
-            found = Some(price.clone());
-        }
+    let full = model.trim().to_lowercase();
+    let exact = overrides
+        .iter()
+        .filter(|(key, _)| key.trim().to_lowercase() == full)
+        .map(|(_, price)| price)
+        .collect::<Vec<_>>();
+    if exact.len() == 1 {
+        return Some(exact[0].clone());
     }
-    if found.is_some() {
-        return found;
+    let id = model_id(model);
+    let found = overrides
+        .iter()
+        .filter(|(key, _)| model_id(key) == id)
+        .map(|(_, price)| price)
+        .collect::<Vec<_>>();
+    if found.len() > 1 {
+        return None;
+    }
+    if let Some(price) = found.first() {
+        return Some((*price).clone());
     }
     builtin()
         .iter()
