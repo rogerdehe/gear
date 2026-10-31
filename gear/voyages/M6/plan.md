@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1031 -->
+<!-- gear-plan project=gear base=1032 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -128,6 +128,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7245: keep course — the eta is now 20h (1200m); projected 1040m with 4 tasks left: three in review, then the v0.6.4 release
 - 2026-10-31 16:35 plan: skills/gear/references/decompose.md rule 7: a voyage ends with an audit split by promise, planned at kickoff; the captain rules on every gap before landing | why: user: per-task reviews pass half-finished pieces that only fail when joined; M6 runs its audit by hand before v0.6.4, GEAR support is designed at M7 kickoff | else: one reviewer audits the whole voyage
 - 2026-10-31 16:43 scope: new S5 task, audit tasks run by reviewers; M6's audit slices are added once it merges and v0.6.4 depends on them | why: user: a voyage ends with an audit split by promise, run by several reviewers, ruled by the captain, and a gap goes back onto the fix path; it lands in M6 | else: the captain audits alone, or GEAR support waits for M7
+- 2026-10-31 16:55 confirmed: lanes hull and mast hk-dgx-1/DeepSeek-V4.1-Flash-1017 -> tokenrhythm/deepseek-v4.1-flash-1017, applied with init --confirmed; the engine switches each lane at its next idle point | why: user: six lanes on the self-hosted endpoint load it too much; it stays with the other project's four
 
 # Queue
 
