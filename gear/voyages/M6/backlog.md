@@ -176,3 +176,6 @@
 
 ## A lane move does not interrupt the old lane
 - 2026-10-31 M6 (another project's T-435 moved surface → prompt): plan apply closes the old lane's attempt and sends "<task> moved to lane <new>; stop work on it" as a non-urgent instruction (crates/gear-app/src/plan.rs, T-311), which waits for the agent's next idle moment, so a busy old lane keeps working on the moved task. Send it urgent, as the direction-check-closed notice is, so it interrupts the old lane's turn.
+
+## A moved task's branches count twice toward the branch cap
+- 2026-10-31 M6 (another project's M-6096, 13 > 12: surface/t435 vs prompt/t435, api/t430 vs money/t430): the branch cap in crates/gear-engine/src/merge.rs counts every lane that ever held an open task, so a moved task holds two places until it is done (only then does the sweep delete the old lane's ref if its tip is on the integration branch). Count one branch per open task. Delete an old lane's ref at once when the task has moved and that ref's tip is an ancestor of the new lane's branch or the integration branch.
