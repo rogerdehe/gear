@@ -131,6 +131,14 @@ fn advance(s: &mut Store, h: &mut FakeHerdr, c: &EngineCfg, at: i64) {
 #[test]
 fn wait_pauses_clock_suppresses_nudges_and_wakes_once_when_merged() {
     let (mut s, mut h, c) = world();
+    // T-458: T-2 belongs to another lane, so the parked heat lane has no next
+    // task of its own and this test sees only the wait's own wake.
+    s.write(|tx| {
+        let mut task = tx.get_task("p", "T-2")?.unwrap();
+        task.lane = Some("other".into());
+        tx.update_task(&task)
+    })
+    .unwrap();
     block(&mut s);
     s.write(|tx| {
         // Overlapping quota and declared waits count only once in the round.
@@ -298,7 +306,15 @@ fn declared_wait_stops_the_live_overrun_clock() {
         .read(|tx| tx.thread_messages("p", "overrun-question:T-1:1:dev"))
         .unwrap()
         .is_empty());
-    assert!(h.prompts_to(LANE).is_empty());
+    // T-458: the parked lane takes its next task (T-2), so its packet is a
+    // new task, never a continue of the waiting one.
+    assert!(
+        h.prompts_to(LANE)
+            .iter()
+            .all(|text| !text.contains("Continue T-1")),
+        "{:?}",
+        h.calls
+    );
 }
 
 #[test]
@@ -519,6 +535,14 @@ fn a_later_message_ends_an_external_wait() {
 #[test]
 fn an_external_wait_times_out_with_an_instruction() {
     let (mut s, mut h, c) = world();
+    // T-458: T-2 belongs to another lane, so the parked heat lane has no next
+    // task and the timeout instruction is the only packet it gets.
+    s.write(|tx| {
+        let mut task = tx.get_task("p", "T-2")?.unwrap();
+        task.lane = Some("other".into());
+        tx.update_task(&task)
+    })
+    .unwrap();
     wait_outside(&mut s, 0);
     advance(&mut s, &mut h, &c, 120 * 60 - 1);
     assert_eq!(
@@ -526,7 +550,13 @@ fn an_external_wait_times_out_with_an_instruction() {
         (Some("external".into()), Some("external".into())),
         "not before 120 min"
     );
-    assert!(h.prompts_to(LANE).is_empty(), "{:?}", h.calls);
+    assert!(
+        h.prompts_to(LANE)
+            .iter()
+            .all(|text| !text.contains("Continue T-1")),
+        "{:?}",
+        h.calls
+    );
     advance(&mut s, &mut h, &c, 120 * 60);
     assert_eq!(external_wait(&mut s), (None, None));
     let told = s
@@ -577,4 +607,47 @@ fn a_merged_wait_keeps_its_own_ending() {
         .read(|tx| tx.thread_messages("p", "wait-external-end:T-1:1"))
         .unwrap()
         .is_empty());
+}
+
+/// T-458: a lane that reports blocked is free for its next startable task
+/// (M5: mast reported T-367 blocked on T-366 and then sat idle about 40
+/// minutes, because the waiting attempt stayed Started and the engine
+/// assigned nothing).
+#[test]
+fn a_blocked_lane_gets_its_next_startable_task() {
+    let (mut s, mut h, c) = world();
+    block(&mut s);
+    // The lane keeps its conversation (T-481): the session step runs first.
+    advance(&mut s, &mut h, &c, 100);
+    h.set_status(LANE, AgentStatus::Done);
+    advance(&mut s, &mut h, &c, 110);
+    // The waiting attempt is parked: it stays Started and keeps its wait, and
+    // the lane works on T-2 meanwhile.
+    let parked = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!(parked.state, AttemptState::Started);
+    assert_eq!(
+        s.read(|tx| tx.get_task("p", "T-1"))
+            .unwrap()
+            .unwrap()
+            .wait_on
+            .as_deref(),
+        Some("T-2")
+    );
+    let next = s.read(|tx| tx.get_attempt("p", "T-2", 1)).unwrap();
+    let next = next.expect("the lane was given its next startable task");
+    assert_eq!(next.seat, "p:heat");
+    let ops = s
+        .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Deliver))
+        .unwrap();
+    assert!(
+        ops.iter().any(|op| op.task.as_deref() == Some("T-2")),
+        "the next task is delivered: {ops:?}"
+    );
+    assert!(
+        h.prompts_to(LANE)
+            .iter()
+            .any(|text| text.contains("New task T-2")),
+        "{:?}",
+        h.calls
+    );
 }

@@ -805,15 +805,24 @@ fn create_round(
     if let Some(open) = tx.open_round_of_seat(&seat.id)? {
         let same = open.attempt == key.attempt && open.role == key.role && open.task == key.task;
         if !same {
-            tx.close_round(
-                &RoundKey {
-                    project: open.project.clone(),
-                    task: open.task.clone(),
-                    attempt: open.attempt,
-                    role: open.role.clone(),
-                },
-                now,
-            )?;
+            // T-458: a round whose attempt still goes on does not end here. A
+            // lane that reported blocked keeps its parked attempt and takes
+            // its next task; the parked round keeps its clock (the wait is its
+            // time).
+            let live = tx
+                .get_attempt(&open.project, &open.task, open.attempt)?
+                .is_some_and(|attempt| attempt.state.occupies_seat());
+            if !live {
+                tx.close_round(
+                    &RoundKey {
+                        project: open.project.clone(),
+                        task: open.task.clone(),
+                        attempt: open.attempt,
+                        role: open.role.clone(),
+                    },
+                    now,
+                )?;
+            }
         }
     }
     tx.insert_round(&NewRound {

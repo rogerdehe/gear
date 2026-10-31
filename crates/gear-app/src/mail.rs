@@ -266,13 +266,22 @@ fn send_inner(
         }
     }
     store.write(|tx| {
-        // The caller must be a seat that may write (design/03).
+        // The caller must be a seat that may write (design/03). A held seat
+        // may still report (T-458): the user's stop holds new work, not the
+        // hand-in of the task the lane already works on (M5 F-176: every
+        // `gear send` of a held lane was refused, so a finished task could
+        // not be handed in).
         let (ctx, seat) = require_seat(
             tx,
             env,
             fp,
             Some(&[SeatRole::Lane, SeatRole::Temp, SeatRole::Captain]),
-            Some(&[SeatState::Active, SeatState::Standby, SeatState::Retiring]),
+            Some(&[
+                SeatState::Active,
+                SeatState::Standby,
+                SeatState::Retiring,
+                SeatState::Held,
+            ]),
         )?;
 
         // Slice 1 kinds, plus `result` (T-45): a result names the exact
@@ -835,7 +844,12 @@ fn stored_receipt(
             env,
             fp,
             Some(&[SeatRole::Lane, SeatRole::Temp, SeatRole::Captain]),
-            Some(&[SeatState::Active, SeatState::Standby, SeatState::Retiring]),
+            Some(&[
+                SeatState::Active,
+                SeatState::Standby,
+                SeatState::Retiring,
+                SeatState::Held,
+            ]),
         )?;
         let key = request_key(
             &ctx.project,

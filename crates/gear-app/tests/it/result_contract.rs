@@ -618,3 +618,62 @@ fn hand_in_with_no_newer_attempt_keeps_todays_error() {
         1
     );
 }
+
+/// T-458: a held lane still reports (M5 F-176: while the user's stop held
+/// mast, every `gear send` was refused, so a finished task could not be handed
+/// in and the lane could not even ask the captain). The hold stops new work,
+/// not the hand-in of the task the lane already works on.
+#[test]
+fn a_held_lane_still_hands_in_its_finished_task() {
+    let mut s = world();
+    s.write(|tx| {
+        tx.set_seat_state(
+            "p:heat",
+            gear_model::SeatState::Held,
+            Some("hold: the user asked"),
+            T0 + 1,
+        )
+    })
+    .unwrap();
+    let (env, fp) = lane();
+    let sent = mail::send(
+        &mut s,
+        &env,
+        Some(&fp),
+        &result(1, Some("abc1234"), "r-held"),
+        T0 + 5,
+    )
+    .unwrap();
+    assert_eq!(sent.recipient, "p:captain");
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!(attempt.state, AttemptState::Submitted);
+    // A question from the held lane reaches the captain too.
+    let question = mail::send(
+        &mut s,
+        &env,
+        Some(&fp),
+        &SendArgs {
+            kind: MsgKind::Question,
+            body: "the hold is not mine to end: shall I wait?".into(),
+            task: None,
+            attempt: None,
+            contract: None,
+            candidate: None,
+            verdict: None,
+            blocking: None,
+            base: None,
+            about: None,
+            to: None,
+            reply_to: None,
+            urgent: false,
+            left: None,
+            blocker: None,
+            on: None,
+            friction: None,
+            request_id: "q-held".into(),
+        },
+        T0 + 6,
+    )
+    .unwrap();
+    assert_eq!(question.recipient, "p:captain");
+}

@@ -3269,6 +3269,13 @@ struct Lost {
     told: bool,
     /// The task's voyage still has a task that is not terminal (T-408).
     voyage: bool,
+    /// An item about this attempt is still open (T-458): the skip rule is
+    /// checked for it before the old filters below.
+    open_item: bool,
+    /// The old filters of T-397 that keep a task out of a **new** item: its
+    /// merge landed, a merge op is queued or running, or its merge-failed item
+    /// is open.
+    settled: bool,
 }
 
 /// Is the task's voyage open (T-408)? A voyage is its milestone, and it is open
@@ -3379,27 +3386,23 @@ fn tell_captain_lost(
             let Some(candidate) = latest.candidate.clone() else {
                 continue;
             };
+            // The old filters of T-397 say only whether a **new** item is
+            // opened. They are kept here rather than skipping the task
+            // (T-458): a task they drop may still hold an open merge-lost item
+            // that the skip rule has to close (T-408 review F1).
             // The attempt carries a merge time: its work landed (design §10.7,
             // row B03-01).
-            if tx
+            let merged = tx
                 .attempt_times(project, &task.id, latest.n)?
                 .merged
-                .is_some()
-            {
-                continue;
-            }
+                .is_some();
             // A merge op will merge it: queued, running or being recovered.
-            if in_flight.contains(&task.id) {
-                continue;
-            }
+            let in_flight = in_flight.contains(&task.id);
             // Its merge failed and the captain has that item still open.
             let failed_open = tx
                 .thread_messages(project, &failed_thread(&task.id))?
                 .into_iter()
                 .any(|message| message.state == MsgState::Open);
-            if failed_open {
-                continue;
-            }
             // Told and settled already: a resolved item does not come back.
             // Such a task is still carried, so the T-408 skips can close an
             // item that is still open.
@@ -3409,6 +3412,14 @@ fn tell_captain_lost(
                 || tx
                     .get_meta(&merge_lost_landed_key(project, &task.id, latest.n))?
                     .is_some();
+            // An item about this attempt is still open (T-458): the skip rule
+            // is checked for it before the old filters. Only a told attempt
+            // can have one — the item is opened with that word.
+            let open_item = told
+                && tx
+                    .thread_messages(project, &lost_thread(&task.id))?
+                    .into_iter()
+                    .any(|message| message.state == MsgState::Open);
             // F1 of the T-397 review: the task's own snapshot says where its
             // work lands — a task keeps the repo and the base it was created
             // against even when its lane moves (design, `repo_of_task`), and
@@ -3421,6 +3432,8 @@ fn tell_captain_lost(
                 repo,
                 told,
                 voyage: voyage_open(&open_voyages, task),
+                open_item,
+                settled: merged || in_flight || failed_open,
             });
         }
         Ok(lost)
@@ -3432,18 +3445,31 @@ fn tell_captain_lost(
         repo,
         told,
         voyage,
+        open_item,
+        settled,
     } in lost
     {
         // T-408: a lost merge of a finished voyage was settled with the voyage,
         // and a candidate the repository no longer holds is work that cannot be
         // remerged. Either way the task is not checked, and an item still open
-        // about it is closed with that word.
-        let skip = !voyage || matches!(candidate_held(&repo, &candidate), Some(false));
-        if skip {
-            resolve_lost(store, project, &task, now)?;
-            continue;
+        // about it is closed with that word. T-458: this comes before the old
+        // filters, so an item stays closable while a merge is in flight or a
+        // merge-failed item is open.
+        let checked = open_item || (!told && !settled);
+        if checked {
+            let skip = !voyage || matches!(candidate_held(&repo, &candidate), Some(false));
+            if skip {
+                if open_item {
+                    resolve_lost(store, project, &task, now)?;
+                }
+                continue;
+            }
         }
         if told {
+            continue;
+        }
+        // The old filters of T-397 keep a settled task out of a new item.
+        if settled {
             continue;
         }
         // The candidate's own repo answers, from its remote-tracking ref: no
@@ -4752,6 +4778,65 @@ mod tests {
             .unwrap();
 
         merge_passed(&mut store, &mut herdr, &cfg, "p", 21).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "a second item was opened: {items:?}");
+        assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
+        assert_eq!(items[0].result.as_deref(), Some(LOST_SKIPPED));
+    }
+
+    /// T-458: the skip rule runs **before** the old filters (T-408 review F1).
+    /// An open merge-lost item used to stay open when the task had a merge in
+    /// flight, because the scan dropped the task before the skip check.
+    #[test]
+    fn an_open_lost_item_closes_while_a_merge_is_in_flight() {
+        let scratch = Scratch::new("merge-lost-in-flight");
+        let candidate = scratch.local_head_of("heat/t5");
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        lost_task(&mut store, &candidate, OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+
+        // The voyage is open and the repo holds the candidate: the work is named.
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "the lost work was not named: {items:?}");
+        assert_eq!(items[0].state, MsgState::Open);
+
+        // The voyage finishes (T-5 is its only task and it is done) while a
+        // new merge for it is queued: the old filter would drop the task.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.milestone = Some("M1".into());
+                tx.update_task(&task)?;
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "branch": "heat/t5", "candidate": candidate }),
+                    created: 21,
+                })
+            })
+            .unwrap();
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 22).unwrap();
         let items = store
             .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
             .unwrap();

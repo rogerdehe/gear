@@ -53,6 +53,14 @@ pub fn tick(
                     .filter(|other| other.seat == round.seat && other.start_at > round.start_at)
                     .min_by_key(|other| other.start_at);
                 if let Some(next) = next {
+                    // T-458: a round whose attempt still goes on does not end
+                    // here. A lane that reported blocked keeps its parked
+                    // attempt (still Started) and takes its next task; the
+                    // parked round keeps its clock, since the wait is its
+                    // time.
+                    if attempt_in_progress(tx, round)? {
+                        continue;
+                    }
                     tx.close_round(&key_of(round), next.start_at)?;
                     report.closed.push(label(round));
                 }
@@ -135,6 +143,15 @@ fn session_cli_key(key: &RoundKey, session: &str) -> String {
 pub(crate) fn add_session(tx: &Tx<'_>, key: &RoundKey, session: &str, cli: &str) -> GearResult<()> {
     tx.add_round_session(key, session)?;
     tx.set_meta(&session_cli_key(key, session), cli)
+}
+
+/// Is the round's attempt still going on (T-458)? A round with an attempt
+/// that occupies the seat — a parked wait included — is not ended by the next
+/// round on its seat.
+fn attempt_in_progress(tx: &Tx<'_>, round: &gear_store::RoundRow) -> GearResult<bool> {
+    Ok(tx
+        .get_attempt(&round.project, &round.task, round.attempt)?
+        .is_some_and(|attempt| attempt.state.occupies_seat()))
 }
 
 /// How a round is named in the report.

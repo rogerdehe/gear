@@ -3886,6 +3886,9 @@ fn record_voyages(
     departed: &std::collections::BTreeSet<String>,
     now: Ts,
 ) -> GearResult<()> {
+    // The plan version this apply writes (T-458): a repeated confirmed change
+    // is a decision of its own, and the version keeps its key apart.
+    let version = tx.plan_version(project)?;
     for (header, body) in &draft.milestones {
         let (id, title) = crate::draft::milestone_parts(header);
         let (done, bar, eta) = crate::draft::milestone_fields(body);
@@ -3956,7 +3959,12 @@ fn record_voyages(
                 // The user's confirmation is a starred decision (T-410).
                 let what = format!("{field} of {id} changed from \"{old}\" to \"{new}\"");
                 let why = "confirmed by the user".to_string();
-                let key = format!("user|{project}|{id}|{field}|{old}|{new}");
+                // T-458: the key names the plan version too. A voyage that goes
+                // back and forth (8h, 10h, 8h) confirms the same transition
+                // twice, and the second confirmation is a decision of its own
+                // (M5: the key held only the field and the two texts, so the
+                // repeat was dropped as a duplicate).
+                let key = format!("user|{project}|{id}|{field}|{old}|{new}|v{version}");
                 tx.insert_decision_if_new(&gear_store::NewDecision {
                     project: project.to_string(),
                     key: crate::decision::key_of(&key),
@@ -3970,7 +3978,7 @@ fn record_voyages(
                     star: true,
                     source: "gear".to_string(),
                     line: Some(format!("{what} | why: {why}")),
-                    plan_version: None,
+                    plan_version: Some(version),
                 })?;
             }
         }

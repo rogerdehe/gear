@@ -348,8 +348,22 @@ pub fn lane_view(
     // one that is not Submitted — comes first; only when every open attempt is
     // handed in does the view carry a Submitted one, and then the next task
     // may be assigned.
-    let mut open = tx.open_attempts_of_seat(&seat.id)?;
-    open.sort_by_key(|a| a.state == AttemptState::Submitted);
+    // T-458: an attempt whose task is in a declared wait is parked — a lane
+    // that reported blocked is free for its next startable task (M5: mast sat
+    // idle about 40 minutes while its attempt stayed Started). A parked
+    // attempt is neither the current one nor a reason to hold the next task;
+    // it comes back when its wait ends.
+    let mut open = Vec::new();
+    for attempt in tx.open_attempts_of_seat(&seat.id)? {
+        let task = tx.get_task(&seat.project, &attempt.task)?;
+        if task.as_ref().is_some_and(|task| task.wait_on.is_some()) {
+            continue;
+        }
+        open.push(attempt);
+    }
+    // The newest open attempt comes first (T-458): a lane may hold a parked
+    // one and a new one at once, and the new one is what it works on.
+    open.sort_by_key(|a| (a.state == AttemptState::Submitted, std::cmp::Reverse(a.started)));
     // The seat has no open attempt that is not Submitted (T-290): an empty
     // list, or one that is handed in, is fine.
     let no_open_unsubmitted = open.iter().all(|a| a.state == AttemptState::Submitted);
@@ -357,9 +371,6 @@ pub fn lane_view(
     let attempt = match open.into_iter().next() {
         Some(attempt) => {
             let task = tx.get_task(&seat.project, &attempt.task)?;
-            if task.as_ref().is_some_and(|task| task.wait_on.is_some()) {
-                return Ok(empty_view(obs));
-            }
             let continues = task
                 .map(|task| match task.state {
                     TaskState::Running | TaskState::Verifying => true,
