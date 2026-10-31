@@ -257,6 +257,26 @@ pub fn take(
     named: Option<&str>,
     now: Ts,
 ) -> GearResult<Taken> {
+    let named: Vec<String> = named
+        .map(|project| vec![project.to_string()])
+        .unwrap_or_default();
+    let mut taken = take_all(store, env, herdr, ancestors, cwd, &named, now)?;
+    Ok(taken.remove(0))
+}
+
+/// `gear captain take <project> [<project>...]` (T-485): bind every named
+/// project's captain seat to the caller's pane. A seat the pane already holds
+/// keeps its generation and its name; the other projects' seats are rebound as
+/// [`take`] does. With no project named, one is resolved as before.
+pub fn take_all(
+    store: &mut Store,
+    env: &Env,
+    herdr: &mut dyn gear_herdr::HerdrAct,
+    ancestors: &[u32],
+    cwd: &Path,
+    named: &[String],
+    now: Ts,
+) -> GearResult<Vec<Taken>> {
     // 1. The pane: the caller's own, else the one unbound daemon pane.
     let pane = identity::caller_pane(herdr, ancestors, env.pane_id.as_deref())
         .or(identity::daemon_pane(store, herdr, false)?)
@@ -266,24 +286,16 @@ pub fn take(
                 "`gear captain take` cannot tell which pane this is: run it from the agent's own pane, or from an agent whose CLI runs its tools in a daemon (codex, opencode) with exactly one such pane bound to no seat",
             )
         })?;
-    // 2. The project: the one named, else the checkout holding the cwd, else
-    //    the only registered one; with several, the list to ask the user from.
-    let project = match named {
-        Some(name) => {
-            if store.read(|tx| tx.get_project(name))?.is_none() {
-                return Err(GearError::new(
-                    ErrorCode::NoTarget,
-                    format!("no project {name:?}: {}", project_list(store, herdr)?),
-                ));
-            }
-            name.to_string()
-        }
-        None => match project_of(store, env, cwd) {
-            Ok(project) => project,
+    // 2. The projects: the ones named, else the one whose checkout holds the
+    //    cwd, else the only registered one; with several, the list to ask the
+    //    user from.
+    let projects: Vec<String> = if named.is_empty() {
+        match project_of(store, env, cwd) {
+            Ok(project) => vec![project],
             Err(_) => {
                 let ids = store.read(|tx| tx.project_ids())?;
                 if ids.len() == 1 {
-                    ids[0].clone()
+                    vec![ids[0].clone()]
                 } else {
                     return Err(GearError::new(
                         ErrorCode::BadFormat,
@@ -294,13 +306,18 @@ pub fn take(
                     ));
                 }
             }
-        },
+        }
+    } else {
+        for name in named {
+            if store.read(|tx| tx.get_project(name))?.is_none() {
+                return Err(GearError::new(
+                    ErrorCode::NoTarget,
+                    format!("no project {name:?}: {}", project_list(store, herdr)?),
+                ));
+            }
+        }
+        named.to_vec()
     };
-    let captain = format!("{project}:captain");
-    let seat = store
-        .read(|tx| tx.get_seat(&captain))?
-        .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {captain}")))?;
-    let config = config::latest(store, &project)?;
     // 3. The pane must host an agent, and that agent must not be another seat's.
     let occupant = herdr
         .agent_get(&pane)
@@ -323,25 +340,77 @@ pub fn take(
             ));
         }
     }
-    let kind = occupant
-        .agent
-        .clone()
-        .filter(|kind| !kind.is_empty())
-        .unwrap_or_else(|| config.captain.kind.clone());
+    let kind = occupant.agent.clone().filter(|kind| !kind.is_empty());
     let session_ref = occupant
         .agent_session
         .as_ref()
         .map(|session| session.value.clone());
-    // 4. The seat's binding may be gone with its pane (the old captain's pane
-    //    was closed): `from` is then simply unknown. The binding also carries
-    //    the session the previous captain can be asked from.
+    let mut taken = Vec::new();
+    for project in projects {
+        taken.push(take_one(
+            store,
+            herdr,
+            &pane,
+            &project,
+            cwd,
+            kind.as_deref(),
+            session_ref.clone(),
+            now,
+        )?);
+    }
+    Ok(taken)
+}
+
+/// Bind one project's captain seat to `pane` (T-485): keep it when the pane
+/// already holds it, else rebind it as a handover does and send the handover
+/// item.
+#[allow(clippy::too_many_arguments)]
+fn take_one(
+    store: &mut Store,
+    herdr: &mut dyn gear_herdr::HerdrAct,
+    pane: &str,
+    project: &str,
+    cwd: &Path,
+    occupant_kind: Option<&str>,
+    session_ref: Option<String>,
+    now: Ts,
+) -> GearResult<Taken> {
+    let captain = format!("{project}:captain");
+    let seat = store
+        .read(|tx| tx.get_seat(&captain))?
+        .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {captain}")))?;
+    let config = config::latest(store, project)?;
+    let kind = occupant_kind
+        .map(str::to_string)
+        .unwrap_or_else(|| config.captain.kind.clone());
+    // 4. A seat this pane already holds keeps its generation and its name.
     let previous = store.read(|tx| tx.get_binding(&captain, seat.generation))?;
+    if let Some(binding) = &previous {
+        if binding.status == BindingStatus::Active && binding.pane_id == pane {
+            let named = gear_herdr::ensure_agent_name(
+                herdr,
+                pane,
+                &crate::config::agent_name(project, "captain"),
+            );
+            return Ok(Taken {
+                project: project.to_string(),
+                captain,
+                from: Some(pane.to_string()),
+                to: pane.to_string(),
+                generation: seat.generation,
+                kind: binding.kind.clone(),
+                named,
+                document: None,
+                request: None,
+            });
+        }
+    }
     let from = previous.as_ref().map(|binding| binding.pane_id.clone());
     let generation = rebind(
         store,
         &captain,
         &seat,
-        &pane,
+        pane,
         &kind,
         session_ref,
         &config,
@@ -356,11 +425,11 @@ pub fn take(
     let mut directory: Option<String> = None;
     let mut request: Option<HandoverRequest> = None;
     if let Some(previous) = &previous {
-        let voyage = store.read(|tx| plan::current_voyage(tx, &project))?;
+        let voyage = store.read(|tx| plan::current_voyage(tx, project))?;
         if !voyage.is_empty() {
             let dir = format!(
                 "{}/handovers",
-                layout::voyage_dir(&config.conventions.voyage_dir, &project, &voyage)
+                layout::voyage_dir(&config.conventions.voyage_dir, project, &voyage)
             );
             document = newest_handover(cwd, &dir);
             if document.is_none() {
@@ -374,7 +443,7 @@ pub fn take(
                         .ok()
                         .and_then(|names| names.get(&previous.pane_id).cloned().flatten())
                         .unwrap_or_else(|| previous.pane_id.clone());
-                    let text = request_text(&project, &pane, generation, &kind, &dir);
+                    let text = request_text(project, pane, generation, &kind, &dir);
                     asked = matches!(herdr.prompt(&target, &text), Outcome::Ok(()));
                 }
                 request = Some(HandoverRequest {
@@ -415,11 +484,11 @@ pub fn take(
                     format!("cannot record the handover request: {error}"),
                 )
             })?;
-            tx.set_meta(&request_key(&project), &raw)?;
+            tx.set_meta(&request_key(project), &raw)?;
         }
         tx.insert_message(&NewMessage {
             meta: None,
-            project: project.clone(),
+            project: project.to_string(),
             thread: "captain:take".to_string(),
             task: None,
             attempt: None,
@@ -439,22 +508,78 @@ pub fn take(
     // 7. The new captain's agent carries the captain's name (T-134): Herdr
     //    clears a name when it re-detects the occupant, and a prompt to an
     //    unnamed agent is refused, so the seat must not start out nameless.
-    let named = gear_herdr::ensure_agent_name(
-        herdr,
-        &pane,
-        &crate::config::agent_name(&project, "captain"),
-    );
+    let named =
+        gear_herdr::ensure_agent_name(herdr, pane, &crate::config::agent_name(project, "captain"));
 
     Ok(Taken {
-        project,
+        project: project.to_string(),
         captain,
         from,
-        to: pane,
+        to: pane.to_string(),
         generation,
         kind,
         named,
         document,
         request,
+    })
+}
+
+/// What `gear captain release` did (T-485): the pane let one project's
+/// captain seat go; the other seats it holds stay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Released {
+    pub project: String,
+    pub captain: String,
+    pub pane: String,
+}
+
+/// `gear captain release <project>` (T-485): let the project's captain go from
+/// this pane. The seat keeps its generation; its binding is void and the seat
+/// is Released, so the pane no longer answers as that project's captain while
+/// the other seats it holds stay.
+pub fn release(
+    store: &mut Store,
+    env: &Env,
+    herdr: &mut dyn gear_herdr::HerdrAct,
+    ancestors: &[u32],
+    project: &str,
+    now: Ts,
+) -> GearResult<Released> {
+    let pane = identity::caller_pane(herdr, ancestors, env.pane_id.as_deref())
+        .or(identity::daemon_pane(store, herdr, true)?)
+        .ok_or_else(|| {
+            GearError::new(
+                ErrorCode::Forbidden,
+                "`gear captain release` cannot tell which pane this is: run it from the captain's own pane",
+            )
+        })?;
+    let captain = format!("{project}:captain");
+    let seat = store
+        .read(|tx| tx.get_seat(&captain))?
+        .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {captain}")))?;
+    let binding = store.read(|tx| tx.get_binding(&captain, seat.generation))?;
+    let held = binding
+        .as_ref()
+        .is_some_and(|binding| binding.status == BindingStatus::Active && binding.pane_id == pane);
+    if !held {
+        return Err(GearError::new(
+            ErrorCode::Forbidden,
+            format!("pane {pane} does not hold the captain of {project}"),
+        ));
+    }
+    store.write(|tx| {
+        tx.set_binding_status(&captain, seat.generation, BindingStatus::Void)?;
+        tx.set_seat_state(
+            &captain,
+            SeatState::Released,
+            Some("released from the pane"),
+            now,
+        )
+    })?;
+    Ok(Released {
+        project: project.to_string(),
+        captain,
+        pane,
     })
 }
 
