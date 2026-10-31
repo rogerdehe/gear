@@ -640,6 +640,13 @@ fn return_from_fallback(
     api: &dyn QuotaApi,
     codex_session: Option<&str>,
 ) -> GearResult<Option<String>> {
+    // T-501 F1: a reviewer goes back only through the review step at its next
+    // job (`review::fallback_review_entry` and the warm-seat release): its
+    // work lives in `engine.review_pending.<seat>`, never in an attempt row,
+    // so the mid-task guard below cannot see a review in progress.
+    if seat.role == SeatRole::Temp {
+        return Ok(None);
+    }
     let Some((left, until)) = fallback_record(store, &seat.id)? else {
         return Ok(None);
     };
@@ -3095,6 +3102,78 @@ quota_reset_h = {reset_h}
         assert!(
             fallback_record(&mut store, "p:heat").unwrap().is_none(),
             "the return clears the record"
+        );
+    }
+
+    /// T-501 F1: the quota tick never switches a reviewer. Its work is in
+    /// `engine.review_pending.<seat>`, not in an attempt row, so the mid-task
+    /// guard cannot see a review in progress: a reviewer goes back through the
+    /// review step at its next job (`fallback_review_entry`).
+    #[test]
+    fn a_fallen_back_reviewer_is_not_switched_by_the_quota_tick() {
+        let mut text = config(r#""minimax-cn/MiniMax-M3.1-Flash""#, "fallback");
+        text = text.replace(
+            "[models]\n",
+            "[models]\nreview = [{ model = \"codex/gpt-5\", cli = \"codex\" }, { model = \"codex/gpt-5.1\", cli = \"codex\" }]\n",
+        );
+        let mut store = world(&text);
+        let mut herdr = herdr_with_quota();
+        herdr.add_shell("w2:p2");
+        let temp = store
+            .write(|tx| {
+                let seat = testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "review-1",
+                    SeatRole::Temp,
+                    "w2:p2",
+                    "codex",
+                    T0,
+                )?;
+                tx.set_meta(&model_meta_key(&seat.id), "codex/gpt-5.1")?;
+                tx.set_meta(
+                    &fallback_meta_key(&seat.id),
+                    &format!("codex/gpt-5|{}", T0 + 30),
+                )?;
+                Ok(seat)
+            })
+            .unwrap();
+        let obs = observed(&temp, false);
+        let api = FakeSpent {
+            spent: std::cell::Cell::new(false),
+        };
+        let report = apply_quota_policy_with(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            &obs,
+            T0 + 40,
+            &api,
+        )
+        .unwrap();
+
+        assert!(report.events.is_empty(), "{:?}", report.events);
+        assert_eq!(
+            meta_get(&mut store, &model_meta_key(&temp.id))
+                .unwrap()
+                .as_deref(),
+            Some("codex/gpt-5.1"),
+            "the reviewer stays on the fallback until its next job"
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat(&temp.id))
+                .unwrap()
+                .unwrap()
+                .state,
+            SeatState::Active
+        );
+        assert_eq!(
+            fallback_record(&mut store, &temp.id).unwrap(),
+            Some(("codex/gpt-5".to_string(), T0 + 30)),
+            "the record waits for the review step"
         );
     }
 
