@@ -264,11 +264,8 @@ fn a_fresh_mark_is_parsed_stored_and_shown() {
 /// T-481: `fresh:` needs a reason.
 #[test]
 fn an_empty_fresh_mark_is_refused() {
-    let mut s = world();
-    let error = run(
-        &mut s,
+    let error = parse(
         "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\nfresh:\ndeps: -\n",
-        "r1",
     )
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat, "{}", error.detail);
