@@ -109,6 +109,7 @@ mod blocked_delivery_contract;
 mod branch_templates_contract;
 mod busy_contract;
 mod captain_quota_contract;
+mod day_contract;
 mod dead_temp_slot_contract;
 mod delivery_grace_contract;
 mod guardrails_contract;
