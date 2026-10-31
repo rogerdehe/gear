@@ -96,13 +96,20 @@ enum CaptainOp {
         #[arg(long)]
         facts: bool,
     },
-    /// Become a project's captain from the agent in this pane: no GEAR_CTX,
-    /// no pane id. The project is the one named, else the one whose checkout
-    /// holds the working directory, else the only registered one; with several,
-    /// it lists them so you can ask the user which.
+    /// Become the captain of one or more projects from the agent in this
+    /// pane: no GEAR_CTX, no pane id. Every named project's captain seat is
+    /// bound to this pane and the seats it already holds are kept; with no
+    /// project named, the one whose checkout holds the working directory,
+    /// else the only registered one (with several, it lists them).
     Take {
-        /// The project to captain (see the list `gear captain take` prints).
-        project: Option<String>,
+        /// The projects to captain (see the list `gear captain take` prints).
+        projects: Vec<String>,
+    },
+    /// Let one project's captain go from this pane; the other seats the pane
+    /// holds stay.
+    Release {
+        /// The project to release.
+        project: String,
     },
 }
 
@@ -470,8 +477,11 @@ fn run(cli: Cli) -> GearResult<()> {
             )),
         },
         Some(Cmd::Captain {
-            op: CaptainOp::Take { project },
-        }) => cmd_captain_take(project.as_deref(), cli.json),
+            op: CaptainOp::Take { projects },
+        }) => cmd_captain_take(&projects, cli.json),
+        Some(Cmd::Captain {
+            op: CaptainOp::Release { project },
+        }) => cmd_captain_release(&project, cli.json),
         Some(Cmd::Whoami) => cmd_whoami(cli.json),
     }
 }
@@ -2129,10 +2139,13 @@ fn cmd_captain_handover(pane: &str, json: bool) -> GearResult<()> {
     Ok(())
 }
 
-fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
+fn cmd_captain_take(projects: &[String], json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
-    let mut herdr = match project.and_then(session_socket_of) {
+    let mut herdr = match projects
+        .first()
+        .and_then(|project| session_socket_of(project))
+    {
         Some(path) => gear_herdr::SocketHerdr::connect(&path).map_err(|e| {
             GearError::new(
                 gear_model::ErrorCode::NotRegistered,
@@ -2148,60 +2161,103 @@ fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
             format!("cannot read the working directory: {e}"),
         )
     })?;
-    let result = gear_app::captain::take(
+    let taken = gear_app::captain::take_all(
         &mut store,
         &env,
         &mut herdr,
         &ancestors,
         &cwd,
-        project,
+        projects,
         now_ts(),
     )?;
+    if json {
+        let values: Vec<serde_json::Value> = taken
+            .iter()
+            .map(|result| {
+                serde_json::json!({
+                    "project": result.project,
+                    "captain": result.captain,
+                    "from": result.from,
+                    "to": result.to,
+                    "generation": result.generation,
+                    "kind": result.kind,
+                    "named": named_line(&result.named),
+                    "document": result.document,
+                    "previous_pane": result.request.as_ref().map(|request| request.pane.clone()),
+                    "previous_session": result.request.as_ref().and_then(|request| request.session_ref.clone()),
+                    "asked": result.request.as_ref().map(|request| request.asked),
+                    "deadline": result.request.as_ref().map(|request| request.deadline),
+                })
+            })
+            .collect();
+        if values.len() == 1 {
+            println!("{}", values[0]);
+        } else {
+            println!("{}", serde_json::Value::Array(values));
+        }
+        return Ok(());
+    }
+    for result in &taken {
+        println!(
+            "captain of {} taken by pane {} (generation {}, {}); it left {}",
+            result.project,
+            result.to,
+            result.generation,
+            result.kind,
+            result.from.as_deref().unwrap_or("no pane recorded")
+        );
+        println!("agent name: {}", named_line(&result.named));
+        if let Some(document) = &result.document {
+            println!("previous captain's handover: {document} (read it before the task packet)");
+        } else if let Some(request) = &result.request {
+            println!(
+                "previous captain: pane {} {} · session {} · if no handover arrives within {} minutes, read it and write part 2 yourself",
+                request.pane,
+                if request.asked {
+                    "was asked for its handover"
+                } else {
+                    "hosts no agent to ask"
+                },
+                request.session_ref.as_deref().unwrap_or("not recorded"),
+                gear_app::captain::HANDOVER_ASK_MIN
+            );
+        }
+    }
+    println!("run `gear` here: this pane is the captain, no GEAR_CTX needed");
+    Ok(())
+}
+
+/// `gear captain release <project>`: let one project's captain go.
+fn cmd_captain_release(project: &str, json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = match session_socket_of(project) {
+        Some(path) => gear_herdr::SocketHerdr::connect(&path).map_err(|e| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                format!("cannot reach herdr at {}: {}", path.display(), e.0),
+            )
+        })?,
+        None => open_herdr()?,
+    };
+    let ancestors = gear_app::identity::process_ancestors();
+    let released =
+        gear_app::captain::release(&mut store, &env, &mut herdr, &ancestors, project, now_ts())?;
     if json {
         println!(
             "{}",
             serde_json::json!({
-                "project": result.project,
-                "captain": result.captain,
-                "from": result.from,
-                "to": result.to,
-                "generation": result.generation,
-                "kind": result.kind,
-                "named": named_line(&result.named),
-                "document": result.document,
-                "previous_pane": result.request.as_ref().map(|request| request.pane.clone()),
-                "previous_session": result.request.as_ref().and_then(|request| request.session_ref.clone()),
-                "asked": result.request.as_ref().map(|request| request.asked),
-                "deadline": result.request.as_ref().map(|request| request.deadline),
+                "project": released.project,
+                "captain": released.captain,
+                "pane": released.pane,
             })
         );
-        return Ok(());
-    }
-    println!(
-        "captain of {} taken by pane {} (generation {}, {}); it left {}",
-        result.project,
-        result.to,
-        result.generation,
-        result.kind,
-        result.from.as_deref().unwrap_or("no pane recorded")
-    );
-    println!("agent name: {}", named_line(&result.named));
-    if let Some(document) = &result.document {
-        println!("previous captain's handover: {document} (read it before the task packet)");
-    } else if let Some(request) = &result.request {
+    } else {
         println!(
-            "previous captain: pane {} {} · session {} · if no handover arrives within {} minutes, read it and write part 2 yourself",
-            request.pane,
-            if request.asked {
-                "was asked for its handover"
-            } else {
-                "hosts no agent to ask"
-            },
-            request.session_ref.as_deref().unwrap_or("not recorded"),
-            gear_app::captain::HANDOVER_ASK_MIN
+            "released the captain of {} from pane {}; the other seats this pane holds stay",
+            released.project, released.pane
         );
     }
-    println!("run `gear` here: this pane is the captain, no GEAR_CTX needed");
     Ok(())
 }
 
@@ -2515,6 +2571,11 @@ fn run_plan(
     let mut draft = gear_app::draft::parse(&text)?;
     draft.confirmed = confirmed;
     let fp = observe_identity(store, env, herdr)?;
+    // T-485: a captain pane may hold several projects; the plan file's header
+    // names the one this apply acts on, so the caller is resolved as that
+    // project's captain (the header is checked against it below).
+    let env = store
+        .read(|tx| gear_app::identity::env_of_captain(tx, env, fp.as_ref(), &draft.project))?;
     // T-133 (review F1): a `- release` of a **lane** must know whether the
     // lane's agent is really in its pane, and only the session can say so. The
     // agents are read here, before the write transaction (Herdr is never
@@ -2558,7 +2619,7 @@ fn run_plan(
     };
     let result = gear_app::plan::apply(
         store,
-        env,
+        &env,
         fp.as_ref(),
         agents.as_deref(),
         &draft,

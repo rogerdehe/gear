@@ -65,6 +65,7 @@ mod github_contract;
 mod home_task_contract;
 mod integrated_by_contract;
 mod kickoff_contract;
+mod multi_captain_contract;
 mod packet_contract;
 mod plan_apply_contract;
 mod plan_fields_contract;

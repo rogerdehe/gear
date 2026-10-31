@@ -1,6 +1,6 @@
 //! Messages: send, reply, inbox batch selection (design/07).
 
-use crate::identity::{require_seat, Fingerprint};
+use crate::identity::{captains_on_pane, env_of_captain, require_seat, Fingerprint};
 use crate::Env;
 use gear_model::{
     AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState,
@@ -1456,6 +1456,106 @@ fn declare_wait(
 ///   an answer of its own, so nothing is answered silently;
 /// - `Wait` needs `wait_until`, the recheck time that makes the message due
 ///   again; `wait_on` is only a label.
+/// Split a qualified id `<project>:<id>` (T-485) when the prefix names a
+/// registered project: the project and the bare id.
+fn split_qualified(tx: &Tx<'_>, id: &str) -> GearResult<(Option<String>, String)> {
+    if let Some((prefix, rest)) = id.split_once(':') {
+        if !rest.is_empty() && tx.get_project(prefix)?.is_some() {
+            return Ok((Some(prefix.to_string()), rest.to_string()));
+        }
+    }
+    Ok((None, id.to_string()))
+}
+
+/// The project a reply acts on (T-485): a qualified id names it; else the
+/// caller's own project when it holds the message; else the one project this
+/// pane captains that holds it. An unqualified id that two projects hold is
+/// refused with both qualified ids named.
+fn reply_project(
+    tx: &Tx<'_>,
+    env: &Env,
+    fp: Option<&Fingerprint>,
+    ids: &[String],
+) -> GearResult<(String, Vec<(String, String)>)> {
+    let mut qualified: Option<String> = None;
+    let mut bare: Vec<(String, String)> = Vec::new();
+    for id in ids {
+        let (project, bare_id) = split_qualified(tx, id)?;
+        if let Some(project) = project {
+            if let Some(known) = &qualified {
+                if known != &project {
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
+                        format!("the ids are in different projects: {known}:... and {project}:..."),
+                    ));
+                }
+            } else {
+                qualified = Some(project);
+            }
+        }
+        bare.push((id.clone(), bare_id));
+    }
+    if let Some(project) = qualified {
+        return Ok((project, bare));
+    }
+    // Unqualified: the caller's own project and every project whose captain
+    // this pane holds.
+    let pane = fp
+        .map(|fp| fp.pane_id.clone())
+        .or_else(|| env.pane_id.clone());
+    let mut held: Vec<String> = Vec::new();
+    if let Some(ctx) = &env.ctx {
+        held.push(ctx.project.clone());
+    }
+    if let Some(pane) = &pane {
+        for seat in captains_on_pane(tx, pane)? {
+            if !held.contains(&seat.project) {
+                held.push(seat.project.clone());
+            }
+        }
+    }
+    let mut chosen: Option<String> = None;
+    for (_, bare_id) in &bare {
+        let mut hits: Vec<String> = Vec::new();
+        for project in &held {
+            if tx.get_message(project, bare_id)?.is_some() {
+                hits.push(project.clone());
+            }
+        }
+        if hits.len() > 1 {
+            let names: Vec<String> = hits.iter().map(|p| format!("{p}:{bare_id}")).collect();
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "message {bare_id} is in more than one project this pane captains: {}; write one of them",
+                    names.join(", ")
+                ),
+            ));
+        }
+        if let Some(hit) = hits.first() {
+            if let Some(known) = &chosen {
+                if known != hit {
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
+                        format!("the ids are in different projects: {known}:... and {hit}:..."),
+                    ));
+                }
+            } else {
+                chosen = Some(hit.clone());
+            }
+        }
+    }
+    let project = chosen
+        .or_else(|| env.ctx.as_ref().map(|ctx| ctx.project.clone()))
+        .ok_or_else(|| {
+            GearError::new(
+                ErrorCode::NotRegistered,
+                "no project: the caller holds no captain seat and the ids name none",
+            )
+        })?;
+    Ok((project, bare))
+}
+
 pub fn reply(
     store: &mut Store,
     env: &Env,
@@ -1464,10 +1564,15 @@ pub fn reply(
     now: Ts,
 ) -> GearResult<ReplyResult> {
     store.write(|tx| {
+        // T-485: a qualified id names its project; an unqualified one is the
+        // caller's own when it has the message, else the one project this
+        // pane captains that does.
+        let (project, ids) = reply_project(tx, env, fp, &args.ids)?;
+        let env = env_of_captain(tx, env, fp, &project)?;
         // Only the captain answers, and only in a state a captain can hold.
         let (ctx, seat) = require_seat(
             tx,
-            env,
+            &env,
             fp,
             Some(&[SeatRole::Captain]),
             Some(&[SeatState::Active]),
@@ -1502,7 +1607,7 @@ pub fn reply(
             // stored result instead of meeting a closed message.
             let mut originals: Vec<MessageRow> = Vec::new();
             let mut seen: Vec<String> = Vec::new();
-            for id in &args.ids {
+            for (_, id) in &ids {
                 // A repeated id is handled once; the first place keeps it.
                 if seen.iter().any(|known| known == id) {
                     continue;
