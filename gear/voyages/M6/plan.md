@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1020 -->
+<!-- gear-plan project=gear base=1021 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -119,6 +119,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - remerge T-500: its gate failed only on timeouts (load average 29 while my hand-fix gate ran; 657 s suite); the code is unchanged.
 - added NEW (S5, mast, before T-493): GEAR's own pi write boundary replaces guardrails' path-access: reads anywhere (cat/head/ls/git log outside the worktree), writes only inside the worktree and temp dirs; permissionGate and policies stay. Lanes of both fleets lose time on refused shell reads several times a day.
 - T-504 cancelled: the user wants the shell-read problem solved in Pi's own configuration, not in GEAR.
+- station M-7190: keep course — 45 done, projected 985m of 1020m; a few minutes of hk-dgx-1 502s stopped both lanes and the lane nudge restarted them.
 
 # Queue
 
