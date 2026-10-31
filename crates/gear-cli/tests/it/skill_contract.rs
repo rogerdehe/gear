@@ -68,7 +68,7 @@ fn the_bare_skill_names_every_topic() {
     }
     // The installer is named with every kind it writes for.
     assert!(
-        text.contains("gear admin install-skill --agent <claude|codex|opencode|grok|pi>"),
+        text.contains("gear admin install-skill --agent <claude|codex|opencode|grok|pi|omp>"),
         "{text}"
     );
 }

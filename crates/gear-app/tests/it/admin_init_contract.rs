@@ -210,6 +210,30 @@ fn a_lane_or_reviewer_of_kind_pi_is_accepted() {
     );
 }
 
+/// T-495: `init` accepts a lane of kind `omp` (oh-my-pi): its built-in
+/// profile runs unattended (`--auto-approve`) and its skill is installed in
+/// `~/.omp/agent/skills`.
+#[test]
+fn a_lane_of_kind_omp_is_accepted() {
+    let mut s = Store::open_in_memory().unwrap();
+    let home = home_with_skills();
+    let config = CONFIG.replace(
+        "[[lanes]]\nname = \"heat\"\nduty = \"thermal calculation\"\nowns = [\"src/heat/\"]\nkind = \"opencode\"\nprofile = \"opencode\"",
+        "[[lanes]]\nname = \"heat\"\nduty = \"thermal calculation\"\nowns = [\"src/heat/\"]\nkind = \"omp\"\nprofile = \"omp\"",
+    );
+    assert_ne!(config, CONFIG, "the config changed");
+    let r = init_with_home(&mut s, &admin(), &config, Some(home.path()), false, T0).unwrap();
+    assert_eq!(r.config_version, 1);
+    let seat = s.read(|tx| tx.get_seat("harbor:heat")).unwrap().unwrap();
+    assert_eq!(seat.profile, "omp");
+    let project = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
+    assert!(
+        project.config_toml.contains("kind = \"omp\""),
+        "{}",
+        project.config_toml
+    );
+}
+
 /// A kind GEAR knows but whose skill is not installed is refused like any
 /// other (T-113): pi's skill lives in `~/.pi/agent/skills`.
 #[test]
