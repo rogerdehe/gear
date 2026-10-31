@@ -372,6 +372,10 @@ pub fn tick(
     note_slow(&mut report, "names", step);
 
     let mut reviewer_nudge_flags = Vec::new();
+    // T-487: the doorbell inputs of every project, gathered per project and
+    // joined by pane after the project loop: one ring for a pane that holds
+    // several captain seats.
+    let mut ring_inputs: Vec<doorbell::DoorbellInput> = Vec::new();
     // T-386: one read of a repository's branch tips per tick, shared by the
     // push clock and the review step.
     let mut tips_by_repo = review::RepoTips::new();
@@ -772,56 +776,18 @@ pub fn tick(
             )?);
             note_slow(report, "retire", step);
 
-            // 9. decide (pure): who should be rung now. This comes after every
-            //    delivery of the tick: a seat that is being handed work is not
-            //    rung in the same tick (T-71) — on T-61 both went into the
-            //    reviewer's pane in one second and the packet was swallowed. The
-            //    delivery holds the seat's slot, so the doorbell waits.
+            // 9. gather (pure): what each seat of this project would be told
+            //    now. The rings themselves are built after every project has
+            //    run, so a pane that holds several captain seats gets one ring
+            //    (T-487). This comes after every delivery of the tick: a seat
+            //    being handed work is not rung in the same tick (T-71) — on
+            //    T-61 both went into the reviewer's pane in one second and the
+            //    packet was swallowed. The delivery holds the seat's slot, so
+            //    the doorbell waits.
             let step = std::time::Instant::now();
             let inputs = store.read(|tx| doorbell_inputs(tx, &project, &observed, now))?;
-            let actions = doorbell::decide(&inputs, cfg.cooldown_s, now);
-            note_slow(report, "doorbell decide", step);
-
-            // 10. intend: fix the doorbell actions as Intended ops in one transaction.
-            let step = std::time::Instant::now();
-            let intended = store.write(|tx| ops::intend_doorbells(tx, &actions, now))?;
-            report.intended.extend(intended.into_iter().map(|op| op.id));
-            note_slow(report, "doorbell intend", step);
-
-            // 11. execute: re-check each op, call Herdr, record the outcome.
-            let step = std::time::Instant::now();
-            quiet::prepare_pending_deliveries(store, herdr, cfg, &project, now)?;
-            let executed = ops::execute_intended(store, herdr, &project, now)?;
-            store.write(|tx| {
-                for (id, state) in &executed {
-                    if state != "submitted" {
-                        continue;
-                    }
-                    let Some(op) = tx.get_op(&project, id)? else {
-                        continue;
-                    };
-                    if op.kind != gear_model::OpKind::Deliver {
-                        continue;
-                    }
-                    let Some(seat) = tx.get_seat(&op.seat)? else {
-                        continue;
-                    };
-                    if seat.role != gear_model::SeatRole::Lane {
-                        continue;
-                    }
-                    if let (Some(task), Some(n)) = (op.task.as_deref(), op.attempt) {
-                        if tx
-                            .get_attempt(&project, task, n)?
-                            .is_some_and(|a| a.sent_at.is_none())
-                        {
-                            tx.set_attempt_sent(&project, task, n, now)?;
-                        }
-                    }
-                }
-                Ok(())
-            })?;
-            report.executed.extend(executed);
-            note_slow(report, "execute", step);
+            ring_inputs.extend(inputs);
+            note_slow(report, "doorbell gather", step);
 
             // 12. merge: collect a finished background merge or launch the next
             //     one. Git and the gate run beside the tick (T-36).
@@ -834,13 +800,70 @@ pub fn tick(
             note_slow(report, "merge", step);
             Ok(())
         };
-    for project in projects {
+    for project in &projects {
         let step = std::time::Instant::now();
-        if let Err(error) = one_project(store, &mut report, &project) {
+        if let Err(error) = one_project(store, &mut report, project) {
             report.project_failed.push(project_error(&project, &error));
         }
         note_slow(&mut report, &format!("project {project}"), step);
     }
+    // 10. rings (T-487): the seats of every project bound to one pane are
+    //     joined into one doorbell, each line naming its project, urgent
+    //     first. A project outside its working hours adds nothing; the other
+    //     projects' rings go on. A single project's ring is the text it always
+    //     was. The idle, at-once and cooldown rules are the ones of `decide`,
+    //     applied per seat before the join.
+    let step = std::time::Instant::now();
+    let mut resting: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for project in &projects {
+        if hours::resting(store, project, now)? {
+            resting.insert(project.clone());
+        }
+    }
+    let rings = doorbell::rings(&ring_inputs, &resting, cfg.cooldown_s, now);
+    let intended = store.write(|tx| ops::intend_rings(tx, &rings, now))?;
+    report.intended.extend(intended.into_iter().map(|op| op.id));
+    note_slow(&mut report, "ring intend", step);
+
+    // 11. execute: re-check each op, call Herdr, record the outcome. The
+    //     ring's own op types the joined text once for its pane; the other
+    //     seats' ops are already submitted and are never typed again.
+    let step = std::time::Instant::now();
+    for project in &projects {
+        quiet::prepare_pending_deliveries(store, herdr, cfg, project, now)?;
+        let executed = ops::execute_intended(store, herdr, project, now)?;
+        store.write(|tx| {
+            for (id, state) in &executed {
+                if state != "submitted" {
+                    continue;
+                }
+                let Some(op) = tx.get_op(project, id)? else {
+                    continue;
+                };
+                if op.kind != gear_model::OpKind::Deliver {
+                    continue;
+                }
+                let Some(seat) = tx.get_seat(&op.seat)? else {
+                    continue;
+                };
+                if seat.role != gear_model::SeatRole::Lane {
+                    continue;
+                }
+                if let (Some(task), Some(n)) = (op.task.as_deref(), op.attempt) {
+                    if tx
+                        .get_attempt(project, task, n)?
+                        .is_some_and(|a| a.sent_at.is_none())
+                    {
+                        tx.set_attempt_sent(project, task, n, now)?;
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        report.executed.extend(executed);
+    }
+    note_slow(&mut report, "execute", step);
+
     // 13. the rounds bookkeeping of every project (design §4.1): the session of
     //     a seat joins its open round, and a round ends at the next round on
     //     its seat or at the seat's release. The overrun question (§5.2) and

@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=992 -->
+<!-- gear-plan project=gear base=1007 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -98,6 +98,16 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7076: keep course — projected 861m of 1020m, six tasks left
 - 2026-11-01 08:10 hand-fix: released v0.6.3 at the user's word for another project's omp use (notes: T-488 and one hand fix added; dev merged into main as ec0c4b8a, tag v0.6.3) | why: station S4 reached, done (5)
 - 2026-11-01 08:20 hand-fix: restarted both engines on v0.6.3 (the earlier restart was interrupted) | why: another project's M-5348, a real notice after the 10-minute grace
+- 2026-11-01 08:40 scope: added to S5 (hull): a re-review resumes the conversation of the review it continues | why: the user's design (a rework's review continues its own earlier review); measured: re-reviews go to the right seat and take ~2 min, but run in the seat's latest session, not attempt 1's | else: -
+- 2026-11-01 08:55 scope: added to S5 (hull): reviewer seats may run different models (`seats` on a review entry) | why: user: reviewers need to support different models, in M6 | else: -
+- station M-7114: keep course — 75% eta, projected 893m of 1020m; hull takes T-500 right after T-499 since T-492 waits on T-486, mast has T-498 after its T-486 rework, so no lane runs dry.
+- T-500 rewritten (contract v2, not started): the user needs the review model chosen per task (light vs strong), which per-seat models do not give; a `review-model:` task field does, and seats already switch model per job.
+- captain pushed plan commit 078a781b while the T-491 merge was executing (my check printed the count but did not stop the chain); the merge still landed clean. The push now waits in a loop until no merge executes.
+- T-492 moved hull → mast: it waits on mast's own T-486, mast had nothing after T-498, and hull keeps T-500 next so the per-task review model lands sooner.
+- station M-7124: keep course — 42 done, projected 871m of 1020m; hull 92m and mast 81m are balanced after T-492 moved to mast.
+- station M-7125: keep course — 780 min mark, projected 872m of 1020m, same picture as M-7124.
+- T-486 verdict fail after its merge gate: home_multi_contract depends on the live Herdr pane and fails under the engine's gate; rework to the scratch::gear fixture.
+- added NEW (S5, hull, after T-500): a seat that fell back on quota returns to its first model at the next task boundary after that model's reset; today a fallback lane stays on the backup for good.
 
 # Queue
 
@@ -316,7 +326,7 @@ goal: [S5] A project on v0.5.x upgrades to v0.6 with no hand step: its store (sc
 accept: Store and engine tests: the v0.5.6 fixture migrates to the current schema with no loss of tasks, attempts, seats, messages or plan versions; one tick and the home page run on it; a second open is a no-op. Run make check CRATE=gear-store and CRATE=gear-engine.
 estimate: 45
 
-## T-492 [now] lane=hull milestone=M6 station=S5 required
+## T-492 [now] lane=mast milestone=M6 station=S5 required
 goal: [S5] End-to-end: one captain pane holds two projects with different working hours in different time zones; an engine runs both on FakeHerdr through a simulated day: each fleet works only in its hours, both work in the overlap, the captain gets one doorbell naming both projects' items, and a reply with a qualified id settles the right project's item. Test only, no product change.
 accept: The scenario test passes. Run make check CRATE=gear-engine.
 deps: T-485, T-486, T-487, T-488
@@ -344,8 +354,23 @@ accept: Usage tests on a fixture made from a real local agy run (content redacte
 deps: T-497
 estimate: 35
 
+## T-499 [now] lane=hull milestone=M6 station=S5 required
+goal: [S5] A re-review resumes the conversation of the review it continues, not whatever conversation its seat had last. Today T-480 sends attempt n's review to the seat that reviewed attempt n-1, but when that seat reviewed other tasks in between, the re-review runs in the session of its latest job (T-472 attempt 2 ran in T-495's review session, not attempt 1's), so the reviewer does not have its own earlier findings. Change crates/gear-engine (the review start in review.rs and session.rs), no other design: the re-review's start resumes the session recorded on the seat's round of attempt n-1 (its last session id) when the CLI and the seat are the same; when that session cannot be resumed, the packet carries one line naming it and the earlier review file, as T-481 does for a lane.
+accept: Engine tests: a seat reviews T-1 attempt 1 in session A, then T-2 in session B; T-1 attempt 2's review starts with a resume of session A, not B; a seat whose attempt-1 session is gone starts fresh with the reference line. Run make check CRATE=gear-engine.
+estimate: 35
+
+## T-500 [now] lane=hull milestone=M6 station=S5 required
+goal: [S5] The captain picks a task's review model. Today every review takes the first entry of `[models] review` that differs from the writer's model, so the captain cannot send one task to a light model and another to a strong one. New task field, no other design: `review-model: <model>` in a queue block; it must name the `model` of an entry in `[models] review` and differ from the model of the task's lane (plan apply rejects it otherwise, naming the entry list). Store it as `fresh:` is stored (T-481: a meta key `task_review_model:<project>:<task>`, set by a block that names it, kept by a block that does not, printed by `gear plan show`). Every review of that task (first review and re-review, start_reviews and the re-review/standby path in review.rs, both call sites of `review_entry`) runs on that entry and its `cli`; the seat switches to it as it already does when the chain's choice changes. A task without the field behaves as today. The field and one example go into skills/gear/references/captain.md's queue field list in one sentence. Change crates/gear-app (draft.rs field, plan.rs apply/show), crates/gear-store (the meta accessors), crates/gear-engine (model.rs, review.rs) and that skill line, no other design.
+accept: Tests: a task with `review-model: B` is reviewed on B while the chain's first entry is A, and its re-review too; a task without it is reviewed on A; apply rejects a model not in the chain and one equal to the lane's model; `gear plan show` prints the field back. Run make check CRATE=gear-app, CRATE=gear-store, CRATE=gear-engine and CRATE=gear-cli.
+estimate: 55
+
+## T-501 [now] lane=hull milestone=M6 station=S5 required
+goal: [S5] A seat that fell back on quota returns to its first model after that model's reset. Today `on_quota = "fallback"` moves a lane to the next entry of its chain and it stays there for good; only a parked seat goes back at the reset (quota.rs). New, no other design: when the engine falls back, it records the reset time of the model it left: the quota source's window reset (+1 min) when a source reads it, else the reset stated on the screen (gear_usage::reset_from_text, +1 min), else now + `quota_reset_h`. Once that time has passed, the lane goes back to its chain's first model at its next task boundary (after it hands a task in and before the next task is delivered, never mid-task), by the switch the fallback uses (in place on the same CLI with a picker, else the restart with the handover). If a quota source reads the first model's window as still spent at that moment, the lane stays and the time moves to the new reset. A reviewer moved off a spent model takes its next job on the first entry again after that reset (the rule that it never runs the writer's current model stays). The return is one event line on the lane (`back on <model>: quota reset`). Change crates/gear-engine (quota.rs, the delivery/round start where the boundary is), no other design.
+accept: Engine tests: a lane that fell back at T with a reset at T+30 min stays on the fallback before the reset, and at its first task boundary after it returns to the first model (not mid-task); a source reading the window still spent keeps it on the fallback; no source and no screen reset uses quota_reset_h; a reviewer's next job after the reset runs on the first entry. Run make check CRATE=gear-engine and CRATE=gear-cli.
+estimate: 55
+
 ## T-493 [now] lane=mast milestone=M6 station=S5 required
 goal: [S5] Release v0.6.4, station S5's release. Change, no other design: (1) the version is 0.6.4 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.4.md, in the form of docs/releases/v0.5.6.md: one line per task merged on origin/dev since v0.6.3 when you start your final check (run git log origin/dev --grep='^merge(T-' then), its T-number and what it changed for a user, from its goal; then "Skill": one line per change to skills/ since v0.6.3 (git log origin/dev -- skills/), or "Nothing outside the tasks above."; "Upgrading" as in v0.5.6. The captain merges dev into main, tags v0.6.4 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.4"; docs/releases/v0.6.4.md lists every task merged on origin/dev since v0.6.3 at the hand-in. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-478, T-489, T-490, T-491, T-492, T-495, T-496, T-497, T-498
+deps: T-478, T-489, T-490, T-491, T-492, T-495, T-496, T-497, T-498, T-499, T-500, T-501
 estimate: 15

@@ -53,7 +53,7 @@ The captain's guide: `gear --skill captain`. Holding the course: `gear --skill c
 | `github` | issues and pull requests on GitHub: the mode, what the engine writes and when, issues into tasks |
 | `agent:claude`, `agent:codex`, `agent:opencode`, `agent:grok`, `agent:pi` | driving one agent CLI through Herdr: start, model, resume, exit, quota signs |
 
-The user installs this skill into an agent CLI with `gear admin install-skill --agent <claude|codex|opencode|grok|pi|omp>`.
+The user installs this skill into an agent CLI with `gear admin install-skill --agent <claude|codex|opencode|grok|pi|omp|agy>`.
 
 ## 7. Errors
 
