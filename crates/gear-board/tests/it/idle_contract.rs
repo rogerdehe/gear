@@ -610,3 +610,61 @@ fn a_project_without_a_captain_has_no_help() {
 
     assert_eq!(help_of(&mut store, T0 + 120), None);
 }
+
+#[test]
+fn an_instruction_sent_during_an_attempt_handed_in_later_is_no_help() {
+    // T-463: the captain sent it while the lane worked on the task, and the
+    // work went on past it; after the hand-in it does not pin the lane.
+    let mut store = world_with_captain();
+    task_on(&mut store, "T-2", LANE, 1, TaskState::Verifying);
+    attempt(&mut store, "T-2", 1, AttemptState::Submitted);
+    store
+        .write(|tx| {
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::Started, T0)?;
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::HandedIn, T0 + 120)?;
+            Ok(())
+        })
+        .unwrap();
+    message(
+        &mut store,
+        MsgKind::Instruction,
+        "p:captain",
+        Some("T-2"),
+        "Read the log of T-2 and send mast the failing line please",
+        None,
+        T0 + 60,
+    );
+
+    assert_eq!(help_of(&mut store, T0 + 200), None);
+    let (reason, _) = reason_of(&mut store, T0 + 200);
+    assert_eq!(reason, Some(IdleReason::NoWork), "{reason:?}");
+}
+
+#[test]
+fn an_instruction_sent_before_the_attempt_started_is_still_help() {
+    // The lane held no attempt when the instruction came: it still has to
+    // answer it until the reply or the limit.
+    let mut store = world_with_captain();
+    task_on(&mut store, "T-2", "mast", 1, TaskState::Verifying);
+    attempt(&mut store, "T-2", 1, AttemptState::Submitted);
+    store
+        .write(|tx| {
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::Started, T0 + 90)?;
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::HandedIn, T0 + 150)?;
+            Ok(())
+        })
+        .unwrap();
+    message(
+        &mut store,
+        MsgKind::Instruction,
+        "p:captain",
+        Some("T-2"),
+        "Read the log of T-2 and send mast the failing line please",
+        None,
+        T0 + 60,
+    );
+
+    let help = help_of(&mut store, T0 + 200).expect("the lane helps");
+    assert_eq!(help.text(), "helping mast: Read the log of T-2 and …");
+    assert_eq!(help.since, T0 + 60);
+}
