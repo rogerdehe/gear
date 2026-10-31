@@ -170,3 +170,6 @@
 
 ## The health-watch cost test fails under load
 - 2026-10-31 M6 (T-508 audit F1, F-287 a merge-push timing test failed at 96 s and passed alone): crates/gear-engine/tests/it/health_contract.rs:393 `the_watch_costs_under_one_percent_of_one_core` measured one real sample at 930 ms CPU on a busy machine and passed on three re-runs. A load-sensitive test can fail a merge gate falsely; measure the cost with a bound that holds under contention, or average several samples.
+
+## A review seat's empty stash rings the captain
+- 2026-10-31 M6 (M-7353, M-7358): before each new review on review-9 the engine stashed the worktree and rang "Preserved changes" for a stash whose tracked diff and untracked tree were both empty. Ring only when the stash holds a change; skip the stash when `git status --porcelain` is empty.
