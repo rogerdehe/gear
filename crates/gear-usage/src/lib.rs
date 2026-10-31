@@ -23,8 +23,12 @@ use std::path::{Path, PathBuf};
 use gear_model::Ts;
 use serde_json::Value;
 
+mod prices;
 mod quota;
 
+pub use prices::{
+    builtin, in_window, model_id, parse_window, price_for, Peak, PeakWindow, Price, Rates,
+};
 pub use quota::{read_quota, read_quota_in, reset_from_text, QuotaReader, Reading, Window};
 
 /// The kinds of log of §4.3, named by the profile's `usage_log` (§2).
@@ -819,6 +823,8 @@ fn home() -> PathBuf {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageRecord {
     pub model: Option<String>,
+    /// The record's own time; a price with peak windows is chosen by it.
+    pub at: Ts,
     pub usage: Usage,
 }
 
@@ -849,6 +855,7 @@ pub fn usage_records_in(
             let model = model_name(&data);
             result.push(UsageRecord {
                 model,
+                at: time,
                 usage: Usage {
                     input: number(tokens, "input"),
                     output: number(tokens, "output"),
@@ -895,6 +902,7 @@ pub fn usage_records_in(
                 }
                 result.push(UsageRecord {
                     model: model_name(message),
+                    at: t,
                     usage: Usage {
                         input: number(u, "input"),
                         output: number(u, "output"),
@@ -936,6 +944,7 @@ pub fn usage_records_in(
                 }
                 result.push(UsageRecord {
                     model: model_name(message),
+                    at: t,
                     usage: Usage {
                         input: number(u, "input_tokens"),
                         output: number(u, "output_tokens"),
@@ -974,6 +983,7 @@ pub fn usage_records_in(
                 }
                 result.push(UsageRecord {
                     model: model_name(payload).or_else(|| current_model.clone()),
+                    at: t,
                     usage: Usage {
                         input: delta.input_tokens - delta.cached_input_tokens,
                         output: delta.output_tokens,
@@ -1004,15 +1014,6 @@ fn model_name(value: &Value) -> Option<String> {
         Some(p) if !model.contains('/') => format!("{p}/{model}"),
         _ => model.to_owned(),
     })
-}
-
-/// Prices in USD per million tokens for one model.
-#[derive(Debug, Clone, Copy)]
-pub struct Price {
-    pub input: f64,
-    pub output: f64,
-    pub cache_read: f64,
-    pub cache_write: f64,
 }
 
 /// Aggregate tokens and their complete cost for a round window.
@@ -1088,7 +1089,17 @@ pub fn round_usage(
             if let Some(c) = u.cost_usd {
                 check.cost_usd = Some(check.cost_usd.unwrap_or(0.0) + c);
             }
-            if let Some(amount) = u.cost_usd {
+            let tokens = u.input + u.output + u.cache_read + u.cache_write + u.reasoning;
+            // pi writes `cost.total: 0` when its provider config names no
+            // price (T-484): a zero with tokens carries no cost. A zero with
+            // no tokens is a true zero and stays.
+            let cli_cost = match u.cost_usd {
+                Some(amount) if amount != 0.0 || tokens == 0 => Some(amount),
+                Some(_) => None,
+                None if tokens == 0 => continue,
+                None => None,
+            };
+            if let Some(amount) = cli_cost {
                 cost += amount;
                 any_cost = true;
                 continue;
@@ -1105,28 +1116,8 @@ pub fn round_usage(
                         .unwrap_or(model)
                 })
                 .or(default_model);
-            let price = model.and_then(|m| {
-                prices.get(m).or_else(|| {
-                    if m.contains('/') {
-                        return None;
-                    }
-                    let mut candidates = prices
-                        .iter()
-                        .filter(|(key, _)| key.rsplit_once('/').is_some_and(|(_, id)| id == m));
-                    let (_, price) = candidates.next()?;
-                    if candidates.next().is_some() {
-                        None
-                    } else {
-                        Some(price)
-                    }
-                })
-            });
-            if let Some(p) = price {
-                cost += (u.input as f64 * p.input
-                    + u.output as f64 * p.output
-                    + u.cache_read as f64 * p.cache_read
-                    + u.cache_write as f64 * p.cache_write)
-                    / 1_000_000.0;
+            if let Some(price) = model.and_then(|m| price_for(m, prices)) {
+                cost += price.cost(&u, record.at);
                 any_cost = true;
                 priced = true;
             } else {

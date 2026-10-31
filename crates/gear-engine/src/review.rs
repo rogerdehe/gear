@@ -2101,7 +2101,7 @@ fn start_reviewer(
         .map(|row| config.repo_of_task(row))
         .unwrap_or_else(|| config.repo_of_lane(&task.lane));
     // The job's branch, and the seat's own anchor (its workspace label is
-    // long-lived; the agent of a job is named after its task).
+    // long-lived; the reviewer's agent carries its seat's name, T-482).
     let branch = if direction {
         format!("direction/{}", task.task.to_lowercase())
     } else {
@@ -9153,7 +9153,8 @@ review = [
     fn two_jobs_on_one_seat_reuse_the_warm_worktree() {
         // T-18: a seat keeps its worktree and its build cache between jobs.
         // The second job takes the released seat, uses the same worktree (no
-        // second worktree_open/create) and its agent is named after its task.
+        // second worktree_open/create) and its agent keeps its seat's name
+        // (T-482).
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
 
@@ -9185,7 +9186,7 @@ review = [
             worktrees_after_first,
             vec![("p/review-1".to_string(), "dev".to_string())]
         );
-        // The job's agent is named after its task.
+        // The job's agent carries its seat's name (T-482).
         let names: Vec<String> = herdr
             .calls
             .iter()
@@ -9466,10 +9467,10 @@ review = [
         )
         .unwrap();
 
-        assert!(
-            report.started.is_empty(),
-            "resume execution waits for T-145"
-        );
+        // T-470: the reviewer's agent was started in the T0+30 call; at T0+35
+        // it is ready, so the resume completes and the review starts in that
+        // same tick (it still never starts before the resume is done).
+        assert_eq!(report.started, vec!["p:review-1".to_string()]);
         let action = store
             .read(|tx| tx.get_meta("engine.review_action.p.T-1.2"))
             .unwrap();

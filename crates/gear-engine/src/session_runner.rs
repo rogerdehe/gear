@@ -91,14 +91,36 @@ fn composer_holds(herdr: &mut dyn HerdrAct, pane: &str, text: &str) -> bool {
 /// Type `command` into the pane and submit it (T-434), then confirm the Enter
 /// took: the command no longer shows in the composer (T-453). A refused type
 /// changes nothing. `false` = the text is still in the box; the step waits at
-/// `enter` and tries again on a later tick.
+/// `enter` and tries again in the same call, or on a later tick.
 fn type_and_submit(herdr: &mut dyn HerdrAct, pane: &str, command: &str) -> Option<bool> {
     if !composer_holds(herdr, pane, command)
         && matches!(herdr.pane_type(pane, command), Outcome::Refused { .. })
     {
         return None;
     }
-    Some(enter(herdr, pane) && !composer_holds(herdr, pane, command))
+    if !enter(herdr, pane) {
+        return Some(false);
+    }
+    // T-470: the screen needs a moment to redraw after the Enter; read it too
+    // early and the typed command still shows, so the step waits a whole tick
+    // for a screen that already changed. A fake has no TUI and does not wait.
+    herdr.type_settle();
+    Some(!composer_holds(herdr, pane, command) || left_idle(herdr, pane))
+}
+
+/// Whether the agent in `pane` left the idle/done state it was typed into
+/// (T-470): a submitted command starts a turn (the agent works), and an exit
+/// command makes it go. A command still shown in the transcript is not a
+/// command in the input box, so this confirms the Enter without waiting for
+/// the screen to scroll.
+fn left_idle(herdr: &mut dyn HerdrAct, pane: &str) -> bool {
+    match herdr.agent_get(pane) {
+        // Working is the turn the command started; Done or Idle leaves the
+        // composer check to decide. Unknown is not proof either way.
+        Ok(Some(info)) => info.agent_status == AgentStatus::Working,
+        Ok(None) => true,
+        Err(_) => false,
+    }
 }
 
 /// The step a submitted session command waits in, with the `t0` and the
@@ -346,8 +368,6 @@ pub(crate) fn run(
         save(store, seat, &state)?;
         state
     };
-    let action_name = str_field(&state, "action").to_string();
-    let phase = str_field(&state, "step").to_string();
     let is_ready = occupant.as_ref().is_some_and(|a| ready(a.agent_status));
     // T-290: `keep` and `fresh` do no pane work, so an agent that queues input
     // typed while it works (pi, claude) is ready mid-turn — the packet waits in
@@ -356,79 +376,91 @@ pub(crate) fn run(
     let mid_turn_ready = occupant.as_ref().is_some_and(|a| {
         a.agent_status == AgentStatus::Working && gear_herdr::queues_input(&binding.kind)
     });
-    if phase == "done" {
-        let done = is_ready
-            || (occupant.is_none() && str_field(&state, "result") == "fresh")
-            || (mid_turn_ready && matches!(action_name.as_str(), "keep" | "fresh"));
-        return Ok(if done { Prep::Ready } else { Prep::Wait });
-    }
-    if phase == "failed" {
-        return Ok(Prep::Wait);
-    }
-    if occupant
-        .as_ref()
-        .is_some_and(|a| a.agent_status == AgentStatus::Working)
-        && action_name == "compact"
-        && !state["saw_working"].as_bool().unwrap_or(false)
-    {
-        state["saw_working"] = json!(true);
-        save(store, seat, &state)?;
-    }
-    if action_name == "keep" || action_name == "fresh" {
-        return if occupant.is_none() || is_ready || mid_turn_ready {
-            record(
-                store,
-                seat,
-                task,
-                attempt,
-                role,
-                &action_name,
-                &mut state,
-                now,
-            )
-        } else {
-            Ok(Prep::Wait)
-        };
-    }
-    if phase == "initial" {
-        if action_name == "resume" && occupant.is_none() {
-            step(seat, &mut state, "start_resume", now);
+    // T-470: a step that needs no new observation from Herdr runs in this same
+    // tick, so a session action no longer costs a whole tick per step. What
+    // this tick already knows — the pane is a shell, the agent is ready, the
+    // composer emptied — carries the next step at once; only a step that waits
+    // for the agent (its session, its exit, its new conversation) ends the
+    // call and is picked up on a later tick.
+    loop {
+        let action_name = str_field(&state, "action").to_string();
+        let phase = str_field(&state, "step").to_string();
+        if phase == "done" {
+            let done = is_ready
+                || (occupant.is_none() && str_field(&state, "result") == "fresh")
+                || (mid_turn_ready && matches!(action_name.as_str(), "keep" | "fresh"));
+            return Ok(if done { Prep::Ready } else { Prep::Wait });
+        }
+        if phase == "failed" {
+            return Ok(Prep::Wait);
+        }
+        if occupant
+            .as_ref()
+            .is_some_and(|a| a.agent_status == AgentStatus::Working)
+            && action_name == "compact"
+            && !state["saw_working"].as_bool().unwrap_or(false)
+        {
+            state["saw_working"] = json!(true);
             save(store, seat, &state)?;
-            return Ok(Prep::Wait);
         }
-        if !is_ready {
-            return Ok(Prep::Wait);
+        if action_name == "keep" || action_name == "fresh" {
+            return if occupant.is_none() || is_ready || mid_turn_ready {
+                record(
+                    store,
+                    seat,
+                    task,
+                    attempt,
+                    role,
+                    &action_name,
+                    &mut state,
+                    now,
+                )
+            } else {
+                Ok(Prep::Wait)
+            };
         }
-        let command = match action_name.as_str() {
-            "new" => profile.new_session.as_str(),
-            "compact" => profile.compact.as_str(),
-            "resume" => profile.exit_command.as_deref().unwrap_or(""),
-            _ => return Ok(Prep::Wait),
-        };
-        if action_name == "resume" && command.is_empty() {
-            if matches!(
-                herdr.send_keys(&binding.pane_id, &profile.exit_keys),
-                Outcome::Refused { .. }
-            ) {
+        if phase == "initial" {
+            if action_name == "resume" && occupant.is_none() {
+                step(seat, &mut state, "start_resume", now);
+                save(store, seat, &state)?;
+                continue;
+            }
+            if !is_ready {
                 return Ok(Prep::Wait);
             }
-            step(seat, &mut state, "wait_exit", now);
-        } else if command.is_empty() {
-            return record(
-                store,
-                seat,
-                task,
-                attempt,
-                role,
-                if action_name == "compact" {
-                    "compact-fallback"
-                } else {
-                    "new-unconfirmed"
-                },
-                &mut state,
-                now,
-            );
-        } else {
+            let command = match action_name.as_str() {
+                "new" => profile.new_session.as_str(),
+                "compact" => profile.compact.as_str(),
+                "resume" => profile.exit_command.as_deref().unwrap_or(""),
+                _ => return Ok(Prep::Wait),
+            };
+            if action_name == "resume" && command.is_empty() {
+                if matches!(
+                    herdr.send_keys(&binding.pane_id, &profile.exit_keys),
+                    Outcome::Refused { .. }
+                ) {
+                    return Ok(Prep::Wait);
+                }
+                step(seat, &mut state, "wait_exit", now);
+                save(store, seat, &state)?;
+                continue;
+            }
+            if command.is_empty() {
+                return record(
+                    store,
+                    seat,
+                    task,
+                    attempt,
+                    role,
+                    if action_name == "compact" {
+                        "compact-fallback"
+                    } else {
+                        "new-unconfirmed"
+                    },
+                    &mut state,
+                    now,
+                );
+            }
             // T-434: type and Enter in this same step; T-453: the next step
             // goes only when the composer emptied — a command left in the box
             // would join the packet typed after it.
@@ -436,82 +468,367 @@ pub(crate) fn run(
                 return Ok(Prep::Wait);
             };
             if took {
-                submitted(seat, &mut state, &action_name, now)
+                submitted(seat, &mut state, &action_name, now);
             } else {
                 step(seat, &mut state, "enter", now);
             }
-        }
-        save(store, seat, &state)?;
-        return Ok(Prep::Wait);
-    }
-    if phase == "enter" {
-        if action_name == "resume" && occupant.is_none() {
-            step(seat, &mut state, "start_resume", now);
             save(store, seat, &state)?;
-            return Ok(Prep::Wait);
+            continue;
         }
-        // T-434: the text is already in the box, so a later Enter does not
-        // wait for the agent to be idle or done again. T-453: the step moves
-        // on only when the composer emptied.
-        let command = match action_name.as_str() {
-            "new" => profile.new_session.as_str(),
-            "compact" => profile.compact.as_str(),
-            "resume" => profile.exit_command.as_deref().unwrap_or(""),
-            _ => "",
-        };
-        if enter(herdr, &binding.pane_id) && !composer_holds(herdr, &binding.pane_id, command) {
-            submitted(seat, &mut state, &action_name, now);
-            save(store, seat, &state)?;
-        }
-        return Ok(Prep::Wait);
-    }
-    if phase == "wait_action" {
-        // T-457: Codex 0.165 opens "Where should the new conversation run?"
-        // after `/new`. Herdr reports the agent done/idle while the dialog
-        // waits, and the text of the next delivery would land in it. The
-        // profile's answer keys take it (Enter keeps the seat in its current
-        // worktree); the step waits a tick for the conversation to start.
-        if action_name == "new"
-            && matches!(
-                gear_herdr::answer_dialog(herdr, &binding.pane_id, &profile),
-                Some(Outcome::Ok(()))
-            )
-        {
-            save(store, seat, &state)?;
-            return Ok(Prep::Wait);
-        }
-        let elapsed = now.saturating_sub(time(&state, "t0"));
-        if action_name == "compact"
-            && occupant
-                .as_ref()
-                .is_some_and(|a| a.agent_status != AgentStatus::Done)
-            && !state["seen_not_done"].as_bool().unwrap_or(false)
-        {
-            state["seen_not_done"] = json!(true);
-            save(store, seat, &state)?;
-        }
-        if action_name == "new" {
-            let old = state.get("old_session_ref").and_then(Value::as_str);
-            let changed = binding
-                .session_ref
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .is_some_and(|s| Some(s) != old);
-            if is_ready && elapsed >= 5 && (changed || binding.kind == "codex") {
-                return record(
-                    store,
-                    seat,
-                    task,
-                    attempt,
-                    role,
-                    if changed { "new" } else { "new-unconfirmed" },
-                    &mut state,
-                    now,
-                );
+        if phase == "enter" {
+            if action_name == "resume" && occupant.is_none() {
+                step(seat, &mut state, "start_resume", now);
+                save(store, seat, &state)?;
+                continue;
             }
-            if is_ready && elapsed >= 30 {
-                if binding.kind != "codex" {
-                    notify_new(store, seat, now)?;
+            // T-434: the text is already in the box, so a later Enter does not
+            // wait for the agent to be idle or done again. T-453: the step
+            // moves on only when the composer emptied. T-470: an agent that
+            // left idle/done took the command, so a command still shown in the
+            // transcript does not hold the step for ticks.
+            let command = match action_name.as_str() {
+                "new" => profile.new_session.as_str(),
+                "compact" => profile.compact.as_str(),
+                "resume" => profile.exit_command.as_deref().unwrap_or(""),
+                _ => "",
+            };
+            let took = left_idle(herdr, &binding.pane_id)
+                || (enter(herdr, &binding.pane_id) && {
+                    herdr.type_settle();
+                    !composer_holds(herdr, &binding.pane_id, command)
+                });
+            if took {
+                submitted(seat, &mut state, &action_name, now);
+                save(store, seat, &state)?;
+                continue;
+            }
+            return Ok(Prep::Wait);
+        }
+        if phase == "wait_action" {
+            // T-457: Codex 0.165 opens "Where should the new conversation run?"
+            // after `/new`. Herdr reports the agent done/idle while the dialog
+            // waits, and the text of the next delivery would land in it. The
+            // profile's answer keys take it (Enter keeps the seat in its current
+            // worktree); the step waits a tick for the conversation to start.
+            if action_name == "new"
+                && matches!(
+                    gear_herdr::answer_dialog(herdr, &binding.pane_id, &profile),
+                    Some(Outcome::Ok(()))
+                )
+            {
+                save(store, seat, &state)?;
+                return Ok(Prep::Wait);
+            }
+            let elapsed = now.saturating_sub(time(&state, "t0"));
+            if action_name == "compact"
+                && occupant
+                    .as_ref()
+                    .is_some_and(|a| a.agent_status != AgentStatus::Done)
+                && !state["seen_not_done"].as_bool().unwrap_or(false)
+            {
+                state["seen_not_done"] = json!(true);
+                save(store, seat, &state)?;
+            }
+            if action_name == "new" {
+                let old = state.get("old_session_ref").and_then(Value::as_str);
+                let changed = binding
+                    .session_ref
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .is_some_and(|s| Some(s) != old);
+                if is_ready && elapsed >= 5 && (changed || binding.kind == "codex") {
+                    return record(
+                        store,
+                        seat,
+                        task,
+                        attempt,
+                        role,
+                        if changed { "new" } else { "new-unconfirmed" },
+                        &mut state,
+                        now,
+                    );
+                }
+                if is_ready && elapsed >= 30 {
+                    if binding.kind != "codex" {
+                        notify_new(store, seat, now)?;
+                    }
+                    return record(
+                        store,
+                        seat,
+                        task,
+                        attempt,
+                        role,
+                        "new-unconfirmed",
+                        &mut state,
+                        now,
+                    );
+                }
+            } else {
+                let session = state.get("old_session_ref").and_then(Value::as_str);
+                let log_new = session.is_some_and(|s| {
+                    new_compaction(s, state["offset"].as_u64().unwrap_or(0))
+                        || profile
+                            .usage_log
+                            .as_deref()
+                            .and_then(gear_usage::UsageLog::from_name)
+                            .and_then(|log| {
+                                gear_usage::usage(
+                                    log,
+                                    s,
+                                    time(&state, "t0").saturating_add(1),
+                                    now.saturating_add(1),
+                                )
+                            })
+                            .is_some_and(|u| u.records > 0)
+                });
+                let done = occupant
+                    .as_ref()
+                    .is_some_and(|a| a.agent_status == AgentStatus::Done)
+                    && (!state["initial_done"].as_bool().unwrap_or(false)
+                        || state["seen_not_done"].as_bool().unwrap_or(false));
+                let small_pi = binding.kind == "pi"
+                    && elapsed >= 15
+                    && !state["saw_working"].as_bool().unwrap_or(false);
+                if is_ready && (done || log_new || small_pi) {
+                    return record(
+                        store,
+                        seat,
+                        task,
+                        attempt,
+                        role,
+                        if small_pi && !done && !log_new {
+                            "keep"
+                        } else {
+                            "compact"
+                        },
+                        &mut state,
+                        now,
+                    );
+                }
+                if is_ready && elapsed >= 300 {
+                    return record(
+                        store,
+                        seat,
+                        task,
+                        attempt,
+                        role,
+                        "compact-fallback",
+                        &mut state,
+                        now,
+                    );
+                }
+            }
+            return Ok(Prep::Wait);
+        }
+        if phase == "wait_exit" {
+            if occupant.is_none() {
+                step(seat, &mut state, "start_resume", now);
+                save(store, seat, &state)?;
+                continue;
+            }
+            if now.saturating_sub(time(&state, "step_at")) >= 30 {
+                step(seat, &mut state, "fallback_exit", now);
+                save(store, seat, &state)?;
+                continue;
+            }
+            return Ok(Prep::Wait);
+        }
+        if phase == "fallback_exit" {
+            if occupant.is_none() {
+                step(seat, &mut state, "start_fallback", now);
+                save(store, seat, &state)?;
+                continue;
+            }
+            if now.saturating_sub(time(&state, "step_at")) >= 30 {
+                return recovery_failed(store, seat, &mut state, &phase, now);
+            }
+            if is_ready {
+                if let Some(command) = profile.exit_command.as_deref().filter(|s| !s.is_empty()) {
+                    if !matches!(
+                        herdr.pane_type(&binding.pane_id, command),
+                        Outcome::Refused { .. }
+                    ) {
+                        // T-434: the exit command leaves with its Enter too;
+                        // "fallback_enter" stays for a refused Enter. T-453:
+                        // the step moves on only when the composer emptied.
+                        if enter(herdr, &binding.pane_id) && {
+                            herdr.type_settle();
+                            !composer_holds(herdr, &binding.pane_id, command)
+                        } {
+                            step(seat, &mut state, "fallback_wait_exit", now)
+                        } else {
+                            step(seat, &mut state, "fallback_enter", now);
+                        }
+                        save(store, seat, &state)?;
+                        continue;
+                    }
+                } else if !matches!(
+                    herdr.send_keys(&binding.pane_id, &profile.exit_keys),
+                    Outcome::Refused { .. }
+                ) {
+                    step(seat, &mut state, "fallback_wait_exit", now);
+                    save(store, seat, &state)?;
+                    continue;
+                }
+            }
+            return Ok(Prep::Wait);
+        }
+        if phase == "fallback_enter" {
+            if occupant.is_none() {
+                step(seat, &mut state, "start_fallback", now);
+                save(store, seat, &state)?;
+                continue;
+            }
+            if now.saturating_sub(time(&state, "step_at")) >= 30 {
+                return recovery_failed(store, seat, &mut state, &phase, now);
+            }
+            if is_ready && enter(herdr, &binding.pane_id) && {
+                herdr.type_settle();
+                !composer_holds(
+                    herdr,
+                    &binding.pane_id,
+                    profile.exit_command.as_deref().unwrap_or(""),
+                )
+            } {
+                step(seat, &mut state, "fallback_wait_exit", now);
+                save(store, seat, &state)?;
+                continue;
+            }
+            return Ok(Prep::Wait);
+        }
+        if phase == "fallback_wait_exit" {
+            if occupant.is_none() {
+                step(seat, &mut state, "start_fallback", now);
+                save(store, seat, &state)?;
+                continue;
+            }
+            if now.saturating_sub(time(&state, "step_at")) >= 30 {
+                return recovery_failed(store, seat, &mut state, &phase, now);
+            }
+            return Ok(Prep::Wait);
+        }
+        if phase == "start_resume" || phase == "start_fallback" {
+            if phase == "start_fallback" && now.saturating_sub(time(&state, "step_at")) >= 60 {
+                return recovery_failed(store, seat, &mut state, &phase, now);
+            }
+            if occupant.is_some() {
+                return Ok(Prep::Wait);
+            }
+            let mut args = profile.unattended_args.clone();
+            args.extend(crate::rules::arguments(
+                store,
+                &seat.project,
+                seat.role,
+                &seat.name,
+                &cfg.db_path,
+                &profile,
+                phase == "start_resume",
+            )?);
+            let target = str_field(&state, "target");
+            if phase == "start_resume" {
+                let Some(resume) = profile.resume_args.as_ref().filter(|_| !target.is_empty())
+                else {
+                    step(seat, &mut state, "start_fallback", now);
+                    save(store, seat, &state)?;
+                    continue;
+                };
+                args.extend(resume.iter().map(|s| s.replace("{session}", target)));
+            }
+            let (model, project) = store.read(|tx| {
+                Ok((
+                    tx.get_meta(&crate::model::model_meta_key(&seat.id))?,
+                    tx.get_project(&seat.project)?,
+                ))
+            })?;
+            if let Some(config) = project.and_then(|p| gear_app::config::parse(&p.config_toml).ok())
+            {
+                let entries = match seat.role {
+                    SeatRole::Lane => config
+                        .lanes
+                        .iter()
+                        .find(|lane| lane.name == seat.name)
+                        .map(|lane| gear_app::config::lane_chain(&config, lane))
+                        .unwrap_or(&config.models.lanes),
+                    SeatRole::Temp => config.models.review.as_slice(),
+                    SeatRole::Captain => config.models.captain.as_slice(),
+                };
+                let entry = match model.as_deref() {
+                    Some(model) => entries.iter().find(|e| e.model() == model),
+                    None => entries.first(),
+                };
+                if let Some(start) = entry.and_then(|e| crate::model::entry_args(&binding.kind, e))
+                {
+                    args.extend(start);
+                } else if let Some(start) = model
+                    .as_deref()
+                    .and_then(|model| crate::model::model_start(&binding.kind, model))
+                {
+                    args.extend(start.args);
+                }
+            } else if let Some(model) = model {
+                if let Some(start) = crate::model::model_start(&binding.kind, &model) {
+                    args.extend(start.args);
+                }
+            }
+            let folder_key = if matches!(role, Role::Review | Role::Direction) {
+                format!("engine.review_path.{}", seat.id)
+            } else {
+                crate::onboard::worktree_path_key(&seat.id)
+            };
+            if let Some(folder) = store.read(|tx| tx.get_meta(&folder_key))? {
+                args = gear_herdr::render_args(&args, &folder);
+            }
+            let name = crate::names::desired(seat);
+            match herdr.agent_start(&name, &binding.kind, &binding.pane_id, &args) {
+                Outcome::Ok(_) | Outcome::Uncertain { .. } => step(
+                    seat,
+                    &mut state,
+                    if phase == "start_resume" {
+                        "wait_resume"
+                    } else {
+                        "wait_fallback"
+                    },
+                    now,
+                ),
+                Outcome::Refused { .. } if phase == "start_resume" => {
+                    step(seat, &mut state, "start_fallback", now)
+                }
+                Outcome::Refused { .. } => return Ok(Prep::Wait),
+            }
+            save(store, seat, &state)?;
+            continue;
+        }
+        if phase == "wait_resume" || phase == "wait_fallback" {
+            // T-457: a resume from another directory asks which working directory
+            // to use. The start args keep it from showing
+            // (`tui.resume_cwd="current"` — the seat's own directory); if it does
+            // show, the profile answers it with the preselected current directory.
+            if phase == "wait_resume"
+                && matches!(
+                    gear_herdr::answer_dialog(herdr, &binding.pane_id, &profile),
+                    Some(Outcome::Ok(()))
+                )
+            {
+                save(store, seat, &state)?;
+                return Ok(Prep::Wait);
+            }
+            if is_ready {
+                if phase == "wait_resume" && state["compact_after"].as_bool().unwrap_or(false) {
+                    state["action"] = json!("compact");
+                    state["old_session_ref"] = state["target"].clone();
+                    state["offset"] = json!(str_field(&state, "target")
+                        .is_empty()
+                        .then_some(0)
+                        .unwrap_or_else(|| std::fs::metadata(str_field(&state, "target"))
+                            .map(|m| m.len())
+                            .unwrap_or(0)));
+                    state["saw_working"] = json!(false);
+                    state["initial_done"] = json!(occupant
+                        .as_ref()
+                        .is_some_and(|a| a.agent_status == AgentStatus::Done));
+                    step(seat, &mut state, "initial", now);
+                    save(store, seat, &state)?;
+                    continue;
                 }
                 return record(
                     store,
@@ -519,298 +836,39 @@ pub(crate) fn run(
                     task,
                     attempt,
                     role,
-                    "new-unconfirmed",
-                    &mut state,
-                    now,
-                );
-            }
-        } else {
-            let session = state.get("old_session_ref").and_then(Value::as_str);
-            let log_new = session.is_some_and(|s| {
-                new_compaction(s, state["offset"].as_u64().unwrap_or(0))
-                    || profile
-                        .usage_log
-                        .as_deref()
-                        .and_then(gear_usage::UsageLog::from_name)
-                        .and_then(|log| {
-                            gear_usage::usage(
-                                log,
-                                s,
-                                time(&state, "t0").saturating_add(1),
-                                now.saturating_add(1),
-                            )
-                        })
-                        .is_some_and(|u| u.records > 0)
-            });
-            let done = occupant
-                .as_ref()
-                .is_some_and(|a| a.agent_status == AgentStatus::Done)
-                && (!state["initial_done"].as_bool().unwrap_or(false)
-                    || state["seen_not_done"].as_bool().unwrap_or(false));
-            let small_pi = binding.kind == "pi"
-                && elapsed >= 15
-                && !state["saw_working"].as_bool().unwrap_or(false);
-            if is_ready && (done || log_new || small_pi) {
-                return record(
-                    store,
-                    seat,
-                    task,
-                    attempt,
-                    role,
-                    if small_pi && !done && !log_new {
-                        "keep"
+                    if phase == "wait_resume" {
+                        "resume"
                     } else {
-                        "compact"
+                        "resume-fallback"
                     },
                     &mut state,
                     now,
                 );
             }
-            if is_ready && elapsed >= 300 {
-                return record(
-                    store,
+            if phase == "wait_resume" && now.saturating_sub(time(&state, "step_at")) >= 60 {
+                step(
                     seat,
-                    task,
-                    attempt,
-                    role,
-                    "compact-fallback",
                     &mut state,
+                    if occupant.is_none() {
+                        "start_fallback"
+                    } else {
+                        "fallback_exit"
+                    },
                     now,
                 );
-            }
-        }
-        return Ok(Prep::Wait);
-    }
-    if phase == "wait_exit" {
-        if occupant.is_none() {
-            step(seat, &mut state, "start_resume", now);
-            save(store, seat, &state)?;
-        } else if now.saturating_sub(time(&state, "step_at")) >= 30 {
-            step(seat, &mut state, "fallback_exit", now);
-            save(store, seat, &state)?;
-        }
-        return Ok(Prep::Wait);
-    }
-    if phase == "fallback_exit" {
-        if occupant.is_none() {
-            step(seat, &mut state, "start_fallback", now);
-            save(store, seat, &state)?;
-        } else if now.saturating_sub(time(&state, "step_at")) >= 30 {
-            return recovery_failed(store, seat, &mut state, &phase, now);
-        } else if is_ready {
-            if let Some(command) = profile.exit_command.as_deref().filter(|s| !s.is_empty()) {
-                if !matches!(
-                    herdr.pane_type(&binding.pane_id, command),
-                    Outcome::Refused { .. }
-                ) {
-                    // T-434: the exit command leaves with its Enter too;
-                    // "fallback_enter" stays for a refused Enter. T-453: the
-                    // step moves on only when the composer emptied.
-                    if enter(herdr, &binding.pane_id)
-                        && !composer_holds(herdr, &binding.pane_id, command)
-                    {
-                        step(seat, &mut state, "fallback_wait_exit", now)
-                    } else {
-                        step(seat, &mut state, "fallback_enter", now);
-                    }
-                    save(store, seat, &state)?;
-                }
-            } else if !matches!(
-                herdr.send_keys(&binding.pane_id, &profile.exit_keys),
-                Outcome::Refused { .. }
-            ) {
-                step(seat, &mut state, "fallback_wait_exit", now);
                 save(store, seat, &state)?;
+                continue;
             }
-        }
-        return Ok(Prep::Wait);
-    }
-    if phase == "fallback_enter" {
-        if occupant.is_none() {
-            step(seat, &mut state, "start_fallback", now);
-            save(store, seat, &state)?;
+            if phase == "wait_fallback" && now.saturating_sub(time(&state, "step_at")) >= 60 {
+                return recovery_failed(store, seat, &mut state, &phase, now);
+            }
             return Ok(Prep::Wait);
         }
-        if now.saturating_sub(time(&state, "step_at")) >= 30 {
-            return recovery_failed(store, seat, &mut state, &phase, now);
-        }
-        if is_ready
-            && enter(herdr, &binding.pane_id)
-            && !composer_holds(
-                herdr,
-                &binding.pane_id,
-                profile.exit_command.as_deref().unwrap_or(""),
-            )
-        {
-            step(seat, &mut state, "fallback_wait_exit", now);
-            save(store, seat, &state)?;
-        }
+        // No phase left to run: the state names one this runner does not know
+        // (an older record): nothing to do until the next tick.
         return Ok(Prep::Wait);
     }
-    if phase == "fallback_wait_exit" {
-        if occupant.is_none() {
-            step(seat, &mut state, "start_fallback", now);
-            save(store, seat, &state)?;
-        } else if now.saturating_sub(time(&state, "step_at")) >= 30 {
-            return recovery_failed(store, seat, &mut state, &phase, now);
-        }
-        return Ok(Prep::Wait);
-    }
-    if phase == "start_resume" || phase == "start_fallback" {
-        if phase == "start_fallback" && now.saturating_sub(time(&state, "step_at")) >= 60 {
-            return recovery_failed(store, seat, &mut state, &phase, now);
-        }
-        if occupant.is_some() {
-            return Ok(Prep::Wait);
-        }
-        let mut args = profile.unattended_args.clone();
-        args.extend(crate::rules::arguments(
-            store,
-            &seat.project,
-            seat.role,
-            &seat.name,
-            &cfg.db_path,
-            &profile,
-            phase == "start_resume",
-        )?);
-        let target = str_field(&state, "target");
-        if phase == "start_resume" {
-            let Some(resume) = profile.resume_args.as_ref().filter(|_| !target.is_empty()) else {
-                step(seat, &mut state, "start_fallback", now);
-                save(store, seat, &state)?;
-                return Ok(Prep::Wait);
-            };
-            args.extend(resume.iter().map(|s| s.replace("{session}", target)));
-        }
-        let (model, project) = store.read(|tx| {
-            Ok((
-                tx.get_meta(&crate::model::model_meta_key(&seat.id))?,
-                tx.get_project(&seat.project)?,
-            ))
-        })?;
-        if let Some(config) = project.and_then(|p| gear_app::config::parse(&p.config_toml).ok()) {
-            let entries = match seat.role {
-                SeatRole::Lane => config
-                    .lanes
-                    .iter()
-                    .find(|lane| lane.name == seat.name)
-                    .map(|lane| gear_app::config::lane_chain(&config, lane))
-                    .unwrap_or(&config.models.lanes),
-                SeatRole::Temp => config.models.review.as_slice(),
-                SeatRole::Captain => config.models.captain.as_slice(),
-            };
-            let entry = match model.as_deref() {
-                Some(model) => entries.iter().find(|e| e.model() == model),
-                None => entries.first(),
-            };
-            if let Some(start) = entry.and_then(|e| crate::model::entry_args(&binding.kind, e)) {
-                args.extend(start);
-            } else if let Some(start) = model
-                .as_deref()
-                .and_then(|model| crate::model::model_start(&binding.kind, model))
-            {
-                args.extend(start.args);
-            }
-        } else if let Some(model) = model {
-            if let Some(start) = crate::model::model_start(&binding.kind, &model) {
-                args.extend(start.args);
-            }
-        }
-        let folder_key = if matches!(role, Role::Review | Role::Direction) {
-            format!("engine.review_path.{}", seat.id)
-        } else {
-            crate::onboard::worktree_path_key(&seat.id)
-        };
-        if let Some(folder) = store.read(|tx| tx.get_meta(&folder_key))? {
-            args = gear_herdr::render_args(&args, &folder);
-        }
-        let name = crate::names::desired(seat);
-        match herdr.agent_start(&name, &binding.kind, &binding.pane_id, &args) {
-            Outcome::Ok(_) | Outcome::Uncertain { .. } => step(
-                seat,
-                &mut state,
-                if phase == "start_resume" {
-                    "wait_resume"
-                } else {
-                    "wait_fallback"
-                },
-                now,
-            ),
-            Outcome::Refused { .. } if phase == "start_resume" => {
-                step(seat, &mut state, "start_fallback", now)
-            }
-            Outcome::Refused { .. } => return Ok(Prep::Wait),
-        }
-        save(store, seat, &state)?;
-        return Ok(Prep::Wait);
-    }
-    if phase == "wait_resume" || phase == "wait_fallback" {
-        // T-457: a resume from another directory asks which working directory
-        // to use. The start args keep it from showing
-        // (`tui.resume_cwd="current"` — the seat's own directory); if it does
-        // show, the profile answers it with the preselected current directory.
-        if phase == "wait_resume"
-            && matches!(
-                gear_herdr::answer_dialog(herdr, &binding.pane_id, &profile),
-                Some(Outcome::Ok(()))
-            )
-        {
-            save(store, seat, &state)?;
-            return Ok(Prep::Wait);
-        }
-        if is_ready {
-            if phase == "wait_resume" && state["compact_after"].as_bool().unwrap_or(false) {
-                state["action"] = json!("compact");
-                state["old_session_ref"] = state["target"].clone();
-                state["offset"] = json!(str_field(&state, "target")
-                    .is_empty()
-                    .then_some(0)
-                    .unwrap_or_else(|| std::fs::metadata(str_field(&state, "target"))
-                        .map(|m| m.len())
-                        .unwrap_or(0)));
-                state["saw_working"] = json!(false);
-                state["initial_done"] = json!(occupant
-                    .as_ref()
-                    .is_some_and(|a| a.agent_status == AgentStatus::Done));
-                step(seat, &mut state, "initial", now);
-                save(store, seat, &state)?;
-                return Ok(Prep::Wait);
-            }
-            return record(
-                store,
-                seat,
-                task,
-                attempt,
-                role,
-                if phase == "wait_resume" {
-                    "resume"
-                } else {
-                    "resume-fallback"
-                },
-                &mut state,
-                now,
-            );
-        }
-        if phase == "wait_resume" && now.saturating_sub(time(&state, "step_at")) >= 60 {
-            step(
-                seat,
-                &mut state,
-                if occupant.is_none() {
-                    "start_fallback"
-                } else {
-                    "fallback_exit"
-                },
-                now,
-            );
-            save(store, seat, &state)?;
-        }
-        if phase == "wait_fallback" && now.saturating_sub(time(&state, "step_at")) >= 60 {
-            return recovery_failed(store, seat, &mut state, &phase, now);
-        }
-    }
-    Ok(Prep::Wait)
 }
-
 fn new_compaction(path: &str, offset: u64) -> bool {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut file) = std::fs::File::open(path) else {

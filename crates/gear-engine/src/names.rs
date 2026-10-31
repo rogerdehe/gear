@@ -19,7 +19,7 @@
 //! across the tasks it reviews (T-482).
 
 use gear_herdr::{HerdrAct, Outcome};
-use gear_model::{GearResult, MsgKind, MsgState, SeatRole, Ts};
+use gear_model::{GearResult, MsgKind, MsgState, Ts};
 use gear_store::{BindingStatus, NewMessage, SeatRow, Store, Tx};
 use std::collections::BTreeMap;
 
