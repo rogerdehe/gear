@@ -7,28 +7,39 @@ use gear_model::{ErrorCode, GearError, GearResult, MsgKind, MsgState, TaskState,
 use gear_store::{MessageRow, NewMessage, Tx};
 
 pub fn is_station(message: &MessageRow) -> bool {
-    message.sender == "engine" && message.kind == MsgKind::System
+    message.sender == "engine"
+        && message.kind == MsgKind::System
         && message.thread.starts_with("station:")
 }
 
 /// Return the ids opened this tick. Finished historical voyages are not
 /// retroactively reported, but a watched voyage can send its final task station.
 pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String>> {
-    let Some(captain) = tx.captain_of(project)? else { return Ok(Vec::new()); };
+    let Some(captain) = tx.captain_of(project)? else {
+        return Ok(Vec::new());
+    };
     let tasks = tx.tasks_of_project(project)?;
     let mut opened = Vec::new();
     for report in gear_board::voyage::reports_including_finished(tx, project, now)? {
-        let scope: Vec<_> = tasks.iter().filter(|task| {
-            task.milestone.as_deref() == Some(&report.milestone)
-                && !matches!(task.state, TaskState::Draft | TaskState::Cancelled | TaskState::Failed)
-        }).collect();
+        let scope: Vec<_> = tasks
+            .iter()
+            .filter(|task| {
+                task.milestone.as_deref() == Some(&report.milestone)
+                    && !matches!(
+                        task.state,
+                        TaskState::Draft | TaskState::Cancelled | TaskState::Failed
+                    )
+            })
+            .collect();
         let done = scope.iter().filter(|t| t.state == TaskState::Done).count();
         let left = scope.len() - done;
         let key = format!("station:{project}:{}", report.milestone);
         if left == 0 && tx.get_meta(&format!("{key}:watch"))?.is_none() {
             continue;
         }
-        if left > 0 { tx.set_meta(&format!("{key}:watch"), "1")?; }
+        if left > 0 {
+            tx.set_meta(&format!("{key}:watch"), "1")?;
+        }
         let mut crossed = Vec::new();
         let mut markers = Vec::new();
         let mut past_quarter = false;
@@ -38,11 +49,16 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
         // replay the hours it slept through.
         let mut course: Option<(String, i64)> = None;
         if left > 0 {
-            let voyage = tx.get_voyage(project, &report.milestone)?.expect("report has a voyage");
+            let voyage = tx
+                .get_voyage(project, &report.milestone)?
+                .expect("report has a voyage");
             if let Some(departure) = voyage.departure {
                 let hours = (now - departure).max(0) / 3600;
                 let course_key = format!("{key}:course");
-                let last = tx.get_meta(&course_key)?.and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                let last = tx
+                    .get_meta(&course_key)?
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0);
                 if hours > last {
                     crossed.push(if hours - last == 1 {
                         format!("{} min", hours * 60)
@@ -52,9 +68,10 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
                     course = Some((course_key, hours));
                 }
             }
-            if let (Some(departure), Some(eta)) = (voyage.departure,
-                report.eta.as_deref().and_then(eta_seconds))
-            {
+            if let (Some(departure), Some(eta)) = (
+                voyage.departure,
+                report.eta.as_deref().and_then(eta_seconds),
+            ) {
                 // Every quarter the elapsed time has crossed rings, not only
                 // 25/50/75%: a voyage past its eta keeps telling the captain
                 // plainly that the eta is passed and by how much, until it
@@ -66,7 +83,11 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
                     if tx.get_meta(&marker)?.is_none() {
                         crossed.push(if quarter >= 4 {
                             past_quarter = true;
-                            format!("{}% eta (past eta by {} min)", quarter * 25, (elapsed - eta) / 60)
+                            format!(
+                                "{}% eta (past eta by {} min)",
+                                quarter * 25,
+                                (elapsed - eta) / 60
+                            )
                         } else {
                             format!("{}% eta", quarter * 25)
                         });
@@ -78,7 +99,10 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
         // Each multiple of three is a station, even after a late engine tick.
         // Reopened tasks cannot replay already-recorded completion milestones.
         let completed_key = format!("{key}:done");
-        let previous = tx.get_meta(&completed_key)?.and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+        let previous = tx
+            .get_meta(&completed_key)?
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
         let groups = done / 3;
         if groups > previous {
             crossed.push(if groups == previous + 1 {
@@ -109,8 +133,13 @@ Close this with `station <id>: land`.",
             tx.set_meta(&format!("{key}:land"), &message.id)?;
             opened.push(message.id);
         }
-        if crossed.is_empty() { continue; }
-        let pace = report.pace().map(|p| format!("{p:.2}x")).unwrap_or_else(|| "-".into());
+        if crossed.is_empty() {
+            continue;
+        }
+        let pace = report
+            .pace()
+            .map(|p| format!("{p:.2}x"))
+            .unwrap_or_else(|| "-".into());
         // The lane that sets the finish is named (§10.7 row B4): the
         // slowest task alone does not say which lane holds the voyage back.
         let slowest = report
@@ -124,13 +153,24 @@ Close this with `station <id>: land`.",
         let lanes = if report.lanes.is_empty() {
             "-".to_string()
         } else {
-            report.lanes.iter().map(|lane| {
-                let projection = lane.projected_min.map(|m| format!("{m}m")).unwrap_or_else(|| "-".into());
-                format!("{} {projection}", lane.lane)
-            }).collect::<Vec<_>>().join(", ")
+            report
+                .lanes
+                .iter()
+                .map(|lane| {
+                    let projection = lane
+                        .projected_min
+                        .map(|m| format!("{m}m"))
+                        .unwrap_or_else(|| "-".into());
+                    format!("{} {projection}", lane.lane)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
         };
         // The time left until the eta: the clock the captain watches.
-        let time_left = match (report.eta.as_deref().and_then(eta_seconds), report.elapsed_min) {
+        let time_left = match (
+            report.eta.as_deref().and_then(eta_seconds),
+            report.elapsed_min,
+        ) {
             (Some(eta), Some(elapsed)) => format!("{}m", (((eta + 59) / 60) - elapsed).max(0)),
             _ => "-".into(),
         };
@@ -142,7 +182,10 @@ Close this with `station <id>: land`.",
         );
         // Urgent when the projected finish is past the eta (row B10): the
         // captain must answer before the voyage is late.
-        let past_eta = match (report.eta.as_deref().and_then(eta_seconds), report.projected_min) {
+        let past_eta = match (
+            report.eta.as_deref().and_then(eta_seconds),
+            report.projected_min,
+        ) {
             (Some(eta), Some(projected)) => projected.saturating_mul(60) > eta,
             _ => false,
         };
@@ -155,16 +198,30 @@ Close this with `station <id>: land`.",
         };
         let message = tx.insert_message(&NewMessage {
             meta: None,
-            project: project.into(), thread: format!("station:{}", report.milestone),
-            task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
-            recipient: captain.id.clone(), kind: MsgKind::System, urgent: past_eta || past_quarter,
-            body: with_goal(tx, project, &report.milestone, body)?, reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
+            project: project.into(),
+            thread: format!("station:{}", report.milestone),
+            task: None,
+            attempt: None,
+            sender: "engine".into(),
+            sender_gen: 0,
+            recipient: captain.id.clone(),
+            kind: MsgKind::System,
+            urgent: past_eta || past_quarter,
+            body: with_goal(tx, project, &report.milestone, body)?,
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
         })?;
-        for marker in markers { tx.set_meta(&marker, &message.id)?; }
+        for marker in markers {
+            tx.set_meta(&marker, &message.id)?;
+        }
         if let Some((course_key, hours)) = course {
             tx.set_meta(&course_key, &hours.to_string())?;
         }
-        if groups > previous { tx.set_meta(&completed_key, &groups.to_string())?; }
+        if groups > previous {
+            tx.set_meta(&completed_key, &groups.to_string())?;
+        }
         opened.push(message.id);
     }
     Ok(opened)
@@ -173,23 +230,185 @@ Close this with `station <id>: land`.",
 /// Only an explicit station decision closes the named action item. The plan
 /// transaction makes a bad reference/action roll back every other plan write.
 pub fn apply_decisions(tx: &Tx<'_>, project: &str, draft: &Draft, now: Ts) -> GearResult<()> {
+    // T-461: the `confirmed:` lines of this same apply, the user's word a
+    // landing over an open clause or a cut needs.
+    let confirmed: Vec<crate::decision::Decision> = draft
+        .decisions
+        .iter()
+        .map(|line| crate::decision::parse(line))
+        .filter(|decision| decision.kind == "confirmed" && !decision.note)
+        .collect();
     for decision in &draft.decisions {
-        let Some(rest) = decision.strip_prefix("station ") else { continue; };
-        let (id, response) = rest.split_once(':').ok_or_else(|| bad("station decision needs `station M-n: action`"))?;
+        let Some(rest) = decision.strip_prefix("station ") else {
+            continue;
+        };
+        let (id, response) = rest
+            .split_once(':')
+            .ok_or_else(|| bad("station decision needs `station M-n: action`"))?;
         let (id, response) = (id.trim(), response.trim());
-        let valid = ["keep course", "time-box", "cut", "move", "land"].iter().any(|action| {
-            response.strip_prefix(action).is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-        });
-        if !valid { return Err(bad("station action must be keep course, time-box, cut, move or land")); }
-        let message = tx.get_message(project, id)?.ok_or_else(|| bad(format!("no station item {id}")))?;
-        let captain = tx.captain_of(project)?.ok_or_else(|| bad("no captain for station decision"))?;
+        let valid = ["keep course", "time-box", "cut", "move", "land"]
+            .iter()
+            .any(|action| {
+                response
+                    .strip_prefix(action)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+            });
+        if !valid {
+            return Err(bad(
+                "station action must be keep course, time-box, cut, move or land",
+            ));
+        }
+        let message = tx
+            .get_message(project, id)?
+            .ok_or_else(|| bad(format!("no station item {id}")))?;
+        let captain = tx
+            .captain_of(project)?
+            .ok_or_else(|| bad("no captain for station decision"))?;
         if !is_station(&message) || message.recipient != captain.id {
             return Err(bad(format!("{id} is not this captain's station item")));
         }
-        if message.state == MsgState::Resolved { continue; } // retained historical decision
-        tx.update_message_state(project, id, MsgState::Resolved, Some(decision), None, None, now)?;
+        if message.state == MsgState::Resolved {
+            continue;
+        } // retained historical decision
+          // T-461: a landing is the voyage's last act; it is refused while a
+          // done clause is open or the voyage was cut by more than a fifth,
+          // unless the user's word (a `confirmed:` line in this apply) names
+          // the open clauses or the cut.
+        if response == "land" || response.starts_with("land ") {
+            require_land_ready(tx, project, &message, &confirmed, draft.confirmed)?;
+        }
+        tx.update_message_state(
+            project,
+            id,
+            MsgState::Resolved,
+            Some(decision),
+            None,
+            None,
+            now,
+        )?;
     }
     Ok(())
+}
+
+/// T-461: whether a landing may close the voyage. The goal check is the one
+/// the board reads (a written check, or the done clauses all open); the cut is
+/// the tasks cancelled or moved out since departure, against the departure's
+/// task count.
+fn require_land_ready(
+    tx: &Tx<'_>,
+    project: &str,
+    message: &MessageRow,
+    confirmed: &[crate::decision::Decision],
+    confirmed_flag: bool,
+) -> GearResult<()> {
+    let milestone = message.thread.strip_prefix("station:").unwrap_or_default();
+    let voyage = tx.get_voyage(project, milestone)?.ok_or_else(|| {
+        bad(format!(
+            "station {} lands voyage {milestone}, but no such voyage is stored",
+            message.id
+        ))
+    })?;
+    let checks = crate::goal::goal_check(tx, project, milestone, voyage.done.as_deref())?;
+    let open: Vec<usize> = checks
+        .iter()
+        .filter(|check| !check.met)
+        .map(|check| check.n)
+        .collect();
+    let cut = cut_tasks(tx, project, milestone, voyage.departure)?;
+    let departure_tasks = voyage.departure_tasks.unwrap_or(0).max(0) as usize;
+    let over = departure_tasks > 0 && cut.len() * 5 > departure_tasks;
+    if open.is_empty() && !over {
+        return Ok(());
+    }
+    let mut reasons: Vec<String> = Vec::new();
+    if !open.is_empty() {
+        reasons.push(format!(
+            "the goal check has open clause{} {}",
+            if open.len() == 1 { "" } else { "s" },
+            open.iter()
+                .map(|n| format!("({n})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if over {
+        reasons.push(format!(
+            "{} of {} departure tasks were cancelled or moved out ({}% > 20%)",
+            cut.len(),
+            departure_tasks,
+            cut.len() * 100 / departure_tasks.max(1)
+        ));
+    }
+    let reasons = reasons.join(" and ");
+    if !confirmed_flag {
+        return Err(bad(format!(
+            "station {}: land is refused: {reasons}; confirm with the user, then apply again with --confirmed and a `confirmed:` line naming the open clauses or the cut",
+            message.id
+        )));
+    }
+    let names = |decision: &crate::decision::Decision| {
+        let text = format!(
+            "{} {}",
+            decision.what,
+            decision.why.clone().unwrap_or_default()
+        );
+        if open.iter().any(|n| !text.contains(&format!("({n})"))) {
+            return false;
+        }
+        if over {
+            let names_cut = text
+                .split_whitespace()
+                .any(|word| word.trim_matches(|c: char| !c.is_alphanumeric() && c != '-') == "cut");
+            let names_task = cut.iter().any(|id| crate::decision::names_task(&text, id));
+            if !names_cut && !names_task {
+                return false;
+            }
+        }
+        true
+    };
+    if !confirmed.iter().any(names) {
+        return Err(bad(format!(
+            "station {}: land is refused: {reasons}; --confirmed is set but no `confirmed:` line names the open clauses or the cut: add `- <time> confirmed: <what changes, before -> after> | why: <the user's reason>` in this same apply",
+            message.id
+        )));
+    }
+    Ok(())
+}
+
+/// The tasks of the voyage cancelled, or moved out of it, since departure
+/// (T-461): the cut the landing counts against the departure's task count.
+fn cut_tasks(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+    departure: Option<Ts>,
+) -> GearResult<Vec<String>> {
+    let mut cut: Vec<String> = Vec::new();
+    let tasks = tx.tasks_of_project(project)?;
+    for task in &tasks {
+        if task.milestone.as_deref() == Some(milestone) && task.state == TaskState::Cancelled {
+            cut.push(task.id.clone());
+        }
+    }
+    let since = departure
+        .map(crate::decision::apply_time)
+        .unwrap_or_default();
+    for decision in tx.decisions_of(project, milestone)? {
+        if decision.kind != "move" || decision.at < since {
+            continue;
+        }
+        let Some(id) = decision.what.split_whitespace().next() else {
+            continue;
+        };
+        // A task moved out and back is in the voyage again: it is no cut.
+        let back = tasks
+            .iter()
+            .any(|task| task.id == id && task.milestone.as_deref() == Some(milestone));
+        if !back && !cut.iter().any(|known| known == id) {
+            cut.push(id.to_string());
+        }
+    }
+    Ok(cut)
 }
 
 fn minutes(value: Option<i64>) -> String {
@@ -198,16 +417,13 @@ fn minutes(value: Option<i64>) -> String {
 
 /// The captain's message body: the voyage's goal line first, the text of
 /// today second (T-336). Nothing changes when the voyage has no goal text.
-fn with_goal(
-    tx: &Tx<'_>,
-    project: &str,
-    milestone: &str,
-    today: String,
-) -> GearResult<String> {
-    Ok(match gear_board::stations::goal_text(tx, project, milestone)? {
-        Some(goal) => format!("{goal}\n{today}"),
-        None => today,
-    })
+fn with_goal(tx: &Tx<'_>, project: &str, milestone: &str, today: String) -> GearResult<String> {
+    Ok(
+        match gear_board::stations::goal_text(tx, project, milestone)? {
+            Some(goal) => format!("{goal}\n{today}"),
+            None => today,
+        },
+    )
 }
 
 fn bad(message: impl Into<String>) -> GearError {
@@ -219,14 +435,18 @@ fn bad(message: impl Into<String>) -> GearError {
 ///
 /// One or more `<number><unit>` groups and nothing else: `apply` refuses a
 /// milestone whose `eta:` this does not read (T-387).
-pub(crate) fn eta_seconds(text: &str) -> Option<i64> {
+pub fn eta_seconds(text: &str) -> Option<i64> {
     let mut rest = text.trim();
     let mut total = 0.0;
     while !rest.is_empty() {
-        let end = rest.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(rest.len());
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(rest.len());
         let number: f64 = rest[..end].parse().ok()?;
         rest = rest[end..].trim_start();
-        let end = rest.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(rest.len());
+        let end = rest
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(rest.len());
         let factor = match rest[..end].to_ascii_lowercase().as_str() {
             "d" | "day" | "days" => 86400.0,
             "h" | "hr" | "hrs" | "hour" | "hours" => 3600.0,
@@ -237,8 +457,7 @@ pub(crate) fn eta_seconds(text: &str) -> Option<i64> {
         total += number * factor;
         rest = rest[end..].trim_start();
     }
-    (total.is_finite() && total >= 1.0 && total < i64::MAX as f64)
-        .then(|| total.ceil() as i64)
+    (total.is_finite() && total >= 1.0 && total < i64::MAX as f64).then(|| total.ceil() as i64)
 }
 
 #[cfg(test)]
@@ -246,11 +465,26 @@ mod tests {
     use super::eta_seconds;
     #[test]
     fn eta_duration_units_and_unknown_values() {
-        for (input, expected) in [("20h",72000),("2.5 hours",9000),("90m",5400),
-            ("1h30m",5400),("2d 4h",187200),("60s",60)] {
+        for (input, expected) in [
+            ("20h", 72000),
+            ("2.5 hours", 9000),
+            ("90m", 5400),
+            ("1h30m", 5400),
+            ("2d 4h", 187200),
+            ("60s", 60),
+        ] {
             assert_eq!(eta_seconds(input), Some(expected), "{input}");
         }
-        for input in ["", "0h", "-1h", "NaNh", "2026-10-24", "soon", "2", "1h junk"] {
+        for input in [
+            "",
+            "0h",
+            "-1h",
+            "NaNh",
+            "2026-10-24",
+            "soon",
+            "2",
+            "1h junk",
+        ] {
             assert_eq!(eta_seconds(input), None, "{input}");
         }
     }

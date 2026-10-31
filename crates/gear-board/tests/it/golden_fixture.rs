@@ -19,8 +19,10 @@ use gear_store::{
 use serde::Deserialize;
 use serde_json::json;
 
-const FIXTURE: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../gear/voyages/M5/board/golden/fixture.json");
+const FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../gear/voyages/M5/board/golden/fixture.json"
+);
 
 /// The minute the prototype's `now` was written near (2026-10-28 14:32 UTC):
 /// the search for the exact second starts here.
@@ -28,7 +30,20 @@ const AROUND: i64 = 1_793_197_920;
 
 /// One task of the fixture: `(id, lane, stage, title, est, actual, rounds,
 /// tokens_k, cost, deps, finished, marks)`.
-type Task = (String, String, String, String, i64, i64, i64, i64, f64, Vec<String>, String, String);
+type Task = (
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+    i64,
+    f64,
+    Vec<String>,
+    String,
+    String,
+);
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -146,8 +161,11 @@ pub fn load() -> (Store, i64) {
                 } else {
                     now - 86_400 * i as i64 - used * 60
                 };
-                let seeded: Vec<&Task> =
-                    voyage.tasks.iter().filter(|task| task.2 != "moved").collect();
+                let seeded: Vec<&Task> = voyage
+                    .tasks
+                    .iter()
+                    .filter(|task| task.2 != "moved")
+                    .collect();
                 tx.upsert_voyage(&VoyageRow {
                     project: "gear".into(),
                     milestone: words.milestone.clone(),
@@ -172,7 +190,11 @@ pub fn load() -> (Store, i64) {
                         at: format!("2026-10-28 {at}"),
                         kind: kind.clone(),
                         what: what.clone(),
-                        why: if why.is_empty() { None } else { Some(why.clone()) },
+                        why: if why.is_empty() {
+                            None
+                        } else {
+                            Some(why.clone())
+                        },
                         alt: None,
                         changes: None,
                         star: *star,
@@ -398,12 +420,24 @@ pub fn load() -> (Store, i64) {
                                 AttemptStep::Settled,
                                 d(reviewed),
                             )?;
-                            tx.set_attempt_time("gear", id, *rounds, AttemptStep::Merged, d(merged))?;
+                            tx.set_attempt_time(
+                                "gear",
+                                id,
+                                *rounds,
+                                AttemptStep::Merged,
+                                d(merged),
+                            )?;
                             tx.insert_verdict(&verdict(id, *rounds, true, d(reviewed)))?;
                         }
                         "review" => {
                             let s = start.expect("a task in review has a WHEN start");
-                            tx.insert_attempt(&attempt(id, lane, 1, AttemptState::Submitted, d(s)))?;
+                            tx.insert_attempt(&attempt(
+                                id,
+                                lane,
+                                1,
+                                AttemptState::Submitted,
+                                d(s),
+                            ))?;
                             tx.set_attempt_time("gear", id, 1, AttemptStep::Started, d(s))?;
                             tx.set_attempt_time(
                                 "gear",
@@ -418,7 +452,13 @@ pub fn load() -> (Store, i64) {
                             for n in 1..=*rounds {
                                 if n == *rounds {
                                     // The captain scopes what is left: it waits.
-                                    tx.insert_attempt(&attempt(id, lane, n, AttemptState::Started, now))?;
+                                    tx.insert_attempt(&attempt(
+                                        id,
+                                        lane,
+                                        n,
+                                        AttemptState::Started,
+                                        now,
+                                    ))?;
                                     tx.set_attempt_time("gear", id, n, AttemptStep::Started, now)?;
                                 } else {
                                     tx.insert_attempt(&attempt(
@@ -429,7 +469,13 @@ pub fn load() -> (Store, i64) {
                                         d(s),
                                     ))?;
                                     tx.set_attempt_time("gear", id, n, AttemptStep::Started, d(s))?;
-                                    tx.set_attempt_time("gear", id, n, AttemptStep::HandedIn, d(s))?;
+                                    tx.set_attempt_time(
+                                        "gear",
+                                        id,
+                                        n,
+                                        AttemptStep::HandedIn,
+                                        d(s),
+                                    )?;
                                     tx.insert_verdict(&verdict(id, n, false, d(s)))?;
                                 }
                             }
@@ -592,7 +638,8 @@ pub fn load() -> (Store, i64) {
 
 /// The fixture, read from the prototype's directory.
 fn read_fixture() -> Fixture {
-    let text = std::fs::read_to_string(FIXTURE).unwrap_or_else(|error| panic!("{FIXTURE}: {error}"));
+    let text =
+        std::fs::read_to_string(FIXTURE).unwrap_or_else(|error| panic!("{FIXTURE}: {error}"));
     serde_json::from_str(&text).unwrap_or_else(|error| panic!("{FIXTURE}: {error}"))
 }
 
@@ -662,8 +709,14 @@ fn the_store_is_drawn_from_the_fixtures_data() {
                 .filter(|task| task.milestone.as_deref() == Some("M5"))
                 .collect();
             assert_eq!(m5.len(), 12, "{m5:?}");
-            assert_eq!(tx.get_task("gear", "T-262")?.unwrap().state, TaskState::Verifying);
-            assert_eq!(tx.get_task("gear", "T-265")?.unwrap().state, TaskState::Ready);
+            assert_eq!(
+                tx.get_task("gear", "T-262")?.unwrap().state,
+                TaskState::Verifying
+            );
+            assert_eq!(
+                tx.get_task("gear", "T-265")?.unwrap().state,
+                TaskState::Ready
+            );
             Ok(())
         })
         .unwrap();
@@ -696,8 +749,10 @@ fn a_working_task_has_its_open_dev_round() {
     store
         .read(|tx| {
             let rounds = tx.rounds_of_task("gear", "T-264")?;
-            let dev =
-                rounds.iter().find(|round| round.role == "dev").expect("the dev round of T-264");
+            let dev = rounds
+                .iter()
+                .find(|round| round.role == "dev")
+                .expect("the dev round of T-264");
             assert_eq!(dev.active_s, 1320);
             assert_eq!(dev.input, Some(285_000));
             assert_eq!(dev.end_at, None);

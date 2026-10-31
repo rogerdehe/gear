@@ -96,7 +96,11 @@ fn a_prompt_to_an_unnamed_live_agent_renames_it_and_retries_next_tick() {
 
     // The agent is named again — and nothing is typed into it yet.
     assert_eq!(herdr.agent_name(LANE_PANE), Some("p-heat"));
-    assert_eq!(herdr.renames_to("p-heat"), vec![LANE_PANE], "one rename, to the seat's name");
+    assert_eq!(
+        herdr.renames_to("p-heat"),
+        vec![LANE_PANE],
+        "one rename, to the seat's name"
+    );
     assert!(
         herdr.prompts_to(LANE_PANE).is_empty(),
         "nothing is typed while the agent has no name: {:?}",
@@ -106,7 +110,11 @@ fn a_prompt_to_an_unnamed_live_agent_renames_it_and_retries_next_tick() {
     assert_eq!(done, vec![(id.clone(), "intended".to_string())]);
     assert_eq!(op_state(&mut store, &id).0, OpState::Intended);
     // Nothing was restarted: the agent of the pane is the same one.
-    assert!(herdr.started_agents.is_empty(), "no restart: {:?}", herdr.started_agents);
+    assert!(
+        herdr.started_agents.is_empty(),
+        "no restart: {:?}",
+        herdr.started_agents
+    );
 
     // The next tick: the packet goes out, aimed at the agent's name.
     let done = execute_intended(&mut store, &mut herdr, "p", T0 + 20).unwrap();
@@ -137,7 +145,10 @@ fn a_prompt_to_a_pane_with_only_a_shell_fails_as_agent_gone() {
     let (state, reason) = op_state(&mut store, &id);
     assert_eq!(state, OpState::Failed);
     let reason = reason.unwrap_or_default();
-    assert!(reason.contains("agent-gone"), "the reason names it: {reason}");
+    assert!(
+        reason.contains("agent-gone"),
+        "the reason names it: {reason}"
+    );
     assert!(
         herdr.prompts_to(LANE_PANE).is_empty(),
         "nothing is typed into a shell: {:?}",
@@ -173,7 +184,10 @@ fn a_prompt_to_a_pane_with_a_foreign_agent_fails_as_agent_gone() {
 
     assert_eq!(done, vec![(id.clone(), "failed".to_string())]);
     let reason = op_state(&mut store, &id).1.unwrap_or_default();
-    assert!(reason.contains("agent-gone"), "the reason names it: {reason}");
+    assert!(
+        reason.contains("agent-gone"),
+        "the reason names it: {reason}"
+    );
     assert!(
         herdr.prompts_to(LANE_PANE).is_empty(),
         "the foreign agent is not typed into: {:?}",
@@ -260,7 +274,11 @@ fn a_refused_prompt_to_a_live_agent_is_renamed_and_retried_next_tick() {
         vec![TEXT, TEXT],
         "the refused attempt and the packet"
     );
-    assert_eq!(herdr.prompt_targets(), vec!["p-heat", "p-heat"], "both by the name");
+    assert_eq!(
+        herdr.prompt_targets(),
+        vec!["p-heat", "p-heat"],
+        "both by the name"
+    );
 }
 
 /// The review of attempt 1, F3: the sender has no exception. An unnamed agent
@@ -273,7 +291,14 @@ fn the_sender_waits_for_the_next_tick_when_the_agent_has_no_name() {
     herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
 
     gear_engine::ops::deliver_doorbell_now(
-        &mut store, &mut herdr, "p", "p:heat", 1, "M-1", true, T0 + 10,
+        &mut store,
+        &mut herdr,
+        "p",
+        "p:heat",
+        1,
+        "M-1",
+        true,
+        T0 + 10,
     )
     .unwrap();
 
@@ -282,7 +307,11 @@ fn the_sender_waits_for_the_next_tick_when_the_agent_has_no_name() {
         "nothing is typed in this call: {:?}",
         herdr.prompt_targets()
     );
-    assert_eq!(herdr.agent_name(LANE_PANE), Some("p-heat"), "the agent is named");
+    assert_eq!(
+        herdr.agent_name(LANE_PANE),
+        Some("p-heat"),
+        "the agent is named"
+    );
     let op = store
         .read(|tx| tx.ops_of_seat_kind("p:heat", gear_model::OpKind::Doorbell))
         .unwrap();

@@ -22,18 +22,39 @@ const CANDIDATE: &str = "abc1234def5678";
 
 fn cap_env() -> Env {
     Env {
-        ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+        ctx: Some(GearCtx {
+            project: "p".into(),
+            seat: "captain".into(),
+            generation: 1,
+        }),
         pane_id: Some(CAP.into()),
         admin: false,
     }
 }
 
 fn fp() -> Fingerprint {
-    Fingerprint { pane_id: CAP.into(), kind: Some("codex".into()), session_ref: None }
+    Fingerprint {
+        pane_id: CAP.into(),
+        kind: Some("codex".into()),
+        session_ref: None,
+    }
 }
 
-fn apply_plan(s: &mut Store, text: &str, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
-    apply(s, &cap_env(), Some(&fp()), None, &parse(text).unwrap(), text, rid, T0 + 50)
+fn apply_plan(
+    s: &mut Store,
+    text: &str,
+    rid: &str,
+) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+    let mut draft = parse(text).unwrap();
+    // T-461: a first voyage's departure is the user's word.
+    if draft.base == 0 {
+        draft.confirmed = true;
+        draft.decisions.push(
+            "2026-10-27 10:05 confirmed: the voyage departs | why: the user said depart"
+                .to_string(),
+        );
+    }
+    apply(s, &cap_env(), Some(&fp()), None, &draft, text, rid, T0 + 50)
 }
 
 const V1: &str = "<!-- gear-plan project=p base=0 -->\n# Milestone M3: delivery\ndone: it ships\nbar: it holds\neta: 8h\n\n# Queue\n## NEW [must] lane=heat milestone=M3\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
@@ -64,7 +85,11 @@ fn world_with(passed: bool) -> Store {
             task: "T-1".into(),
             attempt: 1,
             passed,
-            findings: if passed { "all good".into() } else { "F1: the edge case is not handled".into() },
+            findings: if passed {
+                "all good".into()
+            } else {
+                "F1: the edge case is not handled".into()
+            },
             by_seat: "p:review-1".into(),
             created: T0,
         })?;
@@ -91,7 +116,11 @@ fn world_with(passed: bool) -> Store {
             needs_ack: false,
             // As `gear send` stores it: a pass is information, a fail is an
             // action item.
-            state: if passed { MsgState::Info } else { MsgState::Open },
+            state: if passed {
+                MsgState::Info
+            } else {
+                MsgState::Open
+            },
             created: T0,
         })?;
         Ok(())
@@ -133,12 +162,19 @@ fn the_home_page_names_the_verdicts_line_not_a_reply() {
 
     let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 10).unwrap();
 
-    let expected = format!(
-        "next: gear plan apply gear/voyages/M3/plan.md (# Verdicts: {VERDICTS_LINE})"
+    let expected =
+        format!("next: gear plan apply gear/voyages/M3/plan.md (# Verdicts: {VERDICTS_LINE})");
+    assert!(
+        page.text.contains(&expected),
+        "{}\n---\nexpected: {expected}",
+        page.text
     );
-    assert!(page.text.contains(&expected), "{}\n---\nexpected: {expected}", page.text);
     // The review fail is not something a reply settles.
-    assert!(!page.text.contains("gear reply M-1 --resolve"), "{}", page.text);
+    assert!(
+        !page.text.contains("gear reply M-1 --resolve"),
+        "{}",
+        page.text
+    );
 }
 
 #[test]
@@ -149,7 +185,9 @@ fn resolving_the_fail_by_reply_is_refused_and_leaves_it_verifying() {
 
     assert_eq!(error.code, ErrorCode::BadFormat);
     assert!(
-        error.detail.contains(&format!("# Verdicts: {VERDICTS_LINE}")),
+        error
+            .detail
+            .contains(&format!("# Verdicts: {VERDICTS_LINE}")),
         "the refusal names the line: {}",
         error.detail
     );
@@ -157,7 +195,10 @@ fn resolving_the_fail_by_reply_is_refused_and_leaves_it_verifying() {
     assert_eq!(task_state(&mut s), TaskState::Verifying);
     let item = s.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
     assert_eq!(item.state, MsgState::Open);
-    assert!(s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().is_empty());
+    assert!(s
+        .read(|tx| tx.verdicts_of_task("p", "T-1"))
+        .unwrap()
+        .is_empty());
 }
 
 /// T-187: the verdict that settles the attempt closes the review item too:
@@ -165,7 +206,10 @@ fn resolving_the_fail_by_reply_is_refused_and_leaves_it_verifying() {
 #[test]
 fn after_the_plan_settles_it_the_item_is_closed() {
     let mut s = world();
-    assert_eq!(resolve(&mut s, "M-1").unwrap_err().code, ErrorCode::BadFormat);
+    assert_eq!(
+        resolve(&mut s, "M-1").unwrap_err().code,
+        ErrorCode::BadFormat
+    );
 
     // The captain writes the line the home page named.
     let text = format!(
@@ -175,7 +219,11 @@ fn after_the_plan_settles_it_the_item_is_closed() {
     // The verdict settled the attempt: the task is back in the lane's queue.
     assert_eq!(task_state(&mut s), TaskState::Ready);
     assert_eq!(
-        s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().rework_note.as_deref(),
+        s.read(|tx| tx.get_task("p", "T-1"))
+            .unwrap()
+            .unwrap()
+            .rework_note
+            .as_deref(),
         Some("handle the edge case")
     );
 
@@ -192,43 +240,50 @@ fn after_the_plan_settles_it_the_item_is_closed() {
 fn a_failed_merge_is_settled_by_a_verdict_too() {
     let mut s = world_with(true);
     // The review passed and the task is done; its merge then failed.
-    let merge_item = s.write(|tx| {
-        gear_app::tasks::settle_review(tx, "p", "T-1", 1, T0 + 2)?;
-        let op = tx.insert_op(&gear_store::NewOp {
-            project: "p".into(),
-            seat: "p:heat".into(),
-            generation: 1,
-            kind: OpKind::Merge,
-            task: Some("T-1".into()),
-            attempt: Some(1),
-            ref_msg: None,
-            plan_version: None,
-            payload: serde_json::json!({}),
-            created: T0 + 3,
-        })?;
-        tx.set_op_state("p", &op.id, OpState::Executing, None, T0 + 4)?;
-        tx.set_op_state("p", &op.id, OpState::Failed, Some("conflict merging abc1234"), T0 + 5)?;
-        // The engine's item, naming the task and attempt (T-90).
-        let item = tx.insert_message(&NewMessage {
-            meta: None,
-            project: "p".into(),
-            thread: "merge:1".into(),
-            task: Some("T-1".into()),
-            attempt: Some(1),
-            sender: "p:captain".into(),
-            sender_gen: 1,
-            recipient: "p:captain".into(),
-            kind: MsgKind::Question,
-            urgent: false,
-            body: "merge of T-1 failed: conflict merging abc1234\nnothing was pushed".into(),
-            reply_to: None,
-            needs_ack: false,
-            state: MsgState::Open,
-            created: T0 + 6,
-        })?;
-        Ok(item.id)
-    })
-    .unwrap();
+    let merge_item = s
+        .write(|tx| {
+            gear_app::tasks::settle_review(tx, "p", "T-1", 1, T0 + 2)?;
+            let op = tx.insert_op(&gear_store::NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: OpKind::Merge,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({}),
+                created: T0 + 3,
+            })?;
+            tx.set_op_state("p", &op.id, OpState::Executing, None, T0 + 4)?;
+            tx.set_op_state(
+                "p",
+                &op.id,
+                OpState::Failed,
+                Some("conflict merging abc1234"),
+                T0 + 5,
+            )?;
+            // The engine's item, naming the task and attempt (T-90).
+            let item = tx.insert_message(&NewMessage {
+                meta: None,
+                project: "p".into(),
+                thread: "merge:1".into(),
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                sender: "p:captain".into(),
+                sender_gen: 1,
+                recipient: "p:captain".into(),
+                kind: MsgKind::Question,
+                urgent: false,
+                body: "merge of T-1 failed: conflict merging abc1234\nnothing was pushed".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: T0 + 6,
+            })?;
+            Ok(item.id)
+        })
+        .unwrap();
     assert_eq!(task_state(&mut s), TaskState::Done);
 
     let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 10).unwrap();
@@ -246,7 +301,10 @@ fn a_failed_merge_is_settled_by_a_verdict_too() {
     apply_plan(&mut s, &text, "v2").unwrap();
     assert_eq!(task_state(&mut s), TaskState::Ready);
     assert_eq!(
-        s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+        s.read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap()
+            .state,
         gear_model::AttemptState::Accepted,
         "the attempt did pass; the rework is a new attempt"
     );
@@ -257,7 +315,10 @@ fn a_failed_merge_is_settled_by_a_verdict_too() {
     let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 20).unwrap();
     assert!(!page.text.contains("# Verdicts:"), "{}", page.text);
     let handled = resolve(&mut s, &merge_item).unwrap();
-    assert_eq!(handled.handled, vec![(merge_item.clone(), MsgState::Resolved.as_str().to_string())]);
+    assert_eq!(
+        handled.handled,
+        vec![(merge_item.clone(), MsgState::Resolved.as_str().to_string())]
+    );
 
     // … and it stays ordinary once the lane starts the rework attempt.
     s.write(|tx| {
@@ -306,7 +367,9 @@ fn an_ordinary_question_is_answered_without_a_verdict() {
     let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 10).unwrap();
     assert!(!page.text.contains("# Verdicts:"), "{}", page.text);
     assert!(
-        page.text.contains(&format!("gear reply {question} --resolve -m \"<what was done>\"")),
+        page.text.contains(&format!(
+            "gear reply {question} --resolve -m \"<what was done>\""
+        )),
         "{}",
         page.text
     );
@@ -343,7 +406,13 @@ fn a_remerge_that_landed_closes_the_merge_item_by_reply() {
                 created: T0 + 3,
             })?;
             tx.set_op_state("p", &failed.id, OpState::Executing, None, T0 + 4)?;
-            tx.set_op_state("p", &failed.id, OpState::Failed, Some("push refused"), T0 + 5)?;
+            tx.set_op_state(
+                "p",
+                &failed.id,
+                OpState::Failed,
+                Some("push refused"),
+                T0 + 5,
+            )?;
             let item = tx.insert_message(&NewMessage {
                 meta: None,
                 project: "p".into(),
@@ -376,7 +445,10 @@ fn a_remerge_that_landed_closes_the_merge_item_by_reply() {
     let err = resolve(&mut s, &merge_item).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
     assert!(err.detail.contains("- remerge T-1"), "{err:?}");
-    assert!(err.detail.contains("fail rework"), "the rework line is named too: {err:?}");
+    assert!(
+        err.detail.contains("fail rework"),
+        "the rework line is named too: {err:?}"
+    );
 
     // … then the remerge landed: a Confirmed op for the same attempt.
     s.write(|tx| {
@@ -393,12 +465,22 @@ fn a_remerge_that_landed_closes_the_merge_item_by_reply() {
             created: T0 + 20,
         })?;
         tx.set_op_state("p", &again.id, OpState::Executing, None, T0 + 21)?;
-        tx.set_op_state("p", &again.id, OpState::Confirmed, Some("merged T-1 into dev: def5678"), T0 + 22)
+        tx.set_op_state(
+            "p",
+            &again.id,
+            OpState::Confirmed,
+            Some("merged T-1 into dev: def5678"),
+            T0 + 22,
+        )
     })
     .unwrap();
 
     let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 30).unwrap();
-    assert!(!page.text.contains("# Verdicts:"), "the merge went through: {}", page.text);
+    assert!(
+        !page.text.contains("# Verdicts:"),
+        "the merge went through: {}",
+        page.text
+    );
     let handled = resolve(&mut s, &merge_item).unwrap();
     assert_eq!(
         handled.handled,

@@ -56,21 +56,31 @@ fn insert_op(tx: &Tx<'_>, project: &str, seat: &str, now: i64) -> String {
 fn walk_to(tx: &Tx<'_>, project: &str, id: &str, state: OpState, now: i64) {
     match state {
         OpState::Intended => {}
-        OpState::Executing => tx.set_op_state(project, id, OpState::Executing, None, now).unwrap(),
+        OpState::Executing => tx
+            .set_op_state(project, id, OpState::Executing, None, now)
+            .unwrap(),
         OpState::Submitted => {
-            tx.set_op_state(project, id, OpState::Executing, None, now).unwrap();
-            tx.set_op_state(project, id, OpState::Submitted, None, now).unwrap();
+            tx.set_op_state(project, id, OpState::Executing, None, now)
+                .unwrap();
+            tx.set_op_state(project, id, OpState::Submitted, None, now)
+                .unwrap();
         }
         OpState::Confirmed => {
-            tx.set_op_state(project, id, OpState::Executing, None, now).unwrap();
-            tx.set_op_state(project, id, OpState::Submitted, None, now).unwrap();
-            tx.set_op_state(project, id, OpState::Confirmed, None, now).unwrap();
+            tx.set_op_state(project, id, OpState::Executing, None, now)
+                .unwrap();
+            tx.set_op_state(project, id, OpState::Submitted, None, now)
+                .unwrap();
+            tx.set_op_state(project, id, OpState::Confirmed, None, now)
+                .unwrap();
         }
         OpState::Failed | OpState::Unknown => {
-            tx.set_op_state(project, id, OpState::Executing, None, now).unwrap();
+            tx.set_op_state(project, id, OpState::Executing, None, now)
+                .unwrap();
             tx.set_op_state(project, id, state, None, now).unwrap();
         }
-        OpState::Void => tx.set_op_state(project, id, OpState::Void, None, now).unwrap(),
+        OpState::Void => tx
+            .set_op_state(project, id, OpState::Void, None, now)
+            .unwrap(),
     }
 }
 
@@ -132,7 +142,10 @@ fn executing_becomes_unknown() {
         .write(|tx| {
             intend_doorbells(
                 tx,
-                &[action("p", "p:captain", 1, &["M-1"]), action("q", "q:captain", 1, &["M-2"])],
+                &[
+                    action("p", "p:captain", 1, &["M-1"]),
+                    action("q", "q:captain", 1, &["M-2"]),
+                ],
                 T0 + 1,
             )
         })
@@ -150,7 +163,10 @@ fn executing_becomes_unknown() {
     // Every project is covered, and the pairs say which project each id is in.
     assert_eq!(
         recovered,
-        vec![("p".to_string(), "O-1".to_string()), ("q".to_string(), "O-1".to_string())],
+        vec![
+            ("p".to_string(), "O-1".to_string()),
+            ("q".to_string(), "O-1".to_string())
+        ],
         "op ids are only unique within a project"
     );
     let states = store
@@ -171,7 +187,10 @@ fn two_projects_with_the_same_op_id_are_distinguishable() {
         .write(|tx| {
             intend_doorbells(
                 tx,
-                &[action("p", "p:captain", 1, &["M-1"]), action("q", "q:captain", 1, &["M-2"])],
+                &[
+                    action("p", "p:captain", 1, &["M-1"]),
+                    action("q", "q:captain", 1, &["M-2"]),
+                ],
                 T0 + 1,
             )
         })
@@ -189,7 +208,10 @@ fn two_projects_with_the_same_op_id_are_distinguishable() {
     // Both projects have an op called O-1; the pairs keep them apart.
     assert_eq!(
         recovered,
-        vec![("p".to_string(), "O-1".to_string()), ("q".to_string(), "O-1".to_string())]
+        vec![
+            ("p".to_string(), "O-1".to_string()),
+            ("q".to_string(), "O-1".to_string())
+        ]
     );
     let states = store
         .read(|tx| {

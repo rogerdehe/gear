@@ -28,7 +28,15 @@ fn world() -> (Store, String) {
     let id = s
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "opencode", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "opencode",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
             tx.insert_task(&TaskRow {
                 project: "p".into(),
@@ -132,7 +140,10 @@ fn a_view_after_a_minute_confirms_the_delivery() {
         OpState::Confirmed
     );
     assert_eq!(
-        s.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap().state,
+        s.read(|tx| tx.get_attempt("p", "T-7", 1))
+            .unwrap()
+            .unwrap()
+            .state,
         AttemptState::Started
     );
 }
@@ -145,7 +156,9 @@ fn a_late_check_in_confirms_the_attempt_and_closes_the_stall() {
     // The captain's item about the lane being stuck (the tick opens it when
     // the delivery fails).
     s.write(|tx| stall::alert(tx, LANE, T0 + 30)).unwrap();
-    let items = s.read(|tx| tx.thread_messages("p", "stall:p:heat")).unwrap();
+    let items = s
+        .read(|tx| tx.thread_messages("p", "stall:p:heat"))
+        .unwrap();
     assert_eq!(items.len(), 1, "{items:?}");
     assert_eq!(items[0].state, MsgState::Open);
 
@@ -164,16 +177,18 @@ fn a_late_check_in_confirms_the_attempt_and_closes_the_stall() {
     view(&mut s, T0 + 40, Some("T-7"), Some(1));
     let late = confirm_late_views(&mut s, "p", T0 + 50).unwrap();
     assert_eq!(late.len(), 1, "{late:?}");
-    assert!(
-        late[0].contains("T-7/1"),
-        "the attempt is named: {late:?}"
-    );
+    assert!(late[0].contains("T-7/1"), "the attempt is named: {late:?}");
     assert_eq!(
-        s.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap().state,
+        s.read(|tx| tx.get_attempt("p", "T-7", 1))
+            .unwrap()
+            .unwrap()
+            .state,
         AttemptState::Started,
         "the attempt starts after all"
     );
-    let items = s.read(|tx| tx.thread_messages("p", "stall:p:heat")).unwrap();
+    let items = s
+        .read(|tx| tx.thread_messages("p", "stall:p:heat"))
+        .unwrap();
     assert_eq!(items.len(), 1, "{items:?}");
     assert_eq!(
         items[0].state,
@@ -250,7 +265,10 @@ fn a_started_attempt_never_gets_a_second_deliver() {
     let view = s
         .read(|tx| lane_view(tx, &seat, Some(obs.clone()), T0))
         .unwrap();
-    assert_eq!(view.attempt.as_ref().map(|a| a.state), Some(AttemptState::Started));
+    assert_eq!(
+        view.attempt.as_ref().map(|a| a.state),
+        Some(AttemptState::Started)
+    );
     let decision = decide(&view, &DispatchCfg::default(), T0);
     assert!(
         matches!(decision, gear_engine::dispatch::Action::None { .. }),
@@ -265,9 +283,7 @@ fn a_started_attempt_never_gets_a_second_deliver() {
         tx.update_attempt(&attempt)
     })
     .unwrap();
-    let view = s
-        .read(|tx| lane_view(tx, &seat, Some(obs), T0))
-        .unwrap();
+    let view = s.read(|tx| lane_view(tx, &seat, Some(obs), T0)).unwrap();
     let decision = decide(&view, &DispatchCfg::default(), T0);
     assert_eq!(
         decision,
@@ -280,8 +296,18 @@ fn a_started_attempt_never_gets_a_second_deliver() {
 #[test]
 fn the_taskless_doorbell_text_says_so() {
     let items = vec![
-        DoorbellItem { id: "M-12".into(), urgent: false, at_once: false },
-        DoorbellItem { id: "M-13".into(), urgent: true, at_once: false },
+        DoorbellItem {
+            id: "M-12".into(),
+            urgent: false,
+            at_once: false,
+            cut: false,
+        },
+        DoorbellItem {
+            id: "M-13".into(),
+            urgent: true,
+            at_once: false,
+            cut: false,
+        },
     ];
     let said = text(&items, true);
     assert_eq!(
@@ -363,9 +389,7 @@ fn a_contract_update_for_a_started_attempt_is_no_delivery() {
         screen: None,
         session: None,
     };
-    let view = s
-        .read(|tx| lane_view(tx, &seat, Some(obs), T0))
-        .unwrap();
+    let view = s.read(|tx| lane_view(tx, &seat, Some(obs), T0)).unwrap();
     let decision = decide(&view, &DispatchCfg::default(), T0);
     assert!(
         matches!(decision, gear_engine::dispatch::Action::Adopt { .. }),
@@ -382,9 +406,15 @@ fn a_contract_update_for_a_started_attempt_is_no_delivery() {
     assert!(ops.is_empty(), "no op at all: {ops:?}");
 
     // The contract change reaches the lane as a message.
-    let notices = s.read(|tx| tx.thread_messages("p", "contract:T-7:2")).unwrap();
+    let notices = s
+        .read(|tx| tx.thread_messages("p", "contract:T-7:2"))
+        .unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
-    assert!(notices[0].body.contains("contract changed to v2"), "{:?}", notices[0].body);
+    assert!(
+        notices[0].body.contains("contract changed to v2"),
+        "{:?}",
+        notices[0].body
+    );
     assert_eq!(notices[0].recipient, LANE);
     assert_eq!(notices[0].kind, gear_model::MsgKind::Instruction);
 }
@@ -433,14 +463,19 @@ fn a_late_check_in_closes_the_stall_after_a_retry() {
     let (confirmed, _) = confirm_pending_with(&mut s, "p", 3, 8, &[], T0 + 60).unwrap();
     assert_eq!(confirmed, vec![retry.clone()]);
     assert_eq!(
-        s.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap().state,
+        s.read(|tx| tx.get_attempt("p", "T-7", 1))
+            .unwrap()
+            .unwrap()
+            .state,
         AttemptState::Started
     );
 
     // The failed original op's late check finds the attempt already started:
     // the stall item closes anyway.
     confirm_late_views(&mut s, "p", T0 + 60).unwrap();
-    let items = s.read(|tx| tx.thread_messages("p", "stall:p:heat")).unwrap();
+    let items = s
+        .read(|tx| tx.thread_messages("p", "stall:p:heat"))
+        .unwrap();
     assert_eq!(items.len(), 1, "{items:?}");
     assert_eq!(
         items[0].state,
@@ -451,24 +486,39 @@ fn a_late_check_in_closes_the_stall_after_a_retry() {
 
 #[test]
 fn hand_in_from_delivered_settles_the_pending_delivery_without_a_view() {
-    let (mut s,op)=world();
-    s.write(|tx|gear_engine::stall::alert(tx,LANE,T0+15).map(|_|())).unwrap();
-    s.write(|tx|gear_app::tasks::submit_result(tx,"p","T-7",1,1,"abc1234","report",T0+20)).unwrap();
-    let (confirmed,flagged)=confirm_pending_with(&mut s,"p",3,5,&[],T0+30).unwrap();
-    assert_eq!(confirmed,vec![op.clone()]); assert!(flagged.is_empty());
-    let confirmed_op=s.read(|tx|tx.get_op("p",&op)).unwrap().unwrap();
-    assert_eq!(confirmed_op.state,OpState::Confirmed);
-    assert!(confirmed_op.result.as_deref().unwrap_or("").contains("hand-in"));
-    let items=s.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap();
-    assert_eq!(items.len(),1); assert_eq!(items[0].state,MsgState::Resolved);
+    let (mut s, op) = world();
+    s.write(|tx| gear_engine::stall::alert(tx, LANE, T0 + 15).map(|_| ()))
+        .unwrap();
+    s.write(|tx| {
+        gear_app::tasks::submit_result(tx, "p", "T-7", 1, 1, "abc1234", "report", T0 + 20)
+    })
+    .unwrap();
+    let (confirmed, flagged) = confirm_pending_with(&mut s, "p", 3, 5, &[], T0 + 30).unwrap();
+    assert_eq!(confirmed, vec![op.clone()]);
+    assert!(flagged.is_empty());
+    let confirmed_op = s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap();
+    assert_eq!(confirmed_op.state, OpState::Confirmed);
+    assert!(confirmed_op
+        .result
+        .as_deref()
+        .unwrap_or("")
+        .contains("hand-in"));
+    let items = s
+        .read(|tx| tx.thread_messages("p", "stall:p:heat"))
+        .unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].state, MsgState::Resolved);
 }
 
 #[test]
 fn full_tick_uses_each_projects_configured_delivery_grace() {
-    use gear_herdr::{fake::FakeHerdr,AgentStatus};
-    for (grace, expected) in [(30,OpState::Failed),(120,OpState::Submitted)] {
-        let (mut s,op)=world();
-        s.write(|tx| {let mut p=tx.get_project("p")?.unwrap();p.config_toml=format!(r#"
+    use gear_herdr::{fake::FakeHerdr, AgentStatus};
+    for (grace, expected) in [(30, OpState::Failed), (120, OpState::Submitted)] {
+        let (mut s, op) = world();
+        s.write(|tx| {
+            let mut p = tx.get_project("p")?.unwrap();
+            p.config_toml = format!(
+                r#"
 [project]
 id="p"
 herdr_session="sess"
@@ -488,36 +538,81 @@ kind="opencode"
 profile="opencode"
 [timing]
 delivery_grace_s={grace}
-"#);tx.update_project(&p)}).unwrap();
-        let mut h=FakeHerdr::new();h.add_agent_named("w1:p1","opencode",AgentStatus::Idle,"p-captain");h.add_agent_named("w1:p2","opencode",AgentStatus::Idle,"p-heat");
-        let mut cfg=gear_engine::EngineCfg::default();cfg.profiles=gear_herdr::builtins();cfg.delivery_grace_s=999;
-        gear_engine::tick(&mut s,&mut h,&cfg,T0+70).unwrap();
-        assert_eq!(s.read(|tx|tx.get_op("p",&op)).unwrap().unwrap().state,expected,"grace {grace}");
+"#
+            );
+            tx.update_project(&p)
+        })
+        .unwrap();
+        let mut h = FakeHerdr::new();
+        h.add_agent_named("w1:p1", "opencode", AgentStatus::Idle, "p-captain");
+        h.add_agent_named("w1:p2", "opencode", AgentStatus::Idle, "p-heat");
+        let mut cfg = gear_engine::EngineCfg::default();
+        cfg.profiles = gear_herdr::builtins();
+        cfg.delivery_grace_s = 999;
+        gear_engine::tick(&mut s, &mut h, &cfg, T0 + 70).unwrap();
+        assert_eq!(
+            s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state,
+            expected,
+            "grace {grace}"
+        );
     }
 }
 
 #[test]
 fn an_old_hand_in_does_not_close_a_newer_stall() {
-    let (mut s,op)=world();
-    s.write(|tx|gear_app::tasks::submit_result(tx,"p","T-7",1,1,"abc1234","report",T0+20)).unwrap();
-    s.write(|tx|gear_engine::stall::alert(tx,LANE,T0+25).map(|_|())).unwrap();
-    confirm_pending_with(&mut s,"p",3,5,&[],T0+30).unwrap();
-    assert_eq!(s.read(|tx|tx.get_op("p",&op)).unwrap().unwrap().state,OpState::Confirmed);
-    assert_eq!(s.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap()[0].state,MsgState::Open);
+    let (mut s, op) = world();
+    s.write(|tx| {
+        gear_app::tasks::submit_result(tx, "p", "T-7", 1, 1, "abc1234", "report", T0 + 20)
+    })
+    .unwrap();
+    s.write(|tx| gear_engine::stall::alert(tx, LANE, T0 + 25).map(|_| ()))
+        .unwrap();
+    confirm_pending_with(&mut s, "p", 3, 5, &[], T0 + 30).unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state,
+        OpState::Confirmed
+    );
+    assert_eq!(
+        s.read(|tx| tx.thread_messages("p", "stall:p:heat"))
+            .unwrap()[0]
+            .state,
+        MsgState::Open
+    );
 }
 
 #[test]
 fn hand_in_after_delivery_timeout_closes_the_existing_stall() {
-    let (mut s,op)=world();
-    confirm_pending_with(&mut s,"p",3,5,&[],T0+18).unwrap();
-    assert_eq!(s.read(|tx|tx.get_op("p",&op)).unwrap().unwrap().state,OpState::Failed);
-    s.write(|tx|gear_engine::stall::alert(tx,LANE,T0+19).map(|_|())).unwrap();
-    s.write(|tx|gear_app::tasks::submit_result(tx,"p","T-7",1,1,"abc1234","report",T0+20)).unwrap();
-    let confirmed=confirm_late_views(&mut s,"p",T0+21).unwrap();
-    assert_eq!(confirmed.len(),1);
-    assert!(confirm_late_views(&mut s,"p",T0+22).unwrap().is_empty(), "late hand-in is settled once");
-    assert_eq!(s.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap()[0].state,MsgState::Resolved);
-    assert_eq!(s.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,AttemptState::Submitted);
+    let (mut s, op) = world();
+    confirm_pending_with(&mut s, "p", 3, 5, &[], T0 + 18).unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state,
+        OpState::Failed
+    );
+    s.write(|tx| gear_engine::stall::alert(tx, LANE, T0 + 19).map(|_| ()))
+        .unwrap();
+    s.write(|tx| {
+        gear_app::tasks::submit_result(tx, "p", "T-7", 1, 1, "abc1234", "report", T0 + 20)
+    })
+    .unwrap();
+    let confirmed = confirm_late_views(&mut s, "p", T0 + 21).unwrap();
+    assert_eq!(confirmed.len(), 1);
+    assert!(
+        confirm_late_views(&mut s, "p", T0 + 22).unwrap().is_empty(),
+        "late hand-in is settled once"
+    );
+    assert_eq!(
+        s.read(|tx| tx.thread_messages("p", "stall:p:heat"))
+            .unwrap()[0]
+            .state,
+        MsgState::Resolved
+    );
+    assert_eq!(
+        s.read(|tx| tx.get_attempt("p", "T-7", 1))
+            .unwrap()
+            .unwrap()
+            .state,
+        AttemptState::Submitted
+    );
 }
 
 /// T-192: a late check-in records the session the attempt ran in (design §3.2
@@ -528,9 +623,14 @@ fn hand_in_after_delivery_timeout_closes_the_existing_stall() {
 fn a_late_check_in_records_the_session_and_is_reported_once() {
     let (mut s, op) = world();
     // The seat's binding knows the session its agent is in.
-    s.write(|tx| tx.set_binding_session_ref(LANE, 1, "ses_A")).unwrap();
+    s.write(|tx| tx.set_binding_session_ref(LANE, 1, "ses_A"))
+        .unwrap();
     assert_eq!(
-        s.read(|tx| tx.get_binding(LANE, 1)).unwrap().unwrap().session_ref.as_deref(),
+        s.read(|tx| tx.get_binding(LANE, 1))
+            .unwrap()
+            .unwrap()
+            .session_ref
+            .as_deref(),
         Some("ses_A")
     );
     // The attempt waits for its check-in and knows no session yet.
@@ -556,15 +656,26 @@ fn a_late_check_in_records_the_session_and_is_reported_once() {
     let attempt = s.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap();
     assert_eq!(attempt.state, AttemptState::Started);
     assert_eq!(attempt.session_ref.as_deref(), Some("ses_A"), "{attempt:?}");
-    assert_eq!(attempt.session_cli.as_deref(), Some("opencode"), "{attempt:?}");
+    assert_eq!(
+        attempt.session_cli.as_deref(),
+        Some("opencode"),
+        "{attempt:?}"
+    );
 
     // The next scan changes nothing: it reports nothing (T-192).
     let late = confirm_late_views(&mut s, "p", T0 + 230).unwrap();
-    assert!(late.is_empty(), "an attempt that is already Started is nothing new: {late:?}");
+    assert!(
+        late.is_empty(),
+        "an attempt that is already Started is nothing new: {late:?}"
+    );
 
     // The session is the one that is recorded: a second scan does not
     // replace it.
     let attempt = s.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap();
     assert_eq!(attempt.session_ref.as_deref(), Some("ses_A"), "{attempt:?}");
-    assert_eq!(attempt.session_cli.as_deref(), Some("opencode"), "{attempt:?}");
+    assert_eq!(
+        attempt.session_cli.as_deref(),
+        Some("opencode"),
+        "{attempt:?}"
+    );
 }

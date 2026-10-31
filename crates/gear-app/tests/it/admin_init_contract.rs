@@ -42,43 +42,134 @@ gate = "make test"
 "#;
 
 fn admin() -> Env {
-    Env { ctx: None, pane_id: None, admin: true }
+    Env {
+        ctx: None,
+        pane_id: None,
+        admin: true,
+    }
 }
 
 #[test]
 fn init_registers_project_and_queued_seats() {
     let mut s = Store::open_in_memory().unwrap();
-    let r = init_with_home(&mut s, &admin(), CONFIG,Some(crate::skill_home()), false, T0).unwrap();
+    let r = init_with_home(
+        &mut s,
+        &admin(),
+        CONFIG,
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
     assert_eq!((r.project.as_str(), r.config_version), ("harbor", 1));
-    assert_eq!(r.seats, vec!["harbor:captain", "harbor:heat", "harbor:pricing"]);
+    assert_eq!(
+        r.seats,
+        vec!["harbor:captain", "harbor:heat", "harbor:pricing"]
+    );
     let p = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
-    assert_eq!((p.herdr_session.as_str(), p.config_toml.as_str(), p.quota_lanes, p.plan_version), ("marina", CONFIG, 2, 0));
+    assert_eq!(
+        (
+            p.herdr_session.as_str(),
+            p.config_toml.as_str(),
+            p.quota_lanes,
+            p.plan_version
+        ),
+        ("marina", CONFIG, 2, 0)
+    );
     let seats = s.read(|tx| tx.seats_of_project("harbor")).unwrap();
     assert_eq!(seats.len(), 3);
     for seat in seats.iter().filter(|s| s.role == SeatRole::Lane) {
-        assert_eq!((seat.state, seat.generation), (SeatState::Queued, 0), "{}", seat.id);
+        assert_eq!(
+            (seat.state, seat.generation),
+            (SeatState::Queued, 0),
+            "{}",
+            seat.id
+        );
     }
     let cap = s.read(|tx| tx.get_seat("harbor:captain")).unwrap().unwrap();
-    assert_eq!((cap.role, cap.profile.as_str(), cap.state, cap.generation), (SeatRole::Captain, "codex", SeatState::Active, 1));
-    let b = s.read(|tx| tx.get_binding("harbor:captain", 1)).unwrap().unwrap();
-    assert_eq!((b.pane_id.as_str(), b.kind.as_str(), b.status), ("w2:p1", "codex", gear_store::BindingStatus::Active));
+    assert_eq!(
+        (cap.role, cap.profile.as_str(), cap.state, cap.generation),
+        (SeatRole::Captain, "codex", SeatState::Active, 1)
+    );
+    let b = s
+        .read(|tx| tx.get_binding("harbor:captain", 1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (b.pane_id.as_str(), b.kind.as_str(), b.status),
+        ("w2:p1", "codex", gear_store::BindingStatus::Active)
+    );
 }
 
 #[test]
 fn only_the_user_and_only_valid_new_configs() {
     let mut s = Store::open_in_memory().unwrap();
-    let agent = Env { ctx: Some(GearCtx { project: "harbor".into(), seat: "heat".into(), generation: 1 }), pane_id: None, admin: true };
-    assert_eq!(init_with_home(&mut s, &agent, CONFIG,Some(crate::skill_home()), false, T0).unwrap_err().code, ErrorCode::Forbidden, "an agent never inits");
-    assert_eq!(init_with_home(&mut s, &Env::default(), CONFIG,Some(crate::skill_home()), false, T0).unwrap_err().code, ErrorCode::Forbidden, "GEAR_ADMIN not set");
+    let agent = Env {
+        ctx: Some(GearCtx {
+            project: "harbor".into(),
+            seat: "heat".into(),
+            generation: 1,
+        }),
+        pane_id: None,
+        admin: true,
+    };
+    assert_eq!(
+        init_with_home(&mut s, &agent, CONFIG, Some(crate::skill_home()), false, T0)
+            .unwrap_err()
+            .code,
+        ErrorCode::Forbidden,
+        "an agent never inits"
+    );
+    assert_eq!(
+        init_with_home(
+            &mut s,
+            &Env::default(),
+            CONFIG,
+            Some(crate::skill_home()),
+            false,
+            T0
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::Forbidden,
+        "GEAR_ADMIN not set"
+    );
     let overlap = CONFIG.replace(r#"owns = ["src/pricing/"]"#, r#"owns = ["src/heat/x.rs"]"#);
-    let e = init_with_home(&mut s, &admin(), &overlap,Some(crate::skill_home()), false, T0).unwrap_err();
+    let e = init_with_home(
+        &mut s,
+        &admin(),
+        &overlap,
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap_err();
     assert_eq!(e.code, ErrorCode::BadFormat);
     assert!(e.detail.contains("lanes[1].owns"), "{}", e.detail);
-    assert!(s.read(|tx| tx.get_project("harbor")).unwrap().is_none(), "nothing written");
-    init_with_home(&mut s, &admin(), CONFIG,Some(crate::skill_home()), false, T0).unwrap();
+    assert!(
+        s.read(|tx| tx.get_project("harbor")).unwrap().is_none(),
+        "nothing written"
+    );
+    init_with_home(
+        &mut s,
+        &admin(),
+        CONFIG,
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
     // T-6: a re-init is a config change, not a second registration: the new
     // config is the next config version.
-    let again = init_with_home(&mut s, &admin(), CONFIG,Some(crate::skill_home()), false, T0 + 1).unwrap();
+    let again = init_with_home(
+        &mut s,
+        &admin(),
+        CONFIG,
+        Some(crate::skill_home()),
+        false,
+        T0 + 1,
+    )
+    .unwrap();
     assert_eq!(again.config_version, 2);
 }
 
@@ -112,7 +203,11 @@ fn a_lane_or_reviewer_of_kind_pi_is_accepted() {
     // The reviewer of kind pi is accepted too: the init needs its skill and
     // its profile, and it got both.
     let project = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
-    assert!(project.config_toml.contains("[temps]"), "{}", project.config_toml);
+    assert!(
+        project.config_toml.contains("[temps]"),
+        "{}",
+        project.config_toml
+    );
 }
 
 /// A kind GEAR knows but whose skill is not installed is refused like any
@@ -127,14 +222,18 @@ fn a_pi_kind_without_its_skill_is_refused() {
         "[[lanes]]\nname = \"heat\"\nduty = \"thermal calculation\"\nowns = [\"src/heat/\"]\nkind = \"opencode\"\nprofile = \"opencode\"",
         "[[lanes]]\nname = \"heat\"\nduty = \"thermal calculation\"\nowns = [\"src/heat/\"]\nkind = \"pi\"\nprofile = \"pi\"",
     );
-    let error = init_with_home(&mut s, &admin(), &config, Some(home.path()), false, T0).unwrap_err();
+    let error =
+        init_with_home(&mut s, &admin(), &config, Some(home.path()), false, T0).unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat);
     assert!(
         error.detail.contains("gear admin install-skill --agent pi"),
         "the fix is named: {}",
         error.detail
     );
-    assert!(s.read(|tx| tx.get_project("harbor")).unwrap().is_none(), "nothing written");
+    assert!(
+        s.read(|tx| tx.get_project("harbor")).unwrap().is_none(),
+        "nothing written"
+    );
 }
 
 /// T-83 (trial G06): `init` refuses a config that uses a kind whose GEAR skill
@@ -145,18 +244,33 @@ fn a_kind_without_its_skill_is_refused() {
     let home = tempfile::tempdir().unwrap(); // no skill at all
     let error = init_with_home(&mut s, &admin(), CONFIG, Some(home.path()), false, T0).unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat);
-    assert!(error.detail.contains("GEAR skill is not installed"), "{}", error.detail);
     assert!(
-        error.detail.contains("gear admin install-skill --agent codex"),
+        error.detail.contains("GEAR skill is not installed"),
+        "{}",
+        error.detail
+    );
+    assert!(
+        error
+            .detail
+            .contains("gear admin install-skill --agent codex"),
         "the fix is named: {}",
         error.detail
     );
-    assert!(s.read(|tx| tx.get_project("harbor")).unwrap().is_none(), "nothing written");
+    assert!(
+        s.read(|tx| tx.get_project("harbor")).unwrap().is_none(),
+        "nothing written"
+    );
 
     // With the skill there, the same config registers.
     let home = home_with_skills();
     init_with_home(&mut s, &admin(), CONFIG, Some(home.path()), false, T0).unwrap();
-    assert_eq!(s.read(|tx| tx.get_project("harbor")).unwrap().unwrap().config_version, 1);
+    assert_eq!(
+        s.read(|tx| tx.get_project("harbor"))
+            .unwrap()
+            .unwrap()
+            .config_version,
+        1
+    );
 }
 
 /// Every seat role is checked, and a re-init that adds a kind without its
@@ -247,12 +361,21 @@ fn a_model_chain_cli_without_its_skill_is_refused() {
     let mut s = Store::open_in_memory().unwrap();
     let home = home_with(&[SkillAgent::Codex]);
 
-    let error =
-        init_with_home(&mut s, &admin(), CODEX_CHAIN_CONFIG, Some(home.path()), false, T0).unwrap_err();
+    let error = init_with_home(
+        &mut s,
+        &admin(),
+        CODEX_CHAIN_CONFIG,
+        Some(home.path()),
+        false,
+        T0,
+    )
+    .unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat);
     assert!(error.detail.contains("opencode"), "{}", error.detail);
     assert!(
-        error.detail.contains("gear admin install-skill --agent opencode"),
+        error
+            .detail
+            .contains("gear admin install-skill --agent opencode"),
         "the fix is named: {}",
         error.detail
     );
@@ -263,7 +386,15 @@ fn a_model_chain_cli_without_its_skill_is_refused() {
 
     // The missing skill installed: the same config registers.
     gear_app::skill::install(SkillAgent::OpenCode, home.path()).unwrap();
-    let r = init_with_home(&mut s, &admin(), CODEX_CHAIN_CONFIG, Some(home.path()), false, T0).unwrap();
+    let r = init_with_home(
+        &mut s,
+        &admin(),
+        CODEX_CHAIN_CONFIG,
+        Some(home.path()),
+        false,
+        T0,
+    )
+    .unwrap();
     assert_eq!(r.config_version, 1);
 
     // A re-init with a fallback on a third CLI without its skill: refused, and
@@ -273,9 +404,23 @@ fn a_model_chain_cli_without_its_skill_is_refused() {
         "  { model = \"fallback\", cli = \"codex\" },\n  { model = \"third\", cli = \"grok\" },",
     );
     assert_ne!(with_grok, CODEX_CHAIN_CONFIG, "the config changed");
-    let error = init_with_home(&mut s, &admin(), &with_grok, Some(home.path()), false, T0 + 1).unwrap_err();
+    let error = init_with_home(
+        &mut s,
+        &admin(),
+        &with_grok,
+        Some(home.path()),
+        false,
+        T0 + 1,
+    )
+    .unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat);
-    assert!(error.detail.contains("gear admin install-skill --agent grok"), "{}", error.detail);
+    assert!(
+        error
+            .detail
+            .contains("gear admin install-skill --agent grok"),
+        "{}",
+        error.detail
+    );
     let project = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
     assert_eq!(
         (project.config_version, project.config_toml.as_str()),
@@ -285,7 +430,15 @@ fn a_model_chain_cli_without_its_skill_is_refused() {
 
     // And with it, the same config is a config change.
     gear_app::skill::install(SkillAgent::Grok, home.path()).unwrap();
-    let r = init_with_home(&mut s, &admin(), &with_grok, Some(home.path()), false, T0 + 2).unwrap();
+    let r = init_with_home(
+        &mut s,
+        &admin(),
+        &with_grok,
+        Some(home.path()),
+        false,
+        T0 + 2,
+    )
+    .unwrap();
     assert_eq!(r.config_version, 2);
 }
 
@@ -315,10 +468,13 @@ fn per_lane_and_role_chains_are_checked() {
     for (config, kind) in [(own, "grok"), (review, "claude"), (captain, "grok")] {
         assert_ne!(config, CODEX_CHAIN_CONFIG, "the config changed: {kind}");
         let mut s = Store::open_in_memory().unwrap();
-        let error = init_with_home(&mut s, &admin(), &config, Some(home.path()), false, T0).unwrap_err();
+        let error =
+            init_with_home(&mut s, &admin(), &config, Some(home.path()), false, T0).unwrap_err();
         assert_eq!(error.code, ErrorCode::BadFormat, "{kind}: {}", error.detail);
         assert!(
-            error.detail.contains(&format!("gear admin install-skill --agent {kind}")),
+            error
+                .detail
+                .contains(&format!("gear admin install-skill --agent {kind}")),
             "{kind}: {}",
             error.detail
         );
@@ -338,7 +494,15 @@ fn a_forged_captain_claim_cannot_re_init() {
     use gear_herdr::{fake::FakeHerdr, AgentStatus};
 
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), CONFIG, Some(crate::skill_home()), false, T0).unwrap();
+    init_with_home(
+        &mut s,
+        &admin(),
+        CONFIG,
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
     let mut herdr = FakeHerdr::new();
     herdr.add_agent("w2:p1", "codex", AgentStatus::Idle); // the captain's pane
     herdr.add_agent("w1:p2", "opencode", AgentStatus::Idle); // the lane's pane
@@ -377,7 +541,9 @@ fn a_forged_captain_claim_cannot_re_init() {
         (1, CONFIG),
         "a refused claim changes nothing"
     );
-    let items = s.read(|tx| tx.thread_messages("harbor", "identity:w1:p2")).unwrap();
+    let items = s
+        .read(|tx| tx.thread_messages("harbor", "identity:w1:p2"))
+        .unwrap();
     assert_eq!(items.len(), 1, "one urgent item: {items:?}");
     assert!(items[0].urgent);
     assert!(items[0].body.contains("w1:p2"), "{}", items[0].body);
@@ -415,12 +581,7 @@ fn project_on(id: &str, repo: &std::path::Path, branches: &str) -> String {
 /// The contract's config with another project id and repository (T-302), plus
 /// `conventions` lines in its `[conventions]` section and whole `tail` sections
 /// after it.
-fn project_on_with(
-    id: &str,
-    repo: &std::path::Path,
-    conventions: &str,
-    tail: &str,
-) -> String {
+fn project_on_with(id: &str, repo: &std::path::Path, conventions: &str, tail: &str) -> String {
     let path = serde_json::json!(repo.to_string_lossy()).to_string();
     let text = CONFIG
         .replace("id = \"harbor\"", &format!("id = {id:?}"))
@@ -442,7 +603,10 @@ fn a_second_project_on_one_repo_needs_project_in_its_branch_templates() {
     let elsewhere = dir.path().join("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
     let shown = |path: &std::path::Path| {
-        std::fs::canonicalize(path).unwrap().to_string_lossy().into_owned()
+        std::fs::canonicalize(path)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
     };
     let alpha = project_on("alpha", &repo, "");
     init_with_home(&mut s, &admin(), &alpha, Some(home.path()), false, T0).unwrap();
@@ -459,7 +623,10 @@ fn a_second_project_on_one_repo_needs_project_in_its_branch_templates() {
             shown(&repo)
         )
     );
-    assert!(s.read(|tx| tx.get_project("beta")).unwrap().is_none(), "nothing written");
+    assert!(
+        s.read(|tx| tx.get_project("beta")).unwrap().is_none(),
+        "nothing written"
+    );
 
     // With `{project}` in all three templates and in the voyage folder (T-302)
     // it registers.
@@ -468,7 +635,15 @@ fn a_second_project_on_one_repo_needs_project_in_its_branch_templates() {
         &repo,
         "task_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"\nseat_branch = \"{project}/home/{seat}\"\nvoyage_dir = \"gear/{project}/voyages/{milestone}\"\n",
     );
-    let r = init_with_home(&mut s, &admin(), &templated, Some(home.path()), false, T0 + 2).unwrap();
+    let r = init_with_home(
+        &mut s,
+        &admin(),
+        &templated,
+        Some(home.path()),
+        false,
+        T0 + 2,
+    )
+    .unwrap();
     assert_eq!((r.project.as_str(), r.config_version), ("beta", 1));
 
     // A third project on another repository keeps the defaults.
@@ -481,9 +656,16 @@ fn a_second_project_on_one_repo_needs_project_in_its_branch_templates() {
     let moved = project_on("gamma", &repo, "");
     let e = init_with_home(&mut s, &admin(), &moved, Some(home.path()), false, T0 + 4).unwrap_err();
     assert_eq!(e.code, ErrorCode::BadFormat);
-    assert!(e.detail.contains("project alpha also works in"), "{}", e.detail);
+    assert!(
+        e.detail.contains("project alpha also works in"),
+        "{}",
+        e.detail
+    );
     let row = s.read(|tx| tx.get_project("gamma")).unwrap().unwrap();
-    assert_eq!(row.config_version, 1, "a refused re-registration writes nothing");
+    assert_eq!(
+        row.config_version, 1,
+        "a refused re-registration writes nothing"
+    );
     assert!(row.config_toml.contains("elsewhere"), "{}", row.config_toml);
 }
 
@@ -509,8 +691,15 @@ fn three_lanes() -> String {
 #[test]
 fn a_first_registration_over_the_lane_quota_is_refused() {
     let mut s = Store::open_in_memory().unwrap();
-    let e = init_with_home(&mut s, &admin(), &three_lanes(), Some(crate::skill_home()), false, T0)
-        .unwrap_err();
+    let e = init_with_home(
+        &mut s,
+        &admin(),
+        &three_lanes(),
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap_err();
     assert_eq!(e.code, ErrorCode::BadFormat);
     assert_eq!(
         e.detail,
@@ -520,7 +709,10 @@ fn a_first_registration_over_the_lane_quota_is_refused() {
         s.read(|tx| tx.get_project("harbor")).unwrap().is_none(),
         "nothing written"
     );
-    assert!(s.read(|tx| tx.seats_of_project("harbor")).unwrap().is_empty());
+    assert!(s
+        .read(|tx| tx.seats_of_project("harbor"))
+        .unwrap()
+        .is_empty());
 }
 
 /// T-304: a retired lane keeps its seat but takes no quota slot, so a re-apply
@@ -528,21 +720,45 @@ fn a_first_registration_over_the_lane_quota_is_refused() {
 #[test]
 fn a_retired_lane_takes_no_quota_slot_on_re_apply() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), CONFIG, Some(crate::skill_home()), false, T0).unwrap();
+    init_with_home(
+        &mut s,
+        &admin(),
+        CONFIG,
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
     // pricing is reclaimed: its seat stays, retired.
     s.write(|tx| {
-        tx.set_seat_state("harbor:pricing", SeatState::Retired, Some("reclaimed"), T0 + 1)
+        tx.set_seat_state(
+            "harbor:pricing",
+            SeatState::Retired,
+            Some("reclaimed"),
+            T0 + 1,
+        )
     })
     .unwrap();
 
     // The new config lists heat, pricing and sail under the same quota of two:
     // heat and sail run, pricing does not count.
-    let r = init_with_home(&mut s, &admin(), &three_lanes(), Some(crate::skill_home()), false, T0 + 2)
-        .unwrap();
+    let r = init_with_home(
+        &mut s,
+        &admin(),
+        &three_lanes(),
+        Some(crate::skill_home()),
+        false,
+        T0 + 2,
+    )
+    .unwrap();
     assert_eq!(r.config_version, 2);
     let seats = s.read(|tx| tx.seats_of_project("harbor")).unwrap();
     let pricing = seats.iter().find(|seat| seat.name == "pricing").unwrap();
-    assert_eq!(pricing.state, SeatState::Retired, "a retired lane stays retired");
+    assert_eq!(
+        pricing.state,
+        SeatState::Retired,
+        "a retired lane stays retired"
+    );
     assert!(seats
         .iter()
         .any(|seat| seat.name == "sail" && seat.state == SeatState::Queued));
@@ -564,7 +780,10 @@ fn a_second_project_on_one_repo_needs_its_own_voyage_folder() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    let shown = std::fs::canonicalize(&repo).unwrap().to_string_lossy().into_owned();
+    let shown = std::fs::canonicalize(&repo)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let alpha = project_on("alpha", &repo, TEMPLATED);
     init_with_home(&mut s, &admin(), &alpha, Some(home.path()), false, T0).unwrap();
 
@@ -578,10 +797,14 @@ fn a_second_project_on_one_repo_needs_its_own_voyage_folder() {
             "project alpha also works in {shown} and keeps its voyages in the same folder gear/voyages/{{milestone}}: put {{project}} in conventions.voyage_dir so the two projects' plans, reports and reviews cannot overwrite each other"
         )
     );
-    assert!(s.read(|tx| tx.get_project("beta")).unwrap().is_none(), "nothing written");
+    assert!(
+        s.read(|tx| tx.get_project("beta")).unwrap().is_none(),
+        "nothing written"
+    );
 
     // A voyage folder that names the project registers.
-    let kept_apart = format!("{TEMPLATED}voyage_dir = \"gear/{{project}}/voyages/{{milestone}}\"\n");
+    let kept_apart =
+        format!("{TEMPLATED}voyage_dir = \"gear/{{project}}/voyages/{{milestone}}\"\n");
     let beta = project_on("beta", &repo, &kept_apart);
     let r = init_with_home(&mut s, &admin(), &beta, Some(home.path()), false, T0 + 2).unwrap();
     assert_eq!((r.project.as_str(), r.config_version), ("beta", 1));
@@ -621,7 +844,10 @@ fn two_projects_on_one_github_repo_need_their_own_issue_labels() {
         e.detail,
         "project alpha also takes issues labelled a from GitHub o/r: give each project labels of its own"
     );
-    assert!(s.read(|tx| tx.get_project("gamma")).unwrap().is_none(), "nothing written");
+    assert!(
+        s.read(|tx| tx.get_project("gamma")).unwrap().is_none(),
+        "nothing written"
+    );
 
     // No labels at all takes every open issue, alpha's too: refused.
     let delta = project_on_with("delta", &second, "", &github("o/r", ""));
@@ -631,7 +857,10 @@ fn two_projects_on_one_github_repo_need_their_own_issue_labels() {
         e.detail,
         "project alpha also takes issues from GitHub o/r: each project needs its own non-empty [github.issues] labels"
     );
-    assert!(s.read(|tx| tx.get_project("delta")).unwrap().is_none(), "nothing written");
+    assert!(
+        s.read(|tx| tx.get_project("delta")).unwrap().is_none(),
+        "nothing written"
+    );
 }
 
 /// T-302: every shared label is named in the refusal, in this config's order.
@@ -673,12 +902,29 @@ fn with_seat_branch(template: &str) -> String {
 #[test]
 fn a_changed_seat_branch_names_the_worktree_it_leaves_behind() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), &with_seat_branch("{project}/seat/{seat}"), Some(crate::skill_home()), false, T0).unwrap();
+    init_with_home(
+        &mut s,
+        &admin(),
+        &with_seat_branch("{project}/seat/{seat}"),
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
     // Only one lane has a worktree so far: the other one and the captain say
     // nothing.
-    s.write(|tx| tx.set_meta("engine.worktree_path.harbor:heat", "/work/harbor-heat")).unwrap();
+    s.write(|tx| tx.set_meta("engine.worktree_path.harbor:heat", "/work/harbor-heat"))
+        .unwrap();
 
-    let r = init_with_home(&mut s, &admin(), &with_seat_branch("{project}/home/{seat}"), Some(crate::skill_home()), false, T0 + 1).unwrap();
+    let r = init_with_home(
+        &mut s,
+        &admin(),
+        &with_seat_branch("{project}/home/{seat}"),
+        Some(crate::skill_home()),
+        false,
+        T0 + 1,
+    )
+    .unwrap();
     assert_eq!(r.config_version, 2);
     assert_eq!(
         r.stale_worktrees,
@@ -691,11 +937,21 @@ fn a_changed_seat_branch_names_the_worktree_it_leaves_behind() {
     );
     // Nothing is removed: the seat keeps its worktree until it runs in the new
     // one.
-    let path = s.read(|tx| tx.get_meta("engine.worktree_path.harbor:heat")).unwrap();
+    let path = s
+        .read(|tx| tx.get_meta("engine.worktree_path.harbor:heat"))
+        .unwrap();
     assert_eq!(path.as_deref(), Some("/work/harbor-heat"));
 
     // An unchanged `seat_branch` leaves nothing to say.
-    let r = init_with_home(&mut s, &admin(), &with_seat_branch("{project}/home/{seat}"), Some(crate::skill_home()), false, T0 + 2).unwrap();
+    let r = init_with_home(
+        &mut s,
+        &admin(),
+        &with_seat_branch("{project}/home/{seat}"),
+        Some(crate::skill_home()),
+        false,
+        T0 + 2,
+    )
+    .unwrap();
     assert_eq!(r.config_version, 3);
     assert!(r.stale_worktrees.is_empty());
 }

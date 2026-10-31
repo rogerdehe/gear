@@ -43,7 +43,8 @@ fn world_verdict(passed: bool) -> Store {
             wait_cond: None,
             rework_note: None,
             estimate_min: None,
-             issue: None,updated: T0,
+            issue: None,
+            updated: T0,
         })?;
         tx.insert_contract(&ContractRow {
             project: "p".into(),
@@ -107,26 +108,42 @@ fn a_review_verdict_settles_the_task_in_the_tick() {
         TaskState::Done
     );
     // The merge waits for the engine's merge op executor (T-12).
-    let ops = s.read(|tx| tx.ops_in_state("p", OpState::Intended)).unwrap();
+    let ops = s
+        .read(|tx| tx.ops_in_state("p", OpState::Intended))
+        .unwrap();
     assert_eq!(ops.len(), 1, "{ops:?}");
-    assert_eq!((ops[0].kind, ops[0].task.as_deref()), (OpKind::Merge, Some("T-1")));
+    assert_eq!(
+        (ops[0].kind, ops[0].task.as_deref()),
+        (OpKind::Merge, Some("T-1"))
+    );
 
     // The captain was not asked to settle anything: the review item is
     // closed, one line tells it. The keep-lanes-fed watch may still ask for
     // work — that is the never-stop warning, not a review item.
-    let actionable = s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 20)).unwrap();
+    let actionable = s
+        .read(|tx| tx.actionable_for("p", "p:captain", T0 + 20))
+        .unwrap();
     assert!(
-        actionable.iter().all(|message| message.thread.starts_with("lane:")),
+        actionable
+            .iter()
+            .all(|message| message.thread.starts_with("lane:")),
         "no review item is left for the captain: {actionable:?}"
     );
-    let info = s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap();
-    assert!(info.is_empty(), "settlement information must not enter the unshown reply queue: {info:?}");
+    let info = s
+        .read(|tx| tx.messages_to_since("p", "p:captain", 0))
+        .unwrap();
+    assert!(
+        info.is_empty(),
+        "settlement information must not enter the unshown reply queue: {info:?}"
+    );
 
     // A second tick settles nothing again.
     let report = tick(&mut s, &mut herdr, &auto(), T0 + 30).unwrap();
     assert!(report.settled.is_empty(), "{report:?}");
     assert_eq!(
-        s.read(|tx| tx.ops_in_state("p", OpState::Intended)).unwrap().len(),
+        s.read(|tx| tx.ops_in_state("p", OpState::Intended))
+            .unwrap()
+            .len(),
         1,
         "no second merge op"
     );
@@ -139,7 +156,14 @@ const LANE_PANE: &str = "w1:p2";
 const BOARD_PANE: &str = "w1:p3";
 
 fn cfg() -> EngineCfg {
-    let mut c = EngineCfg { db_path: crate::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), auto_settle: true, ..Default::default() };
+    let mut c = EngineCfg {
+        db_path: crate::temp("gear-engine-tests")
+            .join("gear.db")
+            .to_string_lossy()
+            .into_owned(),
+        auto_settle: true,
+        ..Default::default()
+    };
     let mut profile = builtin("opencode").unwrap();
     profile.new_session.clear();
     c.profiles.insert("opencode".into(), profile);
@@ -190,7 +214,8 @@ fn world_with_ready_work() -> Store {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                 issue: None,updated: T0,
+                issue: None,
+                updated: T0,
             })?;
         }
         Ok(())
@@ -219,7 +244,10 @@ fn a_cancelled_task_s_review_does_not_stop_the_tick() {
         TaskState::Cancelled
     );
     assert_eq!(
-        s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+        s.read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap()
+            .state,
         AttemptState::Rejected
     );
     // Unrelated ready work was dispatched despite the obsolete review.
@@ -242,17 +270,22 @@ fn a_failing_settlement_does_not_abort_the_tick() {
 
     assert_eq!(report.settle_failed.len(), 1, "{report:?}");
     assert!(report.settle_failed[0].contains("T-1/1"), "{report:?}");
-    assert!(report.settle_failed[0].contains("BAD_TRANSITION"), "{report:?}");
+    assert!(
+        report.settle_failed[0].contains("BAD_TRANSITION"),
+        "{report:?}"
+    );
     // The other lane's ready task is still dispatched.
     let t3 = s.read(|tx| tx.get_attempt("p", "T-3", 1)).unwrap();
     assert!(t3.is_some(), "the tick went on: {report:?}");
     assert_eq!(herdr.prompts_to(BOARD_PANE).len(), 1);
 }
 
-
 /// Automatic settlement is opt-in (L-57).
 fn auto() -> EngineCfg {
-    let mut cfg = EngineCfg { auto_settle: true, ..Default::default() };
+    let mut cfg = EngineCfg {
+        auto_settle: true,
+        ..Default::default()
+    };
     let mut profile = gear_herdr::builtin("opencode").unwrap();
     profile.new_session.clear();
     cfg.profiles.insert("opencode".into(), profile);
@@ -277,5 +310,8 @@ fn a_failing_verdict_waits_for_the_captain_even_with_auto_settle() {
     herdr.add_agent("w1:p2", "opencode", AgentStatus::Working);
     let report = tick(&mut s, &mut herdr, &auto(), T0 + 10).unwrap();
     assert!(report.settled.is_empty(), "{report:?}");
-    assert_eq!(s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().state, TaskState::Verifying);
+    assert_eq!(
+        s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().state,
+        TaskState::Verifying
+    );
 }

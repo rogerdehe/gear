@@ -181,7 +181,9 @@ pub fn idle_reason(
     }
 
     // The task is queued and nobody gave it to the lane.
-    Ok(Some(IdleReason::Undelivered { task: next.id.clone() }))
+    Ok(Some(IdleReason::Undelivered {
+        task: next.id.clone(),
+    }))
 }
 
 /// The instruction of the captain the lane still has to answer, if any
@@ -191,12 +193,12 @@ pub fn idle_reason(
 /// has a captain; then the newest unanswered captain instruction to the seat
 /// within [`HELP_LIMIT_S`] is the help. A reply of the lane — any message of
 /// it with `reply_to` the instruction — ends it.
-pub fn helping(
-    tx: &Tx<'_>,
-    project: &str,
-    seat: &SeatRow,
-    now: Ts,
-) -> GearResult<Option<Helping>> {
+///
+/// An instruction the captain sent while the lane worked is not help (T-463):
+/// when an attempt of the lane by this seat started before the instruction and
+/// was handed in, merged or ended after it, the instruction was part of that
+/// work and does not keep the lane busy once the attempt is over.
+pub fn helping(tx: &Tx<'_>, project: &str, seat: &SeatRow, now: Ts) -> GearResult<Option<Helping>> {
     if seat.role != SeatRole::Lane || !tx.in_progress_attempts_of_seat(&seat.id)?.is_empty() {
         return Ok(None);
     }
@@ -210,8 +212,15 @@ pub fn helping(
         .filter(|message| message.sender == captain.id)
         .collect();
     instructions.sort_by(|a, b| (b.created, &b.id).cmp(&(a.created, &a.id)));
+    let spans = work_spans(tx, project, seat)?;
     for instruction in instructions {
         if has_reply(tx, project, &seat.id, &instruction)? {
+            continue;
+        }
+        if spans
+            .iter()
+            .any(|&(start, end)| start < instruction.created && end > instruction.created)
+        {
             continue;
         }
         let lane = match instruction.task.as_deref() {
@@ -227,6 +236,41 @@ pub fn helping(
         }));
     }
     Ok(None)
+}
+
+/// The times the lane worked on a task (T-463): every attempt of one of the
+/// lane's tasks by this seat, from its start to the earliest of its hand-in,
+/// merge and settle (the end of the work; a closed attempt's row time stands
+/// in when no step wrote one).
+fn work_spans(tx: &Tx<'_>, project: &str, seat: &SeatRow) -> GearResult<Vec<(Ts, Ts)>> {
+    let mut spans = Vec::new();
+    for task in tx.tasks_of_project(project)? {
+        if task.lane.as_deref() != Some(seat.name.as_str()) {
+            continue;
+        }
+        for attempt in tx.attempts_of_task(project, &task.id)? {
+            if attempt.seat != seat.id {
+                continue;
+            }
+            let times = tx.attempt_times(project, &task.id, attempt.n)?;
+            let start = times.started.unwrap_or(attempt.started);
+            let end = [
+                times.handed_in,
+                times.merged,
+                times.settled,
+                // A closed attempt has its end in the row when no step wrote
+                // it (an abandoned attempt).
+                attempt.state.is_terminal().then_some(attempt.updated),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+            if let Some(end) = end {
+                spans.push((start, end));
+            }
+        }
+    }
+    Ok(spans)
 }
 
 /// Did the lane answer the instruction?
@@ -267,7 +311,10 @@ pub fn describe(reason: &IdleReason, tx: &Tx<'_>, project: &str) -> String {
             format!("waiting for {on} ({})", lane_and_stage(tx, project, on))
         }
         IdleReason::DepWait { task, on } => {
-            format!("next {task} waits for {on} ({})", lane_and_stage(tx, project, on))
+            format!(
+                "next {task} waits for {on} ({})",
+                lane_and_stage(tx, project, on)
+            )
         }
         IdleReason::Undelivered { task } => format!("next {task} is ready but not delivered"),
         IdleReason::NoWork => "nothing left planned".to_string(),
@@ -470,12 +517,16 @@ fn civil_from_days(days: i64) -> (i64, i64) {
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let shifted_month = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
-    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 };
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
     (month, day)
 }
 
 /// An RFC 3339 time (`2026-10-27T10:00:00Z`) in epoch seconds.
-fn rfc3339(text: &str) -> Option<Ts> {
+pub(crate) fn rfc3339(text: &str) -> Option<Ts> {
     let text = text.trim();
     if text.len() < 19 {
         return None;

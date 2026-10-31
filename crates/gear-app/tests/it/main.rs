@@ -51,9 +51,10 @@ mod app_identity;
 mod app_reply;
 mod app_select_batch;
 mod app_send;
+mod backoff_home_contract;
+mod bar_contract;
 mod base_gate;
 mod cancel_contract;
-mod backoff_home_contract;
 mod captain_handover_contract;
 mod captain_take_contract;
 mod config_change_contract;
@@ -71,25 +72,25 @@ mod plan_size_contract;
 mod plan_staff_contract;
 mod plan_verdicts_contract;
 mod profiles_contract;
-mod result_contract;
+mod queue_contract;
 mod remerge_contract;
+mod result_contract;
+mod retired_lane_contract;
 mod review_contract;
 mod reviewer_mail_contract;
 mod seats_contract;
 mod settle_review_contract;
 mod staffing_lock_contract;
+mod standard_contract;
+mod station_contract;
+mod tail_contract;
 mod tasks_contract;
 mod temps_quota_contract;
 mod time_contract;
 mod time_report_contract;
 mod verdict_item_contract;
-mod queue_contract;
-mod retired_lane_contract;
 mod voyage_contract;
 mod voyage_report_contract;
-mod standard_contract;
-mod station_contract;
-mod tail_contract;
 
 /// A scratch home with the GEAR skill installed for every kind (T-83): `init`
 /// refuses a kind whose skill is missing, and these fixtures are not about
@@ -131,7 +132,13 @@ pub fn point_at(repo: &std::path::Path, origin: &std::path::Path) {
     let url = format!("\turl = {}", origin.display());
     let rewritten: Vec<String> = text
         .lines()
-        .map(|line| if line.trim_start().starts_with("url = ") { url.clone() } else { line.to_string() })
+        .map(|line| {
+            if line.trim_start().starts_with("url = ") {
+                url.clone()
+            } else {
+                line.to_string()
+            }
+        })
         .collect();
     std::fs::write(&config, rewritten.join("\n") + "\n").unwrap();
 }

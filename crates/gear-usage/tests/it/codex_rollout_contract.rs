@@ -10,7 +10,14 @@ use crate::shared::{iso, now, write_lines, T12, T13, T14};
 const THREAD: &str = "0199aaaa-bbbb-cccc-dddd-eeeeffff0000";
 
 /// One token count of Codex: the totals of the session so far.
-fn count(time: i64, input: i64, cached: i64, cache_write: i64, output: i64, reasoning: i64) -> serde_json::Value {
+fn count(
+    time: i64,
+    input: i64,
+    cached: i64,
+    cache_write: i64,
+    output: i64,
+    reasoning: i64,
+) -> serde_json::Value {
     json!({
         "timestamp": iso(time),
         "type": "event_msg",
@@ -63,7 +70,10 @@ fn count_with_last_usage(
 /// The rollout file of a thread, in the day directory of the Codex sessions.
 fn rollout(home: &std::path::Path, lines: &[serde_json::Value]) -> String {
     let dir = codex_day_dir(home, now());
-    let path = write_lines(&dir.join(format!("rollout-2026-10-26T12-00-00-{THREAD}.jsonl")), lines);
+    let path = write_lines(
+        &dir.join(format!("rollout-2026-10-26T12-00-00-{THREAD}.jsonl")),
+        lines,
+    );
     path.to_string_lossy().into_owned()
 }
 
@@ -213,7 +223,10 @@ fn a_thread_without_a_file_is_unknown() {
         T14,
         home.path(),
     );
-    assert!(usage.is_none(), "a thread without a file is unknown, not zero");
+    assert!(
+        usage.is_none(),
+        "a thread without a file is unknown, not zero"
+    );
 }
 
 #[test]

@@ -76,7 +76,11 @@ impl Terminal {
 impl Keys for Terminal {
     fn next_event(&mut self, timeout: Duration) -> Option<Event> {
         self.saved?;
-        let mut fds = libc::pollfd { fd: self.stdin, events: libc::POLLIN, revents: 0 };
+        let mut fds = libc::pollfd {
+            fd: self.stdin,
+            events: libc::POLLIN,
+            revents: 0,
+        };
         let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
         // SAFETY: `fds` is one pollfd we own; the call only waits.
         let ready = unsafe { libc::poll(&mut fds, 1, millis) };
@@ -159,7 +163,10 @@ impl Terminal {
                 break;
             }
             // The arrows and the shift-tab end after their last letter.
-            if matches!(out.as_bytes(), [b'[', b'A'] | [b'[', b'B'] | [b'[', b'C'] | [b'[', b'D'] | [b'[', b'Z']) {
+            if matches!(
+                out.as_bytes(),
+                [b'[', b'A'] | [b'[', b'B'] | [b'[', b'C'] | [b'[', b'D'] | [b'[', b'Z']
+            ) {
                 break;
             }
         }
@@ -272,7 +279,10 @@ mod tests {
         draw(&mut out, "GEAR · p\nLANES\n  T-1 done").unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.starts_with("\x1b[?2026h\x1b[H"), "{text:?}");
-        assert!(!text.contains("\x1b[2J"), "the whole screen is never cleared: {text:?}");
+        assert!(
+            !text.contains("\x1b[2J"),
+            "the whole screen is never cleared: {text:?}"
+        );
         assert!(
             text.ends_with("\x1b[J\x1b[?2026l"),
             "the erase below and the end of the synchronized update close the frame: {text:?}"
@@ -286,7 +296,10 @@ mod tests {
         let lines: Vec<&str> = body.split('\n').collect();
         assert_eq!(lines.len(), 3, "{body:?}");
         for line in &lines {
-            assert!(line.ends_with("\x1b[K"), "every line erases its rest: {line:?}");
+            assert!(
+                line.ends_with("\x1b[K"),
+                "every line erases its rest: {line:?}"
+            );
         }
         assert_eq!(lines[2], "  T-1 done\x1b[K", "{body:?}");
     }

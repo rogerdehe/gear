@@ -16,7 +16,9 @@ fn gear(home: &Path, args: &[&str]) -> Output {
 }
 
 fn skill_file(rel: &str) -> String {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../skills/gear").join(rel);
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../skills/gear")
+        .join(rel);
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
@@ -52,13 +54,17 @@ fn the_bare_skill_names_every_topic() {
         "review",
         "adopt",
         "github",
+        "departure",
         "agent:opencode",
         "agent:codex",
         "agent:claude",
         "agent:grok",
         "agent:pi",
     ] {
-        assert!(text.contains(topic), "the bare skill does not name {topic}:\n{text}");
+        assert!(
+            text.contains(topic),
+            "the bare skill does not name {topic}:\n{text}"
+        );
     }
     // The installer is named with every kind it writes for.
     assert!(
@@ -83,17 +89,46 @@ fn reference_topics_print_their_file() {
 fn m4_commands_and_decision_rules_are_printed_by_the_skill() {
     let home = scratch::home("skill-m4");
     for (topic, expected) in [
-        ("main", &["--kind progress", "--left", "--blocker", "--kind blocked", "--on", "--friction"][..]),
-        ("captain", &["gear queue", "gear plan show", "followup-of", "- ★", "gear friction close", "- release <reviewer>"][..]),
-        ("course", &["gear report voyage", "★ decisions", "user: <text>"][..]),
+        (
+            "main",
+            &[
+                "--kind progress",
+                "--left",
+                "--blocker",
+                "--kind blocked",
+                "--on",
+                "--friction",
+            ][..],
+        ),
+        (
+            "captain",
+            &[
+                "gear queue",
+                "gear plan show",
+                "followup-of",
+                "- ★",
+                "gear friction close",
+                "- release <reviewer>",
+            ][..],
+        ),
+        (
+            "course",
+            &["gear report voyage", "★ decisions", "user: <text>"][..],
+        ),
         ("decompose", &["followup-of: T-<n>", "session"][..]),
         ("review", &["--friction", "exceeds its budget"][..]),
     ] {
-        let args = if topic == "main" { vec!["--skill"] } else { vec!["--skill", topic] };
+        let args = if topic == "main" {
+            vec!["--skill"]
+        } else {
+            vec!["--skill", topic]
+        };
         let o = gear(&home, &args);
         assert!(o.status.success(), "{topic}: {}", stderr(&o));
         let text = stdout(&o);
-        for needle in expected { assert!(text.contains(needle), "{topic} missing {needle}: {text}"); }
+        for needle in expected {
+            assert!(text.contains(needle), "{topic} missing {needle}: {text}");
+        }
     }
 }
 
@@ -106,6 +141,7 @@ fn the_new_topics_print_their_file() {
         ("review", "references/review.md"),
         ("adopt", "references/adopt.md"),
         ("github", "references/github.md"),
+        ("departure", "references/departure.md"),
         ("captain", "references/captain.md"),
         ("agent:claude", "references/agents/claude.md"),
         ("agent:grok", "references/agents/grok.md"),
@@ -132,6 +168,7 @@ fn no_topic_names_a_file_of_the_gear_repo() {
         "captain",
         "adopt",
         "github",
+        "departure",
         "agent:opencode",
         "agent:codex",
         "agent:claude",
@@ -141,11 +178,48 @@ fn no_topic_names_a_file_of_the_gear_repo() {
         let o = gear(&home, &["--skill", topic]);
         assert!(o.status.success(), "{topic}: {}", stderr(&o));
         let text = stdout(&o);
-        assert!(!text.contains("ops/"), "the {topic} topic names an ops/ path:\n{text}");
+        assert!(
+            !text.contains("ops/"),
+            "the {topic} topic names an ops/ path:\n{text}"
+        );
         assert!(
             !text.contains("docs/design/"),
             "the {topic} topic names a design path:\n{text}"
         );
+    }
+}
+
+/// T-469: the skill describes the role charter — written in gear.toml per
+/// lane and for the reviewers, given once per conversation — and the captain's
+/// guide still carries its hand-fix paragraph.
+#[test]
+fn the_skill_describes_role_charters() {
+    let home = scratch::home("skill-charters");
+    for (topic, needles) in [
+        (
+            "conventions",
+            &[
+                "Role charters",
+                "charter = ",
+                "never again in a resumed one",
+            ][..],
+        ),
+        (
+            "captain",
+            &[
+                "one charter per role",
+                "charter =",
+                "hand-fix:",
+                "The same holds for an urgent fix",
+            ][..],
+        ),
+    ] {
+        let o = gear(&home, &["--skill", topic]);
+        assert!(o.status.success(), "{topic}: {}", stderr(&o));
+        let text = stdout(&o);
+        for needle in needles {
+            assert!(text.contains(needle), "{topic} missing {needle}");
+        }
     }
 }
 
@@ -156,8 +230,14 @@ fn unknown_topic_is_bad_format_and_lists_topics() {
     assert_eq!(o.status.code(), Some(1));
     assert!(stdout(&o).is_empty());
     let e = stderr(&o);
-    assert!(e.starts_with("ERROR BAD_FORMAT: unknown skill topic nope; available: "), "{e}");
-    assert!(e.contains("decompose") && e.contains("agent:opencode"), "{e}");
+    assert!(
+        e.starts_with("ERROR BAD_FORMAT: unknown skill topic nope; available: "),
+        "{e}"
+    );
+    assert!(
+        e.contains("decompose") && e.contains("agent:opencode"),
+        "{e}"
+    );
 }
 
 /// T-41: a `gear` call without `GEAR_DB` opens the store under its `HOME`.

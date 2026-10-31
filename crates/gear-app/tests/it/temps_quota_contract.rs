@@ -47,7 +47,11 @@ gate = "make test"
 }
 
 fn admin() -> Env {
-    Env { ctx: None, pane_id: None, admin: true }
+    Env {
+        ctx: None,
+        pane_id: None,
+        admin: true,
+    }
 }
 
 /// A reviewer seat in the state the engine left it in.
@@ -72,14 +76,25 @@ fn reviewer(store: &mut Store, name: &str, state: SeatState, since: i64) {
 
 /// The seat's state and the reason it was left in it.
 fn state_of(store: &mut Store, name: &str) -> (SeatState, Option<String>) {
-    let seat = store.read(|tx| tx.get_seat(&format!("{HARBOR}:{name}"))).unwrap().unwrap();
+    let seat = store
+        .read(|tx| tx.get_seat(&format!("{HARBOR}:{name}")))
+        .unwrap()
+        .unwrap();
     (seat.state, seat.state_reason)
 }
 
 #[test]
 fn a_lower_temps_quota_retires_the_oldest_released_reviewers() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), &config(2), Some(crate::skill_home()), false, T0).unwrap();
+    init_with_home(
+        &mut s,
+        &admin(),
+        &config(2),
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
 
     // Four reviewer seats from the time the project had temps = 4.
     reviewer(&mut s, "review-7", SeatState::Active, T0 + 10);
@@ -87,50 +102,114 @@ fn a_lower_temps_quota_retires_the_oldest_released_reviewers() {
     reviewer(&mut s, "review-10", SeatState::Released, T0 + 30);
     reviewer(&mut s, "review-11", SeatState::Released, T0 + 40);
 
-    init_with_home(&mut s, &admin(), &config(2), Some(crate::skill_home()), false, T0 + 50).unwrap();
+    init_with_home(
+        &mut s,
+        &admin(),
+        &config(2),
+        Some(crate::skill_home()),
+        false,
+        T0 + 50,
+    )
+    .unwrap();
 
     // The working reviewer and the newest released one stay.
-    assert_eq!(state_of(&mut s, "review-7"), (SeatState::Active, None), "an Active seat is never retired");
-    assert_eq!(state_of(&mut s, "review-11").0, SeatState::Released, "the newest seat stays");
+    assert_eq!(
+        state_of(&mut s, "review-7"),
+        (SeatState::Active, None),
+        "an Active seat is never retired"
+    );
+    assert_eq!(
+        state_of(&mut s, "review-11").0,
+        SeatState::Released,
+        "the newest seat stays"
+    );
     // The two older released ones are retired, and say why.
     for name in ["review-9", "review-10"] {
         let (state, reason) = state_of(&mut s, name);
         assert_eq!(state, SeatState::Retired, "{name}");
-        assert_eq!(reason.as_deref(), Some("temps quota lowered to 2"), "{name}");
+        assert_eq!(
+            reason.as_deref(),
+            Some("temps quota lowered to 2"),
+            "{name}"
+        );
     }
 }
 
 #[test]
 fn a_standby_reviewer_beyond_the_quota_goes_releasing() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), &config(2), Some(crate::skill_home()), false, T0).unwrap();
+    init_with_home(
+        &mut s,
+        &admin(),
+        &config(2),
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
     reviewer(&mut s, "review-7", SeatState::Active, T0 + 10);
     reviewer(&mut s, "review-9", SeatState::Released, T0 + 10);
     // Its agent and its pane are still there: it cannot be Retired in one step.
     reviewer(&mut s, "review-11", SeatState::Standby, T0 + 20);
     reviewer(&mut s, "review-10", SeatState::Released, T0 + 30);
 
-    init_with_home(&mut s, &admin(), &config(2), Some(crate::skill_home()), false, T0 + 50).unwrap();
+    init_with_home(
+        &mut s,
+        &admin(),
+        &config(2),
+        Some(crate::skill_home()),
+        false,
+        T0 + 50,
+    )
+    .unwrap();
 
     // The Active seat and the newest idle one fill the quota.
     assert_eq!(state_of(&mut s, "review-7").0, SeatState::Active);
     assert_eq!(state_of(&mut s, "review-10").0, SeatState::Released);
     // The idle seat past the quota that has no agent is Retired ...
-    assert_eq!(state_of(&mut s, "review-9"), (SeatState::Retired, Some("temps quota lowered to 2".to_string())));
+    assert_eq!(
+        state_of(&mut s, "review-9"),
+        (
+            SeatState::Retired,
+            Some("temps quota lowered to 2".to_string())
+        )
+    );
     // ... and the one whose agent is still there is sent on its way out.
-    assert_eq!(state_of(&mut s, "review-11"), (SeatState::Releasing, Some("temps quota lowered to 2".to_string())));
+    assert_eq!(
+        state_of(&mut s, "review-11"),
+        (
+            SeatState::Releasing,
+            Some("temps quota lowered to 2".to_string())
+        )
+    );
 }
 
 #[test]
 fn a_quota_that_fits_the_seats_retires_nothing() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), &config(2), Some(crate::skill_home()), false, T0).unwrap();
+    init_with_home(
+        &mut s,
+        &admin(),
+        &config(2),
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
     reviewer(&mut s, "review-7", SeatState::Active, T0 + 10);
     reviewer(&mut s, "review-9", SeatState::Released, T0 + 20);
     reviewer(&mut s, "review-10", SeatState::Released, T0 + 30);
     reviewer(&mut s, "review-11", SeatState::Released, T0 + 40);
 
-    init_with_home(&mut s, &admin(), &config(4), Some(crate::skill_home()), false, T0 + 50).unwrap();
+    init_with_home(
+        &mut s,
+        &admin(),
+        &config(4),
+        Some(crate::skill_home()),
+        false,
+        T0 + 50,
+    )
+    .unwrap();
 
     for (name, state) in [
         ("review-7", SeatState::Active),

@@ -79,8 +79,11 @@ fn world() -> World {
         delivery_grace_s: 8,
         ..Default::default()
     };
-    cfg.profiles
-        .insert("opencode".into(), { let mut p = gear_herdr::builtin("opencode").unwrap(); p.new_session.clear(); p });
+    cfg.profiles.insert("opencode".into(), {
+        let mut p = gear_herdr::builtin("opencode").unwrap();
+        p.new_session.clear();
+        p
+    });
     World { store, herdr, cfg }
 }
 
@@ -154,21 +157,38 @@ fn an_unconfirmed_delivery_fails_once_and_goes_again_in_a_new_session() {
     w.tick(5);
     w.tick(9);
     let ops = w.deliveries();
-    assert_eq!(ops.len(), 1, "no new delivery while the record blocks: {ops:?}");
+    assert_eq!(
+        ops.len(),
+        1,
+        "no new delivery while the record blocks: {ops:?}"
+    );
     assert_eq!(ops[0].state, OpState::Failed, "{ops:?}");
     let reason = ops[0].result.clone().unwrap_or_default();
     assert!(reason.contains("not confirmed within 8s"), "{reason}");
     assert!(reason.contains("T-1 attempt 1"), "{reason}");
     let items = w.stall_items();
-    assert!(items.is_empty(), "no captain item before the retry: {items:?}");
-    assert!(w.herdr.prompts_to(LANE).len() == 1, "the prompt is not repeated");
+    assert!(
+        items.is_empty(),
+        "no captain item before the retry: {items:?}"
+    );
+    assert!(
+        w.herdr.prompts_to(LANE).len() == 1,
+        "the prompt is not repeated"
+    );
 
     // Ticks 4–5: the same session. Nothing is typed into it again.
     w.tick(13);
     w.tick(17);
-    assert_eq!(w.herdr.prompts_to(LANE).len(), 1, "the same session is not re-typed");
+    assert_eq!(
+        w.herdr.prompts_to(LANE).len(),
+        1,
+        "the same session is not re-typed"
+    );
     assert_eq!(w.deliveries().len(), 1, "{:?}", w.deliveries());
-    assert!(w.stall_items().is_empty(), "no captain item before the retry");
+    assert!(
+        w.stall_items().is_empty(),
+        "no captain item before the retry"
+    );
 
     // The captain restarts the agent by hand: the pane reports a new session.
     w.herdr.set_agent_session(LANE, "ses_hand_restart");
@@ -179,7 +199,10 @@ fn an_unconfirmed_delivery_fails_once_and_goes_again_in_a_new_session() {
     assert_eq!(ops[1].attempt, Some(1));
     let prompts = w.herdr.prompts_to(LANE);
     assert_eq!(prompts.len(), 2, "delivered again: {prompts:?}");
-    assert!(prompts[1].contains("Continue T-1"), "same attempt: {prompts:?}");
+    assert!(
+        prompts[1].contains("Continue T-1"),
+        "same attempt: {prompts:?}"
+    );
 
     // The lane reads it: the new delivery is confirmed and the attempt starts.
     w.store
@@ -201,7 +224,11 @@ fn an_unconfirmed_delivery_fails_once_and_goes_again_in_a_new_session() {
 
     let ops = w.deliveries();
     assert_eq!(ops[1].state, OpState::Confirmed, "{ops:?}");
-    let attempt = w.store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    let attempt = w
+        .store
+        .read(|tx| tx.get_attempt("p", "T-1", 1))
+        .unwrap()
+        .unwrap();
     assert_eq!(attempt.state, AttemptState::Started);
     let task = w.store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
     assert_eq!(task.state, TaskState::Running);
@@ -271,9 +298,18 @@ fn a_restart_before_the_budget_expires_gets_the_open_attempt() {
     let ops = w.deliveries();
     assert_eq!(ops.len(), 2, "{ops:?}");
     assert_eq!(ops[0].state, OpState::Failed, "{ops:?}");
-    assert_eq!(ops[1].state, OpState::Submitted, "the resumed round got the attempt: {ops:?}");
+    assert_eq!(
+        ops[1].state,
+        OpState::Submitted,
+        "the resumed round got the attempt: {ops:?}"
+    );
     assert_eq!(ops[1].attempt, Some(1));
-    assert_eq!(w.herdr.prompts_to(LANE).len(), 2, "{:?}", w.herdr.prompts_to(LANE));
+    assert_eq!(
+        w.herdr.prompts_to(LANE).len(),
+        2,
+        "{:?}",
+        w.herdr.prompts_to(LANE)
+    );
     assert_eq!(w.stall_items().len(), 1);
 
     // The resumed session reads it: the attempt starts.
@@ -281,7 +317,11 @@ fn a_restart_before_the_budget_expires_gets_the_open_attempt() {
     w.tick(17);
     let ops = w.deliveries();
     assert_eq!(ops[1].state, OpState::Confirmed, "{ops:?}");
-    let attempt = w.store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    let attempt = w
+        .store
+        .read(|tx| tx.get_attempt("p", "T-1", 1))
+        .unwrap()
+        .unwrap();
     assert_eq!(attempt.state, AttemptState::Started);
 }
 
@@ -355,25 +395,60 @@ fn resolved_failed_delivery_stays_closed_after_a_late_checkin() {
     view(&mut w, 20);
     w.herdr.set_status(LANE, AgentStatus::Working);
     w.tick(21);
-    assert_eq!(w.store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state, AttemptState::Started);
+    assert_eq!(
+        w.store
+            .read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap()
+            .state,
+        AttemptState::Started
+    );
     w.tick(910);
     let items = w.stall_items();
-    assert!(items.is_empty(), "the recovered failure must not ring again: {items:?}");
+    assert!(
+        items.is_empty(),
+        "the recovered failure must not ring again: {items:?}"
+    );
 }
 
 fn cancel_failed_task(w: &mut World) {
     use gear_app::{draft::parse, identity::Fingerprint, plan::apply, Env};
     use gear_model::GearCtx;
-    let text = "<!-- gear-plan project=p base=0 -->\n# Queue\n## T-1 [must] lane=heat\ngoal: g\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n";
-    let env = Env { ctx: Some(GearCtx {project:"p".into(),seat:"captain".into(),generation:1}), pane_id:Some(CAP.into()), admin:false };
-    let fp = Fingerprint {pane_id:CAP.into(),kind:Some("opencode".into()),session_ref:None};
-    apply(&mut w.store, &env, Some(&fp), None, &parse(text).unwrap(), text, "cancel-failed", T0 + 10).unwrap();
+    // T-461: a cancel line changes the state only, so the block repeats the
+    // stored fields (no `estimate:`: the task has none) and adds the state.
+    let text = "<!-- gear-plan project=p base=0 -->\n# Queue\n## T-1 [must] lane=heat\ngoal: g\naccept: a\ndeps: -\nstate: cancelled\n";
+    let env = Env {
+        ctx: Some(GearCtx {
+            project: "p".into(),
+            seat: "captain".into(),
+            generation: 1,
+        }),
+        pane_id: Some(CAP.into()),
+        admin: false,
+    };
+    let fp = Fingerprint {
+        pane_id: CAP.into(),
+        kind: Some("opencode".into()),
+        session_ref: None,
+    };
+    apply(
+        &mut w.store,
+        &env,
+        Some(&fp),
+        None,
+        &parse(text).unwrap(),
+        text,
+        "cancel-failed",
+        T0 + 10,
+    )
+    .unwrap();
 }
 
 #[test]
 fn cancellation_closes_the_failed_delivery_stall_and_prevents_a_reminder() {
     let mut w = world();
-    w.tick(1); w.tick(9);
+    w.tick(1);
+    w.tick(9);
     // T-218: the first failure does not ring the captain yet — the one
     // automatic retry of the lane's own path may still come.
     assert!(
@@ -382,22 +457,41 @@ fn cancellation_closes_the_failed_delivery_stall_and_prevents_a_reminder() {
         w.stall_items()
     );
     cancel_failed_task(&mut w);
-    assert_eq!(w.store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state, AttemptState::Abandoned);
+    assert_eq!(
+        w.store
+            .read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap()
+            .state,
+        AttemptState::Abandoned
+    );
     w.tick(21);
-    assert!(w.store.read(|tx| gear_engine::delivery::failed(tx, "p:heat")).unwrap().is_none());
+    assert!(w
+        .store
+        .read(|tx| gear_engine::delivery::failed(tx, "p:heat"))
+        .unwrap()
+        .is_none());
     w.tick(910);
     let items = w.stall_items();
-    assert!(items.is_empty(), "cancelled work must not ring again: {items:?}");
+    assert!(
+        items.is_empty(),
+        "cancelled work must not ring again: {items:?}"
+    );
 }
 
 #[test]
 fn cancellation_preserves_an_independent_missing_agent_stall() {
     let mut w = world();
-    w.tick(1); w.tick(9);
+    w.tick(1);
+    w.tick(9);
     cancel_failed_task(&mut w);
     w.herdr.exit_agent(LANE);
     w.tick(21);
-    assert!(w.store.read(|tx| gear_engine::delivery::failed(tx, "p:heat")).unwrap().is_none());
+    assert!(w
+        .store
+        .read(|tx| gear_engine::delivery::failed(tx, "p:heat"))
+        .unwrap()
+        .is_none());
     let items = w.stall_items();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].state, MsgState::Open);

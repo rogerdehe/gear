@@ -39,7 +39,9 @@ pub fn hand_in(agent: &str, rounds: u32) -> String {
 /// `Some("pass")` at the merge that ran it, `None` everywhere else.
 pub fn completion(reviewer: &str, rounds: u32, ci: Option<&str>) -> String {
     match ci {
-        Some(ci) => format!("<!-- ORCHESTRATE:COMPLETION reviewer={reviewer} rounds={rounds} ci={ci} -->"),
+        Some(ci) => {
+            format!("<!-- ORCHESTRATE:COMPLETION reviewer={reviewer} rounds={rounds} ci={ci} -->")
+        }
         None => format!("<!-- ORCHESTRATE:COMPLETION reviewer={reviewer} rounds={rounds} -->"),
     }
 }

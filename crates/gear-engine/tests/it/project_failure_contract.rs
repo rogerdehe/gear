@@ -42,6 +42,7 @@ fn profile(kind: &str) -> gear_herdr::Profile {
         compact: String::new(),
         usage_log: None,
         error_markers: Vec::new(),
+        dialogs: Vec::new(),
         busy_markers: vec!["esc interrupt".into()],
         ratelimit_markers: Vec::new(),
         quota_markers: Vec::new(),
@@ -75,13 +76,29 @@ fn world(broken_config: &str) -> World {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, BROKEN_CAP_PANE, "codex", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                BROKEN_CAP_PANE,
+                "codex",
+                T0,
+            )?;
             let mut broken = tx.get_project("p")?.unwrap();
             broken.config_toml = broken_config.into();
             tx.update_project(&broken)?;
 
             testing::seed_project(tx, "q", "sess", T0)?;
-            testing::seed_active_seat(tx, "q", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "q",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "codex",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "q", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
             tx.insert_task(&TaskRow {
                 repo: None,
@@ -125,7 +142,12 @@ fn world(broken_config: &str) -> World {
     herdr.add_agent(BROKEN_CAP_PANE, "codex", AgentStatus::Idle);
     herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
     herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
-    let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
+    let mut cfg = EngineCfg {
+        tick_s: 4,
+        cooldown_s: 30,
+        doorbell_check_budget: 3,
+        ..Default::default()
+    };
     for kind in ["codex", "opencode"] {
         cfg.profiles.insert(kind.to_string(), profile(kind));
     }
@@ -135,10 +157,22 @@ fn world(broken_config: &str) -> World {
 /// The healthy project's task is delivered by the tick that failed on `p`.
 fn assert_delivered(w: &mut World) {
     let prompts = w.herdr.prompts_to(LANE_PANE);
-    assert_eq!(prompts.len(), 1, "the healthy project's delivery: {prompts:?}");
-    assert!(prompts[0].starts_with("New task T-1 (contract v1)."), "{}", prompts[0]);
     assert_eq!(
-        w.store.read(|tx| tx.get_attempt("q", "T-1", 1)).unwrap().unwrap().state,
+        prompts.len(),
+        1,
+        "the healthy project's delivery: {prompts:?}"
+    );
+    assert!(
+        prompts[0].starts_with("New task T-1 (contract v1)."),
+        "{}",
+        prompts[0]
+    );
+    assert_eq!(
+        w.store
+            .read(|tx| tx.get_attempt("q", "T-1", 1))
+            .unwrap()
+            .unwrap()
+            .state,
         AttemptState::Delivered
     );
 }
@@ -151,14 +185,23 @@ fn a_project_whose_config_the_engine_refuses_does_not_stop_the_tick() {
     assert_delivered(&mut w);
 
     // The broken project is reported, never fatal, and the report names it.
-    assert!(!report.project_failed.is_empty(), "the broken project is reported");
     assert!(
-        report.project_failed.iter().all(|line| line.starts_with("p: BAD_FORMAT: ")),
+        !report.project_failed.is_empty(),
+        "the broken project is reported"
+    );
+    assert!(
+        report
+            .project_failed
+            .iter()
+            .all(|line| line.starts_with("p: BAD_FORMAT: ")),
         "{:?}",
         report.project_failed
     );
     assert!(
-        report.project_failed.iter().any(|line| line.contains("profile codex")),
+        report
+            .project_failed
+            .iter()
+            .any(|line| line.contains("profile codex")),
         "{:?}",
         report.project_failed
     );
@@ -173,5 +216,9 @@ fn a_project_whose_config_is_not_toml_does_not_stop_the_tick() {
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 100).unwrap();
 
     assert_delivered(&mut w);
-    assert!(report.project_failed.is_empty(), "{:?}", report.project_failed);
+    assert!(
+        report.project_failed.is_empty(),
+        "{:?}",
+        report.project_failed
+    );
 }

@@ -17,6 +17,7 @@ fn profile(kind: &str) -> Profile {
         compact: String::new(),
         usage_log: None,
         error_markers: Vec::new(),
+        dialogs: Vec::new(),
         busy_markers: vec!["esc interrupt".into()],
         ratelimit_markers: vec!["Error: Rate limit exceeded".into()],
         quota_markers: vec![],
@@ -48,7 +49,15 @@ fn store_with_seat() -> Store {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess-p", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "codex",
+                T0,
+            )?;
             Ok(())
         })
         .unwrap();
@@ -72,7 +81,11 @@ fn queued_seat(tx: &Tx<'_>) -> gear_model::GearResult<()> {
     Ok(())
 }
 
-fn observe(store: &mut Store, herdr: &mut FakeHerdr, profiles: &std::collections::BTreeMap<String, Profile>) -> Vec<gear_engine::observe::SeatObs> {
+fn observe(
+    store: &mut Store,
+    herdr: &mut FakeHerdr,
+    profiles: &std::collections::BTreeMap<String, Profile>,
+) -> Vec<gear_engine::observe::SeatObs> {
     let agents = herdr.agents().unwrap();
     store
         .read(|tx| reconcile(tx, herdr, "p", &agents, profiles))
@@ -134,7 +147,11 @@ fn not_expected() {
     let temp = observed.iter().find(|o| o.seat.id == "p:temp").unwrap();
     assert_eq!(temp.presence, Presence::NotExpected);
     assert!(!temp.idle);
-    assert_eq!(observed[0].presence, Presence::Present, "the other seat is unaffected");
+    assert_eq!(
+        observed[0].presence,
+        Presence::Present,
+        "the other seat is unaffected"
+    );
 }
 
 #[test]
@@ -157,9 +174,17 @@ fn retired_seat_is_not_expected() {
     let observed = observe(&mut store, &mut herdr, &profiles());
 
     let heat = observed.iter().find(|o| o.seat.id == "p:heat").unwrap();
-    assert_eq!(heat.presence, Presence::NotExpected, "a retired seat expects no agent");
+    assert_eq!(
+        heat.presence,
+        Presence::NotExpected,
+        "a retired seat expects no agent"
+    );
     assert!(!heat.idle);
-    assert_eq!(observed[0].presence, Presence::Present, "the active seat is unaffected");
+    assert_eq!(
+        observed[0].presence,
+        Presence::Present,
+        "the active seat is unaffected"
+    );
 }
 
 #[test]
@@ -202,7 +227,10 @@ fn working_not_read() {
     let observed = observe(&mut store, &mut herdr, &profiles());
 
     assert!(!observed[0].idle);
-    assert!(observed[0].flags.is_empty(), "the screen of a working agent is not read");
+    assert!(
+        observed[0].flags.is_empty(),
+        "the screen of a working agent is not read"
+    );
 }
 
 #[test]

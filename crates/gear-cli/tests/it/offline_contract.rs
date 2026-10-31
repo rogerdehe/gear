@@ -18,5 +18,8 @@ fn a_test_cannot_clone_over_the_network() {
     assert!(!out.status.success(), "the https clone was not refused");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("not allowed"), "{err}");
-    assert!(!PathBuf::from(&dir).join(".git").exists(), "something was cloned");
+    assert!(
+        !PathBuf::from(&dir).join(".git").exists(),
+        "something was cloned"
+    );
 }

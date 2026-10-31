@@ -38,7 +38,11 @@ impl GearCtx {
             .and_then(|g| g.parse::<i64>().ok())
             .filter(|g| *g > 0)
             .ok_or_else(bad)?;
-        Ok(GearCtx { project: project.to_string(), seat: seat.to_string(), generation })
+        Ok(GearCtx {
+            project: project.to_string(),
+            seat: seat.to_string(),
+            generation,
+        })
     }
 }
 
@@ -46,7 +50,8 @@ impl GearCtx {
 pub fn valid_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 32
-        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 #[cfg(test)]
@@ -55,7 +60,11 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let c = GearCtx { project: "harbor".into(), seat: "R-4".into(), generation: 7 };
+        let c = GearCtx {
+            project: "harbor".into(),
+            seat: "R-4".into(),
+            generation: 7,
+        };
         assert_eq!(GearCtx::parse(&c.encode()).unwrap(), c);
         assert_eq!(c.seat_id(), "harbor:R-4");
     }

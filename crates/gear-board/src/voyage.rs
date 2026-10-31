@@ -13,6 +13,13 @@ pub struct VoyageReport {
     pub title: String,
     pub done: Option<String>,
     pub eta: Option<String>,
+    /// When the voyage departs, while it waits for its departure time (T-449):
+    /// `Some` only before it, `None` at and after it and without `[schedule]`.
+    pub departs_at: Option<Ts>,
+    /// The next start of the working hours while the fleet rests outside them
+    /// (T-451): `Some` only outside `[schedule] hours`, `None` inside them and
+    /// without the section.
+    pub off_hours_until: Option<Ts>,
     pub elapsed_min: Option<i64>,
     pub measured_actual_min: i64,
     pub measured_estimate_min: i64,
@@ -60,57 +67,279 @@ pub struct LaneProjection {
 
 impl VoyageReport {
     pub fn pace(&self) -> Option<f64> {
-        (self.measured_estimate_min > 0).then(|| {
-            self.measured_actual_min as f64 / self.measured_estimate_min as f64
-        })
+        (self.measured_estimate_min > 0)
+            .then(|| self.measured_actual_min as f64 / self.measured_estimate_min as f64)
     }
 
     /// Exactly five lines per active milestone, shared by every text surface.
     pub fn lines(&self) -> Vec<String> {
-        let pace = self.pace().map(|p| format!("{p:.2}x")).unwrap_or_else(|| "-".into());
-        let slowest = self.slowest.as_ref().map(|(id, min)| format!("{id} {min}m"))
+        let pace = self
+            .pace()
+            .map(|p| format!("{p:.2}x"))
             .unwrap_or_else(|| "-".into());
+        let slowest = self
+            .slowest
+            .as_ref()
+            .map(|(id, min)| format!("{id} {min}m"))
+            .unwrap_or_else(|| "-".into());
+        // The departure time says why nothing moves while the voyage waits
+        // for it (T-449); without one the line is unchanged. While the fleet
+        // rests outside its working hours (T-451), that moment is said
+        // instead: it is what the seat waits for.
+        let waits = match self.off_hours_until {
+            Some(until) => format!(" · off hours until {}", crate::idle::clock(until)),
+            None => self
+                .departs_at
+                .map(|at| format!(" · departs at {}", crate::idle::clock(at)))
+                .unwrap_or_default(),
+        };
         vec![
-            format!("Voyage {} {} · done: {}", self.milestone, self.title,
-                self.done.as_deref().unwrap_or("-")),
-            format!("  elapsed {} / eta {}", minutes(self.elapsed_min), self.eta.as_deref().unwrap_or("-")),
-            format!("  pace {pace} · projected finish {} from departure", minutes(self.projected_min)),
-            format!("  scope now {} / departure {}", minutes(self.scope_min), minutes(self.departure_scope_min)),
-            format!("  rework {} {} · slowest {slowest}", self.rework_rounds,
-                if self.rework_rounds == 1 { "round" } else { "rounds" }),
+            format!(
+                "Voyage {} {} · done: {}{waits}",
+                self.milestone,
+                self.title,
+                self.done.as_deref().unwrap_or("-")
+            ),
+            format!(
+                "  elapsed {} / eta {}",
+                minutes(self.elapsed_min),
+                self.eta.as_deref().unwrap_or("-")
+            ),
+            format!(
+                "  pace {pace} · projected finish {} from departure",
+                minutes(self.projected_min)
+            ),
+            format!(
+                "  scope now {} / departure {}",
+                minutes(self.scope_min),
+                minutes(self.departure_scope_min)
+            ),
+            format!(
+                "  rework {} {} · slowest {slowest}",
+                self.rework_rounds,
+                if self.rework_rounds == 1 {
+                    "round"
+                } else {
+                    "rounds"
+                }
+            ),
         ]
     }
 }
 
+/// The moment the project's voyage departs (T-449): `Some(depart_at)` while
+/// `now` is before the stored config's `[schedule] depart_at`, else `None`.
+/// The same rule as `gear_app::config::departs_at`; gear-board reads the
+/// stored config itself because gear-app already depends on gear-board.
+fn departs_at(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Ts>> {
+    let Some(row) = tx.get_project(project)? else {
+        return Ok(None);
+    };
+    let Ok(config) = row.config_toml.parse::<toml::Value>() else {
+        return Ok(None);
+    };
+    let Some(at) = config
+        .get("schedule")
+        .and_then(|schedule| schedule.get("depart_at"))
+        .and_then(toml::Value::as_str)
+    else {
+        return Ok(None);
+    };
+    let Some(at) = crate::idle::rfc3339(at) else {
+        return Ok(None);
+    };
+    Ok((now < at).then_some(at))
+}
+
+/// The next start of the working hours while the fleet rests outside them
+/// (T-451): `Some(next start)` while `now` is outside the stored config's
+/// `[schedule] hours`, `None` inside them and without the section. The same
+/// rule as `gear_app::config::off_hours_until`; gear-board reads the stored
+/// config itself because gear-app already depends on gear-board.
+fn off_hours_until(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Ts>> {
+    let Some(row) = tx.get_project(project)? else {
+        return Ok(None);
+    };
+    let Ok(config) = row.config_toml.parse::<toml::Value>() else {
+        return Ok(None);
+    };
+    let Some(hours) = config
+        .get("schedule")
+        .and_then(|schedule| schedule.get("hours"))
+        .and_then(toml::Value::as_str)
+    else {
+        return Ok(None);
+    };
+    Ok(off_hours_until_at(hours, now))
+}
+
+/// The rule of `gear_app::config::off_hours_until` (T-450), on `hours` text:
+/// the next start while `now` is outside the window, `None` inside it and
+/// when it does not parse (the config check refuses that, so this fails
+/// closed).
+fn off_hours_until_at(hours: &str, now: Ts) -> Option<Ts> {
+    let window = hours_window(hours)?;
+    let minute = local_minute(now)?;
+    if inside_hours(window, minute) {
+        return None;
+    }
+    if window.0 < window.1 {
+        let day = if minute < window.0 { 0 } else { 1 };
+        local_at(now, day, window.0)
+    } else {
+        // Overnight: outside is between the end and the start, so the start is
+        // later today.
+        local_at(now, 0, window.0)
+    }
+}
+
+/// `"HH:MM-HH:MM"` with a start different from its end, both real times of
+/// the day.
+fn hours_window(text: &str) -> Option<(u32, u32)> {
+    let (start, end) = text.trim().split_once('-')?;
+    let start = minutes_of_day(start)?;
+    let end = minutes_of_day(end)?;
+    (start != end).then_some((start, end))
+}
+
+/// Whether `minute` (past local midnight) is inside the working hours. An
+/// overnight window (`start > end`) works from its start to its end on the
+/// next day.
+fn inside_hours(window: (u32, u32), minute: u32) -> bool {
+    let (start, end) = window;
+    if start < end {
+        start <= minute && minute < end
+    } else {
+        minute >= start || minute < end
+    }
+}
+
+/// `"HH:MM"` as minutes past midnight; `None` when it is not a time of day.
+fn minutes_of_day(text: &str) -> Option<u32> {
+    let (hours, minutes) = text.split_once(':')?;
+    if hours.len() != 2 || minutes.len() != 2 {
+        return None;
+    }
+    if !hours.bytes().all(|byte| byte.is_ascii_digit())
+        || !minutes.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let hours: u32 = hours.parse().ok()?;
+    let minutes: u32 = minutes.parse().ok()?;
+    (hours <= 23 && minutes <= 59).then_some(hours * 60 + minutes)
+}
+
+/// The local time at `minute` past midnight, `day_offset` days after the day
+/// of `now`. `None` when the machine's local time is not readable.
+fn local_at(now: Ts, day_offset: i32, minute: u32) -> Option<Ts> {
+    let stamp = now as libc::time_t;
+    let mut parts = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // SAFETY: both pointers address valid storage; localtime_r initializes tm
+    // on success and returns null on failure.
+    if unsafe { libc::localtime_r(&stamp, parts.as_mut_ptr()) }.is_null() {
+        return None;
+    }
+    let mut target = unsafe { parts.assume_init() };
+    target.tm_mday += day_offset;
+    target.tm_hour = (minute / 60) as i32;
+    target.tm_min = (minute % 60) as i32;
+    target.tm_sec = 0;
+    target.tm_isdst = -1;
+    let time = unsafe { libc::mktime(&mut target) } as Ts;
+    (time != -1).then_some(time)
+}
+
+/// The minute of the day `now` is, in local time. `None` when the machine's
+/// local time is not readable.
+fn local_minute(now: Ts) -> Option<u32> {
+    let stamp = now as libc::time_t;
+    let mut parts = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // SAFETY: as in `local_at`.
+    if unsafe { libc::localtime_r(&stamp, parts.as_mut_ptr()) }.is_null() {
+        return None;
+    }
+    let parts = unsafe { parts.assume_init() };
+    Some(parts.tm_hour as u32 * 60 + parts.tm_min as u32)
+}
+
 pub fn reports(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<VoyageReport>> {
-    build_reports(tx, project, now, false)
+    build_reports(tx, project, now, false, None)
 }
 
 /// Also measure finished voyages, so a station can include the final third
 /// completion. Consumers decide which historical voyages they are watching.
-pub fn reports_including_finished(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<VoyageReport>> {
-    build_reports(tx, project, now, true)
+pub fn reports_including_finished(
+    tx: &Tx<'_>,
+    project: &str,
+    now: Ts,
+) -> GearResult<Vec<VoyageReport>> {
+    build_reports(tx, project, now, true, None)
 }
 
-fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) -> GearResult<Vec<VoyageReport>> {
+/// The report of one voyage (T-471): the board shows one voyage, so its
+/// rebuild measures that voyage and reads no other voyage's history. The
+/// report is the one [`reports_including_finished`] would give for the same
+/// milestone, finished or not.
+pub fn report_for(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+    now: Ts,
+) -> GearResult<Option<VoyageReport>> {
+    Ok(build_reports(tx, project, now, true, Some(milestone))?
+        .into_iter()
+        .next())
+}
+
+fn build_reports(
+    tx: &Tx<'_>,
+    project: &str,
+    now: Ts,
+    include_finished: bool,
+    only: Option<&str>,
+) -> GearResult<Vec<VoyageReport>> {
     let tasks = tx.tasks_of_project(project)?;
+    let departs_at = departs_at(tx, project, now)?;
+    let off_hours_until = off_hours_until(tx, project, now)?;
     let mut reports = Vec::new();
     for voyage in tx.voyages_of_project(project)? {
-        let scope: Vec<_> = tasks.iter().filter(|t| {
-            t.milestone.as_deref() == Some(&voyage.milestone)
-                && !matches!(t.state, TaskState::Draft | TaskState::Cancelled | TaskState::Failed)
-        }).collect();
+        if only.is_some_and(|milestone| milestone != voyage.milestone) {
+            continue;
+        }
+        let scope: Vec<_> = tasks
+            .iter()
+            .filter(|t| {
+                t.milestone.as_deref() == Some(&voyage.milestone)
+                    && !matches!(
+                        t.state,
+                        TaskState::Draft | TaskState::Cancelled | TaskState::Failed
+                    )
+            })
+            .collect();
         if !include_finished && !scope.iter().any(|t| !t.state.is_terminal()) {
             continue;
         }
         let mut r = VoyageReport {
-            milestone: voyage.milestone, title: voyage.title, done: voyage.done, eta: voyage.eta,
+            milestone: voyage.milestone,
+            title: voyage.title,
+            done: voyage.done,
+            eta: voyage.eta,
+            departs_at,
+            off_hours_until,
             elapsed_min: voyage.departure.map(|start| (now - start).max(0) / 60),
-            measured_actual_min: 0, measured_estimate_min: 0,
-            remaining_estimate_min: Some(0), projected_min: None, projected_at: None,
-            scope_min: Some(0), departure_scope_min: voyage.departure_estimate_min,
-            rework_rounds: 0, slowest: None, slowest_lane: None,
-            lanes: Vec::new(), burn_up: Vec::new(),
+            measured_actual_min: 0,
+            measured_estimate_min: 0,
+            remaining_estimate_min: Some(0),
+            projected_min: None,
+            projected_at: None,
+            scope_min: Some(0),
+            departure_scope_min: voyage.departure_estimate_min,
+            rework_rounds: 0,
+            slowest: None,
+            slowest_lane: None,
+            lanes: Vec::new(),
+            burn_up: Vec::new(),
         };
         // Every lane of the voyage, with its own pace (§10.7 row B4).
         let mut lanes: BTreeMap<String, LaneProjection> = BTreeMap::new();
@@ -151,7 +380,10 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
                 projected_min: None,
             });
             if let Some(actual) = actual {
-                if r.slowest.as_ref().is_none_or(|(_, longest)| actual > *longest) {
+                if r.slowest
+                    .as_ref()
+                    .is_none_or(|(_, longest)| actual > *longest)
+                {
                     r.slowest = Some((task.id.clone(), actual));
                 }
             }
@@ -163,7 +395,10 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
                 *lane_started = Some(lane_started.map_or(started, |first| first.min(started)));
             }
             if task.state == TaskState::Done {
-                let closed = rounds.iter().filter_map(|(_, t)| t.handed_in).max()
+                let closed = rounds
+                    .iter()
+                    .filter_map(|(_, t)| t.handed_in)
+                    .max()
                     .or_else(|| rounds.iter().filter_map(|(_, t)| t.last()).max());
                 if let Some(closed) = closed {
                     *lane_closed = Some(lane_closed.map_or(closed, |last| last.max(closed)));
@@ -231,7 +466,10 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
             (r.elapsed_min, r.slowest_lane.as_ref().map(|(_, min)| *min))
         {
             r.projected_min = Some(elapsed + slowest);
-            r.projected_at = voyage.departure.zip(r.projected_min).map(|(start, min)| start + min * 60);
+            r.projected_at = voyage
+                .departure
+                .zip(r.projected_min)
+                .map(|(start, min)| start + min * 60);
         }
         // The burn-up is cumulative: the scope done so far, hour by hour (the
         // prototype's BURN = [0, 0, 95, 170, 260, 330]). The hours without
@@ -266,16 +504,24 @@ pub fn estimate_of(tx: &Tx<'_>, project: &str, task: &TaskRow) -> GearResult<Opt
     if let Some(minutes) = task.estimate_min {
         return Ok(Some(minutes));
     }
-    Ok(tx.get_contract(project, &task.id, task.contract_version)?
+    Ok(tx
+        .get_contract(project, &task.id, task.contract_version)?
         .and_then(|contract| estimate_from_goal(&contract.goal)))
 }
 
 pub fn estimate_from_goal(goal: &str) -> Option<i64> {
     let rest = goal.split_once("Estimate:")?.1.trim_start();
-    let number: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let number: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
     let value: f64 = number.parse().ok()?;
-    let unit: String = rest[number.len()..].trim_start().chars()
-        .take_while(char::is_ascii_alphabetic).collect::<String>().to_ascii_lowercase();
+    let unit: String = rest[number.len()..]
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_alphabetic)
+        .collect::<String>()
+        .to_ascii_lowercase();
     let minutes = match unit.as_str() {
         "h" | "hr" | "hrs" | "hour" | "hours" => value * 60.0,
         "m" | "min" | "mins" | "minute" | "minutes" => value,

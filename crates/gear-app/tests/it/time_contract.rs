@@ -19,11 +19,19 @@ const CANDIDATE: &str = "abc1234";
 fn captain() -> (Env, Fingerprint) {
     (
         Env {
-            ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "captain".into(),
+                generation: 1,
+            }),
             pane_id: Some(CAP_PANE.into()),
             admin: false,
         },
-        Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None },
+        Fingerprint {
+            pane_id: CAP_PANE.into(),
+            kind: Some("codex".into()),
+            session_ref: None,
+        },
     )
 }
 
@@ -43,7 +51,15 @@ fn world() -> Store {
 
 /// Apply a plan as the captain.
 fn apply(s: &mut Store, text: &str, rid: &str) -> gear_model::GearResult<plan::ApplyResult> {
-    let draft = draft::parse(text).unwrap();
+    let mut draft = draft::parse(text).unwrap();
+    // T-461: a first voyage's departure is the user's word.
+    if draft.base == 0 {
+        draft.confirmed = true;
+        draft.decisions.push(
+            "2026-10-27 10:05 confirmed: the voyage departs | why: the user said depart"
+                .to_string(),
+        );
+    }
     let (env, fp) = captain();
     plan::apply(s, &env, Some(&fp), None, &draft, text, rid, T0)
 }
@@ -112,12 +128,23 @@ fn every_step_writes_its_own_time() {
     apply(&mut s, &plan_text(0, NEW_TASK), "r1").unwrap();
 
     // 1. the lane takes the task.
-    s.write(|tx| start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 60)).unwrap();
+    s.write(|tx| start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 60))
+        .unwrap();
     // 2. the delivery is confirmed: the work begins.
-    s.write(|tx| on_delivery_confirmed(tx, "p", "T-1", 1, T0 + 120)).unwrap();
+    s.write(|tx| on_delivery_confirmed(tx, "p", "T-1", 1, T0 + 120))
+        .unwrap();
     // 3. the lane hands the candidate in.
     s.write(|tx| {
-        submit_result(tx, "p", "T-1", 1, 1, CANDIDATE, "Report: notes/T-1.md", T0 + 20 * 60)
+        submit_result(
+            tx,
+            "p",
+            "T-1",
+            1,
+            1,
+            CANDIDATE,
+            "Report: notes/T-1.md",
+            T0 + 20 * 60,
+        )
     })
     .unwrap();
     // 4. the reviewer hands the verdict in.
@@ -138,7 +165,8 @@ fn every_step_writes_its_own_time() {
     })
     .unwrap();
     // 5. the attempt is settled.
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 30 * 60)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 30 * 60))
+        .unwrap();
 
     let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
     assert_eq!(times.delivered, Some(T0 + 60));
@@ -150,9 +178,14 @@ fn every_step_writes_its_own_time() {
 
     // A later step does not move an earlier one: the row is replaced by the
     // settlement, and the times stay where they were.
-    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 40 * 60)).unwrap();
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 40 * 60))
+        .unwrap();
     let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
     assert_eq!(times.started, Some(T0 + 120));
     assert_eq!(times.handed_in, Some(T0 + 20 * 60));
-    assert_eq!(times.settled, Some(T0 + 30 * 60), "the first settle time stands");
+    assert_eq!(
+        times.settled,
+        Some(T0 + 30 * 60),
+        "the first settle time stands"
+    );
 }

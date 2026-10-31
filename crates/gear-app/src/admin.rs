@@ -168,15 +168,21 @@ pub fn check(
     // project's own) and must be able to run unattended (T-31): an agent that
     // stops on a permission dialog cannot be driven by GEAR.
     let table = config::profile_table(&gear_herdr::builtins(), &config)?;
-    let seats_to_check: Vec<(&str, &str)> = std::iter::once(("captain", config.captain.profile.as_str()))
-        .chain(config.lanes.iter().map(|lane| (lane.name.as_str(), lane.profile.as_str())))
-        .chain(
-            config
-                .temps
-                .iter()
-                .map(|temps| ("temps", temps.profile.as_str())),
-        )
-        .collect();
+    let seats_to_check: Vec<(&str, &str)> =
+        std::iter::once(("captain", config.captain.profile.as_str()))
+            .chain(
+                config
+                    .lanes
+                    .iter()
+                    .map(|lane| (lane.name.as_str(), lane.profile.as_str())),
+            )
+            .chain(
+                config
+                    .temps
+                    .iter()
+                    .map(|temps| ("temps", temps.profile.as_str())),
+            )
+            .collect();
     for (name, profile_name) in &seats_to_check {
         let Some(profile) = table.get(*profile_name) else {
             return Err(GearError::new(
@@ -209,12 +215,10 @@ pub fn check(
         Some(home) => home.to_path_buf(),
         None => match std::env::var_os("HOME") {
             Some(home) => std::path::PathBuf::from(home),
-            None => {
-                return Err(GearError::new(
-                    ErrorCode::BadFormat,
-                    "HOME is not set: `gear admin init` cannot check that the GEAR skill is installed",
-                ))
-            }
+            None => return Err(GearError::new(
+                ErrorCode::BadFormat,
+                "HOME is not set: `gear admin init` cannot check that the GEAR skill is installed",
+            )),
         },
     };
     let mut kinds: Vec<(String, String)> = Vec::new();
@@ -236,8 +240,16 @@ pub fn check(
             &format!("the model chain of lane {}", lane.name),
         );
     }
-    note_chain(&mut kinds, &config.models.review, "the reviewers' model chain");
-    note_chain(&mut kinds, &config.models.captain, "the captain's model chain");
+    note_chain(
+        &mut kinds,
+        &config.models.review,
+        "the reviewers' model chain",
+    );
+    note_chain(
+        &mut kinds,
+        &config.models.captain,
+        "the captain's model chain",
+    );
 
     for (kind, who) in &kinds {
         let Ok(agent) = crate::skill::SkillAgent::parse(kind) else {
@@ -364,10 +376,7 @@ fn other_projects(tx: &Tx<'_>) -> GearResult<Vec<(String, String)>> {
 /// not take a slot, and a config lane that has no seat yet does (the engine
 /// will onboard it). `retired` are the lane names this project's seats hold as
 /// `SeatState::Retired`; a first registration has none.
-pub fn lane_quota_problem(
-    config: &config::ProjectConfig,
-    retired: &[String],
-) -> Option<String> {
+pub fn lane_quota_problem(config: &config::ProjectConfig, retired: &[String]) -> Option<String> {
     let running = config
         .lanes
         .iter()
@@ -414,10 +423,7 @@ fn retired_lane_names(tx: &Tx<'_>, project: &str) -> GearResult<Vec<String>> {
 ///   not expand `conventions.voyage_dir` to the same folder, or their plans,
 ///   reports and reviews overwrite each other. The default
 ///   `gear/voyages/{milestone}` names no project.
-pub fn branch_clash(
-    config: &config::ProjectConfig,
-    others: &[(String, String)],
-) -> Option<String> {
+pub fn branch_clash(config: &config::ProjectConfig, others: &[(String, String)]) -> Option<String> {
     let ours = repo_paths(config);
     let our_repos = config.repos();
     for (other_id, other_text) in others {
@@ -500,7 +506,8 @@ fn github_clash(
             }
             let mut shared: Vec<&str> = Vec::new();
             for label in &ours.issues_labels {
-                if theirs.issues_labels.contains(label) && !shared.iter().any(|seen| *seen == label) {
+                if theirs.issues_labels.contains(label) && !shared.iter().any(|seen| *seen == label)
+                {
                     shared.push(label);
                 }
             }
@@ -952,10 +959,18 @@ pub fn staffing_changes(old: &config::ProjectConfig, new: &config::ProjectConfig
     // [quota]
     let (a, b) = (&old.quota, &new.quota);
     if a.lanes != b.lanes {
-        changes.push(changed_field("quota.lanes", &a.lanes.to_string(), &b.lanes.to_string()));
+        changes.push(changed_field(
+            "quota.lanes",
+            &a.lanes.to_string(),
+            &b.lanes.to_string(),
+        ));
     }
     if a.temps != b.temps {
-        changes.push(changed_field("quota.temps", &a.temps.to_string(), &b.temps.to_string()));
+        changes.push(changed_field(
+            "quota.temps",
+            &a.temps.to_string(),
+            &b.temps.to_string(),
+        ));
     }
     if a.includes_captain != b.includes_captain {
         changes.push(changed_field(
@@ -1008,7 +1023,11 @@ pub fn staffing_changes(old: &config::ProjectConfig, new: &config::ProjectConfig
                     changes.push(changed_field(&format!("{key}.kind"), &a.kind, &b.kind));
                 }
                 if a.profile != b.profile {
-                    changes.push(changed_field(&format!("{key}.profile"), &a.profile, &b.profile));
+                    changes.push(changed_field(
+                        &format!("{key}.profile"),
+                        &a.profile,
+                        &b.profile,
+                    ));
                 }
                 if a.models != b.models {
                     changes.push(changed_field(
@@ -1131,7 +1150,11 @@ fn lane_order_text(lanes: &[config::LaneSection]) -> String {
     if lanes.is_empty() {
         return "none".to_string();
     }
-    lanes.iter().map(|lane| lane.name.as_str()).collect::<Vec<_>>().join(", ")
+    lanes
+        .iter()
+        .map(|lane| lane.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// A lane as one value, for a lane that only one of the two configs names.
@@ -1160,11 +1183,7 @@ fn chain_text(chain: &[config::ModelEntry]) -> String {
     if chain.is_empty() {
         return "none".to_string();
     }
-    chain
-        .iter()
-        .map(entry_text)
-        .collect::<Vec<_>>()
-        .join(", ")
+    chain.iter().map(entry_text).collect::<Vec<_>>().join(", ")
 }
 
 /// One model entry as one value, for a changed-field message (T-392 rework
@@ -1227,7 +1246,10 @@ fn switch_text(entry: Option<&config::ModelSwitch>) -> String {
     match entry {
         None => "none".to_string(),
         Some(entry) => match &entry.variant {
-            Some(variant) => format!("picker {:?}, bar {:?}, variant {variant}", entry.picker, entry.bar),
+            Some(variant) => format!(
+                "picker {:?}, bar {:?}, variant {variant}",
+                entry.picker, entry.bar
+            ),
             None => format!("picker {:?}, bar {:?}", entry.picker, entry.bar),
         },
     }
@@ -1266,7 +1288,11 @@ fn retire_excess_temps(tx: &Tx<'_>, project: &str, quota: u32, now: Ts) -> GearR
         .collect();
     // The newest seats fill the slots; the id breaks a tie so the choice is
     // the same on every run.
-    idle.sort_by(|a, b| b.state_since.cmp(&a.state_since).then_with(|| a.id.cmp(&b.id)));
+    idle.sort_by(|a, b| {
+        b.state_since
+            .cmp(&a.state_since)
+            .then_with(|| a.id.cmp(&b.id))
+    });
 
     let reason = format!("temps quota lowered to {quota}");
     for seat in idle.into_iter().skip(room) {

@@ -12,10 +12,16 @@ use gear_store::{BindingRow, BindingStatus, MessageRow, SeatRow, Tx};
 /// binding of the seat that is not Void becomes Void, and a Pending binding
 /// (`pane_id`, `kind`, session = the project's Herdr session) is inserted for the
 /// new generation. Returns the new generation.
-pub fn begin_onboard(tx: &Tx<'_>, seat_id: &str, pane_id: &str, kind: &str, now: Ts) -> GearResult<i64> {
-    let seat = tx.get_seat(seat_id)?.ok_or_else(|| {
-        GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id}"))
-    })?;
+pub fn begin_onboard(
+    tx: &Tx<'_>,
+    seat_id: &str,
+    pane_id: &str,
+    kind: &str,
+    now: Ts,
+) -> GearResult<i64> {
+    let seat = tx
+        .get_seat(seat_id)?
+        .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id}")))?;
 
     // A seat starts onboarding from Queued (freshly registered) or from
     // Missing/NeedsCheck (a restart); the model says which is legal for the
@@ -68,10 +74,16 @@ pub fn begin_onboard(tx: &Tx<'_>, seat_id: &str, pane_id: &str, kind: &str, now:
 /// `generation` becomes Active (with `session_ref` when Herdr reported one) and
 /// the seat goes Starting → Active. A generation that is not the seat's current
 /// one → `StaleGeneration`; a binding that is not Pending → `BadTransition`.
-pub fn finish_onboard(tx: &Tx<'_>, seat_id: &str, generation: i64, session_ref: Option<&str>, now: Ts) -> GearResult<()> {
-    let seat = tx.get_seat(seat_id)?.ok_or_else(|| {
-        GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id}"))
-    })?;
+pub fn finish_onboard(
+    tx: &Tx<'_>,
+    seat_id: &str,
+    generation: i64,
+    session_ref: Option<&str>,
+    now: Ts,
+) -> GearResult<()> {
+    let seat = tx
+        .get_seat(seat_id)?
+        .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id}")))?;
 
     // Only the seat's current generation may finish: a call from an older
     // session is stale (design/03).
@@ -132,11 +144,7 @@ fn binding_status_name(status: BindingStatus) -> &'static str {
 /// earlier job's messages from this job's.
 ///
 /// `None` for a seat without a binding of that generation (never onboarded).
-pub fn generation_started(
-    tx: &Tx<'_>,
-    seat_id: &str,
-    generation: i64,
-) -> GearResult<Option<Ts>> {
+pub fn generation_started(tx: &Tx<'_>, seat_id: &str, generation: i64) -> GearResult<Option<Ts>> {
     Ok(tx
         .get_binding(seat_id, generation)?
         .map(|binding| binding.created))
@@ -166,7 +174,75 @@ pub fn message_belongs(seat: &SeatRow, message: &MessageRow, since: Ts) -> bool 
         return false;
     }
     if seat.role == SeatRole::Temp {
-        return message.task.as_deref() == seat.task_id.as_deref();
+        // T-454 v2: the notice that closes a direction check under this seat
+        // belongs to it even after the check's job cleared its task — the
+        // freed seat must still read why its `gear send` no longer holds.
+        return message.task.as_deref() == seat.task_id.as_deref()
+            || gear_store::is_direction_closed_notice(message);
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gear_model::{MsgKind, MsgState};
+
+    fn seat(role: SeatRole, task: Option<&str>) -> SeatRow {
+        SeatRow {
+            id: "p:review-1".into(),
+            project: "p".into(),
+            role,
+            name: "review-1".into(),
+            profile: "codex".into(),
+            generation: 1,
+            state: SeatState::Standby,
+            state_since: 0,
+            state_reason: None,
+            task_id: task.map(str::to_string),
+        }
+    }
+
+    fn message(task: &str, body: &str) -> MessageRow {
+        MessageRow {
+            project: "p".into(),
+            id: "M-1".into(),
+            thread: format!("direction:{task}:1:abc1234"),
+            task: Some(task.into()),
+            attempt: Some(1),
+            sender: gear_store::ENGINE_SENDER.into(),
+            sender_gen: 0,
+            recipient: "p:review-1".into(),
+            kind: MsgKind::Instruction,
+            urgent: false,
+            body: body.into(),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            wait_on: None,
+            wait_until: None,
+            result: None,
+            created: 10,
+            resolved: None,
+            meta: None,
+        }
+    }
+
+    /// T-454 v2 (F1 of the T-454 review): the freed reviewer still owns the
+    /// notice that closed its direction check, so its `gear` shows it; another
+    /// engine notice about the old task does not.
+    #[test]
+    fn a_freed_reviewer_owns_the_direction_closed_notice() {
+        let freed = seat(SeatRole::Temp, None);
+        let closed = message("T-1", &gear_store::direction_closed_notice_body("T-1", 1));
+        assert!(message_belongs(&freed, &closed, 0));
+        let other = message("T-1", "No push to heat/t1 for 20 min.");
+        assert!(!message_belongs(&freed, &other, 0));
+
+        // The task-match rule for every other message is unchanged.
+        let working = seat(SeatRole::Temp, Some("T-2"));
+        assert!(!message_belongs(&working, &other, 0));
+        let same = seat(SeatRole::Temp, Some("T-1"));
+        assert!(message_belongs(&same, &other, 0));
+    }
 }

@@ -2,7 +2,10 @@
 
 use gear_herdr::{AgentStatus, HerdrAct, Outcome};
 use gear_model::state::require_transition;
-use gear_model::{AttemptState, ErrorCode, GearError, GearResult, MsgKind, OpKind, OpState, SeatRole, SeatState, Ts};
+use gear_model::{
+    AttemptState, ErrorCode, GearError, GearResult, MsgKind, OpKind, OpState, SeatRole, SeatState,
+    Ts,
+};
 use gear_store::{BindingStatus, NewOp, OpRow, Store, Tx};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -138,23 +141,34 @@ pub fn deliver_doorbell_now(
         id: message.to_string(),
         urgent,
         at_once: true,
+        cut: false,
     }];
     // Design §10.4: a lane with no open attempt gets the text that tells it
     // to stop working on earlier things.
     let (no_task, goal) = store.read(|tx| {
-        let Some(row) = tx.get_seat(seat)? else { return Ok((false, None)) };
-        let goal = if row.role == gear_model::SeatRole::Captain { crate::doorbell::goal_line(tx, &row.project)? } else { None };
+        let Some(row) = tx.get_seat(seat)? else {
+            return Ok((false, None));
+        };
+        let goal = if row.role == gear_model::SeatRole::Captain {
+            crate::doorbell::goal_line(tx, &row.project)?
+        } else {
+            None
+        };
         Ok((crate::no_task_of(tx, &row)?, goal))
     })?;
     let text = crate::doorbell::with_goal(crate::doorbell::text(&items, no_task), goal.as_deref());
     // One write transaction: check the seat, the binding and the coverage, and
     // claim the message with this path's own doorbell op before Herdr runs.
     let claimed = store.write(|tx| {
-        let Some(row) = tx.get_seat(seat)? else { return Ok(None) };
+        let Some(row) = tx.get_seat(seat)? else {
+            return Ok(None);
+        };
         if row.generation != generation || !crate::observe::reachable(row.state) {
             return Ok(None);
         }
-        let Some(binding) = tx.get_binding(seat, generation)? else { return Ok(None) };
+        let Some(binding) = tx.get_binding(seat, generation)? else {
+            return Ok(None);
+        };
         if binding.status != BindingStatus::Active {
             return Ok(None);
         }
@@ -190,7 +204,9 @@ pub fn deliver_doorbell_now(
         tx.set_op_state(project, &op.id, OpState::Executing, None, now)?;
         Ok(Some((op.id, binding.pane_id, agent_name, kind, row.role)))
     })?;
-    let Some((op_id, pane_id, agent_name, kind, role)) = claimed else { return Ok(None) };
+    let Some((op_id, pane_id, agent_name, kind, role)) = claimed else {
+        return Ok(None);
+    };
     // T-241: an urgent text for a lane or a reviewer must not sit behind a
     // long tool call — the working turn is cut first, then the text is aimed
     // as today. The captain's turn is never cut.
@@ -201,7 +217,18 @@ pub fn deliver_doorbell_now(
     // live agent **name**, never to the pane id — a pane that lost its agent
     // refuses the text instead of typing it into a shell.
     let names = crate::names::read(herdr).unwrap_or_default();
-    let outcome = aim(herdr, &names, &pane_id, &agent_name, &kind, &text, PromptPolicy::Doorbell { working: true, unknown: urgent });
+    let outcome = aim(
+        herdr,
+        &names,
+        &pane_id,
+        &agent_name,
+        &kind,
+        &text,
+        PromptPolicy::Doorbell {
+            working: true,
+            unknown: urgent,
+        },
+    );
     let state = match &outcome {
         Aimed::Sent => OpState::Submitted,
         // Nothing was typed: the doorbell waits for the next tick (the agent
@@ -240,7 +267,11 @@ pub fn deliver_doorbell_now(
 
 /// Write Intended ops for the doorbell actions (one transaction). Each op
 /// fixes seat, generation and the covered message ids in its payload.
-pub fn intend_doorbells(tx: &Tx<'_>, actions: &[crate::doorbell::DoorbellAction], now: Ts) -> GearResult<Vec<OpRow>> {
+pub fn intend_doorbells(
+    tx: &Tx<'_>,
+    actions: &[crate::doorbell::DoorbellAction],
+    now: Ts,
+) -> GearResult<Vec<OpRow>> {
     let mut ops = Vec::with_capacity(actions.len());
     for action in actions {
         crate::attention::record(tx, action, now)?;
@@ -263,7 +294,11 @@ pub fn intend_doorbells(tx: &Tx<'_>, actions: &[crate::doorbell::DoorbellAction]
 
 /// One Deliver op per action (state Intended): `task`/`attempt` set, payload
 /// `{ "text": <text> }`. Same transaction rules as [`intend_doorbells`].
-pub fn intend_deliveries(tx: &Tx<'_>, actions: &[crate::dispatch::DeliverAction], now: Ts) -> GearResult<Vec<OpRow>> {
+pub fn intend_deliveries(
+    tx: &Tx<'_>,
+    actions: &[crate::dispatch::DeliverAction],
+    now: Ts,
+) -> GearResult<Vec<OpRow>> {
     let mut ops = Vec::with_capacity(actions.len());
     for action in actions {
         let payload = serde_json::json!({ "text": action.text });
@@ -308,12 +343,27 @@ pub fn execute_intended(
         for op in ops {
             if tx.captain_quota_paused(project)? {
                 let seat = tx.get_seat(&op.seat)?;
-                if seat.as_ref().is_some_and(|seat| seat.role == gear_model::SeatRole::Captain)
-                    && op.payload.get("captain_quota_wake").and_then(|v| v.as_bool()) != Some(true)
-                { continue; }
-                if op.kind == OpKind::Deliver && seat.as_ref().is_some_and(|seat| seat.role == gear_model::SeatRole::Lane) {
+                if seat
+                    .as_ref()
+                    .is_some_and(|seat| seat.role == gear_model::SeatRole::Captain)
+                    && op
+                        .payload
+                        .get("captain_quota_wake")
+                        .and_then(|v| v.as_bool())
+                        != Some(true)
+                {
+                    continue;
+                }
+                if op.kind == OpKind::Deliver
+                    && seat
+                        .as_ref()
+                        .is_some_and(|seat| seat.role == gear_model::SeatRole::Lane)
+                {
                     if let (Some(task), Some(n)) = (op.task.as_deref(), op.attempt) {
-                        if tx.get_attempt(project, task, n)?.is_some_and(|a| a.state == gear_model::AttemptState::Delivered) {
+                        if tx
+                            .get_attempt(project, task, n)?
+                            .is_some_and(|a| a.state == gear_model::AttemptState::Delivered)
+                        {
                             continue;
                         }
                     }
@@ -330,8 +380,11 @@ pub fn execute_intended(
             // blocked-seat alert carries the reason to the captain (T-57).
             let item = match item {
                 Prepared::Run { id, .. }
-                    if op.kind == OpKind::Deliver && (crate::blocked::holding(tx, &op.seat)?
-                        || tx.get_meta(&crate::quiet::compact_key(&op.seat))?.is_some_and(|s| !s.is_empty())) =>
+                    if op.kind == OpKind::Deliver
+                        && (crate::blocked::holding(tx, &op.seat)?
+                            || tx
+                                .get_meta(&crate::quiet::compact_key(&op.seat))?
+                                .is_some_and(|s| !s.is_empty())) =>
                 {
                     Prepared::Wait { id }
                 }
@@ -380,7 +433,15 @@ pub fn execute_intended(
     let mut outcomes = Vec::with_capacity(prepared.len());
     for item in &prepared {
         outcomes.push(match item {
-            Prepared::Run { pane_id, text, agent_name, kind, policy, interrupt, .. } => {
+            Prepared::Run {
+                pane_id,
+                text,
+                agent_name,
+                kind,
+                policy,
+                interrupt,
+                ..
+            } => {
                 // T-241: an urgent doorbell for a lane or a reviewer cuts the
                 // working turn first, so the text is not queued as steering
                 // behind a long tool call.
@@ -447,6 +508,21 @@ pub fn execute_intended(
                 state.as_str(),
             )?;
             tx.set_op_state(project, item.id(), state, result.as_deref(), now)?;
+            // T-453: when a delivery was submitted, so the turn evidence is
+            // only taken from a turn after the text went out (not from the
+            // intent, which may be much older).
+            if matches!(item, Prepared::Run { probe: Some(_), .. }) && state == OpState::Submitted {
+                tx.set_meta(&submitted_key(item.id()), &now.to_string())?;
+                if matches!(
+                    item,
+                    Prepared::Run {
+                        policy: PromptPolicy::Delivery { working: true },
+                        ..
+                    }
+                ) {
+                    tx.set_meta(&aimed_working_key(item.id()), "1")?;
+                }
+            }
             // T-407: a delivery that was typed is a finished step in the
             // engine log, and so is the Enter that follows it. `herdr prompt`
             // types the text and sends the Enter in one call, so the typed
@@ -456,7 +532,14 @@ pub fn execute_intended(
             // Herdr refuses it) finishes at once: its own `failed` and `done`
             // lines, from the op's durable intent, as a confirmed one's (F2 of
             // the T-407 review).
-            if let (Prepared::Run { probe: Some((task, created)), .. }, _) = (item, state) {
+            if let (
+                Prepared::Run {
+                    probe: Some((task, created)),
+                    ..
+                },
+                _,
+            ) = (item, state)
+            {
                 match state {
                     OpState::Submitted => {
                         let typed = ms(now.saturating_sub(*created));
@@ -519,7 +602,12 @@ impl Prepared {
 /// A delivery must additionally still belong to the seat's open attempt: an
 /// attempt that was settled, abandoned or replaced must not be nudged (R-35).
 fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
-    let void = |reason: String| Ok(Prepared::Void { id: op.id.clone(), reason });
+    let void = |reason: String| {
+        Ok(Prepared::Void {
+            id: op.id.clone(),
+            reason,
+        })
+    };
 
     let Some(seat) = tx.get_seat(&op.seat)? else {
         return void("the seat no longer exists".to_string());
@@ -531,7 +619,10 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
         ));
     }
     if !crate::observe::reachable(seat.state) {
-        return void(format!("the seat is not reachable ({})", seat.state.as_str()));
+        return void(format!(
+            "the seat is not reachable ({})",
+            seat.state.as_str()
+        ));
     }
     let Some(binding) = tx.get_binding(&op.seat, op.generation)? else {
         return void("the seat has no binding for this generation".to_string());
@@ -553,14 +644,16 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
         if !is_reviewer(tx, &op.seat)? {
             let open = tx.open_attempts_of_seat(&op.seat)?;
             if !open.iter().any(|a| a.task == task && a.n == attempt) {
-                return void(format!("task {task} attempt {attempt} is not the seat's open attempt"));
+                return void(format!(
+                    "task {task} attempt {attempt} is not the seat's open attempt"
+                ));
             }
         }
     }
     let Some(text) = op.payload.get("text").and_then(serde_json::Value::as_str) else {
         return void("the op carries no text".to_string());
     };
-    let mut urgent = false;
+    let mut cut = false;
     let policy = if op.kind == OpKind::Deliver {
         // T-290: a rework packet (attempt n ≥ 2) that is on its way to a lane
         // whose agent queues input while it works (pi, claude) may go while
@@ -582,26 +675,47 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
         let captain = tx.captain_of(&op.project)?.map(|c| c.id);
         if let Some(ids) = ids {
             for id in ids {
-                let message = match id.as_str() { Some(id) => tx.get_message(&op.project, id)?, None => None };
+                let message = match id.as_str() {
+                    Some(id) => tx.get_message(&op.project, id)?,
+                    None => None,
+                };
                 if let Some(message) = message {
-                    working &= crate::doorbell::reaches_while_working(&message, &seat, &binding.kind, captain.as_deref());
+                    working &= crate::doorbell::reaches_while_working(
+                        &message,
+                        &seat,
+                        &binding.kind,
+                        captain.as_deref(),
+                    );
                     unknown &= message.urgent;
-                    urgent |= message.urgent;
-                } else { working = false; unknown = false; }
+                    // T-454: only a seat's own urgent word cuts a working turn;
+                    // an engine notice waits for the next idle moment instead —
+                    // except the notice that closes a direction check under its
+                    // reviewer (T-444), which must end that turn at once.
+                    cut |= crate::doorbell::ends_direction_check(&message)
+                        || (message.urgent && !crate::doorbell::is_notice(&message.sender));
+                } else {
+                    working = false;
+                    unknown = false;
+                }
             }
         }
         PromptPolicy::Doorbell { working, unknown }
     };
     Ok(Prepared::Run {
         probe: (op.kind == OpKind::Deliver).then(|| {
-            (op.task.clone().unwrap_or_else(|| "-".to_string()), op.created)
+            (
+                op.task.clone().unwrap_or_else(|| "-".to_string()),
+                op.created,
+            )
         }),
         // T-241: an urgent doorbell for a lane or a reviewer cuts the working
         // turn first (never the captain: its turn is not cut). Deliveries and
-        // every other op never interrupt.
+        // every other op never interrupt. T-454: an engine notice is never
+        // urgent in this sense, so it never cuts a running command — except the
+        // direction-closed notice (T-444), which ends the reviewer's turn.
         interrupt: op.kind == OpKind::Doorbell
             && matches!(seat.role, SeatRole::Lane | SeatRole::Temp)
-            && urgent,
+            && cut,
         policy,
         id: op.id.clone(),
         pane_id: binding.pane_id.clone(),
@@ -646,8 +760,13 @@ pub enum Aimed {
 enum PromptPolicy {
     /// A task packet. `working`: a rework packet for an agent that queues
     /// input while it works may go mid-turn (T-290).
-    Delivery { working: bool },
-    Doorbell { working: bool, unknown: bool },
+    Delivery {
+        working: bool,
+    },
+    Doorbell {
+        working: bool,
+        unknown: bool,
+    },
 }
 
 fn aim(
@@ -685,6 +804,23 @@ fn aim(
                 Ok(None) => return Aimed::Gone(format!("no agent in the pane {pane_id}")),
                 Ok(Some(_)) => return Aimed::Gone(format!("the agent in {pane_id} changed kind")),
                 Err(e) => return Aimed::Retry(format!("the pane {pane_id} could not be read: {}", e.0)),
+            }
+            // T-453: a step that types confirms the previous Enter took before
+            // it types. A delivery whose text already sits in the composer (its
+            // Enter was lost) is submitted with the Enter, never typed again:
+            // typing it again would join it to itself.
+            if matches!(policy, PromptPolicy::Delivery { .. }) {
+                if let Ok(tail) = herdr.read_tail(pane_id, UNSENT_READ_LINES) {
+                    if crate::composer::holds(&tail, text) {
+                        return match herdr.send_keys(pane_id, &["enter".to_string()]) {
+                            Outcome::Ok(()) => Aimed::Sent,
+                            Outcome::Uncertain { reason } => Aimed::Uncertain(reason),
+                            Outcome::Refused { code, message } => {
+                                Aimed::Refused(format!("{code}: {message}"))
+                            }
+                        };
+                    }
+                }
             }
             match herdr.prompt(&name, text) {
             Outcome::Ok(()) => Aimed::Sent,
@@ -768,6 +904,95 @@ fn is_reviewer(tx: &Tx<'_>, seat: &str) -> GearResult<bool> {
 /// §10.3: `timing.delivery_grace_s`, default 180 s).
 pub const DEFAULT_DELIVERY_GRACE_S: i64 = 180;
 
+/// The meta key of a seat's last observed agent status (T-453).
+fn agent_status_key(seat: &str, generation: i64) -> String {
+    format!("engine.agent_status.{seat}.{generation}")
+}
+
+/// The meta key of the first tick of a seat's current idle episode (T-453).
+fn agent_idle_since_key(seat: &str, generation: i64) -> String {
+    format!("engine.agent_idle_since.{seat}.{generation}")
+}
+
+/// The meta key of a seat's last idle-to-busy turn (T-453).
+fn agent_turn_key(seat: &str, generation: i64) -> String {
+    format!("engine.agent_turn.{seat}.{generation}")
+}
+
+/// The meta key of a delivery's submission time (T-453): the turn evidence is
+/// taken only from a turn at or after it.
+fn submitted_key(op_id: &str) -> String {
+    format!("engine.deliver_submitted.{op_id}")
+}
+
+/// The meta key that says a delivery was typed into a working agent (T-453):
+/// its text waits in the input queue, so its window starts when the agent is
+/// idle again.
+fn aimed_working_key(op_id: &str) -> String {
+    format!("engine.deliver_working.{op_id}")
+}
+
+fn status_word(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Idle => "idle",
+        AgentStatus::Done => "done",
+        AgentStatus::Working => "working",
+        AgentStatus::Blocked => "blocked",
+        AgentStatus::Unknown => "unknown",
+    }
+}
+
+/// Record every seat's agent status and the turns it takes (T-453).
+///
+/// A delivery counts as landed when the agent shows it took it: the attempt's
+/// first check-in, or the agent's idle-to-busy turn after the text was
+/// submitted. The turn is what a lane shows when it starts reading its packet
+/// without checking in first, so the tick keeps it: a seat whose agent went
+/// from Idle or Done to Working gets its turn time, and the confirm step uses
+/// it as evidence for a delivery submitted before it. The idle episode is kept
+/// too, so a delivery typed into a busy agent has its window start when the
+/// agent is idle again.
+///
+/// Returns the seats that turned busy this tick.
+pub fn note_agent_turns(
+    tx: &Tx<'_>,
+    observed: &[crate::observe::SeatObs],
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    let mut turns = Vec::new();
+    for obs in observed {
+        let seat = &obs.seat.id;
+        let generation = obs.seat.generation;
+        let status_key = agent_status_key(seat, generation);
+        let idle_key = agent_idle_since_key(seat, generation);
+        if obs.presence != crate::observe::Presence::Present {
+            tx.set_meta(&status_key, "")?;
+            tx.set_meta(&idle_key, "")?;
+            continue;
+        }
+        let Some(status) = obs.status else {
+            continue;
+        };
+        let previous = tx.get_meta(&status_key)?.unwrap_or_default();
+        let was_idle = matches!(previous.as_str(), "idle" | "done");
+        let idle = matches!(status, AgentStatus::Idle | AgentStatus::Done);
+        if was_idle && status == AgentStatus::Working {
+            tx.set_meta(&agent_turn_key(seat, generation), &now.to_string())?;
+            turns.push(seat.clone());
+        }
+        if idle {
+            let since = tx.get_meta(&idle_key)?;
+            if !was_idle || since.as_deref().unwrap_or("").is_empty() {
+                tx.set_meta(&idle_key, &now.to_string())?;
+            }
+        } else {
+            tx.set_meta(&idle_key, "")?;
+        }
+        tx.set_meta(&status_key, status_word(status))?;
+    }
+    Ok(turns)
+}
+
 /// [`confirm_pending_with`] with the default confirmation window.
 pub fn confirm_pending(
     store: &mut Store,
@@ -795,8 +1020,11 @@ pub fn confirm_pending(
 /// (T-213): a doorbell that reached a working agent is queued behind its turn,
 /// which is not a stall — such a doorbell spends no check budget, so the
 /// budget counts only the checks made while the agent is idle or done. A
-/// delivery keeps its wall-clock window: a working seat is not spared the
-/// confirmation window.
+/// delivery keeps its wall-clock window (design §10.3): a working seat is not
+/// spared it, but T-453 pauses the window while the agent works — the text
+/// waits in its input queue — and starts it when the agent is idle again. A
+/// delivery also lands on the agent's idle-to-busy turn after the submit
+/// ([`note_agent_turns`]).
 /// Returns (confirmed op ids, flagged seat ids).
 pub fn confirm_pending_with(
     store: &mut Store,
@@ -886,10 +1114,17 @@ pub fn confirm_pending_with(
                     // other: the stored explanation can be traced (P3 of the
                     // T-5 review).
                     let review_delivery = op.kind == OpKind::Deliver && is_reviewer(tx, &op.seat)?;
-                    let hand_in = op.kind == OpKind::Deliver && !review_delivery && !tx.views_since(&op.seat, op.generation, op.created)?.iter().any(|view|
+                    let turn = op.kind == OpKind::Deliver
+                        && tx
+                            .get_meta(&agent_turn_key(&op.seat, op.generation))?
+                            .and_then(|value| value.parse::<Ts>().ok())
+                            == Some(view_ts);
+                    let hand_in = op.kind == OpKind::Deliver && !review_delivery && !turn && !tx.views_since(&op.seat, op.generation, op.created)?.iter().any(|view|
                         view.ts == view_ts && view.shown_task.as_deref() == op.task.as_deref() && view.shown_attempt == op.attempt);
                     let evidence = if review_delivery && !review_by_view {
                         format!("verdict {} attempt {} @ {view_ts}", op.task.as_deref().unwrap_or("-"), op.attempt.unwrap_or(0))
+                    } else if turn {
+                        format!("turn {}/{} @ {view_ts}", op.seat, op.generation)
                     } else if hand_in {
                         format!("hand-in {} attempt {} @ {view_ts}", op.task.as_deref().unwrap_or("-"), op.attempt.unwrap_or(0))
                     } else {
@@ -964,11 +1199,33 @@ pub fn confirm_pending_with(
                 }
                 // No evidence yet: the op waits for the next round.
                 if op.kind == OpKind::Deliver {
+                    // T-453: a delivery typed into a working agent waits in its
+                    // input queue. The window is paused while the agent works
+                    // and starts when it is idle again: no stall item before
+                    // that.
+                    if working.contains(&op.seat) {
+                        continue;
+                    }
                     // Design §10.3: the confirmation window is wall clock
                     // (`timing.delivery_grace_s`), not a number of checks: a
                     // lane that reads its packet after a minute still
-                    // confirms it.
-                    if now - op.created < grace_s {
+                    // confirms it. T-453: a text typed into a busy agent has
+                    // its window start when the agent is idle again, not at
+                    // the op's intent.
+                    let idle_since = tx
+                        .get_meta(&agent_idle_since_key(&op.seat, op.generation))?
+                        .and_then(|value| value.parse::<Ts>().ok());
+                    let aimed_working = tx
+                        .get_meta(&aimed_working_key(&op.id))?
+                        .is_some_and(|value| !value.is_empty());
+                    let window_start = if aimed_working {
+                        idle_since
+                            .map(|idle| idle.max(op.created))
+                            .unwrap_or(op.created)
+                    } else {
+                        op.created
+                    };
+                    if now - window_start < grace_s {
                         continue;
                     }
                     // The window is over: the delivery is not confirmed. It
@@ -1083,12 +1340,6 @@ pub const UNSENT_RESUBMIT_AFTER_S: i64 = 30;
 /// How many lines of the pane the typed text is looked for in (T-371).
 const UNSENT_READ_LINES: u32 = 12;
 
-/// How many of the tail's last non-empty lines must show the text (T-371).
-const UNSENT_TAIL_LINES: usize = 6;
-
-/// How much of the text's first line identifies it in the pane (T-371).
-const UNSENT_NEEDLE_CHARS: usize = 40;
-
 /// The meta key that marks an op as already given its Enter (T-371).
 fn resubmit_key(op_id: &str) -> String {
     format!("engine.resubmit.{op_id}")
@@ -1097,30 +1348,6 @@ fn resubmit_key(op_id: &str) -> String {
 /// The meta key that marks an op as already typed again (T-404).
 fn retype_key(op_id: &str) -> String {
     format!("engine.retype.{op_id}")
-}
-
-/// The needle a pane must show for `text`: its first line, cut to its first
-/// [`UNSENT_NEEDLE_CHARS`] characters. `None` = nothing to look for.
-fn unsent_needle(text: &str) -> Option<String> {
-    let needle: String = text
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .take(UNSENT_NEEDLE_CHARS)
-        .collect();
-    if needle.trim().is_empty() {
-        return None;
-    }
-    Some(needle)
-}
-
-/// Whether one of the tail's last [`UNSENT_TAIL_LINES`] non-empty lines shows
-/// `needle` (T-371).
-fn tail_shows(tail: &str, needle: &str) -> bool {
-    let lines: Vec<&str> = tail.lines().filter(|line| !line.trim().is_empty()).collect();
-    let start = lines.len().saturating_sub(UNSENT_TAIL_LINES);
-    lines[start..].iter().any(|line| line.contains(needle))
 }
 
 /// Give a delivery whose text sits unsent in its lane's input box its Enter
@@ -1133,8 +1360,9 @@ fn tail_shows(tail: &str, needle: &str) -> bool {
 /// [`UNSENT_RESUBMIT_AFTER_S`] old, whose seat is Active at the op's
 /// generation, whose agent is Idle or Done and that never had its Enter
 /// (`engine.resubmit.<op id>` not set): the pane's tail is read, and when the
-/// text's first line (its first [`UNSENT_NEEDLE_CHARS`] characters) shows in
-/// one of its last [`UNSENT_TAIL_LINES`] non-empty lines, one `enter` is sent
+/// text's first line (its first [`crate::composer::NEEDLE_CHARS`] characters)
+/// shows in one of its last [`crate::composer::TAIL_LINES`] non-empty lines, one
+/// `enter` is sent
 /// and the meta key records it — so the op gets that Enter once, never twice.
 /// A failed read or a refused key changes nothing (no meta, no second try at
 /// once). A confirmed op is never touched: the lane read its packet.
@@ -1159,14 +1387,18 @@ pub fn resubmit_unsent(
             if op.kind != OpKind::Deliver || now - op.created < UNSENT_RESUBMIT_AFTER_S {
                 continue;
             }
-            let Some(seat) = tx.get_seat(&op.seat)? else { continue };
+            let Some(seat) = tx.get_seat(&op.seat)? else {
+                continue;
+            };
             if seat.role != SeatRole::Lane
                 || seat.state != SeatState::Active
                 || seat.generation != op.generation
             {
                 continue;
             }
-            let Some(binding) = tx.get_binding(&op.seat, op.generation)? else { continue };
+            let Some(binding) = tx.get_binding(&op.seat, op.generation)? else {
+                continue;
+            };
             if binding.status != BindingStatus::Active {
                 continue;
             }
@@ -1178,11 +1410,12 @@ pub fn resubmit_unsent(
             let Some(text) = op.payload.get("text").and_then(serde_json::Value::as_str) else {
                 continue;
             };
-            let Some(needle) = unsent_needle(text) else { continue };
+            if crate::composer::needle(text).is_none() {
+                continue;
+            }
             out.push((
                 op.id.clone(),
                 binding.pane_id.clone(),
-                needle,
                 text.to_string(),
                 // T-407: what the step's probe line names, and the times it
                 // is measured from — the op's task and its own times.
@@ -1194,14 +1427,18 @@ pub fn resubmit_unsent(
         Ok(out)
     })?;
     let mut sent = Vec::new();
-    for (op_id, pane, needle, text, task, created, typed_at) in candidates {
+    for (op_id, pane, text, task, created, typed_at) in candidates {
         // Only an agent that has nothing better to do left the text unsent.
-        let Ok(Some(agent)) = herdr.agent_get(&pane) else { continue };
+        let Ok(Some(agent)) = herdr.agent_get(&pane) else {
+            continue;
+        };
         if !matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done) {
             continue;
         }
-        let Ok(tail) = herdr.read_tail(&pane, UNSENT_READ_LINES) else { continue };
-        if !tail_shows(&tail, &needle) {
+        let Ok(tail) = herdr.read_tail(&pane, UNSENT_READ_LINES) else {
+            continue;
+        };
+        if !crate::composer::holds(&tail, &text) {
             // The text never reached the input box (T-404): it is typed again
             // once, and a refused prompt changes nothing, not even the meta.
             if !matches!(herdr.prompt(&pane, &text), Outcome::Ok(())) {
@@ -1209,18 +1446,33 @@ pub fn resubmit_unsent(
             }
             store.write(|tx| tx.set_meta(&retype_key(&op_id), &now.to_string()))?;
             // T-407: the text typed again is the delivery's `typed` step.
-            probe("deliver", &task, "typed", ms(now.saturating_sub(created)), ms(now.saturating_sub(created)));
+            probe(
+                "deliver",
+                &task,
+                "typed",
+                ms(now.saturating_sub(created)),
+                ms(now.saturating_sub(created)),
+            );
             sent.push(op_id);
             continue;
         }
         // The Enter itself: a refused key changes nothing, not even the meta.
-        if !matches!(herdr.send_keys(&pane, &["enter".to_string()]), Outcome::Ok(())) {
+        if !matches!(
+            herdr.send_keys(&pane, &["enter".to_string()]),
+            Outcome::Ok(())
+        ) {
             continue;
         }
         store.write(|tx| tx.set_meta(&resubmit_key(&op_id), &now.to_string()))?;
         // T-407: the Enter the delivery lost is its own step, measured from
         // the typing it waited behind.
-        probe("deliver", &task, "enter", ms(now.saturating_sub(typed_at)), ms(now.saturating_sub(created)));
+        probe(
+            "deliver",
+            &task,
+            "enter",
+            ms(now.saturating_sub(typed_at)),
+            ms(now.saturating_sub(created)),
+        );
         sent.push(op_id);
     }
     Ok(sent)
@@ -1270,9 +1522,14 @@ pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResu
             let mut changed = started_here;
             if !started_here {
                 let state = tx.get_attempt(project, task, attempt)?.map(|row| row.state);
-                if matches!(state, Some(AttemptState::Submitted | AttemptState::Accepted | AttemptState::Rejected)) {
+                if matches!(
+                    state,
+                    Some(AttemptState::Submitted | AttemptState::Accepted | AttemptState::Rejected)
+                ) {
                     let key = format!("engine.delivery_late_handin.{}.{}", project, op.id);
-                    if tx.get_meta(&key)?.is_some_and(|value| !value.is_empty()) { continue }
+                    if tx.get_meta(&key)?.is_some_and(|value| !value.is_empty()) {
+                        continue;
+                    }
                     late_hand_in_key = Some(key);
                     changed = true;
                 } else if state != Some(AttemptState::Started) {
@@ -1283,7 +1540,9 @@ pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResu
             // predate the check-in, so a later failure of the same lane keeps
             // its own item.
             crate::stall::resolve(tx, project, &op.seat, now, Some(view_ts))?;
-            if let Some(key) = late_hand_in_key { tx.set_meta(&key, "1")?; }
+            if let Some(key) = late_hand_in_key {
+                tx.set_meta(&key, "1")?;
+            }
             if changed {
                 confirmed.push(format!("{task}/{attempt} @ {view_ts}"));
             }
@@ -1299,10 +1558,24 @@ pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResu
 /// next doorbell. Tying confirmation to the ids left the captain deaf twice
 /// (L-66, L-69): an id no view would show held the seat's slot forever.
 fn shown_in_a_view(tx: &Tx<'_>, project: &str, op: &OpRow, now: Ts) -> GearResult<Option<Ts>> {
-    if op.payload.get("captain_quota_wake").and_then(|v| v.as_bool()) == Some(true) {
-        let before = op.payload.get("views_before").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-        return Ok(tx.views_since(&op.seat, op.generation, 0)?.iter().skip(before)
-            .filter(|view| view.ts >= op.created).map(|view| view.ts).min());
+    if op
+        .payload
+        .get("captain_quota_wake")
+        .and_then(|v| v.as_bool())
+        == Some(true)
+    {
+        let before = op
+            .payload
+            .get("views_before")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        return Ok(tx
+            .views_since(&op.seat, op.generation, 0)?
+            .iter()
+            .skip(before)
+            .filter(|view| view.ts >= op.created)
+            .map(|view| view.ts)
+            .min());
     }
     let views = tx.views_since(&op.seat, op.generation, op.created)?;
     if let Some(ts) = views.iter().map(|view| view.ts).min() {
@@ -1321,7 +1594,11 @@ fn shown_in_a_view(tx: &Tx<'_>, project: &str, op: &OpRow, now: Ts) -> GearResul
     }
     for id in ids {
         match tx.get_message(project, id)? {
-            Some(msg) if !matches!(msg.state, gear_model::MsgState::Open | gear_model::MsgState::Waiting) => {}
+            Some(msg)
+                if !matches!(
+                    msg.state,
+                    gear_model::MsgState::Open | gear_model::MsgState::Waiting
+                ) => {}
             _ => return Ok(None),
         }
     }
@@ -1351,19 +1628,25 @@ fn review_delivery_evidence(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<(Ts, b
 /// still waits for its evidence, the older op is not confirmed (T-267) —
 /// the newer one's confirmation voids it.
 fn superseded(tx: &Tx<'_>, project: &str, op: &OpRow) -> GearResult<bool> {
-    Ok(tx.ops_in_state(project, OpState::Submitted)?.into_iter().any(|other| {
-        other.id != op.id
-            && other.kind == OpKind::Deliver
-            && other.seat == op.seat
-            && other.task == op.task
-            && other.attempt == op.attempt
-            && (other.created, op_seq(&other.id)) > (op.created, op_seq(&op.id))
-    }))
+    Ok(tx
+        .ops_in_state(project, OpState::Submitted)?
+        .into_iter()
+        .any(|other| {
+            other.id != op.id
+                && other.kind == OpKind::Deliver
+                && other.seat == op.seat
+                && other.task == op.task
+                && other.attempt == op.attempt
+                && (other.created, op_seq(&other.id)) > (op.created, op_seq(&op.id))
+        }))
 }
 
 /// The numeric part of an op id (`O-12` → 12).
 fn op_seq(id: &str) -> i64 {
-    id.rsplit('-').next().and_then(|n| n.parse::<i64>().ok()).unwrap_or(0)
+    id.rsplit('-')
+        .next()
+        .and_then(|n| n.parse::<i64>().ok())
+        .unwrap_or(0)
 }
 
 /// A reviewer's delivery op that the reviewer's own first `gear` proves
@@ -1423,13 +1706,40 @@ fn shown_delivery(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
         return Ok(None);
     };
     let views = tx.views_since(&op.seat, op.generation, op.created)?;
-    if let Some(view) = views.iter().find(|view| view.shown_task.as_deref() == Some(task) && view.shown_attempt == Some(attempt)) {
+    if let Some(view) = views.iter().find(|view| {
+        view.shown_task.as_deref() == Some(task) && view.shown_attempt == Some(attempt)
+    }) {
         return Ok(Some(view.ts));
+    }
+    // T-453: the agent's idle-to-busy turn after the text was submitted. A
+    // delivery is typed into an empty composer (a command left in the box is
+    // submitted before the packet is typed), so a turn at or after the op's
+    // submission is the agent taking it. The tick records the turn
+    // (`note_agent_turns`); a turn from before the submit proves nothing.
+    if let Some(turn) = tx
+        .get_meta(&agent_turn_key(&op.seat, op.generation))?
+        .and_then(|value| value.parse::<Ts>().ok())
+    {
+        let submitted = tx
+            .get_meta(&submitted_key(&op.id))?
+            .and_then(|value| value.parse::<Ts>().ok())
+            .unwrap_or(op.created);
+        if turn >= submitted {
+            return Ok(Some(turn));
+        }
     }
     // A hand-in from this seat proves it received the attempt even when no
     // check-in view was recorded. Do not flag its delivery as unconfirmed.
     let row = tx.get_attempt(&op.project, task, attempt)?;
-    if row.as_ref().is_some_and(|a| a.seat == op.seat && matches!(a.state, gear_model::AttemptState::Submitted | gear_model::AttemptState::Accepted | gear_model::AttemptState::Rejected)) {
+    if row.as_ref().is_some_and(|a| {
+        a.seat == op.seat
+            && matches!(
+                a.state,
+                gear_model::AttemptState::Submitted
+                    | gear_model::AttemptState::Accepted
+                    | gear_model::AttemptState::Rejected
+            )
+    }) {
         return Ok(tx.attempt_times(&op.project, task, attempt)?.handed_in);
     }
     // T-277: the seat's own word about this very attempt is proof as well — a
@@ -1443,7 +1753,10 @@ fn shown_delivery(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
         message.sender_gen == op.generation
             && message.task.as_deref() == Some(task)
             && message.attempt == Some(attempt)
-            && matches!(message.kind, MsgKind::Progress | MsgKind::Question | MsgKind::Result)
+            && matches!(
+                message.kind,
+                MsgKind::Progress | MsgKind::Question | MsgKind::Result
+            )
     }) {
         return Ok(Some(message.created));
     }
@@ -1482,12 +1795,7 @@ fn record_attempt_session(tx: &Tx<'_>, project: &str, op: &OpRow) -> GearResult<
 /// A confirmed delivery starts its attempt: `Delivered` → `Started` and the
 /// task `Ready` → `Running`, in the same transaction (design/06). Returns
 /// false when the attempt is not waiting for its first check-in any more.
-fn start_confirmed_attempt(
-    tx: &Tx<'_>,
-    project: &str,
-    op: &OpRow,
-    now: Ts,
-) -> GearResult<bool> {
+fn start_confirmed_attempt(tx: &Tx<'_>, project: &str, op: &OpRow, now: Ts) -> GearResult<bool> {
     let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
         return Ok(false);
     };
@@ -1517,7 +1825,13 @@ pub fn recover_on_start(store: &mut Store, now: Ts) -> GearResult<Vec<(String, S
                     "executing",
                     "unknown",
                 )?;
-                tx.set_op_state(&op.project, &op.id, OpState::Unknown, Some(RECOVERED_REASON), now)?;
+                tx.set_op_state(
+                    &op.project,
+                    &op.id,
+                    OpState::Unknown,
+                    Some(RECOVERED_REASON),
+                    now,
+                )?;
                 recovered.push((op.project.clone(), op.id));
             }
         }
@@ -1549,8 +1863,10 @@ mod tests {
                 created: T0,
             })
             .unwrap();
-        tx.set_op_state("p", &op.id, OpState::Executing, None, T0).unwrap();
-        tx.set_op_state("p", &op.id, OpState::Submitted, None, T0).unwrap();
+        tx.set_op_state("p", &op.id, OpState::Executing, None, T0)
+            .unwrap();
+        tx.set_op_state("p", &op.id, OpState::Submitted, None, T0)
+            .unwrap();
         op.id
     }
 
@@ -1586,7 +1902,10 @@ mod tests {
 
         let (confirmed, flagged) = confirm_pending(&mut store, "p", 1, T0 + 10).unwrap();
         assert!(confirmed.is_empty());
-        assert!(flagged.is_empty(), "a review waits for its verdict, it flags nothing");
+        assert!(
+            flagged.is_empty(),
+            "a review waits for its verdict, it flags nothing"
+        );
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
         assert_eq!(op.state, OpState::Submitted);
         assert_eq!(op.check_budget, 0, "no budget is spent while it waits");
@@ -1627,8 +1946,10 @@ mod tests {
                 created,
             })
             .unwrap();
-        tx.set_op_state("p", &op.id, OpState::Executing, None, created).unwrap();
-        tx.set_op_state("p", &op.id, OpState::Submitted, None, created).unwrap();
+        tx.set_op_state("p", &op.id, OpState::Executing, None, created)
+            .unwrap();
+        tx.set_op_state("p", &op.id, OpState::Submitted, None, created)
+            .unwrap();
         op.id
     }
 
@@ -1708,7 +2029,10 @@ mod tests {
 
         assert_eq!(confirmed, vec!["O-1".to_string()]);
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
-        assert_eq!(op.result, Some(format!("verdict T-1 attempt 1 @ {}", T0 + 5)));
+        assert_eq!(
+            op.result,
+            Some(format!("verdict T-1 attempt 1 @ {}", T0 + 5))
+        );
     }
 
     #[test]
@@ -1716,7 +2040,12 @@ mod tests {
         // Neither proof is in: the delivery waits, spends no budget and flags
         // nothing — the reviewer may still be starting (T-267).
         let mut store = reviewer_world();
-        store.write(|tx| { review_delivery(tx, "T-1", T0); Ok(()) }).unwrap();
+        store
+            .write(|tx| {
+                review_delivery(tx, "T-1", T0);
+                Ok(())
+            })
+            .unwrap();
 
         let (confirmed, flagged) = confirm_pending(&mut store, "p", 1, T0 + 600).unwrap();
 
@@ -1760,7 +2089,15 @@ mod tests {
         store
             .write(|tx| {
                 testing::seed_project(tx, "p", "sess", T0)?;
-                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    T0,
+                )?;
                 let op = tx
                     .insert_op(&NewOp {
                         project: "p".into(),
@@ -1794,8 +2131,18 @@ mod tests {
 
         let (confirmed, _) = confirm_pending_with(&mut store, "p", 2, 60, &[], T0 + 20).unwrap();
 
-        assert!(confirmed.is_empty(), "a view of the seat alone proves nothing");
-        assert_eq!(store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap().state, OpState::Submitted);
+        assert!(
+            confirmed.is_empty(),
+            "a view of the seat alone proves nothing"
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_op("p", "O-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            OpState::Submitted
+        );
     }
 
     /// A lane Deliver op for `task` attempt 1, Submitted, created `created`.
@@ -1878,7 +2225,9 @@ mod tests {
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
         assert_eq!(op.state, OpState::Confirmed);
         assert!(
-            op.result.as_deref().is_some_and(|result| result.contains(&format!("T-1 attempt 1 @ {}", T0 + 10))),
+            op.result
+                .as_deref()
+                .is_some_and(|result| result.contains(&format!("T-1 attempt 1 @ {}", T0 + 10))),
             "the message's time is the evidence: {:?}",
             op.result
         );
@@ -1901,7 +2250,10 @@ mod tests {
 
         let (confirmed, _) = confirm_pending_with(&mut store, "p", 2, 60, &[], T0 + 20).unwrap();
 
-        assert!(confirmed.is_empty(), "none of these messages is the lane's word on T-1 attempt 1");
+        assert!(
+            confirmed.is_empty(),
+            "none of these messages is the lane's word on T-1 attempt 1"
+        );
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
         assert_eq!(op.state, OpState::Submitted);
     }
@@ -1914,7 +2266,15 @@ mod tests {
         store
             .write(|tx| {
                 testing::seed_project(tx, "p", "sess", T0)?;
-                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    T0,
+                )?;
                 submitted_op(tx, "p:heat", OpKind::Onboard);
                 Ok(())
             })
@@ -1923,7 +2283,10 @@ mod tests {
         let (confirmed, flagged) = confirm_pending(&mut store, "p", 1, T0 + 30).unwrap();
 
         assert!(confirmed.is_empty());
-        assert!(flagged.is_empty(), "an op without a rule never flags its seat");
+        assert!(
+            flagged.is_empty(),
+            "an op without a rule never flags its seat"
+        );
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
         assert_eq!(op.state, OpState::Submitted);
         assert_eq!(op.check_budget, 0, "no budget is spent on it");
@@ -1946,7 +2309,8 @@ mod tests {
                 created,
             })
             .unwrap();
-        tx.set_op_state("p", &op.id, OpState::Executing, None, created).unwrap();
+        tx.set_op_state("p", &op.id, OpState::Executing, None, created)
+            .unwrap();
         op.id
     }
 
@@ -1962,7 +2326,15 @@ mod tests {
         store
             .write(|tx| {
                 testing::seed_project(tx, "p", "sess", T0)?;
-                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    T0,
+                )?;
                 executing_op(tx, "p:heat", OpKind::Doorbell, T0 - DOORBELL_EXPIRY_S);
                 Ok(())
             })
@@ -1972,7 +2344,11 @@ mod tests {
 
         assert_eq!(confirmed, vec!["O-1".to_string()]);
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
-        assert_eq!(op.state, OpState::Confirmed, "it left Executing and expired like any doorbell");
+        assert_eq!(
+            op.state,
+            OpState::Confirmed,
+            "it left Executing and expired like any doorbell"
+        );
         assert_eq!(
             op.result.as_deref(),
             Some("expired: rung again if items still wait")
@@ -1986,7 +2362,15 @@ mod tests {
         store
             .write(|tx| {
                 testing::seed_project(tx, "p", "sess", T0)?;
-                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    T0,
+                )?;
                 executing_op(tx, "p:heat", OpKind::Doorbell, T0 - 10);
                 Ok(())
             })
@@ -2007,7 +2391,15 @@ mod tests {
         store
             .write(|tx| {
                 testing::seed_project(tx, "p", "sess", T0)?;
-                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    T0,
+                )?;
                 executing_op(tx, "p:heat", OpKind::Merge, T0 - 3600);
                 Ok(())
             })
@@ -2028,14 +2420,21 @@ mod tests {
         store
             .write(|tx| {
                 testing::seed_project(tx, "p", "sess", T0)?;
-                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    T0,
+                )?;
                 executing_op(tx, "p:heat", OpKind::Deliver, T0 - 300);
                 Ok(())
             })
             .unwrap();
 
-        let (confirmed, _) =
-            confirm_pending_with(&mut store, "p", 1, 1000, &[], T0).unwrap();
+        let (confirmed, _) = confirm_pending_with(&mut store, "p", 1, 1000, &[], T0).unwrap();
 
         assert!(confirmed.is_empty());
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
@@ -2061,7 +2460,15 @@ mod tests {
         store
             .write(|tx| {
                 testing::seed_project(tx, "p", "sess", T0)?;
-                testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "captain",
+                    SeatRole::Captain,
+                    CAP_PANE,
+                    "codex",
+                    T0,
+                )?;
                 testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "pi", T0)?;
                 testing::seed_temp_seat(tx, "p", "r-1", "T-1", REVIEW_PANE, "pi", T0)?;
                 Ok(())
@@ -2094,6 +2501,34 @@ mod tests {
             .id)
     }
 
+    /// An open notice from the engine to `recipient`, with `body`. Returns its
+    /// id.
+    fn notice_for(tx: &Tx<'_>, recipient: &str, body: &str) -> GearResult<String> {
+        Ok(tx
+            .insert_message(&NewMessage {
+                project: "p".into(),
+                thread: "direction:T-1:1:abc1234".into(),
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: recipient.into(),
+                kind: MsgKind::Instruction,
+                urgent: false,
+                body: body.into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: T0,
+                meta: None,
+            })
+            .unwrap()
+            .id)
+    }
+
+    /// The body of the notice that closes a direction check (T-444).
+    const DIRECTION_CLOSED: &str = "The direction check of T-1 attempt 1 is closed: the attempt was handed in or ended. Send nothing for it; end your turn.";
+
     /// An Intended doorbell for `seat` covering `message`.
     fn doorbell_for(tx: &Tx<'_>, seat: &str, message: &str) -> GearResult<String> {
         Ok(tx
@@ -2120,7 +2555,10 @@ mod tests {
         let esc = h.calls.iter().position(|c| {
             matches!(c, Call::SendKeys { pane: p, keys } if p == pane && keys == &["esc".to_string()])
         });
-        let prompt = h.calls.iter().position(|c| matches!(c, Call::Prompt { pane: p, .. } if p == pane));
+        let prompt = h
+            .calls
+            .iter()
+            .position(|c| matches!(c, Call::Prompt { pane: p, .. } if p == pane));
         match (esc, prompt) {
             (None, Some(_)) => assert_eq!(no_esc_message, "", "{no_esc_message}"),
             (Some(e), Some(p)) => assert!(e < p, "the escape goes before the prompt"),
@@ -2150,7 +2588,11 @@ mod tests {
         let done = execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
 
         assert_eq!(done, vec![("O-1".to_string(), "submitted".to_string())]);
-        prompt_or_esc(&herdr, LANE_PANE, "a working lane is cut before its urgent doorbell");
+        prompt_or_esc(
+            &herdr,
+            LANE_PANE,
+            "a working lane is cut before its urgent doorbell",
+        );
     }
 
     #[test]
@@ -2168,7 +2610,13 @@ mod tests {
 
         execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
 
-        assert!(!herdr.calls.iter().any(|c| matches!(c, Call::SendKeys { .. })), "only an urgent doorbell cuts a turn");
+        assert!(
+            !herdr
+                .calls
+                .iter()
+                .any(|c| matches!(c, Call::SendKeys { .. })),
+            "only an urgent doorbell cuts a turn"
+        );
     }
 
     #[test]
@@ -2187,7 +2635,13 @@ mod tests {
         let done = execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
 
         assert_eq!(done, vec![("O-1".to_string(), "submitted".to_string())]);
-        assert!(!herdr.calls.iter().any(|c| matches!(c, Call::SendKeys { .. })), "an idle lane has no turn to cut");
+        assert!(
+            !herdr
+                .calls
+                .iter()
+                .any(|c| matches!(c, Call::SendKeys { .. })),
+            "an idle lane has no turn to cut"
+        );
     }
 
     #[test]
@@ -2206,22 +2660,100 @@ mod tests {
         let done = execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
 
         assert_eq!(done, vec![("O-1".to_string(), "submitted".to_string())]);
-        assert!(!herdr.calls.iter().any(|c| matches!(c, Call::SendKeys { .. })), "the captain's turn is not cut");
+        assert!(
+            !herdr
+                .calls
+                .iter()
+                .any(|c| matches!(c, Call::SendKeys { .. })),
+            "the captain's turn is not cut"
+        );
     }
 
     #[test]
     fn an_urgent_send_to_a_working_reviewer_cuts_the_turn_first() {
         let mut store = interrupt_world();
-        let message = store
-            .write(|tx| message_for(tx, "p:r-1", true))
+        let message = store.write(|tx| message_for(tx, "p:r-1", true)).unwrap();
+        let mut herdr = review_herdr(AgentStatus::Working);
+
+        let pane = deliver_doorbell_now(
+            &mut store,
+            &mut herdr,
+            "p",
+            "p:r-1",
+            1,
+            &message,
+            true,
+            T0 + 2,
+        )
+        .unwrap();
+
+        assert_eq!(pane.as_deref(), Some(REVIEW_PANE));
+        prompt_or_esc(
+            &herdr,
+            REVIEW_PANE,
+            "a working reviewer is cut before its urgent send",
+        );
+    }
+
+    /// T-454 v2 (T-444): the notice that closes a direction check reaches a
+    /// working reviewer — the engine cuts its turn first, then types it, so the
+    /// reviewer ends its turn at once.
+    #[test]
+    fn the_direction_closed_notice_cuts_a_working_reviewers_turn_first() {
+        let mut store = interrupt_world();
+        store
+            .write(|tx| {
+                let id = notice_for(tx, "p:r-1", DIRECTION_CLOSED)?;
+                doorbell_for(tx, "p:r-1", &id)?;
+                Ok(())
+            })
             .unwrap();
         let mut herdr = review_herdr(AgentStatus::Working);
 
-        let pane = deliver_doorbell_now(&mut store, &mut herdr, "p", "p:r-1", 1, &message, true, T0 + 2)
-            .unwrap();
+        let done = execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
 
-        assert_eq!(pane.as_deref(), Some(REVIEW_PANE));
-        prompt_or_esc(&herdr, REVIEW_PANE, "a working reviewer is cut before its urgent send");
+        assert_eq!(done, vec![("O-1".to_string(), "submitted".to_string())]);
+        prompt_or_esc(
+            &herdr,
+            REVIEW_PANE,
+            "a working reviewer is cut before the direction-closed notice",
+        );
+    }
+
+    /// T-454: every other engine notice to a working reviewer waits: no
+    /// escape, no text; the doorbell op waits for its idle moment.
+    #[test]
+    fn an_ordinary_notice_to_a_working_reviewer_waits() {
+        let mut store = interrupt_world();
+        store
+            .write(|tx| {
+                let id = notice_for(tx, "p:r-1", "No push to heat/t1 for 20 min.")?;
+                doorbell_for(tx, "p:r-1", &id)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = review_herdr(AgentStatus::Working);
+
+        let done = execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
+
+        // The agent is working and the notice may not go into it: nothing is
+        // typed, and the op does not count as a doorbell that reached the
+        // seat (a failed one covers nothing), so the message waits for the
+        // next idle moment.
+        assert_eq!(done, vec![("O-1".to_string(), "failed".to_string())]);
+        assert!(
+            !herdr
+                .calls
+                .iter()
+                .any(|c| matches!(c, Call::SendKeys { .. })),
+            "a notice does not cut the reviewer's turn: {:?}",
+            herdr.calls
+        );
+        assert!(
+            herdr.prompts_to(REVIEW_PANE).is_empty(),
+            "a notice waits for idle: {:?}",
+            herdr.prompts_to(REVIEW_PANE)
+        );
     }
 
     // ---- T-371: a delivery that sits unsent in the input box ---------------
@@ -2271,8 +2803,13 @@ mod tests {
         // idle with the text in its input box. After 30 s the engine presses
         // the key once and records it.
         let mut store = lane_world();
-        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
-        let mut herdr = unsent_herdr(AgentStatus::Idle, "> earlier output\n> Continue T-1: run `gear` first");
+        store
+            .write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0))
+            .unwrap();
+        let mut herdr = unsent_herdr(
+            AgentStatus::Idle,
+            "> earlier output\n> Continue T-1: run `gear` first",
+        );
 
         let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap();
 
@@ -2299,14 +2836,19 @@ mod tests {
         // The Enter may still be on its way, or the lane may be about to press
         // it itself: nothing is pressed in the first 30 s.
         let mut store = lane_world();
-        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        store
+            .write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0))
+            .unwrap();
         let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: run `gear` first");
 
         let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 20).unwrap();
 
         assert!(sent.is_empty());
         assert_eq!(enters(&herdr, LANE_PANE), 0);
-        assert_eq!(store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(), None);
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(),
+            None
+        );
     }
 
     /// A codex lane whose delivery never reached the input: a named agent
@@ -2324,7 +2866,9 @@ mod tests {
         // T-404: the op stayed Submitted while the pane showed an empty input
         // and the agent sat idle — nobody had retyped the lost delivery.
         let mut store = lane_world();
-        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        store
+            .write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0))
+            .unwrap();
         let mut herdr = unsent_lost_herdr(AgentStatus::Idle);
 
         let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 90).unwrap();
@@ -2335,7 +2879,11 @@ mod tests {
             vec![UNSENT_TEXT],
             "the delivery is typed again"
         );
-        assert_eq!(enters(&herdr, LANE_PANE), 0, "the prompt carries its own Enter");
+        assert_eq!(
+            enters(&herdr, LANE_PANE),
+            0,
+            "the prompt carries its own Enter"
+        );
         assert_eq!(
             store.read(|tx| tx.get_meta("engine.retype.O-1")).unwrap(),
             Some((T0 + 90).to_string()),
@@ -2350,30 +2898,43 @@ mod tests {
         let again = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 120).unwrap();
 
         assert!(again.is_empty(), "the op was typed again already");
-        assert_eq!(herdr.prompts_to(LANE_PANE).len(), 1, "a second pass types nothing");
+        assert_eq!(
+            herdr.prompts_to(LANE_PANE).len(),
+            1,
+            "a second pass types nothing"
+        );
     }
 
     #[test]
     fn a_delivery_younger_than_the_window_is_not_typed_again() {
         // The text may still be on its way: nothing is typed in the window.
         let mut store = lane_world();
-        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        store
+            .write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0))
+            .unwrap();
         let mut herdr = unsent_lost_herdr(AgentStatus::Idle);
 
         let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 20).unwrap();
 
         assert!(sent.is_empty());
         assert!(herdr.prompts_to(LANE_PANE).is_empty());
-        assert_eq!(store.read(|tx| tx.get_meta("engine.retype.O-1")).unwrap(), None);
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.retype.O-1")).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn a_refused_retype_changes_nothing() {
         let mut store = lane_world();
-        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        store
+            .write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0))
+            .unwrap();
         let mut herdr = unsent_lost_herdr(AgentStatus::Idle);
 
-        herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "injected".into() });
+        herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse {
+            code: "injected".into(),
+        });
         let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 90).unwrap();
 
         assert!(sent.is_empty(), "a refused prompt is no retype");
@@ -2387,7 +2948,9 @@ mod tests {
     #[test]
     fn a_working_agent_gets_no_enter() {
         let mut store = lane_world();
-        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        store
+            .write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0))
+            .unwrap();
         let mut herdr = unsent_herdr(AgentStatus::Working, "> Continue T-1: run `gear` first");
 
         let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap();
@@ -2400,7 +2963,9 @@ mod tests {
     #[test]
     fn a_working_agent_with_an_empty_input_is_not_typed_again() {
         let mut store = lane_world();
-        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        store
+            .write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0))
+            .unwrap();
         let mut herdr = unsent_lost_herdr(AgentStatus::Working);
 
         let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 90).unwrap();
@@ -2425,35 +2990,62 @@ mod tests {
 
         assert!(sent.is_empty(), "the lane read its packet");
         assert_eq!(enters(&herdr, LANE_PANE), 0);
-        assert!(herdr.prompts_to(LANE_PANE).is_empty(), "a confirmed op is not typed again");
-        assert_eq!(store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(), None);
-        assert_eq!(store.read(|tx| tx.get_meta("engine.retype.O-1")).unwrap(), None);
+        assert!(
+            herdr.prompts_to(LANE_PANE).is_empty(),
+            "a confirmed op is not typed again"
+        );
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(),
+            None
+        );
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.retype.O-1")).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn a_failed_read_or_a_refused_key_changes_nothing() {
         let mut store = lane_world();
-        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        store
+            .write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0))
+            .unwrap();
         let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: run `gear` first");
 
         herdr.observe_fails = true;
-        assert!(resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap().is_empty());
+        assert!(resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40)
+            .unwrap()
+            .is_empty());
         assert_eq!(enters(&herdr, LANE_PANE), 0);
-        assert_eq!(store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(), None);
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(),
+            None
+        );
         herdr.observe_fails = false;
 
-        herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "injected".into() });
+        herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse {
+            code: "injected".into(),
+        });
         assert!(
-            resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap().is_empty(),
+            resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40)
+                .unwrap()
+                .is_empty(),
             "a refused key changes nothing"
         );
-        assert_eq!(store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(), None);
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(),
+            None
+        );
 
         // The next pass still finds the text and presses the key (the fake
         // logged the refused attempt, so the successful one is the second).
         let before = enters(&herdr, LANE_PANE);
         let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 50).unwrap();
         assert_eq!(sent, vec!["O-1".to_string()]);
-        assert_eq!(enters(&herdr, LANE_PANE), before + 1, "the retry presses it again");
+        assert_eq!(
+            enters(&herdr, LANE_PANE),
+            before + 1,
+            "the retry presses it again"
+        );
     }
 }

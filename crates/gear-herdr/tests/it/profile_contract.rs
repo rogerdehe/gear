@@ -1,6 +1,8 @@
 //! Contract tests for profile.rs and outcome mapping. Do not edit to make them pass.
 
-use gear_herdr::{classify_screen, outcome_from_error, validate_template, Outcome, Profile, ScreenFlag};
+use gear_herdr::{
+    classify_screen, outcome_from_error, validate_template, Outcome, Profile, ScreenFlag,
+};
 
 fn opencode() -> Profile {
     Profile {
@@ -16,6 +18,7 @@ fn opencode() -> Profile {
         // T-113: the guardrails refusals of a kind without guardrails.
         blocked_markers: vec![],
         error_markers: vec!["overloaded_error".into()],
+        dialogs: Vec::new(),
         new_session: "/new".into(),
         compact: "/compact".into(),
         usage_log: Some("opencode-db".into()),
@@ -35,9 +38,15 @@ fn opencode() -> Profile {
 fn only_tail_window_is_matched() {
     let p = opencode();
     let screen = "Error: Rate limit exceeded\nok\nok\nok";
-    assert!(classify_screen(&p, screen).is_empty(), "old error scrolled out of the 3-line window");
+    assert!(
+        classify_screen(&p, screen).is_empty(),
+        "old error scrolled out of the 3-line window"
+    );
     let screen = "x\nError: Rate limit exceeded\ny";
-    assert_eq!(classify_screen(&p, screen).into_iter().collect::<Vec<_>>(), vec![ScreenFlag::RateLimit]);
+    assert_eq!(
+        classify_screen(&p, screen).into_iter().collect::<Vec<_>>(),
+        vec![ScreenFlag::RateLimit]
+    );
 }
 
 #[test]
@@ -46,7 +55,10 @@ fn multiple_flags() {
     let flags = classify_screen(&p, "  esc interrupt  \ninsufficient_quota\n");
     // M4 §10.2: the screen never says that an agent is busy — Herdr's state
     // does. The busy marker of the profile is kept, but it decides nothing.
-    assert_eq!(flags.into_iter().collect::<Vec<_>>(), vec![ScreenFlag::Quota]);
+    assert_eq!(
+        flags.into_iter().collect::<Vec<_>>(),
+        vec![ScreenFlag::Quota]
+    );
 }
 
 #[test]
@@ -60,13 +72,31 @@ fn template_must_not_contain_markers() {
 #[test]
 fn transport_errors_are_uncertain_protocol_refusals_are_refused() {
     let io = board_herdr_err_io();
-    assert!(matches!(outcome_from_error::<()>(&io), Outcome::Uncertain { .. }));
-    let blocked = board_herdr::HerdrError::Protocol { code: "agent_blocked".into(), message: "x".into() };
-    assert!(matches!(outcome_from_error::<()>(&blocked), Outcome::Refused { .. }));
-    let weird = board_herdr::HerdrError::Protocol { code: "something_new".into(), message: "x".into() };
-    assert!(matches!(outcome_from_error::<()>(&weird), Outcome::Uncertain { .. }), "unknown code = uncertain");
+    assert!(matches!(
+        outcome_from_error::<()>(&io),
+        Outcome::Uncertain { .. }
+    ));
+    let blocked = board_herdr::HerdrError::Protocol {
+        code: "agent_blocked".into(),
+        message: "x".into(),
+    };
+    assert!(matches!(
+        outcome_from_error::<()>(&blocked),
+        Outcome::Refused { .. }
+    ));
+    let weird = board_herdr::HerdrError::Protocol {
+        code: "something_new".into(),
+        message: "x".into(),
+    };
+    assert!(
+        matches!(outcome_from_error::<()>(&weird), Outcome::Uncertain { .. }),
+        "unknown code = uncertain"
+    );
     let deadline = board_herdr::HerdrError::Deadline { operation: "read" };
-    assert!(matches!(outcome_from_error::<()>(&deadline), Outcome::Uncertain { .. }));
+    assert!(matches!(
+        outcome_from_error::<()>(&deadline),
+        Outcome::Uncertain { .. }
+    ));
 }
 
 fn board_herdr_err_io() -> board_herdr::HerdrError {

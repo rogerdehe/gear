@@ -8,7 +8,10 @@
 
 use std::cell::{Cell, RefCell};
 
-use gear_forge::{sync, sync_with, Error, Filter, Forge, ForgeResult, Issue, MergeMethod, MergeResult, PrRef, PrState};
+use gear_forge::{
+    sync, sync_with, Error, Filter, Forge, ForgeResult, Issue, MergeMethod, MergeResult, PrRef,
+    PrState,
+};
 use gear_model::{AttemptState, OpKind, OpState, SeatRole, TaskState};
 use gear_store::{
     testing, AttemptRow, AttemptStep, ContractRow, NewOp, ReviewVerdictRow, Store, TaskRow,
@@ -112,9 +115,12 @@ impl Forge for Fake {
 
     fn merge(&self, pr: &PrRef, method: MergeMethod, head: &str) -> ForgeResult<MergeResult> {
         self.reachable("merge")?;
-        self.calls
-            .borrow_mut()
-            .push(format!("merge {}#{} {} {head}", pr.repo, pr.number, method.flag()));
+        self.calls.borrow_mut().push(format!(
+            "merge {}#{} {} {head}",
+            pr.repo,
+            pr.number,
+            method.flag()
+        ));
         Ok(MergeResult {
             merged: true,
             message: "merged".to_string(),
@@ -302,7 +308,10 @@ fn a_first_delivery_opens_the_claim_and_nothing_else() {
     assert_eq!(calls.len(), 1, "{calls:?}");
     let claim = &calls[0];
     assert!(claim.starts_with("claim owner/name heat/t1 dev"), "{claim}");
-    assert!(claim.contains("The forge layer, GitHub first (#12)"), "{claim}");
+    assert!(
+        claim.contains("The forge layer, GitHub first (#12)"),
+        "{claim}"
+    );
     assert!(claim.contains("Closes #12"), "{claim}");
     assert!(
         claim.contains("<!-- ORCHESTRATE:CLAIM agent=p:heat issue=12 -->"),
@@ -329,7 +338,10 @@ fn a_second_tick_makes_no_call() {
     merged(&mut store, "merged T-1 into dev: def5678");
     let first = tick(&mut store, &forge, 200);
     assert_eq!(first.len(), 4, "{first:?}");
-    assert!(tick(&mut store, &forge, 201).is_empty(), "a confirmed event is not news again");
+    assert!(
+        tick(&mut store, &forge, 201).is_empty(),
+        "a confirmed event is not news again"
+    );
 }
 
 #[test]
@@ -399,7 +411,10 @@ fn a_hand_in_a_verdict_and_a_merge_are_commented_in_order() {
     let calls = forge.calls();
     // The claim, the hand-in, the verdict, the landed comment and the close.
     assert_eq!(calls.len(), 5, "{calls:?}");
-    assert!(calls[0].starts_with("claim owner/name heat/t1 dev"), "{calls:?}");
+    assert!(
+        calls[0].starts_with("claim owner/name heat/t1 dev"),
+        "{calls:?}"
+    );
     assert!(calls[1].starts_with("comment owner/name#1"), "{calls:?}");
     assert!(calls[1].contains("Handed in (abc1234)"), "{calls:?}");
     assert!(
@@ -412,7 +427,10 @@ fn a_hand_in_a_verdict_and_a_merge_are_commented_in_order() {
         calls[2].contains("<!-- ORCHESTRATE:COMPLETION reviewer=p:review-1 rounds=1 -->"),
         "{calls:?}"
     );
-    assert!(calls[3].contains("Landed in dev: merged T-1 into dev: def5678"), "{calls:?}");
+    assert!(
+        calls[3].contains("Landed in dev: merged T-1 into dev: def5678"),
+        "{calls:?}"
+    );
     assert!(
         calls[3].contains("<!-- ORCHESTRATE:COMPLETION reviewer=p:review-1 rounds=1 ci=pass -->"),
         "the landing carries the gate's state: {calls:?}"
@@ -432,7 +450,10 @@ fn a_landing_comments_the_merge_and_closes_the_issue() {
 
     let calls = forge.calls();
     assert_eq!(calls.len(), 5, "{calls:?}");
-    assert!(calls[3].contains("comment owner/name#1 | Landed in dev: merged T-1 into dev: def5678"), "{calls:?}");
+    assert!(
+        calls[3].contains("comment owner/name#1 | Landed in dev: merged T-1 into dev: def5678"),
+        "{calls:?}"
+    );
     assert!(calls[4].starts_with("close owner/name#12"), "{calls:?}");
     assert!(calls[4].contains("Landed in dev"), "{calls:?}");
 }
@@ -452,7 +473,14 @@ fn an_outage_queues_the_call_and_the_next_tick_catches_up() {
         .expect("the ops");
     assert_eq!(ops.len(), 1, "{ops:?}");
     assert_eq!(ops[0].state, OpState::Failed);
-    assert!(ops[0].result.as_deref().unwrap_or_default().contains("forge is down"), "{ops:?}");
+    assert!(
+        ops[0]
+            .result
+            .as_deref()
+            .unwrap_or_default()
+            .contains("forge is down"),
+        "{ops:?}"
+    );
 
     // The forge is back: the same call is made once.
     forge.down.set(false);
@@ -577,10 +605,20 @@ fn a_backlog_is_worked_off_a_bounded_number_of_calls_at_a_time() {
 
     let done = tick(&mut store, &forge, 2);
     assert_eq!(done.len(), gear_forge::sync::MAX_CALLS_PER_TICK, "{done:?}");
-    assert_eq!(forge.calls().len(), gear_forge::sync::MAX_CALLS_PER_TICK, "{:?}", forge.calls());
+    assert_eq!(
+        forge.calls().len(),
+        gear_forge::sync::MAX_CALLS_PER_TICK,
+        "{:?}",
+        forge.calls()
+    );
 
     let done = tick(&mut store, &forge, 3);
-    assert_eq!(forge.calls().len(), 10, "the rest catches up: {:?}", forge.calls());
+    assert_eq!(
+        forge.calls().len(),
+        10,
+        "the rest catches up: {:?}",
+        forge.calls()
+    );
     assert_eq!(done.len(), 2, "{done:?}");
 }
 
@@ -598,7 +636,11 @@ fn a_failed_merge_holds_back_the_close() {
 
     let done = tick(&mut store, &forge, 200);
 
-    assert!(!forge.calls().iter().any(|call| call.starts_with("close")), "{:?}", forge.calls());
+    assert!(
+        !forge.calls().iter().any(|call| call.starts_with("close")),
+        "{:?}",
+        forge.calls()
+    );
     assert_eq!(
         done.len(),
         3,
@@ -609,7 +651,10 @@ fn a_failed_merge_holds_back_the_close() {
     let done = tick(&mut store, &forge, 201);
     assert_eq!(done.len(), 2, "{done:?}");
     let calls = forge.calls();
-    assert!(calls.last().unwrap().starts_with("close owner/name#12"), "{calls:?}");
+    assert!(
+        calls.last().unwrap().starts_with("close owner/name#12"),
+        "{calls:?}"
+    );
 }
 
 /// T-91, F2: a hand-in that fails holds back the verdict, so the comments keep
@@ -625,13 +670,24 @@ fn a_failed_completion_holds_back_the_verdict() {
 
     let done = tick(&mut store, &forge, 200);
     assert_eq!(done, vec!["p:T-1:claim"], "{done:?}");
-    assert_eq!(forge.calls().len(), 1, "only the claim: {:?}", forge.calls());
+    assert_eq!(
+        forge.calls().len(),
+        1,
+        "only the claim: {:?}",
+        forge.calls()
+    );
 
     tick(&mut store, &forge, 201);
     let calls = forge.calls();
     assert_eq!(calls.len(), 3, "{calls:?}");
-    assert!(calls[1].contains("Handed in"), "the completion comes first: {calls:?}");
-    assert!(calls[2].contains("Verdict: pass"), "then the verdict: {calls:?}");
+    assert!(
+        calls[1].contains("Handed in"),
+        "the completion comes first: {calls:?}"
+    );
+    assert!(
+        calls[2].contains("Verdict: pass"),
+        "then the verdict: {calls:?}"
+    );
 }
 
 #[test]
@@ -640,7 +696,8 @@ fn a_local_project_makes_no_call() {
     store
         .write(|tx| {
             let mut project = tx.get_project("p")?.expect("the project");
-            project.config_toml = "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/tmp/x\"\n".into();
+            project.config_toml =
+                "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/tmp/x\"\n".into();
             tx.update_project(&project)
         })
         .expect("a local-only config");
@@ -739,7 +796,9 @@ fn the_land_merges_the_pull_request_with_the_gated_head() {
 
     let calls = forge.calls();
     assert!(
-        calls.iter().any(|call| call == "merge owner/name#7 --squash abc1234"),
+        calls
+            .iter()
+            .any(|call| call == "merge owner/name#7 --squash abc1234"),
         "the merge carries the head: {calls:?}"
     );
     assert_eq!(land_state(&mut store, &id), OpState::Confirmed);
@@ -749,7 +808,10 @@ fn the_land_merges_the_pull_request_with_the_gated_head() {
         .unwrap()
         .result
         .unwrap_or_default();
-    assert!(result.contains("sha99"), "the merge commit is read: {result}");
+    assert!(
+        result.contains("sha99"),
+        "the merge commit is read: {result}"
+    );
 }
 
 #[test]
@@ -828,7 +890,13 @@ fn an_unknown_claim_adopts_the_open_pull_request() {
                 payload: serde_json::json!({ "forge": "claim", "key": "T-1:claim" }),
                 created: T0 + 1,
             })?;
-            tx.set_op_state("p", &op.id, OpState::Unknown, Some("the engine stopped"), T0 + 2)?;
+            tx.set_op_state(
+                "p",
+                &op.id,
+                OpState::Unknown,
+                Some("the engine stopped"),
+                T0 + 2,
+            )?;
             Ok(op.id)
         })
         .expect("the unfinished claim");
@@ -841,13 +909,13 @@ fn an_unknown_claim_adopts_the_open_pull_request() {
 
     tick(&mut store, &forge, 3);
 
-    let op = store
-        .read(|tx| tx.get_op("p", &id))
-        .unwrap()
-        .unwrap();
+    let op = store.read(|tx| tx.get_op("p", &id)).unwrap().unwrap();
     assert_eq!(op.state, OpState::Confirmed, "the claim is adopted");
     let result = op.result.unwrap_or_default();
-    assert!(result.contains("\"number\":7"), "the pull request is named: {result}");
+    assert!(
+        result.contains("\"number\":7"),
+        "the pull request is named: {result}"
+    );
     assert!(
         !forge.calls().iter().any(|call| call.starts_with("claim ")),
         "the claim is not opened again: {:?}",
@@ -881,7 +949,10 @@ fn commit_text(commit: &str) -> Option<String> {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(commit).expect("the answer");
-    value.get("oid").and_then(|oid| oid.as_str()).map(str::to_string)
+    value
+        .get("oid")
+        .and_then(|oid| oid.as_str())
+        .map(str::to_string)
 }
 
 /// The head of a `gh` answer.
@@ -978,7 +1049,9 @@ fn the_land_op_works_on_the_pull_request_of_the_claim() {
 
     let calls = forge.calls();
     assert!(
-        calls.iter().any(|call| call == "merge owner/other#7 --squash abc1234"),
+        calls
+            .iter()
+            .any(|call| call == "merge owner/other#7 --squash abc1234"),
         "the merge names the claim's repo: {calls:?}"
     );
     assert_eq!(land_state(&mut store, &id), OpState::Confirmed);
@@ -1065,7 +1138,13 @@ fn the_calls_of_a_tick_are_spent_by_the_other_work() {
                 payload: serde_json::json!({ "forge": "claim", "key": "T-1:claim" }),
                 created: T0 + 1,
             })?;
-            tx.set_op_state("p", &op.id, OpState::Unknown, Some("the engine stopped"), T0 + 2)?;
+            tx.set_op_state(
+                "p",
+                &op.id,
+                OpState::Unknown,
+                Some("the engine stopped"),
+                T0 + 2,
+            )?;
             Ok(op.id)
         })
         .expect("the claim");

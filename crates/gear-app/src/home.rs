@@ -35,7 +35,10 @@ pub fn build(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, now: Ts) ->
 
 /// Build with an optional Herdr snapshot read before the store transaction.
 pub fn build_with_agents(
-    store: &mut Store, env: &Env, fp: Option<&Fingerprint>, now: Ts,
+    store: &mut Store,
+    env: &Env,
+    fp: Option<&Fingerprint>,
+    now: Ts,
     agents: Option<&[gear_herdr::AgentInfo]>,
 ) -> GearResult<Home> {
     let (text, view) = store.read(|tx| {
@@ -100,6 +103,16 @@ pub fn build_with_agents(
                     "task {} attempt {} contract v{} — {}",
                     attempt.task, attempt.n, version, goal
                 ));
+                // A round that could not continue the earlier conversation
+                // because its CLI changed (T-481, design/10 §resume rules):
+                // the seat sees why, and its packet names the session its
+                // earlier work ran in.
+                if tx
+                    .session_recovery(&ctx.project, &attempt.task, attempt.n)?
+                    .is_some()
+                {
+                    lines.push("round: new-session recovery".to_string());
+                }
                 shown_task = Some(attempt.task.clone());
                 shown_attempt = Some(attempt.n);
                 shown_contract = Some(version);
@@ -283,7 +296,12 @@ const SNAPSHOT_DELIVERIES: usize = 3;
 ///
 /// The model is the board's ([`gear_board::project`]), so the two views of
 /// the plan never disagree. Read-only, like the rest of the page.
-fn snapshot(tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[gear_herdr::AgentInfo]>) -> GearResult<Vec<String>> {
+fn snapshot(
+    tx: &Tx<'_>,
+    project: &str,
+    now: Ts,
+    agents: Option<&[gear_herdr::AgentInfo]>,
+) -> GearResult<Vec<String>> {
     let plan = gear_board::project_with_agents(tx, project, now, agents)?;
     let mut lines = vec![format!(
         "SNAPSHOT {} tasks · {} done · {} in progress · {} waiting",
@@ -328,7 +346,10 @@ fn snapshot(tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[gear_herdr::Ag
         ));
     }
     if plan.unconfirmed.len() > SNAPSHOT_DELIVERIES {
-        lines.push(format!("    +{} more", plan.unconfirmed.len() - SNAPSHOT_DELIVERIES));
+        lines.push(format!(
+            "    +{} more",
+            plan.unconfirmed.len() - SNAPSHOT_DELIVERIES
+        ));
     }
     // The voyages (T-22): the sentence each phase is judged by, its bar and its
     // planned landing, so the captain sees the bar before the inbox. Each
@@ -347,7 +368,9 @@ fn snapshot(tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[gear_herdr::Ag
             if open.is_empty() {
                 // No open work: the voyage the board measures is the one that
                 // matters.
-                plan.workload.as_ref().is_some_and(|measured| measured.milestone == voyage.milestone)
+                plan.workload
+                    .as_ref()
+                    .is_some_and(|measured| measured.milestone == voyage.milestone)
             } else {
                 open.contains(&voyage.milestone)
             }

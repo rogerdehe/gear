@@ -17,20 +17,31 @@ const OTHER_PANE: &str = "w1:p3";
 
 fn world() -> Store {
     let mut s = Store::open_in_memory().unwrap();
-    s
-        .write(|tx| {
-            testing::seed_project(tx, "p", "sess", NOW)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
-            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", NOW)?;
-            Ok(())
-        })
-        .unwrap();
+    s.write(|tx| {
+        testing::seed_project(tx, "p", "sess", NOW)?;
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "captain",
+            SeatRole::Captain,
+            CAP_PANE,
+            "codex",
+            NOW,
+        )?;
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", NOW)?;
+        Ok(())
+    })
+    .unwrap();
     s
 }
 
 fn lane_env() -> Env {
     Env {
-        ctx: Some(GearCtx { project: "p".into(), seat: "heat".into(), generation: 1 }),
+        ctx: Some(GearCtx {
+            project: "p".into(),
+            seat: "heat".into(),
+            generation: 1,
+        }),
         pane_id: Some(LANE_PANE.into()),
         admin: false,
     }
@@ -47,7 +58,11 @@ fn other_lane(s: &mut Store) {
 
 fn cold_env() -> Env {
     Env {
-        ctx: Some(GearCtx { project: "p".into(), seat: "cold".into(), generation: 1 }),
+        ctx: Some(GearCtx {
+            project: "p".into(),
+            seat: "cold".into(),
+            generation: 1,
+        }),
         pane_id: Some(OTHER_PANE.into()),
         admin: false,
     }
@@ -55,18 +70,30 @@ fn cold_env() -> Env {
 
 fn captain_env() -> Env {
     Env {
-        ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+        ctx: Some(GearCtx {
+            project: "p".into(),
+            seat: "captain".into(),
+            generation: 1,
+        }),
         pane_id: Some(CAP_PANE.into()),
         admin: false,
     }
 }
 
 fn lane_fp() -> Fingerprint {
-    Fingerprint { pane_id: LANE_PANE.into(), kind: Some("opencode".into()), session_ref: None }
+    Fingerprint {
+        pane_id: LANE_PANE.into(),
+        kind: Some("opencode".into()),
+        session_ref: None,
+    }
 }
 
 fn captain_fp() -> Fingerprint {
-    Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None }
+    Fingerprint {
+        pane_id: CAP_PANE.into(),
+        kind: Some("codex".into()),
+        session_ref: None,
+    }
 }
 
 fn args(kind: MsgKind) -> SendArgs {
@@ -95,7 +122,14 @@ fn args(kind: MsgKind) -> SendArgs {
 #[test]
 fn question_goes_to_captain_open() {
     let mut s = world();
-    let sent = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &args(MsgKind::Question), NOW).unwrap();
+    let sent = mail::send(
+        &mut s,
+        &lane_env(),
+        Some(&lane_fp()),
+        &args(MsgKind::Question),
+        NOW,
+    )
+    .unwrap();
     assert_eq!(sent.msg_id, "M-1");
     assert_eq!(sent.recipient, "p:captain");
     assert!(!sent.replayed);
@@ -107,15 +141,27 @@ fn question_goes_to_captain_open() {
     assert_eq!(m.recipient, "p:captain");
     assert_eq!(m.sender_gen, 1);
 
-    let inbox = s.read(|tx| tx.actionable_for("p", "p:captain", NOW)).unwrap();
+    let inbox = s
+        .read(|tx| tx.actionable_for("p", "p:captain", NOW))
+        .unwrap();
     assert_eq!(inbox.len(), 1, "the question is in the captain's inbox");
 }
 
 #[test]
 fn progress_is_info() {
     let mut s = world();
-    let sent = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &args(MsgKind::Progress), NOW).unwrap();
-    let m = s.read(|tx| tx.get_message("p", &sent.msg_id)).unwrap().unwrap();
+    let sent = mail::send(
+        &mut s,
+        &lane_env(),
+        Some(&lane_fp()),
+        &args(MsgKind::Progress),
+        NOW,
+    )
+    .unwrap();
+    let m = s
+        .read(|tx| tx.get_message("p", &sent.msg_id))
+        .unwrap()
+        .unwrap();
     assert_eq!(m.state, MsgState::Info);
     assert_eq!(m.recipient, "p:captain");
 }
@@ -137,7 +183,10 @@ fn captain_instructs_lane() {
     let sent = mail::send(&mut s, &captain_env(), Some(&captain_fp()), &a, NOW).unwrap();
     assert_eq!(sent.recipient, "p:heat");
 
-    let m = s.read(|tx| tx.get_message("p", &sent.msg_id)).unwrap().unwrap();
+    let m = s
+        .read(|tx| tx.get_message("p", &sent.msg_id))
+        .unwrap()
+        .unwrap();
     assert_eq!(m.state, MsgState::Open);
     assert_eq!(m.kind, MsgKind::Instruction);
     assert_eq!(m.sender, "p:captain");
@@ -147,17 +196,30 @@ fn captain_instructs_lane() {
 #[test]
 fn reply_to_inherits_thread() {
     let mut s = world();
-    let question = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &args(MsgKind::Question), NOW).unwrap();
+    let question = mail::send(
+        &mut s,
+        &lane_env(),
+        Some(&lane_fp()),
+        &args(MsgKind::Question),
+        NOW,
+    )
+    .unwrap();
 
     let mut a = args(MsgKind::Instruction);
     a.reply_to = Some(question.msg_id.clone());
     a.request_id = "r2".into();
     let sent = mail::send(&mut s, &captain_env(), Some(&captain_fp()), &a, NOW + 1).unwrap();
 
-    assert_eq!(sent.recipient, "p:heat", "the answer goes back to the sender");
+    assert_eq!(
+        sent.recipient, "p:heat",
+        "the answer goes back to the sender"
+    );
     assert_eq!(sent.thread, question.thread, "the thread is inherited");
 
-    let m = s.read(|tx| tx.get_message("p", &sent.msg_id)).unwrap().unwrap();
+    let m = s
+        .read(|tx| tx.get_message("p", &sent.msg_id))
+        .unwrap()
+        .unwrap();
     assert_eq!(m.thread, question.thread);
     assert_eq!(m.reply_to.as_deref(), Some(question.msg_id.as_str()));
 }
@@ -180,9 +242,19 @@ fn to_requires_instruction() {
     let mut instruction = args(MsgKind::Instruction);
     instruction.to = Some("heat".into());
     instruction.request_id = "r2".into();
-    let sent = mail::send(&mut s, &captain_env(), Some(&captain_fp()), &instruction, NOW + 1).unwrap();
+    let sent = mail::send(
+        &mut s,
+        &captain_env(),
+        Some(&captain_fp()),
+        &instruction,
+        NOW + 1,
+    )
+    .unwrap();
     assert_eq!(sent.recipient, "p:heat");
-    let m = s.read(|tx| tx.get_message("p", &sent.msg_id)).unwrap().unwrap();
+    let m = s
+        .read(|tx| tx.get_message("p", &sent.msg_id))
+        .unwrap()
+        .unwrap();
     assert_eq!(m.kind, MsgKind::Instruction);
     assert_eq!(m.state, MsgState::Open);
 }
@@ -190,19 +262,35 @@ fn to_requires_instruction() {
 #[test]
 fn new_thread_starts_with_the_task_or_the_seat() {
     let mut s = world();
-    let sent = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &args(MsgKind::Question), NOW).unwrap();
-    assert_eq!(sent.thread, "heat:1", "a thread without a task is named after the seat");
+    let sent = mail::send(
+        &mut s,
+        &lane_env(),
+        Some(&lane_fp()),
+        &args(MsgKind::Question),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        sent.thread, "heat:1",
+        "a thread without a task is named after the seat"
+    );
 
     let mut a = args(MsgKind::Question);
     a.request_id = "r2".into();
     let sent = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &a, NOW + 1).unwrap();
-    assert_eq!(sent.thread, "heat:2", "the next question gets the next number");
+    assert_eq!(
+        sent.thread, "heat:2",
+        "the next question gets the next number"
+    );
 
     let mut with_task = args(MsgKind::Question);
     with_task.task = Some("T-1".into());
     with_task.request_id = "r3".into();
     let sent = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &with_task, NOW + 2).unwrap();
-    assert_eq!(sent.thread, "T-1:1", "a thread with a task is named after the task");
+    assert_eq!(
+        sent.thread, "T-1:1",
+        "a thread with a task is named after the task"
+    );
 }
 
 #[test]
@@ -217,7 +305,9 @@ fn same_request_is_replayed() {
     assert!(!first.replayed);
     assert!(second.replayed);
 
-    let inbox = s.read(|tx| tx.actionable_for("p", "p:captain", NOW + 2)).unwrap();
+    let inbox = s
+        .read(|tx| tx.actionable_for("p", "p:captain", NOW + 2))
+        .unwrap();
     assert_eq!(inbox.len(), 1, "the replay stored no second message");
     let m2 = s.read(|tx| tx.get_message("p", "M-2")).unwrap();
     assert!(m2.is_none());
@@ -232,7 +322,14 @@ fn same_request_is_replayed() {
 #[test]
 fn request_conflict() {
     let mut s = world();
-    mail::send(&mut s, &lane_env(), Some(&lane_fp()), &args(MsgKind::Question), NOW).unwrap();
+    mail::send(
+        &mut s,
+        &lane_env(),
+        Some(&lane_fp()),
+        &args(MsgKind::Question),
+        NOW,
+    )
+    .unwrap();
 
     let mut other = args(MsgKind::Question);
     other.body = "a different question".into();
@@ -248,22 +345,53 @@ fn slice2_kinds_rejected() {
     // still rejected.
     for kind in [MsgKind::Blocked, MsgKind::Reply] {
         let err = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &args(kind), NOW).unwrap_err();
-        assert_eq!(err.code, ErrorCode::BadFormat, "{kind:?} must not be stored yet");
+        assert_eq!(
+            err.code,
+            ErrorCode::BadFormat,
+            "{kind:?} must not be stored yet"
+        );
     }
-    let result_without_fields = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &args(MsgKind::Result), NOW).unwrap_err();
-    assert_eq!(result_without_fields.code, ErrorCode::BadFormat, "a result needs its four fields");
-    let inbox = s.read(|tx| tx.actionable_for("p", "p:captain", NOW)).unwrap();
+    let result_without_fields = mail::send(
+        &mut s,
+        &lane_env(),
+        Some(&lane_fp()),
+        &args(MsgKind::Result),
+        NOW,
+    )
+    .unwrap_err();
+    assert_eq!(
+        result_without_fields.code,
+        ErrorCode::BadFormat,
+        "a result needs its four fields"
+    );
+    let inbox = s
+        .read(|tx| tx.actionable_for("p", "p:captain", NOW))
+        .unwrap();
     assert!(inbox.is_empty(), "nothing was stored");
 }
 
 #[test]
-fn stale_generation_rejected() {    let mut s = world();
+fn stale_generation_rejected() {
+    let mut s = world();
     let mut env = lane_env();
-    env.ctx = Some(GearCtx { project: "p".into(), seat: "heat".into(), generation: 7 });
-    let err = mail::send(&mut s, &env, Some(&lane_fp()), &args(MsgKind::Question), NOW).unwrap_err();
+    env.ctx = Some(GearCtx {
+        project: "p".into(),
+        seat: "heat".into(),
+        generation: 7,
+    });
+    let err = mail::send(
+        &mut s,
+        &env,
+        Some(&lane_fp()),
+        &args(MsgKind::Question),
+        NOW,
+    )
+    .unwrap_err();
     assert_eq!(err.code, ErrorCode::StaleGeneration);
 
-    let inbox = s.read(|tx| tx.actionable_for("p", "p:captain", NOW)).unwrap();
+    let inbox = s
+        .read(|tx| tx.actionable_for("p", "p:captain", NOW))
+        .unwrap();
     assert!(inbox.is_empty(), "nothing was stored");
 }
 
@@ -287,11 +415,9 @@ fn ack_instruction_waits_for_the_lane() {
     assert_eq!(instruction.kind, MsgKind::Instruction);
     assert_eq!(instruction.state, MsgState::Open);
     assert!(
-        instruction
-            .body
-            .ends_with(&format!(
-                "Acknowledge it: gear send --kind ack --reply-to {id} \"<what you will do>\""
-            )),
+        instruction.body.ends_with(&format!(
+            "Acknowledge it: gear send --kind ack --reply-to {id} \"<what you will do>\""
+        )),
         "the lane is told how to acknowledge it: {}",
         instruction.body
     );
@@ -305,19 +431,39 @@ fn ack_instruction_waits_for_the_lane() {
     assert_eq!(item.wait_until, Some(NOW + 600), "back after ten minutes");
     assert_eq!(
         item.body,
-        format!("heat has not acknowledged {id} yet: bring the board up to date before the station")
+        format!(
+            "heat has not acknowledged {id} yet: bring the board up to date before the station"
+        )
     );
 
     // Not in the captain's batch while it waits, in it when the wait is due.
     let waiting = s
-        .read(|tx| mail::select_batch(tx, "p", "p:captain", NOW + 599, mail::BatchLimits::default()))
+        .read(|tx| {
+            mail::select_batch(
+                tx,
+                "p",
+                "p:captain",
+                NOW + 599,
+                mail::BatchLimits::default(),
+            )
+        })
         .unwrap();
     assert!(
-        waiting.iter().all(|view| view.thread != format!("ack:{id}")),
+        waiting
+            .iter()
+            .all(|view| view.thread != format!("ack:{id}")),
         "a waiting item is not due yet"
     );
     let due = s
-        .read(|tx| mail::select_batch(tx, "p", "p:captain", NOW + 600, mail::BatchLimits::default()))
+        .read(|tx| {
+            mail::select_batch(
+                tx,
+                "p",
+                "p:captain",
+                NOW + 600,
+                mail::BatchLimits::default(),
+            )
+        })
         .unwrap();
     assert!(
         due.iter().any(|view| view.thread == format!("ack:{id}")),
@@ -337,9 +483,16 @@ fn the_lane_acknowledges_and_the_item_settles() {
     let sent = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &a, NOW + 1).unwrap();
     assert_eq!(sent.recipient, "p:captain");
 
-    let ack = s.read(|tx| tx.get_message("p", &sent.msg_id)).unwrap().unwrap();
+    let ack = s
+        .read(|tx| tx.get_message("p", &sent.msg_id))
+        .unwrap()
+        .unwrap();
     assert_eq!(ack.kind, MsgKind::Ack);
-    assert_eq!(ack.state, MsgState::Info, "an ack is information for the captain");
+    assert_eq!(
+        ack.state,
+        MsgState::Info,
+        "an ack is information for the captain"
+    );
     assert_eq!(ack.sender, "p:heat");
     assert_eq!(ack.recipient, "p:captain");
     assert_eq!(ack.reply_to.as_deref(), Some(id.as_str()));
@@ -357,7 +510,11 @@ fn only_the_addressed_lane_acknowledges_an_instruction_that_asks() {
     let mut s = world();
     other_lane(&mut s);
     let id = ack_instruction(&mut s, "r1");
-    let cold_fp = Fingerprint { pane_id: OTHER_PANE.into(), kind: Some("opencode".into()), session_ref: None };
+    let cold_fp = Fingerprint {
+        pane_id: OTHER_PANE.into(),
+        kind: Some("opencode".into()),
+        session_ref: None,
+    };
 
     // Another lane may not answer it.
     let mut a = args(MsgKind::Ack);
@@ -366,7 +523,8 @@ fn only_the_addressed_lane_acknowledges_an_instruction_that_asks() {
     let err = mail::send(&mut s, &cold_env(), Some(&cold_fp), &a, NOW + 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
-        err.detail.contains("an ack answers an instruction that asks for one"),
+        err.detail
+            .contains("an ack answers an instruction that asks for one"),
         "{}",
         err.detail
     );
@@ -391,9 +549,19 @@ fn only_the_addressed_lane_acknowledges_an_instruction_that_asks() {
     // `--ack` is the captain's, and only on an instruction with `--to`.
     let mut question = args(MsgKind::Question);
     question.request_id = "r6".into();
-    let err = mail::send_with_ack(&mut s, &captain_env(), Some(&captain_fp()), &question, NOW + 3).unwrap_err();
+    let err = mail::send_with_ack(
+        &mut s,
+        &captain_env(),
+        Some(&captain_fp()),
+        &question,
+        NOW + 3,
+    )
+    .unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
-    assert_eq!(err.detail, "`--ack` belongs to a captain's instruction with `--to`");
+    assert_eq!(
+        err.detail,
+        "`--ack` belongs to a captain's instruction with `--to`"
+    );
 }
 
 #[test]
@@ -427,12 +595,41 @@ fn wait_world() -> Store {
     let mut s = world();
     s.write(|tx| {
         for (id, rank) in [("T-7", 1), ("T-8", 2)] {
-            tx.insert_task(&TaskRow { repo: None, base: None, gate: None, rework_estimate_min: None, project: "p".into(), id: id.into(), rank,
-                state: TaskState::Ready, priority: "must".into(), lane: Some("heat".into()), milestone: None, required: false,
-                contract_version: 1, deps: vec![], followup_of: None, wait_on: None, wait_cond: None, rework_note: None,
-                estimate_min: None, issue: None, updated: NOW })?;
-            tx.insert_contract(&ContractRow { project: "p".into(), task: id.into(), version: 1, goal: "g".into(), accept: "a".into(),
-                evidence_files: vec![], evidence_due_min: None, body: String::new(), created: NOW, mechanical: None })?;
+            tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: id.into(),
+                rank,
+                state: TaskState::Ready,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: None,
+                issue: None,
+                updated: NOW,
+            })?;
+            tx.insert_contract(&ContractRow {
+                project: "p".into(),
+                task: id.into(),
+                version: 1,
+                goal: "g".into(),
+                accept: "a".into(),
+                evidence_files: vec![],
+                evidence_due_min: None,
+                body: String::new(),
+                created: NOW,
+                mechanical: None,
+            })?;
         }
         gear_app::tasks::start_attempt(tx, "p", WAIT_TASK, "p:heat", 1, NOW)?;
         gear_app::tasks::on_delivery_confirmed(tx, "p", WAIT_TASK, 1, NOW)?;
@@ -456,44 +653,111 @@ fn blocked(on: &str, body: &str) -> SendArgs {
 #[test]
 fn an_external_wait_is_stored_with_its_reason_and_capped_at_two_hours() {
     let mut s = wait_world();
-    mail::send(&mut s, &lane_env(), Some(&lane_fp()), &blocked("external", "the CI run on heat/t1"), NOW + 30).unwrap();
+    mail::send(
+        &mut s,
+        &lane_env(),
+        Some(&lane_fp()),
+        &blocked("external", "the CI run on heat/t1"),
+        NOW + 30,
+    )
+    .unwrap();
 
     let task = s.read(|tx| tx.get_task("p", WAIT_TASK)).unwrap().unwrap();
-    assert_eq!((task.wait_on.as_deref(), task.wait_cond.as_deref()), (Some("external"), Some("external")));
+    assert_eq!(
+        (task.wait_on.as_deref(), task.wait_cond.as_deref()),
+        (Some("external"), Some("external"))
+    );
 
-    let pause = s.read(|tx| tx.pauses_of_project("p")).unwrap().into_iter().find(|p| p.kind == "wait").unwrap();
-    assert_eq!((pause.seat.as_str(), pause.end_at), ("p:heat", None), "the pause is open");
-    assert_eq!(pause.reason.as_deref(), Some("waiting for: the CI run on heat/t1"));
+    let pause = s
+        .read(|tx| tx.pauses_of_project("p"))
+        .unwrap()
+        .into_iter()
+        .find(|p| p.kind == "wait")
+        .unwrap();
+    assert_eq!(
+        (pause.seat.as_str(), pause.end_at),
+        ("p:heat", None),
+        "the pause is open"
+    );
+    assert_eq!(
+        pause.reason.as_deref(),
+        Some("waiting for: the CI run on heat/t1")
+    );
 
-    let until = s.read(|tx| tx.get_meta(&gear_app::mail::external_wait_key("p", WAIT_TASK))).unwrap();
-    assert_eq!(until.as_deref(), Some((NOW + 30 + 120 * 60).to_string().as_str()), "the wait ends in 120 min");
+    let until = s
+        .read(|tx| tx.get_meta(&gear_app::mail::external_wait_key("p", WAIT_TASK)))
+        .unwrap();
+    assert_eq!(
+        until.as_deref(),
+        Some((NOW + 30 + 120 * 60).to_string().as_str()),
+        "the wait ends in 120 min"
+    );
 
-    let item = s.read(|tx| tx.thread_messages("p", "wait-external:T-7:1")).unwrap();
+    let item = s
+        .read(|tx| tx.thread_messages("p", "wait-external:T-7:1"))
+        .unwrap();
     assert_eq!(item.len(), 1, "one info item");
     assert_eq!(item[0].recipient, "p:captain");
     assert_eq!(item[0].state, MsgState::Info);
-    assert_eq!(item[0].body, "heat waits on T-7 for: the CI run on heat/t1 (at most 120 min)");
+    assert_eq!(
+        item[0].body,
+        "heat waits on T-7 for: the CI run on heat/t1 (at most 120 min)"
+    );
 }
 
 #[test]
 fn an_external_wait_needs_its_reason() {
     let mut s = wait_world();
     for body in ["", "   "] {
-        let err = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &blocked("external", body), NOW + 30).unwrap_err();
+        let err = mail::send(
+            &mut s,
+            &lane_env(),
+            Some(&lane_fp()),
+            &blocked("external", body),
+            NOW + 30,
+        )
+        .unwrap_err();
         assert_eq!(err.code, ErrorCode::BadFormat);
-        assert!(err.detail.contains("external"), "the refusal names what is missing: {}", err.detail);
+        assert!(
+            err.detail.contains("external"),
+            "the refusal names what is missing: {}",
+            err.detail
+        );
     }
     let task = s.read(|tx| tx.get_task("p", WAIT_TASK)).unwrap().unwrap();
     assert!(task.wait_on.is_none(), "nothing was kept");
-    assert!(s.read(|tx| tx.get_meta(&gear_app::mail::external_wait_key("p", WAIT_TASK))).unwrap().is_none());
+    assert!(s
+        .read(|tx| tx.get_meta(&gear_app::mail::external_wait_key("p", WAIT_TASK)))
+        .unwrap()
+        .is_none());
 }
 
 #[test]
 fn a_wait_on_a_task_is_unchanged() {
     let mut s = wait_world();
-    mail::send(&mut s, &lane_env(), Some(&lane_fp()), &blocked("T-8", "waiting for the API"), NOW + 30).unwrap();
+    mail::send(
+        &mut s,
+        &lane_env(),
+        Some(&lane_fp()),
+        &blocked("T-8", "waiting for the API"),
+        NOW + 30,
+    )
+    .unwrap();
     let task = s.read(|tx| tx.get_task("p", WAIT_TASK)).unwrap().unwrap();
-    assert_eq!((task.wait_on.as_deref(), task.wait_cond.as_deref()), (Some("T-8"), Some("merged")));
-    assert!(s.read(|tx| tx.get_meta(&gear_app::mail::external_wait_key("p", WAIT_TASK))).unwrap().is_none(), "no external clock");
-    assert!(s.read(|tx| tx.thread_messages("p", "wait-external:T-7:1")).unwrap().is_empty(), "no external item");
+    assert_eq!(
+        (task.wait_on.as_deref(), task.wait_cond.as_deref()),
+        (Some("T-8"), Some("merged"))
+    );
+    assert!(
+        s.read(|tx| tx.get_meta(&gear_app::mail::external_wait_key("p", WAIT_TASK)))
+            .unwrap()
+            .is_none(),
+        "no external clock"
+    );
+    assert!(
+        s.read(|tx| tx.thread_messages("p", "wait-external:T-7:1"))
+            .unwrap()
+            .is_empty(),
+        "no external item"
+    );
 }

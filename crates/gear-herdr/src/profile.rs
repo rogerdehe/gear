@@ -19,6 +19,22 @@ pub enum ScreenFlag {
     Blocked,
 }
 
+/// A screen a CLI opens that must be answered before its composer takes
+/// text (T-457). Codex 0.165 asks `Where should the new conversation run?`
+/// after `/new`, and on a resume from another directory it asks which
+/// working directory to use. Herdr reports the agent done/idle while the
+/// dialog waits, so nothing but the answer moves it on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Dialog {
+    /// The lines that identify the dialog. They are matched like every other
+    /// marker: inside the profile's tail window, one matching line is enough.
+    pub markers: Vec<String>,
+    /// The keys that answer it, in order. A dialog preselects the choice the
+    /// seat needs (the current worktree; the current directory), so Enter
+    /// takes it.
+    pub keys: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Profile {
     /// Herdr agent kind: `opencode`, `claude`, `codex`, `pi`…
@@ -45,6 +61,11 @@ pub struct Profile {
     /// 6): the agent cannot go on, and the engine reads the quota source to
     /// tell a spent quota from a provider error (§9.2).
     pub error_markers: Vec<String>,
+    /// The startup dialogs this CLI opens (T-457). A dialog's screen is read
+    /// as `Blocked` — Herdr still reports the agent done/idle — and the
+    /// profile's answer keys take it. Empty for the kinds whose dialogs are
+    /// not recorded.
+    pub dialogs: Vec<Dialog>,
     /// The slash command that starts a new session in this CLI, typed into
     /// the pane (§2, §3.4). Empty = the CLI has none.
     pub new_session: String,
@@ -117,6 +138,15 @@ pub fn classify_screen(profile: &Profile, tail: &str) -> BTreeSet<ScreenFlag> {
             flags.insert(ScreenFlag::Blocked);
         }
     }
+    // A startup dialog waits on an answer while Herdr reports the agent
+    // done/idle (T-457): it is a blocked screen, not a finished turn.
+    if profile
+        .dialogs
+        .iter()
+        .any(|dialog| window.iter().any(|line| matches_any(&dialog.markers, line)))
+    {
+        flags.insert(ScreenFlag::Blocked);
+    }
     flags
 }
 
@@ -159,7 +189,9 @@ pub fn validate_template(profile: &Profile, template: &str) -> Result<(), String
                 continue;
             }
             if template.contains(marker.as_str()) {
-                return Err(format!("template must not contain the {kind} marker: {marker}"));
+                return Err(format!(
+                    "template must not contain the {kind} marker: {marker}"
+                ));
             }
         }
     }
@@ -168,7 +200,9 @@ pub fn validate_template(profile: &Profile, template: &str) -> Result<(), String
 
 /// Literal substring match of `line` against a marker list.
 fn matches_any(markers: &[String], line: &str) -> bool {
-    markers.iter().any(|m| !m.is_empty() && line.contains(m.as_str()))
+    markers
+        .iter()
+        .any(|m| !m.is_empty() && line.contains(m.as_str()))
 }
 
 /// Built-in profile for an agent kind, from the verified facts in
@@ -184,7 +218,12 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// warning is not one of them; no rate-limit/auth markers yet; tail 16
 /// lines, confirm 2
 /// rounds; unattended `--dangerously-bypass-approvals-and-sandbox` and
-/// `-c check_for_update_on_startup=false`;
+/// `-c check_for_update_on_startup=false`; the startup dialogs of codex
+/// 0.165 (T-457) — `/new` asks `Where should the new conversation run?`
+/// (answer Enter: the current worktree) and a resume from another directory
+/// asks which working directory to use (answer Enter: the current one, and
+/// `-c tui.resume_cwd="current"` keeps that dialog from showing); those
+/// screens read as Blocked although Herdr reports done/idle;
 /// session_ref true (Herdr reports the session uuid); resume
 /// `["resume", "{session}"]`; exit by the typed `/quit` command
 /// (`exit_command`, no keys — §12 item 4); new session `/new`; compact
@@ -237,6 +276,20 @@ impl Profile {
     /// tail window counts, like every other marker.
     pub fn blocked(&self, screen: &str) -> bool {
         classify_screen(self, screen).contains(&ScreenFlag::Blocked)
+    }
+
+    /// The startup dialog that is open on `screen`, if any (T-457).
+    ///
+    /// Only the tail window counts, like every other marker. The answer keys
+    /// of the returned dialog are the ones to send; see
+    /// [`answer_dialog`](crate::answer_dialog).
+    pub fn dialog(&self, screen: &str) -> Option<&Dialog> {
+        let lines: Vec<&str> = screen.lines().collect();
+        let start = lines.len().saturating_sub(self.tail_lines as usize);
+        let window = &lines[start..];
+        self.dialogs
+            .iter()
+            .find(|dialog| window.iter().any(|line| matches_any(&dialog.markers, line)))
     }
 }
 
@@ -423,6 +476,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             backoff_markers: vec![],
             blocked_markers: vec![],
             error_markers: vec![],
+            dialogs: vec![],
             new_session: "/new".into(),
             compact: "/compact".into(),
             usage_log: Some("opencode-db".into()),
@@ -451,6 +505,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             backoff_markers: vec![],
             blocked_markers: vec![],
             error_markers: vec![],
+            dialogs: vec![],
             new_session: "/clear".into(),
             compact: "/compact".into(),
             usage_log: Some("claude-jsonl".into()),
@@ -526,6 +581,35 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             backoff_markers: vec!["Reconnecting...".into()],
             blocked_markers: vec![],
             error_markers: vec![],
+            // T-457: Codex 0.165's startup screens (the screens captured in
+            // M5, gear/voyages/M6/backlog.md). `/new` asks
+            // `Where should the new conversation run?` with
+            // `1. Use current Git worktree` (keep using the current working
+            // directory) and `2. Create new Git worktree`; the first choice
+            // is preselected, so Enter keeps the seat in its own worktree.
+            // A resume from another directory asks which working directory
+            // to use (`Current = your current working directory` /
+            // `Use session directory (<path>)`); the start args keep that
+            // dialog from showing at all (`tui.resume_cwd="current"`), and
+            // Enter takes the preselected current directory if it does.
+            // Herdr reports the agent done/idle on both screens, so
+            // classify_screen reads them as Blocked.
+            dialogs: vec![
+                Dialog {
+                    markers: vec![
+                        "Where should the new conversation run?".into(),
+                        "Where should the forked conversation run?".into(),
+                    ],
+                    keys: vec!["enter".into()],
+                },
+                Dialog {
+                    markers: vec![
+                        "Choose which working directory to use".into(),
+                        "Current = your current working directory".into(),
+                    ],
+                    keys: vec!["enter".into()],
+                },
+            ],
             new_session: "/new".into(),
             compact: "/compact".into(),
             usage_log: Some("codex-rollout".into()),
@@ -543,6 +627,12 @@ pub fn builtin(kind: &str) -> Option<Profile> {
                 // spelling is silently ignored there (checked live, 0.164.0).
                 "-c".into(),
                 "projects={\"{repo_root}\"={trust_level=\"trusted\"}}".into(),
+                // T-457: a resume from another directory asks which working
+                // directory to use; `current` makes Codex use the directory
+                // it was started in — the seat's own worktree — and never
+                // show the dialog (codex-cli 0.165.0, `tui.resume_cwd`).
+                "-c".into(),
+                "tui.resume_cwd=\"current\"".into(),
             ],
             // T-195: codex takes the rules as a developer instruction, in one
             // TOML value.
@@ -576,6 +666,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             backoff_markers: vec![],
             blocked_markers: vec![],
             error_markers: vec![],
+            dialogs: vec![],
             new_session: String::new(),
             compact: String::new(),
             usage_log: None,
@@ -640,6 +731,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             // provider error, not a spent quota: §9.2 reads the quota source
             // to tell the two apart.
             error_markers: vec!["overloaded_error".into(), "Retry failed after".into()],
+            dialogs: vec![],
             new_session: "/new".into(),
             compact: "/compact".into(),
             usage_log: Some("pi-jsonl".into()),
@@ -667,9 +759,18 @@ mod tests {
     /// one-line TOML string that reads back to the same text.
     #[test]
     fn rules_render_on_one_line_and_parse_back() {
-        let text = "Rule one: \"quote\" and \\ backslash.\n\tTab, `code` and $HOME.\r\nVoyage done: x\n";
-        let args = render_rules(&["-c".into(), "developer_instructions={rules_toml}".into()], "/r.md", text);
-        assert!(!args[1].contains('\n') && !args[1].contains('\r'), "{:?}", args[1]);
+        let text =
+            "Rule one: \"quote\" and \\ backslash.\n\tTab, `code` and $HOME.\r\nVoyage done: x\n";
+        let args = render_rules(
+            &["-c".into(), "developer_instructions={rules_toml}".into()],
+            "/r.md",
+            text,
+        );
+        assert!(
+            !args[1].contains('\n') && !args[1].contains('\r'),
+            "{:?}",
+            args[1]
+        );
         let value: toml::Table = toml::from_str(&args[1]).unwrap();
         assert_eq!(value["developer_instructions"].as_str().unwrap(), text);
     }
@@ -688,7 +789,10 @@ mod tests {
     fn the_built_in_profiles_carry_the_rules_where_the_cli_allows_it() {
         assert_eq!(
             builtin("pi").unwrap().instructions_args,
-            vec!["--append-system-prompt".to_string(), "{rules_file}".to_string()]
+            vec![
+                "--append-system-prompt".to_string(),
+                "{rules_file}".to_string()
+            ]
         );
         assert_eq!(
             builtin("claude").unwrap().instructions_args,
@@ -735,9 +839,16 @@ mod tests {
         // One TOML pair naming the file, short enough to be typed into a
         // shell whatever the rules' length (a typed line is cut near 1024 bytes).
         let parsed: toml::Table = toml::from_str(&args[1]).expect("the argument is TOML");
-        let value = parsed.get("developer_instructions").and_then(toml::Value::as_str).unwrap();
+        let value = parsed
+            .get("developer_instructions")
+            .and_then(toml::Value::as_str)
+            .unwrap();
         assert!(value.contains("/tmp/gear/rules/review.md"), "{value}");
-        assert!(args[1].len() < 300 && !args[1].contains('\n'), "{}", args[1]);
+        assert!(
+            args[1].len() < 300 && !args[1].contains('\n'),
+            "{}",
+            args[1]
+        );
     }
 
     /// T-195: a project's config may set the args.
@@ -745,7 +856,10 @@ mod tests {
     fn a_config_patch_overrides_the_rules_args() {
         let pi = builtin("pi").unwrap();
         let patch = ProfilePatch {
-            instructions_args: Some(vec!["--system-prompt".to_string(), "{rules_file}".to_string()]),
+            instructions_args: Some(vec![
+                "--system-prompt".to_string(),
+                "{rules_file}".to_string(),
+            ]),
             ..ProfilePatch::default()
         };
         let patched = pi.patched(&patch, "pi");
@@ -788,7 +902,10 @@ mod tests {
             assert!(profile.backoff_markers.is_empty(), "{kind}");
             assert!(!profile.backoff(CODEX_RETRYING), "{kind}");
         }
-        assert_eq!(builtin("codex").unwrap().backoff_markers, vec!["Reconnecting...".to_string()]);
+        assert_eq!(
+            builtin("codex").unwrap().backoff_markers,
+            vec!["Reconnecting...".to_string()]
+        );
     }
 
     #[test]
@@ -810,7 +927,9 @@ mod tests {
         let profile = builtin("opencode").unwrap().patched(&patch, "opencode");
         assert!(profile.backoff("waiting for provider: 30 s"));
         // The built-in is untouched.
-        assert!(!builtin("opencode").unwrap().backoff("waiting for provider: 30 s"));
+        assert!(!builtin("opencode")
+            .unwrap()
+            .backoff("waiting for provider: 30 s"));
     }
 
     /// T-76: the codex start args carry the folder the agent runs in, so its
@@ -827,12 +946,18 @@ mod tests {
                 "check_for_update_on_startup=false".to_string(),
                 "-c".to_string(),
                 "projects={\"/worktrees/gear/home-heat\"={trust_level=\"trusted\"}}".to_string(),
+                // T-457: the resume keeps to the seat's own directory.
+                "-c".to_string(),
+                "tui.resume_cwd=\"current\"".to_string(),
             ]
         );
         // No placeholder survives, and no kind without it changes.
         assert!(!args.iter().any(|arg| arg.contains("{repo_root}")));
         let claude = builtin("claude").unwrap();
-        assert_eq!(render_args(&claude.unattended_args, "/x"), claude.unattended_args);
+        assert_eq!(
+            render_args(&claude.unattended_args, "/x"),
+            claude.unattended_args
+        );
     }
 
     #[test]

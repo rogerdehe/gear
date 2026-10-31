@@ -13,7 +13,10 @@ use gear_engine::{
     dispatch::task_branch, merge::merge_passed, onboard::onboard_queued, review::start_reviews,
     EngineCfg,
 };
-use gear_herdr::{builtin, fake::{Call, FakeHerdr}};
+use gear_herdr::{
+    builtin,
+    fake::{Call, FakeHerdr},
+};
 use gear_model::{OpKind, OpState, TaskState};
 use gear_store::{ContractRow, ReviewVerdictRow, Store, TaskRow};
 
@@ -69,25 +72,52 @@ impl World {
         let seed = root.path().join("child-seed");
 
         // The parent: a bare origin and a checkout on `dev`.
-        sh(root.path(), &format!("git init -q --bare {}", parent_origin.display()));
-        sh(root.path(), &format!("git init -q -b dev {}", parent.display()));
+        sh(
+            root.path(),
+            &format!("git init -q --bare {}", parent_origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git init -q -b dev {}", parent.display()),
+        );
         fs::write(parent.join(".gitignore"), "child/\n").unwrap();
         fs::write(parent.join("README.md"), "parent\n").unwrap();
-        sh(&parent, "git add -A && git -c user.email=a@b -c user.name=a commit -qm base");
-        sh(&parent, &format!("git remote add origin {}", parent_origin.display()));
+        sh(
+            &parent,
+            "git add -A && git -c user.email=a@b -c user.name=a commit -qm base",
+        );
+        sh(
+            &parent,
+            &format!("git remote add origin {}", parent_origin.display()),
+        );
         publish(&parent, "dev");
 
         // The child: its own bare origin and its own branch `feat`.
-        sh(root.path(), &format!("git init -q --bare -b feat {}", child_origin.display()));
-        sh(root.path(), &format!("git init -q -b feat {}", seed.display()));
+        sh(
+            root.path(),
+            &format!("git init -q --bare -b feat {}", child_origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git init -q -b feat {}", seed.display()),
+        );
         fs::write(seed.join("README.md"), "child\n").unwrap();
-        sh(&seed, "git add -A && git -c user.email=a@b -c user.name=a commit -qm base");
-        sh(&seed, &format!("git remote add origin {}", child_origin.display()));
+        sh(
+            &seed,
+            "git add -A && git -c user.email=a@b -c user.name=a commit -qm base",
+        );
+        sh(
+            &seed,
+            &format!("git remote add origin {}", child_origin.display()),
+        );
         publish(&seed, "feat");
 
         // … cloned into the parent's gitignored path: the parent never sees
         // the child's files.
-        sh(&parent, &format!("git clone -q {} child", child_origin.display()));
+        sh(
+            &parent,
+            &format!("git clone -q {} child", child_origin.display()),
+        );
         let child = parent.join("child");
         assert_eq!(sh(&child, "git rev-parse --abbrev-ref HEAD"), "feat");
         assert_eq!(
@@ -95,7 +125,13 @@ impl World {
             "",
             "the parent ignores the child repo"
         );
-        World { root, parent, parent_origin, child, child_origin }
+        World {
+            root,
+            parent,
+            parent_origin,
+            child,
+            child_origin,
+        }
     }
 
     /// The lane's work: a commit on the lane's task branch, pushed to the
@@ -185,7 +221,10 @@ profile = "claude"
 /// The engine knows the profiles the project uses.
 fn cfg() -> EngineCfg {
     let mut cfg = EngineCfg {
-        db_path: crate::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(),
+        db_path: crate::temp("gear-engine-tests")
+            .join("gear.db")
+            .to_string_lossy()
+            .into_owned(),
         // T-107: the merge's remote runner moves refs from origin's side; no
         // engine test runs `git push`.
         remote: std::sync::Arc::new(gear_engine::merge::FetchRemote),
@@ -202,25 +241,37 @@ fn cfg() -> EngineCfg {
 
 /// The worktree the engine created for `branch`: (repo, branch, base, label).
 fn created(herdr: &FakeHerdr, branch: &str) -> (String, String, String, String) {
-    herdr.calls
+    herdr
+        .calls
         .iter()
         .find_map(|call| match call {
-            Call::WorktreeCreate { repo, branch: made, base, label } if made == branch => {
-                Some((repo.clone(), made.clone(), base.clone(), label.clone()))
-            }
+            Call::WorktreeCreate {
+                repo,
+                branch: made,
+                base,
+                label,
+            } if made == branch => Some((repo.clone(), made.clone(), base.clone(), label.clone())),
             _ => None,
         })
-        .unwrap_or_else(|| panic!("the engine created the worktree {branch}: {:?}", herdr.calls))
+        .unwrap_or_else(|| {
+            panic!(
+                "the engine created the worktree {branch}: {:?}",
+                herdr.calls
+            )
+        })
 }
 
 /// The worktree the engine opened for `branch`: (repo, branch, label).
 fn opened(herdr: &FakeHerdr, branch: &str) -> (String, String, String) {
-    herdr.calls
+    herdr
+        .calls
         .iter()
         .find_map(|call| match call {
-            Call::WorktreeOpen { repo, branch: made, label } if made == branch => {
-                Some((repo.clone(), made.clone(), label.clone()))
-            }
+            Call::WorktreeOpen {
+                repo,
+                branch: made,
+                label,
+            } if made == branch => Some((repo.clone(), made.clone(), label.clone())),
             _ => None,
         })
         .unwrap_or_else(|| panic!("the engine opened the worktree {branch}: {:?}", herdr.calls))
@@ -237,7 +288,8 @@ fn wait_merge(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg) {
         merge_passed(store, herdr, cfg, "p", T0 + 40).unwrap();
         let op = store
             .read(|tx| {
-                Ok(tx.ops_in_state("p", OpState::Confirmed)?
+                Ok(tx
+                    .ops_in_state("p", OpState::Confirmed)?
                     .into_iter()
                     .find(|op| op.kind == OpKind::Merge))
             })
@@ -248,7 +300,8 @@ fn wait_merge(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg) {
         }
         let states = store
             .read(|tx| {
-                Ok(tx.ops_in_state("p", OpState::Failed)?
+                Ok(tx
+                    .ops_in_state("p", OpState::Failed)?
                     .into_iter()
                     .find(|op| op.kind == OpKind::Merge)
                     .map(|op| op.result))
@@ -285,7 +338,11 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
     let mut store = Store::open_in_memory().unwrap();
     admin::init_with_home(
         &mut store,
-        &Env { ctx: None, pane_id: None, admin: true },
+        &Env {
+            ctx: None,
+            pane_id: None,
+            admin: true,
+        },
         &world.config(&gate),
         Some(crate::skill_home()),
         false,
@@ -300,7 +357,11 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
     let active = onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
     assert_eq!(active, vec!["p:heat".to_string()]);
     let (repo, branch, base, label) = created(&herdr, "p/heat");
-    assert_eq!(repo, world.child.to_string_lossy().to_string(), "the child repo");
+    assert_eq!(
+        repo,
+        world.child.to_string_lossy().to_string(),
+        "the child repo"
+    );
     assert_eq!(branch, "p/heat");
     assert_eq!(base, "feat", "the child's own integration branch");
     assert_eq!(label, "p-heat");
@@ -330,7 +391,8 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                 issue: None,updated: T0,
+                issue: None,
+                updated: T0,
             })?;
             tx.insert_contract(&ContractRow {
                 project: "p".into(),
@@ -346,16 +408,7 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
             })?;
             tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
             tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
-            tasks::submit_result(
-                tx,
-                "p",
-                "T-1",
-                1,
-                1,
-                &candidate,
-                "ops/reports/T-1.md",
-                T0,
-            )?;
+            tasks::submit_result(tx, "p", "T-1", 1, 1, &candidate, "ops/reports/T-1.md", T0)?;
             Ok(())
         })
         .unwrap();
@@ -364,16 +417,23 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
     let report = start_reviews(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T0 + 10).unwrap();
     assert_eq!(report.started, vec!["p:review-1"]);
     let (repo, branch, base, label) = created(&herdr, "p/review-1");
-    assert_eq!(repo, world.child.to_string_lossy().to_string(), "the child repo");
+    assert_eq!(
+        repo,
+        world.child.to_string_lossy().to_string(),
+        "the child repo"
+    );
     assert_eq!(branch, "p/review-1");
     assert_eq!(base, "feat", "the child's own integration branch");
     assert_eq!(label, "p-review-1-child", "the label names the repo");
     let checkout = crate::REVIEW_GIT_CALLS.with(|calls| calls.borrow().clone());
-    assert!(checkout.iter().any(|args| args == &["checkout", "-f", "-B", "review/t1", candidate.as_str()]));
+    assert!(checkout
+        .iter()
+        .any(|args| args == &["checkout", "-f", "-B", "review/t1", candidate.as_str()]));
     // The packet asks for the diff against the child's integration branch.
     let packet = store
         .read(|tx| {
-            Ok(tx.ops_of_seat_kind("p:review-1", OpKind::Deliver)?
+            Ok(tx
+                .ops_of_seat_kind("p:review-1", OpKind::Deliver)?
                 .into_iter()
                 .last()
                 .map(|op| op.payload["text"].as_str().unwrap_or_default().to_string())
@@ -410,7 +470,11 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
     herdr.add_worktree("p/merge", &merge_worktree.to_string_lossy(), "wt-merge:p1");
     wait_merge(&mut store, &mut herdr, &cfg);
     let (repo, branch, label) = opened(&herdr, "p/merge");
-    assert_eq!(repo, world.child.to_string_lossy().to_string(), "the child repo");
+    assert_eq!(
+        repo,
+        world.child.to_string_lossy().to_string(),
+        "the child repo"
+    );
     assert_eq!(branch, "p/merge");
     assert_eq!(label, "p-merge-child", "the label names the repo");
 
@@ -430,7 +494,11 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
         fs::canonicalize(&merge_worktree).unwrap(),
         "the gate ran in the child's merge worktree"
     );
-    assert_eq!(origin, world.child_origin.to_string_lossy(), "the child's repo");
+    assert_eq!(
+        origin,
+        world.child_origin.to_string_lossy(),
+        "the child's repo"
+    );
 
     // The parent is untouched: its branch never moved.
     assert_eq!(

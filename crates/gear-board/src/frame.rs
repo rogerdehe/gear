@@ -286,7 +286,8 @@ impl Canvas {
             }
             for column in 0..columns {
                 self.cells[target * self.width + column] = from.cells[source * from.width + column];
-                self.styles[target * self.width + column] = from.styles[source * from.width + column];
+                self.styles[target * self.width + column] =
+                    from.styles[source * from.width + column];
                 self.continuation[target * self.width + column] =
                     from.continuation[source * from.width + column];
             }
@@ -337,14 +338,21 @@ impl Canvas {
             return;
         }
         for column in 1..self.width.saturating_sub(1) {
-            self.styles[y * self.width + column] = Style { fg: None, bold: false, reverse: true };
+            self.styles[y * self.width + column] = Style {
+                fg: None,
+                bold: false,
+                reverse: true,
+            };
         }
     }
 
     /// The screen as plain text: the rows, each cut at the edge, without a
     /// terminal code.
     pub fn text(&self) -> String {
-        (0..self.height).map(|row| self.row_text(row, None)).collect::<Vec<_>>().join("\n")
+        (0..self.height)
+            .map(|row| self.row_text(row, None))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// The screen as the terminal shows it: the styles as SGR codes. Without
@@ -366,7 +374,10 @@ impl Canvas {
             match codes {
                 None => Style::PLAIN,
                 Some(true) => styles[column],
-                Some(false) => Style { fg: None, ..styles[column] },
+                Some(false) => Style {
+                    fg: None,
+                    ..styles[column]
+                },
             }
         };
         // The plain spaces at the end of the row are not drawn.
@@ -433,14 +444,22 @@ pub fn canvas(board: &Board, screen: &Screen, panel: Option<&[Line]>) -> Canvas 
     canvas.copy_rows(&tall, top + offset, top, last.saturating_sub(top));
     // The selected row is lit across the width, in one colour (README change
     // 13).
-    if let Some(row) = picks.get(screen.selected).map(|row| row.saturating_sub(offset)) {
+    if let Some(row) = picks
+        .get(screen.selected)
+        .map(|row| row.saturating_sub(offset))
+    {
         if row >= top && row < last {
             canvas.light_row(row);
         }
     }
     if screen.tab == Tab::Tasks {
         // The Tasks view's legend (the prototype's row `h - 2`).
-        canvas.put_styled(1, height.saturating_sub(2), TASKS_LEGEND, Style::fg(Color::Dim));
+        canvas.put_styled(
+            1,
+            height.saturating_sub(2),
+            TASKS_LEGEND,
+            Style::fg(Color::Dim),
+        );
     }
     canvas.put_styled(1, height - 1, FOOTER, Style::fg(Color::Dim));
     if let Some(panel) = panel {
@@ -545,7 +564,11 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
 
     // Row 1: the shown voyage's milestone and title, and what it does.
     if let Some(voyage) = voyage {
-        let state = if voyage.sailing { "⛵ sailing" } else { "⚓ landed" };
+        let state = if voyage.sailing {
+            "⛵ sailing"
+        } else {
+            "⚓ landed"
+        };
         let line = format!("{}: {} · {}", voyage.milestone, voyage.title, state);
         canvas.put_wide(1, 1, &line, Style::bold());
     }
@@ -658,7 +681,12 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
         accent,
     );
 
-    Layout { top: tab_row + 3, tab_row, tabs, voyages }
+    Layout {
+        top: tab_row + 3,
+        tab_row,
+        tabs,
+        voyages,
+    }
 }
 
 /// The numbers the header's time and tasks rows read (T-354), all in
@@ -725,13 +753,29 @@ fn header_numbers(board: &Board, project: &ProjectBoard) -> HeaderNumbers {
     }
     let going = tasks.saturating_sub(merged + waiting);
 
-    HeaderNumbers { used, eta, expected, sailing, diff, tasks, merged, going, waiting }
+    HeaderNumbers {
+        used,
+        eta,
+        expected,
+        sailing,
+        diff,
+        tasks,
+        merged,
+        going,
+        waiting,
+    }
 }
 
 /// The time bar of `n` cells (the prototype's `bar`, T-354): the cells used,
 /// then the plan's end and, while the voyage sails, the expected finish.
 fn time_bar(n: usize, numbers: &HeaderNumbers) -> String {
-    let HeaderNumbers { used, eta, expected, sailing, .. } = *numbers;
+    let HeaderNumbers {
+        used,
+        eta,
+        expected,
+        sailing,
+        ..
+    } = *numbers;
     let span = eta.max(expected).max(used).max(1) as usize;
     let filled = (((used.max(0) as f64) / span as f64) * n as f64)
         .round_ties_even()
@@ -762,8 +806,17 @@ fn folded_rows(
 ) -> usize {
     let width = canvas.width;
     let numbers = header_numbers(board, project);
-    let HeaderNumbers { used, eta, expected, sailing, diff, tasks, merged, going, waiting } =
-        numbers;
+    let HeaderNumbers {
+        used,
+        eta,
+        expected,
+        sailing,
+        diff,
+        tasks,
+        merged,
+        going,
+        waiting,
+    } = numbers;
 
     // The folded header's bar: the prototype's shorter one.
     let n = (width.saturating_sub(60) / 2).clamp(20, 40);
@@ -772,7 +825,11 @@ fn folded_rows(
     let b = going * n / tasks.max(1);
 
     let mx = (width / 2 + 10).max(90);
-    let time_style = if diff >= 0 { Style::fg(Color::Ok) } else { Style::fg(Color::Bad) };
+    let time_style = if diff >= 0 {
+        Style::fg(Color::Ok)
+    } else {
+        Style::fg(Color::Bad)
+    };
 
     // Row 1: the goal check and the milestone the voyage is on.
     canvas.put_styled(1, row, "Goal check", Style::bold());
@@ -818,9 +875,19 @@ fn folded_rows(
     canvas.put_styled(15, row, &bar, time_style);
     let short = if sailing {
         if diff >= 0 {
-            format!("expected {} of {}, {} ahead", hm(expected), hm(eta), hm(diff))
+            format!(
+                "expected {} of {}, {} ahead",
+                hm(expected),
+                hm(eta),
+                hm(diff)
+            )
         } else {
-            format!("expected {} of {}, {} behind", hm(expected), hm(eta), hm(-diff))
+            format!(
+                "expected {} of {}, {} behind",
+                hm(expected),
+                hm(eta),
+                hm(-diff)
+            )
         }
     } else if diff >= 0 {
         format!("took {} of {}, {} under", hm(used), hm(eta), hm(diff))
@@ -831,7 +898,12 @@ fn folded_rows(
     canvas.put_styled(mx, row, "Tasks", Style::bold());
     canvas.put_styled(mx + 11, row, &"█".repeat(a), Style::fg(Color::Ok));
     canvas.put_styled(mx + 11 + a, row, &"▓".repeat(b), Style::fg(Color::Warn));
-    canvas.put_styled(mx + 11 + a + b, row, &"░".repeat(n - a - b), Style::fg(Color::Dim));
+    canvas.put_styled(
+        mx + 11 + a + b,
+        row,
+        &"░".repeat(n - a - b),
+        Style::fg(Color::Dim),
+    );
     canvas.put_styled(
         mx + 12 + n,
         row,
@@ -866,15 +938,28 @@ fn unfolded_rows(
 ) -> usize {
     let width = canvas.width;
     let numbers = header_numbers(board, project);
-    let HeaderNumbers { used, eta, expected, sailing, diff, tasks, merged, going, waiting } =
-        numbers;
+    let HeaderNumbers {
+        used,
+        eta,
+        expected,
+        sailing,
+        diff,
+        tasks,
+        merged,
+        going,
+        waiting,
+    } = numbers;
 
     // The unfolded header's bar: the prototype's wider one.
     let n = width.saturating_sub(95).clamp(20, 50);
     let bar = time_bar(n, &numbers);
     let a = merged * n / tasks.max(1);
     let b = going * n / tasks.max(1);
-    let time_style = if diff >= 0 { Style::fg(Color::Ok) } else { Style::fg(Color::Bad) };
+    let time_style = if diff >= 0 {
+        Style::fg(Color::Ok)
+    } else {
+        Style::fg(Color::Bad)
+    };
 
     // The goal check: every clause of the voyage's goal, met or not yet.
     canvas.put_styled(1, row, "Goal check", Style::bold());
@@ -897,7 +982,11 @@ fn unfolded_rows(
         .workload
         .as_ref()
         .and_then(|voyage| voyage.projected_min);
-    let left_all: i64 = project.stations.iter().map(|station| station.left_min).sum();
+    let left_all: i64 = project
+        .stations
+        .iter()
+        .map(|station| station.left_min)
+        .sum();
     let mut left_upto = 0i64;
     for station in &project.stations {
         left_upto += station.left_min;
@@ -906,21 +995,24 @@ fn unfolded_rows(
             .filter(|_| left_all > 0)
             .map(|projected| used + ((projected - used) * left_upto).div_euclid(left_all));
         let (text, style) = match (station.state, station.reached_at_min, planned) {
-            (crate::stations::StationState::Reached, Some(at), _) => {
-                (format!("✔ {what} — reached at {}", hm(at)), Style::fg(Color::Ok))
-            }
+            (crate::stations::StationState::Reached, Some(at), _) => (
+                format!("✔ {what} — reached at {}", hm(at)),
+                Style::fg(Color::Ok),
+            ),
             (crate::stations::StationState::Reached, None, _) => {
                 (format!("✔ {what} — reached"), Style::fg(Color::Ok))
             }
-            (crate::stations::StationState::Now, _, Some(at)) => {
-                (format!("▶ {what} — now, planned by {}", hm(at)), Style::bold())
-            }
+            (crate::stations::StationState::Now, _, Some(at)) => (
+                format!("▶ {what} — now, planned by {}", hm(at)),
+                Style::bold(),
+            ),
             (crate::stations::StationState::Now, _, None) => {
                 (format!("▶ {what} — now"), Style::bold())
             }
-            (_, _, Some(at)) => {
-                (format!("· {what} — planned by {}", hm(at)), Style::fg(Color::Dim))
-            }
+            (_, _, Some(at)) => (
+                format!("· {what} — planned by {}", hm(at)),
+                Style::fg(Color::Dim),
+            ),
             (_, _, None) => (format!("· {what}"), Style::fg(Color::Dim)),
         };
         canvas.put_styled(15, row, &text, style);
@@ -955,9 +1047,19 @@ fn unfolded_rows(
             )
         }
     } else if diff >= 0 {
-        format!("took {} · planned {} · {} under plan", hm(used), hm(eta), hm(diff))
+        format!(
+            "took {} · planned {} · {} under plan",
+            hm(used),
+            hm(eta),
+            hm(diff)
+        )
     } else {
-        format!("took {} · planned {} · {} over plan", hm(used), hm(eta), hm(-diff))
+        format!(
+            "took {} · planned {} · {} over plan",
+            hm(used),
+            hm(eta),
+            hm(-diff)
+        )
     };
     canvas.put_styled(17 + n, row, &when, Style::bold());
     row += 1;
@@ -974,12 +1076,20 @@ fn unfolded_rows(
     canvas.put_styled(1, row, "Tasks", Style::bold());
     canvas.put_styled(15, row, &"█".repeat(a), Style::fg(Color::Ok));
     canvas.put_styled(15 + a, row, &"▓".repeat(b), Style::fg(Color::Warn));
-    canvas.put_styled(15 + a + b, row, &"░".repeat(n - a - b), Style::fg(Color::Dim));
-    let mut words = format!(
-        "{merged} of {tasks} merged · {going} in progress · {waiting} not started"
+    canvas.put_styled(
+        15 + a + b,
+        row,
+        &"░".repeat(n - a - b),
+        Style::fg(Color::Dim),
     );
+    let mut words =
+        format!("{merged} of {tasks} merged · {going} in progress · {waiting} not started");
     if !project.moved_out.is_empty() {
-        let moved: Vec<&str> = project.moved_out.iter().map(|(task, _)| task.as_str()).collect();
+        let moved: Vec<&str> = project
+            .moved_out
+            .iter()
+            .map(|(task, _)| task.as_str())
+            .collect();
         words.push_str(&format!(" · moved out: {}", moved.join(", ")));
     }
     canvas.put_styled(17 + n, row, &words, Style::bold());
@@ -1056,7 +1166,11 @@ fn voyage_style(shown: Option<&VoyageEntry>, entry: &VoyageEntry) -> Style {
         .map(|shown| shown.milestone == entry.milestone)
         .unwrap_or(false);
     if is_shown {
-        Style { fg: None, bold: true, reverse: true }
+        Style {
+            fg: None,
+            bold: true,
+            reverse: true,
+        }
     } else {
         Style::fg(Color::Dim)
     }
@@ -1119,7 +1233,11 @@ fn bar_line(bar: Option<&str>) -> String {
 
 /// The lanes of the project, in seat order: the order of the lane colours.
 fn lane_order(project: &ProjectBoard) -> Vec<&str> {
-    project.lanes.iter().map(|lane| lane.lane.as_str()).collect()
+    project
+        .lanes
+        .iter()
+        .map(|lane| lane.lane.as_str())
+        .collect()
 }
 
 /// The colour of a lane on this board.
@@ -1186,8 +1304,17 @@ fn task_lanes(project: &ProjectBoard) -> Vec<String> {
 
 /// The rows the Tasks view draws: the git graph of the project's tasks,
 /// measured from the shown voyage's departure (the prototype's `view_graph`).
-pub fn task_rows(project: &ProjectBoard, now: gear_model::Ts, width: usize) -> Vec<graph::GraphRow> {
-    graph::git_rows(&project.graph, &task_lanes(project), voyage_departure(project, now), width)
+pub fn task_rows(
+    project: &ProjectBoard,
+    now: gear_model::Ts,
+    width: usize,
+) -> Vec<graph::GraphRow> {
+    graph::git_rows(
+        &project.graph,
+        &task_lanes(project),
+        voyage_departure(project, now),
+        width,
+    )
 }
 
 /// The tasks of the Tasks view's picks, in order: the rows with a task and a
@@ -1298,8 +1425,11 @@ fn view_decisions(
     let mut row = top + 1;
     // The starred decisions are the ones that changed the course: the summary
     // the user reads first. A voyage that changed nothing says so.
-    let starred: Vec<&crate::DecisionBoard> =
-        project.decisions.iter().filter(|decision| decision.star).collect();
+    let starred: Vec<&crate::DecisionBoard> = project
+        .decisions
+        .iter()
+        .filter(|decision| decision.star)
+        .collect();
     if starred.is_empty() {
         canvas.put_styled(3, row, "nothing", Style::fg(Color::Dim));
         row += 1;
@@ -1325,7 +1455,12 @@ fn view_decisions(
     for (index, decision) in project.decisions.iter().enumerate() {
         row += 1;
         let picked = index == screen.selected;
-        canvas.put_styled(1, row, if picked { "›" } else { " " }, Style::fg(Color::Acc));
+        canvas.put_styled(
+            1,
+            row,
+            if picked { "›" } else { " " },
+            Style::fg(Color::Acc),
+        );
         canvas.put_styled(
             3,
             row,
@@ -1335,7 +1470,11 @@ fn view_decisions(
                 if decision.star { '★' } else { ' ' },
                 decision.kind
             ),
-            if decision.star { Style::fg(Color::Warn) } else { Style::PLAIN },
+            if decision.star {
+                Style::fg(Color::Warn)
+            } else {
+                Style::PLAIN
+            },
         );
         canvas.put_styled(22, row, &decision.what, Style::PLAIN);
         picks.push(row);
@@ -1358,8 +1497,11 @@ fn view_decisions(
             &format!("{} {:<5}", friction.task, friction.lane),
             lane_style(project, &friction.lane),
         );
-        let (status, color) =
-            if friction.closed { ("read", Color::Dim) } else { ("unread", Color::Warn) };
+        let (status, color) = if friction.closed {
+            ("read", Color::Dim)
+        } else {
+            ("unread", Color::Warn)
+        };
         canvas.put_styled(15, row, &format!("{status:<7}"), Style::fg(color));
         canvas.put_styled(23, row, &friction.body, Style::PLAIN);
     }
@@ -1462,7 +1604,11 @@ fn view_cost(
         dev_k_total += dev_k;
         rev_k_total += rev_k;
         cost_total += dev_c + rev_c;
-        let ratio = if est > 0 { act as f64 / est as f64 } else { 0.0 };
+        let ratio = if est > 0 {
+            act as f64 / est as f64
+        } else {
+            0.0
+        };
         let expanded = screen.opened.iter().any(|open| *open == lane.lane);
         canvas.put_line(
             0,
@@ -1492,7 +1638,11 @@ fn view_cost(
             for task in &mine {
                 let est = task.est_min.unwrap_or(0);
                 let act = task.actual_min.unwrap_or(0);
-                let ratio = if est > 0 { act as f64 / est as f64 } else { 0.0 };
+                let ratio = if est > 0 {
+                    act as f64 / est as f64
+                } else {
+                    0.0
+                };
                 let dev_k = task.dev_tokens.unwrap_or(0) / 1000;
                 let rev_k = task.review_tokens.unwrap_or(0) / 1000;
                 let dev_c = task.dev_cost.unwrap_or(0.0);
@@ -1524,7 +1674,11 @@ fn view_cost(
         (dev_k_total + rev_k_total) as f64 / 1000.0,
         dev_k_total as f64 / 1000.0,
         rev_k_total as f64 / 1000.0,
-        if priced { format!("${cost_total:.2}") } else { "no prices set".to_string() }
+        if priced {
+            format!("${cost_total:.2}")
+        } else {
+            "no prices set".to_string()
+        }
     );
     if unknown > 0 {
         // The sum is what is known: the unknown parts are named.
@@ -1599,7 +1753,12 @@ fn view_now(
     canvas.put_styled(34 + tw, top, "TIME", Style::bold());
     canvas.put_styled(46 + tw, top, "LANE DONE", Style::bold());
     canvas.put_styled(76 + tw, top, "ENDS", Style::bold());
-    canvas.put_styled(86 + tw, top, "(Enter: the lane's work)", Style::fg(Color::Dim));
+    canvas.put_styled(
+        86 + tw,
+        top,
+        "(Enter: the lane's work)",
+        Style::fg(Color::Dim),
+    );
 
     let mut picks = Vec::new();
     let mut row = top + 1;
@@ -1608,7 +1767,12 @@ fn view_now(
         let picked = index == screen.selected;
         // The mark stays in the accent colour, picked or not (the frame then
         // lights the selected row).
-        canvas.put_styled(1, row, if picked { "›" } else { " " }, Style::fg(Color::Acc));
+        canvas.put_styled(
+            1,
+            row,
+            if picked { "›" } else { " " },
+            Style::fg(Color::Acc),
+        );
         canvas.put_styled(
             3,
             row,
@@ -1639,7 +1803,11 @@ fn view_now(
                     34 + tw,
                     row,
                     &format!("{actual}/{estimate}m{}", if over { " ⚠" } else { "" }),
-                    if over { Style::fg(Color::Bad) } else { Style::PLAIN },
+                    if over {
+                        Style::fg(Color::Bad)
+                    } else {
+                        Style::PLAIN
+                    },
                 );
             }
             None => {
@@ -1789,7 +1957,11 @@ fn view_now(
             // The mark and the space after it carry its colour; the hourglass
             // is a wide character, so its two continuation cells come first and
             // the text starts one cell later, as a terminal draws it.
-            let lead = if *mark == "⏳" { format!("{mark}  ") } else { format!("{mark} ") };
+            let lead = if *mark == "⏳" {
+                format!("{mark}  ")
+            } else {
+                format!("{mark} ")
+            };
             canvas.put_styled(3, row, &lead, *style);
             canvas.put_styled(3 + lead.chars().count(), row, text, *style);
             row += 1;
@@ -1851,7 +2023,10 @@ fn view_now(
 /// `idle_reason`): the reason it sits, or what its next task waits for.
 fn idle_reason_text(project: &ProjectBoard, lane: &LaneBoard, landed: bool) -> (String, Style) {
     if landed {
-        return (crate::RETIRED_AT_THE_LANDING.to_string(), Style::fg(Color::Dim));
+        return (
+            crate::RETIRED_AT_THE_LANDING.to_string(),
+            Style::fg(Color::Dim),
+        );
     }
     // A lane that helps on the captain's instruction says so, in the accent
     // colour, as it did before the table (T-323).
@@ -1866,7 +2041,10 @@ fn idle_reason_text(project: &ProjectBoard, lane: &LaneBoard, landed: bool) -> (
             | Some(crate::idle::IdleReason::Held { .. })
             | Some(crate::idle::IdleReason::Waiting { .. })
     ) {
-        return (lane.idle_text.clone().unwrap_or_default(), Style::fg(Color::Bad));
+        return (
+            lane.idle_text.clone().unwrap_or_default(),
+            Style::fg(Color::Bad),
+        );
     }
     // The next task of the lane, and the first dependency it waits for.
     let Some(next) = lane
@@ -1911,10 +2089,16 @@ fn needs_a_look(project: &ProjectBoard) -> Vec<String> {
     let mut tasks: Vec<(&str, &TaskBoard)> = project
         .lanes
         .iter()
-        .flat_map(|lane| lane.tasks.iter().map(move |task| (lane.lane.as_str(), task)))
+        .flat_map(|lane| {
+            lane.tasks
+                .iter()
+                .map(move |task| (lane.lane.as_str(), task))
+        })
         .collect();
     tasks.sort_by(|(_, left), (_, right)| {
-        left.rank.cmp(&right.rank).then_with(|| left.id.cmp(&right.id))
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| left.id.cmp(&right.id))
     });
     let mut looks = Vec::new();
     for (lane, task) in tasks {
@@ -1991,7 +2175,10 @@ fn row_cut(row: &Line, width: usize) -> Line {
 /// `tasks` are the graph's records of the project (T-346): the panel shows the
 /// lane's own, each with the stage the store's facts gave it.
 pub fn lane_panel(lane: &LaneBoard, tasks: &[graph::GraphTask]) -> Vec<String> {
-    styled_lane_panel(lane, tasks, Color::Dim).into_iter().map(|line| line.text).collect()
+    styled_lane_panel(lane, tasks, Color::Dim)
+        .into_iter()
+        .map(|line| line.text)
+        .collect()
 }
 
 /// Whether the graph task is in the lane's queue: a task a plan left without a
@@ -2005,11 +2192,7 @@ fn in_lane(task: &graph::GraphTask, lane: &str) -> bool {
 }
 
 /// The lane's panel in the prototype's colours; `color` is the lane's own.
-pub fn styled_lane_panel(
-    lane: &LaneBoard,
-    tasks: &[graph::GraphTask],
-    color: Color,
-) -> Vec<Line> {
+pub fn styled_lane_panel(lane: &LaneBoard, tasks: &[graph::GraphTask], color: Color) -> Vec<Line> {
     let mine = || tasks.iter().filter(move |task| in_lane(task, &lane.lane));
     let mut rows = vec![
         Line::styled(format!("lane {}", lane.lane), Style::fg(color).and_bold()),
@@ -2060,7 +2243,8 @@ pub fn styled_lane_panel(
     rows.push(Line::styled("LEFT, in order", Style::bold()));
     let mut left = 0;
     let mut minutes = 0;
-    for task in mine().filter(|task| matches!(task.stage, graph::Stage::Deps | graph::Stage::Queued))
+    for task in
+        mine().filter(|task| matches!(task.stage, graph::Stage::Deps | graph::Stage::Queued))
     {
         left += 1;
         minutes += task.est_min.unwrap_or(0);
@@ -2140,16 +2324,33 @@ mod tests {
         assert_eq!(canvas.char_at(1, 0), ' ');
         assert_eq!(canvas.char_at(5, 0), '⛵');
         assert!(canvas.is_continuation(6, 0), "the glyph's second cell");
-        assert_eq!(canvas.char_at(6, 0), ' ', "a space in the cell (the golden planes)");
-        assert_eq!(canvas.style_at(6, 0), Style::fg(Color::Warn), "in the label's style");
-        assert!(!canvas.is_continuation(7, 0), "the label's last space is its own");
+        assert_eq!(
+            canvas.char_at(6, 0),
+            ' ',
+            "a space in the cell (the golden planes)"
+        );
+        assert_eq!(
+            canvas.style_at(6, 0),
+            Style::fg(Color::Warn),
+            "in the label's style"
+        );
+        assert!(
+            !canvas.is_continuation(7, 0),
+            "the label's last space is its own"
+        );
         // An ordinary text after the label keeps the trailing spaces printed.
         canvas.put(8, 0, "x");
         let line = canvas.text().lines().next().unwrap_or_default().to_string();
         assert_eq!(line, "  M5 ⛵ x", "the continuation cell prints nothing");
         let columns: usize = line
             .chars()
-            .map(|character| if matches!(character, '⛵' | '⚓') { 2 } else { 1 })
+            .map(|character| {
+                if matches!(character, '⛵' | '⚓') {
+                    2
+                } else {
+                    1
+                }
+            })
             .sum();
         assert_eq!(columns, 9, "nine cells, nine terminal columns: {line:?}");
     }
@@ -2175,7 +2376,10 @@ mod tests {
         let mut canvas = Canvas::new(20, 8);
         canvas.put_wide(1, 0, "M5 ⛵", Style::fg(Color::Warn));
         canvas.put(4, 0, "y");
-        assert!(!canvas.is_continuation(5, 0), "the glyph has no second half any more");
+        assert!(
+            !canvas.is_continuation(5, 0),
+            "the glyph has no second half any more"
+        );
         assert_eq!(canvas.char_at(5, 0), ' ');
         assert_eq!(canvas.style_at(5, 0), Style::fg(Color::Warn));
         assert_eq!(canvas.text().lines().next().unwrap_or_default(), " M5 y");
@@ -2197,4 +2401,3 @@ mod tests {
         assert_eq!(hm(346), "5h46m");
     }
 }
-

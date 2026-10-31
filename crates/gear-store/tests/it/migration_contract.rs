@@ -13,7 +13,8 @@ const V1_SCHEMA: &str = include_str!("v1_schema.sql");
 
 /// The `voyages` of T-22 attempt 1: `done`, `bar` and `eta` were NOT NULL.
 /// A store that a development build opened then has this shape.
-const VOYAGES_V1_ATTEMPT_1: &str = "CREATE TABLE voyages (project TEXT NOT NULL, milestone TEXT NOT NULL,
+const VOYAGES_V1_ATTEMPT_1: &str =
+    "CREATE TABLE voyages (project TEXT NOT NULL, milestone TEXT NOT NULL,
   title TEXT NOT NULL, done TEXT NOT NULL, bar TEXT NOT NULL, eta TEXT NOT NULL,
   departure INTEGER, departure_tasks INTEGER, updated INTEGER NOT NULL,
   PRIMARY KEY (project, milestone));";
@@ -65,8 +66,11 @@ fn a_store_of_v1(path: &std::path::Path) {
     let conn = Connection::open(path).unwrap();
     conn.execute_batch(V1_SCHEMA).unwrap();
     conn.execute_batch(VOYAGES_V1_ATTEMPT_1).unwrap();
-    conn.execute("INSERT INTO meta (key, value) VALUES ('schema_version', ?1)", [V1])
-        .unwrap();
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
+        [V1],
+    )
+    .unwrap();
     conn.execute(
         "INSERT INTO projects (id, herdr_session, config_toml, config_version, quota_lanes,
             quota_temps, quota_includes_captain, created)
@@ -131,7 +135,8 @@ fn an_old_store_is_migrated_up_and_keeps_its_rows() {
     conn.execute_batch(
         "ALTER TABLE voyages ADD COLUMN departure_estimate_min INTEGER;
          UPDATE voyages SET departure_estimate_min=30;",
-    ).unwrap();
+    )
+    .unwrap();
     drop(conn);
 
     // The binary opens the store: it is carried up to the current version.
@@ -151,9 +156,13 @@ fn an_old_store_is_migrated_up_and_keeps_its_rows() {
         ("attempts", "merged_at"),
         ("voyages", "departure_estimate_min"),
     ] {
-        assert!(shape.iter().any(|(name, columns)| name == table
-            && columns.iter().any(|(name, not_null)| name == column && !not_null)),
-            "missing nullable {table}.{column}");
+        assert!(
+            shape.iter().any(|(name, columns)| name == table
+                && columns
+                    .iter()
+                    .any(|(name, not_null)| name == column && !not_null)),
+            "missing nullable {table}.{column}"
+        );
     }
 
     // The rows are still there.
@@ -164,7 +173,10 @@ fn an_old_store_is_migrated_up_and_keeps_its_rows() {
     assert_eq!(seat.generation, 1);
     let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
     assert_eq!(task.priority, "must");
-    let message = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+    let message = store
+        .read(|tx| tx.get_message("p", "M-1"))
+        .unwrap()
+        .unwrap();
     assert_eq!(message.body, "hello");
 
     // The voyage of T-22 attempt 1 is in the canonical shape now, and its row
@@ -198,8 +210,12 @@ fn a_newer_store_is_refused_for_writes_and_nothing_is_written() {
     let path = dir.path().join("gear.db");
     {
         let mut store = Store::open(&path).unwrap();
-        store.write(|tx| tx.set_meta("schema_version", "999")).unwrap();
-        store.write(|tx| tx.set_meta("marker", "untouched")).unwrap();
+        store
+            .write(|tx| tx.set_meta("schema_version", "999"))
+            .unwrap();
+        store
+            .write(|tx| tx.set_meta("marker", "untouched"))
+            .unwrap();
     }
 
     // The store is of a newer version: it is refused for writing.
@@ -215,13 +231,17 @@ fn a_newer_store_is_refused_for_writes_and_nothing_is_written() {
     // Nothing was written: the store still says 999 and still has its row.
     let conn = Connection::open(&path).unwrap();
     let version: String = conn
-        .query_row("SELECT value FROM meta WHERE key='schema_version'", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(version, "999");
     let marker: String = conn
-        .query_row("SELECT value FROM meta WHERE key='marker'", [], |row| row.get(0))
+        .query_row("SELECT value FROM meta WHERE key='marker'", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(marker, "untouched");
 }

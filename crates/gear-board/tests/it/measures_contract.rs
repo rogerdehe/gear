@@ -16,11 +16,22 @@ fn world() -> Store {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "claude",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
             // A registered lane that never received a task.
             testing::seed_active_seat(tx, "p", "runtime", SeatRole::Lane, "w1:p3", "opencode", T0)?;
-            for (id, rank, state) in [("T-1", 1, TaskState::Verifying), ("T-2", 2, TaskState::Ready)] {
+            for (id, rank, state) in [
+                ("T-1", 1, TaskState::Verifying),
+                ("T-2", 2, TaskState::Ready),
+            ] {
                 tx.insert_task(&TaskRow {
                     repo: None,
                     base: None,
@@ -41,7 +52,8 @@ fn world() -> Store {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                     issue: None,updated: T0,
+                    issue: None,
+                    updated: T0,
                 })?;
             }
             // Two hand-ins on T-1: the first was sent back, the second is in
@@ -88,11 +100,16 @@ fn world() -> Store {
 }
 
 fn lane_header<'a>(text: &'a str, lane: &str) -> &'a str {
-    text.lines().find(|line| line.starts_with(&format!("Lane {lane} ·"))).expect("lane header")
+    text.lines()
+        .find(|line| line.starts_with(&format!("Lane {lane} ·")))
+        .expect("lane header")
 }
 
 fn options() -> Options {
-    Options { project: Some("p".into()), ..Options::default() }
+    Options {
+        project: Some("p".into()),
+        ..Options::default()
+    }
 }
 
 #[test]
@@ -102,9 +119,15 @@ fn the_board_shows_the_rework_rate_and_the_time_since_the_last_task() {
 
     // One lane: two hand-ins, one sent back, and the delivery five minutes
     // ago.
-    assert!(lane_header(&text, "data").contains("rework 1/2 · last task 5m ago"), "{text}");
+    assert!(
+        lane_header(&text, "data").contains("rework 1/2 · last task 5m ago"),
+        "{text}"
+    );
     // The other never received a task.
-    assert!(lane_header(&text, "runtime").contains("rework 0/0 · no task yet"), "{text}");
+    assert!(
+        lane_header(&text, "runtime").contains("rework 0/0 · no task yet"),
+        "{text}"
+    );
     // The project-wide rate is on the totals line.
     assert!(
         text.contains("Totals: 2 tasks · 0 done · 0 in progress · 0 waiting · rework 1/2"),
@@ -130,7 +153,10 @@ fn the_measure_follows_the_seat_that_made_the_attempt() {
     let text = render(&build(&mut store, &options(), T0).unwrap(), View::Lanes);
 
     assert!(lane_header(&text, "data").contains("rework 1/2"), "{text}");
-    assert!(lane_header(&text, "runtime").contains("rework 0/0"), "{text}");
+    assert!(
+        lane_header(&text, "runtime").contains("rework 0/0"),
+        "{text}"
+    );
     // And the project-wide rate counts each hand-in once.
     assert!(text.contains("rework 1/2"), "{text}");
 }

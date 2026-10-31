@@ -202,11 +202,20 @@ fn a_lane_parked_on_a_quota_wait_resumes_its_own_session_at_the_reset() {
 
     // One idle tick with the marker is no fact; the second confirms it.
     step(&mut store, &mut herdr, &cfg, T0 + 10);
-    assert_eq!(seat(&mut store).state, SeatState::Active, "one tick is no fact");
+    assert_eq!(
+        seat(&mut store).state,
+        SeatState::Active,
+        "one tick is no fact"
+    );
 
     let report = step(&mut store, &mut herdr, &cfg, T0 + 20);
     let parked = seat(&mut store);
-    assert_eq!(parked.state, SeatState::Parked, "{:?}: {report:?}", parked.state_reason);
+    assert_eq!(
+        parked.state,
+        SeatState::Parked,
+        "{:?}: {report:?}",
+        parked.state_reason
+    );
     // `quota_reset_h = 1`: the park ends an hour after the tick that parked it.
     let until = T0 + 20 + 3600;
     assert!(
@@ -218,7 +227,10 @@ fn a_lane_parked_on_a_quota_wait_resumes_its_own_session_at_the_reset() {
         "{:?}",
         parked.state_reason
     );
-    assert!(deliveries(&mut store).is_empty(), "the park delivers nothing");
+    assert!(
+        deliveries(&mut store).is_empty(),
+        "the park delivers nothing"
+    );
     let calls_at_park = herdr.calls.len();
 
     // Ticks before the reset deliver nothing, whatever the screen shows.
@@ -233,7 +245,12 @@ fn a_lane_parked_on_a_quota_wait_resumes_its_own_session_at_the_reset() {
     let report = step(&mut store, &mut herdr, &cfg, until);
 
     let awake = seat(&mut store);
-    assert_eq!(awake.state, SeatState::Active, "{:?}: {report:?}", awake.state_reason);
+    assert_eq!(
+        awake.state,
+        SeatState::Active,
+        "{:?}: {report:?}",
+        awake.state_reason
+    );
     assert_eq!(
         deliveries(&mut store),
         vec!["Continue T-1: your quota is back.".to_string()],
@@ -248,12 +265,18 @@ fn a_lane_parked_on_a_quota_wait_resumes_its_own_session_at_the_reset() {
         Some(SESSION),
         "the lane resumed its own session: {report:?}"
     );
-    assert_eq!(binding_session(&mut store), session_before, "the same binding session: {report:?}");
+    assert_eq!(
+        binding_session(&mut store),
+        session_before,
+        "the same binding session: {report:?}"
+    );
     // Every call after the park: no AgentStart and no exit keys (none of the
     // parked ticks and not the wake closed or restarted the agent).
     let after = calls_after(&herdr, calls_at_park);
     assert!(
-        after.iter().all(|call| !matches!(call, Call::AgentStart { .. })),
+        after
+            .iter()
+            .all(|call| !matches!(call, Call::AgentStart { .. })),
         "no restart: {after:?}"
     );
     assert!(
@@ -265,7 +288,9 @@ fn a_lane_parked_on_a_quota_wait_resumes_its_own_session_at_the_reset() {
         "no exit keys: {after:?}"
     );
     assert!(
-        after.iter().all(|call| !matches!(call, Call::Prompt { text, .. } if text == "/quit")),
+        after
+            .iter()
+            .all(|call| !matches!(call, Call::Prompt { text, .. } if text == "/quit")),
         "no exit command: {after:?}"
     );
 }

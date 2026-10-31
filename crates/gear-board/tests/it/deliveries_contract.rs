@@ -18,7 +18,15 @@ fn world() -> Store {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "claude",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
             testing::seed_active_seat(tx, "p", "old", SeatRole::Lane, "w1:p3", "opencode", T0)?;
             tx.set_seat_state("p:old", gear_model::SeatState::Retired, None, T0)?;
@@ -52,7 +60,10 @@ fn seed_delivery(store: &mut Store, seat: &str, generation: i64, state: OpState)
 }
 
 fn options() -> Options {
-    Options { project: Some("p".into()), ..Options::default() }
+    Options {
+        project: Some("p".into()),
+        ..Options::default()
+    }
 }
 
 #[test]
@@ -61,7 +72,9 @@ fn only_a_live_delivery_is_unconfirmed() {
     // The retired seat's op, though unsettled, is history.
     seed_delivery(&mut store, "p:old", 1, OpState::Unknown);
     // The lane restarted: generation 2 is live, so its old op is history too.
-    store.write(|tx| tx.set_seat_generation("p:data", 2)).unwrap();
+    store
+        .write(|tx| tx.set_seat_generation("p:data", 2))
+        .unwrap();
     seed_delivery(&mut store, "p:data", 1, OpState::Unknown);
     // The live generation's op counts.
     seed_delivery(&mut store, "p:data", 2, OpState::Unknown);
@@ -142,10 +155,20 @@ fn the_unconfirmed_deliveries_are_named_oldest_first() {
 
     let board = build(&mut store, &options(), T0).unwrap();
     let project = &board.projects[0];
-    assert_eq!(project.unconfirmed_deliveries, 2, "the count stays as it is");
-    assert_eq!(project.unconfirmed.len(), 2, "only the live deliveries are named");
+    assert_eq!(
+        project.unconfirmed_deliveries, 2,
+        "the count stays as it is"
+    );
+    assert_eq!(
+        project.unconfirmed.len(),
+        2,
+        "only the live deliveries are named"
+    );
     assert_eq!(project.unconfirmed[0].op, older.id);
-    assert_eq!(project.unconfirmed[0].seat, "data", "the seat's name, not its id");
+    assert_eq!(
+        project.unconfirmed[0].seat, "data",
+        "the seat's name, not its id"
+    );
     assert_eq!(project.unconfirmed[0].task.as_deref(), Some("T-1"));
     assert_eq!(project.unconfirmed[0].age_s, 300);
     assert_eq!(project.unconfirmed[1].op, newer.id);

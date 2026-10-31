@@ -61,11 +61,19 @@ fn world_at(repo: Option<&std::path::Path>, review_branch: Option<&str>) -> Stor
 fn cap() -> (Env, Fingerprint) {
     (
         Env {
-            ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "captain".into(),
+                generation: 1,
+            }),
             pane_id: Some(CAP.into()),
             admin: false,
         },
-        Fingerprint { pane_id: CAP.into(), kind: Some("codex".into()), session_ref: None },
+        Fingerprint {
+            pane_id: CAP.into(),
+            kind: Some("codex".into()),
+            session_ref: None,
+        },
     )
 }
 
@@ -79,7 +87,16 @@ fn run(
     let base = s.read(|tx| tx.plan_version("p")).unwrap();
     let text = format!("<!-- gear-plan project=p base={base} -->\n{body}");
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), None, &parse(&text).unwrap(), &text, rid, now)
+    apply(
+        s,
+        &env,
+        Some(&fp),
+        None,
+        &parse(&text).unwrap(),
+        &text,
+        rid,
+        now,
+    )
 }
 
 /// Task T-1 on lane `heat`, with attempt 1 accepted on candidate `c1`.
@@ -124,7 +141,13 @@ fn failed_merge(s: &mut Store, created: i64) -> String {
             created,
         })?;
         tx.set_op_state("p", &op.id, OpState::Executing, None, created)?;
-        tx.set_op_state("p", &op.id, OpState::Failed, Some("the gate failed"), created + 1)?;
+        tx.set_op_state(
+            "p",
+            &op.id,
+            OpState::Failed,
+            Some("the gate failed"),
+            created + 1,
+        )?;
         Ok(op.id)
     })
     .unwrap()
@@ -166,7 +189,10 @@ fn a_remerge_names_the_projects_review_branch() {
     failed_merge(&mut s, T0 + 10);
     run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap();
     let op = queued_merge(&mut s);
-    assert_eq!(op.payload["review"], "p/review/t1", "the project's template, not review/t1");
+    assert_eq!(
+        op.payload["review"], "p/review/t1",
+        "the project's template, not review/t1"
+    );
     assert_eq!(op.payload["candidate"], "c1");
     assert_eq!(op.payload["branch"], "heat/t1");
     assert_eq!(op.payload["remerge"], true);
@@ -269,7 +295,13 @@ fn the_last_merge_is_the_higher_op_number_not_the_larger_string() {
         assert_eq!(confirmed.id, "O-999");
         tx.set_op_state("p", &confirmed.id, OpState::Executing, None, CREATED)?;
         tx.set_op_state("p", &confirmed.id, OpState::Submitted, None, CREATED)?;
-        tx.set_op_state("p", &confirmed.id, OpState::Confirmed, Some("merged T-1"), CREATED)?;
+        tx.set_op_state(
+            "p",
+            &confirmed.id,
+            OpState::Confirmed,
+            Some("merged T-1"),
+            CREATED,
+        )?;
         let failed = tx.insert_op(&NewOp {
             project: "p".into(),
             seat: "p:heat".into(),
@@ -284,7 +316,13 @@ fn the_last_merge_is_the_higher_op_number_not_the_larger_string() {
         })?;
         assert_eq!(failed.id, "O-1000");
         tx.set_op_state("p", &failed.id, OpState::Executing, None, CREATED)?;
-        tx.set_op_state("p", &failed.id, OpState::Failed, Some("the gate failed"), CREATED)
+        tx.set_op_state(
+            "p",
+            &failed.id,
+            OpState::Failed,
+            Some("the gate failed"),
+            CREATED,
+        )
     })
     .unwrap();
 
@@ -320,7 +358,13 @@ fn a_confirmed_four_digit_merge_is_named_in_the_refusal() {
         })?;
         assert_eq!(failed.id, "O-999");
         tx.set_op_state("p", &failed.id, OpState::Executing, None, CREATED)?;
-        tx.set_op_state("p", &failed.id, OpState::Failed, Some("the gate failed"), CREATED)?;
+        tx.set_op_state(
+            "p",
+            &failed.id,
+            OpState::Failed,
+            Some("the gate failed"),
+            CREATED,
+        )?;
         let confirmed = tx.insert_op(&NewOp {
             project: "p".into(),
             seat: "p:heat".into(),
@@ -336,13 +380,22 @@ fn a_confirmed_four_digit_merge_is_named_in_the_refusal() {
         assert_eq!(confirmed.id, "O-1000");
         tx.set_op_state("p", &confirmed.id, OpState::Executing, None, CREATED)?;
         tx.set_op_state("p", &confirmed.id, OpState::Submitted, None, CREATED)?;
-        tx.set_op_state("p", &confirmed.id, OpState::Confirmed, Some("merged T-1"), CREATED)
+        tx.set_op_state(
+            "p",
+            &confirmed.id,
+            OpState::Confirmed,
+            Some("merged T-1"),
+            CREATED,
+        )
     })
     .unwrap();
 
     let error = run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap_err();
     assert_eq!(error.code, gear_model::ErrorCode::BadFormat, "{error:?}");
-    assert!(error.detail.contains("already merged (O-1000)"), "{error:?}");
+    assert!(
+        error.detail.contains("already merged (O-1000)"),
+        "{error:?}"
+    );
 }
 
 // ---- T-92 F1: a candidate that is already on the integration branch ---------
@@ -375,7 +428,8 @@ fn open_failed_item(s: &mut Store) -> String {
 }
 
 fn merge_failed_items(s: &mut Store) -> Vec<gear_store::MessageRow> {
-    s.read(|tx| tx.thread_messages("p", "merge-failed:T-1")).unwrap()
+    s.read(|tx| tx.thread_messages("p", "merge-failed:T-1"))
+        .unwrap()
 }
 
 /// The merge ops of T-1 in any state: a queued remerge adds one.
@@ -407,7 +461,11 @@ fn sh(dir: &Path, command: &str) {
         .current_dir(dir)
         .output()
         .expect("run sh");
-    assert!(out.status.success(), "{command}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{command}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn sh_out(dir: &Path, command: &str) -> String {
@@ -417,7 +475,11 @@ fn sh_out(dir: &Path, command: &str) -> String {
         .current_dir(dir)
         .output()
         .expect("run sh");
-    assert!(out.status.success(), "{command}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{command}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -480,8 +542,14 @@ fn repo(scratch: &Path, merged: bool) -> (PathBuf, String) {
 /// the objects and the ref is set — no test pushes (T-108).
 fn publish(origin: &Path, source: &Path, branch: &str) {
     let sha = sh_out(source, &format!("git rev-parse refs/heads/{branch}"));
-    sh(origin, &format!("git fetch -q {} refs/heads/{branch}", source.display()));
-    sh(origin, &format!("git update-ref refs/heads/{branch} {}", sha.trim()));
+    sh(
+        origin,
+        &format!("git fetch -q {} refs/heads/{branch}", source.display()),
+    );
+    sh(
+        origin,
+        &format!("git update-ref refs/heads/{branch} {}", sha.trim()),
+    );
 }
 
 /// A candidate that landed by another way (a hand merge) is on `dev` already:
@@ -499,7 +567,11 @@ fn a_remerge_of_a_candidate_already_on_the_integration_branch_queues_nothing() {
 
     let result = run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap();
 
-    assert_eq!(merge_op_count(&mut s), 1, "no merge op was queued: {result:?}");
+    assert_eq!(
+        merge_op_count(&mut s),
+        1,
+        "no merge op was queued: {result:?}"
+    );
     assert_eq!(
         result.warnings,
         vec![format!(
@@ -533,5 +605,9 @@ fn a_remerge_of_a_candidate_not_on_the_integration_branch_queues_the_op() {
     assert_eq!(queued_merge(&mut s).payload["candidate"], candidate);
     assert!(result.warnings.is_empty(), "{result:?}");
     let items = merge_failed_items(&mut s);
-    assert_eq!(items[0].state, MsgState::Open, "the engine's retry answers it");
+    assert_eq!(
+        items[0].state,
+        MsgState::Open,
+        "the engine's retry answers it"
+    );
 }

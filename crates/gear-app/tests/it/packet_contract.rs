@@ -18,14 +18,47 @@ fn world(attempt: bool) -> Store {
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", T0)?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
-        tx.insert_task(&TaskRow { repo: None, base: None, gate: None, rework_estimate_min: None, project: "p".into(), id: "T-7".into(), rank: 1, state: TaskState::Ready, priority: "must".into(),
-            lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
-            wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
-        tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 1, goal: "Fix the login crash".into(),
-            accept: "repro passes".into(), evidence_files: vec!["notes/T-7.md".into()], evidence_due_min: Some(60), body: String::new(), created: T0, mechanical: None, })?;
-        if attempt { start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?; }
+        tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: "p".into(),
+            id: "T-7".into(),
+            rank: 1,
+            state: TaskState::Ready,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: None,
+            issue: None,
+            updated: T0,
+        })?;
+        tx.insert_contract(&ContractRow {
+            project: "p".into(),
+            task: "T-7".into(),
+            version: 1,
+            goal: "Fix the login crash".into(),
+            accept: "repro passes".into(),
+            evidence_files: vec!["notes/T-7.md".into()],
+            evidence_due_min: Some(60),
+            body: String::new(),
+            created: T0,
+            mechanical: None,
+        })?;
+        if attempt {
+            start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
+        }
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     s
 }
 
@@ -80,7 +113,10 @@ fn the_report_path_is_the_voyages_reports_folder() {
     // Without a milestone the lane may report where it likes.
     let mut s = world(true);
     let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
-    assert!(text.contains("--candidate <commit> \"Report: <path>\""), "{text}");
+    assert!(
+        text.contains("--candidate <commit> \"Report: <path>\""),
+        "{text}"
+    );
 }
 
 #[test]
@@ -88,21 +124,38 @@ fn a_task_that_adopted_its_current_version_has_no_pending_section() {
     let mut s = world(true);
     let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
     assert!(!text.contains("## Pending update"), "{text}");
-    assert!(!text.contains("Run `gear` (no arguments) to adopt it"), "{text}");
+    assert!(
+        !text.contains("Run `gear` (no arguments) to adopt it"),
+        "{text}"
+    );
 }
 
 #[test]
 fn pending_update_and_missing_task() {
     let mut s = world(true);
     s.write(|tx| {
-        tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 2, goal: "Fix it better".into(),
-            accept: "a2".into(), evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0 + 1, mechanical: None, })?;
+        tx.insert_contract(&ContractRow {
+            project: "p".into(),
+            task: "T-7".into(),
+            version: 2,
+            goal: "Fix it better".into(),
+            accept: "a2".into(),
+            evidence_files: vec![],
+            evidence_due_min: None,
+            body: String::new(),
+            created: T0 + 1,
+            mechanical: None,
+        })?;
         let mut t = tx.get_task("p", "T-7")?.unwrap();
         t.contract_version = 2;
         tx.update_task(&t)
-    }).unwrap();
+    })
+    .unwrap();
     let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
-    assert!(text.contains("# T-7 — Fix the login crash"), "rendered from the adopted v1:\n{text}");
+    assert!(
+        text.contains("# T-7 — Fix the login crash"),
+        "rendered from the adopted v1:\n{text}"
+    );
     assert!(text.contains("## Pending update: v2"), "{text}");
     // T-378: the pending version's own wording, not only its number.
     assert!(text.contains("Goal (v2):\nFix it better\n"), "{text}");
@@ -111,9 +164,17 @@ fn pending_update_and_missing_task() {
         text.contains("Run `gear` (no arguments) to adopt it, then work and hand in to v2.\n"),
         "{text}"
     );
-    assert_eq!(s.read(|tx| render_task_packet(tx, "p", "T-9")).unwrap_err().code, ErrorCode::NoTarget);
+    assert_eq!(
+        s.read(|tx| render_task_packet(tx, "p", "T-9"))
+            .unwrap_err()
+            .code,
+        ErrorCode::NoTarget
+    );
     let mut s = world(false);
-    assert!(s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap().contains("--attempt <n>"));
+    assert!(s
+        .read(|tx| render_task_packet(tx, "p", "T-7"))
+        .unwrap()
+        .contains("--attempt <n>"));
 }
 
 /// T-272: a mechanical task's packet says the review is skipped and that the
@@ -161,7 +222,10 @@ fn a_mechanical_task_says_the_gate_is_the_only_check() {
         ),
         "{text}"
     );
-    assert!(!text.contains("run its command before you hand in"), "{text}");
+    assert!(
+        !text.contains("run its command before you hand in"),
+        "{text}"
+    );
 }
 
 /// The world of a rework round (T-118): T-7 was handed in as `CANDIDATE`, the
@@ -171,7 +235,16 @@ fn rework_world() -> Store {
     s.write(|tx| {
         start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
         on_delivery_confirmed(tx, "p", "T-7", 1, T0)?;
-        submit_result(tx, "p", "T-7", 1, 1, CANDIDATE, "Report: ops/reports/T-7.md", T0 + 1)?;
+        submit_result(
+            tx,
+            "p",
+            "T-7",
+            1,
+            1,
+            CANDIDATE,
+            "Report: ops/reports/T-7.md",
+            T0 + 1,
+        )?;
         tx.insert_review_verdict(&ReviewVerdictRow {
             project: "p".into(),
             task: "T-7".into(),
@@ -201,25 +274,40 @@ fn a_rework_packet_leads_with_the_rework_and_keeps_the_old_review_as_history() {
     let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
 
     // The rework comes first, before the contract.
-    let rework_at = text.find("## Rework (attempt 2, from the review of attempt 1)")
+    let rework_at = text
+        .find("## Rework (attempt 2, from the review of attempt 1)")
         .unwrap_or_else(|| panic!("no rework section:\n{text}"));
     let goal_at = text.find("## Goal").expect("a goal section");
     assert!(rework_at < goal_at, "the rework leads:\n{text}");
     // The captain's rework text is in it: only the blocking finding.
     let rework = &text[rework_at..goal_at];
     assert!(rework.contains("F1: the rework is missing"), "{rework}");
-    assert!(!rework.contains("F2"), "the logged finding is not a rework: {rework}");
+    assert!(
+        !rework.contains("F2"),
+        "the logged finding is not a rework: {rework}"
+    );
 
     // The older report is history, under its own heading.
     assert!(text.contains("## Earlier reviews (history)"), "{text}");
-    assert!(!text.contains("\n## Review\n"), "the old heading is gone:\n{text}");
+    assert!(
+        !text.contains("\n## Review\n"),
+        "the old heading is gone:\n{text}"
+    );
     let history_at = text.find("## Earlier reviews (history)").unwrap();
-    assert!(history_at > rework_at, "the history follows the rework:\n{text}");
-    assert!(text[history_at..].contains("attempt 1 · fail · p:r-1"), "{text}");
+    assert!(
+        history_at > rework_at,
+        "the history follows the rework:\n{text}"
+    );
+    assert!(
+        text[history_at..].contains("attempt 1 · fail · p:r-1"),
+        "{text}"
+    );
 
     // The hand-in command names the attempt of this round.
     assert!(
-        text.contains("gear send --kind result --task T-7 --attempt 2 --contract 1 --candidate <commit>"),
+        text.contains(
+            "gear send --kind result --task T-7 --attempt 2 --contract 1 --candidate <commit>"
+        ),
         "{text}"
     );
 }
@@ -241,7 +329,16 @@ fn a_finished_task_has_no_rework_section() {
     let mut s = rework_world();
     s.write(|tx| {
         on_delivery_confirmed(tx, "p", "T-7", 2, T0 + 5)?;
-        submit_result(tx, "p", "T-7", 2, 1, "bbb2222", "Report: ops/reports/T-7.md", T0 + 5)?;
+        submit_result(
+            tx,
+            "p",
+            "T-7",
+            2,
+            1,
+            "bbb2222",
+            "Report: ops/reports/T-7.md",
+            T0 + 5,
+        )?;
         tx.insert_review_verdict(&ReviewVerdictRow {
             project: "p".into(),
             task: "T-7".into(),
@@ -256,5 +353,8 @@ fn a_finished_task_has_no_rework_section() {
     .unwrap();
     let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
     assert!(!text.contains("## Rework"), "{text}");
-    assert!(text.contains("## Review"), "the plain review history stays:\n{text}");
+    assert!(
+        text.contains("## Review"),
+        "the plain review history stays:\n{text}"
+    );
 }

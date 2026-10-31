@@ -18,28 +18,43 @@ const CODEX_PANE: &str = "w1:p4";
 
 fn env(seat: Option<&str>, gen: i64, pane: Option<&str>, admin: bool) -> Env {
     Env {
-        ctx: seat.map(|s| GearCtx { project: "p".into(), seat: s.into(), generation: gen }),
+        ctx: seat.map(|s| GearCtx {
+            project: "p".into(),
+            seat: s.into(),
+            generation: gen,
+        }),
         pane_id: pane.map(|p| p.to_string()),
         admin,
     }
 }
 
 fn fp(pane: &str, kind: &str) -> Fingerprint {
-    Fingerprint { pane_id: pane.to_string(), kind: Some(kind.to_string()), session_ref: None }
+    Fingerprint {
+        pane_id: pane.to_string(),
+        kind: Some(kind.to_string()),
+        session_ref: None,
+    }
 }
 
 /// A project with an active captain (`p:captain`) and an active lane
 /// (`p:heat`), each bound to its own pane.
 fn world() -> Store {
     let mut s = Store::open_in_memory().unwrap();
-    s
-        .write(|tx| {
-            testing::seed_project(tx, "p", "sess", NOW)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
-            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", NOW)?;
-            Ok(())
-        })
-        .unwrap();
+    s.write(|tx| {
+        testing::seed_project(tx, "p", "sess", NOW)?;
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "captain",
+            SeatRole::Captain,
+            CAP_PANE,
+            "codex",
+            NOW,
+        )?;
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", NOW)?;
+        Ok(())
+    })
+    .unwrap();
     s
 }
 
@@ -49,9 +64,15 @@ fn observe_without_ctx_is_none() {
     herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
 
     // No GEAR_CTX: there is no caller to look for.
-    assert_eq!(observe(&env(None, 1, Some(CAP_PANE), false), &mut herdr, &me()).unwrap(), None);
+    assert_eq!(
+        observe(&env(None, 1, Some(CAP_PANE), false), &mut herdr, &me()).unwrap(),
+        None
+    );
     // GEAR_CTX but no pane: nothing to read.
-    assert_eq!(observe(&env(Some("captain"), 1, None, false), &mut herdr, &me()).unwrap(), None);
+    assert_eq!(
+        observe(&env(Some("captain"), 1, None, false), &mut herdr, &me()).unwrap(),
+        None
+    );
 }
 
 #[test]
@@ -59,7 +80,12 @@ fn observe_returns_occupant() {
     let mut herdr = FakeHerdr::new();
     herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
 
-    let got = observe(&env(Some("captain"), 1, Some(CAP_PANE), false), &mut herdr, &me()).unwrap();
+    let got = observe(
+        &env(Some("captain"), 1, Some(CAP_PANE), false),
+        &mut herdr,
+        &me(),
+    )
+    .unwrap();
     let got = got.expect("the pane hosts an agent");
     assert_eq!(got.pane_id, CAP_PANE);
     assert_eq!(got.kind.as_deref(), Some("codex"));
@@ -71,8 +97,12 @@ fn observe_failure_is_not_registered() {
     herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
     herdr.observe_fails = true;
 
-    let err =
-        observe(&env(Some("captain"), 1, Some(CAP_PANE), false), &mut herdr, &me()).unwrap_err();
+    let err = observe(
+        &env(Some("captain"), 1, Some(CAP_PANE), false),
+        &mut herdr,
+        &me(),
+    )
+    .unwrap_err();
     assert_eq!(err.code, ErrorCode::NotRegistered);
 }
 
@@ -135,7 +165,8 @@ fn stale_generation() {
 #[test]
 fn binding_not_active() {
     let mut s = world();
-    s.write(|tx| tx.set_binding_status("p:heat", 1, BindingStatus::Void)).unwrap();
+    s.write(|tx| tx.set_binding_status("p:heat", 1, BindingStatus::Void))
+        .unwrap();
 
     let err = s
         .read(|tx| {
@@ -194,7 +225,9 @@ fn agentless_pane_is_rejected() {
     // exited, but no agent runs there: it is not the seat (design/03).
     let env = env(Some("heat"), 1, Some(LANE_PANE), false);
 
-    let err = s.read(|tx| require_seat(tx, &env, None, None, None)).unwrap_err();
+    let err = s
+        .read(|tx| require_seat(tx, &env, None, None, None))
+        .unwrap_err();
     assert_eq!(err.code, ErrorCode::NotRegistered);
 
     // A read-only caller cannot prove it is the seat either.
@@ -239,7 +272,8 @@ fn forbidden_role() {
 #[test]
 fn forbidden_state() {
     let mut s = world();
-    s.write(|tx| tx.set_seat_state("p:heat", SeatState::Parked, None, NOW)).unwrap();
+    s.write(|tx| tx.set_seat_state("p:heat", SeatState::Parked, None, NOW))
+        .unwrap();
 
     let err = s
         .read(|tx| {
@@ -301,7 +335,9 @@ fn classify_seat() {
 #[test]
 fn classify_admin() {
     let mut s = world();
-    let caller = s.read(|tx| classify(tx, &env(None, 1, None, true), None)).unwrap();
+    let caller = s
+        .read(|tx| classify(tx, &env(None, 1, None, true), None))
+        .unwrap();
     assert_eq!(caller, Caller::Admin);
 }
 
@@ -321,7 +357,9 @@ fn classify_bad_ctx_is_anonymous() {
     assert_eq!(caller, Caller::Anonymous);
 
     // No context and no admin flag: anonymous.
-    let caller = s.read(|tx| classify(tx, &env(None, 1, None, false), None)).unwrap();
+    let caller = s
+        .read(|tx| classify(tx, &env(None, 1, None, false), None))
+        .unwrap();
     assert_eq!(caller, Caller::Anonymous);
 }
 
@@ -347,22 +385,55 @@ fn a_caller_outside_the_bound_pane_is_refused_and_the_captain_hears_it() {
     let error = observe(&claimed, &mut herdr, &LANE_CALLER).unwrap_err();
 
     assert_eq!(error.code, ErrorCode::NotRegistered);
-    assert!(error.detail.contains(CAP_PANE), "names the claim: {}", error.detail);
-    assert!(error.detail.contains("runs in pane w1:p2"), "names the truth: {}", error.detail);
-    assert!(error.detail.contains("GEAR_CTX"), "says why pids beat env: {}", error.detail);
+    assert!(
+        error.detail.contains(CAP_PANE),
+        "names the claim: {}",
+        error.detail
+    );
+    assert!(
+        error.detail.contains("runs in pane w1:p2"),
+        "names the truth: {}",
+        error.detail
+    );
+    assert!(
+        error.detail.contains("GEAR_CTX"),
+        "says why pids beat env: {}",
+        error.detail
+    );
 
     // One urgent item for the captain, naming the real pane; a repeat is quiet.
-    assert!(gear_app::identity::report_claim(&mut s, &claimed, &mut herdr, &error, &LANE_CALLER, NOW)
-        .unwrap());
-    let items = s.read(|tx| tx.thread_messages("p", "identity:w1:p2")).unwrap();
+    assert!(gear_app::identity::report_claim(
+        &mut s,
+        &claimed,
+        &mut herdr,
+        &error,
+        &LANE_CALLER,
+        NOW
+    )
+    .unwrap());
+    let items = s
+        .read(|tx| tx.thread_messages("p", "identity:w1:p2"))
+        .unwrap();
     assert_eq!(items.len(), 1, "{items:?}");
     assert!(items[0].urgent, "urgent: {items:?}");
     assert_eq!(items[0].state, gear_model::MsgState::Open);
     assert!(items[0].body.contains("runs in w1:p2"), "{}", items[0].body);
     assert!(items[0].body.contains("captain"), "{}", items[0].body);
-    assert!(!gear_app::identity::report_claim(&mut s, &claimed, &mut herdr, &error, &LANE_CALLER, NOW + 1)
-        .unwrap());
-    assert_eq!(s.read(|tx| tx.thread_messages("p", "identity:w1:p2")).unwrap().len(), 1);
+    assert!(!gear_app::identity::report_claim(
+        &mut s,
+        &claimed,
+        &mut herdr,
+        &error,
+        &LANE_CALLER,
+        NOW + 1
+    )
+    .unwrap());
+    assert_eq!(
+        s.read(|tx| tx.thread_messages("p", "identity:w1:p2"))
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// T-314: a refusal has to be traceable afterwards. It names the Herdr door it
@@ -390,7 +461,11 @@ fn the_refusal_names_the_herdr_socket_and_the_ancestry() {
     // A door that cannot name its socket says so, rather than leaving a blank.
     herdr.socket = None;
     let error = observe(&claimed, &mut herdr, &ancestors).unwrap_err();
-    assert!(error.detail.contains("an unnamed Herdr"), "{}", error.detail);
+    assert!(
+        error.detail.contains("an unnamed Herdr"),
+        "{}",
+        error.detail
+    );
 }
 
 /// The caller in its own pane is the seat it says it is.
@@ -402,10 +477,15 @@ fn a_caller_in_the_bound_pane_is_accepted() {
     herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
     let own = env(Some("heat"), 1, Some(LANE_PANE), false);
 
-    let got = observe(&own, &mut herdr, &LANE_CALLER).unwrap().expect("the lane's agent");
+    let got = observe(&own, &mut herdr, &LANE_CALLER)
+        .unwrap()
+        .expect("the lane's agent");
     assert_eq!(got.pane_id, LANE_PANE);
     let caller = s.read(|tx| classify(tx, &own, Some(&got))).unwrap();
-    assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:heat"), "{caller:?}");
+    assert!(
+        matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:heat"),
+        "{caller:?}"
+    );
 }
 
 /// The captain's own commands run in the captain's pane: they still pass, and a
@@ -419,21 +499,31 @@ fn the_captains_own_commands_pass_and_survive_a_restart() {
     herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
     let own = env(Some("captain"), 1, Some(CAP_PANE), false);
 
-    let got = observe(&own, &mut herdr, &CAP_CALLER).unwrap().expect("the captain's agent");
+    let got = observe(&own, &mut herdr, &CAP_CALLER)
+        .unwrap()
+        .expect("the captain's agent");
     let caller = s.read(|tx| classify(tx, &own, Some(&got))).unwrap();
     match caller {
         Caller::Seat { seat, .. } => {
-            assert_eq!((seat.id.as_str(), seat.role), ("p:captain", SeatRole::Captain))
+            assert_eq!(
+                (seat.id.as_str(), seat.role),
+                ("p:captain", SeatRole::Captain)
+            )
         }
         other => panic!("expected the captain, got {other:?}"),
     }
 
     // The captain restarted in the same pane: a new session, the same seat.
     herdr.set_agent_session(CAP_PANE, "ses_captain_2");
-    let got = observe(&own, &mut herdr, &CAP_CALLER).unwrap().expect("the restarted captain");
+    let got = observe(&own, &mut herdr, &CAP_CALLER)
+        .unwrap()
+        .expect("the restarted captain");
     assert_eq!(got.session_ref.as_deref(), Some("ses_captain_2"));
     let caller = s.read(|tx| classify(tx, &own, Some(&got))).unwrap();
-    assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:captain"), "{caller:?}");
+    assert!(
+        matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:captain"),
+        "{caller:?}"
+    );
 }
 
 /// T-131: the ancestry of this process itself is found in process — its parent
@@ -443,7 +533,11 @@ fn the_captains_own_commands_pass_and_survive_a_restart() {
 #[test]
 fn this_process_ancestry_comes_from_the_os_in_process() {
     let ancestors = gear_app::identity::process_ancestors();
-    assert_eq!(ancestors.first().copied(), Some(std::process::id()), "own pid first: {ancestors:?}");
+    assert_eq!(
+        ancestors.first().copied(),
+        Some(std::process::id()),
+        "own pid first: {ancestors:?}"
+    );
     let parent = std::os::unix::process::parent_id();
     assert_eq!(
         ancestors.get(1).copied(),
@@ -476,7 +570,11 @@ fn a_path_provided_ps_cannot_fabricate_ancestry() {
         .output()
         .expect("run the probe");
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{text}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(text.contains("ANCESTRY="), "the probe ran: {text}");
 }
 
@@ -513,18 +611,43 @@ fn a_partial_claim_is_refused_with_one_item() {
     // really in w1:p2, the captain is bound to w1:p1.
     let claimed = env(Some("captain"), 1, Some(LANE_PANE), false);
 
-    let error =
-        gear_app::identity::prove_seat(&mut s, &claimed, &mut herdr, &LANE_CALLER, &DaemonSessions::default(), NOW).unwrap_err();
+    let error = gear_app::identity::prove_seat(
+        &mut s,
+        &claimed,
+        &mut herdr,
+        &LANE_CALLER,
+        &DaemonSessions::default(),
+        NOW,
+    )
+    .unwrap_err();
 
     assert_eq!(error.code, ErrorCode::NotRegistered);
-    assert!(error.detail.contains(CAP_PANE), "the seat's own pane: {}", error.detail);
-    let items = s.read(|tx| tx.thread_messages("p", "identity:w1:p2")).unwrap();
+    assert!(
+        error.detail.contains(CAP_PANE),
+        "the seat's own pane: {}",
+        error.detail
+    );
+    let items = s
+        .read(|tx| tx.thread_messages("p", "identity:w1:p2"))
+        .unwrap();
     assert_eq!(items.len(), 1, "one urgent item: {items:?}");
     assert!(items[0].urgent);
     assert!(items[0].body.contains("w1:p2"), "{}", items[0].body);
     // A repeat is quiet.
-    let _ = gear_app::identity::prove_seat(&mut s, &claimed, &mut herdr, &LANE_CALLER, &DaemonSessions::default(), NOW + 1);
-    assert_eq!(s.read(|tx| tx.thread_messages("p", "identity:w1:p2")).unwrap().len(), 1);
+    let _ = gear_app::identity::prove_seat(
+        &mut s,
+        &claimed,
+        &mut herdr,
+        &LANE_CALLER,
+        &DaemonSessions::default(),
+        NOW + 1,
+    );
+    assert_eq!(
+        s.read(|tx| tx.thread_messages("p", "identity:w1:p2"))
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// OpenCode and Codex-in-daemon-mode run their tools in a shared service,
@@ -547,9 +670,14 @@ fn a_daemon_caller_keeps_its_claim_on_a_daemon_pane() {
     let service: Vec<u32> = vec![4_000_001, 4_000_000, 1];
 
     let lane = env(Some("heat"), 1, Some(LANE_PANE), false);
-    let got = observe(&lane, &mut herdr, &service).unwrap().expect("the lane's agent");
+    let got = observe(&lane, &mut herdr, &service)
+        .unwrap()
+        .expect("the lane's agent");
     let caller = s.read(|tx| classify(tx, &lane, Some(&got))).unwrap();
-    assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:heat"), "{caller:?}");
+    assert!(
+        matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:heat"),
+        "{caller:?}"
+    );
 
     // T-126: a Codex caller in no pane is the seat of the Codex pane it
     // claims (its own daemon), where Claude Code's `observe` still refuses.
@@ -561,10 +689,15 @@ fn a_daemon_caller_keeps_its_claim_on_a_daemon_pane() {
     })
     .unwrap();
     let codex = env(Some("heat3"), 1, Some(CODEX_PANE), false);
-    let got = observe(&codex, &mut herdr, &service).unwrap().expect("the codex pane");
+    let got = observe(&codex, &mut herdr, &service)
+        .unwrap()
+        .expect("the codex pane");
     assert_eq!(got.kind.as_deref(), Some("codex"));
     let caller = s.read(|tx| classify(tx, &codex, Some(&got))).unwrap();
-    assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:heat3"), "{caller:?}");
+    assert!(
+        matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:heat3"),
+        "{caller:?}"
+    );
 
     // The captain's pane runs Claude Code: a caller in no pane cannot claim it.
     let captain = env(Some("captain"), 1, Some(CAP_PANE), false);
@@ -577,7 +710,8 @@ fn a_daemon_caller_keeps_its_claim_on_a_daemon_pane() {
     s.write(|tx| {
         testing::seed_active_seat(tx, "p", "heat2", SeatRole::Lane, CLAUDE_PANE, "claude", NOW)?;
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     let error = observe(&claude, &mut herdr, &service).unwrap_err();
     assert_eq!(error.code, ErrorCode::NotRegistered, "{}", error.detail);
 }
@@ -600,12 +734,24 @@ fn a_caller_without_ctx_in_a_bound_pane_is_that_seat() {
         gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &LANE_CALLER).unwrap();
     assert_eq!(
         resolved.ctx,
-        Some(GearCtx { project: "p".into(), seat: "heat".into(), generation: 1 })
+        Some(GearCtx {
+            project: "p".into(),
+            seat: "heat".into(),
+            generation: 1
+        })
     );
-    assert_eq!(resolved.pane_id.as_deref(), Some(LANE_PANE), "the real pane is kept");
+    assert_eq!(
+        resolved.pane_id.as_deref(),
+        Some(LANE_PANE),
+        "the real pane is kept"
+    );
 
-    let fp = observe(&resolved, &mut herdr, &LANE_CALLER).unwrap().expect("the lane's agent");
-    let (ctx, seat) = s.read(|tx| require_seat(tx, &resolved, Some(&fp), None, None)).unwrap();
+    let fp = observe(&resolved, &mut herdr, &LANE_CALLER)
+        .unwrap()
+        .expect("the lane's agent");
+    let (ctx, seat) = s
+        .read(|tx| require_seat(tx, &resolved, Some(&fp), None, None))
+        .unwrap();
     assert_eq!((ctx.seat.as_str(), seat.id.as_str()), ("heat", "p:heat"));
 }
 
@@ -646,7 +792,11 @@ fn a_daemon_caller_without_ctx_finds_the_one_bound_daemon_pane() {
     let resolved = gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service).unwrap();
     assert_eq!(
         resolved.ctx,
-        Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 })
+        Some(GearCtx {
+            project: "p".into(),
+            seat: "captain".into(),
+            generation: 1
+        })
     );
     assert_eq!(resolved.pane_id.as_deref(), Some(CAP_PANE));
 
@@ -656,7 +806,11 @@ fn a_daemon_caller_without_ctx_finds_the_one_bound_daemon_pane() {
     let error = gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service).unwrap_err();
     assert_eq!(error.code, ErrorCode::NotRegistered);
     assert!(error.detail.contains("no pane"), "{}", error.detail);
-    assert!(error.detail.contains("gear captain take"), "{}", error.detail);
+    assert!(
+        error.detail.contains("gear captain take"),
+        "{}",
+        error.detail
+    );
 }
 
 /// `GEAR_CTX` stays an override (T-126): a set context is never second-guessed
@@ -688,9 +842,14 @@ fn a_codex_daemon_caller_keeps_its_captain_seat() {
     let daemon: Vec<u32> = vec![5_000_001, 5_000_000, 1];
 
     let captain = env(Some("captain"), 1, Some(CAP_PANE), false);
-    let got = observe(&captain, &mut herdr, &daemon).unwrap().expect("the captain's agent");
+    let got = observe(&captain, &mut herdr, &daemon)
+        .unwrap()
+        .expect("the captain's agent");
     let caller = s.read(|tx| classify(tx, &captain, Some(&got))).unwrap();
-    assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:captain"), "{caller:?}");
+    assert!(
+        matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:captain"),
+        "{caller:?}"
+    );
 
     // A lane's shell (really in the lane's pane) claiming the captain is refused.
     let error = observe(&captain, &mut herdr, &LANE_CALLER).unwrap_err();
@@ -830,7 +989,10 @@ fn daemon_sessions_come_from_the_tool_shells_variables() {
     let sessions = DaemonSessions::from_vars(vars);
     assert_eq!(sessions.opencode.as_deref(), Some("ses_x"));
     assert_eq!(sessions.codex, None, "an empty value is no value");
-    assert_eq!(DaemonSessions::from_vars(|_| None), DaemonSessions::default());
+    assert_eq!(
+        DaemonSessions::from_vars(|_| None),
+        DaemonSessions::default()
+    );
 }
 
 /// T-328: an OpenCode tool shell in no pane proves it is the seat's **own**
@@ -847,25 +1009,41 @@ fn an_opencode_daemon_caller_proves_its_own_session() {
     // The service's tool shell: its ancestry reaches no pane of the session.
     let service: Vec<u32> = vec![4_000_001, 4_000_000, 1];
     let lane = env(Some("heat"), 1, Some(LANE_PANE), false);
-    s.write(|tx| tx.set_binding_session_ref("p:heat", 1, "ses_a")).unwrap();
+    s.write(|tx| tx.set_binding_session_ref("p:heat", 1, "ses_a"))
+        .unwrap();
 
     // The seat's own session: the claim holds.
-    let own = DaemonSessions { opencode: Some("ses_a".into()), codex: None };
+    let own = DaemonSessions {
+        opencode: Some("ses_a".into()),
+        codex: None,
+    };
     let fp = gear_app::identity::prove_seat(&mut s, &lane, &mut herdr, &service, &own, NOW)
         .unwrap()
         .expect("the lane's pane");
     assert_eq!(fp.kind.as_deref(), Some("opencode"));
 
     // Another same-daemon lane's session: refused, and the captain told once.
-    let foreign = DaemonSessions { opencode: Some("ses_b".into()), codex: None };
-    let error =
-        gear_app::identity::prove_seat(&mut s, &lane, &mut herdr, &service, &foreign, NOW)
-            .unwrap_err();
+    let foreign = DaemonSessions {
+        opencode: Some("ses_b".into()),
+        codex: None,
+    };
+    let error = gear_app::identity::prove_seat(&mut s, &lane, &mut herdr, &service, &foreign, NOW)
+        .unwrap_err();
     assert_eq!(error.code, ErrorCode::NotRegistered);
-    assert!(error.detail.contains("claimed by OpenCode session ses_b"), "{}", error.detail);
-    assert!(error.detail.contains("the seat's sessions are ses_a"), "{}", error.detail);
+    assert!(
+        error.detail.contains("claimed by OpenCode session ses_b"),
+        "{}",
+        error.detail
+    );
+    assert!(
+        error.detail.contains("the seat's sessions are ses_a"),
+        "{}",
+        error.detail
+    );
     // The tool shell runs in no pane, so the report names the unknown pane.
-    let items = s.read(|tx| tx.thread_messages("p", "identity:unknown")).unwrap();
+    let items = s
+        .read(|tx| tx.thread_messages("p", "identity:unknown"))
+        .unwrap();
     assert_eq!(items.len(), 1, "one urgent item: {items:?}");
     assert!(items[0].urgent);
 
@@ -880,14 +1058,30 @@ fn an_opencode_daemon_caller_proves_its_own_session() {
     )
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::NotRegistered);
-    assert!(error.detail.contains("without OPENCODE_SESSION_ID"), "{}", error.detail);
-    assert!(error.detail.contains("not the seat's OpenCode session"), "{}", error.detail);
+    assert!(
+        error.detail.contains("without OPENCODE_SESSION_ID"),
+        "{}",
+        error.detail
+    );
+    assert!(
+        error.detail.contains("not the seat's OpenCode session"),
+        "{}",
+        error.detail
+    );
 
     // A seat with no known session has nothing to prove against (as before).
     herdr.add_agent(CODEX_PANE, "opencode", AgentStatus::Idle);
     herdr.set_pane_processes(CODEX_PANE, Some(CLAUDE_CALLER[1]), &[]);
     s.write(|tx| {
-        testing::seed_active_seat(tx, "p", "heat2", SeatRole::Lane, CODEX_PANE, "opencode", NOW)
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "heat2",
+            SeatRole::Lane,
+            CODEX_PANE,
+            "opencode",
+            NOW,
+        )
     })
     .unwrap();
     let bare = env(Some("heat2"), 1, Some(CODEX_PANE), false);
@@ -928,15 +1122,24 @@ fn a_codex_daemon_caller_of_a_foreign_thread_owes_one_notice() {
     herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
     let service: Vec<u32> = vec![4_000_001, 4_000_000, 1];
     let captain = env(Some("captain"), 1, Some(CAP_PANE), false);
-    s.write(|tx| tx.set_binding_session_ref("p:captain", 1, "th_1")).unwrap();
+    s.write(|tx| tx.set_binding_session_ref("p:captain", 1, "th_1"))
+        .unwrap();
     let thread = "identity-codex:p:captain:1";
 
     // The seat's own thread: quiet from the start.
-    let own = DaemonSessions { opencode: None, codex: Some("th_1".into()) };
-    assert!(gear_app::identity::prove_seat(&mut s, &captain, &mut herdr, &service, &own, NOW)
+    let own = DaemonSessions {
+        opencode: None,
+        codex: Some("th_1".into()),
+    };
+    assert!(
+        gear_app::identity::prove_seat(&mut s, &captain, &mut herdr, &service, &own, NOW)
+            .unwrap()
+            .is_some()
+    );
+    assert!(s
+        .read(|tx| tx.thread_messages("p", thread))
         .unwrap()
-        .is_some());
-    assert!(s.read(|tx| tx.thread_messages("p", thread)).unwrap().is_empty());
+        .is_empty());
 
     // No thread at all: it says nothing either.
     assert!(gear_app::identity::prove_seat(
@@ -949,22 +1152,46 @@ fn a_codex_daemon_caller_of_a_foreign_thread_owes_one_notice() {
     )
     .unwrap()
     .is_some());
-    assert!(s.read(|tx| tx.thread_messages("p", thread)).unwrap().is_empty());
+    assert!(s
+        .read(|tx| tx.thread_messages("p", thread))
+        .unwrap()
+        .is_empty());
 
     // A foreign thread: the claim passes, and the captain is told once.
-    let foreign = DaemonSessions { opencode: None, codex: Some("th_2".into()) };
-    assert!(gear_app::identity::prove_seat(&mut s, &captain, &mut herdr, &service, &foreign, NOW + 2)
-        .unwrap()
-        .is_some());
+    let foreign = DaemonSessions {
+        opencode: None,
+        codex: Some("th_2".into()),
+    };
+    assert!(gear_app::identity::prove_seat(
+        &mut s,
+        &captain,
+        &mut herdr,
+        &service,
+        &foreign,
+        NOW + 2
+    )
+    .unwrap()
+    .is_some());
     let items = s.read(|tx| tx.thread_messages("p", thread)).unwrap();
     assert_eq!(items.len(), 1, "one notice: {items:?}");
     assert_eq!(items[0].state, gear_model::MsgState::Info);
     assert!(!items[0].urgent);
-    assert!(items[0].body.contains("Codex thread th_2"), "{}", items[0].body);
-    assert!(items[0].body.contains("the seat's sessions are th_1"), "{}", items[0].body);
+    assert!(
+        items[0].body.contains("Codex thread th_2"),
+        "{}",
+        items[0].body
+    );
+    assert!(
+        items[0].body.contains("the seat's sessions are th_1"),
+        "{}",
+        items[0].body
+    );
 
     // A second call writes no second one.
     gear_app::identity::prove_seat(&mut s, &captain, &mut herdr, &service, &foreign, NOW + 3)
         .unwrap();
-    assert_eq!(s.read(|tx| tx.thread_messages("p", thread)).unwrap().len(), 1);
+    assert_eq!(
+        s.read(|tx| tx.thread_messages("p", thread)).unwrap().len(),
+        1
+    );
 }

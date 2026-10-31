@@ -76,7 +76,11 @@ mod tests {
 
         // The second start appends nothing: one entry, byte for byte.
         trust_grok_worktree_in(&home, "/worktrees/gear-t32", 1_800_000_100).unwrap();
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), once, "written once");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            once,
+            "written once"
+        );
 
         // Another worktree is appended, and the first entry stays.
         trust_grok_worktree_in(&home, "/worktrees/gear-t33", 1_800_000_200).unwrap();

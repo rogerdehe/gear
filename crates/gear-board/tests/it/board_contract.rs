@@ -20,7 +20,15 @@ fn world() -> Store {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "claude",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
             testing::seed_active_seat(tx, "p", "runtime", SeatRole::Lane, "w1:p3", "opencode", T0)?;
             for (id, rank, lane, state) in [
@@ -49,7 +57,8 @@ fn world() -> Store {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                     issue: None,updated: T0,
+                    issue: None,
+                    updated: T0,
                 })?;
             }
             // The attempts behind the states: the lane lines read the stage the
@@ -87,7 +96,10 @@ fn world() -> Store {
 
 /// The board of the project `p`, with the engine down.
 fn options() -> Options {
-    Options { project: Some("p".into()), ..Options::default() }
+    Options {
+        project: Some("p".into()),
+        ..Options::default()
+    }
 }
 
 #[test]
@@ -96,7 +108,10 @@ fn the_board_shows_the_totals_and_every_lane_queue() {
     let board = build(&mut store, &options(), T0 + 60).unwrap();
     let text = render(&board, View::Lanes);
 
-    assert!(text.contains("Totals: 4 tasks · 1 done · 1 in progress · 1 waiting"), "{text}");
+    assert!(
+        text.contains("Totals: 4 tasks · 1 done · 1 in progress · 1 waiting"),
+        "{text}"
+    );
     // The lanes come in seat order, their tasks in queue order.
     assert!(
         text.contains("Lane data · agent unknown · T-3 handed in, waits for a reviewer · 0 queued · rework 0/1 · no task yet\n  T-1 done\n  T-3 waiting"),
@@ -108,18 +123,57 @@ fn the_board_shows_the_totals_and_every_lane_queue() {
     );
 }
 
+/// T-481: a round that could not continue the earlier conversation because
+/// its CLI changed says so on the lane line, as the seat's home page does.
+#[test]
+fn the_lane_line_marks_a_new_session_recovery() {
+    let mut store = world();
+    store
+        .write(|tx| tx.set_session_recovery("p", "T-2", 1, "codex", "session-x"))
+        .unwrap();
+    let board = store
+        .read(|tx| gear_board::project(tx, "p", T0 + 60))
+        .unwrap();
+    let line = |name: &str| {
+        let lane = board
+            .lanes
+            .iter()
+            .find(|lane| lane.lane == name)
+            .expect("the lane");
+        gear_board::lane_line(lane)
+    };
+    assert_eq!(
+        line("runtime"),
+        "runtime · agent unknown · T-2 working · new-session recovery · 1 queued"
+    );
+    // A lane whose round continues its conversation says nothing extra.
+    assert_eq!(
+        line("data"),
+        "data · agent unknown · T-3 handed in, waits for a reviewer · 0 queued"
+    );
+}
+
 /// T-347: the lane line names the task's stage in the words of the board's
 /// views, so the board and the captain's home page never disagree.
 #[test]
 fn the_lane_line_names_the_stage_in_the_words_of_the_graph() {
     let mut store = world();
-    let board = store.read(|tx| gear_board::project(tx, "p", T0 + 60)).unwrap();
+    let board = store
+        .read(|tx| gear_board::project(tx, "p", T0 + 60))
+        .unwrap();
     let line = |name: &str| {
-        let lane = board.lanes.iter().find(|lane| lane.lane == name).expect("the lane");
+        let lane = board
+            .lanes
+            .iter()
+            .find(|lane| lane.lane == name)
+            .expect("the lane");
         gear_board::lane_line(lane)
     };
     // A lane working on attempt 1.
-    assert_eq!(line("runtime"), "runtime · agent unknown · T-2 working · 1 queued");
+    assert_eq!(
+        line("runtime"),
+        "runtime · agent unknown · T-2 working · 1 queued"
+    );
     // A lane whose task waits for a reviewer: the stage says so, not "waiting".
     assert_eq!(
         line("data"),
@@ -144,9 +198,10 @@ fn a_cancelled_task_is_not_the_current_task_of_its_lane() {
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
-            for (id, rank, state) in
-                [("T-1", 1, TaskState::Cancelled), ("T-2", 2, TaskState::Running)]
-            {
+            for (id, rank, state) in [
+                ("T-1", 1, TaskState::Cancelled),
+                ("T-2", 2, TaskState::Running),
+            ] {
                 tx.insert_task(&TaskRow {
                     repo: None,
                     base: None,
@@ -173,9 +228,10 @@ fn a_cancelled_task_is_not_the_current_task_of_its_lane() {
             }
             // The cancelled task keeps its rejected attempt; the running one
             // is on its first attempt, started.
-            for (task, state) in
-                [("T-1", AttemptState::Rejected), ("T-2", AttemptState::Started)]
-            {
+            for (task, state) in [
+                ("T-1", AttemptState::Rejected),
+                ("T-2", AttemptState::Started),
+            ] {
                 tx.insert_attempt(&AttemptRow {
                     project: "p".into(),
                     task: task.into(),
@@ -200,14 +256,19 @@ fn a_cancelled_task_is_not_the_current_task_of_its_lane() {
             Ok(())
         })
         .unwrap();
-    let board = store.read(|tx| gear_board::project(tx, "p", T0 + 60)).unwrap();
+    let board = store
+        .read(|tx| gear_board::project(tx, "p", T0 + 60))
+        .unwrap();
     let lane = board.lanes.iter().find(|lane| lane.lane == "heat").unwrap();
     // The cancelled task is in the lane model and its stage reads open...
     let cancelled = lane.tasks.iter().find(|task| task.id == "T-1").unwrap();
     assert_eq!(cancelled.state, TaskState::Cancelled);
     assert_eq!(cancelled.stage, gear_board::graph::Stage::SentBack);
     // ...and the lane's current task is the next open one, not it.
-    assert_eq!(gear_board::lane_line(lane), "heat · agent unknown · T-2 working · 0 queued");
+    assert_eq!(
+        gear_board::lane_line(lane),
+        "heat · agent unknown · T-2 working · 0 queued"
+    );
     // The graph leaves the cancelled task out, so the lane line and the views
     // agree on what the lane works on.
     assert!(
@@ -222,7 +283,15 @@ fn a_lane_with_no_tasks_is_shown_without_a_current_task() {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "claude",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
             Ok(())
         })
@@ -232,7 +301,12 @@ fn a_lane_with_no_tasks_is_shown_without_a_current_task() {
 
     // A registered lane with no tasks stays visible: the captain refills it.
     assert!(text.contains("Totals: 0 tasks"), "{text}");
-    assert!(text.contains("Lane data · agent unknown · no current task · 0 queued · rework 0/0 · no task yet"), "{text}");
+    assert!(
+        text.contains(
+            "Lane data · agent unknown · no current task · 0 queued · rework 0/0 · no task yet"
+        ),
+        "{text}"
+    );
 }
 
 #[test]
@@ -248,7 +322,10 @@ fn the_board_names_the_project_it_shows() {
 #[test]
 fn an_unknown_project_is_no_target() {
     let mut store = world();
-    let opts = Options { project: Some("nope".into()), ..Options::default() };
+    let opts = Options {
+        project: Some("nope".into()),
+        ..Options::default()
+    };
     let err = build(&mut store, &opts, T0).unwrap_err();
 
     assert_eq!(err.code, gear_model::ErrorCode::NoTarget);
@@ -258,7 +335,10 @@ fn an_unknown_project_is_no_target() {
 #[test]
 fn every_project_is_shown_when_none_is_named() {
     let mut store = world();
-    let opts = Options { project: None, ..Options::default() };
+    let opts = Options {
+        project: None,
+        ..Options::default()
+    };
     let board = build(&mut store, &opts, T0).unwrap();
 
     assert_eq!(board.projects.len(), 1);
@@ -273,16 +353,28 @@ fn the_warning_line_is_printed_only_when_the_engine_is_down() {
     std::fs::write(dir.path().join("engine.lock"), "1234\n").unwrap();
 
     // The lock is free: the engine is down and the board says so.
-    let opts = Options { project: Some("p".into()), db: Some(db.clone()), ..Options::default() };
+    let opts = Options {
+        project: Some("p".into()),
+        db: Some(db.clone()),
+        ..Options::default()
+    };
     let text = render(&build(&mut store, &opts, T0).unwrap(), View::Lanes);
     assert!(text.contains("engine down"), "{text}");
 
     // The engine holds its lock: no warning.
-    let lock = std::fs::OpenOptions::new().read(true).write(true).open(dir.path().join("engine.lock")).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.path().join("engine.lock"))
+        .unwrap();
     lock.try_lock().unwrap();
     let board = build(&mut store, &opts, T0).unwrap();
     assert_eq!(board.engine, EngineState::Running);
-    assert!(!render(&board, View::Lanes).contains("engine down"), "{}", render(&board, View::Lanes));
+    assert!(
+        !render(&board, View::Lanes).contains("engine down"),
+        "{}",
+        render(&board, View::Lanes)
+    );
 }
 
 #[test]
@@ -314,9 +406,15 @@ fn the_board_shows_the_captains_inbox_and_the_temp_slots() {
         })
         .unwrap();
 
-    let text = render(&build(&mut store, &options(), T0 + 300).unwrap(), View::Lanes);
+    let text = render(
+        &build(&mut store, &options(), T0 + 300).unwrap(),
+        View::Lanes,
+    );
 
-    assert!(text.contains("Waiting for the captain: 1 item · oldest 3m"), "{text}");
+    assert!(
+        text.contains("Waiting for the captain: 1 item · oldest 3m"),
+        "{text}"
+    );
     // The project was seeded with a quota of two temp slots; one is in use.
     assert!(
         text.contains("Temp slots: ") && text.contains("1 of 2 in use"),
@@ -421,16 +519,28 @@ fn a_task_is_measured_by_the_time_its_lane_worked_on_it() {
     let board = build(&mut store, &options(), now).unwrap();
     let tasks = &board.projects[0].lanes[0].tasks;
     let worked = tasks.iter().find(|task| task.id == "T-1").unwrap();
-    assert_eq!(worked.actual_min, Some(35), "the work time of the two rounds");
+    assert_eq!(
+        worked.actual_min,
+        Some(35),
+        "the work time of the two rounds"
+    );
     // A task without a dev or rework round keeps its span.
     let span = tasks.iter().find(|task| task.id == "T-2").unwrap();
-    assert_eq!(span.actual_min, Some(180), "the span of a task with no round");
+    assert_eq!(
+        span.actual_min,
+        Some(180),
+        "the span of a task with no round"
+    );
 
     let graph = store
         .read(|tx| gear_board::graph::tasks(tx, "p", now))
         .unwrap();
     let worked = graph.iter().find(|task| task.id == "T-1").unwrap();
-    assert_eq!(worked.actual_min, Some(35), "the same work time in the graph");
+    assert_eq!(
+        worked.actual_min,
+        Some(35),
+        "the same work time in the graph"
+    );
     let span = graph.iter().find(|task| task.id == "T-2").unwrap();
     assert_eq!(span.actual_min, Some(180), "the same span in the graph");
 }
@@ -457,7 +567,11 @@ impl Keys for Quitter {
 #[test]
 fn q_leaves_the_board() {
     let mut store = world();
-    let opts = Options { project: Some("p".into()), refresh: Duration::from_millis(1), ..Options::default() };
+    let opts = Options {
+        project: Some("p".into()),
+        refresh: Duration::from_millis(1),
+        ..Options::default()
+    };
     let mut out: Vec<u8> = Vec::new();
     let mut keys = Quitter { timeouts: 0 };
 
@@ -469,9 +583,18 @@ fn q_leaves_the_board() {
     // The frame is drawn in place (T-403): it opens a synchronized update and
     // never clears the whole screen.
     assert!(text.contains("\x1b[?2026h\x1b[H"), "{text:?}");
-    assert!(!text.contains("\x1b[2J"), "the screen is never cleared whole: {text:?}");
-    assert!(text.contains("\x1b[K"), "every line erases its rest: {text:?}");
-    assert!(text.contains("\x1b[J"), "the screen below the frame is erased: {text:?}");
+    assert!(
+        !text.contains("\x1b[2J"),
+        "the screen is never cleared whole: {text:?}"
+    );
+    assert!(
+        text.contains("\x1b[K"),
+        "every line erases its rest: {text:?}"
+    );
+    assert!(
+        text.contains("\x1b[J"),
+        "the screen below the frame is erased: {text:?}"
+    );
 }
 
 #[test]
@@ -499,7 +622,8 @@ fn a_task_in_review_is_shown_as_in_review() {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                 issue: None,updated: T0,
+                issue: None,
+                updated: T0,
             })?;
             Ok(())
         })
@@ -512,13 +636,20 @@ fn a_task_in_review_is_shown_as_in_review() {
         "{text}"
     );
     // A task in review is not done and not running: the totals say so.
-    assert!(text.contains("Totals: 5 tasks · 1 done · 1 in progress · 1 waiting"), "{text}");
+    assert!(
+        text.contains("Totals: 5 tasks · 1 done · 1 in progress · 1 waiting"),
+        "{text}"
+    );
 }
 
 #[test]
 fn a_board_that_cannot_read_the_plan_fails() {
     let mut store = world();
-    let opts = Options { project: Some("nope".into()), refresh: Duration::from_millis(1), ..Options::default() };
+    let opts = Options {
+        project: Some("nope".into()),
+        refresh: Duration::from_millis(1),
+        ..Options::default()
+    };
     let mut out: Vec<u8> = Vec::new();
     let mut keys = Quitter { timeouts: 0 };
 
@@ -585,9 +716,8 @@ struct FdWriter(libc::c_int);
 impl std::io::Write for FdWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         // SAFETY: `buf` is a valid buffer of `buf.len()` bytes.
-        let written = unsafe {
-            libc::write(self.0, buf.as_ptr() as *const libc::c_void, buf.len())
-        };
+        let written =
+            unsafe { libc::write(self.0, buf.as_ptr() as *const libc::c_void, buf.len()) };
         if written < 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -618,9 +748,13 @@ fn read_until(master: libc::c_int, needle: &str, timeout: Duration) -> Vec<u8> {
         }
         // Wait on the descriptor, not on the clock: the time left to the
         // deadline is the only timeout.
-        let mut fds = libc::pollfd { fd: master, events: libc::POLLIN, revents: 0 };
-        let millis = (deadline.saturating_duration_since(std::time::Instant::now()))
-            .as_millis() as i32;
+        let mut fds = libc::pollfd {
+            fd: master,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis =
+            (deadline.saturating_duration_since(std::time::Instant::now())).as_millis() as i32;
         // SAFETY: `fds` is one pollfd we own; the call only waits.
         let ready = unsafe { libc::poll(&mut fds, 1, millis) };
         if ready <= 0 {
@@ -628,9 +762,8 @@ fn read_until(master: libc::c_int, needle: &str, timeout: Duration) -> Vec<u8> {
         }
         let mut chunk = [0u8; 4096];
         // SAFETY: the buffer is one chunk long.
-        let read = unsafe {
-            libc::read(master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
-        };
+        let read =
+            unsafe { libc::read(master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len()) };
         if read <= 0 {
             continue;
         }
@@ -732,37 +865,67 @@ fn every_row_of_the_frame_starts_at_column_zero_in_raw_mode() {
 fn the_captain_quota_pause_and_view_wait_are_shown() {
     let mut store = world();
     let mut state = gear_store::CaptainQuota {
-        generation: 1, detected_at: T0, reset_at: T0 + 3600, bar: "5h 100%".into(),
-        wake_op: None, views_before_wake: 0, resumed: false,
+        generation: 1,
+        detected_at: T0,
+        reset_at: T0 + 3600,
+        bar: "5h 100%".into(),
+        wake_op: None,
+        views_before_wake: 0,
+        resumed: false,
     };
-    store.write(|tx| tx.set_captain_quota("p", Some(&state))).unwrap();
+    store
+        .write(|tx| tx.set_captain_quota("p", Some(&state)))
+        .unwrap();
     let board = build(&mut store, &options(), T0 + 60).unwrap();
     for mode in [View::Lanes, View::Deps] {
         let text = render(&board, mode);
-        assert!(text.contains("Captain quota: out — reset in 59 min"), "{text}");
+        assert!(
+            text.contains("Captain quota: out — reset in 59 min"),
+            "{text}"
+        );
         assert!(text.contains("new tasks paused"), "{text}");
     }
     let json: serde_json::Value = serde_json::from_str(&to_json(&board).unwrap()).unwrap();
     assert_eq!(json["projects"][0]["captain_quota"]["reset_at"], T0 + 3600);
     state.wake_op = Some("O-1".into());
-    store.write(|tx| tx.set_captain_quota("p", Some(&state))).unwrap();
+    store
+        .write(|tx| tx.set_captain_quota("p", Some(&state)))
+        .unwrap();
     let board = build(&mut store, &options(), T0 + 3601).unwrap();
     assert!(render(&board, View::Lanes).contains("waiting for the captain to run gear"));
     state.resumed = true;
-    store.write(|tx| tx.set_captain_quota("p", Some(&state))).unwrap();
-    assert!(build(&mut store, &options(), T0 + 3602).unwrap().projects[0].captain_quota.is_none());
+    store
+        .write(|tx| tx.set_captain_quota("p", Some(&state)))
+        .unwrap();
+    assert!(
+        build(&mut store, &options(), T0 + 3602).unwrap().projects[0]
+            .captain_quota
+            .is_none()
+    );
 }
 
 #[test]
 fn a_retired_lane_is_not_reintroduced_by_its_tasks() {
     let mut store = world();
-    store.write(|tx| tx.set_seat_state("p:runtime", gear_model::SeatState::Retired, None, T0)).unwrap();
+    store
+        .write(|tx| tx.set_seat_state("p:runtime", gear_model::SeatState::Retired, None, T0))
+        .unwrap();
     let board = build(&mut store, &options(), T0).unwrap();
-    assert!(board.projects[0].lanes.iter().all(|lane| lane.lane != "runtime"));
-    assert_eq!(board.projects[0].totals.tasks, 4, "retirement does not erase plan history");
+    assert!(board.projects[0]
+        .lanes
+        .iter()
+        .all(|lane| lane.lane != "runtime"));
+    assert_eq!(
+        board.projects[0].totals.tasks, 4,
+        "retirement does not erase plan history"
+    );
     assert!(!render(&board, View::Lanes).contains("Lane runtime"));
     let json: serde_json::Value = serde_json::from_str(&to_json(&board).unwrap()).unwrap();
-    assert!(json["projects"][0]["lanes"].as_array().unwrap().iter().all(|lane| lane["lane"] != "runtime"));
+    assert!(json["projects"][0]["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|lane| lane["lane"] != "runtime"));
 }
 
 #[test]
@@ -771,15 +934,23 @@ fn agent_state_is_reported_independently_of_task_state() {
     let mut store = world();
     let mut herdr = FakeHerdr::new();
     for (status, word) in [
-        (AgentStatus::Working, "working"), (AgentStatus::Idle, "idle"),
-        (AgentStatus::Blocked, "blocked"), (AgentStatus::Done, "done"),
+        (AgentStatus::Working, "working"),
+        (AgentStatus::Idle, "idle"),
+        (AgentStatus::Blocked, "blocked"),
+        (AgentStatus::Done, "done"),
         (AgentStatus::Unknown, "unknown"),
     ] {
         herdr.add_agent("w1:p3", "opencode", status);
         let agents = herdr.agents().unwrap();
-        let board = gear_board::build_with_agents(&mut store, &options(), T0, Some(&agents)).unwrap();
+        let board =
+            gear_board::build_with_agents(&mut store, &options(), T0, Some(&agents)).unwrap();
         let text = render(&board, View::Lanes);
-        assert!(text.contains(&format!("Lane runtime · agent {word} · T-2 working · 1 queued")), "{text}");
+        assert!(
+            text.contains(&format!(
+                "Lane runtime · agent {word} · T-2 working · 1 queued"
+            )),
+            "{text}"
+        );
         let doc: serde_json::Value = serde_json::from_str(&to_json(&board).unwrap()).unwrap();
         assert_eq!(doc["projects"][0]["lanes"][1]["agent_state"], word);
     }
@@ -811,7 +982,14 @@ fn the_board_frame_reads_herdr_and_still_renders_when_observation_fails() {
         herdr.observe_fails = fails;
         let mut out = Vec::new();
         let mut keys = Quitter { timeouts: 0 };
-        run_with(&mut store, &options(), &mut out, &mut keys, Some(&mut herdr)).unwrap();
+        run_with(
+            &mut store,
+            &options(),
+            &mut out,
+            &mut keys,
+            Some(&mut herdr),
+        )
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
         // The first view shows the lanes; the agent state of the lane is in
         // the model, and the lane's task is in the frame. A lane name longer
@@ -839,12 +1017,24 @@ fn a_needs_check_lane_says_why_and_how_to_retry_it() {
         })
         .unwrap();
 
-    let board = store.read(|tx| gear_board::project(tx, "p", T0 + 2)).unwrap();
-    let runtime = board.lanes.iter().find(|lane| lane.lane == "runtime").unwrap();
+    let board = store
+        .read(|tx| gear_board::project(tx, "p", T0 + 2))
+        .unwrap();
+    let runtime = board
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "runtime")
+        .unwrap();
     let line = gear_board::lane_line(runtime);
     assert!(line.starts_with("runtime · needs check: "), "{line}");
-    assert!(line.contains("agent_pane_busy"), "the reason is shown: {line}");
-    assert!(line.contains("- retry runtime"), "the way back is shown: {line}");
+    assert!(
+        line.contains("agent_pane_busy"),
+        "the reason is shown: {line}"
+    );
+    assert!(
+        line.contains("- retry runtime"),
+        "the way back is shown: {line}"
+    );
     assert!(!line.contains("agent unknown"), "{line}");
 
     // A running lane keeps its agent state and gains no action.
@@ -869,11 +1059,23 @@ fn a_held_lane_names_the_line_that_releases_it() {
         })
         .unwrap();
 
-    let board = store.read(|tx| gear_board::project(tx, "p", T0 + 2)).unwrap();
-    let runtime = board.lanes.iter().find(|lane| lane.lane == "runtime").unwrap();
+    let board = store
+        .read(|tx| gear_board::project(tx, "p", T0 + 2))
+        .unwrap();
+    let runtime = board
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "runtime")
+        .unwrap();
     let line = gear_board::lane_line(runtime);
-    assert!(line.contains("held: hold: the machine is recovering"), "{line}");
-    assert!(line.contains("- release runtime"), "the way back is shown: {line}");
+    assert!(
+        line.contains("held: hold: the machine is recovering"),
+        "{line}"
+    );
+    assert!(
+        line.contains("- release runtime"),
+        "the way back is shown: {line}"
+    );
 }
 
 /// Write to the master side of the pty: the keys the user presses.
@@ -968,8 +1170,14 @@ impl Frames {
             if now >= deadline {
                 return true;
             }
-            let mut fds = libc::pollfd { fd: self.master, events: libc::POLLIN, revents: 0 };
-            let millis = (deadline.saturating_duration_since(now)).as_millis().min(50) as i32;
+            let mut fds = libc::pollfd {
+                fd: self.master,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let millis = (deadline.saturating_duration_since(now))
+                .as_millis()
+                .min(50) as i32;
             // SAFETY: `fds` is one pollfd we own; the call only waits.
             let ready = unsafe { libc::poll(&mut fds, 1, millis) };
             if ready <= 0 {
@@ -978,7 +1186,11 @@ impl Frames {
             let mut chunk = [0u8; 4096];
             // SAFETY: the buffer is one chunk long.
             let read = unsafe {
-                libc::read(self.master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+                libc::read(
+                    self.master,
+                    chunk.as_mut_ptr() as *mut libc::c_void,
+                    chunk.len(),
+                )
             };
             if read > 0 {
                 self.buffer
@@ -1004,7 +1216,11 @@ impl Frames {
             if std::time::Instant::now() >= deadline {
                 panic!("no frame with {needle:?} (or without it) within {timeout:?}");
             }
-            let mut fds = libc::pollfd { fd: self.master, events: libc::POLLIN, revents: 0 };
+            let mut fds = libc::pollfd {
+                fd: self.master,
+                events: libc::POLLIN,
+                revents: 0,
+            };
             let millis = (deadline.saturating_duration_since(std::time::Instant::now()))
                 .as_millis()
                 .min(50) as i32;
@@ -1016,7 +1232,11 @@ impl Frames {
             let mut chunk = [0u8; 4096];
             // SAFETY: the buffer is one chunk long.
             let read = unsafe {
-                libc::read(self.master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+                libc::read(
+                    self.master,
+                    chunk.as_mut_ptr() as *mut libc::c_void,
+                    chunk.len(),
+                )
             };
             if read > 0 {
                 self.buffer
@@ -1046,7 +1266,11 @@ impl Frames {
             if std::time::Instant::now() >= deadline {
                 panic!("no frame with {needle:?} within {timeout:?}");
             }
-            let mut fds = libc::pollfd { fd: self.master, events: libc::POLLIN, revents: 0 };
+            let mut fds = libc::pollfd {
+                fd: self.master,
+                events: libc::POLLIN,
+                revents: 0,
+            };
             let millis = (deadline.saturating_duration_since(std::time::Instant::now()))
                 .as_millis()
                 .min(50) as i32;
@@ -1058,7 +1282,11 @@ impl Frames {
             let mut chunk = [0u8; 4096];
             // SAFETY: the buffer is one chunk long.
             let read = unsafe {
-                libc::read(self.master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+                libc::read(
+                    self.master,
+                    chunk.as_mut_ptr() as *mut libc::c_void,
+                    chunk.len(),
+                )
             };
             if read > 0 {
                 self.buffer
@@ -1144,13 +1372,28 @@ fn the_tab_row_has_the_four_views_of_the_user() {
     for label in ["  1 Now  ", "  2 Tasks  ", "  3 Cost  ", "  4 Log  "] {
         assert!(row.contains(label), "{label:?} is not in {row:?}");
     }
-    assert!(row.trim_end().ends_with('│'), "the bar closes at the edge: {row:?}");
+    assert!(
+        row.trim_end().ends_with('│'),
+        "the bar closes at the edge: {row:?}"
+    );
     let above = text.lines().nth(layout.tab_row - 1).unwrap_or_default();
-    assert!(above.trim().starts_with('╭'), "the bar's top rule: {above:?}");
-    assert!(above.trim_end().ends_with('╮'), "the bar's top rule: {above:?}");
+    assert!(
+        above.trim().starts_with('╭'),
+        "the bar's top rule: {above:?}"
+    );
+    assert!(
+        above.trim_end().ends_with('╮'),
+        "the bar's top rule: {above:?}"
+    );
     let under = text.lines().nth(layout.tab_row + 1).unwrap_or_default();
-    assert!(under.trim().starts_with('╰'), "the bar's bottom rule: {under:?}");
-    assert!(under.trim_end().ends_with('╯'), "the bar's bottom rule: {under:?}");
+    assert!(
+        under.trim().starts_with('╰'),
+        "the bar's bottom rule: {under:?}"
+    );
+    assert!(
+        under.trim_end().ends_with('╯'),
+        "the bar's bottom rule: {under:?}"
+    );
     // No view draws a burn-up any more (the chart is removed).
     for tab in Tab::all() {
         let text = frame::frame(&board, &crate::screen(tab, 0, (160, 40)), None);
@@ -1195,13 +1438,19 @@ fn the_goal_box_says_what_the_quality_bar_blocks() {
     let canvas = frame::canvas(&board, &screen, None);
     let text = canvas.text();
 
-    let line = "Quality bar: STRICT — severe issues block a task; medium ones are the captain's call";
+    let line =
+        "Quality bar: STRICT — severe issues block a task; medium ones are the captain's call";
     let row = text
         .lines()
         .position(|text| text.contains(line))
         .unwrap_or_else(|| panic!("the box holds {line:?}:\n{text}"));
     // The bar is locked in the box with the goal: yellow, and not bold.
-    let x = text.lines().nth(row).unwrap_or_default().find(line).unwrap_or(0);
+    let x = text
+        .lines()
+        .nth(row)
+        .unwrap_or_default()
+        .find(line)
+        .unwrap_or(0);
     assert_eq!(canvas.style_at(x, row), Style::fg(Color::Warn), "{text}");
     // That row is inside the box: it opens and closes with the box's borders.
     let row_text = text.lines().nth(row).unwrap_or_default();
@@ -1250,7 +1499,11 @@ fn a_click_on_column_15_of_the_tab_bar_picks_the_tasks_tab_in_both_headers() {
     let mut store = world_with_a_voyage();
     let size = (120, 48);
     let folded = head_of(&mut store, size);
-    assert_eq!(folded.top, folded.tab_row + 3, "the view starts three rows under the tabs");
+    assert_eq!(
+        folded.top,
+        folded.tab_row + 3,
+        "the view starts three rows under the tabs"
+    );
     // Column 15 of the terminal is the screen's column 14, inside the Tasks
     // tab: the tab's own columns and the rule after its label.
     let (first, last, tab) = *folded
@@ -1268,17 +1521,32 @@ fn a_click_on_column_15_of_the_tab_bar_picks_the_tasks_tab_in_both_headers() {
     let canvas = frame::canvas(
         &build(
             &mut store,
-            &Options { project: Some("p".into()), ..Options::default() },
+            &Options {
+                project: Some("p".into()),
+                ..Options::default()
+            },
             now_seconds(),
         )
         .unwrap(),
         &crate::screen(Tab::Now, 0, size),
         None,
     );
-    assert_eq!(canvas.char_at(first, folded.tab_row), '│', "the range starts on the rule");
-    assert_eq!(canvas.char_at(first + 1, folded.tab_row), ' ', "the label follows the rule");
+    assert_eq!(
+        canvas.char_at(first, folded.tab_row),
+        '│',
+        "the range starts on the rule"
+    );
+    assert_eq!(
+        canvas.char_at(first + 1, folded.tab_row),
+        ' ',
+        "the label follows the rule"
+    );
 
-    let events = vec![Event::Mouse { button: 0, x: 15, y: folded.tab_row as u16 + 1 }];
+    let events = vec![Event::Mouse {
+        button: 0,
+        x: 15,
+        y: folded.tab_row as u16 + 1,
+    }];
     let frame = run_events(&mut store, events, size);
     assert!(
         frame.contains("merged into dev"),
@@ -1289,7 +1557,10 @@ fn a_click_on_column_15_of_the_tab_bar_picks_the_tasks_tab_in_both_headers() {
     // click on the new row picks the tab too.
     let board = build(
         &mut store,
-        &Options { project: Some("p".into()), ..Options::default() },
+        &Options {
+            project: Some("p".into()),
+            ..Options::default()
+        },
         now_seconds(),
     )
     .unwrap();
@@ -1311,7 +1582,11 @@ fn a_click_on_column_15_of_the_tab_bar_picks_the_tasks_tab_in_both_headers() {
     );
     let events = vec![
         Event::Key('d'),
-        Event::Mouse { button: 0, x: 15, y: opened.tab_row as u16 + 1 },
+        Event::Mouse {
+            button: 0,
+            x: 15,
+            y: opened.tab_row as u16 + 1,
+        },
     ];
     let frame = run_events(&mut store, events, size);
     assert!(
@@ -1356,7 +1631,10 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     });
 
     // The first frame: the title, the bars, the tabs and the first view.
-    let mut frames = Frames { master: pty.master, buffer: String::new() };
+    let mut frames = Frames {
+        master: pty.master,
+        buffer: String::new(),
+    };
     let frame = frames.next("NOW DOING", Duration::from_secs(5));
     assert!(frame.contains("GEAR · p"), "{frame}");
     assert!(frame.contains("1 Now"), "{frame}");
@@ -1370,7 +1648,10 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     // The head of the board is the prototype's (T-353): the goal box and the
     // voyage's name.
     assert!(frame.contains("╔═ GOAL "), "{frame}");
-    assert!(frame.contains(" M4: one seat model, a voyage the user can review · "), "{frame}");
+    assert!(
+        frame.contains(" M4: one seat model, a voyage the user can review · "),
+        "{frame}"
+    );
     // The footer keeps the last row of the screen.
     let rows: Vec<&str> = frame.lines().collect();
     assert!(rows.last().unwrap_or(&"").contains(FOOTER_START), "{frame}");
@@ -1391,12 +1672,18 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     // A click on the Graph tab, where it is drawn, moves to the graph. The
     // click counts from 1: the tab's first column plus one (T-353).
     let tab = column_of(&frame, head.tab_row, "2 Tasks") + 1;
-    press(pty.master, format!("\x1b[<0;{tab};{row}M", row = head.tab_row + 1).as_bytes());
+    press(
+        pty.master,
+        format!("\x1b[<0;{tab};{row}M", row = head.tab_row + 1).as_bytes(),
+    );
     let _frame = frames.next("merged into dev", Duration::from_secs(5));
 
     // A click on the Now tab, where it is drawn, comes back to the lanes.
     let now = column_of(&frame, head.tab_row, "1 Now") + 1;
-    press(pty.master, format!("\x1b[<0;{now};{row}M", row = head.tab_row + 1).as_bytes());
+    press(
+        pty.master,
+        format!("\x1b[<0;{now};{row}M", row = head.tab_row + 1).as_bytes(),
+    );
     let _frame = frames.next("NOW DOING", Duration::from_secs(5));
 
     // A click on the first row of the first view picks that row, and `Enter`
@@ -1426,7 +1713,6 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     press(pty.master, b"\r");
     let _frame = frames.next("lane runtime", Duration::from_secs(5));
 
-
     // Any key closes the panel; then `q` leaves the board.
     press(pty.master, b"x");
     let frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
@@ -1448,7 +1734,13 @@ fn world_with_two_projects() -> Store {
             for (project, pane) in [("a", "w1:p1"), ("b", "w1:p2")] {
                 testing::seed_project(tx, project, "sess", T0)?;
                 testing::seed_active_seat(
-                    tx, project, "data", SeatRole::Lane, pane, "opencode", T0,
+                    tx,
+                    project,
+                    "data",
+                    SeatRole::Lane,
+                    pane,
+                    "opencode",
+                    T0,
                 )?;
             }
             Ok(())
@@ -1479,7 +1771,10 @@ fn a_board_without_a_project_shows_them_one_at_a_time() {
     });
 
     // The first frame shows the first project: its name is the first row's.
-    let mut frames = Frames { master: pty.master, buffer: String::new() };
+    let mut frames = Frames {
+        master: pty.master,
+        buffer: String::new(),
+    };
     let frame = frames.next("NOW DOING", Duration::from_secs(5));
     let title = plain(frame.lines().next().unwrap_or_default());
     assert!(title.trim_start().starts_with("GEAR · a "), "{title}");
@@ -1512,17 +1807,31 @@ fn a_board_without_a_project_shows_them_one_at_a_time() {
 #[test]
 fn a_board_printed_once_promises_no_project_key() {
     let mut store = world_with_two_projects();
-    let opts = Options { project: None, color: false, ..Options::default() };
+    let opts = Options {
+        project: None,
+        color: false,
+        ..Options::default()
+    };
     let mut out: Vec<u8> = Vec::new();
     gear_board::run(&mut store, &opts, &mut out, None).expect("the printed board");
     let text = String::from_utf8_lossy(&out).into_owned();
     let title = plain(text.lines().next().unwrap_or_default());
-    assert!(title.trim_start().starts_with("GEAR · a "), "the first project prints: {title}");
-    assert!(!title.contains("next of"), "a printed board promises no key: {title}");
+    assert!(
+        title.trim_start().starts_with("GEAR · a "),
+        "the first project prints: {title}"
+    );
+    assert!(
+        !title.contains("next of"),
+        "a printed board promises no key: {title}"
+    );
 
     // The JSON is the whole board, unchanged: the switch is only the text's
     // own business.
-    let opts = Options { json: true, project: None, ..Options::default() };
+    let opts = Options {
+        json: true,
+        project: None,
+        ..Options::default()
+    };
     let mut out: Vec<u8> = Vec::new();
     gear_board::run(&mut store, &opts, &mut out, None).expect("the board as JSON");
     let doc: serde_json::Value = serde_json::from_slice(&out).expect("JSON");
@@ -1538,7 +1847,10 @@ fn a_board_of_one_project_has_no_project_key() {
     let mut store = world();
     let board = build(
         &mut store,
-        &Options { project: None, ..Options::default() },
+        &Options {
+            project: None,
+            ..Options::default()
+        },
         T0,
     )
     .unwrap();
@@ -1570,7 +1882,10 @@ fn a_board_of_one_project_has_no_project_key() {
 /// for the footer line that ends it.
 #[test]
 fn a_frame_without_the_footer_is_never_accepted() {
-    let mut frames = Frames { master: -1, buffer: String::new() };
+    let mut frames = Frames {
+        master: -1,
+        buffer: String::new(),
+    };
     // The clear-screen and the body, but no footer yet.
     frames.buffer.push_str("\x1b[?2026h\x1b[HGEAR · p\nLANES\n");
     assert!(
@@ -1670,22 +1985,34 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
         let _ = left.send(result.is_ok());
     });
 
-    let mut frames = Frames { master: pty.master, buffer: String::new() };
+    let mut frames = Frames {
+        master: pty.master,
+        buffer: String::new(),
+    };
     let _frame = frames.next("NOW DOING", Duration::from_secs(5));
 
     // The panel of a lane with seventeen tasks is taller than the terminal: it
     // keeps both borders and the footer's row (F3). The first lane is the one
     // the board shows as picked, and a click that picks it again writes no
     // frame (T-403): `Enter` opens it from there.
-    press(pty.master, format!("\x1b[<0;1;{pick}M", pick = head.top + 2).as_bytes());
+    press(
+        pty.master,
+        format!("\x1b[<0;1;{pick}M", pick = head.top + 2).as_bytes(),
+    );
     assert!(
         frames.quiet(Duration::from_millis(300)),
         "a click on the picked row writes no frame"
     );
     press(pty.master, b"\r");
     let frame = frames.next("LEFT, in order", Duration::from_secs(5));
-    assert!(frame.contains("┐"), "the right border of the panel: {frame}");
-    assert!(frame.contains("└"), "the bottom border of the panel: {frame}");
+    assert!(
+        frame.contains("┐"),
+        "the right border of the panel: {frame}"
+    );
+    assert!(
+        frame.contains("└"),
+        "the bottom border of the panel: {frame}"
+    );
     let rows: Vec<&str> = frame.lines().collect();
     assert!(
         rows.last().unwrap_or(&"").contains(FOOTER_START),
@@ -1701,7 +2028,10 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     // screen, and a frame that reads like the last one written is not written
     // again (T-403).
     let tab = column_of(&frame, head.tab_row, "2 Tasks") + 1;
-    press(pty.master, format!("\x1b[<0;{tab};{row}M", row = head.tab_row + 1).as_bytes());
+    press(
+        pty.master,
+        format!("\x1b[<0;{tab};{row}M", row = head.tab_row + 1).as_bytes(),
+    );
     let _frame = frames.next("dev", Duration::from_secs(5));
 
     // Repeated `Down` walks to the last task and keeps it visible (F8). Every
@@ -1717,7 +2047,10 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     }
     // The last pick is T-01, the last task to run (T-361, T-362): the view
     // scrolled to it.
-    assert!(frame.contains("T-01"), "the last pick stays visible: {frame}");
+    assert!(
+        frame.contains("T-01"),
+        "the last pick stays visible: {frame}"
+    );
 
     // A click on the footer's row and on the spacer below the data selects
     // nothing (F8): the selection stays on the last task, and no frame is
@@ -1734,8 +2067,14 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     let frame = frames.next("T-01 · lane", Duration::from_secs(5));
     assert!(frame.contains("ROUNDS"), "the panel of the task: {frame}");
     // The goal is longer than the screen: the panel is cut, not hidden (F3).
-    assert!(frame.contains("┐"), "the right border of the panel: {frame}");
-    assert!(frame.contains("└"), "the bottom border of the panel: {frame}");
+    assert!(
+        frame.contains("┐"),
+        "the right border of the panel: {frame}"
+    );
+    assert!(
+        frame.contains("└"),
+        "the bottom border of the panel: {frame}"
+    );
     let rows: Vec<&str> = frame.lines().collect();
     assert!(
         rows.last().unwrap_or(&"").contains(FOOTER_START),
@@ -1758,15 +2097,25 @@ fn a_long_graph_draws_its_last_task() {
     let mut store = world_with_a_long_graph();
     let board = gear_board::build(
         &mut store,
-        &Options { project: Some("p".into()), ..Options::default() },
+        &Options {
+            project: Some("p".into()),
+            ..Options::default()
+        },
         now_seconds(),
     )
     .unwrap();
-    let text = gear_board::frame::frame(&board, &crate::screen(gear_board::frame::Tab::Tasks, 16, (80, 24)), None);
+    let text = gear_board::frame::frame(
+        &board,
+        &crate::screen(gear_board::frame::Tab::Tasks, 16, (80, 24)),
+        None,
+    );
     // The last pick is the last task to run, T-01: the waiting tasks hang
     // newest first (T-361, T-362).
     assert!(text.contains("T-01"), "the last pick is drawn: {text}");
-    assert!(!text.contains("T-17"), "the first pick scrolled away: {text}");
+    assert!(
+        !text.contains("T-17"),
+        "the first pick scrolled away: {text}"
+    );
 }
 
 /// Keys that send the given events, then `q`, on a screen of the given size.
@@ -1791,7 +2140,10 @@ impl Keys for Events {
 /// The last frame the board drew: the frames are separated by the clear.
 fn last_frame(out: &[u8]) -> String {
     let text = String::from_utf8_lossy(out);
-    text.rsplit("\u{1b}[?2026h\u{1b}[H").next().unwrap_or_default().to_string()
+    text.rsplit("\u{1b}[?2026h\u{1b}[H")
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// T-342: a view with more picks than screen rows scrolls so the selected one
@@ -1802,7 +2154,10 @@ fn a_view_scrolls_to_its_selected_pick_and_a_click_keeps_it() {
     let mut store = world_with_a_long_graph();
     let board = build(
         &mut store,
-        &Options { project: Some("p".into()), ..Options::default() },
+        &Options {
+            project: Some("p".into()),
+            ..Options::default()
+        },
         now_seconds(),
     )
     .unwrap();
@@ -1816,12 +2171,21 @@ fn a_view_scrolls_to_its_selected_pick_and_a_click_keeps_it() {
     let canvas = frame::canvas(&board, &crate::screen(Tab::Tasks, 16, size), None);
     let text = canvas.text();
     assert!(text.contains("T-01"), "the selected pick is drawn: {text}");
-    assert!(!text.contains("T-17"), "the view scrolled past the first pick: {text}");
+    assert!(
+        !text.contains("T-17"),
+        "the view scrolled past the first pick: {text}"
+    );
     // Its row is the last row the view owns, and it is the lit one: the view
     // stops on the row above the legend (T-362).
     let row = 9;
-    assert!(text.lines().nth(row).unwrap_or_default().contains("T-01"), "{text}");
-    assert!(canvas.style_at(1, row).reverse, "the selected row is lit: {text}");
+    assert!(
+        text.lines().nth(row).unwrap_or_default().contains("T-01"),
+        "{text}"
+    );
+    assert!(
+        canvas.style_at(1, row).reverse,
+        "the selected row is lit: {text}"
+    );
 
     // Sixteen `Down` keys and then a click on the row T-01 is drawn on: the
     // click adds the viewport's offset and picks the same task.
@@ -1829,7 +2193,11 @@ fn a_view_scrolls_to_its_selected_pick_and_a_click_keeps_it() {
     for _ in 0..16 {
         events.push(Event::Key('j'));
     }
-    events.push(Event::Mouse { button: 0, x: 1, y: 10 });
+    events.push(Event::Mouse {
+        button: 0,
+        x: 1,
+        y: 10,
+    });
     let opts = Options {
         project: Some("p".into()),
         color: false,
@@ -1837,7 +2205,14 @@ fn a_view_scrolls_to_its_selected_pick_and_a_click_keeps_it() {
         ..Options::default()
     };
     let mut out: Vec<u8> = Vec::new();
-    run_with(&mut store, &opts, &mut out, &mut Events { events, size }, None).unwrap();
+    run_with(
+        &mut store,
+        &opts,
+        &mut out,
+        &mut Events { events, size },
+        None,
+    )
+    .unwrap();
 
     let frame = last_frame(&out);
     let rows: Vec<&str> = frame.lines().collect();
@@ -1878,7 +2253,10 @@ fn a_click_on_the_top_row_of_a_scrolled_view_picks_the_task_there() {
     let size = (160, 21);
     let board = build(
         &mut store,
-        &Options { project: Some("gear".into()), ..Options::default() },
+        &Options {
+            project: Some("gear".into()),
+            ..Options::default()
+        },
         now_seconds(),
     )
     .unwrap();
@@ -1886,7 +2264,11 @@ fn a_click_on_the_top_row_of_a_scrolled_view_picks_the_task_there() {
     let before = frame::canvas(&board, &crate::screen(frame::Tab::Tasks, 8, size), None);
     let before = before.text();
     assert!(
-        before.lines().nth(head.top).unwrap_or_default().contains("T-268"),
+        before
+            .lines()
+            .nth(head.top)
+            .unwrap_or_default()
+            .contains("T-268"),
         "the view's first row holds T-268: {before}"
     );
     // `2` is the graph; eight `Down` select T-262. The click at x 1 y
@@ -1896,7 +2278,11 @@ fn a_click_on_the_top_row_of_a_scrolled_view_picks_the_task_there() {
     for _ in 0..8 {
         events.push(Event::Key('j'));
     }
-    events.push(Event::Mouse { button: 0, x: 1, y: (head.top + 1) as u16 });
+    events.push(Event::Mouse {
+        button: 0,
+        x: 1,
+        y: (head.top + 1) as u16,
+    });
     let opts = Options {
         project: Some("gear".into()),
         color: false,
@@ -1904,7 +2290,14 @@ fn a_click_on_the_top_row_of_a_scrolled_view_picks_the_task_there() {
         ..Options::default()
     };
     let mut out: Vec<u8> = Vec::new();
-    run_with(&mut store, &opts, &mut out, &mut Events { events, size }, None).unwrap();
+    run_with(
+        &mut store,
+        &opts,
+        &mut out,
+        &mut Events { events, size },
+        None,
+    )
+    .unwrap();
 
     let frame_text = last_frame(&out);
     let rows: Vec<&str> = frame_text.lines().collect();
@@ -1933,8 +2326,14 @@ fn down_then_enter_opens_the_panel_of_the_second_task_row() {
         vec![Event::Key('2'), Event::Key('j'), Event::Key('\r')],
         (80, 24),
     );
-    assert!(out.contains("T-16 · lane"), "the panel of the second task row: {out}");
-    assert!(!out.contains("T-17 · lane"), "the first task's panel is not opened: {out}");
+    assert!(
+        out.contains("T-16 · lane"),
+        "the panel of the second task row: {out}"
+    );
+    assert!(
+        !out.contains("T-17 · lane"),
+        "the first task's panel is not opened: {out}"
+    );
 }
 
 /// T-362: a Tasks view longer than the screen scrolls the selected row into
@@ -1947,7 +2346,10 @@ fn a_long_tasks_view_scrolls_and_keeps_the_legend_above_the_footer() {
     let mut store = world_with_tasks(40);
     let board = build(
         &mut store,
-        &Options { project: Some("p".into()), ..Options::default() },
+        &Options {
+            project: Some("p".into()),
+            ..Options::default()
+        },
         now_seconds(),
     )
     .unwrap();
@@ -1958,13 +2360,30 @@ fn a_long_tasks_view_scrolls_and_keeps_the_legend_above_the_footer() {
     // The last pick is T-01 (the waiting tasks hang newest first): it scrolled
     // into view, lit, on the last row the view owns (`H - 4`).
     let row = 20;
-    assert!(rows.get(row).unwrap_or(&"").contains("T-01"), "the selected pick is drawn: {text}");
-    assert!(canvas.style_at(1, row).reverse, "the selected row is lit: {text}");
+    assert!(
+        rows.get(row).unwrap_or(&"").contains("T-01"),
+        "the selected pick is drawn: {text}"
+    );
+    assert!(
+        canvas.style_at(1, row).reverse,
+        "the selected row is lit: {text}"
+    );
     // The legend is on row `H - 2`, in Dim, and the footer keeps row `H - 1`.
     let legend = rows.get(22).copied().unwrap_or_default();
-    assert!(legend.starts_with(" ● merged into dev"), "the legend on row H - 2: {text}");
-    assert_eq!(canvas.style_at(1, 22).fg, Some(Color::Dim), "the legend is Dim: {text}");
-    assert_eq!(canvas.style_at(1, 23).fg, Some(Color::Dim), "the footer keeps its row: {text}");
+    assert!(
+        legend.starts_with(" ● merged into dev"),
+        "the legend on row H - 2: {text}"
+    );
+    assert_eq!(
+        canvas.style_at(1, 22).fg,
+        Some(Color::Dim),
+        "the legend is Dim: {text}"
+    );
+    assert_eq!(
+        canvas.style_at(1, 23).fg,
+        Some(Color::Dim),
+        "the footer keeps its row: {text}"
+    );
 }
 
 // ---- T-383: the QUOTA lines of the board
@@ -1973,7 +2392,10 @@ fn a_long_tasks_view_scrolls_and_keeps_the_legend_above_the_footer() {
 fn now_frame(store: &mut Store, now: i64) -> String {
     let board = build(
         store,
-        &gear_board::Options { project: Some("p".into()), ..Default::default() },
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
         now,
     )
     .unwrap();
@@ -2081,7 +2503,15 @@ fn world_with_tasks(n: usize) -> Store {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "claude",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
             for n in 1..=n {
                 tx.insert_task(&TaskRow {
@@ -2120,7 +2550,10 @@ fn head_of(store: &mut Store, size: (usize, usize)) -> gear_board::frame::Layout
     use gear_board::frame;
     let board = build(
         store,
-        &Options { project: Some("p".into()), ..Options::default() },
+        &Options {
+            project: Some("p".into()),
+            ..Options::default()
+        },
         now_seconds(),
     )
     .unwrap();
@@ -2154,7 +2587,15 @@ fn world_with_two_voyages() -> Store {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", now)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", now)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "codex",
+                now,
+            )?;
             testing::seed_active_seat(tx, "p", "old", SeatRole::Lane, "w1:p2", "pi", now)?;
             testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p3", "pi", now)?;
             for (milestone, departure) in [("M1", now - 7200), ("M2", now - 3600)] {
@@ -2195,7 +2636,8 @@ fn world_with_two_voyages() -> Store {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                     issue: None,updated: now,
+                    issue: None,
+                    updated: now,
                 })?;
             }
             Ok(())
@@ -2229,46 +2671,86 @@ fn the_voyage_keys_and_a_click_on_a_label_pick_the_shown_voyage() {
     // voyage, the sailing M2, and its list is newest first.
     let board = build(&mut store, &options(), now_seconds()).unwrap();
     let head = frame::layout(&board, &crate::screen(Tab::Now, 0, size));
-    let labels: Vec<&str> =
-        head.voyages.iter().map(|(_, _, milestone)| milestone.as_str()).collect();
-    assert_eq!(labels, vec!["M2", "M1"], "the labels of the first row: {labels:?}");
+    let labels: Vec<&str> = head
+        .voyages
+        .iter()
+        .map(|(_, _, milestone)| milestone.as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["M2", "M1"],
+        "the labels of the first row: {labels:?}"
+    );
     let (first, _, _) = head.voyages[1];
-    assert!(!head.tabs.is_empty(), "the tab row is drawn below the labels");
+    assert!(
+        !head.tabs.is_empty(),
+        "the tab row is drawn below the labels"
+    );
 
     // The first frame shows the measured voyage, M2.
     let opened = run_events_output(&mut store, vec![], size);
     let opened = last_frame(opened.as_bytes());
-    assert!(opened.lines().nth(1).unwrap_or_default().contains("M2:"), "{opened}");
+    assert!(
+        opened.lines().nth(1).unwrap_or_default().contains("M2:"),
+        "{opened}"
+    );
 
     // `[` goes one entry older: the whole board shows the landed M1, and its
     // label on the first row is the lit one.
     let older = run_events_output(&mut store, vec![Event::Key('[')], size);
     let older = last_frame(older.as_bytes());
     let rows: Vec<&str> = older.lines().collect();
-    assert!(rows[1].contains("M1: voyage M1 · ⚓ landed"), "row 1 of the older voyage: {older}");
+    assert!(
+        rows[1].contains("M1: voyage M1 · ⚓ landed"),
+        "row 1 of the older voyage: {older}"
+    );
     assert!(!rows[1].contains("M2:"), "the board shows M1 only: {older}");
-    assert!(rows[0].contains("\u{1b}[1;7m M1 ⚓"), "the M1 label is lit: {older:?}");
+    assert!(
+        rows[0].contains("\u{1b}[1;7m M1 ⚓"),
+        "the M1 label is lit: {older:?}"
+    );
 
     // `[` again: the oldest voyage stays the oldest.
     let oldest = run_events_output(&mut store, vec![Event::Key('['), Event::Key('[')], size);
     let oldest = last_frame(oldest.as_bytes());
-    assert!(oldest.lines().nth(1).unwrap_or_default().contains("M1:"), "{oldest}");
+    assert!(
+        oldest.lines().nth(1).unwrap_or_default().contains("M1:"),
+        "{oldest}"
+    );
 
     // `]` goes one entry newer: M2 is shown again.
     let newer = run_events_output(&mut store, vec![Event::Key('['), Event::Key(']')], size);
     let newer = last_frame(newer.as_bytes());
-    assert!(newer.lines().nth(1).unwrap_or_default().contains("M2:"), "{newer}");
+    assert!(
+        newer.lines().nth(1).unwrap_or_default().contains("M2:"),
+        "{newer}"
+    );
 
     // A click on the first column of the M1 label picks M1, and the pick starts
     // the selection over: two `Down` keys had selected the second lane, and the
     // clicked frame draws the first row the board of M1 draws at selection 0.
-    let click = Event::Mouse { button: 0, x: (first + 1) as u16, y: 1 };
-    let clicked = run_events_output(&mut store, vec![Event::Key('j'), Event::Key('j'), click], size);
+    let click = Event::Mouse {
+        button: 0,
+        x: (first + 1) as u16,
+        y: 1,
+    };
+    let clicked = run_events_output(
+        &mut store,
+        vec![Event::Key('j'), Event::Key('j'), click],
+        size,
+    );
     let clicked = last_frame(clicked.as_bytes());
-    assert!(clicked.lines().nth(1).unwrap_or_default().contains("M1:"), "{clicked}");
+    assert!(
+        clicked.lines().nth(1).unwrap_or_default().contains("M1:"),
+        "{clicked}"
+    );
     let m1 = build(
         &mut store,
-        &Options { project: Some("p".into()), milestone: Some("M1".into()), ..Options::default() },
+        &Options {
+            project: Some("p".into()),
+            milestone: Some("M1".into()),
+            ..Options::default()
+        },
         now_seconds(),
     )
     .unwrap();
@@ -2298,7 +2780,11 @@ fn the_wheel_and_the_page_keys_move_the_selection_over_a_long_view() {
     // the dashed ┆), so thirty picks scroll the viewport to its end (T-353:
     // the head's height moves the rows, not the picks).
     let mut events = vec![Event::Key('2')];
-    events.extend((0..10).map(|_| Event::Mouse { button: 65, x: 1, y: 7 }));
+    events.extend((0..10).map(|_| Event::Mouse {
+        button: 65,
+        x: 1,
+        y: 7,
+    }));
     let frame = run_events(&mut store, events, size);
     let rows: Vec<&str> = frame.lines().collect();
     let row = gear_board::frame::view_bottom(gear_board::frame::Tab::Tasks, size.1) - 1;
@@ -2313,7 +2799,11 @@ fn the_wheel_and_the_page_keys_move_the_selection_over_a_long_view() {
 
     // The wheel up at the first pick stays there.
     let mut events = vec![Event::Key('2')];
-    events.extend((0..10).map(|_| Event::Mouse { button: 64, x: 1, y: 7 }));
+    events.extend((0..10).map(|_| Event::Mouse {
+        button: 64,
+        x: 1,
+        y: 7,
+    }));
     let frame = run_events(&mut store, events, size);
     let rows: Vec<&str> = frame.lines().collect();
     assert!(
@@ -2334,7 +2824,9 @@ fn the_wheel_and_the_page_keys_move_the_selection_over_a_long_view() {
     let last = gear_board::frame::view_bottom(gear_board::frame::Tab::Tasks, size.1);
     let lit = (first + page).min(last - 1);
     assert!(
-        rows.get(lit).unwrap_or(&"").contains(&format!("T-{:02}", 100 - page)),
+        rows.get(lit)
+            .unwrap_or(&"")
+            .contains(&format!("T-{:02}", 100 - page)),
         "the page down picks the task one screen down: {frame}"
     );
     assert!(
@@ -2381,14 +2873,28 @@ fn a_wheel_notch_is_never_a_click() {
     // (the panel's frame is not the last one: the key that closes it is read
     // after it).
     let opened = run_events_output(&mut store, vec![Event::Key('2'), Event::Key('\r')], size);
-    assert!(opened.contains("ROUNDS"), "`Enter` opens the panel: {opened}");
+    assert!(
+        opened.contains("ROUNDS"),
+        "`Enter` opens the panel: {opened}"
+    );
     let frame = run_events(
         &mut store,
-        vec![Event::Key('2'), Event::Key('\r'), Event::Mouse { button: 65, x: 1, y: 7 }],
+        vec![
+            Event::Key('2'),
+            Event::Key('\r'),
+            Event::Mouse {
+                button: 65,
+                x: 1,
+                y: 7,
+            },
+        ],
         size,
     );
     let rows: Vec<&str> = frame.lines().collect();
-    assert!(!frame.contains("ROUNDS"), "the wheel opens no panel: {frame}");
+    assert!(
+        !frame.contains("ROUNDS"),
+        "the wheel opens no panel: {frame}"
+    );
     assert!(
         rows.get(head.top + 1).unwrap_or(&"").contains("T-100"),
         "the notch that closed the panel moved nothing: {frame}"
@@ -2399,7 +2905,14 @@ fn a_wheel_notch_is_never_a_click() {
     // the row two rows per pick below the first).
     let frame = run_events(
         &mut store,
-        vec![Event::Key('2'), Event::Mouse { button: 65, x: 1, y: head.tab_row as u16 + 1 }],
+        vec![
+            Event::Key('2'),
+            Event::Mouse {
+                button: 65,
+                x: 1,
+                y: head.tab_row as u16 + 1,
+            },
+        ],
         size,
     );
     let rows: Vec<&str> = frame.lines().collect();
@@ -2433,7 +2946,9 @@ fn the_page_keys_parse_and_the_wheel_is_still_a_mouse() {
             }
         }
     });
-    is_ready.recv_timeout(std::time::Duration::from_secs(5)).expect("the terminal is in raw mode");
+    is_ready
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the terminal is in raw mode");
     press(pty.master, b"\x1b[5~");
     press(pty.master, b"\x1b[6~");
     press(pty.master, b"\x1b[<64;10;20M");
@@ -2441,23 +2956,41 @@ fn the_page_keys_parse_and_the_wheel_is_still_a_mouse() {
     press(pty.master, b"\x1b[<0;1;7M");
 
     let read = |events: &std::sync::mpsc::Receiver<Option<Event>>| {
-        events.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or(None)
+        events
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or(None)
     };
     assert_eq!(read(&events), Some(Event::PageUp), "`[5~` is the page up");
-    assert_eq!(read(&events), Some(Event::PageDown), "`[6~` is the page down");
     assert_eq!(
         read(&events),
-        Some(Event::Mouse { button: 64, x: 10, y: 20 }),
+        Some(Event::PageDown),
+        "`[6~` is the page down"
+    );
+    assert_eq!(
+        read(&events),
+        Some(Event::Mouse {
+            button: 64,
+            x: 10,
+            y: 20
+        }),
         "the wheel up is still a mouse"
     );
     assert_eq!(
         read(&events),
-        Some(Event::Mouse { button: 65, x: 10, y: 20 }),
+        Some(Event::Mouse {
+            button: 65,
+            x: 10,
+            y: 20
+        }),
         "the wheel down is still a mouse"
     );
     assert_eq!(
         read(&events),
-        Some(Event::Mouse { button: 0, x: 1, y: 7 }),
+        Some(Event::Mouse {
+            button: 0,
+            x: 1,
+            y: 7
+        }),
         "the left click keeps its button"
     );
     reader.join().ok();
@@ -2472,7 +3005,15 @@ fn cancelled_tasks_are_not_counted_in_the_totals() {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "claude",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
             tx.upsert_voyage(&VoyageRow {
                 project: "p".into(),
@@ -2533,7 +3074,11 @@ fn cancelled_tasks_are_not_counted_in_the_totals() {
     let text = render(&board, View::Lanes);
     assert!(text.contains("Totals: 5 tasks · 3 done"), "{text}");
     // The cancelled tasks stay in the lane's queue, as they did before.
-    let lane = plan.lanes.iter().find(|lane| lane.lane == "data").expect("the lane");
+    let lane = plan
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "data")
+        .expect("the lane");
     let ids: Vec<&str> = lane.tasks.iter().map(|task| task.id.as_str()).collect();
     for id in ["T-6", "T-7", "T-8", "T-9"] {
         assert!(ids.contains(&id), "{id} stays in the Tasks view: {ids:?}");
@@ -2578,7 +3123,13 @@ fn a_landed_voyage_s_lane_reads_retired_at_the_landing_and_has_no_ends() {
         })
         .unwrap();
     let board = build(&mut store, &options(), now_seconds()).unwrap();
-    assert!(!board.projects[0].shown.as_ref().expect("the voyage").sailing);
+    assert!(
+        !board.projects[0]
+            .shown
+            .as_ref()
+            .expect("the voyage")
+            .sailing
+    );
     // The second lane's row is not the lit one: its Dim reason is readable.
     let screen = crate::screen(Tab::Now, 1, (160, 40));
     let canvas = frame::canvas(&board, &screen, None);
@@ -2592,7 +3143,10 @@ fn a_landed_voyage_s_lane_reads_retired_at_the_landing_and_has_no_ends() {
     assert_eq!(rows.len(), 2, "both lanes retired:\n{text}");
     let row = rows[0];
     assert_eq!(canvas.style_at(9, row), Style::fg(Color::Dim), "{text}");
-    assert!(!text.lines().nth(row).unwrap_or_default().contains('~'), "{text}");
+    assert!(
+        !text.lines().nth(row).unwrap_or_default().contains('~'),
+        "{text}"
+    );
 }
 
 /// T-359: a lane with nothing open says what its next task waits for, with the
@@ -2605,7 +3159,15 @@ fn a_lane_with_nothing_open_names_the_dependency_it_waits_for() {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "claude",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "mast", SeatRole::Lane, "w1:p2", "opencode", T0)?;
             testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p3", "opencode", T0)?;
             tx.upsert_voyage(&VoyageRow {
@@ -2690,7 +3252,15 @@ fn a_cancelled_task_is_not_the_now_doing_of_its_lane() {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "claude",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
             tx.upsert_voyage(&VoyageRow {
                 project: "p".into(),
@@ -2759,7 +3329,10 @@ fn a_cancelled_task_is_not_the_now_doing_of_its_lane() {
     let board = build(&mut store, &options(), T0 + 60).unwrap();
     let text = frame::canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None).text();
     assert!(text.contains("data  T-2"), "{text}");
-    assert!(!text.contains("data  T-1"), "the cancelled task is NOW DOING:\n{text}");
+    assert!(
+        !text.contains("data  T-1"),
+        "the cancelled task is NOW DOING:\n{text}"
+    );
 }
 
 // ---- T-360: under the lanes the Now view lists what to handle, each item
@@ -2843,7 +3416,10 @@ fn an_open_reworked_task_is_an_item_to_handle() {
         })
         .unwrap();
     let frame = now_frame(&mut store, T0 + 30 * 60);
-    assert!(frame.contains("⚠ T-2 runtime round 2,"), "the item names its lane and round: {frame}");
+    assert!(
+        frame.contains("⚠ T-2 runtime round 2,"),
+        "the item names its lane and round: {frame}"
+    );
     assert!(frame.contains("the captain scopes what is left"), "{frame}");
 }
 
@@ -2855,7 +3431,15 @@ fn the_items_follow_the_plan_order_across_lanes() {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "claude",
+                T0,
+            )?;
             // The seat order puts hull before keel; the plan ranks keel first.
             testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "opencode", T0)?;
             testing::seed_active_seat(tx, "p", "keel", SeatRole::Lane, "w1:p3", "opencode", T0)?;
@@ -2935,7 +3519,10 @@ fn the_quota_is_one_line_with_a_day_two_days_away() {
         &["codex", "minimax-cn"],
         &[
             ("codex", &reading_json("codex", "weekly", in_two_days, T0)),
-            ("minimax-cn", &reading_json("minimax-cn", "5h", T0 + 3600, T0)),
+            (
+                "minimax-cn",
+                &reading_json("minimax-cn", "5h", T0 + 3600, T0),
+            ),
         ],
     );
     let frame = now_frame(&mut store, T0);
@@ -2944,9 +3531,16 @@ fn the_quota_is_one_line_with_a_day_two_days_away() {
         .find(|line| line.contains("Quota"))
         .unwrap_or_else(|| panic!("no quota line: {frame}"));
     // The hour-out window comes first: the windows are ordered by their reset.
-    let minimax = line.find("minimax-cn 5h 63%").unwrap_or_else(|| panic!("no minimax-cn window: {line}"));
-    let codex = line.find("codex weekly 63%").unwrap_or_else(|| panic!("no codex window: {line}"));
-    assert!(minimax < codex, "the window that resets first comes first: {line}");
+    let minimax = line
+        .find("minimax-cn 5h 63%")
+        .unwrap_or_else(|| panic!("no minimax-cn window: {line}"));
+    let codex = line
+        .find("codex weekly 63%")
+        .unwrap_or_else(|| panic!("no codex window: {line}"));
+    assert!(
+        minimax < codex,
+        "the window that resets first comes first: {line}"
+    );
     assert!(
         line.contains(&format!(
             "codex weekly 63% · resets {}",

@@ -142,11 +142,20 @@ fn attempt(task: &str, state: AttemptState) -> AttemptRow {
 fn drawn(store: &mut Store) -> (gear_board::Board, Screen, Canvas, Vec<String>) {
     let board = build(
         store,
-        &Options { project: Some("p".into()), ..Options::default() },
+        &Options {
+            project: Some("p".into()),
+            ..Options::default()
+        },
         NOW,
     )
     .unwrap();
-    let screen = Screen { tab: Tab::Now, selected: 0, detail: false, opened: Vec::new(), size: (160, 40) };
+    let screen = Screen {
+        tab: Tab::Now,
+        selected: 0,
+        detail: false,
+        opened: Vec::new(),
+        size: (160, 40),
+    };
     let canvas = frame::canvas(&board, &screen, None);
     let rows: Vec<String> = canvas.text().lines().map(str::to_string).collect();
     (board, screen, canvas, rows)
@@ -163,7 +172,10 @@ fn the_goal_check_is_the_plans_or_the_done_sentence_unmet() {
     let mut store = world();
     let plan = build(
         &mut store,
-        &Options { project: Some("p".into()), ..Options::default() },
+        &Options {
+            project: Some("p".into()),
+            ..Options::default()
+        },
         NOW,
     )
     .unwrap();
@@ -198,7 +210,10 @@ fn the_goal_check_is_the_plans_or_the_done_sentence_unmet() {
         .unwrap();
     let broken = build(
         &mut store,
-        &Options { project: Some("p".into()), ..Options::default() },
+        &Options {
+            project: Some("p".into()),
+            ..Options::default()
+        },
         NOW,
     )
     .unwrap();
@@ -237,15 +252,27 @@ fn the_folded_header_gives_the_check_the_milestone_the_time_and_the_tasks() {
     // slowest end expected; a bar of the prototype's width with the plan's end
     // and the expected finish on it.
     let used = 60;
-    let end = board.projects[0].forecast.iter().map(|end| end.end_min).max().unwrap_or(0);
+    let end = board.projects[0]
+        .forecast
+        .iter()
+        .map(|end| end.end_min)
+        .max()
+        .unwrap_or(0);
     let expected = used + end;
     let long = format!("{}h{:02}m", expected / 60, expected % 60);
     let row = &rows[time];
     assert_eq!(at(row, 1, 4), "Time");
     let bar: Vec<char> = at(row, 15, 40).chars().collect();
-    assert_eq!(bar.len(), 40, "a 160 column screen's bar is 40 cells: {row:?}");
+    assert_eq!(
+        bar.len(),
+        40,
+        "a 160 column screen's bar is 40 cells: {row:?}"
+    );
     assert!(bar.contains(&'│'), "the plan's end is on the bar: {row:?}");
-    assert!(bar.contains(&'◆'), "a sailing voyage's expected finish: {row:?}");
+    assert!(
+        bar.contains(&'◆'),
+        "a sailing voyage's expected finish: {row:?}"
+    );
     let short = at(row, 56, 34);
     assert!(
         short.starts_with(&format!("expected {long} of 2h00m, ")),
@@ -277,7 +304,10 @@ fn the_folded_header_gives_the_check_the_milestone_the_time_and_the_tasks() {
         "the bar's top rule before the tab row: {:?}",
         rows[head.tab_row - 1]
     );
-    assert!(rows[head.tab_row].contains("1 Now"), "the tab row follows the rules");
+    assert!(
+        rows[head.tab_row].contains("1 Now"),
+        "the tab row follows the rules"
+    );
     assert!(
         rows[head.tab_row + 1].trim().starts_with('╰'),
         "the bar's bottom rule under the tab row: {:?}",
@@ -378,7 +408,11 @@ fn a_goal_change_puts_a_red_line_under_the_box_and_moves_the_rows_down() {
 fn the_time_of_a_landed_voyage_is_how_long_it_took() {
     // Both tasks merged: the voyage landed 75 minutes after departure, against
     // a plan of 1h.
-    let mut store = world_of(&[("T-1", TaskState::Done), ("T-2", TaskState::Done)], "1h", 5_100);
+    let mut store = world_of(
+        &[("T-1", TaskState::Done), ("T-2", TaskState::Done)],
+        "1h",
+        5_100,
+    );
     store
         .write(|tx| {
             tx.insert_attempt(&attempt("T-2", AttemptState::Accepted))?;
@@ -393,7 +427,10 @@ fn the_time_of_a_landed_voyage_is_how_long_it_took() {
     let time = head.tab_row - 3;
     let shown = board.projects[0].shown.as_ref().expect("the landed voyage");
     assert!(!shown.sailing, "the voyage landed");
-    assert!(board.projects[0].forecast.is_empty(), "no open work, no forecast");
+    assert!(
+        board.projects[0].forecast.is_empty(),
+        "no open work, no forecast"
+    );
 
     assert_eq!(
         at(&rows[time], 15, 40),
@@ -401,7 +438,11 @@ fn the_time_of_a_landed_voyage_is_how_long_it_took() {
         "75 minutes used of the 1h plan, the plan's end on the bar"
     );
     assert_eq!(at(&rows[time], 56, 31), "took 1h15m of 1h00m, 0h15m over");
-    assert_eq!(canvas.style_at(15, time), Style::fg(Color::Bad), "over the plan");
+    assert_eq!(
+        canvas.style_at(15, time),
+        Style::fg(Color::Bad),
+        "over the plan"
+    );
     assert_eq!(canvas.style_at(56, time), Style::fg(Color::Bad));
 }
 
@@ -436,9 +477,7 @@ fn the_d_key_unfolds_the_header_and_keeps_the_selection() {
     let lit: Vec<usize> = rows
         .iter()
         .enumerate()
-        .filter(|(y, line)| {
-            *y != 0 && !line.contains("1 Now") && line.contains("\u{1b}[7m")
-        })
+        .filter(|(y, line)| *y != 0 && !line.contains("1 Now") && line.contains("\u{1b}[7m"))
         .map(|(y, _)| y)
         .collect();
     assert_eq!(lit.len(), 1, "one lit row, the selection: {frame_text}");
@@ -470,7 +509,10 @@ fn an_unfolded_tasks_row_names_the_tasks_that_moved_out() {
         .unwrap();
     let board = build(
         &mut store,
-        &Options { project: Some("p".into()), ..Options::default() },
+        &Options {
+            project: Some("p".into()),
+            ..Options::default()
+        },
         NOW,
     )
     .unwrap();
@@ -480,8 +522,13 @@ fn an_unfolded_tasks_row_names_the_tasks_that_moved_out() {
         "the board reads the voyage's move decision"
     );
 
-    let screen =
-        Screen { tab: Tab::Now, selected: 0, detail: true, opened: Vec::new(), size: (160, 40) };
+    let screen = Screen {
+        tab: Tab::Now,
+        selected: 0,
+        detail: true,
+        opened: Vec::new(),
+        size: (160, 40),
+    };
     let canvas = frame::canvas(&board, &screen, None);
     let rows: Vec<String> = canvas.text().lines().map(str::to_string).collect();
     let tasks: Vec<&String> = rows
@@ -523,7 +570,17 @@ fn run_events(store: &mut Store, events: Vec<Event>) -> String {
         ..Options::default()
     };
     let mut out: Vec<u8> = Vec::new();
-    run_with(store, &opts, &mut out, &mut Events { events, size: (160, 40) }, None).unwrap();
+    run_with(
+        store,
+        &opts,
+        &mut out,
+        &mut Events {
+            events,
+            size: (160, 40),
+        },
+        None,
+    )
+    .unwrap();
     String::from_utf8_lossy(&out).into_owned()
 }
 
@@ -554,8 +611,10 @@ fn milestones_world(
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", NOW)?;
             testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p1", "pi", NOW)?;
-            let tasks: Vec<&(&str, TaskState, i64, Option<i64>)> =
-                stations.iter().flat_map(|(_, _, tasks)| tasks.iter()).collect();
+            let tasks: Vec<&(&str, TaskState, i64, Option<i64>)> = stations
+                .iter()
+                .flat_map(|(_, _, tasks)| tasks.iter())
+                .collect();
             tx.upsert_voyage(&VoyageRow {
                 project: "p".into(),
                 milestone: "M5".into(),
@@ -638,12 +697,20 @@ fn milestones_world(
 fn unfolded(store: &mut Store) -> (gear_board::Board, Canvas, Vec<String>) {
     let board = build(
         store,
-        &Options { project: Some("p".into()), ..Options::default() },
+        &Options {
+            project: Some("p".into()),
+            ..Options::default()
+        },
         NOW,
     )
     .unwrap();
-    let screen =
-        Screen { tab: Tab::Now, selected: 0, detail: true, opened: Vec::new(), size: (160, 40) };
+    let screen = Screen {
+        tab: Tab::Now,
+        selected: 0,
+        detail: true,
+        opened: Vec::new(),
+        size: (160, 40),
+    };
     let canvas = frame::canvas(&board, &screen, None);
     let rows: Vec<String> = canvas.text().lines().map(str::to_string).collect();
     (board, canvas, rows)
@@ -694,17 +761,20 @@ fn a_station_ahead_is_placed_between_the_time_used_and_the_projected_finish() {
     let mut store = milestones_world(
         60,
         &[
-            (
-                "S1",
-                "the box",
-                &[("T-1", TaskState::Done, 30, Some(30))],
-            ),
+            ("S1", "the box", &[("T-1", TaskState::Done, 30, Some(30))]),
             ("S2", "the views", &[("T-2", TaskState::Ready, 50, None)]),
-            ("S3", "the goal lock", &[("T-3", TaskState::Ready, 150, None)]),
+            (
+                "S3",
+                "the goal lock",
+                &[("T-3", TaskState::Ready, 150, None)],
+            ),
         ],
     );
     let (board, _, rows) = unfolded(&mut store);
-    let voyage = board.projects[0].workload.as_ref().expect("the measured voyage");
+    let voyage = board.projects[0]
+        .workload
+        .as_ref()
+        .expect("the measured voyage");
     assert_eq!(
         (voyage.elapsed_min, voyage.projected_min),
         (Some(60), Some(260)),
@@ -737,7 +807,10 @@ fn a_station_ahead_without_a_projection_is_planned_by_nothing() {
     );
     let (board, _, rows) = unfolded(&mut store);
     assert_eq!(
-        board.projects[0].workload.as_ref().and_then(|voyage| voyage.projected_min),
+        board.projects[0]
+            .workload
+            .as_ref()
+            .and_then(|voyage| voyage.projected_min),
         None,
         "no projection"
     );
@@ -745,8 +818,5 @@ fn a_station_ahead_without_a_projection_is_planned_by_nothing() {
         milestone_text(station_row(&rows, "S1")),
         "▶ S1 the box — now"
     );
-    assert_eq!(
-        milestone_text(station_row(&rows, "S2")),
-        "· S2 the views"
-    );
+    assert_eq!(milestone_text(station_row(&rows, "S2")), "· S2 the views");
 }

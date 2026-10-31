@@ -40,11 +40,7 @@ pub struct FeedChange {
 }
 
 /// Watch every lane and keep one item per lane in the captain's inbox.
-pub fn keep_lanes_fed(
-    store: &mut Store,
-    project: &str,
-    now: Ts,
-) -> GearResult<Vec<FeedChange>> {
+pub fn keep_lanes_fed(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
     store.write(|tx| feed(tx, project, now))
 }
 
@@ -82,7 +78,10 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
                 "the lane is parked or held",
                 now,
             )? {
-                changes.push(FeedChange { lane: seat.name.clone(), action: "closed" });
+                changes.push(FeedChange {
+                    lane: seat.name.clone(),
+                    action: "closed",
+                });
             }
             continue;
         }
@@ -99,7 +98,10 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
                 &format!("the lane is {}", help.text()),
                 now,
             )? {
-                changes.push(FeedChange { lane: seat.name.clone(), action: "closed" });
+                changes.push(FeedChange {
+                    lane: seat.name.clone(),
+                    action: "closed",
+                });
             }
             continue;
         }
@@ -141,12 +143,23 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
         };
         let recovered = dry.is_none()
             && (ready >= ENOUGH_READY
-                || horizon.zip(average).is_some_and(|(left, average)| left > average));
+                || horizon
+                    .zip(average)
+                    .is_some_and(|(left, average)| left > average));
         if recovered {
             tx.set_meta(&state_key, "0")?;
-            if close(tx, project, &seat.name, &captain.id,
-                &format!("the queue is refilled ({ready} ready)"), now)? {
-                changes.push(FeedChange { lane: seat.name.clone(), action: "closed" });
+            if close(
+                tx,
+                project,
+                &seat.name,
+                &captain.id,
+                &format!("the queue is refilled ({ready} ready)"),
+                now,
+            )? {
+                changes.push(FeedChange {
+                    lane: seat.name.clone(),
+                    action: "closed",
+                });
             }
             continue;
         }
@@ -159,13 +172,20 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
         } else if let (Some(left), Some(average)) = (horizon, average) {
             // Taking the final queued task does not itself shorten the
             // forecast. Escalate when runway halves, then when actually idle.
-            if left <= average / 2 { 2 } else { 1 }
+            if left <= average / 2 {
+                2
+            } else {
+                1
+            }
         } else if ready == 0 {
             2
         } else {
             1
         };
-        let previous = tx.get_meta(&state_key)?.and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+        let previous = tx
+            .get_meta(&state_key)?
+            .and_then(|s| s.parse::<u8>().ok())
+            .unwrap_or(0);
         // The captain may resolve an alert without refilling immediately. The
         // same condition stays acknowledged until it worsens, recovers, or is due again.
         let body = if ready == 0 && !working {
@@ -174,11 +194,13 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
         } else if let Some(dry) = dry {
             // The same words the plan apply uses: the lane has nothing to
             // start after its current task.
-            dry.warning()
-                .trim_start_matches("warning: ")
-                .to_string()
+            dry.warning().trim_start_matches("warning: ").to_string()
         } else if let Some(seconds) = horizon {
-            format!("lane {} runs dry in ~{} min", seat.name, (seconds + 59) / 60)
+            format!(
+                "lane {} runs dry in ~{} min",
+                seat.name,
+                (seconds + 59) / 60
+            )
         } else {
             format!(
                 "lane {} has {} ready {} left",
@@ -188,24 +210,42 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
             )
         };
         if let Some(item) = open_item(tx, project, &seat.name, &captain.id)? {
-            if item.body != body { tx.update_message_body(project, &item.id, &body)?; }
+            if item.body != body {
+                tx.update_message_body(project, &item.id, &body)?;
+            }
             tx.set_meta(&state_key, &severity.to_string())?;
             continue;
         }
-        if previous != 0 && severity <= previous && !crate::attention::due(tx, project, &thread(&seat.name), &captain.id, now)? {
+        if previous != 0
+            && severity <= previous
+            && !crate::attention::due(tx, project, &thread(&seat.name), &captain.id, now)?
+        {
             tx.set_meta(&state_key, &severity.to_string())?;
             continue;
         }
         let action = "opened";
         tx.insert_message(&NewMessage {
             meta: None,
-            project: project.to_string(), thread: thread(&seat.name),
-            task: None, attempt: None, sender: "engine".to_string(), sender_gen: 0,
-            recipient: captain.id.clone(), kind: MsgKind::System, urgent: false,
-            body, reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
+            project: project.to_string(),
+            thread: thread(&seat.name),
+            task: None,
+            attempt: None,
+            sender: "engine".to_string(),
+            sender_gen: 0,
+            recipient: captain.id.clone(),
+            kind: MsgKind::System,
+            urgent: false,
+            body,
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
         })?;
         tx.set_meta(&state_key, &severity.to_string())?;
-        changes.push(FeedChange { lane: seat.name.clone(), action });
+        changes.push(FeedChange {
+            lane: seat.name.clone(),
+            action,
+        });
     }
     // The imbalance of the lanes (§8.4): one item for the project.
     if let Some(change) = imbalance(tx, project, &captain.id, now)? {
@@ -253,15 +293,11 @@ fn close_all_lanes(
             continue;
         }
         tx.set_meta(&format!("feed-severity:{}", seat.id), "0")?;
-        if close(
-            tx,
-            project,
-            &seat.name,
-            captain,
-            NO_WORK_LEFT,
-            now,
-        )? {
-            changes.push(FeedChange { lane: seat.name.clone(), action: "closed" });
+        if close(tx, project, &seat.name, captain, NO_WORK_LEFT, now)? {
+            changes.push(FeedChange {
+                lane: seat.name.clone(),
+                action: "closed",
+            });
         }
     }
     Ok(changes)
@@ -272,12 +308,7 @@ fn close_all_lanes(
 ///
 /// One item for the project, on the thread `balance`: it is updated while the
 /// state lasts and closed when it ends — never one item per pair of lanes.
-fn imbalance(
-    tx: &Tx<'_>,
-    project: &str,
-    captain: &str,
-    now: Ts,
-) -> GearResult<Option<FeedChange>> {
+fn imbalance(tx: &Tx<'_>, project: &str, captain: &str, now: Ts) -> GearResult<Option<FeedChange>> {
     let mut idle: Option<String> = None;
     let mut busy: Option<(String, usize, i64)> = None;
     for seat in tx.seats_of_project(project)? {
@@ -328,7 +359,10 @@ fn imbalance(
             None,
             now,
         )?;
-        return Ok(Some(FeedChange { lane: "balance".to_string(), action: "closed" }));
+        return Ok(Some(FeedChange {
+            lane: "balance".to_string(),
+            action: "closed",
+        }));
     };
     let body = format!(
         "{idle} has nothing left; {busy_lane} has {count} tasks ({minutes}m) left: move some (lane ownership allowing) or plan more for {idle}."
@@ -345,10 +379,15 @@ fn imbalance(
                 tx.update_message_body(project, &item.id, &body)?;
             }
             tx.set_meta(&balance_key(project), &incident)?;
-            Ok(Some(FeedChange { lane: idle, action: "updated" }))
+            Ok(Some(FeedChange {
+                lane: idle,
+                action: "updated",
+            }))
         }
         None => {
-            if !told.is_empty() && !crate::attention::due(tx, project, BALANCE_THREAD, captain, now)? {
+            if !told.is_empty()
+                && !crate::attention::due(tx, project, BALANCE_THREAD, captain, now)?
+            {
                 // The captain resolved the item and the imbalance is the same:
                 // the fact is not told again.
                 return Ok(None);
@@ -371,7 +410,10 @@ fn imbalance(
                 state: MsgState::Open,
                 created: now,
             })?;
-            Ok(Some(FeedChange { lane: idle, action: "opened" }))
+            Ok(Some(FeedChange {
+                lane: idle,
+                action: "opened",
+            }))
         }
     }
 }
@@ -401,11 +443,7 @@ fn not_started(tx: &Tx<'_>, project: &str, lane: &str) -> GearResult<(usize, i64
 }
 
 /// The open imbalance item of the project, if there is one.
-fn open_balance(
-    tx: &Tx<'_>,
-    project: &str,
-    captain: &str,
-) -> GearResult<Option<MessageRow>> {
+fn open_balance(tx: &Tx<'_>, project: &str, captain: &str) -> GearResult<Option<MessageRow>> {
     Ok(tx
         .thread_messages(project, BALANCE_THREAD)?
         .into_iter()
@@ -423,7 +461,9 @@ fn average_task_seconds(tx: &Tx<'_>, project: &str, seat: &str) -> GearResult<Op
     let mut samples = 0;
     for task in tx.tasks_of_project(project)? {
         for attempt in tx.attempts_of_task(project, &task.id)? {
-            if attempt.seat != seat { continue; }
+            if attempt.seat != seat {
+                continue;
+            }
             let times = tx.attempt_times(project, &task.id, attempt.n)?;
             if let (Some(start), Some(end)) = (times.started, times.handed_in) {
                 if end > start {

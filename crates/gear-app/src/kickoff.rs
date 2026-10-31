@@ -158,7 +158,10 @@ pub fn models_of(kind: &str) -> (Vec<String>, Option<String>) {
                         Vec::new(),
                         Some(format!("`opencode models` exited {}", out.status)),
                     ),
-                    Err(e) => (Vec::new(), Some(format!("cannot run `opencode models`: {e}"))),
+                    Err(e) => (
+                        Vec::new(),
+                        Some(format!("cannot run `opencode models`: {e}")),
+                    ),
                 };
                 if attempt == 0 {
                     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -303,7 +306,9 @@ impl Asker<'_> {
 
 /// Where Codex keeps the models it knows.
 fn codex_cache() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     home.join(".codex/models_cache.json")
 }
 
@@ -324,9 +329,8 @@ pub fn parse_opencode_models(text: &str) -> Vec<String> {
 
 /// The slugs of `~/.codex/models_cache.json` (`{"models": [{"slug": …}]}`).
 pub fn parse_codex_models(text: &str) -> GearResult<Vec<String>> {
-    let doc: serde_json::Value = serde_json::from_str(text).map_err(|e| {
-        GearError::new(ErrorCode::BadFormat, format!("models_cache.json: {e}"))
-    })?;
+    let doc: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| GearError::new(ErrorCode::BadFormat, format!("models_cache.json: {e}")))?;
     let models = doc
         .get("models")
         .and_then(|models| models.as_array())
@@ -507,11 +511,17 @@ pub fn skeleton(inventory: &Inventory) -> String {
 pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
     let lane = lane_kind(inventory);
     let captain = captain_kind(inventory);
-    let models: &[String] = lane.map(|installed| installed.models.as_slice()).unwrap_or(&[]);
+    let models: &[String] = lane
+        .map(|installed| installed.models.as_slice())
+        .unwrap_or(&[]);
     let lanes = lane_chain(models);
     let review = review_chain(models, &lanes);
-    let lane_kind = lane.map(|installed| installed.kind.as_str()).unwrap_or("TODO");
-    let captain_kind = captain.map(|installed| installed.kind.as_str()).unwrap_or("TODO");
+    let lane_kind = lane
+        .map(|installed| installed.kind.as_str())
+        .unwrap_or("TODO");
+    let captain_kind = captain
+        .map(|installed| installed.kind.as_str())
+        .unwrap_or("TODO");
 
     let chain = |models: &[String]| -> String {
         if models.is_empty() {
@@ -536,7 +546,12 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
 
     // Filled from where kickoff runs when it can (inside a Herdr pane, in the
     // project's repository); otherwise left as TODO.
-    let env_or_todo = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "TODO".into());
+    let env_or_todo = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "TODO".into())
+    };
     let session = env_or_todo("HERDR_SESSION");
     let pane = env_or_todo("HERDR_PANE_ID");
     let repo = root
@@ -565,10 +580,15 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
         "[[lanes]]                     # one block per long-lived lane".to_string(),
         "name = \"lane-1\"               # [a-z][a-z0-9-]*; its duty is one sentence".to_string(),
         "duty = \"TODO: what this lane is for\"".to_string(),
-        "owns = [\"TODO/\"]               # the paths it writes; lanes must not overlap".to_string(),
+        "owns = [\"TODO/\"]               # the paths it writes; lanes must not overlap"
+            .to_string(),
         "not = []".to_string(),
         format!("kind = \"{lane_kind}\""),
         format!("profile = \"{lane_kind}\""),
+        pad(
+            "# charter = \"\"\"…\"\"\"",
+            "# optional (T-469): how this lane works on the agent and model it runs; empty = the lane rules",
+        ),
         pad(
             "# repo = \"TODO\"",
             "# the [[repos]] name this lane works in; empty = the project root",
@@ -584,7 +604,10 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
         ));
         lines.push(pad(
             &format!("# name = \"{}\"", nested.name),
-            &format!("# [a-z][a-z0-9-]*; a lane binds to it with repo = \"{}\"", nested.name),
+            &format!(
+                "# [a-z][a-z0-9-]*; a lane binds to it with repo = \"{}\"",
+                nested.name
+            ),
         ));
         lines.push(pad(
             &format!("# path = \"{}\"", nested.path),
@@ -600,6 +623,10 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
         "[temps]".to_string(),
         format!("kind = \"{lane_kind}\""),
         format!("profile = \"{lane_kind}\""),
+        pad(
+            "# charter = \"\"\"…\"\"\"",
+            "# optional (T-469): how a reviewer works on the agent and model it runs; empty = the reviewer rules",
+        ),
         String::new(),
         "[models]                      # full model ids; the user confirms them at kickoff".to_string(),
         format!(
@@ -638,12 +665,27 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
         ));
         lines.push(format!("# kind = \"{}\"", installed.kind));
         lines.push("# unattended_args = [\"--auto\"]   # required: no permission dialogs, or the agent stops".to_string());
-        lines.push("# busy_markers = []             # the screen text of a running turn".to_string());
-        lines.push("# quota_markers = []            # the screen text of a provider limit".to_string());
-        lines.push("# exit_keys = [\"ctrl+c\"]        # the keys that make it exit cleanly".to_string());
-        lines.push("# tail_lines = 16                # the lines of the screen that are matched".to_string());
-        lines.push("# confirm_rounds = 2             # consecutive observations before a flag counts".to_string());
-        lines.push("# resume_args = [\"-s\", \"{session}\"]   # optional: how a session is resumed".to_string());
+        lines.push(
+            "# busy_markers = []             # the screen text of a running turn".to_string(),
+        );
+        lines.push(
+            "# quota_markers = []            # the screen text of a provider limit".to_string(),
+        );
+        lines.push(
+            "# exit_keys = [\"ctrl+c\"]        # the keys that make it exit cleanly".to_string(),
+        );
+        lines.push(
+            "# tail_lines = 16                # the lines of the screen that are matched"
+                .to_string(),
+        );
+        lines.push(
+            "# confirm_rounds = 2             # consecutive observations before a flag counts"
+                .to_string(),
+        );
+        lines.push(
+            "# resume_args = [\"-s\", \"{session}\"]   # optional: how a session is resumed"
+                .to_string(),
+        );
     }
     lines.push(String::new());
     lines.join("\n")
@@ -669,7 +711,10 @@ pub fn to_json(inventory: &Inventory) -> GearResult<String> {
         "skeleton": skeleton(inventory),
     });
     serde_json::to_string(&doc).map_err(|e| {
-        GearError::new(ErrorCode::BadFormat, format!("cannot serialize the inventory: {e}"))
+        GearError::new(
+            ErrorCode::BadFormat,
+            format!("cannot serialize the inventory: {e}"),
+        )
     })
 }
 
@@ -870,6 +915,38 @@ mod tests {
         assert_eq!(
             warnings,
             vec!["lane heat: model gpt-6.1-sol is not among the models codex lists"]
+        );
+    }
+
+    /// T-459: a review entry that names a CLI is checked against that CLI's
+    /// list, not against the `[temps]` kind the entry overrides.
+    #[test]
+    fn a_review_entry_naming_a_cli_is_checked_against_its_cli() {
+        let config = project(
+            "pi",
+            "\"tok/deep-1\"",
+            Some("pi"),
+            "{ model = \"gpt-6.1-terra\", cli = \"codex\" }",
+            "codex",
+            "",
+        );
+        let mut asked: Vec<String> = Vec::new();
+        let warnings = model_warnings(&config, &mut |cli| {
+            asked.push(cli.to_string());
+            match cli {
+                "pi" => (vec!["tok/deep-1".to_string()], None),
+                "codex" => (vec!["gpt-6.1-mini".to_string()], None),
+                other => panic!("asked {other}: the review entry names codex"),
+            }
+        });
+        assert_eq!(
+            warnings,
+            vec!["reviewers: model gpt-6.1-terra is not among the models codex lists"]
+        );
+        assert_eq!(
+            asked,
+            vec!["pi", "codex"],
+            "the review entry's CLI, not the temps kind"
         );
     }
 

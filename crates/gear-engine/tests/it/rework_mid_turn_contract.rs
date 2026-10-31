@@ -154,10 +154,17 @@ fn a_working_opencode_lane_waits_for_idle_with_its_rework() {
     tick(&mut store, &mut herdr, &cfg(), T0 + 10).unwrap();
 
     assert!(
-        store.read(|tx| tx.get_attempt("p", "T-1", 2)).unwrap().is_none(),
+        store
+            .read(|tx| tx.get_attempt("p", "T-1", 2))
+            .unwrap()
+            .is_none(),
         "an opencode turn takes the text as keystrokes: the rework waits"
     );
-    assert!(herdr.prompts_to(PANE).is_empty(), "{:?}", herdr.prompts_to(PANE));
+    assert!(
+        herdr.prompts_to(PANE).is_empty(),
+        "{:?}",
+        herdr.prompts_to(PANE)
+    );
 }
 
 #[test]
@@ -179,10 +186,17 @@ fn a_working_pi_lane_waits_for_a_new_task() {
     tick(&mut store, &mut herdr, &cfg(), T0 + 10).unwrap();
 
     assert!(
-        store.read(|tx| tx.get_attempt("p", "T-9", 1)).unwrap().is_none(),
+        store
+            .read(|tx| tx.get_attempt("p", "T-9", 1))
+            .unwrap()
+            .is_none(),
         "a first packet waits for idle"
     );
-    assert!(herdr.prompts_to(PANE).is_empty(), "{:?}", herdr.prompts_to(PANE));
+    assert!(
+        herdr.prompts_to(PANE).is_empty(),
+        "{:?}",
+        herdr.prompts_to(PANE)
+    );
 }
 
 #[test]
@@ -192,6 +206,14 @@ fn an_idle_pi_lane_gets_its_rework_packet_as_before() {
 
     tick(&mut store, &mut herdr, &cfg(), T0 + 10).unwrap();
 
-    assert_eq!(herdr.prompts_to(PANE).len(), 1, "{:?}", herdr.prompts_to(PANE));
-    assert!(store.read(|tx| tx.get_attempt("p", "T-1", 2)).unwrap().is_some());
+    assert_eq!(
+        herdr.prompts_to(PANE).len(),
+        1,
+        "{:?}",
+        herdr.prompts_to(PANE)
+    );
+    assert!(store
+        .read(|tx| tx.get_attempt("p", "T-1", 2))
+        .unwrap()
+        .is_some());
 }

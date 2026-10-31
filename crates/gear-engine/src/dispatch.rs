@@ -5,8 +5,8 @@
 use crate::delivery::FailedDelivery;
 use crate::observe::SeatObs;
 use gear_herdr::ScreenFlag;
-use gear_model::{AttemptState, MsgKind, MsgState, OpKind, SeatRole, SeatState, TaskState, Ts};
 use gear_model::GearResult;
+use gear_model::{AttemptState, MsgKind, MsgState, OpKind, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{AttemptRow, NewMessage, OpRow, SeatRow, Store, TaskRow, Tx};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,21 +48,36 @@ pub struct DispatchCfg {
 
 impl Default for DispatchCfg {
     fn default() -> Self {
-        DispatchCfg { cooldown_s: 90, nudge_budget: 5 }
+        DispatchCfg {
+            cooldown_s: 90,
+            nudge_budget: 5,
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    None { reason: String },
+    None {
+        reason: String,
+    },
     /// Same task, same attempt.
-    Continue { task: String },
+    Continue {
+        task: String,
+    },
     /// First ready task.
-    Assign { task: String },
+    Assign {
+        task: String,
+    },
     /// The task's contract moved on; the lane adopts it at its next view.
-    Adopt { task: String, version: i64 },
+    Adopt {
+        task: String,
+        version: i64,
+    },
     /// Tell the captain; stop nudging.
-    Escalate { task: String, reason: String },
+    Escalate {
+        task: String,
+        reason: String,
+    },
 }
 
 /// The decision order of design/09 "Decision order", first match wins:
@@ -94,7 +109,10 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
         return none("observation failed this tick");
     };
     let seat = &obs.seat;
-    if !matches!(seat.state, SeatState::Active | SeatState::Standby | SeatState::Retiring) {
+    if !matches!(
+        seat.state,
+        SeatState::Active | SeatState::Standby | SeatState::Retiring
+    ) {
         return none("the seat may not take work in its current state");
     }
     // 3. A delivery that is not settled yet blocks everything.
@@ -115,15 +133,17 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
     //    after the current step. A first packet, a lane with other work in
     //    flight, and an opencode or codex lane still wait for idle.
     if !obs.idle {
-        let mid_turn = v.rework_mid_turn
-            && obs.status == Some(gear_herdr::AgentStatus::Working);
+        let mid_turn = v.rework_mid_turn && obs.status == Some(gear_herdr::AgentStatus::Working);
         if !mid_turn {
             return none("the agent is not ready");
         }
     }
     // 5. A rate limit / quota / auth wall is not nudged through.
     if obs.flags.iter().any(|flag| {
-        matches!(flag, ScreenFlag::RateLimit | ScreenFlag::Quota | ScreenFlag::Auth)
+        matches!(
+            flag,
+            ScreenFlag::RateLimit | ScreenFlag::Quota | ScreenFlag::Auth
+        )
     }) {
         return none("the screen shows a ratelimit, quota or auth problem");
     }
@@ -162,7 +182,8 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
                 // newest version, so two bumps still give one delivery.
                 if let Some(version) = attempt.pending_update {
                     if version > attempt.adopted_version
-                        && !(attempt.state == AttemptState::Delivered && attempt.sent_at.is_none()) {
+                        && !(attempt.state == AttemptState::Delivered && attempt.sent_at.is_none())
+                    {
                         return Action::Adopt {
                             task: attempt.task.clone(),
                             version,
@@ -185,7 +206,9 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
                         ),
                     }
                 } else {
-                    Action::Continue { task: attempt.task.clone() }
+                    Action::Continue {
+                        task: attempt.task.clone(),
+                    }
                 }
             }
             AttemptState::Submitted => {
@@ -210,7 +233,9 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
 
 /// A `None` action with a reason (design/09 asks for one).
 fn none(reason: &str) -> Action {
-    Action::None { reason: reason.to_string() }
+    Action::None {
+        reason: reason.to_string(),
+    }
 }
 
 /// A delivery's text, with the project standard's line when the project has
@@ -228,7 +253,9 @@ fn assign_first(ready: &[TaskRow], may_assign: bool) -> Action {
         return none("a retiring or temp seat never takes a new assignment");
     }
     match ready.first() {
-        Some(task) => Action::Assign { task: task.id.clone() },
+        Some(task) => Action::Assign {
+            task: task.id.clone(),
+        },
         None => none("no ready task for this lane"),
     }
 }
@@ -304,7 +331,12 @@ pub fn contract_changed_text(task: &str, version: i64) -> String {
 /// - `rework_mid_turn`: the seat's agent queues input while it works (pi,
 ///   claude), it has no open attempt that is not Submitted, and the first ready
 ///   task is a rework this seat's last attempt failed (T-290).
-pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> GearResult<LaneView> {
+pub fn lane_view(
+    tx: &Tx<'_>,
+    seat: &SeatRow,
+    obs: Option<SeatObs>,
+    now: Ts,
+) -> GearResult<LaneView> {
     let _ = now; // the design/09 cooldown uses last_deliver_at, not this tick's time
 
     // The open attempt, but only while its task may still be worked on: a
@@ -316,8 +348,27 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
     // one that is not Submitted — comes first; only when every open attempt is
     // handed in does the view carry a Submitted one, and then the next task
     // may be assigned.
-    let mut open = tx.open_attempts_of_seat(&seat.id)?;
-    open.sort_by_key(|a| a.state == AttemptState::Submitted);
+    // T-458: an attempt whose task is in a declared wait is parked — a lane
+    // that reported blocked is free for its next startable task (M5: mast sat
+    // idle about 40 minutes while its attempt stayed Started). A parked
+    // attempt is neither the current one nor a reason to hold the next task;
+    // it comes back when its wait ends.
+    let mut open = Vec::new();
+    for attempt in tx.open_attempts_of_seat(&seat.id)? {
+        let task = tx.get_task(&seat.project, &attempt.task)?;
+        if task.as_ref().is_some_and(|task| task.wait_on.is_some()) {
+            continue;
+        }
+        open.push(attempt);
+    }
+    // The newest open attempt comes first (T-458): a lane may hold a parked
+    // one and a new one at once, and the new one is what it works on.
+    open.sort_by_key(|a| {
+        (
+            a.state == AttemptState::Submitted,
+            std::cmp::Reverse(a.started),
+        )
+    });
     // The seat has no open attempt that is not Submitted (T-290): an empty
     // list, or one that is handed in, is fine.
     let no_open_unsubmitted = open.iter().all(|a| a.state == AttemptState::Submitted);
@@ -325,9 +376,6 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
     let attempt = match open.into_iter().next() {
         Some(attempt) => {
             let task = tx.get_task(&seat.project, &attempt.task)?;
-            if task.as_ref().is_some_and(|task| task.wait_on.is_some()) {
-                return Ok(empty_view(obs));
-            }
             let continues = task
                 .map(|task| match task.state {
                     TaskState::Running | TaskState::Verifying => true,
@@ -357,9 +405,7 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
             Some(task) if task.rework_note.is_some() => tx
                 .attempts_of_task(&seat.project, &task.id)?
                 .last()
-                .is_some_and(|last| {
-                    last.seat == seat.id && last.state == AttemptState::Rejected
-                }),
+                .is_some_and(|last| last.seat == seat.id && last.state == AttemptState::Rejected),
             _ => false,
         };
 
@@ -373,8 +419,12 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
         safe_for_next,
         // The plan is durable in meta (T-33): a switch in progress is not
         // forgotten while the quota line is gone.
-        switch_pending: tx.get_meta(&format!("engine.switch.{}", seat.id))?.is_some_and(|value| !value.is_empty())
-            || tx.get_meta(&crate::restart::pending_meta_key(&seat.id))?.is_some_and(|value| !value.is_empty()),
+        switch_pending: tx
+            .get_meta(&format!("engine.switch.{}", seat.id))?
+            .is_some_and(|value| !value.is_empty())
+            || tx
+                .get_meta(&crate::restart::pending_meta_key(&seat.id))?
+                .is_some_and(|value| !value.is_empty()),
         failed_delivery: crate::delivery::failed(tx, &seat.id)?,
         rework_mid_turn,
     })
@@ -400,7 +450,9 @@ fn empty_view(obs: Option<SeatObs>) -> LaneView {
 pub(crate) fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<TaskRow>> {
     use std::collections::BTreeSet;
     let tasks = tx.tasks_of_project(&seat.project)?;
-    let lane_repo = tx.get_project(&seat.project)?.and_then(|p| gear_app::config::parse(&p.config_toml).ok())
+    let lane_repo = tx
+        .get_project(&seat.project)?
+        .and_then(|p| gear_app::config::parse(&p.config_toml).ok())
         .map(|config| config.repo_of_lane(&seat.name).path);
     // A dependency counts only when its work is merged (T-236, F-76): Done is
     // set at the review pass, before the merge reaches the integration branch.
@@ -413,7 +465,12 @@ pub(crate) fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<Task
     Ok(tasks
         .into_iter()
         .filter(|task| task.lane.as_deref() == Some(seat.name.as_str()))
-        .filter(|task| task.repo.as_ref().zip(lane_repo.as_ref()).is_none_or(|(repo, current)| repo == current))
+        .filter(|task| {
+            task.repo
+                .as_ref()
+                .zip(lane_repo.as_ref())
+                .is_none_or(|(repo, current)| repo == current)
+        })
         .filter(|task| task.state == TaskState::Ready)
         .filter(|task| task.priority != "wont")
         .filter(|task| task.deps.iter().all(|dep| done.contains(dep)))
@@ -468,7 +525,13 @@ pub fn integration_branch(tx: &Tx<'_>, project: &str, lane: &str) -> String {
 /// One decision per Lane-role seat of `project` (other roles skipped), in
 /// seat-id order: `lane_view(tx, seat, obs, now)` with that seat's entry from
 /// `observed` (None when absent) → `decide`.
-pub fn plan_dispatch(tx: &Tx<'_>, project: &str, observed: &[SeatObs], cfg: &DispatchCfg, now: Ts) -> GearResult<Vec<(SeatRow, Action)>> {
+pub fn plan_dispatch(
+    tx: &Tx<'_>,
+    project: &str,
+    observed: &[SeatObs],
+    cfg: &DispatchCfg,
+    now: Ts,
+) -> GearResult<Vec<(SeatRow, Action)>> {
     let mut decisions = Vec::new();
     for seat in tx.seats_of_project(project)? {
         if seat.role != SeatRole::Lane {
@@ -480,9 +543,12 @@ pub fn plan_dispatch(tx: &Tx<'_>, project: &str, observed: &[SeatObs], cfg: &Dis
         let view = lane_view(tx, &seat, obs, now)?;
         let action = decide(&view, cfg, now);
         let action = rebind_action(tx, &seat.id, action)?;
-        let action = if matches!(action, Action::Assign { .. }) && tx.captain_quota_paused(project)? {
-            none("captain quota: current tasks may finish; new tasks are paused")
-        } else { action };
+        let action =
+            if matches!(action, Action::Assign { .. }) && tx.captain_quota_paused(project)? {
+                none("captain quota: current tasks may finish; new tasks are paused")
+            } else {
+                action
+            };
         decisions.push((seat, action));
     }
     Ok(decisions)
@@ -491,16 +557,26 @@ pub fn plan_dispatch(tx: &Tx<'_>, project: &str, observed: &[SeatObs], cfg: &Dis
 /// A pending rebind permits current work to finish, but does not start more.
 /// After config changes, nothing goes to the old worktree while it is moving.
 fn rebind_action(tx: &Tx<'_>, seat: &str, action: Action) -> GearResult<Action> {
-    let applied = tx.get_meta(&format!("lane-rebind-applied:{seat}"))?.is_some_and(|s| !s.is_empty());
-    let pending = tx.get_meta(&gear_app::plan::rebind_pending_key(seat))?.is_some_and(|s| !s.is_empty());
+    let applied = tx
+        .get_meta(&format!("lane-rebind-applied:{seat}"))?
+        .is_some_and(|s| !s.is_empty());
+    let pending = tx
+        .get_meta(&gear_app::plan::rebind_pending_key(seat))?
+        .is_some_and(|s| !s.is_empty());
     let continuing_unsent = if let Action::Assign { task } = &action {
-        tx.open_attempts_of_seat(seat)?.iter().any(|a| a.task == *task && a.state == AttemptState::Delivered && a.sent_at.is_none())
-    } else { false };
+        tx.open_attempts_of_seat(seat)?
+            .iter()
+            .any(|a| a.task == *task && a.state == AttemptState::Delivered && a.sent_at.is_none())
+    } else {
+        false
+    };
     Ok(if applied {
         none("lane rebind is waiting for the new worktree")
     } else if pending && matches!(action, Action::Assign { .. }) && !continuing_unsent {
         none("lane rebind is waiting for open attempts")
-    } else { action })
+    } else {
+        action
+    })
 }
 
 /// The meta key that holds what a lane's home worktree still had
@@ -514,10 +590,18 @@ pub(crate) fn dirty_home_key(seat: &str) -> String {
 /// `engine.dirty_home.<seat>` — `{"task": …, "paths": [the first five],
 /// "count": n}`, else "" (clean, no worktree path, or a failed read). The git
 /// call runs outside any transaction; nothing here blocks a delivery.
-fn note_dirty_home(store: &mut Store, cfg: &crate::EngineCfg, seat: &SeatRow, task: &str) -> GearResult<()> {
+fn note_dirty_home(
+    store: &mut Store,
+    cfg: &crate::EngineCfg,
+    seat: &SeatRow,
+    task: &str,
+) -> GearResult<()> {
     // A task that already has an attempt is a rework: its worktree story is
     // the branch it worked on, not the home worktree.
-    if !store.read(|tx| tx.attempts_of_task(&seat.project, task))?.is_empty() {
+    if !store
+        .read(|tx| tx.attempts_of_task(&seat.project, task))?
+        .is_empty()
+    {
         return Ok(());
     }
     let path = store.read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(&seat.id)))?;
@@ -528,8 +612,12 @@ fn note_dirty_home(store: &mut Store, cfg: &crate::EngineCfg, seat: &SeatRow, ta
 /// The value `note_dirty_home` writes: the worktree's uncommitted paths, or
 /// "" when it is clean or git could not read it.
 fn dirty_home_json(cfg: &crate::EngineCfg, path: Option<&str>, task: &str) -> String {
-    let Some(path) = path.filter(|path| !path.is_empty()) else { return String::new() };
-    let Ok(status) = cfg.review_git.run(path, &["status", "--porcelain"]) else { return String::new() };
+    let Some(path) = path.filter(|path| !path.is_empty()) else {
+        return String::new();
+    };
+    let Ok(status) = cfg.review_git.run(path, &["status", "--porcelain"]) else {
+        return String::new();
+    };
     let all: Vec<String> = status.lines().filter_map(porcelain_path).collect();
     if all.is_empty() {
         return String::new();
@@ -573,7 +661,11 @@ fn branch_sentence_end(text: &str, branch: &str) -> Option<usize> {
     for sentence in text.split_inclusive(". ") {
         let stop = start + sentence.len();
         if sentence.contains(branch) {
-            return Some(if sentence.ends_with(". ") { stop - 1 } else { stop });
+            return Some(if sentence.ends_with(". ") {
+                stop - 1
+            } else {
+                stop
+            });
         }
         start = stop;
     }
@@ -583,7 +675,9 @@ fn branch_sentence_end(text: &str, branch: &str) -> Option<usize> {
 /// Put `notice` right after the branch sentence of a packet, keeping the rest
 /// of the text after it (T-291).
 fn insert_after_branch_sentence(text: &mut String, branch: &str, notice: &str) {
-    let Some(at) = branch_sentence_end(text, branch) else { return };
+    let Some(at) = branch_sentence_end(text, branch) else {
+        return;
+    };
     let rest = text.split_off(at);
     text.push_str(notice);
     let rest = rest.trim_start();
@@ -607,7 +701,10 @@ pub fn prepare_dispatch(
     for (seat, action) in planned {
         let task = match action {
             Action::Assign { task } | Action::Continue { task } => task,
-            _ => { ready.push((seat.clone(), action.clone())); continue; }
+            _ => {
+                ready.push((seat.clone(), action.clone()));
+                continue;
+            }
         };
         // T-291 (M4 F-90): a first attempt lands in the lane's home worktree.
         // What that worktree still holds uncommitted is read now, before the
@@ -616,24 +713,50 @@ pub fn prepare_dispatch(
             note_dirty_home(store, cfg, seat, task)?;
         }
         let attempt = store.write(|tx| {
-            if matches!(rebind_action(tx, &seat.id, action.clone())?, Action::None { .. }) {
+            if matches!(
+                rebind_action(tx, &seat.id, action.clone())?,
+                Action::None { .. }
+            ) {
                 return Ok(None);
             }
-            if let Some(existing) = tx.open_attempts_of_seat(&seat.id)?.into_iter()
-                .find(|a| a.task == *task && a.state == AttemptState::Delivered) {
+            if let Some(existing) = tx
+                .open_attempts_of_seat(&seat.id)?
+                .into_iter()
+                .find(|a| a.task == *task && a.state == AttemptState::Delivered)
+            {
                 return Ok(Some(existing));
             }
             if matches!(action, Action::Assign { .. }) {
-                return gear_app::tasks::start_attempt(tx, project, task, &seat.id, seat.generation, now).map(Some);
+                return gear_app::tasks::start_attempt(
+                    tx,
+                    project,
+                    task,
+                    &seat.id,
+                    seat.generation,
+                    now,
+                )
+                .map(Some);
             }
-            tx.open_attempts_of_seat(&seat.id)?.into_iter().find(|a| a.task == *task)
-                .map(Some).ok_or_else(|| gear_model::GearError::new(gear_model::ErrorCode::NoTarget, "open attempt disappeared"))
+            tx.open_attempts_of_seat(&seat.id)?
+                .into_iter()
+                .find(|a| a.task == *task)
+                .map(Some)
+                .ok_or_else(|| {
+                    gear_model::GearError::new(
+                        gear_model::ErrorCode::NoTarget,
+                        "open attempt disappeared",
+                    )
+                })
         })?;
         let Some(attempt) = attempt else { continue };
-        if crate::session::prepare_lane(store, herdr, cfg, seat, task, attempt.n, now)? == crate::session::Prep::Ready {
+        if crate::session::prepare_lane(store, herdr, cfg, seat, task, attempt.n, now)?
+            == crate::session::Prep::Ready
+        {
             let action = if attempt.sent_at.is_none() && attempt.state == AttemptState::Delivered {
                 Action::Assign { task: task.clone() }
-            } else { action.clone() };
+            } else {
+                action.clone()
+            };
             ready.push((seat.clone(), action));
         }
     }
@@ -653,31 +776,62 @@ pub fn recover_open_rounds(
 ) -> GearResult<()> {
     for obs in observed {
         let seat = &obs.seat;
-        if seat.role != SeatRole::Lane || !matches!(seat.state, SeatState::Active | SeatState::Retiring) { continue; }
-        if planned.iter().any(|(s, action)| s.id == seat.id && matches!(action, Action::Assign { .. } | Action::Continue { .. })) { continue; }
+        if seat.role != SeatRole::Lane
+            || !matches!(seat.state, SeatState::Active | SeatState::Retiring)
+        {
+            continue;
+        }
+        if planned.iter().any(|(s, action)| {
+            s.id == seat.id && matches!(action, Action::Assign { .. } | Action::Continue { .. })
+        }) {
+            continue;
+        }
         let recovery = store.read(|tx| {
-            if !tx.slot_ops(&seat.id)?.is_empty() { return Ok(None); }
-            let Some(round) = tx.open_round_of_seat(&seat.id)? else { return Ok(None) };
-            let Some(attempt) = tx.get_attempt(project, &round.task, round.attempt)? else { return Ok(None) };
+            if !tx.slot_ops(&seat.id)?.is_empty() {
+                return Ok(None);
+            }
+            let Some(round) = tx.open_round_of_seat(&seat.id)? else {
+                return Ok(None);
+            };
+            let Some(attempt) = tx.get_attempt(project, &round.task, round.attempt)? else {
+                return Ok(None);
+            };
             let unsent = attempt.state == AttemptState::Delivered && attempt.sent_at.is_none();
-            if !matches!(attempt.state, AttemptState::Delivered | AttemptState::Started | AttemptState::Stopped) { return Ok(None); }
-            let mismatch = crate::session::round_session(tx, &round)?.as_ref().is_some_and(|session| {
-                obs.presence == crate::observe::Presence::Missing
-                    || (obs.presence == crate::observe::Presence::Present
-                        && obs.session.as_deref().is_some_and(|current| current != session))
-            });
-            let running = tx.get_meta(&format!("engine.session_step.{}", seat.id))?
+            if !matches!(
+                attempt.state,
+                AttemptState::Delivered | AttemptState::Started | AttemptState::Stopped
+            ) {
+                return Ok(None);
+            }
+            let mismatch = crate::session::round_session(tx, &round)?
+                .as_ref()
+                .is_some_and(|session| {
+                    obs.presence == crate::observe::Presence::Missing
+                        || (obs.presence == crate::observe::Presence::Present
+                            && obs
+                                .session
+                                .as_deref()
+                                .is_some_and(|current| current != session))
+                });
+            let running = tx
+                .get_meta(&format!("engine.session_step.{}", seat.id))?
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
                 .is_some_and(|s| {
-                    let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
-                    s["round"] == identity && (unsent || s["action"] == "resume")
+                    let identity = format!(
+                        "{}:{}:{}:{}",
+                        round.project, round.task, round.attempt, round.role
+                    );
+                    s["round"] == identity
+                        && (unsent || s["action"] == "resume")
                         && (s["generation"].as_i64() != Some(seat.generation)
                             || (s["step"] != "done" && s["step"] != "failed"))
                 });
             Ok((mismatch || running).then_some((round.task, round.attempt)))
         })?;
         if let Some((task, attempt)) = recovery {
-            if crate::session::prepare_lane(store, herdr, cfg, seat, &task, attempt, now)? == crate::session::Prep::Ready {
+            if crate::session::prepare_lane(store, herdr, cfg, seat, &task, attempt, now)?
+                == crate::session::Prep::Ready
+            {
                 // A restarted agent can resume the same session. It is a new
                 // recipient for the failed packet even though its session id
                 // is unchanged; allow one retry and clear the marker on send.
@@ -702,7 +856,12 @@ pub fn recover_open_rounds(
 /// - Continue → a delivery for the seat's open attempt with `continue_text(task, adopted_version, packet_ref(task))`;
 /// - None / Escalate → nothing.
 /// Returns the Intended ops (via `ops::intend_deliveries`).
-pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)], now: Ts) -> GearResult<Vec<OpRow>> {
+pub fn intend_dispatch(
+    tx: &Tx<'_>,
+    project: &str,
+    actions: &[(SeatRow, Action)],
+    now: Ts,
+) -> GearResult<Vec<OpRow>> {
     let mut deliveries: Vec<DeliverAction> = Vec::new();
     // T-84: the project standard travels with the assignment and the continue.
     let standard = gear_app::standard::line_for(tx, project)?;
@@ -712,12 +871,22 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
         let guarded = rebind_action(tx, &seat.id, action.clone())?;
         match &guarded {
             Action::Assign { task } => {
-                if tx.captain_quota_paused(project)? { continue; }
+                if tx.captain_quota_paused(project)? {
+                    continue;
+                }
                 // The attempt exists before the delivery that announces it.
-                let attempt = match tx.open_attempts_of_seat(&seat.id)?.into_iter()
-                    .find(|a| a.task == *task && a.state == AttemptState::Delivered && a.sent_at.is_none()) {
+                let attempt = match tx.open_attempts_of_seat(&seat.id)?.into_iter().find(|a| {
+                    a.task == *task && a.state == AttemptState::Delivered && a.sent_at.is_none()
+                }) {
                     Some(attempt) => attempt,
-                    None => gear_app::tasks::start_attempt(tx, project, task, &seat.id, seat.generation, now)?,
+                    None => gear_app::tasks::start_attempt(
+                        tx,
+                        project,
+                        task,
+                        &seat.id,
+                        seat.generation,
+                        now,
+                    )?,
                 };
                 // T-222 (F-75): the first attempt says how to start the branch;
                 // a rework (attempt n ≥ 2) keeps the old wording — the branch
@@ -747,8 +916,19 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
                     }
                 }
                 let action = attempt.session_action.as_deref().unwrap_or("");
-                if attempt.n == 1 && (action.starts_with("new") || action == "fresh" || action == "resume-fallback") {
-                    if let Some(followup) = tx.get_task(project, task)?.and_then(|t| t.followup_of) {
+                // T-481: a follow-up whose session cannot be used keeps the
+                // lane's own conversation instead of starting one, so the
+                // pointer to the task it follows goes with the `keep` too —
+                // the design's §3.3 sentence covers every case where the
+                // follow-up's session is not the one the round runs in.
+                if attempt.n == 1
+                    && (action.starts_with("new")
+                        || action == "fresh"
+                        || action == "resume-fallback"
+                        || action == "keep")
+                {
+                    if let Some(followup) = tx.get_task(project, task)?.and_then(|t| t.followup_of)
+                    {
                         text.push_str(&format!("\nThis task follows {followup}; read its report: gear --show {followup}"));
                     }
                 }
@@ -892,7 +1072,11 @@ mod tests {
                 task_id: None,
             },
             presence: Presence::Present,
-            status: Some(if idle { AgentStatus::Idle } else { AgentStatus::Working }),
+            status: Some(if idle {
+                AgentStatus::Idle
+            } else {
+                AgentStatus::Working
+            }),
             flags: BTreeSet::new(),
             idle,
             screen: None,
@@ -951,7 +1135,8 @@ mod tests {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                 issue: None,updated: NOW,
+                issue: None,
+                updated: NOW,
             }],
             safe_for_next: false,
             failed_delivery: None,
@@ -974,7 +1159,10 @@ mod tests {
                 assert_eq!(task, "T-1");
                 assert_eq!(
                     reason,
-                    format!("no verifiable progress after {} continues", cfg.nudge_budget)
+                    format!(
+                        "no verifiable progress after {} continues",
+                        cfg.nudge_budget
+                    )
                 );
             }
             other => panic!("expected an escalation, got {other:?}"),
@@ -984,33 +1172,58 @@ mod tests {
     #[test]
     fn unknown_attempt_is_not_nudged() {
         // An unknown outcome is never retried (design/08).
-        let action = decide(&view(Some(attempt(AttemptState::Unknown))), &DispatchCfg::default(), NOW);
+        let action = decide(
+            &view(Some(attempt(AttemptState::Unknown))),
+            &DispatchCfg::default(),
+            NOW,
+        );
         assert!(matches!(action, Action::None { .. }));
     }
     #[test]
     fn rebind_waits_for_existing_work_and_blocks_the_old_worktree() {
         let mut store = gear_store::Store::open_in_memory().unwrap();
-        store.write(|tx| {
-            tx.set_meta(&gear_app::plan::rebind_pending_key("p:heat"), "pending")?;
-            assert!(matches!(rebind_action(tx, "p:heat", Action::Assign {task:"T-2".into()})?, Action::None {..}));
-            assert_eq!(rebind_action(tx, "p:heat", Action::Continue {task:"T-1".into()})?, Action::Continue {task:"T-1".into()});
-            tx.set_meta("lane-rebind-applied:p:heat", "moving")?;
-            assert!(matches!(rebind_action(tx, "p:heat", Action::Continue {task:"T-1".into()})?, Action::None {..}));
-            Ok(())
-        }).unwrap();
+        store
+            .write(|tx| {
+                tx.set_meta(&gear_app::plan::rebind_pending_key("p:heat"), "pending")?;
+                assert!(matches!(
+                    rebind_action(tx, "p:heat", Action::Assign { task: "T-2".into() })?,
+                    Action::None { .. }
+                ));
+                assert_eq!(
+                    rebind_action(tx, "p:heat", Action::Continue { task: "T-1".into() })?,
+                    Action::Continue { task: "T-1".into() }
+                );
+                tx.set_meta("lane-rebind-applied:p:heat", "moving")?;
+                assert!(matches!(
+                    rebind_action(tx, "p:heat", Action::Continue { task: "T-1".into() })?,
+                    Action::None { .. }
+                ));
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
     fn planned_assignment_is_rechecked_after_a_rebind_is_requested() {
         let mut store = gear_store::Store::open_in_memory().unwrap();
-        store.write(|tx| {
-            gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
-            let seat = gear_store::testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p1", "opencode", NOW)?;
-            tx.set_meta("lane-rebind-applied:p:heat", "moving")?;
-            let actions = vec![(seat, Action::Assign { task:"T-1".into() })];
-            assert!(intend_dispatch(tx, "p", &actions, NOW)?.is_empty());
-            Ok(())
-        }).unwrap();
+        store
+            .write(|tx| {
+                gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+                let seat = gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p1",
+                    "opencode",
+                    NOW,
+                )?;
+                tx.set_meta("lane-rebind-applied:p:heat", "moving")?;
+                let actions = vec![(seat, Action::Assign { task: "T-1".into() })];
+                assert!(intend_dispatch(tx, "p", &actions, NOW)?.is_empty());
+                Ok(())
+            })
+            .unwrap();
     }
 
     /// A config the engine can read: the project, its quota, its captain and
@@ -1057,11 +1270,17 @@ mod tests {
             .write(|tx| {
                 let actions = vec![(
                     tx.get_seat("p:heat")?.unwrap(),
-                    Action::Assign { task: task.to_string() },
+                    Action::Assign {
+                        task: task.to_string(),
+                    },
                 )];
                 let ops = intend_dispatch(tx, "p", &actions, NOW)?;
                 assert_eq!(ops.len(), 1, "one delivery");
-                assert_eq!(ops[0].attempt, Some(attempt), "the attempt the delivery is for");
+                assert_eq!(
+                    ops[0].attempt,
+                    Some(attempt),
+                    "the attempt the delivery is for"
+                );
                 Ok(ops[0].payload["text"].as_str().unwrap().to_string())
             })
             .unwrap()
@@ -1072,15 +1291,24 @@ mod tests {
     #[test]
     fn a_first_attempt_says_how_to_start_the_branch() {
         let mut store = gear_store::Store::open_in_memory().unwrap();
-        store.write(|tx| {
-            let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
-            project.config_toml = config_toml("trunk");
-            tx.update_project(&project)?;
-            gear_store::testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
-            tx.insert_task(&ready_task("T-1"))?;
-            Ok(())
-        })
-        .unwrap();
+        store
+            .write(|tx| {
+                let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+                project.config_toml = config_toml("trunk");
+                tx.update_project(&project)?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    NOW,
+                )?;
+                tx.insert_task(&ready_task("T-1"))?;
+                Ok(())
+            })
+            .unwrap();
         let text = assign_delivery_text(&mut store, "T-1", 1);
         assert!(
             text.contains(
@@ -1095,38 +1323,53 @@ mod tests {
     #[test]
     fn a_rework_keeps_the_old_branch_line() {
         let mut store = gear_store::Store::open_in_memory().unwrap();
-        store.write(|tx| {
-            let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
-            project.config_toml = config_toml("trunk");
-            tx.update_project(&project)?;
-            gear_store::testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
-            tx.insert_task(&ready_task("T-1"))?;
-            tx.insert_attempt(&AttemptRow {
-                session_ref: None,
-                session_cli: None,
-                session_action: None,
-                sent_at: None,
-                project: "p".into(),
-                task: "T-1".into(),
-                n: 2,
-                seat: "p:heat".into(),
-                generation: 1,
-                contract_version: 1,
-                adopted_version: 1,
-                pending_update: None,
-                state: AttemptState::Delivered,
-                candidate: None,
-                report: None,
-                safe_point: None,
-                started: NOW,
-                updated: NOW,
-            })?;
-            Ok(())
-        })
-        .unwrap();
+        store
+            .write(|tx| {
+                let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+                project.config_toml = config_toml("trunk");
+                tx.update_project(&project)?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    NOW,
+                )?;
+                tx.insert_task(&ready_task("T-1"))?;
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 2,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Delivered,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: NOW,
+                    updated: NOW,
+                })?;
+                Ok(())
+            })
+            .unwrap();
         let text = assign_delivery_text(&mut store, "T-1", 2);
-        assert!(text.contains("Branch: heat/t1 (in your worktree)."), "{text}");
-        assert!(!text.contains("git switch"), "a rework does not start a branch: {text}");
+        assert!(
+            text.contains("Branch: heat/t1 (in your worktree)."),
+            "{text}"
+        );
+        assert!(
+            !text.contains("git switch"),
+            "a rework does not start a branch: {text}"
+        );
     }
 
     /// The lane's own repo names its integration branch (T-52).
@@ -1147,7 +1390,10 @@ mod tests {
         })
         .unwrap();
         let text = assign_delivery_text(&mut store, "T-1", 1);
-        assert!(text.contains("git switch -c heat/t1 origin/web-dev"), "{text}");
+        assert!(
+            text.contains("git switch -c heat/t1 origin/web-dev"),
+            "{text}"
+        );
     }
 
     /// The exact wording of the two packets.
@@ -1217,14 +1463,28 @@ mod tests {
 
     /// The lane `heat` ready for the first assignment of `T-1`, with `path` as
     /// its home worktree.
-    fn home_world(path: &str) -> (gear_store::Store, gear_herdr::fake::FakeHerdr, crate::EngineCfg) {
+    fn home_world(
+        path: &str,
+    ) -> (
+        gear_store::Store,
+        gear_herdr::fake::FakeHerdr,
+        crate::EngineCfg,
+    ) {
         let mut store = gear_store::Store::open_in_memory().unwrap();
         store
             .write(|tx| {
                 let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
                 project.config_toml = config_toml("trunk");
                 tx.update_project(&project)?;
-                gear_store::testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    NOW,
+                )?;
                 tx.set_meta(&crate::onboard::worktree_path_key("p:heat"), path)?;
                 // The agent is up with a fresh session: the packet needs no
                 // pane work, so the test reads its text at once.
@@ -1235,7 +1495,10 @@ mod tests {
             .unwrap();
         let mut h = gear_herdr::fake::FakeHerdr::new();
         h.add_agent_named("w1:p2", "opencode", gear_herdr::AgentStatus::Idle, "p-heat");
-        let cfg = crate::EngineCfg { profiles: gear_herdr::builtins(), ..Default::default() };
+        let cfg = crate::EngineCfg {
+            profiles: gear_herdr::builtins(),
+            ..Default::default()
+        };
         (store, h, cfg)
     }
 
@@ -1247,10 +1510,17 @@ mod tests {
         task: &str,
     ) -> String {
         let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
-        let actions = vec![(seat, Action::Assign { task: task.to_string() })];
+        let actions = vec![(
+            seat,
+            Action::Assign {
+                task: task.to_string(),
+            },
+        )];
         let prepared = prepare_dispatch(store, h, cfg, "p", &actions, NOW).unwrap();
         assert_eq!(prepared.len(), 1, "the packet is ready");
-        let ops = store.write(|tx| intend_dispatch(tx, "p", &prepared, NOW)).unwrap();
+        let ops = store
+            .write(|tx| intend_dispatch(tx, "p", &prepared, NOW))
+            .unwrap();
         assert_eq!(ops.len(), 1, "one delivery");
         ops[0].payload["text"].as_str().unwrap().to_string()
     }
@@ -1264,7 +1534,9 @@ mod tests {
         let (mut store, mut h, cfg) = home_world(&home_path());
         let text = first_packet(&mut store, &mut h, &cfg, "T-1");
         assert!(
-            text.contains("Your worktree has uncommitted changes from earlier work (1 paths: src/a.rs)"),
+            text.contains(
+                "Your worktree has uncommitted changes from earlier work (1 paths: src/a.rs)"
+            ),
             "{text}"
         );
         assert!(text.contains("never `git stash`"), "{text}");
@@ -1284,7 +1556,10 @@ mod tests {
         );
         // The record is spent: a rework check of the same meta finds nothing.
         assert_eq!(
-            store.read(|tx| tx.get_meta(&dirty_home_key("p:heat"))).unwrap().as_deref(),
+            store
+                .read(|tx| tx.get_meta(&dirty_home_key("p:heat")))
+                .unwrap()
+                .as_deref(),
             Some("")
         );
     }
@@ -1312,7 +1587,8 @@ mod tests {
             .write(|tx| {
                 tx.set_meta(
                     &dirty_home_key("p:heat"),
-                    &serde_json::json!({"task": "T-1", "paths": ["src/a.rs"], "count": 1}).to_string(),
+                    &serde_json::json!({"task": "T-1", "paths": ["src/a.rs"], "count": 1})
+                        .to_string(),
                 )?;
                 tx.insert_attempt(&AttemptRow {
                     session_ref: None,
@@ -1337,7 +1613,10 @@ mod tests {
             })
             .unwrap();
         let text = first_packet(&mut store, &mut h, &cfg, "T-1");
-        assert!(!text.contains("uncommitted changes from earlier work"), "{text}");
+        assert!(
+            !text.contains("uncommitted changes from earlier work"),
+            "{text}"
+        );
         assert!(!text.contains("git stash"), "{text}");
     }
 
@@ -1352,7 +1631,10 @@ mod tests {
             first_attempt_text("T-1", 1, "heat/t1", "origin", "trunk", "`gear --show T-1`")
         );
         assert_eq!(
-            store.read(|tx| tx.get_meta(&dirty_home_key("p:heat"))).unwrap().as_deref(),
+            store
+                .read(|tx| tx.get_meta(&dirty_home_key("p:heat")))
+                .unwrap()
+                .as_deref(),
             Some("")
         );
     }

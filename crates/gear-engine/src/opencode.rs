@@ -56,7 +56,9 @@ pub(crate) fn target(
         .iter()
         .find(|m| m["providerID"] == provider && m["id"] == id)
     else {
-        return Lookup::Invalid(format!("invalid OpenCode model {model}: absent from model.list"));
+        return Lookup::Invalid(format!(
+            "invalid OpenCode model {model}: absent from model.list"
+        ));
     };
     if let Some(variant) = variant {
         if !info["variants"]
@@ -388,15 +390,22 @@ variant = "max"
             {"id": "minimax-cn", "name": "MiniMax (minimax.cn)"},
             {"id": "opencode-go", "name": "OpenCode Go"}
         ]})));
-        let labels = derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", None, Some("/repo"))
-            .expect("the catalogue is readable")
-            .expect("the catalogue holds it");
+        let labels = derived_labels(
+            &mut herdr,
+            "minimax-cn/MiniMax-M3.1-Flash",
+            None,
+            Some("/repo"),
+        )
+        .expect("the catalogue is readable")
+        .expect("the catalogue holds it");
         assert_eq!(labels.bar, "MiniMax-M3.1-Flash MiniMax (minimax.cn)");
         assert_eq!(labels.picker, "MiniMax-M3.1-Flash MiniMax (minimax.cn)");
         assert_eq!(labels.variant, None);
 
         // A model the catalogue does not hold has no labels to derive.
-        herdr.api_replies.push_back(Ok(json!({"data": [{"providerID": "x", "id": "y"}]})));
+        herdr
+            .api_replies
+            .push_back(Ok(json!({"data": [{"providerID": "x", "id": "y"}]})));
         assert_eq!(
             derived_labels(&mut herdr, "minimax-cn/nope", None, Some("/repo")),
             Ok(None)
@@ -408,10 +417,17 @@ variant = "max"
             "id": "MiniMax-M3.1-Flash",
             "name": "MiniMax-M3.1-Flash"
         }]})));
-        herdr.api_replies.push_back(Ok(json!({"data": [{"id": "minimax-cn", "name": "MiniMax (minimax.cn)"}]})));
-        let labels = derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", Some("max"), None)
-            .expect("the catalogue is readable")
-            .expect("the catalogue holds it");
+        herdr.api_replies.push_back(Ok(
+            json!({"data": [{"id": "minimax-cn", "name": "MiniMax (minimax.cn)"}]}),
+        ));
+        let labels = derived_labels(
+            &mut herdr,
+            "minimax-cn/MiniMax-M3.1-Flash",
+            Some("max"),
+            None,
+        )
+        .expect("the catalogue is readable")
+        .expect("the catalogue holds it");
         assert_eq!(labels.variant.as_deref(), Some("max"));
     }
 
@@ -421,17 +437,31 @@ variant = "max"
     fn an_unreadable_catalogue_is_an_error_not_an_absent_model() {
         // The API call itself fails: its own text is the reason.
         let mut herdr = FakeHerdr::new();
-        herdr.api_replies.push_back(Err("connection refused".into()));
+        herdr
+            .api_replies
+            .push_back(Err("connection refused".into()));
         assert_eq!(
-            derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", None, Some("/repo")),
+            derived_labels(
+                &mut herdr,
+                "minimax-cn/MiniMax-M3.1-Flash",
+                None,
+                Some("/repo")
+            ),
             Err("connection refused".into())
         );
 
         // The reply is not a list.
         let mut herdr = FakeHerdr::new();
-        herdr.api_replies.push_back(Ok(json!({"data": {"models": []}})));
+        herdr
+            .api_replies
+            .push_back(Ok(json!({"data": {"models": []}})));
         assert_eq!(
-            derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", None, Some("/repo")),
+            derived_labels(
+                &mut herdr,
+                "minimax-cn/MiniMax-M3.1-Flash",
+                None,
+                Some("/repo")
+            ),
             Err("model.list did not return a list".into())
         );
 
@@ -439,7 +469,12 @@ variant = "max"
         let mut herdr = FakeHerdr::new();
         herdr.api_replies.push_back(Ok(json!({"data": []})));
         assert_eq!(
-            derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", None, Some("/repo")),
+            derived_labels(
+                &mut herdr,
+                "minimax-cn/MiniMax-M3.1-Flash",
+                None,
+                Some("/repo")
+            ),
             Err("the model list is not loaded yet".into())
         );
 
@@ -451,9 +486,16 @@ variant = "max"
             "id": "MiniMax-M3.1-Flash",
             "name": "MiniMax-M3.1-Flash"
         }]})));
-        herdr.api_replies.push_back(Ok(json!({"data": [{"id": "opencode-go", "name": "OpenCode Go"}]})));
+        herdr.api_replies.push_back(Ok(
+            json!({"data": [{"id": "opencode-go", "name": "OpenCode Go"}]}),
+        ));
         assert_eq!(
-            derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", None, Some("/repo")),
+            derived_labels(
+                &mut herdr,
+                "minimax-cn/MiniMax-M3.1-Flash",
+                None,
+                Some("/repo")
+            ),
             Err("provider.list has no name for minimax-cn".into())
         );
     }

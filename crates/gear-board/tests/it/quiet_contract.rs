@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gear_board::{hook, run_with, Event, Keys, Options};
-use gear_herdr::{fake::FakeHerdr, AgentInfo, AgentStatus, HerdrRead, ObserveError, PaneProcessInfo};
+use gear_herdr::{
+    fake::FakeHerdr, AgentInfo, AgentStatus, HerdrRead, ObserveError, PaneProcessInfo,
+};
 use gear_model::{SeatRole, TaskState};
 use gear_store::{testing, Store, TaskRow};
 
@@ -23,9 +25,18 @@ fn seed(store: &mut Store) {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "claude",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
-            for (id, rank, state) in [("T-1", 1, TaskState::Running), ("T-2", 2, TaskState::Ready)] {
+            for (id, rank, state) in [("T-1", 1, TaskState::Running), ("T-2", 2, TaskState::Ready)]
+            {
                 tx.insert_task(&TaskRow {
                     repo: None,
                     base: None,
@@ -56,7 +67,12 @@ fn seed(store: &mut Store) {
 }
 
 fn options(refresh: Duration) -> Options {
-    Options { project: Some("p".into()), color: false, refresh, ..Options::default() }
+    Options {
+        project: Some("p".into()),
+        color: false,
+        refresh,
+        ..Options::default()
+    }
 }
 
 /// A keyboard that lets `periods` refresh periods time out and then quits. Each
@@ -133,7 +149,11 @@ impl Counting {
     fn new(moves: bool) -> Counting {
         let mut herdr = FakeHerdr::new();
         herdr.add_agent("w1:p2", "opencode", AgentStatus::Working);
-        Counting { herdr, asks: 0, moves }
+        Counting {
+            herdr,
+            asks: 0,
+            moves,
+        }
     }
 }
 
@@ -177,7 +197,10 @@ impl HerdrRead for Counting {
 /// frames are told apart there.
 fn frames(out: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(out);
-    text.split("\u{1b}[?2026h\u{1b}[H").skip(1).map(str::to_string).collect()
+    text.split("\u{1b}[?2026h\u{1b}[H")
+        .skip(1)
+        .map(str::to_string)
+        .collect()
 }
 
 #[test]
@@ -187,14 +210,35 @@ fn ten_refresh_periods_build_the_board_once() {
     seed(&mut store);
 
     let mut out: Vec<u8> = Vec::new();
-    run_with(&mut store, &options(Duration::from_millis(1)), &mut out, &mut Beat { periods: 10 }, None)
-        .unwrap();
+    run_with(
+        &mut store,
+        &options(Duration::from_millis(1)),
+        &mut out,
+        &mut Beat { periods: 10 },
+        None,
+    )
+    .unwrap();
 
-    assert_eq!(hook::builds(), 1, "nothing changed: one board, ten refreshes");
+    assert_eq!(
+        hook::builds(),
+        1,
+        "nothing changed: one board, ten refreshes"
+    );
+    // T-471: the frame text is rendered once, not once per refresh: a refresh
+    // that changes none of the frame's inputs reuses the text.
+    assert_eq!(
+        hook::renders(),
+        1,
+        "nothing changed: one frame rendered, ten refreshes"
+    );
     // The board is not redrawn either: the frame the ten refreshes build says
     // what the first one said, so it is not written again (T-403: rewriting
     // the same frame is what made the page blink).
-    assert_eq!(frames(&out).len(), 1, "the first frame, and no refresh writes one");
+    assert_eq!(
+        frames(&out).len(),
+        1,
+        "the first frame, and no refresh writes one"
+    );
 }
 
 #[test]
@@ -207,9 +251,20 @@ fn a_write_from_another_connection_builds_the_board_again() {
 
     let mut out: Vec<u8> = Vec::new();
     let mut keys = Writer { path, wrote: false };
-    run_with(&mut store, &options(Duration::from_millis(2)), &mut out, &mut keys, None).unwrap();
+    run_with(
+        &mut store,
+        &options(Duration::from_millis(2)),
+        &mut out,
+        &mut keys,
+        None,
+    )
+    .unwrap();
 
-    assert_eq!(hook::builds(), 2, "the first frame, and one rebuild after the other writer's commit");
+    assert_eq!(
+        hook::builds(),
+        2,
+        "the first frame, and one rebuild after the other writer's commit"
+    );
 }
 
 #[test]
@@ -223,13 +278,37 @@ fn a_key_press_redraws_without_building_the_board() {
     // tasks and writes no frame at all (T-403).
     let events = vec![Event::Key('2'), Event::Down, Event::Down, Event::Key('q')];
     let mut out: Vec<u8> = Vec::new();
-    run_with(&mut store, &options(Duration::from_millis(1)), &mut out, &mut Events(events), None)
-        .unwrap();
+    run_with(
+        &mut store,
+        &options(Duration::from_millis(1)),
+        &mut out,
+        &mut Events(events),
+        None,
+    )
+    .unwrap();
 
-    assert_eq!(hook::builds(), 1, "the keys redrew the board, they did not build it");
+    assert_eq!(
+        hook::builds(),
+        1,
+        "the keys redrew the board, they did not build it"
+    );
+    // T-471: each change renders the frame once; the second `Down` has nowhere
+    // to go, so its frame is reused and not rendered again.
+    assert_eq!(
+        hook::renders(),
+        3,
+        "the first frame, the tab and the one move that changed the selection"
+    );
     let drawn = frames(&out);
-    assert_eq!(drawn.len(), 3, "the first frame and one redraw per change: {drawn:?}");
-    assert_ne!(drawn[0], drawn[2], "the last frame shows the moved selection");
+    assert_eq!(
+        drawn.len(),
+        3,
+        "the first frame and one redraw per change: {drawn:?}"
+    );
+    assert_ne!(
+        drawn[0], drawn[2],
+        "the last frame shows the moved selection"
+    );
 }
 
 #[test]
@@ -241,10 +320,20 @@ fn an_old_board_is_built_again_once() {
 
     // One period of 40 ms is longer than the 25 ms a kept board is trusted.
     let mut out: Vec<u8> = Vec::new();
-    run_with(&mut store, &options(Duration::from_millis(40)), &mut out, &mut Beat { periods: 1 }, None)
-        .unwrap();
+    run_with(
+        &mut store,
+        &options(Duration::from_millis(40)),
+        &mut out,
+        &mut Beat { periods: 1 },
+        None,
+    )
+    .unwrap();
 
-    assert_eq!(hook::builds(), 2, "the first frame, then one rebuild of an old board");
+    assert_eq!(
+        hook::builds(),
+        2,
+        "the first frame, then one rebuild of an old board"
+    );
 }
 
 #[test]
@@ -265,7 +354,10 @@ fn herdr_is_asked_for_its_agents_at_most_every_interval() {
     )
     .unwrap();
 
-    assert_eq!(herdr.asks, 2, "asked at the first frame and once the interval passed, not per refresh");
+    assert_eq!(
+        herdr.asks, 2,
+        "asked at the first frame and once the interval passed, not per refresh"
+    );
     assert_eq!(hook::builds(), 1, "the list did not change: no rebuild");
 }
 
@@ -288,7 +380,11 @@ fn a_changed_agent_list_builds_the_board_again() {
     .unwrap();
 
     assert_eq!(herdr.asks, 2);
-    assert_eq!(hook::builds(), 2, "the agent list moved: the board was built again");
+    assert_eq!(
+        hook::builds(),
+        2,
+        "the agent list moved: the board was built again"
+    );
 }
 
 /// A keyboard that reports another size after the first frame, waits the
@@ -325,7 +421,10 @@ fn a_resize_draws_once_over_a_full_clear() {
         &mut store,
         &options(Duration::from_millis(1)),
         &mut out,
-        &mut Resize { size: (100, 30), asked: false },
+        &mut Resize {
+            size: (100, 30),
+            asked: false,
+        },
         None,
     )
     .unwrap();
@@ -333,9 +432,17 @@ fn a_resize_draws_once_over_a_full_clear() {
     // The frame under the new size is drawn all the same, and the terminal is
     // cleared once for it (T-403): the resize threw the old one away.
     let drawn = frames(&out);
-    assert_eq!(drawn.len(), 2, "the first frame and the frame of the new size");
+    assert_eq!(
+        drawn.len(),
+        2,
+        "the first frame and the frame of the new size"
+    );
     let text = String::from_utf8_lossy(&out);
-    assert_eq!(text.matches("\u{1b}[2J").count(), 1, "the resize clears the screen once: {text:?}");
+    assert_eq!(
+        text.matches("\u{1b}[2J").count(),
+        1,
+        "the resize clears the screen once: {text:?}"
+    );
 }
 
 /// The keys of a board with no project named: `p` twice — one full cycle over
@@ -383,7 +490,13 @@ fn a_project_registered_later_does_not_move_the_shown_one() {
             for (project, pane) in [("a", "w1:p1"), ("b", "w1:p2")] {
                 testing::seed_project(tx, project, "sess", T0)?;
                 testing::seed_active_seat(
-                    tx, project, "data", SeatRole::Lane, pane, "opencode", T0,
+                    tx,
+                    project,
+                    "data",
+                    SeatRole::Lane,
+                    pane,
+                    "opencode",
+                    T0,
                 )?;
             }
             Ok(())
@@ -392,10 +505,19 @@ fn a_project_registered_later_does_not_move_the_shown_one() {
 
     let mut out: Vec<u8> = Vec::new();
     let mut keys = Registers { path, call: 0 };
-    let opts = Options { project: None, color: false, refresh: Duration::from_millis(2), ..Options::default() };
+    let opts = Options {
+        project: None,
+        color: false,
+        refresh: Duration::from_millis(2),
+        ..Options::default()
+    };
     run_with(&mut store, &opts, &mut out, &mut keys, None).unwrap();
 
-    assert_eq!(hook::builds(), 2, "the first frame, and one rebuild for the new project");
+    assert_eq!(
+        hook::builds(),
+        2,
+        "the first frame, and one rebuild for the new project"
+    );
     let drawn = frames(&out);
     // The title row of a frame, up to the clock at its end. T-353's head names
     // the shown project only: the number of the session's projects is no
@@ -406,7 +528,13 @@ fn a_project_registered_later_does_not_move_the_shown_one() {
     };
     // a, b, and a again — two presses over two projects complete the cycle.
     assert!(names(&drawn[1], "b"), "the second project: {drawn:?}");
-    assert!(names(&drawn[2], "a"), "the cycle is back at the first: {drawn:?}");
+    assert!(
+        names(&drawn[2], "a"),
+        "the cycle is back at the first: {drawn:?}"
+    );
     // The registration rebuilds once, and the board still shows `a`.
-    assert!(names(drawn.last().unwrap(), "a"), "still the first project: {drawn:?}");
+    assert!(
+        names(drawn.last().unwrap(), "a"),
+        "still the first project: {drawn:?}"
+    );
 }

@@ -44,7 +44,11 @@ pub fn planes(canvas: &Canvas) -> Planes {
         colour.push(colour_row);
         reverse.push(reverse_row);
     }
-    Planes { text, colour, reverse }
+    Planes {
+        text,
+        colour,
+        reverse,
+    }
 }
 
 /// The character of a colour in the colour plane.
@@ -98,7 +102,11 @@ mod tests {
 
         assert_eq!(canvas.char_at(17, 2), 'x');
         assert_eq!(canvas.char_at(18, 2), 'y');
-        assert_eq!(canvas.char_at(19, 2), ' ', "the last column is never written");
+        assert_eq!(
+            canvas.char_at(19, 2),
+            ' ',
+            "the last column is never written"
+        );
         // A text that starts at the last column writes nothing.
         canvas.put_styled(19, 3, "abc", Style::PLAIN);
         assert_eq!(canvas.char_at(19, 3), ' ');
@@ -114,13 +122,25 @@ mod tests {
         assert_eq!(canvas.style_at(0, 2), Style::PLAIN, "column 0 stays");
         assert_eq!(
             canvas.style_at(1, 2),
-            Style { fg: None, bold: false, reverse: true }
+            Style {
+                fg: None,
+                bold: false,
+                reverse: true
+            }
         );
         assert_eq!(
             canvas.style_at(18, 2),
-            Style { fg: None, bold: false, reverse: true }
+            Style {
+                fg: None,
+                bold: false,
+                reverse: true
+            }
         );
-        assert_eq!(canvas.style_at(19, 2), Style::PLAIN, "the last column stays");
+        assert_eq!(
+            canvas.style_at(19, 2),
+            Style::PLAIN,
+            "the last column stays"
+        );
         assert_eq!(canvas.char_at(1, 2), 'b', "the characters stay");
         // A row off the canvas is not lit and does not panic.
         canvas.light_row(8);
@@ -137,8 +157,16 @@ mod tests {
         assert_eq!(canvas.char_at(1, 5), 'a');
         assert_eq!(canvas.style_at(1, 5), Style::fg(Color::Ok).and_bold());
         assert_eq!(canvas.char_at(2, 5), 'b');
-        assert_eq!(canvas.style_at(1, 6).reverse, true, "the lit row keeps its style");
-        assert_eq!(canvas.style_at(0, 6), Style::PLAIN, "the lit row's first column stays");
+        assert_eq!(
+            canvas.style_at(1, 6).reverse,
+            true,
+            "the lit row keeps its style"
+        );
+        assert_eq!(
+            canvas.style_at(0, 6),
+            Style::PLAIN,
+            "the lit row's first column stays"
+        );
         assert_eq!(canvas.text().lines().nth(5).unwrap_or_default(), " ab");
         // Rows off either canvas are not copied and do not panic.
         let before = canvas.text();

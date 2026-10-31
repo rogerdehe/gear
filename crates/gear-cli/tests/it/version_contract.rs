@@ -27,7 +27,11 @@ fn version_prints_the_workspace_version() {
     let home = scratch_home("version");
     let out = gear(&home, &["--version"]).output().expect("run gear");
 
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     assert_eq!(text.trim(), format!("gear {}", env!("CARGO_PKG_VERSION")));
 }
@@ -36,7 +40,11 @@ fn version_prints_the_workspace_version() {
 fn version_writes_nothing() {
     let home = scratch_home("version-nowrite");
     let out = gear(&home, &["--version"]).output().expect("run gear");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // No store, no directory: the question touched nothing in the home.
     let mut entries: Vec<String> = std::fs::read_dir(&home)

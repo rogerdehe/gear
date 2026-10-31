@@ -20,12 +20,18 @@ fn data_version_moves_when_another_connection_writes() {
 
     writer.write(|tx| tx.set_meta("k", "v1")).unwrap();
     let after = board.read(|tx| tx.data_version()).unwrap();
-    assert_ne!(after, before, "the other connection's commit moved the value");
+    assert_ne!(
+        after, before,
+        "the other connection's commit moved the value"
+    );
 
     // Another commit moves it again.
     writer.write(|tx| tx.set_meta("k", "v2")).unwrap();
     let later = board.read(|tx| tx.data_version()).unwrap();
-    assert_ne!(later, after, "every commit of the other connection moves it");
+    assert_ne!(
+        later, after,
+        "every commit of the other connection moves it"
+    );
 
     // This connection's own write does not move the value it sees (SQLite:
     // `data_version` reports the changes of other connections only).

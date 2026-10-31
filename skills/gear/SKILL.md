@@ -26,6 +26,7 @@ No `GEAR_CTX` in your environment and no seat bound to your pane → GEAR did no
 - Answer an estimate question with `gear send --kind progress --task T-<n> --attempt <a> --contract <c> --left <minutes> --blocker "<what stops you, or none>" "<done; left>"`, then keep working. When another task must merge first, send `gear send --kind blocked --task T-<n> --attempt <a> --contract <c> --on T-<m> "<done; what waits>"`; the clock pauses until it merges.
 - For a result or review, add `--friction "<what cost time the captain could fix>"` when a permission, slow build or test, unclear contract, missing tool or fixture, or other step cost time. The flag is required when the round exceeds its budget.
 - If a command prints `UNCONFIRMED`, run it again with the same `--request-id`; never resend it reworded.
+- When your agent is switched to another CLI, the packet starts with a handover: read the previous session it names, check the worktree it describes, and do not start over on work you have not inspected. The template ships as `templates/handover.md`.
 - Do not edit the plan or the packets GEAR renders; do not start background jobs that keep writing after your turn ends.
 
 ## 4. Reviewers
@@ -44,6 +45,7 @@ The captain's guide: `gear --skill captain`. Holding the course: `gear --skill c
 |---|---|
 | `conventions` | names, branches, worktrees, the lane's task loop, questions, review and merge |
 | `captain` | kickoff, config, the plan file, the daily loop |
+| `departure` | the departure sheet the user confirms before every voyage departs |
 | `course` | keeping the work aimed at the goal: findings, eta, signals, landing |
 | `decompose` | cutting work into tasks |
 | `review` | what a temp reviewer delivers |

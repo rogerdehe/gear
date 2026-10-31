@@ -13,7 +13,7 @@
 //! without `[[repos]]` is a single-repo project and behaves exactly as
 //! before.
 
-use gear_model::{ErrorCode, GearError, GearResult};
+use gear_model::{ErrorCode, GearError, GearResult, Ts};
 use gear_store::Store;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -36,6 +36,9 @@ pub struct ProjectConfig {
     pub conventions: Conventions,
     #[serde(default)]
     pub timing: Timing,
+    /// The departure time of a voyage (T-448); absent = today's behaviour.
+    #[serde(default)]
+    pub schedule: Option<ScheduleSection>,
     /// API-equivalent USD per million tokens, keyed by provider/model.
     #[serde(default)]
     pub prices: BTreeMap<String, Price>,
@@ -90,19 +93,29 @@ impl ProjectConfig {
         let Some(path) = task.repo.as_deref() else {
             return self.repo_of_lane(task.lane.as_deref().unwrap_or_default());
         };
-        let mut repo = self.repos().into_iter().find(|r| r.path == path).unwrap_or_else(|| {
-            // A removed repo is still a valid historical target. Do not use a
-            // different repo's GitHub settings or worker key for it.
-            let mut hash = 0xcbf29ce484222325u64;
-            for b in path.bytes() { hash = (hash ^ u64::from(b)).wrapping_mul(0x100000001b3); }
-            let mut fallback = self.root_repo();
-            fallback.name = format!("snapshot-{hash:x}");
-            fallback.path = path.to_string();
-            fallback.github = None;
-            fallback
-        });
-        if let Some(base) = &task.base { repo.integration = base.clone(); }
-        if let Some(gate) = &task.gate { repo.gate = gate.clone(); }
+        let mut repo = self
+            .repos()
+            .into_iter()
+            .find(|r| r.path == path)
+            .unwrap_or_else(|| {
+                // A removed repo is still a valid historical target. Do not use a
+                // different repo's GitHub settings or worker key for it.
+                let mut hash = 0xcbf29ce484222325u64;
+                for b in path.bytes() {
+                    hash = (hash ^ u64::from(b)).wrapping_mul(0x100000001b3);
+                }
+                let mut fallback = self.root_repo();
+                fallback.name = format!("snapshot-{hash:x}");
+                fallback.path = path.to_string();
+                fallback.github = None;
+                fallback
+            });
+        if let Some(base) = &task.base {
+            repo.integration = base.clone();
+        }
+        if let Some(gate) = &task.gate {
+            repo.gate = gate.clone();
+        }
         repo
     }
 
@@ -216,6 +229,10 @@ pub struct LaneSection {
     /// root.
     #[serde(default)]
     pub repo: Option<String>,
+    /// This lane's charter (T-469): how its agent works on the model it runs,
+    /// written at kickoff for that model. Absent = the lane rules.
+    #[serde(default)]
+    pub charter: Option<String>,
 }
 
 /// One repo of a multi-repo project (T-52): a child repository below
@@ -361,6 +378,10 @@ pub struct Repo {
 pub struct TempsSection {
     pub kind: String,
     pub profile: String,
+    /// The reviewers' charter (T-469): how a reviewer works on its model.
+    /// Absent = the reviewer rules.
+    #[serde(default)]
+    pub charter: Option<String>,
 }
 
 /// The default cap on a task's planned time (T-279): no task is planned for
@@ -590,7 +611,11 @@ impl ModelEntry {
     pub fn cli(&self) -> Option<&str> {
         match self {
             ModelEntry::Plain(_) => None,
-            ModelEntry::Entry(spec) => spec.cli.as_deref().map(str::trim).filter(|cli| !cli.is_empty()),
+            ModelEntry::Entry(spec) => spec
+                .cli
+                .as_deref()
+                .map(str::trim)
+                .filter(|cli| !cli.is_empty()),
         }
     }
 
@@ -603,7 +628,10 @@ impl ModelEntry {
     }
 
     pub fn context_window_k(&self) -> Option<u64> {
-        match self { ModelEntry::Plain(_) => None, ModelEntry::Entry(spec) => spec.context_window_k }
+        match self {
+            ModelEntry::Plain(_) => None,
+            ModelEntry::Entry(spec) => spec.context_window_k,
+        }
     }
 
     /// The entry as one line, for a log or a message: the model id, and the
@@ -681,7 +709,12 @@ impl<'de> serde::de::Visitor<'de> for ModelEntryVisitor {
             }
         }
         let model = model.ok_or_else(|| serde::de::Error::missing_field("model"))?;
-        Ok(ModelEntry::Entry(ModelSpec { model, cli, args, context_window_k }))
+        Ok(ModelEntry::Entry(ModelSpec {
+            model,
+            cli,
+            args,
+            context_window_k,
+        }))
     }
 }
 
@@ -740,6 +773,12 @@ pub struct Timing {
     /// ran its suite is not a stale base. `0` = a hand-in must contain the
     /// current tip (the strict rule).
     pub handin_base_window_min: u32,
+    /// How long an at-once agent switch lets the outgoing agent wrap up and
+    /// commit before the engine exits it anyway (T-465); default 10 minutes.
+    pub switch_grace_min: u32,
+    /// Whether an agent switch (a new CLI) happens at once instead of at the
+    /// seat's next safe point (T-465); default false = the next safe point.
+    pub switch_at_once: bool,
 }
 
 impl Default for Timing {
@@ -753,8 +792,179 @@ impl Default for Timing {
             lane_busy_idle_min: 10,
             delivery_grace_s: 180,
             handin_base_window_min: 30,
+            switch_grace_min: 10,
+            switch_at_once: false,
         }
     }
+}
+
+/// A voyage that departs at an agreed time (T-448): before it, the engine
+/// starts no lane and delivers nothing; at it, it starts them by itself.
+///
+/// ```toml
+/// [schedule]
+/// depart_at = "2026-10-30T14:00:00-05:00"  # RFC3339
+/// hours = "09:00-18:00"                    # local time
+/// notice_min = 15
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ScheduleSection {
+    /// The moment the voyage departs (RFC3339); absent = as soon as ready.
+    pub depart_at: Option<String>,
+    /// The working hours of the day (`"HH:MM-HH:MM"`, local time).
+    pub hours: Option<String>,
+    /// How long before the departure the captain is told (T-450).
+    pub notice_min: u32,
+}
+
+impl Default for ScheduleSection {
+    fn default() -> Self {
+        Self {
+            depart_at: None,
+            hours: None,
+            notice_min: 15,
+        }
+    }
+}
+
+/// The moment a voyage departs (T-448): `Some(depart_at)` while `now` is
+/// before it, `None` at and after it, and when the config names none. A
+/// `depart_at` that does not parse is refused by `validate`, so a reader that
+/// skipped the check fails closed (no departure time, today's behaviour).
+pub fn departs_at(config: &ProjectConfig, now: Ts) -> Option<Ts> {
+    let at = crate::plan::parse_rfc3339(config.schedule.as_ref()?.depart_at.as_deref()?)?;
+    (now < at).then_some(at)
+}
+
+/// The working hours of `[schedule].hours` as (start, end) in minutes past
+/// local midnight. `None` when the section names no hours or they do not
+/// parse (the config check refuses them).
+fn hours_window(config: &ProjectConfig) -> Option<(u32, u32)> {
+    let text = config.schedule.as_ref()?.hours.as_deref()?;
+    let (start, end) = text.trim().split_once('-')?;
+    let start = minutes_of_day(start)?;
+    let end = minutes_of_day(end)?;
+    (start != end).then_some((start, end))
+}
+
+/// Whether `minute` (past local midnight) is inside the working hours. An
+/// overnight window (`start > end`) works from its start to its end on the
+/// next day.
+fn inside_hours(window: (u32, u32), minute: u32) -> bool {
+    let (start, end) = window;
+    if start < end {
+        start <= minute && minute < end
+    } else {
+        minute >= start || minute < end
+    }
+}
+
+/// The local time at `minute` past midnight, `day_offset` days after the day
+/// of `now`. `None` when the machine's local time is not readable.
+fn local_at(now: Ts, day_offset: i32, minute: u32) -> Option<Ts> {
+    let stamp = now as libc::time_t;
+    let mut parts = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // SAFETY: both pointers address valid storage; localtime_r initializes tm
+    // on success and returns null on failure.
+    if unsafe { libc::localtime_r(&stamp, parts.as_mut_ptr()) }.is_null() {
+        return None;
+    }
+    let mut target = unsafe { parts.assume_init() };
+    target.tm_mday += day_offset;
+    target.tm_hour = (minute / 60) as i32;
+    target.tm_min = (minute % 60) as i32;
+    target.tm_sec = 0;
+    target.tm_isdst = -1;
+    let time = unsafe { libc::mktime(&mut target) } as Ts;
+    (time != -1).then_some(time)
+}
+
+/// The minute of the day `now` is, in local time. `None` when the machine's
+/// local time is not readable.
+fn local_minute(now: Ts) -> Option<u32> {
+    let stamp = now as libc::time_t;
+    let mut parts = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // SAFETY: as in `local_at`.
+    if unsafe { libc::localtime_r(&stamp, parts.as_mut_ptr()) }.is_null() {
+        return None;
+    }
+    let parts = unsafe { parts.assume_init() };
+    Some(parts.tm_hour as u32 * 60 + parts.tm_min as u32)
+}
+
+/// The end of the working period that is current or next (T-450): the hour the
+/// fleet stops, from `[schedule].hours` and the local time of `now`.
+pub fn hours_end(config: &ProjectConfig, now: Ts) -> Option<Ts> {
+    let window = hours_window(config)?;
+    let minute = local_minute(now)?;
+    let day = if minute < window.1 { 0 } else { 1 };
+    local_at(now, day, window.1)
+}
+
+/// The start of the next working period, while `now` is outside the working
+/// hours (T-450): when the fleet comes back from `[schedule].hours`. `None`
+/// without hours, and while `now` is inside them.
+pub fn off_hours_until(config: &ProjectConfig, now: Ts) -> Option<Ts> {
+    let window = hours_window(config)?;
+    let minute = local_minute(now)?;
+    if inside_hours(window, minute) {
+        return None;
+    }
+    if window.0 < window.1 {
+        let day = if minute < window.0 { 0 } else { 1 };
+        local_at(now, day, window.0)
+    } else {
+        // Overnight: outside is between the end and the start, so the start is
+        // later today.
+        local_at(now, 0, window.0)
+    }
+}
+
+/// The start of the next working period after `now`, inside or outside the
+/// working hours (T-450): the time the notice tells a seat to continue at.
+pub fn hours_next_start(config: &ProjectConfig, now: Ts) -> Option<Ts> {
+    let window = hours_window(config)?;
+    let minute = local_minute(now)?;
+    if window.0 < window.1 {
+        let day = if minute < window.0 { 0 } else { 1 };
+        local_at(now, day, window.0)
+    } else if minute >= window.0 {
+        local_at(now, 1, window.0)
+    } else {
+        local_at(now, 0, window.0)
+    }
+}
+
+/// `"HH:MM-HH:MM"` with a start different from its end, both real times of
+/// the day.
+fn valid_hours(text: &str) -> bool {
+    let Some((start, end)) = text.trim().split_once('-') else {
+        return false;
+    };
+    let Some(start) = minutes_of_day(start) else {
+        return false;
+    };
+    let Some(end) = minutes_of_day(end) else {
+        return false;
+    };
+    start != end
+}
+
+/// `"HH:MM"` as minutes past midnight; `None` when it is not a time of day.
+fn minutes_of_day(text: &str) -> Option<u32> {
+    let (hours, minutes) = text.split_once(':')?;
+    if hours.len() != 2 || minutes.len() != 2 {
+        return None;
+    }
+    if !hours.bytes().all(|byte| byte.is_ascii_digit())
+        || !minutes.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let hours: u32 = hours.parse().ok()?;
+    let minutes: u32 = minutes.parse().ok()?;
+    (hours <= 23 && minutes <= 59).then_some(hours * 60 + minutes)
 }
 
 /// One validation finding. `field` is a dotted path such as `lanes[1].owns`.
@@ -781,14 +991,12 @@ pub fn parse(text: &str) -> GearResult<ProjectConfig> {
 /// reads both in **one** transaction and parses outside it, so a config change
 /// can never be seen half-applied (review R-63).
 pub fn latest(store: &mut Store, project: &str) -> GearResult<ProjectConfig> {
-    let row = store
-        .read(|tx| tx.get_project(project))?
-        .ok_or_else(|| {
-            GearError::new(
-                ErrorCode::NoTarget,
-                format!("no project {project} in the store"),
-            )
-        })?;
+    let row = store.read(|tx| tx.get_project(project))?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("no project {project} in the store"),
+        )
+    })?;
     parse(&row.config_toml)
 }
 
@@ -829,7 +1037,10 @@ pub fn profile_table(
         // A name that is not built in starts from the operational defaults
         // (16 lines, two confirmation rounds), not from an all-zero profile
         // (review R2).
-        let current = table.get(name).cloned().unwrap_or_else(gear_herdr::Profile::for_new);
+        let current = table
+            .get(name)
+            .cloned()
+            .unwrap_or_else(gear_herdr::Profile::for_new);
         let mut profile = current.patched(&patch, name);
         // A profile the user configured is one GEAR may drive: they wrote the
         // kind, the args and the exit keys (T-31). `gear admin init` refuses
@@ -914,7 +1125,10 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     let mut issues = Vec::new();
 
     if cfg.timing.delivery_grace_s == 0 {
-        issues.push(issue("timing.delivery_grace_s", "must be at least one second".to_string()));
+        issues.push(issue(
+            "timing.delivery_grace_s",
+            "must be at least one second".to_string(),
+        ));
     }
     // A cap of zero would refuse every task (T-279): the captain plans each
     // task's time, and no estimate is under it.
@@ -949,12 +1163,26 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         ));
     }
     for (model, price) in &cfg.prices {
-        if !model.split_once('/').is_some_and(|(provider, name)| !provider.trim().is_empty() && !name.trim().is_empty()) {
-            issues.push(issue(&format!("prices.{model}"), "must name a provider/model".to_string()));
+        if !model
+            .split_once('/')
+            .is_some_and(|(provider, name)| !provider.trim().is_empty() && !name.trim().is_empty())
+        {
+            issues.push(issue(
+                &format!("prices.{model}"),
+                "must name a provider/model".to_string(),
+            ));
         }
-        for (field, value) in [("input",price.input),("output",price.output),("cache_read",price.cache_read),("cache_write",price.cache_write)] {
+        for (field, value) in [
+            ("input", price.input),
+            ("output", price.output),
+            ("cache_read", price.cache_read),
+            ("cache_write", price.cache_write),
+        ] {
             if !value.is_finite() || value < 0.0 {
-                issues.push(issue(&format!("prices.{model}.{field}"), "must be a finite non-negative rate".to_string()));
+                issues.push(issue(
+                    &format!("prices.{model}.{field}"),
+                    "must be a finite non-negative rate".to_string(),
+                ));
             }
         }
     }
@@ -971,14 +1199,16 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     if cfg.conventions.gate.contains("TODO") {
         issues.push(issue(
             "conventions.gate",
-            "conventions.gate must be your build + test command (it runs before every merge)".to_string(),
+            "conventions.gate must be your build + test command (it runs before every merge)"
+                .to_string(),
         ));
     }
     let gate_missing = cfg.conventions.gate.trim().is_empty();
-    let repo_without_own_gate = cfg
-        .repos
-        .iter()
-        .any(|repo| repo.gate.as_deref().is_none_or(|gate| gate.trim().is_empty()));
+    let repo_without_own_gate = cfg.repos.iter().any(|repo| {
+        repo.gate
+            .as_deref()
+            .is_none_or(|gate| gate.trim().is_empty())
+    });
     let root_has_work = cfg.repos.is_empty()
         || cfg.lanes.iter().any(|lane| {
             lane.repo
@@ -996,8 +1226,16 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     // chain with `fallback` is really "park for quota_reset_h hours" — say so
     // at kickoff instead of finding out when every lane stops.
     for (field, chain, policy) in [
-        ("models.lanes", &cfg.models.lanes, &cfg.models.on_quota.lanes),
-        ("models.review", &cfg.models.review, &cfg.models.on_quota.review),
+        (
+            "models.lanes",
+            &cfg.models.lanes,
+            &cfg.models.on_quota.lanes,
+        ),
+        (
+            "models.review",
+            &cfg.models.review,
+            &cfg.models.on_quota.review,
+        ),
     ] {
         if *policy == QuotaPolicy::Fallback && chain.len() == 1 {
             issues.push(issue(
@@ -1036,10 +1274,7 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     if !is_name(&cfg.project.id) {
         issues.push(issue(
             "project.id",
-            format!(
-                "project id {:?} must match [a-z][a-z0-9-]*",
-                cfg.project.id
-            ),
+            format!("project id {:?} must match [a-z][a-z0-9-]*", cfg.project.id),
         ));
     }
     if !agent_name_fits(&cfg.project.id, "captain") {
@@ -1081,7 +1316,10 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         match first_lane_with_name.get(lane.name.as_str()) {
             Some(first) => issues.push(issue(
                 &field,
-                format!("lane name {:?} is already used by lanes[{first}]", lane.name),
+                format!(
+                    "lane name {:?} is already used by lanes[{first}]",
+                    lane.name
+                ),
             )),
             None => {
                 first_lane_with_name.insert(lane.name.as_str(), index);
@@ -1117,19 +1355,41 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                 &owns_field,
                 "an owns entry is empty after trimming".to_string(),
             ));
-        } else if let Some(other) = cfg.lanes[..index]
-            .iter()
-            .find(|earlier| {
-                // Two lanes overlap only when they work in the same repo
-                // (T-52): the same paths in two repos are two different
-                // files, and a lane's `owns` is relative to its repo.
-                earlier.repo == lane.repo && owns_overlap(&earlier.owns, &lane.owns)
-            })
-        {
+        } else if let Some(other) = cfg.lanes[..index].iter().find(|earlier| {
+            // Two lanes overlap only when they work in the same repo
+            // (T-52): the same paths in two repos are two different
+            // files, and a lane's `owns` is relative to its repo.
+            earlier.repo == lane.repo && owns_overlap(&earlier.owns, &lane.owns)
+        }) {
             issues.push(issue(
                 &owns_field,
                 format!("overlaps the paths owned by lane {:?}", other.name),
             ));
+        }
+
+        // A charter (T-469) that is present must say something: a blank one
+        // would replace the lane rules with nothing, so it is a finding.
+        if let Some(charter) = &lane.charter {
+            if charter.trim().is_empty() {
+                issues.push(issue(
+                    &format!("lanes[{index}].charter"),
+                    "a charter is empty after trimming: leave it out to keep the lane rules"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
+    // ---- the reviewers' charter (T-469), the same rule.
+    if let Some(temps) = &cfg.temps {
+        if let Some(charter) = &temps.charter {
+            if charter.trim().is_empty() {
+                issues.push(issue(
+                    "temps.charter",
+                    "a charter is empty after trimming: leave it out to keep the reviewer rules"
+                        .to_string(),
+                ));
+            }
         }
     }
 
@@ -1149,7 +1409,10 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         match first_repo_with_name.get(repo.name.as_str()) {
             Some(first) => issues.push(issue(
                 &name_field,
-                format!("repo name {:?} is already used by repos[{first}]", repo.name),
+                format!(
+                    "repo name {:?} is already used by repos[{first}]",
+                    repo.name
+                ),
             )),
             None => {
                 first_repo_with_name.insert(repo.name.as_str(), index);
@@ -1224,7 +1487,10 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                 ));
             }
             if gate_pipes_without_pipefail(gate) {
-                issues.push(issue(&format!("repos.{}.gate", repo.name), GATE_PIPE.to_string()));
+                issues.push(issue(
+                    &format!("repos.{}.gate", repo.name),
+                    GATE_PIPE.to_string(),
+                ));
             }
         }
     }
@@ -1382,12 +1648,8 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     // seats every project has: the merge seat and a reviewer's.
     let project = &cfg.project.id;
     for lane in &cfg.lanes {
-        let task = gear_model::branch::expand(
-            &conventions.task_branch,
-            project,
-            &lane.name,
-            SAMPLE_TASK,
-        );
+        let task =
+            gear_model::branch::expand(&conventions.task_branch, project, &lane.name, SAMPLE_TASK);
         let review = gear_model::branch::expand(
             &conventions.review_branch,
             project,
@@ -1422,11 +1684,43 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     }
 
     if cfg.timing.captain_item_stale_min == 0 {
-        issues.push(issue("timing.captain_item_stale_min", "must be at least one minute".to_string()));
+        issues.push(issue(
+            "timing.captain_item_stale_min",
+            "must be at least one minute".to_string(),
+        ));
     }
 
     if cfg.timing.lane_busy_idle_min == 0 {
-        issues.push(issue("timing.lane_busy_idle_min", "must be at least one minute".to_string()));
+        issues.push(issue(
+            "timing.lane_busy_idle_min",
+            "must be at least one minute".to_string(),
+        ));
+    }
+
+    // ---- the schedule (T-448): a departure time must be an RFC3339 moment
+    // the engine can compare with the clock, and the hours of the day must be
+    // two real times with a start different from the end.
+    if let Some(schedule) = &cfg.schedule {
+        if let Some(depart_at) = &schedule.depart_at {
+            if crate::plan::parse_rfc3339(depart_at).is_none() {
+                issues.push(issue(
+                    "schedule.depart_at",
+                    format!(
+                        "must be an RFC3339 moment (e.g. 2026-10-30T14:00:00-05:00), got {depart_at:?}"
+                    ),
+                ));
+            }
+        }
+        if let Some(hours) = &schedule.hours {
+            if !valid_hours(hours) {
+                issues.push(issue(
+                    "schedule.hours",
+                    format!(
+                        "must be two HH:MM times with a different start and end (e.g. \"09:00-18:00\"), got {hours:?}"
+                    ),
+                ));
+            }
+        }
     }
 
     // ---- models (17 §0): empty chains mean models are not managed
@@ -1465,8 +1759,7 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         if !independent {
             issues.push(issue(
                 "models.review",
-                "the review chain must hold a model that no lane runs as its primary"
-                    .to_string(),
+                "the review chain must hold a model that no lane runs as its primary".to_string(),
             ));
         }
     }
@@ -1483,11 +1776,7 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     // by the CLI itself, which costs a review round to find out. The CLI of
     // an entry is its own, else the kind of the seat that runs it.
     let lane_kinds: Vec<&str> = cfg.lanes.iter().map(|lane| lane.kind.trim()).collect();
-    let temps_kinds: Vec<&str> = cfg
-        .temps
-        .iter()
-        .map(|temps| temps.kind.trim())
-        .collect();
+    let temps_kinds: Vec<&str> = cfg.temps.iter().map(|temps| temps.kind.trim()).collect();
     claude_model_issues("models.lanes", &models.lanes, &lane_kinds, &mut issues);
     claude_model_issues("models.review", &models.review, &temps_kinds, &mut issues);
     claude_model_issues(
@@ -1553,7 +1842,9 @@ fn is_github_repo(repo: &str) -> bool {
         && !name.is_empty()
         && !name.contains('/')
         && !owner.contains('/')
-        && repo.chars().all(|c| !c.is_whitespace() && !matches!(c, '@' | ':' | '\\'))
+        && repo
+            .chars()
+            .all(|c| !c.is_whitespace() && !matches!(c, '@' | ':' | '\\'))
 }
 
 // ---------------------------------------------------------------- helpers
@@ -1864,7 +2155,10 @@ mod tests {
     fn agent_names_are_at_most_32_characters() {
         assert!(agent_name_fits("harbor", "heat"));
         assert!(agent_name_fits("harbor", "captain"));
-        assert!(!agent_name_fits("harbor", "a-very-long-lane-name-for-harbor"));
+        assert!(!agent_name_fits(
+            "harbor",
+            "a-very-long-lane-name-for-harbor"
+        ));
     }
 
     #[test]

@@ -53,11 +53,7 @@ pub struct StationProgress {
 ///
 /// The voyage's scope is its tasks whose state is not Draft, Cancelled or
 /// Failed (the rule of `crates/gear-app/src/station.rs`).
-pub fn progress(
-    tx: &Tx<'_>,
-    project: &str,
-    milestone: &str,
-) -> GearResult<Vec<StationProgress>> {
+pub fn progress(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<Vec<StationProgress>> {
     let stations = tx.voyage_stations(project, milestone)?;
     if stations.is_empty() {
         return Ok(Vec::new());
@@ -96,8 +92,7 @@ pub fn progress(
                 *latest_at = (*latest_at).max(at);
             }
             None => {
-                entry.left_min += crate::voyage::estimate_of(tx, project, &task)?
-                    .unwrap_or(0);
+                entry.left_min += crate::voyage::estimate_of(tx, project, &task)?.unwrap_or(0);
             }
         }
     }
@@ -163,11 +158,7 @@ pub fn course(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<String>
 /// The one text every captain output uses: the voyage's goal, its bar and
 /// where the voyage stands. None when the voyage is missing or its `done` is
 /// empty.
-pub fn goal_text(
-    tx: &Tx<'_>,
-    project: &str,
-    milestone: &str,
-) -> GearResult<Option<String>> {
+pub fn goal_text(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<Option<String>> {
     let Some(voyage) = tx.get_voyage(project, milestone)? else {
         return Ok(None);
     };

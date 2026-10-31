@@ -85,7 +85,15 @@ fn world(on_quota_review: &str) -> (Store, SeatRow) {
             project.config_toml = config(on_quota_review);
             tx.update_project(&project)?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAPTAIN_PANE, "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAPTAIN_PANE,
+                "claude",
+                T0,
+            )?;
             tx.insert_task(&TaskRow {
                 repo: None,
                 base: None,
@@ -151,9 +159,16 @@ fn world(on_quota_review: &str) -> (Store, SeatRow) {
 }
 
 fn cfg() -> EngineCfg {
-    let mut cfg = EngineCfg { db_path: crate::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
+    let mut cfg = EngineCfg {
+        db_path: crate::temp("gear-engine-tests")
+            .join("gear.db")
+            .to_string_lossy()
+            .into_owned(),
+        ..Default::default()
+    };
     for kind in ["opencode", "claude", "codex"] {
-        cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        cfg.profiles
+            .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
     }
     cfg
 }
@@ -167,7 +182,11 @@ fn observed(seat: &SeatRow, quota: bool, idle: bool) -> Vec<SeatObs> {
     vec![SeatObs {
         seat: seat.clone(),
         presence: Presence::Present,
-        status: Some(if idle { AgentStatus::Idle } else { AgentStatus::Working }),
+        status: Some(if idle {
+            AgentStatus::Idle
+        } else {
+            AgentStatus::Working
+        }),
         flags,
         idle,
         screen: None,
@@ -229,9 +248,9 @@ fn starts(herdr: &FakeHerdr) -> Vec<(String, String, Vec<String>)> {
         .calls
         .iter()
         .filter_map(|call| match call {
-            Call::AgentStart { kind, pane, args, .. } => {
-                Some((kind.clone(), pane.clone(), args.clone()))
-            }
+            Call::AgentStart {
+                kind, pane, args, ..
+            } => Some((kind.clone(), pane.clone(), args.clone())),
             _ => None,
         })
         .collect()
@@ -248,18 +267,31 @@ fn a_spent_codex_reviewer_is_restarted_on_the_review_fallback() {
     // One quota screen is not enough for the codex profile (`confirm_rounds`).
     let report = tick(&mut store, &mut herdr, true, T0 + 10);
     assert!(report.events.is_empty(), "{:?}", report.events);
-    assert!(exits(&herdr).is_empty(), "nothing is closed on the first tick");
+    assert!(
+        exits(&herdr).is_empty(),
+        "nothing is closed on the first tick"
+    );
 
     // The limit is confirmed: the Codex agent is told to exit.
     let report = tick(&mut store, &mut herdr, true, T0 + 20);
     assert!(report.events.is_empty(), "{:?}", report.events);
     let exit_command = gear_herdr::builtin("codex").unwrap().exit_command;
     // M4 §12 item 4: codex exits with the typed `/quit`, not with keys.
-    assert_eq!(exit_prompts(&herdr), vec![exit_command.unwrap_or_default()], "{:?}", herdr.calls);
+    assert_eq!(
+        exit_prompts(&herdr),
+        vec![exit_command.unwrap_or_default()],
+        "{:?}",
+        herdr.calls
+    );
     assert!(exits(&herdr).is_empty(), "no exit keys for codex any more");
-    assert!(starts(&herdr).is_empty(), "nothing starts before the pane is a shell");
     assert!(
-        gear_engine::restart::pending(&mut store, "p:r-1").unwrap().is_some(),
+        starts(&herdr).is_empty(),
+        "nothing starts before the pane is a shell"
+    );
+    assert!(
+        gear_engine::restart::pending(&mut store, "p:r-1")
+            .unwrap()
+            .is_some(),
         "the restart is durable"
     );
     // The seat leaves the doorbell's reach before its agent goes.
@@ -284,8 +316,15 @@ fn a_spent_codex_reviewer_is_restarted_on_the_review_fallback() {
     assert_eq!(seat.state, SeatState::Active, "{:?}", seat.state_reason);
     assert_eq!(seat.generation, 2, "the fallback is a new generation");
     assert_eq!(seat.profile, "opencode");
-    assert_eq!(seat.task_id.as_deref(), Some("T-7"), "the seat keeps its job");
-    let binding = store.read(|tx| tx.get_binding("p:r-1", 2)).unwrap().unwrap();
+    assert_eq!(
+        seat.task_id.as_deref(),
+        Some("T-7"),
+        "the seat keeps its job"
+    );
+    let binding = store
+        .read(|tx| tx.get_binding("p:r-1", 2))
+        .unwrap()
+        .unwrap();
     assert_eq!(binding.kind, "opencode");
     assert_eq!(binding.pane_id, REVIEW_PANE);
     assert_eq!(
@@ -294,7 +333,11 @@ fn a_spent_codex_reviewer_is_restarted_on_the_review_fallback() {
         "the new agent is up before the packet goes"
     );
     assert_eq!(report.events.len(), 1, "{:?}", report.events);
-    assert!(report.events[0].contains("restarted on opencode"), "{:?}", report.events);
+    assert!(
+        report.events[0].contains("restarted on opencode"),
+        "{:?}",
+        report.events
+    );
 
     // The job travels with the seat: a full review packet for the same task
     // and attempt, not the lane's "Continue T-n".
@@ -306,21 +349,40 @@ fn a_spent_codex_reviewer_is_restarted_on_the_review_fallback() {
     assert_eq!(packet.attempt, Some(1));
     assert_eq!(packet.generation, 2);
     let text = packet.payload["text"].as_str().unwrap_or_default();
-    assert!(text.starts_with("Review T-7 attempt 1."), "{text}");
-    assert!(text.contains("abc1234"), "the candidate rides along: {text}");
-    assert!(text.contains("gear send --kind review --task T-7 --attempt 1"), "{text}");
-    assert!(!text.contains("Continue T-7"), "not a lane's continue line: {text}");
+    // T-465: the restarted reviewer's packet starts with the handover of the
+    // agent that was switched, then the review packet.
+    assert!(
+        text.starts_with("## Handover — you take over another agent's work"),
+        "{text}"
+    );
+    assert!(text.contains("Review T-7 attempt 1."), "{text}");
+    assert!(
+        text.contains("abc1234"),
+        "the candidate rides along: {text}"
+    );
+    assert!(
+        text.contains("gear send --kind review --task T-7 --attempt 1"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Continue T-7"),
+        "not a lane's continue line: {text}"
+    );
 
     // The captain hears about the move in an information line.
     let told: Vec<_> = store
         .read(|tx| tx.actionable_for("p", "p:captain", T0 + 40))
         .unwrap();
-    assert!(told.is_empty(), "a successful fallback does not ring: {told:?}");
-    let info = store
-        .read(|tx| tx.thread_messages("p", "r-1:1"))
-        .unwrap();
+    assert!(
+        told.is_empty(),
+        "a successful fallback does not ring: {told:?}"
+    );
+    let info = store.read(|tx| tx.thread_messages("p", "r-1:1")).unwrap();
     assert_eq!(info.len(), 1, "{info:?}");
-    assert!(info[0].state == MsgState::Info && !info[0].urgent, "{info:?}");
+    assert!(
+        info[0].state == MsgState::Info && !info[0].urgent,
+        "{info:?}"
+    );
     assert!(info[0].body.contains("restarted on opencode"), "{info:?}");
 
     // And the verdict settles the same attempt on the new agent.
@@ -363,16 +425,27 @@ fn a_reviewer_on_wait_is_flagged_once_with_its_task() {
 
     assert_eq!(report.events.len(), 1, "{:?}", report.events);
     assert_eq!(reviewer(&mut store).state, SeatState::NeedsCheck);
-    assert!(exits(&herdr).is_empty(), "nothing is closed: {:?}", herdr.calls);
+    assert!(
+        exits(&herdr).is_empty(),
+        "nothing is closed: {:?}",
+        herdr.calls
+    );
     assert!(starts(&herdr).is_empty());
-    let open = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 30)).unwrap();
+    let open = store
+        .read(|tx| tx.actionable_for("p", "p:captain", T0 + 30))
+        .unwrap();
     assert_eq!(open.len(), 1, "one urgent item: {open:?}");
     assert!(open[0].urgent, "{open:?}");
-    assert!(open[0].body.contains("T-7"), "it names the review: {open:?}");
+    assert!(
+        open[0].body.contains("T-7"),
+        "it names the review: {open:?}"
+    );
 
     // A later tick says nothing new.
     tick(&mut store, &mut herdr, true, T0 + 40);
-    let open = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 50)).unwrap();
+    let open = store
+        .read(|tx| tx.actionable_for("p", "p:captain", T0 + 50))
+        .unwrap();
     assert_eq!(open.len(), 1, "told once: {open:?}");
 }
 

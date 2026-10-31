@@ -50,7 +50,8 @@ enum Outcome {
 
 /// The state an op the engine did not finish is left in: the call may have
 /// happened, so it is never repeated.
-const RESTARTED: &str = "the engine stopped before the answer; the call may have happened, so it is not repeated";
+const RESTARTED: &str =
+    "the engine stopped before the answer; the call may have happened, so it is not repeated";
 
 /// One `gh` call that ran past its bound: the forge may have taken it.
 const TIMED_OUT: &str = "the call ran past its bound; the forge may have taken it";
@@ -398,7 +399,9 @@ fn reconcile_land(
         return Ok(Outcome::Pending);
     };
     if let Some(result) = merged_result(&state) {
-        store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Confirmed, Some(&result), now))?;
+        store.write(|tx| {
+            tx.set_op_state(project, &land.op.id, OpState::Confirmed, Some(&result), now)
+        })?;
         return Ok(Outcome::Done(result));
     }
     if state.is_open() && state.head_ref_oid.as_deref() == Some(land.head.as_str()) {
@@ -431,40 +434,74 @@ fn merge_and_record(
     *budget -= 1;
     // The op is Executing before the call: an engine that stops here leaves
     // an op whose outcome is unknown, never one that looks untouched (F3).
-    store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Executing,
-        Some("the merge runs"), now))?;
+    store.write(|tx| {
+        tx.set_op_state(
+            project,
+            &land.op.id,
+            OpState::Executing,
+            Some("the merge runs"),
+            now,
+        )
+    })?;
     match forge.merge(&land.pr, land.method, &land.head) {
         Ok(_) => {
             // The merge commit is read from the pull request (§11.2 step 5).
             // A pull request that is not merged yet leaves the op unknown: the
             // next tick reconciles it by the pull request's own state (F2).
             if *budget == 0 {
-                store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Unknown,
-                    Some("the merge ran; its commit is not read yet"), now))?;
+                store.write(|tx| {
+                    tx.set_op_state(
+                        project,
+                        &land.op.id,
+                        OpState::Unknown,
+                        Some("the merge ran; its commit is not read yet"),
+                        now,
+                    )
+                })?;
                 return Ok(Outcome::Pending);
             }
             *budget -= 1;
             let Ok(state) = forge.pr_state(&land.pr) else {
-                store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Unknown,
-                    Some("the merge ran; its commit is not read yet"), now))?;
+                store.write(|tx| {
+                    tx.set_op_state(
+                        project,
+                        &land.op.id,
+                        OpState::Unknown,
+                        Some("the merge ran; its commit is not read yet"),
+                        now,
+                    )
+                })?;
                 return Ok(Outcome::Pending);
             };
             let Some(result) = merged_result(&state) else {
-                store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Unknown,
-                    Some("the merge was accepted; the pull request is not merged yet"), now))?;
+                store.write(|tx| {
+                    tx.set_op_state(
+                        project,
+                        &land.op.id,
+                        OpState::Unknown,
+                        Some("the merge was accepted; the pull request is not merged yet"),
+                        now,
+                    )
+                })?;
                 return Ok(Outcome::Pending);
             };
-            store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Confirmed, Some(&result), now))?;
+            store.write(|tx| {
+                tx.set_op_state(project, &land.op.id, OpState::Confirmed, Some(&result), now)
+            })?;
             Ok(Outcome::Done(result))
         }
         Err(crate::Error::Timeout(_)) => {
             // The forge may have taken it: the next tick reconciles.
-            store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Unknown, Some(TIMED_OUT), now))?;
+            store.write(|tx| {
+                tx.set_op_state(project, &land.op.id, OpState::Unknown, Some(TIMED_OUT), now)
+            })?;
             Ok(Outcome::Pending)
         }
         Err(why) => {
             let reason = why.to_string();
-            store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Failed, Some(&reason), now))?;
+            store.write(|tx| {
+                tx.set_op_state(project, &land.op.id, OpState::Failed, Some(&reason), now)
+            })?;
             Ok(Outcome::Pending)
         }
     }
@@ -476,7 +513,10 @@ fn merged_result(state: &crate::PrState) -> Option<String> {
     if !state.is_merged() {
         return None;
     }
-    let commit = state.merge_commit.clone().filter(|commit| !commit.trim().is_empty())?;
+    let commit = state
+        .merge_commit
+        .clone()
+        .filter(|commit| !commit.trim().is_empty())?;
     Some(serde_json::json!({ "merge_commit": commit }).to_string())
 }
 
@@ -561,7 +601,10 @@ fn calls_after_claim(project: &str, fact: &Fact, pr: &PrRef) -> Vec<Call> {
             let ci = if reviewer.is_empty() {
                 String::new()
             } else {
-                format!("\n\n{}", marker::completion(reviewer, attempt.n as u32, Some("pass")))
+                format!(
+                    "\n\n{}",
+                    marker::completion(reviewer, attempt.n as u32, Some("pass"))
+                )
             };
             calls.push(Call {
                 key: format!("{base}:merge"),
@@ -617,7 +660,8 @@ fn run_call(
     {
         // The engine stopped between the intent and the answer: the call may
         // have happened, so it is never repeated (T-91, F4).
-        store.write(|tx| tx.set_op_state(project, &op.id, OpState::Unknown, Some(RESTARTED), now))?;
+        store
+            .write(|tx| tx.set_op_state(project, &op.id, OpState::Unknown, Some(RESTARTED), now))?;
         return Ok(Outcome::Pending);
     }
     if *budget == 0 {
@@ -674,15 +718,17 @@ fn act(forge: &dyn Forge, what: &What) -> ForgeResult<String> {
             base,
             title,
             body,
-        } => forge
-            .open_claim(repo, branch, base, title, body)
-            .map(|pr| serde_json::json!({ "repo": pr.repo, "number": pr.number, "url": pr.url }).to_string()),
+        } => forge.open_claim(repo, branch, base, title, body).map(|pr| {
+            serde_json::json!({ "repo": pr.repo, "number": pr.number, "url": pr.url }).to_string()
+        }),
         What::Comment { pr, body } => forge.comment(pr, body).map(|_| String::new()),
         What::Close {
             repo,
             issue,
             comment,
-        } => forge.close_issue(repo, *issue, comment).map(|_| String::new()),
+        } => forge
+            .close_issue(repo, *issue, comment)
+            .map(|_| String::new()),
     }
 }
 
@@ -698,8 +744,12 @@ fn facts(tx: &Tx<'_>, project: &str) -> GearResult<Vec<Fact>> {
     };
     let mut facts = Vec::new();
     for task in tx.tasks_of_project(project)? {
-        let Some(issue) = task.issue.and_then(|n| u64::try_from(n).ok()) else { continue };
-        let Some(lane) = task.lane.clone() else { continue };
+        let Some(issue) = task.issue.and_then(|n| u64::try_from(n).ok()) else {
+            continue;
+        };
+        let Some(lane) = task.lane.clone() else {
+            continue;
+        };
         let Some((github, integration)) = config.mode_of_lane(&lane) else {
             continue;
         };
@@ -849,12 +899,11 @@ impl Config {
             .iter()
             .find(|section| section.name == lane)
             .and_then(|section| section.repo.as_deref());
-        let (github, integration) = match bound
-            .and_then(|name| self.repos.iter().find(|repo| repo.name == name))
-        {
-            Some(section) => (section.github.as_ref(), section.integration.clone()),
-            None => (self.github.as_ref(), None),
-        };
+        let (github, integration) =
+            match bound.and_then(|name| self.repos.iter().find(|repo| repo.name == name)) {
+                Some(section) => (section.github.as_ref(), section.integration.clone()),
+                None => (self.github.as_ref(), None),
+            };
         let github = github.and_then(|section| {
             Some(Github {
                 repo: section.repo.clone()?,

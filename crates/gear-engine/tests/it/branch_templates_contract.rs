@@ -68,11 +68,23 @@ impl Repo {
         let root = tempfile::tempdir().unwrap();
         let origin = root.path().join("origin.git");
         let work = root.path().join("work");
-        sh(root.path(), &format!("git init -q --bare -b dev {}", origin.display()));
-        sh(root.path(), &format!("git init -q -b dev {}", work.display()));
+        sh(
+            root.path(),
+            &format!("git init -q --bare -b dev {}", origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git init -q -b dev {}", work.display()),
+        );
         fs::write(work.join("README.md"), "base\n").unwrap();
-        sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm base");
-        sh(&work, &format!("git remote add origin {}", origin.display()));
+        sh(
+            &work,
+            "git add -A && git -c user.email=a@b -c user.name=a commit -qm base",
+        );
+        sh(
+            &work,
+            &format!("git remote add origin {}", origin.display()),
+        );
         publish(&work, "dev");
         Repo { root, origin, work }
     }
@@ -182,7 +194,11 @@ fn world(config: &str) -> Store {
     let mut store = Store::open_in_memory().unwrap();
     admin::init_with_home(
         &mut store,
-        &Env { ctx: None, pane_id: None, admin: true },
+        &Env {
+            ctx: None,
+            pane_id: None,
+            admin: true,
+        },
         config,
         Some(crate::skill_home()),
         false,
@@ -252,12 +268,20 @@ fn created(herdr: &FakeHerdr, branch: &str) -> (String, String, String, String) 
         .calls
         .iter()
         .find_map(|call| match call {
-            Call::WorktreeCreate { repo, branch: made, base, label } if made == branch => {
-                Some((repo.clone(), made.clone(), base.clone(), label.clone()))
-            }
+            Call::WorktreeCreate {
+                repo,
+                branch: made,
+                base,
+                label,
+            } if made == branch => Some((repo.clone(), made.clone(), base.clone(), label.clone())),
             _ => None,
         })
-        .unwrap_or_else(|| panic!("the engine created the worktree {branch}: {:?}", herdr.calls))
+        .unwrap_or_else(|| {
+            panic!(
+                "the engine created the worktree {branch}: {:?}",
+                herdr.calls
+            )
+        })
 }
 
 /// Wait for the merge to finish; it must be confirmed.
@@ -268,7 +292,8 @@ fn wait_merge(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg) {
         merge_passed(store, herdr, cfg, "p", T0 + 40).unwrap();
         let op = store
             .read(|tx| {
-                Ok(tx.ops_in_state("p", OpState::Confirmed)?
+                Ok(tx
+                    .ops_in_state("p", OpState::Confirmed)?
                     .into_iter()
                     .find(|op| op.kind == OpKind::Merge))
             })
@@ -278,7 +303,8 @@ fn wait_merge(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg) {
         }
         let failed = store
             .read(|tx| {
-                Ok(tx.ops_in_state("p", OpState::Failed)?
+                Ok(tx
+                    .ops_in_state("p", OpState::Failed)?
                     .into_iter()
                     .find(|op| op.kind == OpKind::Merge)
                     .map(|op| op.result))
@@ -305,9 +331,11 @@ fn wait_merge(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg) {
 #[test]
 fn the_dispatch_packet_and_the_lane_worktree_come_from_the_projects_templates() {
     let repo = Repo::new();
-    let config = repo.config(r#"task_branch = "b/{project}/{lane}/t{n}"
+    let config = repo.config(
+        r#"task_branch = "b/{project}/{lane}/t{n}"
 review_branch = "b/review/t{n}"
-seat_branch = "w/{seat}""#);
+seat_branch = "w/{seat}""#,
+    );
     let mut store = world(&config);
     let mut herdr = FakeHerdr::new();
     let cfg = cfg();
@@ -315,7 +343,10 @@ seat_branch = "w/{seat}""#);
     let active = onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
     assert_eq!(active, vec!["p:heat".to_string()]);
     let (_, branch, base, _) = created(&herdr, "w/heat");
-    assert_eq!(branch, "w/heat", "the project's seat_branch names the worktree");
+    assert_eq!(
+        branch, "w/heat",
+        "the project's seat_branch names the worktree"
+    );
     assert_eq!(base, "dev");
 
     // The dispatch packet names the project's task branch.
@@ -325,7 +356,10 @@ seat_branch = "w/{seat}""#);
         .write(|tx| intend_dispatch(tx, "p", &actions, T0 + 10).map(|_| ()))
         .unwrap();
     let text = delivered(&mut store, "p:heat");
-    assert!(text.contains("b/p/heat/t1"), "the dispatch packet names the branch: {text}");
+    assert!(
+        text.contains("b/p/heat/t1"),
+        "the dispatch packet names the branch: {text}"
+    );
 }
 
 /// T-253: the review packet names `review_branch`, the review seat's worktree
@@ -334,9 +368,11 @@ seat_branch = "w/{seat}""#);
 #[test]
 fn the_review_and_the_merge_come_from_the_projects_templates() {
     let repo = Repo::new();
-    let config = repo.config(r#"task_branch = "b/{project}/{lane}/t{n}"
+    let config = repo.config(
+        r#"task_branch = "b/{project}/{lane}/t{n}"
 review_branch = "b/review/t{n}"
-seat_branch = "w/{seat}""#);
+seat_branch = "w/{seat}""#,
+    );
     let mut store = world(&config);
     let mut herdr = FakeHerdr::new();
     let cfg = cfg();
@@ -364,7 +400,10 @@ seat_branch = "w/{seat}""#);
     let (_, branch, _, _) = created(&herdr, "w/review-1");
     assert_eq!(branch, "w/review-1");
     let text = delivered(&mut store, "p:review-1");
-    assert!(text.contains("b/review/t1"), "the review packet names the branch: {text}");
+    assert!(
+        text.contains("b/review/t1"),
+        "the review packet names the branch: {text}"
+    );
 
     // The reviewer's work, the verdict, the merge.
     repo.review_work("b/review/t1");
@@ -402,13 +441,19 @@ seat_branch = "w/{seat}""#);
 
     // The merge opened the worktree of the project's seat_branch.
     assert!(
-        herdr.calls.iter().any(|call| matches!(call, Call::WorktreeOpen { branch, .. } if branch == "w/merge")),
+        herdr
+            .calls
+            .iter()
+            .any(|call| matches!(call, Call::WorktreeOpen { branch, .. } if branch == "w/merge")),
         "the merge opened w/merge: {:?}",
         herdr.calls
     );
     let log = sh(&repo.origin, "git log --format=%s dev");
     assert!(log.contains("work"), "the task branch landed: {log}");
-    assert!(log.contains("review"), "the review branch from the template landed: {log}");
+    assert!(
+        log.contains("review"),
+        "the review branch from the template landed: {log}"
+    );
     // The task branch the merge consumed is closed on origin, under the name
     // the project's template gave it.
     assert_eq!(
@@ -425,9 +470,11 @@ seat_branch = "w/{seat}""#);
 #[test]
 fn a_merge_closes_only_the_tasks_own_branches() {
     let repo = Repo::new();
-    let config = repo.config(r#"task_branch = "tasks/{n}/work"
+    let config = repo.config(
+        r#"task_branch = "tasks/{n}/work"
 review_branch = "b/review/t{n}"
-seat_branch = "w/{seat}""#);
+seat_branch = "w/{seat}""#,
+    );
     let mut store = world(&config);
     let mut herdr = FakeHerdr::new();
     let cfg = cfg();
@@ -530,9 +577,17 @@ fn a_worktree_of_another_repository_is_not_used_and_opens_a_captain_item() {
     );
 
     // The captain hears about it once, on the seat's own thread.
-    let items = store.read(|tx| tx.thread_messages("p", "worktree:heat")).unwrap();
-    let body = items.last().map(|message| message.body.clone()).unwrap_or_default();
+    let items = store
+        .read(|tx| tx.thread_messages("p", "worktree:heat"))
+        .unwrap();
+    let body = items
+        .last()
+        .map(|message| message.body.clone())
+        .unwrap_or_default();
     assert!(body.contains("belongs to another repository"), "{body}");
-    assert!(body.contains("conventions.seat_branch with {project}"), "{body}");
+    assert!(
+        body.contains("conventions.seat_branch with {project}"),
+        "{body}"
+    );
     assert_eq!(items.len(), 1, "one item, not one per tick: {items:?}");
 }

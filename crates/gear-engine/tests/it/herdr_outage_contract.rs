@@ -32,7 +32,15 @@ fn world() -> World {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "codex",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
             tx.insert_task(&TaskRow {
                 repo: None,
@@ -72,7 +80,11 @@ fn world() -> World {
         profiles: gear_herdr::builtins(),
         ..Default::default()
     };
-    cfg.profiles.get_mut("opencode").unwrap().new_session.clear();
+    cfg.profiles
+        .get_mut("opencode")
+        .unwrap()
+        .new_session
+        .clear();
     World { store, herdr, cfg }
 }
 
@@ -121,14 +133,21 @@ fn a_failed_observation_decides_nothing_and_the_next_tick_acts_again() {
     assert!(ops.is_empty(), "a failed observation writes no op: {ops:?}");
     let stall = w.stall_items();
     assert!(stall.is_empty(), "and no stall item: {stall:?}");
-    assert!(w.herdr.calls.is_empty(), "and no side effect: {:?}", w.herdr.calls);
+    assert!(
+        w.herdr.calls.is_empty(),
+        "and no side effect: {:?}",
+        w.herdr.calls
+    );
 
     // Two failed ticks in a row: still nothing decided, nothing flagged.
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 20).unwrap();
     assert_eq!(report.observe_failed, vec!["p".to_string()], "{report:?}");
     assert!(report.flagged.is_empty(), "{report:?}");
     let ops = w.ops();
-    assert!(ops.is_empty(), "the second failed tick writes no op: {ops:?}");
+    assert!(
+        ops.is_empty(),
+        "the second failed tick writes no op: {ops:?}"
+    );
     let stall = w.stall_items();
     assert!(stall.is_empty(), "{stall:?}");
     assert!(w.herdr.calls.is_empty(), "{:?}", w.herdr.calls);
@@ -146,6 +165,11 @@ fn a_failed_observation_decides_nothing_and_the_next_tick_acts_again() {
         w.herdr.calls
     );
     let said = w.herdr.prompts_to(LANE_PANE);
-    assert_eq!(said.len(), 1, "one packet, not one per failed tick: {:?}", w.herdr.calls);
+    assert_eq!(
+        said.len(),
+        1,
+        "one packet, not one per failed tick: {:?}",
+        w.herdr.calls
+    );
     assert!(said[0].contains(TASK), "{said:?}");
 }

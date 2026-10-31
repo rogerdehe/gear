@@ -30,6 +30,7 @@ fn profile(kind: &str) -> gear_herdr::Profile {
         compact: String::new(),
         usage_log: None,
         error_markers: Vec::new(),
+        dialogs: Vec::new(),
         busy_markers: vec!["esc interrupt".into()],
         ratelimit_markers: vec![],
         quota_markers: vec![],
@@ -60,13 +61,26 @@ fn world() -> World {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "codex",
+                T0,
+            )?;
             Ok(())
         })
         .unwrap();
     let mut herdr = FakeHerdr::new();
     herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
-    let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
+    let mut cfg = EngineCfg {
+        tick_s: 4,
+        cooldown_s: 30,
+        doorbell_check_budget: 3,
+        ..Default::default()
+    };
     for kind in ["codex", "opencode"] {
         cfg.profiles.insert(kind.to_string(), profile(kind));
     }
@@ -254,7 +268,8 @@ fn warm_reviewer(w: &mut World) -> SeatRow {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                 issue: None,updated: T0,
+                issue: None,
+                updated: T0,
             })?;
             tx.insert_contract(&ContractRow {
                 project: "p".into(),
@@ -277,8 +292,15 @@ fn warm_reviewer(w: &mut World) -> SeatRow {
             let mut task = tx.get_task("p", "T-7")?.unwrap();
             task.state = TaskState::Verifying;
             tx.update_task(&task)?;
-            let seat =
-                testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, REV_PANE, "codex", T0)?;
+            let seat = testing::seed_active_seat(
+                tx,
+                "p",
+                "review-1",
+                SeatRole::Temp,
+                REV_PANE,
+                "codex",
+                T0,
+            )?;
             tx.set_seat_task(&seat.id, "T-7")?;
             Ok(seat)
         })
@@ -316,8 +338,14 @@ fn a_warm_reviewer_gets_its_packet_before_any_doorbell() {
 
     let said = w.herdr.prompts_to(REV_PANE);
     assert_eq!(said.len(), 1, "{said:?}");
-    assert!(said[0].contains("Review T-7"), "the packet comes first: {said:?}");
-    assert!(!said[0].contains("GEAR:"), "and no doorbell with it: {said:?}");
+    assert!(
+        said[0].contains("Review T-7"),
+        "the packet comes first: {said:?}"
+    );
+    assert!(
+        !said[0].contains("GEAR:"),
+        "and no doorbell with it: {said:?}"
+    );
 }
 
 #[test]
@@ -384,7 +412,8 @@ fn a_reregistered_lane_starts_with_its_task_not_a_doorbell() {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                 issue: None,updated: T0,
+                issue: None,
+                updated: T0,
             })
         })
         .unwrap();
@@ -393,8 +422,14 @@ fn a_reregistered_lane_starts_with_its_task_not_a_doorbell() {
 
     let said = w.herdr.prompts_to(LANE_PANE);
     assert_eq!(said.len(), 1, "{said:?}");
-    assert!(said[0].contains("New task T-1"), "the task comes first: {said:?}");
-    assert!(!said[0].contains("GEAR:"), "and no doorbell with it: {said:?}");
+    assert!(
+        said[0].contains("New task T-1"),
+        "the task comes first: {said:?}"
+    );
+    assert!(
+        !said[0].contains("GEAR:"),
+        "and no doorbell with it: {said:?}"
+    );
 }
 
 #[test]
@@ -441,7 +476,8 @@ fn a_tick_with_a_doorbell_and_a_delivery_for_one_seat_sends_only_the_delivery() 
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                 issue: None,updated: T0,
+                issue: None,
+                updated: T0,
             })
         })
         .unwrap();
@@ -493,7 +529,13 @@ fn a_late_answer_about_the_previous_task_does_not_reach_the_new_job() {
 }
 
 /// `gear` for a seat, as the CLI builds it.
-fn home_of(w: &mut World, seat: &SeatRow, pane: &str, kind: &str, now: i64) -> gear_app::home::Home {
+fn home_of(
+    w: &mut World,
+    seat: &SeatRow,
+    pane: &str,
+    kind: &str,
+    now: i64,
+) -> gear_app::home::Home {
     let env = gear_app::Env {
         ctx: Some(gear_model::GearCtx {
             project: "p".into(),
@@ -517,7 +559,11 @@ fn an_open_item_from_before_a_new_captain_generation_still_rings() {
     // A new captain generation (a handover), and an item that was already
     // open before it: the captain's inbox is the engine's business, so the
     // item must ring (F2 of the T-71 review).
-    let captain = w.store.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
+    let captain = w
+        .store
+        .read(|tx| tx.get_seat("p:captain"))
+        .unwrap()
+        .unwrap();
     w.next_generation(&captain, CAP_PANE);
     w.question("p:captain", "merge of T-5 failed: conflict", T0 + 10);
 
@@ -575,20 +621,48 @@ fn doorbells_to<'a>(w: &'a World, pane: &str) -> Vec<&'a str> {
 #[test]
 fn the_captains_doorbell_names_only_the_items_its_gear_shows() {
     let mut w = world();
-    let first = w.engine_item("p:captain", "merge:1", "T-305: merge of T-305 failed", T0 + 10);
-    let second = w.engine_item("p:captain", "merge:2", "T-310: merge of T-310 failed", T0 + 20);
-    let third = w.engine_item("p:captain", "merge:3", "T-341: merge of T-341 failed", T0 + 30);
+    let first = w.engine_item(
+        "p:captain",
+        "merge:1",
+        "T-305: merge of T-305 failed",
+        T0 + 10,
+    );
+    let second = w.engine_item(
+        "p:captain",
+        "merge:2",
+        "T-310: merge of T-310 failed",
+        T0 + 20,
+    );
+    let third = w.engine_item(
+        "p:captain",
+        "merge:3",
+        "T-341: merge of T-341 failed",
+        T0 + 30,
+    );
 
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 40).unwrap();
 
     let said = doorbells_to(&w, CAP_PANE);
     assert_eq!(said.len(), 1, "{said:?}");
-    assert_eq!(named_by(&said[0]), vec![first.clone(), second.clone()], "{}", said[0]);
+    assert_eq!(
+        named_by(&said[0]),
+        vec![first.clone(), second.clone()],
+        "{}",
+        said[0]
+    );
 
     // And that is what its own `gear` shows: the same two items, not the third.
-    let captain = w.store.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
+    let captain = w
+        .store
+        .read(|tx| tx.get_seat("p:captain"))
+        .unwrap()
+        .unwrap();
     let home = home_of(&mut w, &captain, CAP_PANE, "codex", T0 + 40);
-    assert!(home.text.contains(&first) && home.text.contains(&second), "{}", home.text);
+    assert!(
+        home.text.contains(&first) && home.text.contains(&second),
+        "{}",
+        home.text
+    );
     assert!(!home.text.contains(&third), "{}", home.text);
 }
 
@@ -597,19 +671,47 @@ fn the_captains_doorbell_names_only_the_items_its_gear_shows() {
 #[test]
 fn a_resolved_item_lets_the_next_one_into_the_captains_doorbell() {
     let mut w = world();
-    let first = w.engine_item("p:captain", "merge:1", "T-305: merge of T-305 failed", T0 + 10);
-    let second = w.engine_item("p:captain", "merge:2", "T-310: merge of T-310 failed", T0 + 20);
-    let third = w.engine_item("p:captain", "merge:3", "T-341: merge of T-341 failed", T0 + 30);
+    let first = w.engine_item(
+        "p:captain",
+        "merge:1",
+        "T-305: merge of T-305 failed",
+        T0 + 10,
+    );
+    let second = w.engine_item(
+        "p:captain",
+        "merge:2",
+        "T-310: merge of T-310 failed",
+        T0 + 20,
+    );
+    let third = w.engine_item(
+        "p:captain",
+        "merge:3",
+        "T-341: merge of T-341 failed",
+        T0 + 30,
+    );
 
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 40).unwrap();
     let said = doorbells_to(&w, CAP_PANE);
-    assert_eq!(named_by(&said[0]), vec![first.clone(), second.clone()], "{}", said[0]);
+    assert_eq!(
+        named_by(&said[0]),
+        vec![first.clone(), second.clone()],
+        "{}",
+        said[0]
+    );
 
     // The captain answers the first: the item is resolved, and the doorbell
     // that named it was taken (so its slot and cooldown are over).
     w.store
         .write(|tx| {
-            tx.update_message_state("p", &first, MsgState::Resolved, Some("merged"), None, None, T0 + 50)?;
+            tx.update_message_state(
+                "p",
+                &first,
+                MsgState::Resolved,
+                Some("merged"),
+                None,
+                None,
+                T0 + 50,
+            )?;
             for op in tx.ops_of_seat_kind("p:captain", OpKind::Doorbell)? {
                 tx.set_op_state("p", &op.id, OpState::Confirmed, Some("taken"), T0 + 50)?;
             }
@@ -621,7 +723,12 @@ fn a_resolved_item_lets_the_next_one_into_the_captains_doorbell() {
 
     let said = doorbells_to(&w, CAP_PANE);
     assert_eq!(said.len(), 2, "a second doorbell: {said:?}");
-    assert_eq!(named_by(&said[1]), vec![second.clone(), third.clone()], "{}", said[1]);
+    assert_eq!(
+        named_by(&said[1]),
+        vec![second.clone(), third.clone()],
+        "{}",
+        said[1]
+    );
 }
 
 // ---------------------------------------------------------------- T-319
@@ -659,7 +766,9 @@ fn inbox_threads(home: &str) -> Vec<(bool, Vec<String>)> {
 
 /// The `(<k> urgent)` count of a doorbell text, zero when it carries none.
 fn urgent_in_doorbell(text: &str) -> usize {
-    let Some(start) = text.find(" (") else { return 0 };
+    let Some(start) = text.find(" (") else {
+        return 0;
+    };
     text[start + 2..]
         .split(" urgent)")
         .next()
@@ -679,18 +788,77 @@ fn an_urgent_item_past_the_batch_is_not_rung_and_enters_it_later() {
     // Sender a: one normal thread and two urgent ones. The oldest normal thread
     // takes the reserved slot, so `per_sender` 2 keeps one of the urgent ones
     // and pushes the other past the batch.
-    w.item("p:lane-a", "p:captain", "merge:a1", "T-301: merge of T-301 failed", false, T0 + 10);
-    w.item("p:lane-a", "p:captain", "merge:a2", "T-302: merge of T-302 failed", true, T0 + 20);
-    let past = w.item("p:lane-a", "p:captain", "merge:a3", "T-303: merge of T-303 failed", true, T0 + 30);
-    w.item("p:lane-b", "p:captain", "merge:b1", "T-304: merge of T-304 failed", false, T0 + 40);
-    w.item("p:lane-b", "p:captain", "merge:b2", "T-305: merge of T-305 failed", true, T0 + 50);
-    let normal_past = w.item("p:lane-b", "p:captain", "merge:b3", "T-306: merge of T-306 failed", false, T0 + 60);
-    w.item("p:lane-c", "p:captain", "merge:c1", "T-307: merge of T-307 failed", false, T0 + 70);
-    w.item("p:lane-c", "p:captain", "merge:c2", "T-308: merge of T-308 failed", false, T0 + 80);
+    w.item(
+        "p:lane-a",
+        "p:captain",
+        "merge:a1",
+        "T-301: merge of T-301 failed",
+        false,
+        T0 + 10,
+    );
+    w.item(
+        "p:lane-a",
+        "p:captain",
+        "merge:a2",
+        "T-302: merge of T-302 failed",
+        true,
+        T0 + 20,
+    );
+    let past = w.item(
+        "p:lane-a",
+        "p:captain",
+        "merge:a3",
+        "T-303: merge of T-303 failed",
+        true,
+        T0 + 30,
+    );
+    w.item(
+        "p:lane-b",
+        "p:captain",
+        "merge:b1",
+        "T-304: merge of T-304 failed",
+        false,
+        T0 + 40,
+    );
+    w.item(
+        "p:lane-b",
+        "p:captain",
+        "merge:b2",
+        "T-305: merge of T-305 failed",
+        true,
+        T0 + 50,
+    );
+    let normal_past = w.item(
+        "p:lane-b",
+        "p:captain",
+        "merge:b3",
+        "T-306: merge of T-306 failed",
+        false,
+        T0 + 60,
+    );
+    w.item(
+        "p:lane-c",
+        "p:captain",
+        "merge:c1",
+        "T-307: merge of T-307 failed",
+        false,
+        T0 + 70,
+    );
+    w.item(
+        "p:lane-c",
+        "p:captain",
+        "merge:c2",
+        "T-308: merge of T-308 failed",
+        false,
+        T0 + 80,
+    );
 
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 100).unwrap();
 
-    let said: Vec<String> = doorbells_to(&w, CAP_PANE).into_iter().map(str::to_string).collect();
+    let said: Vec<String> = doorbells_to(&w, CAP_PANE)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     assert_eq!(said.len(), 1, "{said:?}");
     let named = named_by(&said[0]);
     assert_eq!(named.len(), 6, "one batch holds six threads: {}", said[0]);
@@ -703,13 +871,21 @@ fn an_urgent_item_past_the_batch_is_not_rung_and_enters_it_later() {
     // The home page lists the same items: every id the doorbell names is under
     // INBOX, and the doorbell's urgent count is the urgent threads the INBOX
     // marks among them.
-    let captain = w.store.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
+    let captain = w
+        .store
+        .read(|tx| tx.get_seat("p:captain"))
+        .unwrap()
+        .unwrap();
     let home = home_of(&mut w, &captain, CAP_PANE, "codex", T0 + 100);
     let threads = inbox_threads(&home.text);
     let listed: Vec<&String> = threads.iter().flat_map(|(_, ids)| ids.iter()).collect();
     assert_eq!(threads.len(), 6, "{}", home.text);
     for id in &named {
-        assert!(listed.contains(&id), "{id} is named but not in the INBOX: {}", home.text);
+        assert!(
+            listed.contains(&id),
+            "{id} is named but not in the INBOX: {}",
+            home.text
+        );
     }
     let urgent_listed = threads.iter().filter(|(urgent, _)| *urgent).count();
     assert_eq!(
@@ -725,7 +901,15 @@ fn an_urgent_item_past_the_batch_is_not_rung_and_enters_it_later() {
     w.store
         .write(|tx| {
             for id in &named {
-                tx.update_message_state("p", id, MsgState::Resolved, Some("handled"), None, None, T0 + 200)?;
+                tx.update_message_state(
+                    "p",
+                    id,
+                    MsgState::Resolved,
+                    Some("handled"),
+                    None,
+                    None,
+                    T0 + 200,
+                )?;
             }
             for op in tx.ops_of_seat_kind("p:captain", OpKind::Doorbell)? {
                 tx.set_op_state("p", &op.id, OpState::Confirmed, Some("taken"), T0 + 200)?;
@@ -736,7 +920,10 @@ fn an_urgent_item_past_the_batch_is_not_rung_and_enters_it_later() {
 
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 300).unwrap();
 
-    let said: Vec<String> = doorbells_to(&w, CAP_PANE).into_iter().map(str::to_string).collect();
+    let said: Vec<String> = doorbells_to(&w, CAP_PANE)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     assert_eq!(said.len(), 2, "a second doorbell: {said:?}");
     let next = named_by(&said[1]);
     assert_eq!(next.len(), 2, "the two past the batch: {}", said[1]);
@@ -752,7 +939,16 @@ fn an_urgent_item_past_the_batch_is_not_rung_and_enters_it_later() {
         .flat_map(|(_, ids)| ids)
         .collect();
     for id in &next {
-        assert!(listed.contains(id), "{id} is named but not in the INBOX: {}", home.text);
+        assert!(
+            listed.contains(id),
+            "{id} is named but not in the INBOX: {}",
+            home.text
+        );
     }
-    assert_eq!(urgent_in_doorbell(&said[1]), 1, "one of the two is urgent: {}", said[1]);
+    assert_eq!(
+        urgent_in_doorbell(&said[1]),
+        1,
+        "one of the two is urgent: {}",
+        said[1]
+    );
 }

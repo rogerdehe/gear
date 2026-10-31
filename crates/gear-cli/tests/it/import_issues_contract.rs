@@ -55,7 +55,8 @@ fn store_with_plan(db: &Path, github: bool) -> Store {
             testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T0)?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
             let mut project = tx.get_project("p")?.expect("the project");
-            let base = "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/tmp/gear-issues\"\n\
+            let base =
+                "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/tmp/gear-issues\"\n\
                         \n[quota]\nlanes = 1\ntemps = 0\n\
                         \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
                         \n[conventions]\nintegration = \"dev\"\n";
@@ -132,7 +133,6 @@ const ISSUES: &str = r#"[
 {"number":14,"title":"A new idea","body":"","labels":[]}
 ]"#;
 
-
 /// A fake `gh` that behaves like the real one: without `--limit` it answers the
 /// default first page, with it every issue. The argv is still recorded.
 fn fake_gh_paged(dir: &Path, all: &str, page: &str) {
@@ -166,11 +166,7 @@ exit 0
 fn issues_json(numbers: &[u32]) -> String {
     let items: Vec<String> = numbers
         .iter()
-        .map(|n| {
-            format!(
-                "{{\"number\":{n},\"title\":\"issue {n}\",\"body\":\"\",\"labels\":[]}}"
-            )
-        })
+        .map(|n| format!("{{\"number\":{n},\"title\":\"issue {n}\",\"body\":\"\",\"labels\":[]}}"))
         .collect();
     format!("[{}]", items.join(",\n"))
 }
@@ -192,17 +188,30 @@ fn an_issue_older_than_the_first_page_is_still_imported() {
     let voyage = dir.join("M2.md");
     let mut planned = String::from("# Queue\n");
     for n in (2..=31).rev() {
-        planned.push_str(&format!("## T-{n} [must] lane=heat milestone=M2\ngoal: x\nissue: #{n}\n\n"));
+        planned.push_str(&format!(
+            "## T-{n} [must] lane=heat milestone=M2\ngoal: x\nissue: #{n}\n\n"
+        ));
     }
     std::fs::write(&voyage, planned).expect("the voyage file");
 
     let o = gear(&dir, &db, Some(&voyage), &[], &dir.join("bin"));
 
-    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     let out = stdout(&o);
-    assert!(out.contains("issue: #1"), "the older unplanned issue is missing:\n{out}");
+    assert!(
+        out.contains("issue: #1"),
+        "the older unplanned issue is missing:\n{out}"
+    );
     assert!(out.contains("goal: issue 1"), "{out}");
-    assert!(!out.contains("issue: #2\n"), "a planned issue came back:\n{out}");
+    assert!(
+        !out.contains("issue: #2\n"),
+        "a planned issue came back:\n{out}"
+    );
     // The query asked for everything, not the default page.
     let args = argv(&dir.join("bin"));
     assert!(args.windows(2).any(|pair| pair[0] == "--limit"), "{args:?}");
@@ -217,20 +226,37 @@ fn it_prints_blocks_for_the_issues_the_plan_does_not_carry() {
 
     let o = gear(&dir, &db, None, &[], &dir.join("bin"));
 
-    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     let out = stdout(&o);
-    assert!(!out.contains("Already planned"), "issue #12 is in the plan:\n{out}");
+    assert!(
+        !out.contains("Already planned"),
+        "issue #12 is in the plan:\n{out}"
+    );
     assert!(out.contains("goal: A bug in the gate"), "{out}");
     assert!(out.contains("issue: #13"), "{out}");
-    assert!(out.contains("## NEW [should] lane=<lane> milestone=<M>"), "{out}");
+    assert!(
+        out.contains("## NEW [should] lane=<lane> milestone=<M>"),
+        "{out}"
+    );
     assert!(out.contains("accept: the gate is red on main"), "{out}");
     assert!(out.contains("goal: A new idea"), "{out}");
     assert!(out.contains("issue: #14"), "{out}");
     // The config's own label narrowed the query, with the repo named.
     let args = argv(&dir.join("bin"));
     assert_eq!(args.first().map(String::as_str), Some("issue"), "{args:?}");
-    assert!(args.windows(2).any(|pair| pair == ["--repo", "owner/name"]), "{args:?}");
-    assert!(args.windows(2).any(|pair| pair == ["--label", "gear"]), "{args:?}");
+    assert!(
+        args.windows(2).any(|pair| pair == ["--repo", "owner/name"]),
+        "{args:?}"
+    );
+    assert!(
+        args.windows(2).any(|pair| pair == ["--label", "gear"]),
+        "{args:?}"
+    );
 }
 
 #[test]
@@ -247,16 +273,33 @@ fn a_label_flag_narrows_the_query_and_a_voyage_file_narrows_the_plan() {
     )
     .expect("the voyage file");
 
-    let o = gear(&dir, &db, Some(&voyage), &["--label", "bug"], &dir.join("bin"));
+    let o = gear(
+        &dir,
+        &db,
+        Some(&voyage),
+        &["--label", "bug"],
+        &dir.join("bin"),
+    );
 
-    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     let out = stdout(&o);
     assert!(!out.contains("issue: #12"), "{out}");
     assert!(!out.contains("issue: #13"), "the file names it:\n{out}");
     assert!(out.contains("issue: #14"), "{out}");
     let args = argv(&dir.join("bin"));
-    assert!(args.windows(2).any(|pair| pair == ["--label", "gear"]), "{args:?}");
-    assert!(args.windows(2).any(|pair| pair == ["--label", "bug"]), "{args:?}");
+    assert!(
+        args.windows(2).any(|pair| pair == ["--label", "gear"]),
+        "{args:?}"
+    );
+    assert!(
+        args.windows(2).any(|pair| pair == ["--label", "bug"]),
+        "{args:?}"
+    );
 }
 
 #[test]

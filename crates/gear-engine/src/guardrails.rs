@@ -1,5 +1,9 @@
 //! A lane refused by its own guardrails reaches the captain (T-113).
 //!
+//! The same flag is raised by a startup dialog that waits for an answer
+//! (T-457): Codex 0.165's `/new` asks where the new conversation should run
+//! while Herdr reports the agent done/idle.
+//!
 //! Pi runs `@aliou/pi-guardrails`: the `permission-gate` extension refuses a
 //! dangerous command (`Command auto-denied: …`) and the `path-access`
 //! extension refuses a write outside the workspace (`Access to <path> is
@@ -30,12 +34,7 @@ fn key(seat: &str) -> String {
 /// is resolved when a later screen read shows no refusal any more. A screen
 /// that was not read (the agent works) changes nothing — a fact that was not
 /// looked at is not a fact that went away.
-pub fn check(
-    tx: &Tx<'_>,
-    project: &str,
-    observed: &[SeatObs],
-    now: Ts,
-) -> GearResult<Vec<String>> {
+pub fn check(tx: &Tx<'_>, project: &str, observed: &[SeatObs], now: Ts) -> GearResult<Vec<String>> {
     let mut rung = Vec::new();
     for obs in observed
         .iter()
@@ -81,7 +80,7 @@ pub fn check(
             kind: MsgKind::System,
             urgent: false,
             body: format!(
-                "the guardrails of seat {} refused one of its actions: the agent went on, but it was told to do something it may not do. Look at its pane and its last task, then resolve this item. Last screen lines:\n{}",
+                "the screen of seat {} shows a stop: its own guardrails refused an action, or a startup dialog waits for an answer (T-457). Look at its pane and its last task, then resolve this item. Last screen lines:\n{}",
                 seat.name, screen
             ),
             reply_to: None,

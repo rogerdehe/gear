@@ -78,7 +78,8 @@ fn running_attempt(s: &mut gear_store::Store, task_id: &str) {
         })
         .unwrap();
         // Only the start is recorded: the round is still running.
-        tx.set_attempt_time("p", task_id, 1, AttemptStep::Started, T0).unwrap();
+        tx.set_attempt_time("p", task_id, 1, AttemptStep::Started, T0)
+            .unwrap();
         Ok(())
     })
     .unwrap();
@@ -90,15 +91,14 @@ fn running_attempt(s: &mut gear_store::Store, task_id: &str) {
 fn the_elapsed_minutes_of_a_running_task_run_to_now() {
     let mut s = world();
     s.write(|tx| {
-        tx.insert_task(&task("T-1", "heat", TaskState::Running, 60)).unwrap();
+        tx.insert_task(&task("T-1", "heat", TaskState::Running, 60))
+            .unwrap();
         Ok(())
     })
     .unwrap();
     running_attempt(&mut s, "T-1");
 
-    let queue = s
-        .read(|tx| queue::queue(tx, "p", T0 + 38 * 60))
-        .unwrap();
+    let queue = s.read(|tx| queue::queue(tx, "p", T0 + 38 * 60)).unwrap();
     let heat = queue.lanes.iter().find(|lane| lane.lane == "heat").unwrap();
     let working = heat.working.as_ref().expect("the lane works");
     assert_eq!(working.actual_min, Some(38), "38 minutes of work so far");
@@ -114,24 +114,31 @@ fn the_elapsed_minutes_of_a_running_task_run_to_now() {
 fn a_held_lane_with_an_open_attempt_is_idle() {
     let mut s = world();
     s.write(|tx| {
-        tx.insert_task(&task("T-1", "heat", TaskState::Running, 60)).unwrap();
+        tx.insert_task(&task("T-1", "heat", TaskState::Running, 60))
+            .unwrap();
         Ok(())
     })
     .unwrap();
     running_attempt(&mut s, "T-1");
     // The captain holds the lane.
     s.write(|tx| {
-        tx.set_seat_state("p:heat", SeatState::Held, Some("hold: the captain paused it"), T0 + 60)
-            .unwrap();
+        tx.set_seat_state(
+            "p:heat",
+            SeatState::Held,
+            Some("hold: the captain paused it"),
+            T0 + 60,
+        )
+        .unwrap();
         Ok(())
     })
     .unwrap();
 
-    let queue = s
-        .read(|tx| queue::queue(tx, "p", T0 + 38 * 60))
-        .unwrap();
+    let queue = s.read(|tx| queue::queue(tx, "p", T0 + 38 * 60)).unwrap();
     let heat = queue.lanes.iter().find(|lane| lane.lane == "heat").unwrap();
-    assert!(heat.working.is_none(), "a held lane does not work: {heat:?}");
+    assert!(
+        heat.working.is_none(),
+        "a held lane does not work: {heat:?}"
+    );
     assert_eq!(
         heat.idle.as_deref(),
         Some("held: the captain paused it"),
@@ -156,17 +163,19 @@ fn a_waiting_lane_with_an_open_attempt_is_idle() {
         // The task waits for another task (§5.3).
         waiting.wait_on = Some("T-9".into());
         tx.insert_task(&waiting).unwrap();
-        tx.insert_task(&task("T-9", "keel", TaskState::Ready, 30)).unwrap();
+        tx.insert_task(&task("T-9", "keel", TaskState::Ready, 30))
+            .unwrap();
         Ok(())
     })
     .unwrap();
     running_attempt(&mut s, "T-1");
 
-    let queue = s
-        .read(|tx| queue::queue(tx, "p", T0 + 38 * 60))
-        .unwrap();
+    let queue = s.read(|tx| queue::queue(tx, "p", T0 + 38 * 60)).unwrap();
     let heat = queue.lanes.iter().find(|lane| lane.lane == "heat").unwrap();
-    assert!(heat.working.is_none(), "a waiting lane does not work: {heat:?}");
+    assert!(
+        heat.working.is_none(),
+        "a waiting lane does not work: {heat:?}"
+    );
     let idle = heat.idle.as_deref().expect("the lane waits");
     assert!(idle.starts_with("waiting for T-9"), "{idle}");
 }
@@ -181,20 +190,21 @@ fn only_the_available_reviewers_are_in_the_queue() {
         testing::seed_temp_seat(tx, "p", "r-1", "T-1", "w1:p3", "codex", T0).unwrap();
         // A standby reviewer, standing by for three minutes.
         testing::seed_temp_seat(tx, "p", "r-2", "T-2", "w1:p4", "codex", T0).unwrap();
-        tx.set_seat_state("p:r-2", SeatState::Standby, None, T0).unwrap();
+        tx.set_seat_state("p:r-2", SeatState::Standby, None, T0)
+            .unwrap();
         // A released reviewer: its agent and its pane are gone (§3.6).
         testing::seed_temp_seat(tx, "p", "r-3", "T-3", "w1:p5", "codex", T0).unwrap();
-        tx.set_seat_state("p:r-3", SeatState::Released, None, T0).unwrap();
+        tx.set_seat_state("p:r-3", SeatState::Released, None, T0)
+            .unwrap();
         // A retired reviewer.
         testing::seed_temp_seat(tx, "p", "r-4", "T-4", "w1:p6", "codex", T0).unwrap();
-        tx.set_seat_state("p:r-4", SeatState::Retired, None, T0).unwrap();
+        tx.set_seat_state("p:r-4", SeatState::Retired, None, T0)
+            .unwrap();
         Ok(())
     })
     .unwrap();
 
-    let queue = s
-        .read(|tx| queue::queue(tx, "p", T0 + 180))
-        .unwrap();
+    let queue = s.read(|tx| queue::queue(tx, "p", T0 + 180)).unwrap();
     let names: Vec<&str> = queue
         .reviewers
         .iter()
@@ -259,14 +269,18 @@ fn the_queue_shows_the_overlaps_with_the_integration_branch() {
         serde_json::from_str(&serde_json::to_string(&queue).unwrap()).unwrap();
     assert_eq!(json["overlaps"][0]["task"], "T-9");
     assert_eq!(json["overlaps"][0]["integration"], "dev");
-    assert_eq!(json["overlaps"][0]["files"][0], "crates/gear-app/src/queue.rs");
+    assert_eq!(
+        json["overlaps"][0]["files"][0],
+        "crates/gear-app/src/queue.rs"
+    );
 }
 
 /// T-208: a cleared overlap shows nothing.
 #[test]
 fn a_cleared_overlap_is_not_in_the_queue() {
     let mut s = world();
-    s.write(|tx| tx.set_meta("parallel:p:integration:T-9", "")).unwrap();
+    s.write(|tx| tx.set_meta("parallel:p:integration:T-9", ""))
+        .unwrap();
 
     let queue = s.read(|tx| queue::queue(tx, "p", T0)).unwrap();
     assert!(queue.overlaps.is_empty());

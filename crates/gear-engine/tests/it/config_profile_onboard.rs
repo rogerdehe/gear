@@ -46,7 +46,13 @@ gate = "make test"
 "#;
 
 fn cfg() -> EngineCfg {
-    let mut c = EngineCfg { db_path: crate::temp("gear-engine-tests").join("gear.db").to_string_lossy().into_owned(), ..Default::default() };
+    let mut c = EngineCfg {
+        db_path: crate::temp("gear-engine-tests")
+            .join("gear.db")
+            .to_string_lossy()
+            .into_owned(),
+        ..Default::default()
+    };
     // The built-ins only: grok comes from the project config.
     for (name, profile) in gear_herdr::builtins() {
         c.profiles.insert(name, profile);
@@ -60,12 +66,26 @@ fn a_configured_profile_onboards_its_lane() {
     // user's own home, and out of another test's window (HOME is
     // process-wide).
     let home = tempfile::tempdir().unwrap();
-    let _home = crate::HOME_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _home = crate::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let previous = std::env::var("HOME").ok();
     std::env::set_var("HOME", home.path());
 
     let mut s = Store::open_in_memory().unwrap();
-    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, CONFIG,Some(crate::skill_home()), false, T0).unwrap();
+    admin::init_with_home(
+        &mut s,
+        &Env {
+            ctx: None,
+            pane_id: None,
+            admin: true,
+        },
+        CONFIG,
+        Some(crate::skill_home()),
+        false,
+        T0,
+    )
+    .unwrap();
     let mut herdr = FakeHerdr::new();
 
     let active = onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap();
@@ -76,13 +96,19 @@ fn a_configured_profile_onboards_its_lane() {
         .calls
         .iter()
         .filter_map(|call| match call {
-            Call::AgentStart { name, kind, args, .. } => Some((name.as_str(), kind.as_str(), args)),
+            Call::AgentStart {
+                name, kind, args, ..
+            } => Some((name.as_str(), kind.as_str(), args)),
             _ => None,
         })
         .collect();
     assert_eq!(starts.len(), 1, "{starts:?}");
     assert_eq!((starts[0].0, starts[0].1), ("toy-heat", "grok"));
-    assert!(starts[0].2.contains(&"--yolo".to_string()), "{:?}", starts[0].2);
+    assert!(
+        starts[0].2.contains(&"--yolo".to_string()),
+        "{:?}",
+        starts[0].2
+    );
 
     // The seat is active and bound, as for any lane.
     let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();

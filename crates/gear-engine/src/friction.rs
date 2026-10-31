@@ -82,15 +82,12 @@ fn ring_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
     // Newest first (design §6.4, T-416): the store lists them oldest first,
     // by creation and then by the (lexicographic) id.
     let mut open = tx.open_frictions(project)?;
-    open.sort_by(|a, b| {
-        (b.created, id_no(&b.id)).cmp(&(a.created, id_no(&a.id)))
-    });
+    open.sort_by(|a, b| (b.created, id_no(&b.id)).cmp(&(a.created, id_no(&a.id))));
 
     // The item the engine opened, while it is still open.
     let item = match state.item.as_deref() {
         Some(id) => tx.get_message(project, id)?.filter(|message| {
-            matches!(message.state, MsgState::Open | MsgState::Waiting)
-                && message.thread == THREAD
+            matches!(message.state, MsgState::Open | MsgState::Waiting) && message.thread == THREAD
         }),
         None => None,
     };
@@ -107,7 +104,14 @@ fn ring_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
                 None,
                 now,
             )?;
-            write_state(tx, project, &State { at: state.at, item: None })?;
+            write_state(
+                tx,
+                project,
+                &State {
+                    at: state.at,
+                    item: None,
+                },
+            )?;
             return Ok(Some(Change::Closed));
         }
         // A report arrived while the item was open: its list changes.
@@ -156,7 +160,10 @@ fn ring_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
     write_state(
         tx,
         project,
-        &State { at: Some(now), item: Some(message.id) },
+        &State {
+            at: Some(now),
+            item: Some(message.id),
+        },
     )?;
     Ok(Some(Change::Opened))
 }
@@ -180,7 +187,10 @@ fn body(open: &[FrictionRow]) -> String {
     }
     text.push('\n');
     if count > MAX_LISTED {
-        text.push_str(&format!("and {} more: run gear friction", count - MAX_LISTED));
+        text.push_str(&format!(
+            "and {} more: run gear friction",
+            count - MAX_LISTED
+        ));
     } else {
         text.push_str("run gear friction");
     }

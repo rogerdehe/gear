@@ -8,11 +8,17 @@ fn opencode_is_built_in_and_verified() {
     assert_eq!(p.kind, "opencode");
     assert!(p.verified);
     assert_eq!(p.unattended_args, vec!["--auto".to_string()]);
-    assert_eq!(p.resume_args, Some(vec!["-s".to_string(), "{session}".to_string()]));
+    assert_eq!(
+        p.resume_args,
+        Some(vec!["-s".to_string(), "{session}".to_string()])
+    );
     assert_eq!(p.exit_keys, vec!["ctrl+c".to_string()]);
     let quota = classify_screen(&p, "  Error: ... Token Plan ... (2056)\n  Session failed");
     assert!(quota.contains(&ScreenFlag::Quota));
-    assert!(classify_screen(&p, "Free usage limit reached. Connect a provider").contains(&ScreenFlag::Quota));
+    assert!(
+        classify_screen(&p, "Free usage limit reached. Connect a provider")
+            .contains(&ScreenFlag::Quota)
+    );
     // M4 §10.2: the screen never says that an agent is busy — Herdr's state
     // does. The busy marker of the profile is kept, but it decides nothing.
     assert!(classify_screen(&p, "   ■■⬝⬝ esc interrupt").is_empty());
@@ -25,7 +31,10 @@ fn grok_is_built_in_and_verified() {
     assert_eq!(p.kind, "grok");
     assert!(p.verified);
     assert_eq!(p.unattended_args, vec!["--always-approve".to_string()]);
-    assert_eq!(p.resume_args, Some(vec!["-r".to_string(), "{session}".to_string()]));
+    assert_eq!(
+        p.resume_args,
+        Some(vec!["-r".to_string(), "{session}".to_string()])
+    );
     assert!(p.session_ref, "Herdr reports grok's session");
     // It exits on `/exit`, not on a key.
     assert_eq!(p.exit_keys, Vec::<String>::new());
@@ -52,6 +61,10 @@ fn codex_is_built_in_and_never_shows_its_update_dialog() {
             // worktree at start), so no "Trust this folder?" dialog.
             "-c".to_string(),
             "projects={\"{repo_root}\"={trust_level=\"trusted\"}}".to_string(),
+            // T-457: a resume uses the directory Codex was started in (the
+            // seat's own worktree) and never asks which working directory.
+            "-c".to_string(),
+            "tui.resume_cwd=\"current\"".to_string(),
         ]
     );
 }
@@ -138,7 +151,10 @@ fn a_low_codex_limit_is_not_a_quota_stop() {
 #[test]
 fn a_codex_model_at_capacity_is_neither_a_quota_nor_an_auth_stop() {
     let p = builtin("codex").expect("codex is built in");
-    let flags = classify_screen(&p, "■ Selected model is at capacity. Please try a different model.");
+    let flags = classify_screen(
+        &p,
+        "■ Selected model is at capacity. Please try a different model.",
+    );
     assert!(!flags.contains(&ScreenFlag::Quota), "{flags:?}");
     assert!(!flags.contains(&ScreenFlag::Auth), "{flags:?}");
 }
@@ -180,12 +196,24 @@ fn pi_is_built_in_and_verified() {
 fn the_screen_never_says_that_an_agent_is_busy() {
     for kind in ["pi", "codex", "claude", "opencode", "grok"] {
         let p = builtin(kind).unwrap();
-        assert!(classify_screen(&p, "── ⠋ Working ─────────────────────────").is_empty(), "{kind}");
-        assert!(classify_screen(&p, "── ⠧ Working ─────────────────────────").is_empty(), "{kind}");
+        assert!(
+            classify_screen(&p, "── ⠋ Working ─────────────────────────").is_empty(),
+            "{kind}"
+        );
+        assert!(
+            classify_screen(&p, "── ⠧ Working ─────────────────────────").is_empty(),
+            "{kind}"
+        );
         // The line that holds pi's old busy sign in the middle of a word.
-        assert!(classify_screen(&p, "Working tree clean").is_empty(), "{kind}");
+        assert!(
+            classify_screen(&p, "Working tree clean").is_empty(),
+            "{kind}"
+        );
         // Codex's own busy sign.
-        assert!(classify_screen(&p, "• Working (12s • esc to interrupt)").is_empty(), "{kind}");
+        assert!(
+            classify_screen(&p, "• Working (12s • esc to interrupt)").is_empty(),
+            "{kind}"
+        );
         // The idle screen says nothing either.
         assert!(classify_screen(&p, "LSP Inactive").is_empty(), "{kind}");
     }
@@ -202,11 +230,19 @@ fn the_pi_provider_signs_are_recognised() {
     let limited = " Error: 429: {\"message\":\"Rate limit reached for mock-model\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\"}";
     let flags = classify_screen(&p, limited);
     assert!(flags.contains(&ScreenFlag::RateLimit));
-    assert!(!flags.contains(&ScreenFlag::Quota), "a rate limit is not a spent quota");
+    assert!(
+        !flags.contains(&ScreenFlag::Quota),
+        "a rate limit is not a spent quota"
+    );
     // No credentials.
-    assert!(classify_screen(&p, " Error: No API key found for anthropic.").contains(&ScreenFlag::Auth));
+    assert!(
+        classify_screen(&p, " Error: No API key found for anthropic.").contains(&ScreenFlag::Auth)
+    );
     // The provider back-off: pi retries on its own, so it is not a stall.
-    assert!(classify_screen(&p, "── ⠙ Retrying (3/3) in 7s... (escape to cancel) ──").contains(&ScreenFlag::Backoff));
+    assert!(
+        classify_screen(&p, "── ⠙ Retrying (3/3) in 7s... (escape to cancel) ──")
+            .contains(&ScreenFlag::Backoff)
+    );
 }
 
 /// The guardrails refusals of `@aliou/pi-guardrails` (T-113): the agent goes
@@ -214,14 +250,16 @@ fn the_pi_provider_signs_are_recognised() {
 #[test]
 fn the_pi_guardrails_refusals_are_recognised() {
     let p = builtin("pi").unwrap();
-    assert!(
-        classify_screen(&p, "   Command auto-denied: No privileged commands in an unattended lane.")
-            .contains(&ScreenFlag::Blocked)
-    );
-    assert!(
-        classify_screen(&p, "   Access to ~/probe.txt is blocked (outside working directory).")
-            .contains(&ScreenFlag::Blocked)
-    );
+    assert!(classify_screen(
+        &p,
+        "   Command auto-denied: No privileged commands in an unattended lane."
+    )
+    .contains(&ScreenFlag::Blocked));
+    assert!(classify_screen(
+        &p,
+        "   Access to ~/probe.txt is blocked (outside working directory)."
+    )
+    .contains(&ScreenFlag::Blocked));
     // Ordinary output is not a refusal.
     assert!(!classify_screen(&p, " Took 0.0s\n done-sleeping").contains(&ScreenFlag::Blocked));
 }

@@ -49,7 +49,11 @@ fn world() -> (tempfile::TempDir, Store) {
     let mut s = Store::open_in_memory().unwrap();
     admin::init_with_home(
         &mut s,
-        &Env { ctx: None, pane_id: None, admin: true },
+        &Env {
+            ctx: None,
+            pane_id: None,
+            admin: true,
+        },
         &TEMPLATE.replace("{root}", &root.path().display().to_string()),
         Some(crate::skill_home()),
         false,
@@ -99,13 +103,21 @@ fn world() -> (tempfile::TempDir, Store) {
 
 fn write_standard(root: &Path) {
     fs::create_dir_all(root.join("gear")).unwrap();
-    fs::write(root.join("gear/standard.md"), "# Standard\n\none good example\n").unwrap();
+    fs::write(
+        root.join("gear/standard.md"),
+        "# Standard\n\none good example\n",
+    )
+    .unwrap();
 }
 
 #[test]
 fn the_line_names_the_absolute_file_and_what_it_is_for() {
     let root = tempfile::tempdir().unwrap();
-    assert_eq!(standard::line(&root.path().display().to_string()), None, "no file, no line");
+    assert_eq!(
+        standard::line(&root.path().display().to_string()),
+        None,
+        "no file, no line"
+    );
 
     write_standard(root.path());
 
