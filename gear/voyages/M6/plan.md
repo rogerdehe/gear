@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1049 -->
+<!-- gear-plan project=gear base=1050 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -142,6 +142,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-10-31 18:45 scope: hull task, a direction round ends when its check ends | why: another project's false overrun item M-5705 rang for a direction round left open after its result (goal clause 3, normal use) | else: log it
 - 2026-10-31 18:50 T-509 pass (audit S4, all points met); F1 fixed by hand: docs/releases/v0.6.3.md said S4 was omp usage; it now names the plan tools and where they shipped; the T-509 record merged by hand until T-512 | why: a release record must say what the station delivered | else: -
 - station M-7317: keep course — projected 1161m of 1200m; S1, S3, S4 audits passed; four fix tasks on both lanes, S2 re-audit, S5 and goal audits, then the v0.6.4 tag
+- 2026-10-31 18:58 T-510 pass (audit S5, six points met, no finding); point 6 (audit tasks) has the record-merge gap found live and fixed by T-512; record merged by hand until T-512 | why: - | else: -
 
 # Queue
 
