@@ -162,7 +162,7 @@ pub fn apply(
             // before the queue writes so the guard can tell a new milestone
             // from one that already carried tasks.
             let guard = planned_guard(tx, &ctx.project, draft)?;
-            let result = apply_queue(
+            let mut result = apply_queue(
                 tx,
                 &ctx.project,
                 &seat.id,
@@ -182,6 +182,31 @@ pub fn apply(
             let departed = departed_voyages(tx, &ctx.project)?;
             fix_departures(tx, &ctx.project, now)?;
             record_voyages(tx, &ctx.project, draft, &departed, now)?;
+            // T-473: a `- drop <milestone>` removes a milestone with no task
+            // and no history. It runs after the voyages so a task moved out in
+            // this same apply no longer holds it, and after the queue so the
+            // tasks' states are final.
+            for item in &draft.staff {
+                if let StaffItem::Drop { milestone, .. } = item {
+                    drop_milestone(tx, &ctx.project, draft, milestone, staff_line(item))?;
+                    result.staffed.push(format!("drop {milestone}"));
+                    let version = tx.plan_version(&ctx.project)?;
+                    // F2: the voyage row is gone; a decision against its id
+                    // would be inherited by a later milestone of the same id.
+                    // Keep the staff line in the append-only log, unattached.
+                    record_gear_decision(
+                        tx,
+                        &ctx.project,
+                        "",
+                        version,
+                        "staff",
+                        &staff_text(item),
+                        None,
+                        &staff_text(item),
+                        now,
+                    )?;
+                }
+            }
             record_task_stations(tx, &ctx.project, draft, &result.created)?;
             // T-461: after every validation of the file has spoken, a new
             // milestone's departure and a move between milestones need the
@@ -414,6 +439,20 @@ fn apply_queue(
                             ));
                         }
                     }
+                    Some("hold") => {
+                        // T-473: a task can be kept out of delivery only
+                        // before it is delivered; a running or waiting task
+                        // already has an attempt on it.
+                        if !matches!(task.state, TaskState::Draft | TaskState::Ready) {
+                            return Err(bad(
+                                item.line,
+                                format!(
+                                    "task {id} is {}, only a draft or ready task is held here",
+                                    task.state.as_str()
+                                ),
+                            ));
+                        }
+                    }
                     Some(other) => {
                         return Err(bad(item.line, format!("unknown state {other:?}")));
                     }
@@ -438,9 +477,9 @@ fn apply_queue(
                         "a NEW block needs `estimate:` (the planned time in minutes)",
                     ));
                 }
-                if item.state.is_some() {
-                    return Err(bad(item.line, "`state=` is only for existing tasks"));
-                }
+                // T-473: a NEW block may be held out of delivery at once;
+                // `ready` is its default and `cancelled` is allowed too. The
+                // parser has already refused any other value.
             }
         }
         // A task sails on a voyage the plan describes (T-442): a milestone no
@@ -547,6 +586,7 @@ fn apply_queue(
         let state = match item.state.as_deref() {
             Some("cancelled") => TaskState::Cancelled,
             Some("ready") => TaskState::Ready,
+            Some("hold") => TaskState::Draft,
             _ => states.get(&id).copied().unwrap_or(TaskState::Ready),
         };
         states.insert(id, state);
@@ -625,7 +665,13 @@ fn apply_queue(
                     project: project.to_string(),
                     id: id.clone(),
                     rank,
-                    state: TaskState::Ready,
+                    // T-473: a NEW block with `state: hold` is created out of
+                    // delivery; a later `state: ready` sends it.
+                    state: match item.state.as_deref() {
+                        Some("hold") => TaskState::Draft,
+                        Some("cancelled") => TaskState::Cancelled,
+                        _ => TaskState::Ready,
+                    },
                     priority: priority_str(item.priority).to_string(),
                     lane: item.lane.clone(),
                     milestone: item.milestone.clone(),
@@ -761,6 +807,7 @@ fn apply_queue(
                         )?);
                     }
                     Some("ready") => task.state = TaskState::Ready,
+                    Some("hold") => task.state = TaskState::Draft,
                     _ => {}
                 }
                 // A task moved to another lane takes its work with it (T-311):
@@ -939,7 +986,7 @@ fn apply_queue(
     for item in &draft.staff {
         if matches!(
             item,
-            StaffItem::Rebind { .. } | StaffItem::RebindCancel { .. }
+            StaffItem::Rebind { .. } | StaffItem::RebindCancel { .. } | StaffItem::Drop { .. }
         ) {
             continue;
         }
@@ -1091,6 +1138,7 @@ fn apply_queue(
             StaffItem::Release { .. } => unreachable!("release is applied above"),
             StaffItem::Rebind { .. } => unreachable!("rebind is applied above"),
             StaffItem::RebindCancel { .. } => unreachable!("rebind is applied above"),
+            StaffItem::Drop { .. } => unreachable!("drop is applied after the voyages"),
             StaffItem::Raise { .. } => unreachable!("raise is applied above"),
         };
         let seat_id = format!("{project}:{lane}");
@@ -1310,6 +1358,13 @@ fn apply_queue(
             running += 1;
             staffed.push(format!("start {}", seat.name));
         }
+    }
+
+    // T-473: two Ready tasks on different lanes that name one file are a
+    // warning, not a refusal: a lane works its queue in order, but the file
+    // may need both.
+    for warning in shared_file_warnings(tx, project)? {
+        warnings.push(warning);
     }
 
     tx.insert_plan(&PlanRow {
@@ -1692,6 +1747,7 @@ pub fn staff_line(item: &StaffItem) -> usize {
         | StaffItem::Remerge { line, .. }
         | StaffItem::Rebind { line, .. }
         | StaffItem::RebindCancel { line, .. }
+        | StaffItem::Drop { line, .. }
         | StaffItem::Raise { line, .. } => *line,
     }
 }
@@ -3563,17 +3619,10 @@ fn floor_div(a: i64, b: i64) -> i64 {
     }
 }
 
-/// Fix the departure of every milestone that has tasks and no departure yet:
-/// the moment its first tasks were created. This runs on **every** apply, not
-/// only when the draft repeats the milestone block, so a queue-only apply that
-/// creates the first tasks departs then (review R1) and a later block edit
-/// cannot move it (R2). A milestone whose tasks predate the voyage record takes
-/// its departure from the oldest plan draft that already carried them.
-///
-/// A milestone emptied of its tasks loses its departure (T-239), so a reused
-/// milestone id starts its clock when its new tasks come: the reset is recorded
-/// in `meta`, and `departure_from_history` searches only the drafts applied
-/// after it. A milestone that still has tasks never changes.
+/// Empty the departure of every milestone that has no task left (T-239): the
+/// id is free to be reused, and its history must not start at the emptied
+/// drafts. A departure is set by `record_voyages` from the milestone block's
+/// `depart: now` line (T-473), never here.
 fn fix_departures(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
     let mut counts: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
     for task in tx.tasks_of_project(project)? {
@@ -3581,48 +3630,73 @@ fn fix_departures(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
             *counts.entry(milestone).or_insert(0) += 1;
         }
     }
-    // A voyage whose milestone has no task left keeps no departure: the id is
-    // free to be reused, and its history must not start at the emptied drafts.
-    let version = tx.plan_version(project)?;
     for voyage in tx.voyages_of_project(project)? {
         if voyage.departure.is_none() || counts.contains_key(&voyage.milestone) {
             continue;
         }
         tx.clear_voyage_departure(project, &voyage.milestone)?;
-        tx.set_meta(
-            &departure_reset_key(project, &voyage.milestone),
-            &version.to_string(),
-        )?;
     }
-    for (milestone, tasks) in counts {
+    // A voyage that departed before its estimate was recorded recovers the
+    // estimate from the oldest plan that carried its tasks; the departure
+    // itself is never moved (T-473: it came from the explicit line).
+    for (milestone, _tasks) in counts {
         let voyage = tx.get_voyage(project, &milestone)?;
-        if voyage
-            .as_ref()
-            .is_some_and(|v| v.departure.is_some() && v.departure_estimate_min.is_some())
-        {
+        let Some(voyage) = voyage else {
+            continue;
+        };
+        if voyage.departure.is_none() || voyage.departure_estimate_min.is_some() {
             continue;
         }
-        let history = departure_from_history(tx, project, &milestone)?;
-        let already_departed = voyage.as_ref().is_some_and(|v| v.departure.is_some());
-        let (departure, at_departure, estimate) = match history {
-            Some(found) => found,
-            None if !already_departed => {
-                let estimates = tx
-                    .tasks_of_project(project)?
-                    .iter()
-                    .filter(|task| task.milestone.as_deref() == Some(&milestone))
-                    .map(|task| gear_board::voyage::estimate_of(tx, project, task))
-                    .collect::<GearResult<Vec<_>>>()?;
-                (now, tasks, estimates.into_iter().sum())
+        if let Some((departure, at_departure, estimate)) =
+            departure_from_history(tx, project, &milestone)?
+        {
+            tx.set_voyage_departure(project, &milestone, departure, at_departure, now)?;
+            if let Some(estimate) = estimate {
+                tx.set_voyage_departure_estimate(project, &milestone, estimate)?;
             }
-            None => continue, // No historical evidence: do not invent a baseline.
-        };
-        tx.set_voyage_departure(project, &milestone, departure, at_departure, now)?;
-        if let Some(estimate) = estimate {
-            tx.set_voyage_departure_estimate(project, &milestone, estimate)?;
         }
     }
     Ok(())
+}
+
+/// Where a milestone that predates the voyage record departed from: the oldest
+/// plan version whose draft already had tasks on it, with how many. The plan's
+/// stored drafts are the persisted history (tasks carry no creation time). Its
+/// departure is only used when the voyage has one; the estimate it recovers is
+/// the departure's scope.
+fn departure_from_history(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+) -> GearResult<Option<(Ts, i64, Option<i64>)>> {
+    let newest = tx.plan_version(project)?;
+    for version in 1..=newest {
+        let Some(plan) = tx.get_plan(project, version)? else {
+            continue;
+        };
+        let Ok(draft) = crate::draft::parse(&plan.draft) else {
+            continue;
+        };
+        let items: Vec<_> = draft
+            .queue
+            .iter()
+            .filter(|item| item.milestone.as_deref() == Some(milestone))
+            .collect();
+        if !items.is_empty() {
+            let estimate = items
+                .iter()
+                .map(|item| {
+                    item.estimate.map(i64::from).or_else(|| {
+                        item.goal
+                            .as_deref()
+                            .and_then(gear_board::voyage::estimate_from_goal)
+                    })
+                })
+                .sum();
+            return Ok(Some((plan.applied, items.len() as i64, estimate)));
+        }
+    }
+    Ok(None)
 }
 
 /// The milestones whose voyage had departed before this apply (T-410): their
@@ -3636,6 +3710,14 @@ fn departed_voyages(tx: &Tx<'_>, project: &str) -> GearResult<std::collections::
         .filter(|voyage| voyage.departure.is_some())
         .map(|voyage| voyage.milestone)
         .collect())
+}
+
+/// T-473: whether the draft's block for `milestone` carries `depart: now`.
+fn departs_now(draft: &Draft, milestone: &str) -> bool {
+    draft.milestones.iter().any(|(header, body)| {
+        let (id, _) = crate::draft::milestone_parts(header);
+        id == milestone && crate::draft::milestone_depart(body).as_deref() == Some("now")
+    })
 }
 
 /// T-461: the departures and the moves a draft would make, read before the
@@ -3652,12 +3734,6 @@ fn planned_guard(
         .into_iter()
         .map(|task| (task.id.clone(), task))
         .collect();
-    let mut counts_before: BTreeMap<String, usize> = BTreeMap::new();
-    for task in existing.values() {
-        if let Some(milestone) = &task.milestone {
-            *counts_before.entry(milestone.clone()).or_default() += 1;
-        }
-    }
     let mut after: BTreeMap<String, Option<String>> = existing
         .iter()
         .map(|(id, task)| (id.clone(), task.milestone.clone()))
@@ -3682,11 +3758,13 @@ fn planned_guard(
     }
     let mut departing: BTreeSet<String> = BTreeSet::new();
     for milestone in counts_after.keys() {
-        if counts_before.get(milestone).copied().unwrap_or(0) > 0 {
-            continue;
-        }
         let voyage = tx.get_voyage(project, milestone)?;
         if voyage.as_ref().is_some_and(|v| v.departure.is_some()) {
+            continue;
+        }
+        // T-473: a milestone departs only on its explicit `depart: now` line,
+        // whether it is new or already carried tasks without one.
+        if !departs_now(draft, milestone) {
             continue;
         }
         departing.insert(milestone.clone());
@@ -3916,57 +3994,6 @@ fn cancel_changes_only_state(
             changed.join(", ")
         ),
     ))
-}
-
-/// The meta key that remembers the plan version at which a milestone lost its
-/// last task (T-239): `departure_from_history` starts after it.
-fn departure_reset_key(project: &str, milestone: &str) -> String {
-    format!("departure-reset:{project}:{milestone}")
-}
-
-/// Where a milestone that predates the voyage record departed from: the oldest
-/// plan version whose draft already had tasks on it, with how many. The plan's
-/// stored drafts are the persisted history (tasks carry no creation time).
-///
-/// A milestone that was emptied and reused starts after its reset (T-239): the
-/// drafts before it carried the earlier voyage's tasks, not this one's.
-fn departure_from_history(
-    tx: &Tx<'_>,
-    project: &str,
-    milestone: &str,
-) -> GearResult<Option<(Ts, i64, Option<i64>)>> {
-    let newest = tx.plan_version(project)?;
-    let reset = tx
-        .get_meta(&departure_reset_key(project, milestone))?
-        .and_then(|raw| raw.trim().parse::<i64>().ok());
-    let start = reset.map_or(1, |version| version + 1);
-    for version in start..=newest {
-        let Some(plan) = tx.get_plan(project, version)? else {
-            continue;
-        };
-        let Ok(draft) = crate::draft::parse(&plan.draft) else {
-            continue;
-        };
-        let items: Vec<_> = draft
-            .queue
-            .iter()
-            .filter(|item| item.milestone.as_deref() == Some(milestone))
-            .collect();
-        if !items.is_empty() {
-            let estimate = items
-                .iter()
-                .map(|item| {
-                    item.estimate.map(i64::from).or_else(|| {
-                        item.goal
-                            .as_deref()
-                            .and_then(gear_board::voyage::estimate_from_goal)
-                    })
-                })
-                .sum();
-            return Ok(Some((plan.applied, items.len() as i64, estimate)));
-        }
-    }
-    Ok(None)
 }
 
 /// Record the draft's milestone blocks as voyages (T-22).
@@ -4213,6 +4240,7 @@ fn staff_text(item: &StaffItem) -> String {
             lane, repo, owns, ..
         } => format!("rebind {lane} repo={repo} owns=[{}]", owns.join(", ")),
         StaffItem::RebindCancel { lane, .. } => format!("rebind {lane} cancel"),
+        StaffItem::Drop { milestone, .. } => format!("drop {milestone}"),
         StaffItem::Raise {
             role,
             to,
@@ -4249,6 +4277,23 @@ fn why_naming(decisions: &[crate::decision::Decision], task: &str) -> Option<Str
 /// the change applies and a starred decision of kind `user` records it. A
 /// voyage that had not departed before this apply states its words freely; a
 /// departed voyage with no stations yet gets its first list freely too.
+/// T-473 F1: the project's scheduled departure (`[schedule] depart_at`), when
+/// the stored config names one that parses; a block without `depart:` departs
+/// then. A config that cannot be parsed names no schedule.
+fn scheduled_departure(tx: &Tx<'_>, project: &str) -> GearResult<Option<Ts>> {
+    let Some(row) = tx.get_project(project)? else {
+        return Ok(None);
+    };
+    let Ok(config) = crate::config::parse(&row.config_toml) else {
+        return Ok(None);
+    };
+    Ok(config
+        .schedule
+        .as_ref()
+        .and_then(|schedule| schedule.depart_at.as_deref())
+        .and_then(parse_rfc3339))
+}
+
 fn record_voyages(
     tx: &Tx<'_>,
     project: &str,
@@ -4363,9 +4408,21 @@ fn record_voyages(
                 })?;
             }
         }
+        // T-473: a milestone departs only on its explicit `depart: now` line.
+        // A timed departure is `[schedule] depart_at` in the config, not a
+        // second way here.
+        if let Some(depart) = crate::draft::milestone_depart(body) {
+            if depart != "now" {
+                return Err(bad(
+                    0,
+                    format!(
+                        "milestone {id}: depart is `now` (a timed departure is [schedule] depart_at in gear.toml), got {depart:?}"
+                    ),
+                ));
+            }
+        }
         // The stations the block names, in plan order (M5 S3), then the words;
-        // the departure was fixed when the milestone's first tasks
-        // were created (fix_departures), so a block edit never moves it.
+        // a departure is set once and never moved by a later block.
         let stations = crate::draft::milestone_stations(body)
             .map_err(|e| GearError::new(ErrorCode::BadFormat, format!("milestone {id}: {e}")))?;
         tx.upsert_voyage(&gear_store::VoyageRow {
@@ -4381,8 +4438,162 @@ fn record_voyages(
             updated: now,
         })?;
         tx.set_voyage_stations(project, id, &stations)?;
+        // T-473: `depart: now` departs at the apply; a block with no `depart:`
+        // line takes the project's `[schedule] depart_at` when the config
+        // names one (F1: a timed voyage keeps its eta and its scheduled end).
+        let departure = match crate::draft::milestone_depart(body).as_deref() {
+            Some("now") => Some(now),
+            _ => scheduled_departure(tx, project)?,
+        };
+        if let Some(at) = departure {
+            let voyage = tx.get_voyage(project, id)?;
+            if voyage
+                .as_ref()
+                .is_none_or(|voyage| voyage.departure.is_none())
+            {
+                let tasks: Vec<TaskRow> = tx
+                    .tasks_of_project(project)?
+                    .into_iter()
+                    .filter(|task| task.milestone.as_deref() == Some(id))
+                    .collect();
+                if !tasks.is_empty() {
+                    let estimate: i64 = tasks
+                        .iter()
+                        .map(|task| gear_board::voyage::estimate_of(tx, project, task))
+                        .collect::<GearResult<Vec<_>>>()?
+                        .into_iter()
+                        .flatten()
+                        .sum();
+                    tx.set_voyage_departure(project, id, at, tasks.len() as i64, now)?;
+                    tx.set_voyage_departure_estimate(project, id, estimate)?;
+                }
+            }
+        }
     }
     Ok(())
+}
+
+/// T-473: remove a milestone with no task and no history. A milestone the
+/// plan still describes is not removed: its block would create it again. A
+/// milestone with a task, a departure, a decision or a station is history and
+/// stays.
+fn drop_milestone(
+    tx: &Tx<'_>,
+    project: &str,
+    draft: &Draft,
+    milestone: &str,
+    line: usize,
+) -> GearResult<()> {
+    if draft
+        .milestones
+        .iter()
+        .any(|(header, _)| crate::draft::milestone_parts(header).0 == milestone)
+    {
+        return Err(bad(
+            line,
+            format!("milestone {milestone} is described by this plan: remove its block too"),
+        ));
+    }
+    let voyage = tx
+        .get_voyage(project, milestone)?
+        .ok_or_else(|| bad(line, format!("no milestone {milestone} in this project")))?;
+    if tx
+        .tasks_of_project(project)?
+        .iter()
+        .any(|task| task.milestone.as_deref() == Some(milestone))
+    {
+        return Err(bad(
+            line,
+            format!("milestone {milestone} still has a task: move or cancel it first"),
+        ));
+    }
+    if voyage.departure.is_some() {
+        return Err(bad(
+            line,
+            format!("milestone {milestone} departed: a voyage that sailed is history and stays"),
+        ));
+    }
+    if !tx.decisions_of(project, milestone)?.is_empty() {
+        return Err(bad(
+            line,
+            format!("milestone {milestone} has decisions: it is history and stays"),
+        ));
+    }
+    if !tx.voyage_stations(project, milestone)?.is_empty() {
+        return Err(bad(
+            line,
+            format!("milestone {milestone} has stations: it is history and stays"),
+        ));
+    }
+    tx.delete_voyage(project, milestone)?;
+    Ok(())
+}
+
+/// T-473: one warning per file two Ready tasks on different lanes name. The
+/// names come from each task's goal text (a path such as `crates/x/src/y.rs`)
+/// and its evidence files. A warning, never a refusal: a lane works its queue
+/// in order, but the file may need both.
+fn shared_file_warnings(tx: &Tx<'_>, project: &str) -> GearResult<Vec<String>> {
+    let mut by_file: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    for task in tx
+        .tasks_of_project(project)?
+        .iter()
+        .filter(|task| task.state == TaskState::Ready)
+    {
+        let Some(contract) = tx.get_contract(project, &task.id, task.contract_version)? else {
+            continue;
+        };
+        let lane = task.lane.clone().unwrap_or_default();
+        let mut files: std::collections::BTreeSet<String> =
+            files_of(&contract.goal).into_iter().collect();
+        files.extend(contract.evidence_files.iter().cloned());
+        for file in files {
+            by_file
+                .entry(file)
+                .or_default()
+                .push((task.id.clone(), lane.clone()));
+        }
+    }
+    let mut warnings = Vec::new();
+    for (file, users) in by_file {
+        let lanes: std::collections::BTreeSet<&str> =
+            users.iter().map(|(_, lane)| lane.as_str()).collect();
+        if lanes.len() < 2 {
+            continue;
+        }
+        let named: Vec<String> = users
+            .iter()
+            .map(|(id, lane)| format!("{id} ({lane})"))
+            .collect();
+        warnings.push(format!(
+            "{} name {file}: Ready tasks on different lanes share one file",
+            named.join(", ")
+        ));
+    }
+    Ok(warnings)
+}
+
+/// The file paths a goal text names: a token with a slash and a file extension
+/// in its last part, not a URL. Surrounding punctuation is cut.
+fn files_of(text: &str) -> Vec<String> {
+    let mut files = Vec::new();
+    for raw in text.split_whitespace() {
+        let token = raw.trim_matches(|c: char| {
+            matches!(
+                c,
+                ',' | ';' | ':' | '(' | ')' | '.' | '`' | '\'' | '"' | '*' | '[' | ']' | '>' | '<'
+            )
+        });
+        if token.contains("://") || !token.contains('/') {
+            continue;
+        }
+        let last = token.rsplit('/').next().unwrap_or("");
+        if !last.is_empty() && last.contains('.') {
+            files.push(token.to_string());
+        }
+    }
+    files
 }
 
 /// The stations of a block as one text for the confirmation guard and its

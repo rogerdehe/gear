@@ -2545,6 +2545,18 @@ impl<'s> Tx<'s> {
         Ok(())
     }
 
+    /// Remove a voyage row (T-473): a milestone with no task and no history
+    /// can be dropped. Callers check the history; this only deletes the row.
+    pub fn delete_voyage(&self, project: &str, milestone: &str) -> GearResult<()> {
+        self.tx
+            .execute(
+                "DELETE FROM voyages WHERE project=?1 AND milestone=?2",
+                params![project, milestone],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
     /// One milestone's voyage, if it has one.
     pub fn get_voyage(&self, project: &str, milestone: &str) -> GearResult<Option<VoyageRow>> {
         let row: Option<VoyageRow> = self
