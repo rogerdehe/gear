@@ -218,7 +218,12 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// warning is not one of them; no rate-limit/auth markers yet; tail 16
 /// lines, confirm 2
 /// rounds; unattended `--dangerously-bypass-approvals-and-sandbox` and
-/// `-c check_for_update_on_startup=false`;
+/// `-c check_for_update_on_startup=false`; the startup dialogs of codex
+/// 0.165 (T-457) — `/new` asks `Where should the new conversation run?`
+/// (answer Enter: the current worktree) and a resume from another directory
+/// asks which working directory to use (answer Enter: the current one, and
+/// `-c tui.resume_cwd="current"` keeps that dialog from showing); those
+/// screens read as Blocked although Herdr reports done/idle;
 /// session_ref true (Herdr reports the session uuid); resume
 /// `["resume", "{session}"]`; exit by the typed `/quit` command
 /// (`exit_command`, no keys — §12 item 4); new session `/new`; compact
@@ -941,6 +946,9 @@ mod tests {
                 "check_for_update_on_startup=false".to_string(),
                 "-c".to_string(),
                 "projects={\"/worktrees/gear/home-heat\"={trust_level=\"trusted\"}}".to_string(),
+                // T-457: the resume keeps to the seat's own directory.
+                "-c".to_string(),
+                "tui.resume_cwd=\"current\"".to_string(),
             ]
         );
         // No placeholder survives, and no kind without it changes.
