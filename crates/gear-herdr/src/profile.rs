@@ -806,6 +806,10 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             dialogs: vec![],
             new_session: "/new".into(),
             compact: "/compact".into(),
+            // T-496: omp writes pi's session files under
+            // `~/.omp/agent/sessions/<path>/*.jsonl`; a real 18.12.6 session
+            // carries the same `message`/`usage` records, so the pi-jsonl
+            // reader reads it (fixture: crates/gear-usage/tests/it/fixtures).
             usage_log: Some("pi-jsonl".into()),
             tail_lines: 16,
             confirm_rounds: 2,
