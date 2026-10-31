@@ -610,3 +610,121 @@ fn a_project_without_a_captain_has_no_help() {
 
     assert_eq!(help_of(&mut store, T0 + 120), None);
 }
+
+#[test]
+fn an_instruction_sent_during_an_attempt_handed_in_later_is_no_help() {
+    // T-463: the captain sent it while the lane worked on the task, and the
+    // work went on past it; after the hand-in it does not pin the lane.
+    let mut store = world_with_captain();
+    task_on(&mut store, "T-2", LANE, 1, TaskState::Verifying);
+    attempt(&mut store, "T-2", 1, AttemptState::Submitted);
+    store
+        .write(|tx| {
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::Started, T0)?;
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::HandedIn, T0 + 120)?;
+            Ok(())
+        })
+        .unwrap();
+    message(
+        &mut store,
+        MsgKind::Instruction,
+        "p:captain",
+        Some("T-2"),
+        "Read the log of T-2 and send mast the failing line please",
+        None,
+        T0 + 60,
+    );
+
+    assert_eq!(help_of(&mut store, T0 + 200), None);
+    let (reason, _) = reason_of(&mut store, T0 + 200);
+    assert_eq!(reason, Some(IdleReason::NoWork), "{reason:?}");
+}
+
+#[test]
+fn an_instruction_sent_before_the_attempt_started_is_still_help() {
+    // The lane held no attempt when the instruction came: it still has to
+    // answer it until the reply or the limit.
+    let mut store = world_with_captain();
+    task_on(&mut store, "T-2", "mast", 1, TaskState::Verifying);
+    attempt(&mut store, "T-2", 1, AttemptState::Submitted);
+    store
+        .write(|tx| {
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::Started, T0 + 90)?;
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::HandedIn, T0 + 150)?;
+            Ok(())
+        })
+        .unwrap();
+    message(
+        &mut store,
+        MsgKind::Instruction,
+        "p:captain",
+        Some("T-2"),
+        "Read the log of T-2 and send mast the failing line please",
+        None,
+        T0 + 60,
+    );
+
+    let help = help_of(&mut store, T0 + 200).expect("the lane helps");
+    assert_eq!(help.text(), "helping mast: Read the log of T-2 and …");
+    assert_eq!(help.since, T0 + 60);
+}
+
+#[test]
+fn an_instruction_without_a_task_sent_during_a_handed_in_attempt_is_no_help() {
+    // T-463 (B): any instruction the captain sent while this seat worked is
+    // part of that work, whatever task it names.
+    let mut store = world_with_captain();
+    task_on(&mut store, "T-2", LANE, 1, TaskState::Verifying);
+    attempt(&mut store, "T-2", 1, AttemptState::Submitted);
+    store
+        .write(|tx| {
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::Started, T0)?;
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::HandedIn, T0 + 120)?;
+            Ok(())
+        })
+        .unwrap();
+    message(
+        &mut store,
+        MsgKind::Instruction,
+        "p:captain",
+        None,
+        "Check the quota line",
+        None,
+        T0 + 60,
+    );
+
+    assert_eq!(help_of(&mut store, T0 + 200), None);
+}
+
+#[test]
+fn an_instruction_sent_after_the_hand_in_is_still_help_after_settle_and_merge() {
+    // F1 of the T-463 review: the work span ends at the earliest of hand-in,
+    // settle and merge. An instruction the captain sent after the hand-in —
+    // when the lane held no attempt — still pins the lane until its reply or
+    // the limit, even after the attempt is settled and merged.
+    let mut store = world_with_captain();
+    task_on(&mut store, "T-2", LANE, 1, TaskState::Done);
+    attempt(&mut store, "T-2", 1, AttemptState::Accepted);
+    store
+        .write(|tx| {
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::Started, T0)?;
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::HandedIn, T0 + 120)?;
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::Settled, T0 + 240)?;
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::Merged, T0 + 300)?;
+            Ok(())
+        })
+        .unwrap();
+    message(
+        &mut store,
+        MsgKind::Instruction,
+        "p:captain",
+        Some("T-2"),
+        "Check the quota line",
+        None,
+        T0 + 180,
+    );
+
+    let help = help_of(&mut store, T0 + 400).expect("the lane still helps");
+    assert_eq!(help.text(), "helping the captain: Check the quota line");
+    assert_eq!(help.since, T0 + 180);
+}

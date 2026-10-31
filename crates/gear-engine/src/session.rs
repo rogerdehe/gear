@@ -108,6 +108,13 @@ pub struct Facts {
     pub attempt: i64,
     /// The task the round follows (`followup-of: F`), if any (L5-L6).
     pub followup_of: Option<String>,
+    /// Whether the task's block carries `fresh: <why>` (T-481): the captain's
+    /// mark that its work is unrelated to what the lane did before, so the
+    /// round starts a new conversation.
+    pub fresh: bool,
+    /// The CLI the seat's last round ran on (T-481): the conversation the seat
+    /// holds now was made by it. None when the seat never ran a round.
+    pub last_round_cli: Option<String>,
     /// The seat that ran the earlier work: the rework's attempt n−1, the
     /// follow-up's F, or the seat of the earlier review round of this task.
     pub earlier_seat: Option<String>,
@@ -154,7 +161,9 @@ impl Facts {
 /// - **S1** — the round is open and its agent died or was restarted: the
 ///   round resumes its session, in the same round;
 /// - **L2-L7** — a lane round: a rework (n ≥ 2), else a follow-up, else a
-///   new task;
+///   task that keeps the lane's conversation (L7, T-481) — a new one only
+///   when the captain marked it unrelated (`fresh:`), the CLI changed, or the
+///   seat holds no conversation yet;
 /// - **V1-V2** — a review round: the earlier review of this task on this
 ///   seat, else a new session.
 ///
@@ -233,8 +242,22 @@ fn lane_action(facts: &Facts) -> Action {
             resume(facts)
         };
     }
-    // L7: an unrelated task starts a new conversation.
-    Action::New
+    // L7 (T-481, the user's decision): a lane keeps its conversation from one
+    // task to the next. A new conversation only when the captain marked the
+    // task unrelated (`fresh:`), when the CLI that made the seat's
+    // conversation changed, or when the seat holds no conversation yet.
+    if facts.fresh {
+        return Action::New;
+    }
+    if let Some(last_cli) = facts.last_round_cli.as_deref() {
+        if facts.current_cli.as_deref() != Some(last_cli) {
+            return Action::New;
+        }
+    }
+    if facts.current_session.is_none() {
+        return Action::New;
+    }
+    Action::Keep
 }
 
 /// The review rules V1-V2 (design §3.3).
@@ -369,13 +392,31 @@ pub fn prepare_lane(
         action = Action::Fresh;
     }
     if round.is_none()
-        && facts.followup_of.is_some()
         && attempt == 1
+        && facts.last_round_cli.is_some()
         && matches!(action, Action::Keep)
         && context_large(store, cfg, seat, facts.current_session.as_deref())?
     {
         action = Action::Compact;
     }
+
+    // A round that cannot use the earlier session because the CLI changed
+    // (T-481, design/10 §resume rules): it is marked a new-session recovery,
+    // and its packet names the CLI and session the earlier work ran in, so the
+    // lane can read it if its CLI can.
+    let recovery = match (
+        facts.earlier_cli.as_deref(),
+        facts.earlier_session.as_deref(),
+    ) {
+        (Some(cli), Some(session))
+            if round.is_none()
+                && matches!(action, Action::New | Action::Fresh)
+                && facts.current_cli.as_deref() != Some(cli) =>
+        {
+            Some((cli.to_string(), session.to_string()))
+        }
+        _ => None,
+    };
 
     store.write(|tx| {
         if round.is_none() {
@@ -391,6 +432,9 @@ pub fn prepare_lane(
         }
         if round.is_none() {
             tx.set_attempt_action(&project, task, attempt, action.as_str())?;
+            if let Some((cli, session)) = &recovery {
+                tx.set_session_recovery(&project, task, attempt, cli, session)?;
+            }
         }
         Ok(())
     })?;
@@ -572,26 +616,34 @@ fn lane_facts(
 ) -> GearResult<Facts> {
     // The earlier work: the attempt before this one (a rework), or the last
     // accepted attempt of the task it follows (a follow-up).
-    let (followup_of, earlier_seat, earlier_cli, earlier_session) = store.read(|tx| {
-        let followup_of = tx
-            .get_task(project, task)?
-            .and_then(|row| row.followup_of.clone());
-        let earlier = if attempt >= 2 {
-            tx.get_attempt(project, task, attempt - 1)?
-        } else if let Some(followup) = followup_of.as_deref() {
-            tx.attempts_of_task(project, followup)?
-                .into_iter()
-                .rfind(|row| row.state == AttemptState::Accepted)
-        } else {
-            None
-        };
-        Ok((
-            followup_of,
-            earlier.as_ref().map(|row| row.seat.clone()),
-            earlier.as_ref().and_then(|row| row.session_cli.clone()),
-            earlier.as_ref().and_then(|row| row.session_ref.clone()),
-        ))
-    })?;
+    let (followup_of, fresh, last_round_cli, earlier_seat, earlier_cli, earlier_session) = store
+        .read(|tx| {
+            let followup_of = tx
+                .get_task(project, task)?
+                .and_then(|row| row.followup_of.clone());
+            let fresh = tx.task_fresh(project, task)?.is_some();
+            let last_round_cli = tx
+                .last_round_of_seat(&seat.id)?
+                .map(|round| round.cli)
+                .filter(|cli| !cli.is_empty());
+            let earlier = if attempt >= 2 {
+                tx.get_attempt(project, task, attempt - 1)?
+            } else if let Some(followup) = followup_of.as_deref() {
+                tx.attempts_of_task(project, followup)?
+                    .into_iter()
+                    .rfind(|row| row.state == AttemptState::Accepted)
+            } else {
+                None
+            };
+            Ok((
+                followup_of,
+                fresh,
+                last_round_cli,
+                earlier.as_ref().map(|row| row.seat.clone()),
+                earlier.as_ref().and_then(|row| row.session_cli.clone()),
+                earlier.as_ref().and_then(|row| row.session_ref.clone()),
+            ))
+        })?;
 
     let (current_session, current_cli, agent_live) = seat_session(store, herdr, seat)?;
     Ok(Facts {
@@ -604,6 +656,8 @@ fn lane_facts(
         },
         attempt,
         followup_of,
+        fresh,
+        last_round_cli,
         earlier_seat,
         earlier_cli,
         earlier_session,
@@ -648,6 +702,8 @@ fn review_facts(
         role: Role::Review,
         attempt,
         followup_of: None,
+        fresh: false,
+        last_round_cli: None,
         earlier_seat,
         earlier_cli,
         earlier_session,
@@ -1971,6 +2027,8 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
     }
 
     /// The facts of a lane round, with the defaults of a seat that works.
+    /// The facts of a lane round, with the defaults of a seat that works and
+    /// already ran a round on its CLI: the second task on a lane.
     fn lane_facts() -> Facts {
         Facts {
             seat: "p:heat".into(),
@@ -1978,6 +2036,8 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
             role: Role::Dev,
             attempt: 1,
             followup_of: None,
+            fresh: false,
+            last_round_cli: Some("codex".into()),
             earlier_seat: None,
             earlier_cli: None,
             earlier_session: None,
@@ -2071,25 +2131,321 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
         assert_eq!(choose(&facts), Action::Resume("session-old".into()));
     }
 
-    /// L7: an unrelated task → a new conversation.
+    /// L7 (T-481, the user's decision): a lane keeps its conversation from one
+    /// task to the next.
     #[test]
-    fn l7_an_unrelated_task_starts_a_new_session() {
+    fn l7_a_second_task_on_a_lane_keeps_its_conversation() {
         let facts = lane_facts();
+        assert_eq!(choose(&facts), Action::Keep);
+
+        // A seat that never ran a round but holds a session keeps it: the
+        // conversation the agent was onboarded with.
+        let mut facts = facts.clone();
+        facts.last_round_cli = None;
+        assert_eq!(choose(&facts), Action::Keep);
+        facts.current_session = None;
         assert_eq!(choose(&facts), Action::New);
 
-        // A follow-up whose earlier attempt ran on another seat: L7 as well.
-        let mut facts = facts;
+        // A follow-up whose earlier attempt ran on another seat: its session
+        // cannot be used, so the lane keeps its own conversation (T-481).
+        let mut facts = lane_facts();
         facts.followup_of = Some("T-7".into());
         facts.earlier_seat = Some("p:other".into());
         facts.earlier_cli = Some("codex".into());
         facts.earlier_session = Some("session-a".into());
-        assert_eq!(choose(&facts), Action::New);
+        assert_eq!(choose(&facts), Action::Keep);
 
         facts.earlier_seat = Some("p:heat".into());
         facts.earlier_session = None;
         assert_eq!(choose(&facts), Action::New);
         facts.agent_live = false;
         assert_eq!(choose(&facts), Action::Fresh);
+    }
+
+    /// L7 (T-481): the captain's `fresh:` mark says the task is unrelated, so
+    /// the lane starts a new conversation even when it holds one.
+    #[test]
+    fn l7_a_task_marked_fresh_starts_a_new_conversation() {
+        let mut facts = lane_facts();
+        facts.fresh = true;
+        assert_eq!(choose(&facts), Action::New);
+
+        // A seat without a live agent starts its agent plainly: fresh.
+        facts.agent_live = false;
+        assert_eq!(choose(&facts), Action::Fresh);
+    }
+
+    /// L7 (T-481): the CLI that made the seat's conversation changed, so the
+    /// round cannot continue it: a new conversation.
+    #[test]
+    fn l7_a_lane_whose_cli_changed_starts_a_new_conversation() {
+        let mut facts = lane_facts();
+        facts.current_cli = Some("pi".into());
+        assert_eq!(choose(&facts), Action::New);
+
+        // The same CLI as the seat's last round: the conversation stays.
+        facts.last_round_cli = Some("pi".into());
+        assert_eq!(choose(&facts), Action::Keep);
+    }
+
+    /// A second task of the lane `heat` and its first attempt, written
+    /// straight into the store (T-481): the lane keeps its conversation.
+    fn second_task(store: &mut Store, task: &str) {
+        store
+            .write(|tx| {
+                tx.insert_task(&gear_store::TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: task.into(),
+                    rank: 2,
+                    state: gear_model::TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    project: "p".into(),
+                    task: task.into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Delivered,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                })
+            })
+            .unwrap();
+    }
+
+    /// The round the lane ran before (T-481): T-1, on `cli`, in `session`.
+    fn previous_round(store: &mut Store, cli: &str, session: &str) {
+        store
+            .write(|tx| {
+                let key = gear_store::RoundKey {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    role: "dev".into(),
+                };
+                tx.insert_round(&gear_store::NewRound {
+                    key: key.clone(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    cli: cli.into(),
+                    model: None,
+                    start_at: T0,
+                })?;
+                tx.add_round_session(&key, session)
+            })
+            .unwrap();
+    }
+
+    /// A project whose lane model carries a context window, and a codex log
+    /// that reports the given context (T-481: keep or compact).
+    fn lane_window(store: &mut Store, context: i64) -> (tempfile::TempDir, String) {
+        let text = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+[quota]
+lanes = 1
+temps = 1
+[captain]
+pane = "p:captain"
+kind = "pi"
+profile = "pi"
+[[lanes]]
+name = "heat"
+duty = "test"
+owns = []
+kind = "codex"
+profile = "codex"
+models = [{ model = "test-model", context_window_k = 100 }]
+[models]
+lanes = [{ model = "test-model", context_window_k = 100 }]
+"#;
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = text.into();
+                tx.update_project(&project)?;
+                tx.set_meta(&crate::model::model_meta_key("p:heat"), "test-model")
+            })
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\",\"info\":{{\"total_token_usage\":{{\"input_tokens\":{context}}},\"last_token_usage\":{{\"input_tokens\":{context},\"cache_write_input_tokens\":0}}}}}}}}\n"
+            ),
+        )
+        .unwrap();
+        let session = path.to_string_lossy().into_owned();
+        (dir, session)
+    }
+
+    /// T-481: a second task on a lane, on the same CLI, keeps the lane's
+    /// conversation — no `/new` is typed.
+    #[test]
+    fn a_second_task_on_a_lane_keeps_its_conversation() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let (_dir, session) = lane_window(&mut store, 100);
+        previous_round(&mut store, "codex", &session);
+        second_task(&mut store, "T-2");
+        store
+            .write(|tx| tx.set_binding_session_ref("p:heat", 1, &session))
+            .unwrap();
+
+        assert_eq!(
+            prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-2", 1, T0 + 10).unwrap(),
+            Prep::Ready,
+            "keep needs nothing from Herdr"
+        );
+        let attempt = store
+            .read(|tx| tx.get_attempt("p", "T-2", 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.session_action.as_deref(), Some("keep"));
+        assert!(
+            !herdr
+                .calls
+                .iter()
+                .any(|call| matches!(call, gear_herdr::fake::Call::PaneType { text, .. } if text == "/new")),
+            "a kept conversation is not restarted"
+        );
+    }
+
+    /// T-481: a kept conversation whose context is large is compacted before
+    /// the packet (§3.5).
+    #[test]
+    fn a_large_context_compacts_a_kept_conversation() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let (_dir, session) = lane_window(&mut store, 60_000);
+        previous_round(&mut store, "codex", &session);
+        second_task(&mut store, "T-2");
+        store
+            .write(|tx| tx.set_binding_session_ref("p:heat", 1, &session))
+            .unwrap();
+
+        assert_eq!(
+            prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-2", 1, T0 + 10).unwrap(),
+            Prep::Wait,
+            "the compaction runs first"
+        );
+        let attempt = store
+            .read(|tx| tx.get_attempt("p", "T-2", 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.session_action.as_deref(), Some("compact"));
+        assert!(herdr
+            .calls
+            .iter()
+            .any(|call| matches!(call, gear_herdr::fake::Call::PaneType { text, .. } if text == "/compact")));
+    }
+
+    /// T-481: a rework whose earlier work ran on another CLI starts a new
+    /// conversation, is marked a new-session recovery, and its packet names
+    /// the CLI and session of that earlier work.
+    #[test]
+    fn a_rework_on_another_cli_is_a_new_session_recovery() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        store
+            .write(|tx| {
+                tx.refresh_attempt_session("p", "T-1", 1, Some("session-x"), "pi")?;
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 2,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Delivered,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                })?;
+                tx.insert_contract(&gear_store::ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 1,
+                    goal: "the goal".into(),
+                    accept: "the acceptance".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0,
+                    mechanical: None,
+                })
+            })
+            .unwrap();
+
+        assert_eq!(
+            prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 2, T0 + 10).unwrap(),
+            Prep::Wait,
+            "a new conversation is started"
+        );
+        let attempt = store
+            .read(|tx| tx.get_attempt("p", "T-1", 2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.session_action.as_deref(), Some("new"));
+        assert_eq!(
+            store.read(|tx| tx.session_recovery("p", "T-1", 2)).unwrap(),
+            Some(("pi".to_string(), "session-x".to_string())),
+            "the round is marked a new-session recovery"
+        );
+        let packet = store
+            .read(|tx| gear_app::plan::render_task_packet(tx, "p", "T-1"))
+            .unwrap();
+        assert!(
+            packet.contains(
+                "Earlier work on this task ran in pi session session-x; \
+                 read it for reference if your CLI can."
+            ),
+            "{packet}"
+        );
     }
 
     /// L1: a seat without a live agent has its agent started plainly, and the
@@ -2120,6 +2476,8 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
             role: Role::Review,
             attempt: 1,
             followup_of: None,
+            fresh: false,
+            last_round_cli: None,
             earlier_seat: Some("p:review-1".into()),
             earlier_cli: Some("codex".into()),
             earlier_session: Some("session-r".into()),
@@ -2147,6 +2505,8 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
             role: Role::Review,
             attempt: 1,
             followup_of: None,
+            fresh: false,
+            last_round_cli: None,
             earlier_seat: None,
             earlier_cli: None,
             earlier_session: None,
@@ -2197,6 +2557,8 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
             role: Role::Review,
             attempt: 1,
             followup_of: None,
+            fresh: false,
+            last_round_cli: None,
             earlier_seat: Some("p:review-1".into()),
             earlier_cli: Some("codex".into()),
             earlier_session: Some("session-r".into()),

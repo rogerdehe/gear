@@ -160,6 +160,29 @@ pub struct MessageRow {
     pub meta: Option<String>,
 }
 
+/// The sender GEAR's engine writes its own notices under (T-454).
+pub const ENGINE_SENDER: &str = "engine";
+
+/// The body the engine's notice that closes a direction check under its
+/// reviewer opens with (T-444, T-454 v2).
+pub const DIRECTION_CLOSED_PREFIX: &str = "The direction check of ";
+
+/// The body of that notice (T-444, T-454 v2): one definition, so the sender
+/// (`review.rs`) and its readers (the doorbell, `message_belongs`) cannot
+/// drift apart.
+pub fn direction_closed_notice_body(task: &str, attempt: i64) -> String {
+    format!(
+        "{DIRECTION_CLOSED_PREFIX}{task} attempt {attempt} is closed: the attempt was handed in or ended. Send nothing for it; end your turn."
+    )
+}
+
+/// Is this the notice that closes a direction check under its reviewer? It is
+/// the one engine notice that reaches a working agent, and the one a freed
+/// reviewer seat still owns (T-454 v2).
+pub fn is_direction_closed_notice(message: &MessageRow) -> bool {
+    message.sender == ENGINE_SENDER && message.body.starts_with(DIRECTION_CLOSED_PREFIX)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewOp {
     pub project: String,
@@ -2797,6 +2820,83 @@ impl<'s> Tx<'s> {
         Ok(row)
     }
 
+    /// The last round the seat ran, whatever task it was: the conversation
+    /// the seat holds now was made by that round (T-481).
+    pub fn last_round_of_seat(&self, seat: &str) -> GearResult<Option<RoundRow>> {
+        let row: Option<RoundRow> = self
+            .tx
+            .query_row(
+                &round_select(" WHERE seat=?1 ORDER BY start_at DESC LIMIT 1"),
+                params![seat],
+                round_from_row,
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(row)
+    }
+
+    /// The `fresh:` mark of a task (T-481): the captain's reason that its work
+    /// is unrelated to what the lane did before, so the lane starts a new
+    /// conversation. None when the block carries none.
+    pub fn task_fresh(&self, project: &str, task: &str) -> GearResult<Option<String>> {
+        Ok(self
+            .get_meta(&format!("task_fresh:{project}:{task}"))?
+            .filter(|why| !why.is_empty()))
+    }
+
+    /// Set the `fresh:` mark of a task (T-481).
+    pub fn set_task_fresh(&self, project: &str, task: &str, why: &str) -> GearResult<()> {
+        self.set_meta(&format!("task_fresh:{project}:{task}"), why)
+    }
+
+    /// Clear the `fresh:` mark of a task (T-481): a task that is done or
+    /// cancelled carries none — the mark is about the round that starts it.
+    pub fn clear_task_fresh(&self, project: &str, task: &str) -> GearResult<()> {
+        self.set_meta(&format!("task_fresh:{project}:{task}"), "")
+    }
+
+    /// Mark a round as a new-session recovery (T-481, design/10 §resume rules):
+    /// its earlier work ran on another CLI, so it could not continue that
+    /// conversation. The mark carries that work's CLI and session, which the
+    /// packet points the lane at.
+    pub fn set_session_recovery(
+        &self,
+        project: &str,
+        task: &str,
+        attempt: i64,
+        cli: &str,
+        session: &str,
+    ) -> GearResult<()> {
+        let mark = serde_json::json!({"cli": cli, "session": session});
+        self.set_meta(
+            &format!("engine.session_recovery.{project}.{task}.{attempt}"),
+            &mark.to_string(),
+        )
+    }
+
+    /// The new-session recovery mark of a round (T-481): the CLI and session
+    /// of its earlier work. None when the round continues its conversation.
+    pub fn session_recovery(
+        &self,
+        project: &str,
+        task: &str,
+        attempt: i64,
+    ) -> GearResult<Option<(String, String)>> {
+        let raw = self.get_meta(&format!(
+            "engine.session_recovery.{project}.{task}.{attempt}"
+        ))?;
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let Ok(mark) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return Ok(None);
+        };
+        match (mark["cli"].as_str(), mark["session"].as_str()) {
+            (Some(cli), Some(session)) => Ok(Some((cli.to_string(), session.to_string()))),
+            _ => Ok(None),
+        }
+    }
+
     /// Close a round: the next round's start on the seat, or the seat's
     /// release (§4.1).
     pub fn close_round(&self, key: &RoundKey, end_at: Ts) -> GearResult<()> {
@@ -4003,6 +4103,45 @@ fn view_from_row(row: &rusqlite::Row) -> rusqlite::Result<ViewRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-454 v2 (F2 of the T-454 review): the body of the direction-closed
+    /// notice and the prefix its readers recognise have one definition, so a
+    /// reword of the body cannot silently disable the interrupt path.
+    #[test]
+    fn the_direction_closed_notice_body_carries_the_recognised_prefix() {
+        let body = direction_closed_notice_body("T-7", 2);
+        assert!(
+            body.starts_with(DIRECTION_CLOSED_PREFIX),
+            "{body:?} must open with {DIRECTION_CLOSED_PREFIX:?}"
+        );
+        let message = MessageRow {
+            project: "p".into(),
+            id: "M-1".into(),
+            thread: "direction:T-7:2:abc".into(),
+            task: Some("T-7".into()),
+            attempt: Some(2),
+            sender: ENGINE_SENDER.into(),
+            sender_gen: 0,
+            recipient: "p:review-1".into(),
+            kind: MsgKind::Instruction,
+            urgent: false,
+            body,
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            wait_on: None,
+            wait_until: None,
+            result: None,
+            created: 0,
+            resolved: None,
+            meta: None,
+        };
+        assert!(is_direction_closed_notice(&message));
+        // Any other engine notice is not it.
+        let mut other = message.clone();
+        other.body = "No push to heat/t1 for 20 min.".into();
+        assert!(!is_direction_closed_notice(&other));
+    }
 
     // Both connections see the old schema before the writer commits. The
     // opener must choose its work from the version under BEGIN IMMEDIATE.
