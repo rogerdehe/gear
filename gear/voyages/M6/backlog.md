@@ -161,3 +161,6 @@
 
 ## The gear-engine test run is past the 300 s red line under load
 - 2026-10-31 M6 (F-281, F-282, F-283): lanes report the gear-engine test run at 1.5-7 minutes on the merged tree while two fleets share the machine (T-492 about 7 min, T-501 about 6 min); the fake Herdr never checks in, so scenario tests settle delivery and doorbell ops by hand. Measure the slowest tests with the probe of a quiet machine, then cut or split them under the 300 s red line.
+
+## The captain cannot give a reviewer an audit job
+- 2026-10-31 M6: a reviewer seat only gets jobs bound to a lane's push (the direction check) or hand-in (the review), so the whole-voyage audit of decompose rule 7 has no GEAR path. Design at M7 kickoff: an audit job with its own text sent to a reviewer seat, its slices planned at kickoff, the gaps judged by the captain, and landing refused while a gap has no ruling.

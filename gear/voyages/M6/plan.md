@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1027 -->
+<!-- gear-plan project=gear base=1028 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -126,6 +126,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - hand fix (review.rs last_job_recorded): a direction record counts only for the seat it names; another project's T-424 re-review waited for good on review-3 after a later T-434 check on review-1 rewrote the record review-3's result was matched against. Test: a_direction_result_frees_its_seat_after_a_later_check_takes_the_record; gate 2283 passed.
 - 2026-10-31 confirmed: eta 17h -> 20h | why: user: requirements were added mid-voyage (review model per task, model return, task colours, onboarding fix); 20h covers the S5 reviews, the v0.6.4 release and a whole-voyage check before landing
 - station M-7245: keep course — the eta is now 20h (1200m); projected 1040m with 4 tasks left: three in review, then the v0.6.4 release
+- 2026-10-31 hand fix: skills/gear/references/decompose.md rule 7: a voyage ends with an audit split by promise, planned at kickoff; the captain rules on every gap before landing | why: user: per-task reviews pass half-finished pieces that only fail when joined; M6 runs its audit by hand before v0.6.4, GEAR support is designed at M7 kickoff | else: one reviewer audits the whole voyage
 
 # Queue
 
