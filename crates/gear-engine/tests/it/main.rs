@@ -113,6 +113,7 @@ mod dead_temp_slot_contract;
 mod delivery_grace_contract;
 mod guardrails_contract;
 mod hand_in_notifications;
+mod health_contract;
 mod lane_nudge_contract;
 mod lane_restart_generation_contract;
 mod multi_repo_contract;

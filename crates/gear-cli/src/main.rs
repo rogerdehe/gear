@@ -3791,6 +3791,9 @@ fn engine_cfg(db_path: &str) -> gear_engine::EngineCfg {
     // the captain's judgement (the engine settles passes only).
     cfg.auto_settle = true;
     cfg.profiles = builtin_profiles();
+    // T-472: the running engine reads the machine and the fleet's own
+    // processes; a test's EngineCfg keeps the silent reader.
+    cfg.health = std::sync::Arc::new(gear_engine::health::SystemRead::new());
     cfg
 }
 
@@ -3879,6 +3882,10 @@ fn run_engine(
 const BINARY_CHANGED: &str =
     "engine: the binary on disk changed since this engine started; restart it to run the new build";
 
+/// How long a replaced binary waits for its restart before the captains are
+/// told.
+const BINARY_CHANGED_GRACE: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// The engine's own binary on disk: a rebuild replaces it and the running
 /// engine keeps the old one, silently, for as long as it lives (T-398;
 /// 2026-10-29: an hour on a replaced pre-fix binary).
@@ -3915,6 +3922,14 @@ impl BinaryWatch {
             return false; // the binary is gone or unreadable: no evidence
         };
         if Some(now) == self.mtime_at_start {
+            return false;
+        }
+        // A rebuild is followed by a restart within minutes: only a binary
+        // replaced longer ago than that is news to a captain.
+        let replaced_long_ago = std::time::SystemTime::now()
+            .duration_since(now)
+            .is_ok_and(|age| age >= BINARY_CHANGED_GRACE);
+        if !replaced_long_ago {
             return false;
         }
         self.announced = true;
@@ -8974,7 +8989,9 @@ path="api"
         // A rebuild replaces the file: new content, new modification time (a
         // coarse file system may keep the second, so the time is set by hand).
         std::fs::write(&binary, b"the new build").unwrap();
-        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        // Replaced longer ago than the grace a restart gets.
+        let later =
+            std::time::SystemTime::now() - BINARY_CHANGED_GRACE - std::time::Duration::from_secs(5);
         std::fs::OpenOptions::new()
             .write(true)
             .open(&binary)
