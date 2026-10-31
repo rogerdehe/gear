@@ -874,3 +874,180 @@ fn a_release_of_an_expired_park_works() {
     run_with_agents(&mut s, &mut herdr, "- release heat\n", "r1").unwrap();
     assert_eq!(seat(&mut s, "heat").0, SeatState::Active);
 }
+
+/// T-467: the config a raise applies to: four configured reviewers.
+const RAISE_CONFIG: &str = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 2
+temps = 4
+
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+"#;
+
+fn raise_world() -> Store {
+    let mut s = world();
+    s.write(|tx| {
+        let mut project = tx.get_project("p")?.unwrap();
+        project.config_toml = RAISE_CONFIG.into();
+        tx.update_project(&project)
+    })
+    .unwrap();
+    s
+}
+
+/// An apply of a draft with `# Decisions` and `# Staff`, with the confirmation
+/// flag the CLI's `--confirmed` sets.
+fn run_full(
+    s: &mut Store,
+    decisions: &str,
+    staff: &str,
+    confirmed: bool,
+    rid: &str,
+) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+    let text =
+        format!("<!-- gear-plan project=p base=0 -->\n# Decisions\n{decisions}\n# Staff\n{staff}");
+    let mut draft = parse(&text).unwrap();
+    draft.confirmed = confirmed;
+    let env = Env {
+        ctx: Some(GearCtx {
+            project: "p".into(),
+            seat: "captain".into(),
+            generation: 1,
+        }),
+        pane_id: Some(CAP.into()),
+        admin: false,
+    };
+    let fp = Fingerprint {
+        pane_id: CAP.into(),
+        kind: Some("codex".into()),
+        session_ref: None,
+    };
+    apply(s, &env, Some(&fp), None, &draft, &text, rid, T0 + 10)
+}
+
+/// T-467: a raise is the user's change: with `--confirmed` and its own
+/// `confirmed:` line the plan line stores the raised count and records the
+/// decision.
+#[test]
+fn a_confirmed_raise_is_applied_and_recorded() {
+    let mut s = raise_world();
+    let r = run_full(
+        &mut s,
+        "- 2026-10-31 18:00 confirmed: reviewers 4 -> 8 until no-hand-ins-wait | why: clear the backlog\n",
+        "- raise reviewers to=8 until=no-hand-ins-wait reason=clear the backlog\n",
+        true,
+        "r1",
+    )
+    .unwrap();
+    assert_eq!(
+        r.staffed,
+        vec!["raise reviewers 4->8 until=no-hand-ins-wait: clear the backlog".to_string()]
+    );
+    let raw = s
+        .read(|tx| tx.get_meta("engine.review_raise.p"))
+        .unwrap()
+        .expect("the raise is stored");
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(value["from"], 4);
+    assert_eq!(value["to"], 8);
+    assert_eq!(value["until"], "no-hand-ins-wait");
+    assert_eq!(value["reason"], "clear the backlog");
+    let decisions = s.read(|tx| tx.decisions_of("p", "")).unwrap();
+    assert!(
+        decisions
+            .iter()
+            .any(|decision| decision.what.contains("raise reviewers")),
+        "the raise is a recorded decision: {decisions:?}"
+    );
+}
+
+/// T-467: without `--confirmed` the raise is refused and nothing is written.
+#[test]
+fn a_raise_without_confirmation_writes_nothing() {
+    let mut s = raise_world();
+    let e = run_full(
+        &mut s,
+        "",
+        "- raise reviewers to=8 until=no-hand-ins-wait reason=clear the backlog\n",
+        false,
+        "r1",
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadFormat);
+    assert!(e.detail.contains("--confirmed"), "{e:?}");
+    assert!(s
+        .read(|tx| tx.get_meta("engine.review_raise.p"))
+        .unwrap()
+        .is_none());
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 0);
+}
+
+/// T-467: `--confirmed` alone is not enough: the raise needs its own
+/// `confirmed:` line in the same apply.
+#[test]
+fn a_raise_needs_its_own_confirmed_line() {
+    let mut s = raise_world();
+    let e = run_full(
+        &mut s,
+        "",
+        "- raise reviewers to=8 until=no-hand-ins-wait reason=clear the backlog\n",
+        true,
+        "r1",
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadFormat);
+    assert!(e.detail.contains("confirmed:"), "{e:?}");
+    assert!(s
+        .read(|tx| tx.get_meta("engine.review_raise.p"))
+        .unwrap()
+        .is_none());
+}
+
+/// T-467: a `confirmed:` line that names another change does not confirm the
+/// raise.
+#[test]
+fn a_raise_is_not_confirmed_by_another_change() {
+    let mut s = raise_world();
+    let e = run_full(
+        &mut s,
+        "- 2026-10-31 18:00 confirmed: milestone M9 departs | why: the user asked\n",
+        "- raise reviewers to=8 until=no-hand-ins-wait reason=clear the backlog\n",
+        true,
+        "r1",
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadFormat);
+    assert!(e.detail.contains("its own"), "{e:?}");
+    assert!(s
+        .read(|tx| tx.get_meta("engine.review_raise.p"))
+        .unwrap()
+        .is_none());
+}
+
+/// T-467: a raise must go above the configured count.
+#[test]
+fn a_raise_below_the_configured_count_is_refused() {
+    let mut s = raise_world();
+    let e = run_full(
+        &mut s,
+        "- 2026-10-31 18:00 confirmed: reviewers 4 -> 4 until no-hand-ins-wait | why: none\n",
+        "- raise reviewers to=4 until=no-hand-ins-wait reason=none\n",
+        true,
+        "r1",
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadFormat);
+    assert!(e.detail.contains("must be above"), "{e:?}");
+    assert!(s
+        .read(|tx| tx.get_meta("engine.review_raise.p"))
+        .unwrap()
+        .is_none());
+}

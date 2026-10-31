@@ -3702,11 +3702,26 @@ fn require_confirmed_changes(
     departing: &BTreeSet<String>,
     moved: &[(String, String, String)],
 ) -> GearResult<()> {
-    if departing.is_empty() && moved.is_empty() {
+    // T-467: a raise of a count is the user's change too: it needs the same
+    // `--confirmed` and `confirmed:` line as a departure or a move.
+    let raises: Vec<(String, u32, String)> = draft
+        .staff
+        .iter()
+        .filter_map(|item| match item {
+            StaffItem::Raise {
+                role, to, until, ..
+            } => Some((role.clone(), *to, until.clone())),
+            _ => None,
+        })
+        .collect();
+    if departing.is_empty() && moved.is_empty() && raises.is_empty() {
         return Ok(());
     }
     if !draft.confirmed {
-        let what = if !departing.is_empty() {
+        let what = if !raises.is_empty() {
+            let (role, to, until) = &raises[0];
+            format!("the raise of {role} to {to} until {until} in this apply")
+        } else if !departing.is_empty() {
             format!(
                 "milestone {} departs in this apply",
                 departing.iter().cloned().collect::<Vec<_>>().join(", ")
@@ -3718,18 +3733,35 @@ fn require_confirmed_changes(
         return Err(GearError::new(
             ErrorCode::BadFormat,
             format!(
-                "{what}: a departure and a move between milestones are the user's; confirm it with them, then apply again with --confirmed and a `confirmed:` line in # Decisions"
+                "{what}: a raise, a departure and a move between milestones are the user's; confirm it with them, then apply again with --confirmed and a `confirmed:` line in # Decisions"
             ),
         ));
     }
-    if confirmed_decisions(draft).is_empty() {
+    let confirmed = confirmed_decisions(draft);
+    if confirmed.is_empty() {
         return Err(GearError::new(
             ErrorCode::BadFormat,
             format!(
                 "this apply changes {} but # Decisions carries no `confirmed:` line: add `- <time> confirmed: <what changes, before -> after> | why: <the user's reason>` in this same apply",
-                guarded_summary(departing, moved)
+                guarded_summary(departing, moved, &raises)
             ),
         ));
+    }
+    for (role, to, until) in &raises {
+        // The captain's line names the role and the raised count; its
+        // `until ...` wording is the captain's own, so it is not matched
+        // word for word against the staff line's end condition.
+        let named = confirmed.iter().any(|decision| {
+            decision.what.contains(role.as_str()) && decision.what.contains(&to.to_string())
+        });
+        if !named {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "the raise of {role} to {to} until {until} needs its own `confirmed:` line: add `- <time> confirmed: {role} <from> -> {to} until {until} | why: <the user's reason>` in this same apply"
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -3750,8 +3782,12 @@ fn confirmed_decisions(draft: &Draft) -> Vec<crate::decision::Decision> {
 fn guarded_summary(
     departing: &std::collections::BTreeSet<String>,
     moved: &[(String, String, String)],
+    raises: &[(String, u32, String)],
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
+    for (role, to, until) in raises {
+        parts.push(format!("the raise of {role} to {to} until {until}"));
+    }
     if !departing.is_empty() {
         parts.push(format!(
             "the departure of {}",

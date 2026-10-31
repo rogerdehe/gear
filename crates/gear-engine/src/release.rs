@@ -530,6 +530,22 @@ enum RaiseStep {
     Cleared,
 }
 
+/// The reviewer count and the reviewer idle time (T-467): from the project's
+/// config, or the store's own count and the default 30 minutes when the config
+/// is empty or cannot be read.
+fn release_timing(store: &mut Store, project: &str) -> GearResult<(u32, u32)> {
+    match gear_app::config::latest(store, project) {
+        Ok(config) => Ok((config.quota.temps, config.quota.reviewer_release_idle_min)),
+        Err(_) => {
+            let count = store
+                .read(|tx| tx.get_project(project))?
+                .map(|row| row.quota_temps.max(0) as u32)
+                .unwrap_or(0);
+            Ok((count, 30))
+        }
+    }
+}
+
 /// Return an ended raise to the configured count (T-467): release the idle
 /// extra seats, never a running review, and record the return when the count
 /// is back. While a raise is in effect the ordinary sweep does not run.
@@ -548,9 +564,8 @@ fn settle_review_raise(
     if hand_ins_waiting(store, project)? > 0 {
         return Ok(RaiseStep::Active);
     }
-    let config = gear_app::config::latest(store, project)?;
-    let configured = config.quota.temps;
-    let idle_min = i64::from(config.quota.reviewer_release_idle_min) * 60;
+    let (configured, reviewer_idle_min) = release_timing(store, project)?;
+    let idle_min = i64::from(reviewer_idle_min) * 60;
     let _ = release_standby_above(store, herdr, project, configured as usize, idle_min, now)?;
     if temp_seats_in_use(store, herdr, project)? > configured as usize {
         return Ok(RaiseStep::Active);
@@ -703,8 +718,8 @@ pub fn release_idle_standby(
     }
     // T-467: a seat is released only after its role's idle time; a seat that
     // just got its verdict stays for the next review (M-2603).
-    let config = gear_app::config::latest(store, project)?;
-    let idle_min = i64::from(config.quota.reviewer_release_idle_min) * 60;
+    let (_, reviewer_idle_min) = release_timing(store, project)?;
+    let idle_min = i64::from(reviewer_idle_min) * 60;
     let working = working_lanes(store, project)?;
     let excess = standby.len().saturating_sub(working.max(0) as usize);
     let waiting: Vec<SeatRow> = standby
