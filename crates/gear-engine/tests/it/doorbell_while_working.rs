@@ -6,6 +6,10 @@
 //! whose agent queues input typed while it works (pi, claude), is typed at once;
 //! a normal message to an agent that does not queue (opencode, codex) still
 //! waits for idle. One doorbell per message, never repeated.
+//!
+//! T-454: a notice from the engine waits for the seat's next idle moment and
+//! never cuts its turn; one notice is the exception (T-444), the one that
+//! closes a direction check under its reviewer, which ends that turn at once.
 
 use gear_engine::{tick, EngineCfg};
 use gear_herdr::fake::{Call, FakeHerdr, Inject};

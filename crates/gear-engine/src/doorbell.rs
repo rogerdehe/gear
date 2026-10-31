@@ -10,6 +10,8 @@
 //! the think ask) never go into a working agent. Typed into one, a notice stops
 //! the running command (M5: two notices stopped a 9-minute check twice), so a
 //! notice waits for the seat's next idle moment. A seat's word keeps its path.
+//! One notice is the exception (T-444): the one that closes a direction check
+//! under its reviewer reaches it while it works, and ends that turn at once.
 
 use gear_model::{MsgKind, Ts};
 
@@ -119,13 +121,25 @@ pub fn is_notice(sender: &str) -> bool {
     sender == NOTICE_SENDER
 }
 
+/// The body the notice that closes a direction check opens with (T-444).
+pub const DIRECTION_CLOSED_NOTICE: &str = "The direction check of ";
+
+/// Is this the notice that ends a direction check under its reviewer (T-444)?
+/// It is the one engine notice that reaches a working agent (T-454 v2): the
+/// reviewer still working on that check ends its turn at once.
+pub fn ends_direction_check(message: &gear_store::MessageRow) -> bool {
+    is_notice(&message.sender) && message.body.starts_with(DIRECTION_CLOSED_NOTICE)
+}
+
 /// [`at_once`] for one stored message and the seat it is addressed to: the seat
 /// is a lane whose agent kind queues input, and `captain` is the project's
 /// captain (so the message is a captain instruction). Used by the engine tick
 /// and by `gear send` alike, so the two never drift apart.
 ///
 /// A notice is the exception (T-454): whatever its urgency it waits for the
-/// seat's next idle moment, so it never stops a command the agent runs.
+/// seat's next idle moment, so it never stops a command the agent runs. The
+/// one notice that must reach a working agent is the one that closes a
+/// direction check under its reviewer (T-444): it ends that turn at once.
 pub fn reaches_while_working(
     message: &gear_store::MessageRow,
     seat: &gear_store::SeatRow,
@@ -133,7 +147,7 @@ pub fn reaches_while_working(
     captain: Option<&str>,
 ) -> bool {
     if is_notice(&message.sender) {
-        return false;
+        return ends_direction_check(message);
     }
     let queues_input =
         seat.role == gear_model::SeatRole::Lane && gear_herdr::queues_input(agent_kind);

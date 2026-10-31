@@ -1,10 +1,11 @@
 //! Contract for gear_engine::doorbell (T-8, T-130). Pure functions.
 
 use gear_engine::doorbell::{
-    at_once, decide, goal_line, text, DoorbellAction, DoorbellInput, DoorbellItem,
+    at_once, decide, goal_line, reaches_while_working, text, DoorbellAction, DoorbellInput,
+    DoorbellItem,
 };
-use gear_model::{MsgKind, SeatRole, TaskState};
-use gear_store::{testing, Store, TaskRow, VoyageRow};
+use gear_model::{MsgKind, MsgState, SeatRole, TaskState};
+use gear_store::{testing, MessageRow, Store, TaskRow, VoyageRow};
 
 const NOW: i64 = 10_000;
 
@@ -190,6 +191,95 @@ fn at_once_rule_names_the_two_ways_a_message_arrives_while_working() {
     assert!(!at_once(false, Question, true, true));
     assert!(!at_once(false, Reply, true, true));
     assert!(!at_once(false, Progress, true, true));
+}
+
+/// T-454: an engine notice never reaches a working agent, whatever its
+/// urgency; the one exception is the notice that closes a direction check
+/// under its reviewer (T-444). A seat's word keeps its path.
+#[test]
+fn a_notice_waits_for_idle_except_the_direction_closed_one() {
+    fn message(sender: &str, urgent: bool, body: &str) -> MessageRow {
+        MessageRow {
+            project: "p".into(),
+            id: "M-1".into(),
+            thread: "t".into(),
+            task: None,
+            attempt: None,
+            sender: sender.into(),
+            sender_gen: 0,
+            recipient: "p:heat".into(),
+            kind: MsgKind::Instruction,
+            urgent,
+            body: body.into(),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            wait_on: None,
+            wait_until: None,
+            result: None,
+            created: NOW,
+            resolved: None,
+            meta: None,
+        }
+    }
+    let mut store = Store::open_in_memory().unwrap();
+    let (lane, reviewer, captain) = store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", NOW)?;
+            let captain = testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "codex",
+                NOW,
+            )?;
+            let lane =
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "pi", NOW)?;
+            let reviewer = testing::seed_temp_seat(tx, "p", "review-1", "T-1", "w1:p3", "pi", NOW)?;
+            Ok((lane, reviewer, captain))
+        })
+        .unwrap();
+    let captain = Some(captain.id.as_str());
+    // An urgent engine notice (the quiet, think and overrun ones) waits.
+    assert!(!reaches_while_working(
+        &message("engine", true, "No push to heat/t1 for 20 min."),
+        &lane,
+        "pi",
+        captain
+    ));
+    assert!(!reaches_while_working(
+        &message("engine", true, "No push to heat/t1 for 20 min."),
+        &reviewer,
+        "pi",
+        captain
+    ));
+    // The notice that closes a direction check ends the reviewer's turn.
+    assert!(reaches_while_working(
+        &message(
+            "engine",
+            false,
+            "The direction check of T-1 attempt 1 is closed: the attempt was handed in or ended. Send nothing for it; end your turn."
+        ),
+        &reviewer,
+        "pi",
+        captain
+    ));
+    // A seat's word keeps its path: an urgent message, and a captain
+    // instruction to a lane whose agent queues input.
+    assert!(reaches_while_working(
+        &message("p:captain", true, "read the plan"),
+        &lane,
+        "pi",
+        captain
+    ));
+    assert!(reaches_while_working(
+        &message("p:captain", false, "read the plan"),
+        &lane,
+        "pi",
+        captain
+    ));
 }
 
 #[test]
