@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=985 -->
+<!-- gear-plan project=gear base=986 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -90,6 +90,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7021: move — projected 885m of 1020m; hull runs dry in ~21 min (M-7023) while mast holds 225m: T-497 and T-498 (Antigravity CLI profile and usage) go to hull
 - 2026-11-01 06:00 staff: T-491 (v0.5 upgrade test) moves to mast | why: mast runs dry in ~17 min (M-7028; its releases wait for their stations) while hull holds the T-487 rework, T-488, T-492, T-497 and T-498
 - 2026-11-01 06:10 hand-fix: copied the T-495 omp probe's session log (checked: no secrets) into mast's worktree target/tmp for T-496's fixture | why: seats may not read ~/.omp (M-7029)
+- 2026-11-01 06:40 hand-fix: released v0.6.2 (notes: T-489 and three hand fixes added, T-482 left to v0.6.1; dev merged into main as 9b27cc4e, tag v0.6.2); both engines on v0.6.2 | why: station S3 reached, done (5); the skill review found nothing new
 
 # Queue
 
