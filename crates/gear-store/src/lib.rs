@@ -1893,6 +1893,28 @@ impl<'s> Tx<'s> {
         Ok(ops)
     }
 
+    /// The Deliver ops of a project that are not settled yet (T-471): the
+    /// board shows the deliveries in flight, so it reads those rows only
+    /// instead of every op of the project in the four open states.
+    pub fn unsettled_deliveries(&self, project: &str) -> GearResult<Vec<OpRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(&op_select(
+                " WHERE project=?1 AND kind=?2
+                 AND state IN ('intended', 'executing', 'submitted', 'unknown')
+                 ORDER BY created, id",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, OpKind::Deliver.as_str()], op_from_row)
+            .map_err(map_sqlite)?;
+        let mut ops = Vec::new();
+        for row in rows {
+            ops.push(row.map_err(map_sqlite)?);
+        }
+        Ok(ops)
+    }
+
     /// Most recent op of `kind` for `seat` (any state), for cooldowns.
     /// Every op of `kind` for `seat`, oldest first.
     pub fn ops_of_seat_kind(&self, seat: &str, kind: OpKind) -> GearResult<Vec<OpRow>> {
