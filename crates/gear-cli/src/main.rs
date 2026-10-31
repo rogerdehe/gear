@@ -8307,8 +8307,35 @@ path="api"
                 // T-76: the folder the agent runs in is trusted.
                 "-c".to_string(),
                 "projects={\"{repo_root}\"={trust_level=\"trusted\"}}".to_string(),
+                // T-457: a resume runs in the seat's own directory and never
+                // shows the working-directory dialog.
+                "-c".to_string(),
+                "tui.resume_cwd=\"current\"".to_string(),
             ]
         );
+        // T-457: Codex 0.165's startup screens are answered, not read as an
+        // idle agent.
+        let dialogs = &codex.dialogs;
+        assert_eq!(dialogs.len(), 2, "the /new and the resume dialog");
+        assert!(
+            dialogs[0]
+                .markers
+                .contains(&"Where should the new conversation run?".to_string()),
+            "the /new dialog's marker"
+        );
+        assert!(
+            dialogs[1]
+                .markers
+                .contains(&"Choose which working directory to use".to_string()),
+            "the resume dialog's marker"
+        );
+        for dialog in dialogs {
+            assert_eq!(
+                dialog.keys,
+                vec!["enter".to_string()],
+                "the preselected choice is taken with Enter"
+            );
+        }
     }
 
     #[test]
