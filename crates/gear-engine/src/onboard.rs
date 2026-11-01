@@ -1345,6 +1345,11 @@ profile = "opencode"
 
     /// The same project with a lane chain: `minimax-cn/MiniMax-M3.1-Flash`
     /// first, `deepseek/deepseek-flash` as the fallback.
+    /// A `model.list` answer holding exactly one model.
+    fn catalogue(provider: &str, id: &str) -> serde_json::Value {
+        serde_json::json!({"data":[{"providerID":provider, "id":id, "variants":[]}]})
+    }
+
     const CONFIG_WITH_MODELS: &str = r#"
 [project]
 id = "toy"
@@ -1600,11 +1605,13 @@ repo = "web"
         let model = serde_json::json!({"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash"});
         let listed = serde_json::json!({"data":[{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash", "name":"MiniMax-M3.1-Flash", "variants":[]}]});
         herdr.api_replies.extend([
+            // The start's catalogue and session.
             Ok(listed.clone()),
             Ok(serde_json::json!({"data":{"id":"ses_t94", "model":model}})),
+            // The labels from OpenCode's own lists (T-94).
             Ok(listed.clone()),
             Ok(serde_json::json!({"data":[{"id":"minimax-cn", "name":"MiniMax (minimax.cn)"}]})),
-            Ok(serde_json::json!({"data":{"id":"ses_t94", "model":model}})),
+            // T-531: the model gate reads the catalogue and the session.
             Ok(listed),
             Ok(serde_json::json!({"data":{"id":"ses_t94", "model":model}})),
         ]);
@@ -2175,6 +2182,13 @@ repo = "web"
         let mut herdr = FakeHerdr::new();
         // An OpenCode lane must start on the chain's model (T-33, F5).
         herdr.start_screen = Some("Build auto · MiniMax-M3.1-Flash MiniMax · high".into());
+        herdr.api_replies.extend([
+            Ok(catalogue("minimax-cn", "MiniMax-M3.1-Flash")),
+            Ok(serde_json::json!({"data":{"id":"ses_env", "model":{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash"}}})),
+            // T-531: the model gate reads the catalogue and the session.
+            Ok(catalogue("minimax-cn", "MiniMax-M3.1-Flash")),
+            Ok(serde_json::json!({"data":{"id":"ses_env", "model":{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash"}}})),
+        ]);
 
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
@@ -2203,25 +2217,24 @@ repo = "web"
 
     /// T-33 (F5): a lane that starts on the wrong model is switched in place
     /// before it is marked Active; no work is dispatched until the bar says so.
+    /// T-531: the switch is the session API's, so the pane sees no model key.
     #[test]
     fn a_lane_that_starts_on_the_wrong_model_switches_before_it_is_active() {
         let mut store = world(CONFIG_WITH_MODELS);
         let mut herdr = FakeHerdr::new();
         // The agent comes up on another model.
         herdr.start_screen = Some("Build auto · Flint-40B Free OpenCode · high".to_string());
-        herdr.screen_after = vec![
-            ("esc".into(), "  Ask anything…".into()),
-            (
-                "/model".into(),
-                "  Search\n  Recent\n  MiniMax-M3.1-Flash  MiniMax".into(),
-            ),
-            (
-                "MiniMax-M3.1-Flash".into(),
-                "Build auto · MiniMax-M3.1-Flash MiniMax · high".into(),
-            ),
-        ];
+        let session = serde_json::json!({"data":{"id":"ses_wrong", "model":{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash"}}});
+        herdr.api_replies.extend([
+            Ok(catalogue("minimax-cn", "MiniMax-M3.1-Flash")),
+            Ok(session.clone()),
+            // T-531: the model gate reads the catalogue and the session.
+            Ok(catalogue("minimax-cn", "MiniMax-M3.1-Flash")),
+            Ok(session.clone()),
+        ]);
 
-        // Tick 1: the agent starts, the check finds another model, esc is sent.
+        // Tick 1: the agent starts, the check finds another bar, the switch
+        // waits for the TUI to render the model.
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
         assert!(active.is_empty(), "the seat is not started yet");
         let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
@@ -2230,30 +2243,29 @@ repo = "web"
             .unwrap()
             .is_some());
 
-        // The next ticks continue the switch; the seat becomes Active only when
-        // the bar confirms.
-        let mut active = Vec::new();
-        for tick in 0..5 {
-            active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 2 + tick).unwrap();
-            if !active.is_empty() {
-                break;
-            }
-        }
+        // The TUI renders the model: the next tick confirms and the seat is
+        // Active.
+        let pane = store
+            .read(|tx| tx.get_binding("toy:heat", 1))
+            .unwrap()
+            .unwrap()
+            .pane_id;
+        herdr.set_screen(&pane, "Build auto · MiniMax-M3.1-Flash MiniMax · high");
+        herdr.api_replies.extend([
+            Ok(catalogue("minimax-cn", "MiniMax-M3.1-Flash")),
+            Ok(session),
+        ]);
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 2).unwrap();
         assert_eq!(active, vec!["toy:heat".to_string()]);
-        let sent: Vec<String> = herdr
-            .calls
-            .iter()
-            .filter_map(|call| match call {
-                gear_herdr::fake::Call::PaneType { text, .. } => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            sent.iter().filter(|c| *c == "/model").count(),
-            1,
-            "{sent:?}"
+        // T-531: not one key or typed line reached the pane.
+        assert!(
+            !herdr.calls.iter().any(|call| matches!(
+                call,
+                gear_herdr::fake::Call::SendKeys { .. } | gear_herdr::fake::Call::PaneType { .. }
+            )),
+            "the pane got no keys: {:?}",
+            herdr.calls
         );
-        assert!(sent.iter().any(|c| c == "MiniMax-M3.1-Flash"), "{sent:?}");
         assert!(
             herdr.started_agents.len() == 1,
             "the agent is started once: {:?}",
@@ -2267,21 +2279,35 @@ repo = "web"
         let mut store = world(CONFIG_WITH_MODELS);
         let mut herdr = FakeHerdr::new();
         herdr.start_screen = Some("Build auto · MiniMax-M3.1-Flash MiniMax · high".to_string());
+        herdr.api_replies.extend([
+            Ok(catalogue("minimax-cn", "MiniMax-M3.1-Flash")),
+            Ok(serde_json::json!({"data":{"id":"ses_right", "model":{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash"}}})),
+            // T-531: the gate reads the catalogue and the session.
+            Ok(catalogue("minimax-cn", "MiniMax-M3.1-Flash")),
+            Ok(serde_json::json!({"data":{"id":"ses_right", "model":{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash"}}})),
+        ]);
 
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
         assert_eq!(active, vec!["toy:heat".to_string()]);
-        let sent: Vec<String> = herdr
-            .calls
-            .iter()
-            .filter_map(|call| match call {
-                gear_herdr::fake::Call::PaneType { text, .. } => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
+        // T-531: no key and no `/model`/`/models` text reaches the pane.
         assert!(
-            !sent.iter().any(|c| c == "/model"),
-            "nothing typed into the agent: {sent:?}"
+            !herdr.calls.iter().any(|call| matches!(
+                call,
+                gear_herdr::fake::Call::SendKeys { .. } | gear_herdr::fake::Call::PaneType { .. }
+            )),
+            "nothing typed into the agent: {:?}",
+            herdr.calls
+        );
+        assert!(
+            herdr
+                .calls
+                .iter()
+                .filter(|call| matches!(call, gear_herdr::fake::Call::OpenCodeApi { .. }))
+                .count()
+                == 4,
+            "{:?}",
+            herdr.calls
         );
     }
 
@@ -2290,6 +2316,14 @@ repo = "web"
         let mut store = world(CONFIG_WITH_LANE_MODELS);
         let mut herdr = FakeHerdr::new();
         herdr.start_screen = Some("Build auto · DeepSeek V4 Pro DeepSeek · high".into());
+        let session = serde_json::json!({"data":{"id":"ses_own", "model":{"providerID":"deepseek", "id":"deepseek-v4-pro"}}});
+        herdr.api_replies.extend([
+            Ok(catalogue("deepseek", "deepseek-v4-pro")),
+            Ok(session.clone()),
+            // T-531: the gate reads the catalogue and the session.
+            Ok(catalogue("deepseek", "deepseek-v4-pro")),
+            Ok(session),
+        ]);
 
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
