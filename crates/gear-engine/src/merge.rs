@@ -2188,6 +2188,14 @@ fn merge_one_locked(
         .get("mechanical")
         .and_then(|mechanical| mechanical.as_bool())
         .unwrap_or(false);
+    // T-532: a remerge carries the captain's conflict fix on the review
+    // branch (decision 03:55): the review branch merged the integration branch
+    // and the conflict was resolved there.
+    let remerge = op
+        .payload
+        .get("remerge")
+        .and_then(|remerge| remerge.as_bool())
+        .unwrap_or(false);
     let review_ref = format!("{remote_name}/{review}");
     let review_found = git(dir, &["rev-parse", "--verify", &review_ref]);
     let has_review = review_found.is_ok() && !mechanical;
@@ -2198,29 +2206,51 @@ fn merge_one_locked(
              a merge publishes the approved candidate and its review branch together"
         )));
     }
-    let mut pinned_refs = Vec::new();
+    // What merges, and the source the merge commit names for it: as today, the
+    // candidate by sha and then the review branch by its name.
+    let mut merges: Vec<(String, String)> = Vec::new();
     if !already {
-        pinned_refs.push(sha.clone());
+        merges.push((sha.clone(), sha.clone()));
     }
     if has_review {
-        pinned_refs.push(review_ref.clone());
+        merges.push((review_ref.clone(), review_ref.clone()));
     }
-    if pinned_refs.is_empty() {
+    // T-532: a remerge whose review branch contains the candidate — the captain
+    // merged the integration branch into it and resolved the conflict there —
+    // merges only that commit: the candidate is inside it, and merging the
+    // candidate alone would conflict again. The review ref is resolved once,
+    // so a branch that moves later cannot slip an unreviewed commit in, and the
+    // merge commit still names the review ref as its source.
+    if remerge
+        && has_review
+        && git(dir, &["merge-base", "--is-ancestor", &sha, &review_ref]).is_ok()
+    {
+        if let Ok(out) = git(
+            dir,
+            &["rev-parse", "--verify", &format!("{review_ref}^{{commit}}")],
+        ) {
+            let review_sha = out.trim().to_string();
+            if !review_sha.is_empty() {
+                merges = vec![(review_sha, review_ref.clone())];
+            }
+        }
+    }
+    if merges.is_empty() {
         // The candidate is on the integration branch and its review branch is
         // gone: a restart after the push. Nothing to merge, nothing to push.
         return Step::Merged(format!(
             "{task} was already merged: {sha} is on {remote_name}/{integration}"
         ));
     }
-    for pinned in &pinned_refs {
+    for (target, source) in &merges {
         if let Err(reason) = git(
             dir,
             &[
                 "merge",
                 "--no-ff",
-                pinned,
+                target,
                 "-m",
-                &gear_model::commit::fill(commit, &[("source", pinned)]),
+                &gear_model::commit::fill(commit, &[("source", source)]),
             ],
         ) {
             // Abort and leave the worktree exactly at the integration branch.
@@ -2231,7 +2261,7 @@ fn merge_one_locked(
             );
             probe.step("merge");
             return Step::Failed(Failed::stuck(format!(
-                "conflict merging {pinned}: {reason}"
+                "conflict merging {target}: {reason}"
             )));
         }
     }
@@ -6553,6 +6583,22 @@ gate = "{gate}"
         gate: &str,
         candidate: &str,
     ) -> (Store, gear_herdr::fake::FakeHerdr, EngineCfg) {
+        queued_merge_payload(
+            scratch,
+            gate,
+            candidate,
+            serde_json::json!({ "branch": "heat/t5", "candidate": candidate }),
+        )
+    }
+
+    /// A queued merge whose op carries the payload a test wants (T-532: the
+    /// review branch and the `remerge` mark of the captain's retry).
+    fn queued_merge_payload(
+        scratch: &Scratch,
+        gate: &str,
+        candidate: &str,
+        payload: serde_json::Value,
+    ) -> (Store, gear_herdr::fake::FakeHerdr, EngineCfg) {
         let worktree = scratch.merge_worktree();
         let candidate = candidate.to_string();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
@@ -6575,7 +6621,7 @@ gate = "{gate}"
                     attempt: Some(1),
                     ref_msg: None,
                     plan_version: None,
-                    payload: serde_json::json!({ "branch": "heat/t5", "candidate": candidate }),
+                    payload,
                     created: 10,
                 })?;
                 Ok(())
@@ -8090,6 +8136,124 @@ gate = "{project_gate}"
         assert_eq!(state.dev, before, "dev is untouched");
         let branches = &state.branches;
         assert!(branches.contains("heat/t5"), "{branches}");
+    }
+
+    /// T-532: the repos a conflict needs (dev moves the line the candidate
+    /// appends to), with the captain's fix on the review branch: it merged dev
+    /// and resolved the conflict there, so the review branch contains the
+    /// candidate.
+    fn remerge_scratch(name: &str) -> Scratch {
+        let scratch = Scratch::new(name);
+        sh(&scratch.work, "git switch -q dev && printf 'dev\nother\n' > README.md && git -c user.email=a@b -c user.name=a commit -qam other");
+        publish(&scratch.work, "dev");
+        // The review branch merges dev, conflicts, and keeps the captain's
+        // resolution.
+        sh(
+            &scratch.work,
+            "git switch -q review/t5 && git merge -q --no-edit dev || true",
+        );
+        sh(
+            &scratch.work,
+            "printf 'dev\nother\ntask\n' > README.md && git add README.md \
+             && git -c user.email=a@b -c user.name=a commit -qm resolution",
+        );
+        publish(&scratch.work, "review/t5");
+        scratch
+    }
+
+    /// T-532 (decision 03:55): a remerge carries the captain's conflict fix on
+    /// the review branch — the review branch contains the candidate, so the
+    /// remerge merges only its commit: the candidate is inside it, and the
+    /// candidate alone would conflict again.
+    #[test]
+    fn a_remerge_carries_the_captains_conflict_fix_on_the_review_branch() {
+        let scratch = remerge_scratch("remerge-fix");
+        let marker = scratch.root.join("gate-ran");
+        let gate = format!("touch '{}'", marker.display());
+        let candidate = scratch.head_of("heat/t5");
+        let (mut store, mut herdr, cfg) = queued_merge_payload(
+            &scratch,
+            &gate,
+            &candidate,
+            serde_json::json!({
+                "branch": "heat/t5",
+                "candidate": candidate,
+                "review": "review/t5",
+                "remerge": true,
+            }),
+        );
+        accept(&mut store, "T-5", 0);
+
+        let merged = wait_merge(&mut store, &mut herdr, &cfg);
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        assert_eq!(
+            op_state(&mut store, "O-1"),
+            Some(OpState::Confirmed),
+            "the op is confirmed"
+        );
+        assert!(marker.exists(), "the gate ran");
+        // dev holds the candidate and the captain's resolution.
+        let log = scratch.dev_log();
+        assert!(log.contains("task"), "the candidate landed: {log}");
+        assert!(log.contains("resolution"), "the fix landed: {log}");
+        assert!(
+            log.contains("merge(T-5): origin/review/t5"),
+            "the source names the review branch: {log}"
+        );
+        let readme = sh(&scratch.root, "git -C origin.git show dev:README.md");
+        assert_eq!(readme, "dev\nother\ntask");
+    }
+
+    /// T-532: the same repos with a first merge op (no `remerge`) still fail:
+    /// the candidate alone conflicts with dev.
+    #[test]
+    fn a_first_merge_of_the_same_repos_still_conflicts() {
+        let scratch = remerge_scratch("remerge-first");
+        let worktree = scratch.merge_worktree();
+        let before = scratch.dev_log();
+        let candidate = scratch.head_of("heat/t5");
+
+        let failed = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap_err();
+
+        assert!(
+            failed
+                .reason
+                .contains(&format!("conflict merging {candidate}")),
+            "{}",
+            failed.reason
+        );
+        assert_eq!(failed.blocker, Blocker::Stuck);
+        assert_eq!(scratch.dev_log(), before, "dev is untouched");
+    }
+
+    /// T-532: a remerge whose review branch does not contain the candidate
+    /// merges the candidate, then the review branch, as today.
+    #[test]
+    fn a_remerge_whose_review_branch_lacks_the_candidate_merges_both_as_today() {
+        let scratch = Scratch::new("remerge-lacks");
+        // The review branch is cut from dev again and carries its own commit:
+        // it does not contain the candidate.
+        sh(
+            &scratch.work,
+            "git switch -q review/t5 && git reset -q --hard dev && echo reviewed > review.txt \
+             && git add review.txt && git -c user.email=a@b -c user.name=a commit -qm reviewed",
+        );
+        publish(&scratch.work, "review/t5");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        let mut remerge = op(&candidate);
+        remerge.payload["remerge"] = serde_json::json!(true);
+
+        let line = merge_one(&worktree, &repo("true"), &remerge).unwrap();
+
+        assert!(line.contains("merged T-5"), "{line}");
+        let log = scratch.dev_log();
+        assert!(log.contains("task"), "the candidate landed: {log}");
+        assert!(log.contains("reviewed"), "the review landed: {log}");
+        assert!(
+            log.contains("merge(T-5): origin/review/t5"),
+            "the review branch was merged: {log}"
+        );
     }
 
     #[test]
