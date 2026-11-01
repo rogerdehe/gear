@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1117 -->
+<!-- gear-plan project=gear base=1119 -->
 # Goal
 Fix the bugs the user reports while the projects that use GEAR run on it, and get each fix into their hands at once: every batch ships as a v0.6.x release that the shared engines, the CLI and the installed skill copies run, and each project's captain is told. M6.1 is planned as it goes: its first bugs are below, and each further bug the user reports becomes tasks here. It lands on the user's word.
 
@@ -39,6 +39,7 @@ depart: now
 - done (2): met | evidence: the user's reports this voyage each became tasks within minutes: machine-wide model 03:40 (T-531, T-533), unsent delivery 04:30 (T-535), held tasks 04:45 (T-536), the other project's remerge 03:55 (T-532); the merge-gate question was answered with evidence and shown to be no GEAR fault (the other project's CI and tests)
 - done (3): met | evidence: v0.6.12 tagged and published; gear --version 0.6.12; skill copies rewritten for five CLIs; engines restarted 11:58:31Z; both other captains told
 - done (4): met | evidence: decision 06:05 read the 12 lessons against skills/gear; T-541 rewrote five lines (lane and review rules, decompose.md twice, departure.md), T-533 and T-539 carried the rest; no paragraph added
+- 2026-11-01 06:35 scope: the landing item M-7600 rang the captain every few minutes while it waited for the user's word, and the user saw each ring (M7 backlog since M5.3: "nothing the captain could do answered it"). `gear reply --wait <who> --until <t>` parks an item quietly until its time, but mail.rs refuses every reply mode except --note on a station item. Allow --wait on station items too; `station <id>: land` still closes it. Then v0.6.13 | why: done clause (2): a bug the user sees now; both lanes idle | else: M7
 
 # Queue
 
@@ -97,3 +98,14 @@ goal: [v0.6.12] Release v0.6.12. Change, no other design: (1) the version is 0.6
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.12"; docs/releases/v0.6.12.md lists every task merged since v0.6.11. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
 deps: T-531, T-532, T-533, T-535, T-536, T-537, T-538, T-539, T-540, T-541
 estimate: 25
+
+## T-542 [now] lane=mast milestone=M6.1 required
+goal: [v0.6.13] A station item can wait for the user quietly (decision 06:35). Change crates/gear-app/src/mail.rs only, no other design: in the reply checks (near line 1666, the refusal "station … needs a plan # Decisions line"), allow `ReplyMode::Wait` on a station item as well as `ReplyMode::Note`; `--resolve` stays refused there. A station item put in Waiting with `--wait <who> --until <t>` then behaves as every waiting captain item does (no doorbell until its time, back to Open after it), and a plan line `station <id>: land` (or keep course, time-box, cut, move) still settles it from Waiting. Check that the plan's station path accepts an item in Waiting; if it refuses one, change that check in crates/gear-app (it is in your paths) so it accepts Open and Waiting.
+accept: Tests in crates/gear-app with the store: a ready-to-land station item answered with `--wait user --until +12h` is Waiting and is not in the doorbell's list of the captain's waiting items; after the time it is Open again; a plan apply with `station <id>: land` closes it from Waiting; `--resolve` on a station item is still refused with the plan-line message. Run only `make check CRATE=gear-app TESTS='test(station) | test(reply)'`; the merge gate runs `make gate`.
+estimate: 25
+
+## T-543 [now] lane=mast milestone=M6.1 required
+goal: [v0.6.13] Release v0.6.13. Change, no other design: (1) the version is 0.6.13 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.13.md, in the form of docs/releases/v0.6.12.md: one line per task merged on origin/dev since v0.6.12 at the hand-in, and an "Upgrading" section (the binary changed; the skill did not).
+accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.13"; docs/releases/v0.6.13.md lists every task merged since v0.6.12. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+deps: T-542
+estimate: 20
