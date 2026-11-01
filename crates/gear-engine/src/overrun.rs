@@ -1073,12 +1073,61 @@ mod tests {
 
     /// F1 of the T-406 review: the selection must read the project's messages
     /// once, not once per ended round. Thousands of messages and hundreds of
-    /// ended rounds are a normal project's history; the selection still has to
-    /// be cheap enough for the tick's write.
+    /// ended rounds are a normal project's history, so the selection is read by
+    /// index — `messages_thread` for the answered threads, the rounds key for
+    /// the rounds.
+    ///
+    /// T-520: the check is the query plan, not the clock. A timing assertion
+    /// here failed under the gate's parallel load (F-293); the plan is the fact
+    /// that does not move with the machine's load.
     #[test]
-    fn a_long_history_does_not_cost_the_rounds_query() {
-        let mut s = world();
+    fn a_long_history_is_selected_by_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gear.db");
+        let mut s = Store::open(&path).unwrap();
         s.write(|tx| {
+            testing::seed_project(tx, "p", "sess", T)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "codex", T)?;
+            // The world of the other tests: a lane working T-1 in an open round.
+            tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: "T-1".into(),
+                rank: 1,
+                state: TaskState::Ready,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: Some(10),
+                issue: None,
+                updated: T,
+            })?;
+            gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T)?;
+            gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T)?;
+            tx.insert_round(&NewRound {
+                key: RoundKey {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    role: "dev".into(),
+                },
+                seat: "p:heat".into(),
+                generation: 1,
+                cli: "codex".into(),
+                model: None,
+                start_at: T,
+            })?;
             for n in 0..300 {
                 let key = RoundKey {
                     project: "p".into(),
@@ -1119,13 +1168,44 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let started = std::time::Instant::now();
-        let rounds = s.read(|tx| tx.rounds_to_process("p")).unwrap();
-        let elapsed = started.elapsed();
-        assert_eq!(rounds.len(), 1, "only the open round is selected");
+
+        // The plan of the selection, as the store asks it: the rounds by their
+        // key, the answered threads by `messages_thread` — no full scan of
+        // either table.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT project FROM rounds
+                 WHERE project=?1
+                   AND (end_at IS NULL OR ('overrun:'||task||':'||role, attempt) IN (
+                     SELECT m.thread, m.attempt FROM messages m
+                      WHERE m.project=?1 AND m.kind='system'
+                        AND m.state IN ('open', 'waiting')))
+                 ORDER BY start_at, task, role",
+            )
+            .unwrap()
+            .query_map(["p"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        let text = plan.join(" | ");
         assert!(
-            elapsed < std::time::Duration::from_millis(500),
-            "the rounds query took {elapsed:?} on 10 000 messages and 300 ended rounds"
+            text.contains("SEARCH rounds USING"),
+            "the rounds are not read by an index: {text}"
         );
+        assert!(
+            text.contains("SEARCH m USING"),
+            "the answered threads are not read by an index: {text}"
+        );
+        assert!(
+            !text.contains("SCAN rounds")
+                && !text.contains("SCAN m")
+                && !text.contains("SCAN messages"),
+            "the selection scans a table: {text}"
+        );
+
+        // And it still selects the one round that is open.
+        let rounds = s.read(|tx| tx.rounds_to_process("p")).unwrap();
+        assert_eq!(rounds.len(), 1, "only the open round is selected");
     }
 }
