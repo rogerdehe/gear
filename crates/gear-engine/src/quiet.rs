@@ -7,6 +7,11 @@ use std::hash::{Hash, Hasher};
 
 const LOOP_INTERVAL: i64 = 10 * 60;
 const THINK_INTERVAL: i64 = 15 * 60;
+/// How long a worktree fingerprint stands (T-521). The ask only follows
+/// `THINK_INTERVAL` without a change, so one reading a minute is enough: the
+/// three git commands per lane are the quiet step's steady cost on a large
+/// repository, and a change seen half a minute late moves `since` by that much.
+const FP_INTERVAL: i64 = 60;
 fn ask_key(seat: &str) -> String {
     format!("engine.quiet.{seat}")
 }
@@ -299,14 +304,29 @@ pub fn thinks(store: &mut Store, project: &str, observed: &[SeatObs], now: Ts) -
             else {
                 return Ok(None);
             };
-            Ok(Some((seat, attempt, path)))
+            let meta = tx
+                .get_meta(&think_key(&seat.id))?
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+            Ok(Some((seat, attempt, path, meta)))
         })?;
-        let Some((seat, attempt, path)) = candidate else {
+        let Some((seat, attempt, path, meta)) = candidate else {
             continue;
         };
+        // The last reading stands for a minute (T-521): same task, same
+        // attempt, read less than `FP_INTERVAL` ago. Nothing moves in the
+        // meantime, so the stored state is the state this tick would write.
+        let current = meta.as_ref().filter(|m| {
+            m["task"].as_str() == Some(attempt.task.as_str())
+                && m["n"].as_i64() == Some(attempt.n)
+                && m["fp_at"]
+                    .as_i64()
+                    .is_some_and(|at| now.saturating_sub(at) < FP_INTERVAL)
+        });
+        if current.is_some() {
+            continue;
+        }
         let Some(fp) = think_fp(&path) else { continue };
         store.write(|tx| {
-            let meta = tx.get_meta(&think_key(&seat.id))?.and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
             let live = meta.as_ref().filter(|m| m["task"].as_str() == Some(attempt.task.as_str())
                 && m["n"].as_i64() == Some(attempt.n) && m["fp"].as_u64() == Some(fp));
             let since = live.and_then(|m| m["since"].as_i64()).unwrap_or(now);
@@ -316,7 +336,7 @@ pub fn thinks(store: &mut Store, project: &str, observed: &[SeatObs], now: Ts) -
                 think_notify(tx, &seat, &attempt, now.saturating_sub(since) / 60, now)?;
                 asked = Some(now);
             }
-            tx.set_meta(&think_key(&seat.id), &serde_json::json!({"task":attempt.task,"n":attempt.n,"fp":fp,"since":since,"asked":asked}).to_string())
+            tx.set_meta(&think_key(&seat.id), &serde_json::json!({"task":attempt.task,"n":attempt.n,"fp":fp,"fp_at":now,"since":since,"asked":asked}).to_string())
         })?;
     }
     Ok(())
@@ -1231,6 +1251,76 @@ mod tests {
             "15 min after the first ask"
         );
         assert_eq!(messages(&mut t.s, "think:p:heat").len(), 2);
+    }
+
+    /// The think meta as it stands: the fingerprint, when it was read, and the
+    /// clock it stands for.
+    fn think_meta(t: &mut Think) -> serde_json::Value {
+        let raw =
+            t.s.read(|tx| tx.get_meta(&think_key("p:heat")))
+                .unwrap()
+                .expect("the seat has a think meta");
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[test]
+    fn the_worktree_is_read_once_a_minute() {
+        let mut t = thinking(T + 900);
+        think(&mut t, T);
+        let first = think_meta(&mut t);
+        assert_eq!(first["fp_at"].as_i64(), Some(T));
+
+        // A change 5 s later is not read: the fingerprint of the last reading
+        // stands for a minute.
+        std::fs::write(t._dir.path().join("file"), "edited").unwrap();
+        think(&mut t, T + 5);
+        let cached = think_meta(&mut t);
+        assert_eq!(cached["fp"], first["fp"], "the fingerprint stands");
+        assert_eq!(cached["fp_at"].as_i64(), Some(T), "no second reading");
+        assert_eq!(cached["since"], first["since"], "the clock did not move");
+
+        // A minute later the worktree is read again, and the edit resets the
+        // clock — up to a minute late, as the packet allows.
+        think(&mut t, T + 60);
+        let read_again = think_meta(&mut t);
+        assert_ne!(
+            read_again["fp"], first["fp"],
+            "a minute later the worktree is read again"
+        );
+        assert_eq!(read_again["fp_at"].as_i64(), Some(T + 60));
+        assert_eq!(
+            read_again["since"].as_i64(),
+            Some(T + 60),
+            "the edit resets it"
+        );
+        assert!(messages(&mut t.s, "think-lane:p:heat").is_empty());
+    }
+
+    #[test]
+    fn a_moved_attempt_reads_the_worktree_at_once() {
+        let mut t = thinking(T + 900);
+        think(&mut t, T);
+        let first = think_meta(&mut t);
+
+        // The stored meta is for another attempt: it is not the state of this
+        // one, so the fingerprint is read at once instead of standing.
+        let mut stale = first.clone();
+        stale["n"] = serde_json::json!(0);
+        t.s.write(|tx| tx.set_meta(&think_key("p:heat"), &stale.to_string()))
+            .unwrap();
+        std::fs::write(t._dir.path().join("file"), "edited").unwrap();
+        think(&mut t, T + 5);
+
+        let read_again = think_meta(&mut t);
+        assert_eq!(
+            read_again["n"].as_i64(),
+            Some(1),
+            "the live attempt is stored"
+        );
+        assert_ne!(
+            read_again["fp"], first["fp"],
+            "a moved attempt reads the worktree at once"
+        );
     }
 
     #[test]
