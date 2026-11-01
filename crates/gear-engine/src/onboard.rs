@@ -535,7 +535,7 @@ pub fn onboard_queued(
         // Parsing happens outside the transaction: it is pure and the read
         // snapshot is released. A registered project always parses; if it does
         // not, its lanes are parked instead of retried.
-        let config = match gear_app::config::parse(&config_text) {
+        let config = match gear_app::config::parse_cached(&project, &config_text) {
             Ok(config) => config,
             Err(e) => {
                 park_queued_lanes(

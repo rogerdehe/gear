@@ -333,7 +333,7 @@ pub fn merge_passed(
     let Some(row) = store.read(|tx| tx.get_project(project))? else {
         return Ok(merged);
     };
-    let config = match gear_app::config::parse(&row.config_toml) {
+    let config = match gear_app::config::parse_row(&row) {
         Ok(config) => config,
         Err(_) => return Ok(merged),
     };
