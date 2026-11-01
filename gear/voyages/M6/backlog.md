@@ -197,3 +197,6 @@
 
 ## Rebind cannot name the project root
 - 2026-11-01 M6 (another project, root only: no [[repos]], only `project.repo`): `- rebind <lane> repo=<name> owns=[...]` needs a named `[[repos]]` entry, the root's name is empty and the draft parser refuses `repo=`, so a root-only project cannot move owned paths between lanes by rebind; its only path is a whole-config re-init with `--confirmed`. Accept `repo=.` (or omit `repo=`) for the root.
+
+## The board's idle view drops the last task's work span at landing
+- 2026-11-01 M6 (T-529 review F2): `work_spans` (crates/gear-board/src/idle.rs) now reads only open voyages' tasks, so a captain instruction sent while a lane worked the voyage's final task, still unanswered when the voyage lands, reads as "help" for up to HELP_LIMIT_S (30 min) instead of part of that work (T-463). Keep the work spans of tasks done within HELP_LIMIT_S.
