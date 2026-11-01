@@ -200,3 +200,9 @@
 
 ## The board's idle view drops the last task's work span at landing
 - 2026-11-01 M6 (T-529 review F2): `work_spans` (crates/gear-board/src/idle.rs) now reads only open voyages' tasks, so a captain instruction sent while a lane worked the voyage's final task, still unanswered when the voyage lands, reads as "help" for up to HELP_LIMIT_S (30 min) instead of part of that work (T-463). Keep the work spans of tasks done within HELP_LIMIT_S.
+
+## A held task drops out of the voyage's scope and counts
+- 2026-11-01 M6 (another project's M3: 10 required tasks set to `state: hold`): `hold` stores the task as Draft, and every count treats Draft as "not in the plan yet" — the `gear` home voyage line, the board header, Stations progress and totals (crates/gear-board/src/stations.rs, voyage.rs, lib.rs), the forecast and station items, the flow graph and deps view — so the board showed 34 tasks / 1368 m instead of 44 / 1799 m. Give a held task its own state (Held) that is in scope and counted as remaining, never dispatched until `ready`; keep Draft for tasks not yet planned.
+
+## A reviewer seat caught mid-start by an engine restart stays Starting
+- 2026-11-01 M6 (another project's review-1): its session start began at 05:31:35Z (`probe resume ... start_resume`), the engine was restarted at 05:44:49Z, and the seat stayed `starting / onboarding` with no further step for over an hour. Resume a Temp seat's start step after a restart, or release it once its start is older than the start timeout.
