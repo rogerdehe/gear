@@ -1272,6 +1272,16 @@ pub fn parse_row(row: &gear_store::ProjectRow) -> GearResult<ProjectConfig> {
     parse_cached(&row.id, &row.config_toml)
 }
 
+/// The config the process-wide cache holds for `project`, or `None` when it
+/// holds none (T-518): what a test reads to see that each project kept its own
+/// entry.
+pub fn cached(project: &str) -> Option<ProjectConfig> {
+    cache()
+        .entries
+        .get(project)
+        .map(|(_, config)| (**config).clone())
+}
+
 /// The config a project is registered with: the text the store holds for its
 /// **latest** config version, parsed. A project that is not registered →
 /// `NoTarget`; stored text that does not parse → `BadFormat`.

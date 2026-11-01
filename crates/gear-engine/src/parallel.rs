@@ -728,6 +728,33 @@ mod tests {
     /// The integration file the two branches share.
     const SRC: &str = "src/lib.rs";
 
+    /// T-518: a parallel scan of two projects leaves each project's own entry
+    /// in the process-wide config cache — the other-projects loop keys each
+    /// row by that row's own project, never by the caller's.
+    #[test]
+    fn a_scan_of_two_projects_keeps_each_projects_config_in_the_cache() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                for (id, lanes) in [("cache-a", 1), ("cache-b", 2)] {
+                    let mut row = testing::seed_project(tx, id, "sess", T0)?;
+                    row.config_toml = format!(
+                        "\n[project]\nid = \"{id}\"\nherdr_session = \"sess\"\nrepo = \"/repo\"\n\n[quota]\nlanes = {lanes}\ntemps = 0\n\n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n"
+                    );
+                    tx.update_project(&row)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let _ = inputs(&mut store, "cache-a", T0).unwrap();
+
+        let a = gear_app::config::cached("cache-a").expect("cache-a holds its own entry");
+        let b = gear_app::config::cached("cache-b").expect("cache-b holds its own entry");
+        assert_eq!(a.quota.lanes, 1, "cache-a kept its own config");
+        assert_eq!(b.quota.lanes, 2, "cache-b kept its own config");
+    }
+
     fn sh(path: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .arg("-C")
