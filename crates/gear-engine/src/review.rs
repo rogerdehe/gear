@@ -2610,6 +2610,31 @@ fn start_reviewer(
                 profile.unattended_args.len()..profile.unattended_args.len(),
                 rules,
             );
+            // T-531: an OpenCode reviewer is switched through its session API
+            // once it runs, so its session is made before the TUI starts — as
+            // onboarding and the restart path already do. Without one the
+            // model gate could only flag the seat.
+            if kind == "opencode" {
+                if let Some(model) = model.filter(|model| !model.is_empty()) {
+                    match crate::opencode::start_args(
+                        store,
+                        herdr,
+                        &seat.id,
+                        generation,
+                        &path,
+                        config,
+                        model,
+                        cfg.model_list_wait_s,
+                        cfg.model_list_poll_ms,
+                    ) {
+                        Ok(session_args) => args.extend(session_args),
+                        Err(reason) => {
+                            park(store, &seat.id, &reason, now)?;
+                            return Ok(Started::NotYet);
+                        }
+                    }
+                }
+            }
 
             // The start is recorded before Herdr is asked: an engine restart
             // between the two must find the intent and adopt the agent it
@@ -8128,6 +8153,16 @@ review = [
         );
     }
 
+    /// A `model.list` answer holding exactly one model (T-531).
+    fn catalogue(provider: &str, id: &str) -> serde_json::Value {
+        serde_json::json!({"data":[{"providerID":provider, "id":id, "variants":[]}]})
+    }
+
+    /// A `GET /api/session/<id>` answer naming `provider/id` (T-531).
+    fn session_on(provider: &str, id: &str) -> serde_json::Value {
+        serde_json::json!({"data":{"model":{"providerID":provider, "id":id}}})
+    }
+
     /// The shell commands the engine typed into a pane.
     fn pane_runs(herdr: &FakeHerdr, pane: &str) -> Vec<String> {
         herdr
@@ -8529,24 +8564,22 @@ review = [
                 "[temps]\nkind = \"codex\"\nprofile = \"codex\"",
                 "[temps]\nkind = \"opencode\"\nprofile = \"opencode\"",
             )
-            // The plain form: the temps kind decides the CLI.
-            .replace(REVIEW_CHAIN, REVIEW_CHAIN_PLAIN)
-            + "\n[models.switch.\"gpt-6.1-sol\"]\npicker = \"GPT-6.1 Sol\"\nbar = \"GPT-6.1 Sol\"\n";
+            // The plain form: the temps kind decides the CLI. T-531: the
+            // session API needs provider/id, so the model names its provider.
+            .replace(REVIEW_CHAIN, r#"review = ["openai/gpt-6.1-sol"]"#)
+            + "\n[models.switch.\"openai/gpt-6.1-sol\"]\npicker = \"GPT-6.1 Sol\"\nbar = \"GPT-6.1 Sol\"\n";
         let mut store = world(&text);
         let mut herdr = FakeHerdr::new();
         // The reviewer starts on another model.
         herdr.start_screen = Some("Build auto · MiniMax-M3.1-Flash MiniMax · high".to_string());
-        herdr.screen_after = vec![
-            ("esc".into(), "  Ask anything…".into()),
-            (
-                "/model".into(),
-                "  Search\n  Recent\n  GPT-6.1 Sol  OpenAI".into(),
-            ),
-            (
-                "GPT-6.1 Sol".into(),
-                "Build auto · GPT-6.1 Sol OpenAI · high".into(),
-            ),
-        ];
+        // T-531: the reviewer's session is made before the TUI, and the gate
+        // asks the service; the bar decides. No key is typed.
+        herdr.api_replies.extend([
+            Ok(catalogue("openai", "gpt-6.1-sol")),
+            Ok(serde_json::json!({"data":{"id":"ses_review", "model":{"providerID":"openai", "id":"gpt-6.1-sol"}}})),
+            Ok(catalogue("openai", "gpt-6.1-sol")),
+            Ok(session_on("openai", "gpt-6.1-sol")),
+        ]);
 
         start_reviews(
             &mut store,
@@ -8558,6 +8591,10 @@ review = [
         )
         .unwrap();
 
+        herdr.api_replies.extend([
+            Ok(catalogue("openai", "gpt-6.1-sol")),
+            Ok(session_on("openai", "gpt-6.1-sol")),
+        ]);
         let first = start_reviews(
             &mut store,
             &mut herdr,
@@ -8572,23 +8609,25 @@ review = [
             "the packet waits for the model: {first:?}"
         );
 
-        let mut delivered = false;
-        for tick in 0..6 {
-            let report = start_reviews(
-                &mut store,
-                &mut herdr,
-                &cfg(),
-                &cfg().profiles,
-                "p",
-                T0 + 30 + tick,
-            )
-            .unwrap();
-            if !report.started.is_empty() {
-                delivered = true;
-                break;
-            }
-        }
-        assert!(delivered, "the reviewer starts once the bar confirms");
+        // The TUI renders the model: the next tick confirms and delivers.
+        herdr.set_screen("wt1:p1", "Build auto · GPT-6.1 Sol OpenAI · high");
+        herdr.api_replies.extend([
+            Ok(catalogue("openai", "gpt-6.1-sol")),
+            Ok(session_on("openai", "gpt-6.1-sol")),
+        ]);
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 30,
+        )
+        .unwrap();
+        assert!(
+            !report.started.is_empty(),
+            "the reviewer starts once the bar confirms: {report:?}"
+        );
         // The packet is delivered once, and the reviewer was started once.
         let deliveries: Vec<_> = herdr
             .calls
@@ -8596,6 +8635,7 @@ review = [
             .filter(|call| matches!(call, Call::AgentStart { .. }))
             .collect();
         assert_eq!(deliveries.len(), 1, "{:?}", herdr.calls);
+        // T-531: the switch is the API's — no `/model`, no `/models` typed.
         let commands: Vec<String> = herdr
             .calls
             .iter()
@@ -8604,12 +8644,13 @@ review = [
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            commands.iter().filter(|c| *c == "/model").count(),
-            1,
-            "{commands:?}"
+        assert!(
+            !commands
+                .iter()
+                .any(|c| c.contains("/model") || c.contains("/models")),
+            "the pane got model keys: {commands:?}"
         );
-        assert!(commands.iter().any(|c| c == "GPT-6.1 Sol"), "{commands:?}");
+        assert!(commands.is_empty(), "no model text typed: {commands:?}");
     }
 
     #[test]
