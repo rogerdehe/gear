@@ -182,3 +182,6 @@
 
 ## Deps do not hold an accepted task's merge
 - 2026-11-01 M6 (another project's plan 658: T-407 got `deps: T-448` and its pass in one apply, merged at once on the old CI workflow and failed): deps order only dispatch; the merge step never reads them, so a pass or `- remerge T-n` merges at once. Let a merge wait for its task's unmerged deps (or take `- remerge T-n after=T-m`), and say in plan apply output when a dep is ignored.
+
+## T-516's idle-step timing test fails under load
+- 2026-11-01 M6 (F-293): the test that asserts an idle `merge_passed` returns in under 100 ms failed in a full gear-engine gate under parallel load and passed alone. Replace the wall-clock bound with a count of lost scans (the scan runs once, not every tick).
