@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1070 -->
+<!-- gear-plan project=gear base=1071 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -159,6 +159,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7390: keep course — past eta by 257 min; clause (4) not met and only its root causes remain: T-517 store indexes (hull) and T-518 config cache (mast) run in parallel, then T-519 v0.6.6, a new measure, and the landing
 - 2026-11-01 01:12 scope: T-517 also adds a migration step 7 → 8 for the indexes | why: schema.sql runs only on a fresh store, so a store already in use (another project's) would never get them; the user asked how an existing user gets the fix on upgrade | else: -
 - 2026-11-01 01:20 scope: T-517's accept drops its wall-clock test and keeps the query-plan check | why: F-293, T-516's 100 ms idle-step test already fails under the gate's parallel load; a second timing test would flake the same way | else: -
+- station M-7410: keep course — T-517 merging, T-518 rework in review, then T-519 v0.6.6, a new measure of clause (4) and the landing; hull, idle, takes the flaky timing tests that already cost T-517 one gate run and can fail the next merges
 
 # Queue
 
@@ -528,4 +529,9 @@ estimate: 20
 goal: [S5] Release v0.6.6. Change, no other design: (1) the version is 0.6.6 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.6.md, in the form of docs/releases/v0.6.5.md: one line per task merged on origin/dev since v0.6.5 at the hand-in (T-517, T-518), plus a "Fixed by the captain" line: a lane's delivery is no longer held by another task's declared wait (dev 95615d2b).
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.6"; docs/releases/v0.6.6.md lists T-517, T-518 and the captain fix. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
 deps: T-517, T-518
+estimate: 15
+
+## T-520 [now] lane=hull milestone=M6 station=S5 required
+goal: [S3] The gate has no wall-clock test. Two engine tests assert a time and fail under the gate's parallel load (F-293: T-517's gate failed once on the first and passed alone): crates/gear-engine/tests/it/merge_scan_contract.rs asserts the best of three idle ticks under 100 ms, and crates/gear-engine/src/overrun.rs asserts `rounds_to_process` under 500 ms on 10 000 messages. Remove both time assertions. The first test already proves the idle tick skipped the scan (the stored scan time does not move), so keep that and drop the timing loop. For the second, assert the query plan of `rounds_to_process` uses an index (no full `SCAN` of messages or rounds, as T-517's tests check), adding the index the same way T-517 did (schema.sql plus the migration step) only if the plan shows a scan. No other change.
+accept: `grep -rn "from_millis" crates/gear-engine/tests crates/gear-engine/src` finds no assertion on an elapsed time in a test; the two tests pass. Run make check CRATE=gear-engine.
 estimate: 15
