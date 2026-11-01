@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1124 -->
+<!-- gear-plan project=gear base=1125 -->
 # Goal
 Fix the bugs the user reports while the projects that use GEAR run on it, and get each fix into their hands at once: every batch ships as a v0.6.x release that the shared engines, the CLI and the installed skill copies run, and each project's captain is told. M6.1 is planned as it goes: its first bugs are below, and each further bug the user reports becomes tasks here. It lands on the user's word.
 
@@ -46,6 +46,7 @@ depart: now
 - 2026-11-01 10:03 staffing: lanes hull and mast move from hk-dgx-1/DeepSeek-V4.1-Flash-1017 to tokenrhythm/deepseek-v4.1-flash-1017 (same pi CLI, thinking high, 600K; config v39); both lanes restarted on it at their safe point | why: the hk-dgx-1 service revoked the shared key (401 invalid_api_key from every caller) and the user directed the move to TokenRhythm | else: wait for a restored hk-dgx-1 key
 - 2026-11-01 10:07 release: v0.6.13 tagged at 45f9bffb, main merged, GitHub release published; binary rebuilt, both engines restarted 16:07:21Z in the window Prometheus offered, with no merge or other op intended or executing in either store; captains of Prometheus and goldmine told; skill unchanged | why: a release is done only when user projects run it | else: none
 - 2026-11-01 10:30 scope: Prometheus F-468 (T-423 attempt 2 never read its rework) is a GEAR fault: the rework was stored and `gear --show` renders it, but the delivery of attempt n >= 2 opens "New task", the same words as a first delivery, so the lane read only `gear` and guessed; the fix is the new rework task below, released as v0.6.14 | why: an error in normal use (every failed review) | else: log it in the M7 backlog
+- station M-7618: keep course 400 min in; T-544 (20 min) on hull is the one task left, inside the 80 min to eta; then v0.6.14
 
 # Queue
 
