@@ -179,3 +179,6 @@
 
 ## A moved task's branches count twice toward the branch cap
 - 2026-10-31 M6 (another project's M-6096, 13 > 12: surface/t435 vs prompt/t435, api/t430 vs money/t430): the branch cap in crates/gear-engine/src/merge.rs counts every lane that ever held an open task, so a moved task holds two places until it is done (only then does the sweep delete the old lane's ref if its tip is on the integration branch). Count one branch per open task. Delete an old lane's ref at once when the task has moved and that ref's tip is an ancestor of the new lane's branch or the integration branch.
+
+## Deps do not hold an accepted task's merge
+- 2026-11-01 M6 (another project's plan 658: T-407 got `deps: T-448` and its pass in one apply, merged at once on the old CI workflow and failed): deps order only dispatch; the merge step never reads them, so a pass or `- remerge T-n` merges at once. Let a merge wait for its task's unmerged deps (or take `- remerge T-n after=T-m`), and say in plan apply output when a dep is ignored.
