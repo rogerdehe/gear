@@ -2158,6 +2158,52 @@ impl<'s> Tx<'s> {
         Ok(tasks)
     }
 
+    /// The project's live tasks, in rank then id order (T-529): the ones that
+    /// are not terminal, and the ones of a voyage that still has a task that is
+    /// not — a finished voyage's tasks are history, not work.
+    ///
+    /// A tick read every task of every voyage (`tasks_of_project`) and kept
+    /// these; on our store that was 528 tasks of six voyages, five of them
+    /// landed. `tasks_state` (project, state) serves the first half and
+    /// `tasks_milestone` (project, milestone, state) the voyage still open.
+    pub fn tasks_live_of_project(&self, project: &str) -> GearResult<Vec<TaskRow>> {
+        let mut stmt = self.tx.prepare_cached(LIVE_TASKS_SQL).map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], task_from_row)
+            .map_err(map_sqlite)?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row.map_err(map_sqlite)?);
+        }
+        Ok(tasks)
+    }
+
+    /// The project's tasks whose work is merged (T-529): Done and holding an
+    /// attempt whose merge landed. A dependency counts only when its work is
+    /// merged (T-236), and the dispatch step used to read every done task's
+    /// attempts (`merged_at`, `attempt_times_of_task`) on every tick. The
+    /// attempts' primary key (project, task) serves the join; a landed voyage's
+    /// tasks stay readable this way even though they are no live work.
+    pub fn merged_done_tasks(&self, project: &str) -> GearResult<Vec<String>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(
+                "SELECT DISTINCT t.id FROM tasks t
+                   JOIN attempts a ON a.project=t.project AND a.task=t.id
+                  WHERE t.project=?1 AND t.state='done' AND a.merged_at IS NOT NULL
+                  ORDER BY t.id",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], |row| row.get::<_, String>(0))
+            .map_err(map_sqlite)?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row.map_err(map_sqlite)?);
+        }
+        Ok(tasks)
+    }
+
     /// Replace every column of an existing task (raw write, no transition
     /// check — callers use `require_transition`). Missing → NoTarget.
     pub fn update_task(&self, row: &TaskRow) -> GearResult<()> {
@@ -3253,6 +3299,76 @@ impl<'s> Tx<'s> {
         Ok(rounds)
     }
 
+    /// The rounds of a project that are not closed, oldest first (T-529): the
+    /// live ones. The rounds bookkeeping used to read every round a project
+    /// ever ran, several times a tick, and keep these.
+    pub fn open_rounds_of_project(&self, project: &str) -> GearResult<Vec<RoundRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(&round_select(
+                " WHERE project=?1 AND end_at IS NULL ORDER BY start_at, task, role",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], round_from_row)
+            .map_err(map_sqlite)?;
+        let mut rounds = Vec::new();
+        for row in rows {
+            rounds.push(row.map_err(map_sqlite)?);
+        }
+        Ok(rounds)
+    }
+
+    /// The closed rounds whose attempt is still in progress (T-529): the ones a
+    /// parked attempt reopens. The rounds bookkeeping used to read every round
+    /// of the project to find them; a closed round with no open attempt (the
+    /// overwhelming majority, a project's whole history) never comes back.
+    pub fn closed_rounds_with_open_attempt(&self, project: &str) -> GearResult<Vec<RoundRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(&round_select(
+                " WHERE project=?1 AND end_at IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM attempts a
+                                 WHERE a.project=rounds.project AND a.task=rounds.task
+                                   AND a.n=rounds.attempt
+                                   AND a.state IN ('delivered', 'started', 'stopped', 'unknown'))
+                  ORDER BY start_at, task, role",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], round_from_row)
+            .map_err(map_sqlite)?;
+        let mut rounds = Vec::new();
+        for row in rows {
+            rounds.push(row.map_err(map_sqlite)?);
+        }
+        Ok(rounds)
+    }
+
+    /// The ended rounds whose usage is still being counted (T-529, T-525): the
+    /// ones whose usage was never found, up to half an hour after their end.
+    /// `rounds_open` (project, end_at) serves the read; the back-off itself
+    /// stays the caller's decision.
+    pub fn rounds_to_count(&self, project: &str) -> GearResult<Vec<RoundRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(&round_select(
+                " WHERE project=?1 AND end_at IS NOT NULL
+                    AND (input IS NULL OR counted_at IS NULL)
+                    AND (counted_at IS NULL OR counted_at < end_at + 1800)
+                  ORDER BY start_at, task, role",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], round_from_row)
+            .map_err(map_sqlite)?;
+        let mut rounds = Vec::new();
+        for row in rows {
+            rounds.push(row.map_err(map_sqlite)?);
+        }
+        Ok(rounds)
+    }
+
     /// The rounds a project's overrun step still has to look at (T-406): the
     /// open ones (no `end_at`) and the ended ones that still owe an answer on
     /// their `overrun:<task>:<role>` thread (T-381's resolution). A settled
@@ -3931,6 +4047,40 @@ fn op_select(tail: &str) -> String {
          FROM operations{tail}"
     )
 }
+
+/// The live tasks of a project (T-529): the ones that are not terminal, and the
+/// ones of a voyage that still has a task that is not.
+///
+/// Two index-served reads, not one scan of the project with a subquery per
+/// terminal row (F1 of the review of attempt 1): the open tasks from
+/// `tasks_state`, and the terminal ones of a voyage that is still open from
+/// `tasks_milestone`; the two halves cannot overlap (a task's state is open or
+/// terminal), so the halves are a `UNION ALL`. The open states are named one by one — the five
+/// `TaskState`s that are not `is_terminal()`, which is Done, Failed and
+/// Cancelled — so the read seeks the index; a `NOT IN` would walk it. The text
+/// is a constant because the plan contract test asks the store's own query
+/// (`live_work_contract.rs`), not a copy of it.
+#[doc(hidden)]
+pub const LIVE_TASKS_SQL: &str = "
+SELECT * FROM (
+    SELECT project, id, rank, state, priority, lane, milestone, required,
+           contract_version, deps, followup_of, wait_on, wait_cond,
+           rework_note, estimate_min, issue, repo, base, gate,
+           rework_estimate_min, updated
+      FROM tasks
+     WHERE project=?1
+       AND state IN ('draft', 'ready', 'running', 'waiting', 'verifying')
+    UNION ALL
+    SELECT t.project, t.id, t.rank, t.state, t.priority, t.lane, t.milestone,
+           t.required, t.contract_version, t.deps, t.followup_of, t.wait_on,
+           t.wait_cond, t.rework_note, t.estimate_min, t.issue, t.repo,
+           t.base, t.gate, t.rework_estimate_min, t.updated
+      FROM (SELECT DISTINCT milestone FROM tasks
+             WHERE project=?1 AND milestone IS NOT NULL
+               AND state IN ('draft', 'ready', 'running', 'waiting', 'verifying')) m
+      JOIN tasks t ON t.project=?1 AND t.milestone=m.milestone
+     WHERE t.state IN ('done', 'failed', 'cancelled'))
+ ORDER BY rank, id";
 
 fn task_select(tail: &str) -> String {
     format!(

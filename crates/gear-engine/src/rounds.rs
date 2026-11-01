@@ -45,7 +45,9 @@ pub fn tick(
     let projects = store.read(|tx| tx.project_ids())?;
     for project in projects {
         store.write(|tx| {
-            let rounds = tx.rounds_of_project(&project)?;
+            // T-529: only the open rounds are bookkeeping; a project's closed
+            // rounds are history.
+            let rounds = tx.open_rounds_of_project(&project)?;
             // 1. §4.1: a round ends when the next round on the same seat
             //    starts. The seat's open round is the newest one, so every
             //    other open round of that seat ends here.
@@ -71,8 +73,8 @@ pub fn tick(
             //     step 1 may have closed one already, and closing it a second
             //     time with `now` would push its end past the next round's
             //     start.
-            for round in &tx.rounds_of_project(&project)? {
-                if round.end_at.is_some() || round.role != "direction" {
+            for round in &tx.open_rounds_of_project(&project)? {
+                if round.role != "direction" {
                     continue;
                 }
                 let job = tx
@@ -103,10 +105,9 @@ pub fn tick(
                     live.push(round);
                 }
             }
-            for round in &tx.rounds_of_project(&project)? {
-                if round.end_at.is_none() || !attempt_in_progress(tx, round)? {
-                    continue;
-                }
+            // T-529: the closed rounds whose attempt is still going — the ones
+            // a parked attempt reopens — instead of every round the project ran.
+            for round in &tx.closed_rounds_with_open_attempt(&project)? {
                 // T-515 (F1 of the review of attempt 1): a direction round is
                 // never a parked attempt to resume. A check whose result is in
                 // ends in step 1a and stays closed; reopening it would ring the
@@ -165,10 +166,7 @@ pub fn tick(
             // 3. §4.1: or when the seat is released — the agent is gone and
             //    its records belong to the round it handed in. The round keeps
             //    the release time, not the time of this tick.
-            for round in tx.rounds_of_project(&project)? {
-                if round.end_at.is_some() {
-                    continue;
-                }
+            for round in tx.open_rounds_of_project(&project)? {
                 let Some(seat) = tx.get_seat(&round.seat)? else {
                     continue;
                 };
@@ -183,9 +181,9 @@ pub fn tick(
             //     A round whose attempt is still in progress belongs to the
             //     seat whatever its generation (a restart inside a task), and
             //     keeps running.
-            let moved = tx.rounds_of_project(&project)?;
+            let moved = tx.open_rounds_of_project(&project)?;
             for round in &moved {
-                if round.end_at.is_some() || attempt_in_progress(tx, round)? {
+                if attempt_in_progress(tx, round)? {
                     continue;
                 }
                 let Some(seat) = tx.get_seat(&round.seat)? else {
@@ -215,7 +213,9 @@ pub fn tick(
             .read(|tx| tx.get_project(&project))?
             .map(|project| project.config_toml)
             .and_then(|raw| raw.parse::<toml::Value>().ok());
-        let rounds = store.read(|tx| tx.rounds_of_project(&project))?;
+        // T-529: the ended rounds still being counted, not every round the
+        // project ever ran.
+        let rounds = store.read(|tx| tx.rounds_to_count(&project))?;
         for round in rounds {
             let Some(end) = round.end_at else { continue };
             // T-525: a round whose usage was found is counted once and kept.
@@ -317,8 +317,8 @@ fn holds_job_for(tx: &Tx<'_>, seat: &gear_store::SeatRow, task: &str) -> GearRes
         return Ok(true);
     }
     // A direction job of that task that still runs is the seat's job too.
-    for round in tx.rounds_of_project(&seat.project)? {
-        if round.task != task || round.end_at.is_some() {
+    for round in tx.open_rounds_of_project(&seat.project)? {
+        if round.task != task {
             continue;
         }
         let job = tx
