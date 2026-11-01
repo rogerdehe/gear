@@ -185,3 +185,9 @@
 
 ## T-516's idle-step timing test fails under load
 - 2026-11-01 M6 (F-293): the test that asserts an idle `merge_passed` returns in under 100 ms failed in a full gear-engine gate under parallel load and passed alone. Replace the wall-clock bound with a count of lost scans (the scan runs once, not every tick).
+
+## A later switch_at_once does not speed up a pending switch
+- 2026-11-01 M6 (another project's config 47 → 48, money): config 47 changed money's model and the engine planned a safe-point switch; config 48 set `[timing] switch_at_once = true`, but the plan is made only when the model or args fingerprint changes (crates/gear-engine/src/restart.rs, config-change step), so the pending plan kept `at_once: false` and waited for the lane's next idle. Re-read the timing for a pending plan that has not exited yet.
+
+## No supported restart of a lane whose model is unchanged
+- 2026-11-01 M6 (another project's prompt and surface): the user changed Pi's own model registry (context window 1.0M → 600K); a running Pi keeps the model object it started with, and `/reload` does not replace it. GEAR restarts a lane (wrap-up, grace, exit, resume of the same session, handover) only when its model or args change in the config, so the captain has no way to ask for that managed restart. Add `- restart <lane>` under `# Staff`, using the same at-once path.
