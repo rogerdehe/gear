@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1111 -->
+<!-- gear-plan project=gear base=1112 -->
 # Goal
 Fix the bugs the user reports while the projects that use GEAR run on it, and get each fix into their hands at once: every batch ships as a v0.6.x release that the shared engines, the CLI and the installed skill copies run, and each project's captain is told. M6.1 is planned as it goes: its first bugs are below, and each further bug the user reports becomes tasks here. It lands on the user's word.
 
@@ -27,6 +27,7 @@ depart: now
 - station M-7548: keep course 40 min in; T-533, T-536 and T-537 accepted, T-538 in review, T-539 on mast; hull on T-531 (its question M-7545 answered: an OpenCode reviewer starts with a service session, review.rs), then T-535 and T-532; the release T-534 waits on all seven
 - 2026-11-01 05:35 move: T-532 (merge.rs only) from hull to mast as an allowed edit, moved for balance (M5.1's T-434 precedent) | why: mast is idle (M-7552) while hull holds T-531, T-535 and T-532; T-532 shares no file with them | else: mast idle until the release
 - station M-7566: keep course 56 min in; 6 done (T-533, T-536..T-539 merged or accepted), projected finish 95 min from departure; hull on T-531 then T-535, mast on T-532 then the release T-534
+- station M-7571: keep course 60 min in; nothing changed since M-7566 four minutes earlier (projected finish 99 min from departure)
 
 # Queue
 
