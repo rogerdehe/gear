@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1078 -->
+<!-- gear-plan project=gear base=1080 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -166,6 +166,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7438: keep course — projected 1570m; T-521 on mast is the last clause (4) fix, then T-522 v0.6.7, the measure and the landing
 - station M-7443: keep course — projected 1588m; T-521 is the last fix, then T-522 v0.6.7, the measure and the landing
 - 2026-11-01 02:52 hand-recovery: one Esc to review-11 and one prompt (use git grep on tracked files) | why: M-7449, the T-522 review sat 21 min in `grep -rn .` over the worktree's target/ build folder | else: wait for the reviewer's grep to finish
+- 2026-11-01 03:30 scope: one more clause (4) task, the merge and nudge steps read only the ops they need (hull), then release v0.6.8 | why: measured 03:23-03:29 on dev with T-521 (two 3-minute ps samples): engines 20.2-20.7 % and 14.4-14.7 % of one core, 33-38 MB; boards 3.0-3.1 % and 6.4-6.5 %, 15-16 MB; a CPU sample of our engine puts it in ops_in_state and op_from_row parsing payload JSON: the merge step reads every op of every state each tick (our store 5900 ops, about 10 MB of payloads) to keep the merge ops, and the lane nudge reads every delivery a seat ever had | else: land with (4) not met
 
 # Queue
 
@@ -551,4 +552,15 @@ estimate: 20
 goal: [S5] Release v0.6.7. Change, no other design: (1) the version is 0.6.7 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.7.md, in the form of docs/releases/v0.6.6.md: one line per task merged on origin/dev since v0.6.6 at the hand-in (T-520, T-521).
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.7"; docs/releases/v0.6.7.md lists T-520 and T-521. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
 deps: T-519, T-520, T-521
+estimate: 15
+
+## T-523 [now] lane=hull milestone=M6 station=S5 required
+goal: [S3] A tick reads only the ops it needs, not the store's whole history. A CPU sample of a running engine puts most of its time in `Tx::ops_in_state` and `op_from_row` parsing payload JSON: in crates/gear-engine/src/merge.rs the merge-keys helper (around line 1797) and `merge_op_of` (around line 1830) call `ops_in_state` for all seven states, Confirmed, Failed and Void included, every tick, and keep only `kind == Merge`; on a store with 5900 ops (about 10 MB of payloads, most of them deliveries and doorbells) that parses everything to find a few hundred small merge ops. crates/gear-engine/src/lane_nudge.rs calls `ops_of_seat_kind(seat, Deliver)` (every delivery the seat ever had) to find the ops of one task attempt. Add store queries that select in SQL what the callers filter in Rust: ops by (project, kind) with an optional state list, and ops by (seat, kind, task, attempt), each with an index (`operations (project, kind, state)`, `operations (seat, kind, task, attempt)`) added in schema.sql and in a migration step 8 → 9 as T-517 did; the merge keys read only the task and attempt columns, not the payload. Route those callers through them, and any other per-tick caller that reads all ops of a state only to filter by kind. Same results as today. No other change.
+accept: gear-store tests: the new queries return the same ops as the old filter on a seeded store (merge and deliver ops of several states, tasks and seats); `EXPLAIN QUERY PLAN` uses the new indexes; a version-8 store opened by the new code gets them and is stamped 9. gear-engine tests: the existing merge and lane-nudge tests pass unchanged. No wall-clock assertion. Run make check CRATE=gear-store and CRATE=gear-engine.
+estimate: 30
+
+## T-524 [now] lane=mast milestone=M6 station=S5 required
+goal: [S5] Release v0.6.8. Change, no other design: (1) the version is 0.6.8 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.8.md, in the form of docs/releases/v0.6.7.md: one line per task merged on origin/dev since v0.6.7 at the hand-in.
+accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.8"; docs/releases/v0.6.8.md lists every task merged since v0.6.7. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+deps: T-522, T-523
 estimate: 15
