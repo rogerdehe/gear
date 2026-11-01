@@ -3493,7 +3493,9 @@ bar = "New Provider"
             .calls
             .iter()
             .filter_map(|call| match call {
-                Call::OpenCodeApi { args } if args[0] == "session.switchModel" => Some(args.clone()),
+                Call::OpenCodeApi { args } if args[0] == "session.switchModel" => {
+                    Some(args.clone())
+                }
                 _ => None,
             })
             .collect()

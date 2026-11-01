@@ -623,7 +623,9 @@ mod tests {
             .calls
             .iter()
             .filter_map(|call| match call {
-                Call::OpenCodeApi { args } if args[0] == "session.switchModel" => Some(args.clone()),
+                Call::OpenCodeApi { args } if args[0] == "session.switchModel" => {
+                    Some(args.clone())
+                }
                 _ => None,
             })
             .collect()
@@ -649,7 +651,8 @@ mod tests {
         let (mut store, mut herdr) = api_world();
         let mut labels = labels();
         labels.variant = Some("max".into());
-        herdr.api_replies.extend([Ok(catalog()),
+        herdr.api_replies.extend([
+            Ok(catalog()),
             Ok(other_session()),
             Ok(serde_json::json!({})),
         ]);
@@ -734,8 +737,15 @@ mod tests {
                 break;
             }
         }
-        let waited = outcomes.iter().filter(|o| **o == SwitchOutcome::Waiting).count();
-        assert_eq!(outcomes.last(), Some(&SwitchOutcome::Failed), "{outcomes:?}");
+        let waited = outcomes
+            .iter()
+            .filter(|o| **o == SwitchOutcome::Waiting)
+            .count();
+        assert_eq!(
+            outcomes.last(),
+            Some(&SwitchOutcome::Failed),
+            "{outcomes:?}"
+        );
         assert_eq!(waited as i64, WAIT_TICKS * 2, "{outcomes:?}");
         assert_nothing_typed(&herdr);
         assert!(
@@ -834,7 +844,9 @@ mod tests {
         assert!(herdr.calls.is_empty());
         herdr.set_status(PANE, gear_herdr::AgentStatus::Idle);
         herdr.set_screen(PANE, &format!("┃ Build auto · {}", labels().bar));
-        herdr.api_replies.extend([Ok(catalog()), Ok(switched_session(&labels()))]);
+        herdr
+            .api_replies
+            .extend([Ok(catalog()), Ok(switched_session(&labels()))]);
         assert_eq!(
             api_switch(&mut store, &mut herdr, &labels()),
             SwitchOutcome::Done
@@ -1006,10 +1018,7 @@ profile = "claude"
         for line in 0..40 {
             screen.push_str(&format!("  conversation line {line}\n"));
         }
-        screen.push_str(&format!(
-            "  Build auto · {} · high\n",
-            labels.bar
-        ));
+        screen.push_str(&format!("  Build auto · {} · high\n", labels.bar));
         herdr.set_screen(PANE, &screen);
         herdr
             .api_replies
@@ -1019,10 +1028,7 @@ profile = "claude"
             SwitchOutcome::Waiting
         );
         // The dialog closed: the bar confirms.
-        herdr.set_screen(
-            PANE,
-            &format!("  Build auto · {} · high\n", labels.bar),
-        );
+        herdr.set_screen(PANE, &format!("  Build auto · {} · high\n", labels.bar));
         herdr
             .api_replies
             .extend([Ok(catalog()), Ok(switched_session(&labels))]);
