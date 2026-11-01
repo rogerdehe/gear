@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1073 -->
+<!-- gear-plan project=gear base=1075 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -162,6 +162,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7410: keep course — T-517 merging, T-518 rework in review, then T-519 v0.6.6, a new measure of clause (4) and the landing; hull, idle, takes the flaky timing tests that already cost T-517 one gate run and can fail the next merges
 - station M-7411: keep course — past eta by 300 min; T-517 and T-518 merging, T-520 on hull, then T-519 v0.6.6, the clause (4) measure and the landing
 - 2026-11-01 02:03 hand-recovery: restarted both engines on dev d4b74c6f+ (T-517, T-518) for the clause (4) measure; my first kill failed on a quoted pid list, and the second came one second after another project's T-407 merge O-4499 had started, so it stopped mid-merge; the new engine took the op back as Unknown and ran it again (executing at 02:03:05Z), nothing lost | why: measure the engine with the indexes and the config cache before the release | else: wait for T-519
+- 2026-11-01 02:16 scope: one more clause (4) task, the think fingerprint once a minute (hull, after T-520), then release v0.6.7 | why: measured at 02:05-02:08 on dev with T-517 and T-518 (3-minute ps sample): our engine 3.6 % of one core, 36 MB; boards 1.9 % and 4.6 %, 15-16 MB; the other project's engine 14.6 %, 34 MB; its CPU is steady at 1.2-1.4 s per 10 s, and its `quiet` step costs 500-800 ms every 5-second tick: quiet::thinks runs git rev-parse, status --porcelain and a full diff HEAD for every lane on every tick | else: land with (4) met for our fleet but not the larger one
 
 # Queue
 
@@ -536,4 +537,15 @@ estimate: 15
 ## T-520 [now] lane=hull milestone=M6 station=S5 required
 goal: [S3] The gate has no wall-clock test. Two engine tests assert a time and fail under the gate's parallel load (F-293: T-517's gate failed once on the first and passed alone): crates/gear-engine/tests/it/merge_scan_contract.rs asserts the best of three idle ticks under 100 ms, and crates/gear-engine/src/overrun.rs asserts `rounds_to_process` under 500 ms on 10 000 messages. Remove both time assertions. The first test already proves the idle tick skipped the scan (the stored scan time does not move), so keep that and drop the timing loop. For the second, assert the query plan of `rounds_to_process` uses an index (no full `SCAN` of messages or rounds, as T-517's tests check), adding the index the same way T-517 did (schema.sql plus the migration step) only if the plan shows a scan. No other change.
 accept: `grep -rn "from_millis" crates/gear-engine/tests crates/gear-engine/src` finds no assertion on an elapsed time in a test; the two tests pass. Run make check CRATE=gear-engine.
+estimate: 15
+
+## T-521 [now] lane=mast milestone=M6 station=S5 required
+goal: [S3] The think watch reads a lane's work once a minute, not every tick. crates/gear-engine/src/quiet.rs `thinks` calls `think_fp` for every eligible lane on every tick (about every 5 s), and `think_fp` runs three git commands in the lane's worktree (`rev-parse HEAD`, `status --porcelain`, `diff HEAD`) and hashes the output. On a large repository with four lanes that is the engine's steady cost: the `quiet` step takes 500-800 ms a tick and the engine sits near 14 % of one core. The watch only asks after `THINK_INTERVAL` of no change, so a fingerprint a minute is enough: keep the last fingerprint and its time per seat in the think meta, and run `think_fp` again only when 60 s have passed since that time (or the attempt changed). A change seen up to 60 s late moves `since` by at most that much. No other change.
+accept: gear-engine tests: two `thinks` calls 5 s apart run `think_fp` once (a counter or a fake git path); a call 60 s later runs it again; a new attempt on the seat runs it at once; the existing think tests still pass (the ask still comes after THINK_INTERVAL of no change). No wall-clock assertion. Run make check CRATE=gear-engine.
+estimate: 20
+
+## T-522 [now] lane=hull milestone=M6 station=S5 required
+goal: [S5] Release v0.6.7. Change, no other design: (1) the version is 0.6.7 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.7.md, in the form of docs/releases/v0.6.6.md: one line per task merged on origin/dev since v0.6.6 at the hand-in (T-520, T-521).
+accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.7"; docs/releases/v0.6.7.md lists T-520 and T-521. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+deps: T-519, T-520, T-521
 estimate: 15
