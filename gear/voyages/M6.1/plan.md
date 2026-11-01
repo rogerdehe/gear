@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1099 -->
+<!-- gear-plan project=gear base=1100 -->
 # Goal
 Fix the bugs the user reports while the projects that use GEAR run on it, and get each fix into their hands at once: every batch ships as a v0.6.x release that the shared engines, the CLI and the installed skill copies run, and each project's captain is told. M6.1 is planned as it goes: its first bugs are below, and each further bug the user reports becomes tasks here. It lands on the user's word.
 
@@ -17,6 +17,7 @@ depart: now
 - 2026-11-01 03:55 scope: taken from gear/voyages/M7/backlog.md into M6.1: a remerge carries a conflict fix made on the review branch. Evidence (the other project's captain, T-441): its accepted candidate conflicted with dev; the fix pushed to review/t441 was never reached, because a merge merges the pinned candidate first; a hand merge on dev lost two races (its CI runs ~230 s, and T-430 then T-442 moved dev each time), and the work now waits on a new reconciliation task. Rule (captain): on a `- remerge` (payload `"remerge": true`), when the review branch contains the accepted candidate, the review branch's tip is merged alone, so the captain's resolution lands through the engine's own merge and gate with no race; the first merge of a task is unchanged | why: done clause (2); the supported path for a conflict is a remerge, and the engine merges between other merges so it never races dev | else: M7
 - 2026-11-01 04:05 note: sent goldmine's captain the shared-machine build rules before its first lane (user): this machine has 10 cores and 16 GB of memory, and goldmine has 39 crates, Nautilus vendored and a 12 GB target/; copy tools/build-slot/build-slot.sh under the same name so all three projects' runs count one another; Makefile check/gate/full as GEAR's; TMPDIR in the checkout with prune; debug = "line-tables-only"; measure a cold build's peak memory and the gate time before choosing the lane count (start with 2); suite red line 300 s; no whole-disk scans; hold lanes at critical memory pressure
 - 2026-11-01 04:20 confirmed: depart M6.1 (user); reviewers at effort high (captain's call) | why: the user gave the bug and the staffing as the order to start; the captain wrongly held for a sheet
+- 2026-11-01 04:09 hand-recovery: mast's first packet (T-533) sat typed in pi's input box without Enter for about 2 min after onboarding; the captain pressed Enter and the lane started | why: the lane idled with work delivered | else: wait for the engine's delivery check
 
 # Queue
 
