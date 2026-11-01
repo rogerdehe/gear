@@ -279,14 +279,15 @@ pub fn continue_text(task: &str, version: i64, packet: &str) -> String {
     )
 }
 
-/// design/09 "Delivery content", exactly:
-/// `New task <task> (contract v<version>). Branch: <branch> (in your worktree). Run `gear` first (…). Task packet: <packet>. Read it before starting; report with gear send. After your result, end your turn: …`
+/// design/09 "Delivery content", exactly (T-544):
+/// `Rework <task> attempt <n> (contract v<version>): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: <branch> (in your worktree). Run `gear` first (…). Task packet: <packet>. Read it before starting; report with gear send. After your result, end your turn: …`
 ///
-/// This is the wording of a **rework** (attempt n ≥ 2): the branch and the
-/// worktree are already there, so nothing is said about starting them.
-pub fn assign_text(task: &str, version: i64, branch: &str, packet: &str) -> String {
+/// This is the wording of a **rework** (attempt n ≥ 2): it says so, and that
+/// the fixes are in the packet's Rework section. The branch and the worktree
+/// are already there, so nothing is said about starting them.
+pub fn assign_text(task: &str, attempt: i64, version: i64, branch: &str, packet: &str) -> String {
     format!(
-        "New task {task} (contract v{version}). Branch: {branch} (in your worktree). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+        "Rework {task} attempt {attempt} (contract v{version}): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: {branch} (in your worktree). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
     )
 }
 
@@ -858,7 +859,7 @@ pub fn recover_open_rounds(
 
 /// Turn decisions into Deliver ops in the caller's transaction:
 /// - Assign → `gear_app::tasks::start_attempt(tx, project, task, seat.id, seat.generation, now)`
-///   then a delivery with `assign_text(task, contract_version, task_branch(template, project, seat.name, task), packet_ref(task))`;
+///   then a delivery with `assign_text(task, attempt.n, contract_version, task_branch(template, project, seat.name, task), packet_ref(task))`;
 /// - Continue → a delivery for the seat's open attempt with `continue_text(task, adopted_version, packet_ref(task))`;
 /// - None / Escalate → nothing.
 /// Returns the Intended ops (via `ops::intend_deliveries`).
@@ -895,8 +896,8 @@ pub fn intend_dispatch(
                     )?,
                 };
                 // T-222 (F-75): the first attempt says how to start the branch;
-                // a rework (attempt n ≥ 2) keeps the old wording — the branch
-                // and the worktree are already there.
+                // a rework (attempt n ≥ 2) says it is a rework (T-544) — the
+                // branch and the worktree are already there.
                 let branch = task_branch(&conventions.task_branch, project, &seat.name, task);
                 let mut text = if attempt.n == 1 {
                     first_attempt_text(
@@ -908,7 +909,13 @@ pub fn intend_dispatch(
                         &packet_ref(task),
                     )
                 } else {
-                    assign_text(task, attempt.contract_version, &branch, &packet_ref(task))
+                    assign_text(
+                        task,
+                        attempt.n,
+                        attempt.contract_version,
+                        &branch,
+                        &packet_ref(task),
+                    )
                 };
                 // T-291 (M4 F-90): a first attempt into a worktree that still
                 // holds earlier uncommitted work says so, right after the
@@ -1422,7 +1429,7 @@ mod tests {
             .unwrap();
         let text = assign_delivery_text(&mut store, "T-1", 2);
         assert!(
-            text.contains("Branch: heat/t1 (in your worktree)."),
+            text.contains("Rework T-1 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t1 (in your worktree)."),
             "{text}"
         );
         assert!(
@@ -1463,8 +1470,8 @@ mod tests {
             "New task T-1 (contract v1). Branch: heat/t1. Before you read any repository file, start it from the integration branch: git fetch origin && git switch -c heat/t1 origin/dev (if it exists already: git switch heat/t1). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
         );
         assert_eq!(
-            assign_text("T-1", 1, "heat/t1", "`gear --show T-1`"),
-            "New task T-1 (contract v1). Branch: heat/t1 (in your worktree). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+            assign_text("T-1", 2, 1, "heat/t1", "`gear --show T-1`"),
+            "Rework T-1 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t1 (in your worktree). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
         );
     }
 
