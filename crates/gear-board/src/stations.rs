@@ -51,8 +51,9 @@ pub struct StationProgress {
 
 /// The voyage's stations, in plan order, with their progress.
 ///
-/// The voyage's scope is its tasks whose state is not Draft, Cancelled or
-/// Failed (the rule of `crates/gear-app/src/station.rs`).
+/// The voyage's scope is its tasks whose state is not Cancelled or Failed
+/// (the rule of `crates/gear-app/src/station.rs`). A held task (Draft) is
+/// part of it: it is remaining work of the voyage.
 pub fn progress(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<Vec<StationProgress>> {
     let stations = tx.voyage_stations(project, milestone)?;
     if stations.is_empty() {
@@ -174,18 +175,14 @@ pub fn goal_text(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<Opti
     )))
 }
 
-/// The tasks of the voyage that count: not a draft, not cancelled, not failed.
+/// The tasks of the voyage that count: not cancelled, not failed. A held
+/// task (Draft) counts as remaining work.
 fn scope(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<Vec<TaskRow>> {
     Ok(tx
         .tasks_of_project(project)?
         .into_iter()
         .filter(|task| task.milestone.as_deref() == Some(milestone))
-        .filter(|task| {
-            !matches!(
-                task.state,
-                TaskState::Draft | TaskState::Cancelled | TaskState::Failed
-            )
-        })
+        .filter(|task| !matches!(task.state, TaskState::Cancelled | TaskState::Failed))
         .collect())
 }
 
