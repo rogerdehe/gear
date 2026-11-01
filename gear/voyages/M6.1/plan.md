@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1108 -->
+<!-- gear-plan project=gear base=1109 -->
 # Goal
 Fix the bugs the user reports while the projects that use GEAR run on it, and get each fix into their hands at once: every batch ships as a v0.6.x release that the shared engines, the CLI and the installed skill copies run, and each project's captain is told. M6.1 is planned as it goes: its first bugs are below, and each further bug the user reports becomes tasks here. It lands on the user's word.
 
@@ -24,6 +24,7 @@ depart: now
 - 2026-11-01 05:00 confirmed: done clause (4) added: the lessons recorded during the voyage are read against the shipped skill before landing, and the skill is iterated, never grown (user) | why: user: two standing rules — record every pit in the voyage's lessons as it happens; before the end, iterate the skill against them | else: -
 - 2026-11-01 05:00 config: charters written for both roles (lanes on the flash model implement the packet exactly and ask instead of guessing; reviewers on Sonnet judge against the contract and the DELIVERABLE bar); the kickoff left them out | why: user: role charters follow the model, a decision of M6 (station S2) the captain skipped at this kickoff | else: -
 - 2026-11-01 05:00 scope: the role-charter design reaches the user and the captain's packets: the departure sheet shows the proposed charter per role, and the kickoff line on charters says what the model means for the captain's packets (a flash lane gets files, functions and steps; a strong lane gets the goal, boundaries and acceptance) | why: user: the charter is a recommendation to the user by model; M6 built the mechanism but the sheet never shows it and the skill does not tie it to the packets | else: the landing's skill review
+- station M-7548: keep course 40 min in; T-533, T-536 and T-537 accepted, T-538 in review, T-539 on mast; hull on T-531 (its question M-7545 answered: an OpenCode reviewer starts with a service session, review.rs), then T-535 and T-532; the release T-534 waits on all seven
 
 # Queue
 
