@@ -34,7 +34,7 @@ use rusqlite::{params, Transaction};
 use crate::{map_sqlite, SCHEMA_SQL};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// The oldest version the steps know. A store without a stamp is this old:
 /// nothing ever wrote a version before v1.
@@ -74,6 +74,10 @@ pub const STEPS: &[Step] = &[
     Step {
         from: 6,
         apply: step_6_to_7,
+    },
+    Step {
+        from: 7,
+        apply: step_7_to_8,
     },
 ];
 
@@ -232,6 +236,25 @@ fn step_6_to_7(tx: &Transaction<'_>) -> GearResult<()> {
         tx.execute_batch("ALTER TABLE contracts ADD COLUMN mechanical TEXT")
             .map_err(map_sqlite)?;
     }
+    Ok(())
+}
+
+/// v8 (T-517): the indexes the engine's tick reads by. `operations_state`
+/// serves `ops_in_state`, `messages_thread` serves `thread_messages`,
+/// `attempts_seat` serves the seat's attempts and `rounds_seat` the seat's
+/// rounds: each of those reads used to scan its whole table on every call.
+fn step_7_to_8(tx: &Transaction<'_>) -> GearResult<()> {
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS operations_state
+           ON operations (project, state, created, id);
+         CREATE INDEX IF NOT EXISTS messages_thread
+           ON messages (project, thread, created, id);
+         CREATE INDEX IF NOT EXISTS attempts_seat
+           ON attempts (seat, state, task, n);
+         CREATE INDEX IF NOT EXISTS rounds_seat
+           ON rounds (seat, start_at);",
+    )
+    .map_err(map_sqlite)?;
     Ok(())
 }
 
