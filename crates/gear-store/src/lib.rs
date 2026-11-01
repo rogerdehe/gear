@@ -2167,24 +2167,7 @@ impl<'s> Tx<'s> {
     /// landed. `tasks_state` (project, state) serves the first half and
     /// `tasks_milestone` (project, milestone, state) the voyage still open.
     pub fn tasks_live_of_project(&self, project: &str) -> GearResult<Vec<TaskRow>> {
-        let mut stmt = self
-            .tx
-            .prepare_cached(
-                "SELECT t.project, t.id, t.rank, t.state, t.priority, t.lane, t.milestone,
-                        t.required, t.contract_version, t.deps, t.followup_of, t.wait_on,
-                        t.wait_cond, t.rework_note, t.estimate_min, t.issue, t.repo, t.base,
-                        t.gate, t.rework_estimate_min, t.updated
-                   FROM tasks t
-                  WHERE t.project=?1
-                    AND (t.state NOT IN ('done', 'failed', 'cancelled')
-                         OR EXISTS (SELECT 1 FROM tasks o
-                                     WHERE o.project=t.project
-                                       AND o.milestone=t.milestone
-                                       AND o.milestone IS NOT NULL
-                                       AND o.state NOT IN ('done', 'failed', 'cancelled')))
-                  ORDER BY t.rank, t.id",
-            )
-            .map_err(map_sqlite)?;
+        let mut stmt = self.tx.prepare_cached(LIVE_TASKS_SQL).map_err(map_sqlite)?;
         let rows = stmt
             .query_map(params![project], task_from_row)
             .map_err(map_sqlite)?;
@@ -4064,6 +4047,40 @@ fn op_select(tail: &str) -> String {
          FROM operations{tail}"
     )
 }
+
+/// The live tasks of a project (T-529): the ones that are not terminal, and the
+/// ones of a voyage that still has a task that is not.
+///
+/// Two index-served reads, not one scan of the project with a subquery per
+/// terminal row (F1 of the review of attempt 1): the open tasks from
+/// `tasks_state`, and the terminal ones of a voyage that is still open from
+/// `tasks_milestone`; the two halves cannot overlap (a task's state is open or
+/// terminal), so the halves are a `UNION ALL`. The open states are named one by one — the five
+/// `TaskState`s that are not `is_terminal()`, which is Done, Failed and
+/// Cancelled — so the read seeks the index; a `NOT IN` would walk it. The text
+/// is a constant because the plan contract test asks the store's own query
+/// (`live_work_contract.rs`), not a copy of it.
+#[doc(hidden)]
+pub const LIVE_TASKS_SQL: &str = "
+SELECT * FROM (
+    SELECT project, id, rank, state, priority, lane, milestone, required,
+           contract_version, deps, followup_of, wait_on, wait_cond,
+           rework_note, estimate_min, issue, repo, base, gate,
+           rework_estimate_min, updated
+      FROM tasks
+     WHERE project=?1
+       AND state IN ('draft', 'ready', 'running', 'waiting', 'verifying')
+    UNION ALL
+    SELECT t.project, t.id, t.rank, t.state, t.priority, t.lane, t.milestone,
+           t.required, t.contract_version, t.deps, t.followup_of, t.wait_on,
+           t.wait_cond, t.rework_note, t.estimate_min, t.issue, t.repo,
+           t.base, t.gate, t.rework_estimate_min, t.updated
+      FROM (SELECT DISTINCT milestone FROM tasks
+             WHERE project=?1 AND milestone IS NOT NULL
+               AND state IN ('draft', 'ready', 'running', 'waiting', 'verifying')) m
+      JOIN tasks t ON t.project=?1 AND t.milestone=m.milestone
+     WHERE t.state IN ('done', 'failed', 'cancelled'))
+ ORDER BY rank, id";
 
 fn task_select(tail: &str) -> String {
     format!(

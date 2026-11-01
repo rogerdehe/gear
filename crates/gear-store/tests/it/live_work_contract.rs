@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use gear_model::{TaskState, Ts};
-use gear_store::{NewRound, RoundKey, Store, TaskRow, SCHEMA_VERSION};
+use gear_store::{NewRound, RoundKey, Store, TaskRow, LIVE_TASKS_SQL, SCHEMA_VERSION};
 use rusqlite::Connection;
 
 const PROJECT: &str = "p";
@@ -270,6 +270,33 @@ fn the_live_reads_use_the_new_indexes() {
             "{read} does not use one of {indexes:?}: {text}"
         );
     }
+}
+
+/// The live-task query itself, as the engine asks it (F1 of the review of
+/// attempt 1): two index-served reads — the open tasks from `tasks_state`, the
+/// terminal ones of a voyage still open from `tasks_milestone` — and no scan of
+/// the project's tasks. The plan at v10 is
+/// `MERGE (UNION ALL) · SEARCH tasks USING INDEX tasks_state (project=? AND state=?)
+/// · SEARCH tasks USING COVERING INDEX tasks_milestone (project=? AND milestone>?)
+/// · SEARCH t USING INDEX tasks_milestone (project=? AND milestone=? AND state=?)`.
+#[test]
+fn the_live_task_query_reads_both_halves_by_index() {
+    let (_dir, path) = temp_db("live-plan");
+    let _store = a_project_of_six_voyages(&path);
+    // The store's own query text, not a copy of it.
+    let text = plan_of(&path, LIVE_TASKS_SQL, &[&PROJECT]).join(" | ");
+    assert!(
+        !text.contains("SCAN tasks"),
+        "the live-task read scans the project: {text}"
+    );
+    assert!(
+        !text.contains("sqlite_autoindex_tasks_1"),
+        "the live-task read walks the project's primary key: {text}"
+    );
+    assert!(
+        text.contains("tasks_state") && text.contains("tasks_milestone"),
+        "the two halves are not both index-served: {text}"
+    );
 }
 
 /// A version-9 store opened by this code gets the v10 indexes and is stamped
