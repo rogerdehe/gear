@@ -311,7 +311,7 @@ fn a_version_8_store_gains_the_kind_indexes_when_it_is_opened() {
         Some(SCHEMA_VERSION.to_string()),
         "the store was carried up to v9"
     );
-    assert_eq!(SCHEMA_VERSION, 9, "this binary writes v9");
+    assert_eq!(SCHEMA_VERSION, 10, "this binary writes v10");
     // The rows are untouched: the fixture's seven merge ops are still there.
     let keys = store
         .read(|tx| tx.op_keys_of_kind(PROJECT, OpKind::Merge))

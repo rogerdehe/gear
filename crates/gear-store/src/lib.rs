@@ -2158,6 +2158,43 @@ impl<'s> Tx<'s> {
         Ok(tasks)
     }
 
+    /// The project's live tasks, in rank then id order (T-529): the ones that
+    /// are not terminal, and the ones of a voyage that still has a task that is
+    /// not — a finished voyage's tasks are history, not work.
+    ///
+    /// A tick read every task of every voyage (`tasks_of_project`) and kept
+    /// these; on our store that was 528 tasks of six voyages, five of them
+    /// landed. `tasks_state` (project, state) serves the first half and
+    /// `tasks_milestone` (project, milestone, state) the voyage still open.
+    pub fn tasks_live_of_project(&self, project: &str) -> GearResult<Vec<TaskRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(
+                "SELECT t.project, t.id, t.rank, t.state, t.priority, t.lane, t.milestone,
+                        t.required, t.contract_version, t.deps, t.followup_of, t.wait_on,
+                        t.wait_cond, t.rework_note, t.estimate_min, t.issue, t.repo, t.base,
+                        t.gate, t.rework_estimate_min, t.updated
+                   FROM tasks t
+                  WHERE t.project=?1
+                    AND (t.state NOT IN ('done', 'failed', 'cancelled')
+                         OR EXISTS (SELECT 1 FROM tasks o
+                                     WHERE o.project=t.project
+                                       AND o.milestone=t.milestone
+                                       AND o.milestone IS NOT NULL
+                                       AND o.state NOT IN ('done', 'failed', 'cancelled')))
+                  ORDER BY t.rank, t.id",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], task_from_row)
+            .map_err(map_sqlite)?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row.map_err(map_sqlite)?);
+        }
+        Ok(tasks)
+    }
+
     /// Replace every column of an existing task (raw write, no transition
     /// check — callers use `require_transition`). Missing → NoTarget.
     pub fn update_task(&self, row: &TaskRow) -> GearResult<()> {
@@ -3241,6 +3278,50 @@ impl<'s> Tx<'s> {
             .tx
             .prepare_cached(&round_select(
                 " WHERE project=?1 ORDER BY start_at, task, role",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], round_from_row)
+            .map_err(map_sqlite)?;
+        let mut rounds = Vec::new();
+        for row in rows {
+            rounds.push(row.map_err(map_sqlite)?);
+        }
+        Ok(rounds)
+    }
+
+    /// The rounds of a project that are not closed, oldest first (T-529): the
+    /// live ones. The rounds bookkeeping used to read every round a project
+    /// ever ran, several times a tick, and keep these.
+    pub fn open_rounds_of_project(&self, project: &str) -> GearResult<Vec<RoundRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(&round_select(
+                " WHERE project=?1 AND end_at IS NULL ORDER BY start_at, task, role",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], round_from_row)
+            .map_err(map_sqlite)?;
+        let mut rounds = Vec::new();
+        for row in rows {
+            rounds.push(row.map_err(map_sqlite)?);
+        }
+        Ok(rounds)
+    }
+
+    /// The ended rounds whose usage is still being counted (T-529, T-525): the
+    /// ones whose usage was never found, up to half an hour after their end.
+    /// `rounds_open` (project, end_at) serves the read; the back-off itself
+    /// stays the caller's decision.
+    pub fn rounds_to_count(&self, project: &str) -> GearResult<Vec<RoundRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(&round_select(
+                " WHERE project=?1 AND end_at IS NOT NULL
+                    AND (input IS NULL OR counted_at IS NULL)
+                    AND (counted_at IS NULL OR counted_at < end_at + 1800)
+                  ORDER BY start_at, task, role",
             ))
             .map_err(map_sqlite)?;
         let rows = stmt

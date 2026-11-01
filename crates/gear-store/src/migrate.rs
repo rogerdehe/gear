@@ -33,6 +33,8 @@
 //! `operations_kind` (a project's merge ops, a review's confirmed deliveries)
 //! and `operations_attempt` (a seat's ops of one task attempt, the lane's
 //! deliveries). Both steps only create indexes: no row changes.
+//! **v10** adds the indexes for the live work a tick reads (T-529): `tasks_state`,
+//! `tasks_milestone` and `rounds_open`.
 
 use gear_model::{ErrorCode, GearError, GearResult};
 use rusqlite::{params, Transaction};
@@ -40,7 +42,7 @@ use rusqlite::{params, Transaction};
 use crate::{map_sqlite, SCHEMA_SQL};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// The oldest version the steps know. A store without a stamp is this old:
 /// nothing ever wrote a version before v1.
@@ -88,6 +90,10 @@ pub const STEPS: &[Step] = &[
     Step {
         from: 8,
         apply: step_8_to_9,
+    },
+    Step {
+        from: 9,
+        apply: step_9_to_10,
     },
 ];
 
@@ -279,6 +285,20 @@ fn step_8_to_9(tx: &Transaction<'_>) -> GearResult<()> {
            ON operations (project, kind, state);
          CREATE INDEX IF NOT EXISTS operations_attempt
            ON operations (seat, kind, task, attempt);",
+    )
+    .map_err(map_sqlite)?;
+    Ok(())
+}
+
+/// v10 (T-529): the indexes for the live work a tick reads. `tasks_state` and
+/// `tasks_milestone` serve the tasks that are not terminal and the tasks of a
+/// voyage that still is; `rounds_open` the rounds that are not closed. Every
+/// tick read every task of every voyage and every round the project ever ran.
+fn step_9_to_10(tx: &Transaction<'_>) -> GearResult<()> {
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS tasks_state ON tasks (project, state);
+         CREATE INDEX IF NOT EXISTS tasks_milestone ON tasks (project, milestone, state);
+         CREATE INDEX IF NOT EXISTS rounds_open ON rounds (project, end_at);",
     )
     .map_err(map_sqlite)?;
     Ok(())

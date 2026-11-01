@@ -240,3 +240,12 @@ CREATE TABLE IF NOT EXISTS decisions (
   line TEXT,                          -- the plan line, verbatim (source = plan)
   plan_version INTEGER, created INTEGER NOT NULL,
   PRIMARY KEY (project, key));
+
+-- T-529 (v10): the tick reads the live work, not the whole history. A task is
+-- live when it is not terminal or when its voyage still has a task that is not;
+-- `tasks_state` serves the first half of that read and `tasks_milestone` the
+-- second (the voyage's still-open tasks). `rounds_open` serves "the rounds that
+-- are not closed" and the ended rounds whose usage is still being counted.
+CREATE INDEX IF NOT EXISTS tasks_state ON tasks (project, state);
+CREATE INDEX IF NOT EXISTS tasks_milestone ON tasks (project, milestone, state);
+CREATE INDEX IF NOT EXISTS rounds_open ON rounds (project, end_at);
