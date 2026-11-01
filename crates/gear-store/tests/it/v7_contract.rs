@@ -99,9 +99,9 @@ fn a_v6_store_migrates_to_v7_with_existing_contracts_null() {
             .as_deref(),
         Some(SCHEMA_VERSION.to_string().as_str())
     );
-    // T-517 carried the schema on to v8: a v6 store still lands on what this
-    // binary writes, and the v7 column is there.
-    assert_eq!(SCHEMA_VERSION, 8);
+    // T-517 carried the schema on to v8 and T-523 to v9: a v6 store still lands
+    // on what this binary writes, and the v7 column is there.
+    assert_eq!(SCHEMA_VERSION, 9);
 
     // The rows are still there, and the new column is NULL: the migration
     // does not invent a reason.

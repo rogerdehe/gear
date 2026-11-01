@@ -145,6 +145,12 @@ CREATE INDEX IF NOT EXISTS operations_seat ON operations (seat, state);
 -- Submitted, …) on every tick; without this index each read scanned the whole
 -- operations table.
 CREATE INDEX IF NOT EXISTS operations_state ON operations (project, state, created, id);
+-- T-523 (v9): the engine asks for the ops of one kind in a project (the merge
+-- step's keys and its queue, the confirmed deliveries of a review) and for the
+-- ops of one seat's task attempt (the lane's deliveries); the callers used to
+-- read every op of a state and filter by kind in Rust, parsing every payload.
+CREATE INDEX IF NOT EXISTS operations_kind ON operations (project, kind, state);
+CREATE INDEX IF NOT EXISTS operations_attempt ON operations (seat, kind, task, attempt);
 
 CREATE TABLE IF NOT EXISTS verdicts (project TEXT NOT NULL, task TEXT NOT NULL, attempt INTEGER NOT NULL,
   contract_version INTEGER NOT NULL, candidate TEXT NOT NULL, passed INTEGER NOT NULL,

@@ -1933,6 +1933,97 @@ impl<'s> Tx<'s> {
         Ok(rows)
     }
 
+    /// The ops of one `kind` in a project, oldest first, limited to `states`
+    /// (all of them when the list is empty).
+    ///
+    /// T-523: the merge step's callers used to read every op of the project in
+    /// seven states and keep the merge ones in Rust, parsing the payload of
+    /// each delivery and doorbell in the store. The index `operations_kind`
+    /// (project, kind, state) serves this read.
+    pub fn ops_of_kind_in_states(
+        &self,
+        project: &str,
+        kind: OpKind,
+        states: &[OpState],
+    ) -> GearResult<Vec<OpRow>> {
+        let mut sql = op_select(" WHERE project=?1 AND kind=?2");
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(project.to_string()), Box::new(kind.as_str())];
+        if !states.is_empty() {
+            let marks: Vec<String> = (0..states.len()).map(|n| format!("?{}", n + 3)).collect();
+            sql.push_str(&format!(" AND state IN ({})", marks.join(", ")));
+            for state in states {
+                args.push(Box::new(state.as_str()));
+            }
+        }
+        sql.push_str(" ORDER BY created, id");
+        let mut stmt = self.tx.prepare_cached(&sql).map_err(map_sqlite)?;
+        let params: Vec<&dyn rusqlite::ToSql> = args.iter().map(|arg| arg.as_ref()).collect();
+        let rows = stmt
+            .query_map(params.as_slice(), op_from_row)
+            .map_err(map_sqlite)?;
+        let mut ops = Vec::new();
+        for row in rows {
+            ops.push(row.map_err(map_sqlite)?);
+        }
+        Ok(ops)
+    }
+
+    /// The (task, attempt) keys of a project's ops of one `kind` — the columns
+    /// only, never the payload (T-523).
+    ///
+    /// The merge step asks this every tick to know which attempts a merge was
+    /// made for; reading the rows would parse every payload of the store for a
+    /// handful of keys.
+    pub fn op_keys_of_kind(&self, project: &str, kind: OpKind) -> GearResult<Vec<(String, i64)>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(
+                "SELECT task, attempt FROM operations
+                  WHERE project=?1 AND kind=?2 AND task IS NOT NULL AND attempt IS NOT NULL
+                  ORDER BY created, id",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, kind.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(map_sqlite)?;
+        let mut keys = Vec::new();
+        for row in rows {
+            keys.push(row.map_err(map_sqlite)?);
+        }
+        Ok(keys)
+    }
+
+    /// The ops of one `kind` for one seat's task attempt, oldest first (T-523).
+    /// The lane's nudge and redelivery used to read every delivery the seat
+    /// ever had and keep this attempt's in Rust; `operations_attempt`
+    /// (seat, kind, task, attempt) serves this read.
+    pub fn ops_of_seat_kind_task(
+        &self,
+        seat: &str,
+        kind: OpKind,
+        task: &str,
+        attempt: i64,
+    ) -> GearResult<Vec<OpRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(&op_select(
+                " WHERE seat=?1 AND kind=?2 AND task=?3 AND attempt=?4
+                 ORDER BY created, CAST(SUBSTR(id, INSTR(id, '-')+1) AS INTEGER)",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![seat, kind.as_str(), task, attempt], op_from_row)
+            .map_err(map_sqlite)?;
+        let mut ops = Vec::new();
+        for row in rows {
+            ops.push(row.map_err(map_sqlite)?);
+        }
+        Ok(ops)
+    }
+
     pub fn last_op(&self, seat: &str, kind: OpKind) -> GearResult<Option<OpRow>> {
         let row: Option<OpRow> = self
             .tx

@@ -3839,12 +3839,12 @@ fn tell_captain_of_a_review_stall(
             // A packet the reviewer confirmed reached a reviewer: the hand-in
             // is not stalled, whatever the tick's report says — and the count
             // of a later hand-in of the same attempt starts over (T-514).
+            // T-523: the project's confirmed deliveries, read by kind.
             let reached = tx
-                .ops_in_state(project, OpState::Confirmed)?
+                .ops_of_kind_in_states(project, OpKind::Deliver, &[OpState::Confirmed])?
                 .into_iter()
                 .any(|op| {
-                    op.kind == OpKind::Deliver
-                        && op.task.as_deref() == Some(task.task.as_str())
+                    op.task.as_deref() == Some(task.task.as_str())
                         && op.attempt == Some(task.attempt)
                         && tx
                             .get_seat(&op.seat)

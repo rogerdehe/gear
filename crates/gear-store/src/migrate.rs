@@ -27,6 +27,12 @@
 //! **v7** adds `contracts.mechanical` (T-272): the reason a task is mechanical —
 //! the merge gate alone proves the change, so the review is skipped. NULL means
 //! reviewed as before, and the migration leaves every existing contract NULL.
+//! **v8** adds the indexes the engine's tick reads by (T-517): `operations_state`,
+//! `messages_thread`, `attempts_seat` and `rounds_seat`.
+//! **v9** adds the indexes for the ops the engine asks for by kind (T-523):
+//! `operations_kind` (a project's merge ops, a review's confirmed deliveries)
+//! and `operations_attempt` (a seat's ops of one task attempt, the lane's
+//! deliveries). Both steps only create indexes: no row changes.
 
 use gear_model::{ErrorCode, GearError, GearResult};
 use rusqlite::{params, Transaction};
@@ -34,7 +40,7 @@ use rusqlite::{params, Transaction};
 use crate::{map_sqlite, SCHEMA_SQL};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// The oldest version the steps know. A store without a stamp is this old:
 /// nothing ever wrote a version before v1.
@@ -78,6 +84,10 @@ pub const STEPS: &[Step] = &[
     Step {
         from: 7,
         apply: step_7_to_8,
+    },
+    Step {
+        from: 8,
+        apply: step_8_to_9,
     },
 ];
 
@@ -253,6 +263,22 @@ fn step_7_to_8(tx: &Transaction<'_>) -> GearResult<()> {
            ON attempts (seat, state, task, n);
          CREATE INDEX IF NOT EXISTS rounds_seat
            ON rounds (seat, start_at);",
+    )
+    .map_err(map_sqlite)?;
+    Ok(())
+}
+
+/// v9 (T-523): the indexes for the ops the engine reads by kind. The merge
+/// step read the merge ops by walking every op of the project in seven states,
+/// and the lane's nudge read every delivery the seat ever had; `operations_kind`
+/// serves the first (project and kind, with the state list in the query) and
+/// `operations_attempt` the second (seat, kind and the task attempt).
+fn step_8_to_9(tx: &Transaction<'_>) -> GearResult<()> {
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS operations_kind
+           ON operations (project, kind, state);
+         CREATE INDEX IF NOT EXISTS operations_attempt
+           ON operations (seat, kind, task, attempt);",
     )
     .map_err(map_sqlite)?;
     Ok(())

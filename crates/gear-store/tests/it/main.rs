@@ -3,6 +3,7 @@ mod contract;
 mod data_version_contract;
 mod lock_contract;
 mod migration_contract;
+mod ops_by_kind_contract;
 mod read_indexes_contract;
 mod slice2_contract;
 mod time_contract;
