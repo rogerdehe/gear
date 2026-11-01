@@ -321,7 +321,10 @@ pub fn submit_result(
         if failed.state != AttemptState::Rejected {
             continue;
         }
-        if failed.candidate.as_deref() != Some(candidate) {
+        let Some(stored) = failed.candidate.as_deref() else {
+            continue;
+        };
+        if !same_candidate(stored, candidate) {
             continue;
         }
         return Err(GearError::new(
@@ -532,6 +535,22 @@ pub fn verdict_hint(
     }))
 }
 
+/// Whether two candidates name the same commit (M7 backlog, T-457): equal, or
+/// both at least 7 characters of hex and one a prefix of the other, ignoring
+/// ASCII case. A verdict may name a candidate by any sha prefix of the stored
+/// one, or the stored one by a prefix of it.
+fn same_candidate(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let is_sha = |s: &str| s.len() >= 7 && s.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !is_sha(a) || !is_sha(b) {
+        return false;
+    }
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    long.as_bytes()[..short.len()].eq_ignore_ascii_case(short.as_bytes())
+}
+
 /// Has the captain already sent this attempt back after a failed merge (T-90)?
 /// The reopening fail is a fail verdict on the attempt's candidate while the
 /// attempt keeps its accepted state.
@@ -543,7 +562,9 @@ fn reopened(
     candidate: &str,
 ) -> GearResult<bool> {
     Ok(tx.verdicts_of_task(project, task)?.iter().any(|verdict| {
-        verdict.attempt == attempt && !verdict.passed && verdict.candidate == candidate
+        verdict.attempt == attempt
+            && !verdict.passed
+            && same_candidate(&verdict.candidate, candidate)
     }))
 }
 
@@ -690,7 +711,7 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
         if settled.attempt != v.attempt {
             continue;
         }
-        if settled.passed == v.pass && settled.candidate == v.candidate {
+        if settled.passed == v.pass && same_candidate(&settled.candidate, &v.candidate) {
             // The same verdict again settles nothing; but a pass that names
             // the merge that landed the work (design §10.7, row B03-01) still
             // has to be marked: the attribution arrives after the attempt was
@@ -710,7 +731,7 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
         // because its merge failed. The attempt stays accepted below.
         if settled.passed
             && !v.pass
-            && settled.candidate == v.candidate
+            && same_candidate(&settled.candidate, &v.candidate)
             && attempt.state == AttemptState::Accepted
         {
             continue;
@@ -740,7 +761,11 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
         ));
     }
 
-    if attempt.candidate.as_deref() != Some(v.candidate.as_str()) {
+    if !attempt
+        .candidate
+        .as_deref()
+        .is_some_and(|stored| same_candidate(stored, &v.candidate))
+    {
         return Err(GearError::new(
             ErrorCode::BadFormat,
             format!(
