@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1081 -->
+<!-- gear-plan project=gear base=1082 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -168,6 +168,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-11-01 02:52 hand-recovery: one Esc to review-11 and one prompt (use git grep on tracked files) | why: M-7449, the T-522 review sat 21 min in `grep -rn .` over the worktree's target/ build folder | else: wait for the reviewer's grep to finish
 - 2026-11-01 03:30 scope: one more clause (4) task, the merge and nudge steps read only the ops they need (hull), then release v0.6.8 | why: measured 03:23-03:29 on dev with T-521 (two 3-minute ps samples): engines 20.2-20.7 % and 14.4-14.7 % of one core, 33-38 MB; boards 3.0-3.1 % and 6.4-6.5 %, 15-16 MB; a CPU sample of our engine puts it in ops_in_state and op_from_row parsing payload JSON: the merge step reads every op of every state each tick (our store 5900 ops, about 10 MB of payloads) to keep the merge ops, and the lane nudge reads every delivery a seat ever had | else: land with (4) not met
 - station M-7454: keep course — projected 1664m; T-523 (ops read by kind) on hull is the root of the remaining engine CPU, then T-524 v0.6.8, the measure and the landing
+- station M-7465: keep course — projected 1670m; T-523 done, T-524 v0.6.8 on mast; the clause (4) measure runs on dev now, then the landing
 
 # Queue
 
