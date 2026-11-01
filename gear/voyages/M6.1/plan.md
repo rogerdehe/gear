@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1122 -->
+<!-- gear-plan project=gear base=1123 -->
 # Goal
 Fix the bugs the user reports while the projects that use GEAR run on it, and get each fix into their hands at once: every batch ships as a v0.6.x release that the shared engines, the CLI and the installed skill copies run, and each project's captain is told. M6.1 is planned as it goes: its first bugs are below, and each further bug the user reports becomes tasks here. It lands on the user's word.
 
@@ -44,6 +44,7 @@ depart: now
 - station M-7608: keep course 156 min in; 12 done, T-543 left; M-7600 stays open for the user's landing word and is parked with --wait once T-542 ships
 - 2026-11-01 06:50 hand-recovery: the gear binary rebuilt from dev at T-542's merge (fa39b46b) before the v0.6.13 release, so the landing item M-7600 could be parked (`gear reply --wait user --until +12h`) and stop ringing; the engines still run 0.6.12 until the release restarts them | why: the user saw every ring | else: let it ring until T-543 merges
 - 2026-11-01 10:03 staffing: lanes hull and mast move from hk-dgx-1/DeepSeek-V4.1-Flash-1017 to tokenrhythm/deepseek-v4.1-flash-1017 (same pi CLI, thinking high, 600K; config v39); both lanes restarted on it at their safe point | why: the hk-dgx-1 service revoked the shared key (401 invalid_api_key from every caller) and the user directed the move to TokenRhythm | else: wait for a restored hk-dgx-1 key
+- 2026-11-01 10:07 release: v0.6.13 tagged at 45f9bffb, main merged, GitHub release published; binary rebuilt, both engines restarted 16:07:21Z in the window Prometheus offered, with no merge or other op intended or executing in either store; captains of Prometheus and goldmine told; skill unchanged | why: a release is done only when user projects run it | else: none
 
 # Queue
 
