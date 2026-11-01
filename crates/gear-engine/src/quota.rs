@@ -943,20 +943,23 @@ fn retire_unconfirmed_deliveries(
     seat: &SeatRow,
     now: Ts,
 ) -> GearResult<()> {
-    for state in [OpState::Submitted, OpState::Unknown] {
-        for op in tx.ops_in_state(project, state)? {
-            if op.kind != OpKind::Deliver || op.seat != seat.id || op.generation != seat.generation
-            {
-                continue;
-            }
-            tx.set_op_state(
-                project,
-                &op.id,
-                OpState::Failed,
-                Some("the model switched before the delivery was confirmed: the switch sends it again on the new model"),
-                now,
-            )?;
+    // T-523: this seat's deliveries in the two states, read by kind — not
+    // every op of the project in them.
+    for op in tx.ops_of_kind_in_states(
+        project,
+        OpKind::Deliver,
+        &[OpState::Submitted, OpState::Unknown],
+    )? {
+        if op.seat != seat.id || op.generation != seat.generation {
+            continue;
         }
+        tx.set_op_state(
+            project,
+            &op.id,
+            OpState::Failed,
+            Some("the model switched before the delivery was confirmed: the switch sends it again on the new model"),
+            now,
+        )?;
     }
     Ok(())
 }
