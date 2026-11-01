@@ -18,6 +18,13 @@
 //! it before the merge conflicts. Each project's own pass writes its own
 //! captain's item; a store's other projects only, never another store's.
 //!
+//! T-527: a pass starts a few git processes, not one per ref. Every branch tip
+//! the scan needs comes from one `for-each-ref` over `refs/heads` and
+//! `refs/remotes`, and the candidates the store names from one
+//! `cat-file --batch-check`; `revision` answers from those two maps. An
+//! ancestry answer for a pair of full commit ids is kept for the life of the
+//! process, like the diff cache below: the answer never changes.
+//!
 //! T-435: a diff of two commits is remembered for the life of the process.
 //! The scan diffs the same pair every ten minutes and at every hand-in; on a
 //! large repository that reads cost one project's tick 41.7 s. A pair of full
@@ -49,6 +56,28 @@ const DIFFS_MAX: usize = 4096;
 /// so the test build carries it and no other build does.
 #[cfg(test)]
 static DIFF_MISSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The ancestry answers already read (T-527): keyed by the repo and the two
+/// full commit ids of the pair, which never change for a key. A scan asks
+/// `merge-base --is-ancestor` for the same pairs every ten minutes and at every
+/// hand-in; a process start per pair was most of the scan's on-CPU time.
+static ANCESTORS: std::sync::LazyLock<std::sync::Mutex<HashMap<(PathBuf, String, String), bool>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// The answers the cache holds before it is cleared (T-527), as the diffs'
+/// (T-435): an engine runs for weeks, so the map is bounded.
+const ANCESTORS_MAX: usize = 4096;
+
+/// The `for-each-ref` reads (T-527) and the `cat-file` reads: the test counts
+/// git processes through them, so the test build carries them and no other
+/// build does.
+#[cfg(test)]
+static REF_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static CAT_FILE_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The ancestry reads (T-527): the test proves the second answer runs no git.
+#[cfg(test)]
+static ANCESTOR_MISSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// The key of the project root in the meta: a repo name never starts with a
 /// dash.
@@ -492,11 +521,19 @@ fn close(tx: &Tx<'_>, project: &str, key: &str, reason: &str, now: Ts) -> GearRe
 
 fn scan(input: &Input) -> Result<Findings, String> {
     git(&input.repo, &["rev-parse", "--git-dir"])?;
-    let local = revision(&input.repo, &format!("refs/heads/{}", input.integration))?;
-    let remote = revision(
-        &input.repo,
-        &format!("refs/remotes/{}/{}", input.remote, input.integration),
-    )?;
+    // T-527: one pass reads every branch tip and resolves every candidate, so
+    // the scan starts two git processes for them however many refs it asks for.
+    let candidates: Vec<String> = input
+        .tasks
+        .iter()
+        .filter_map(|task| task.candidate.clone())
+        .collect();
+    let tips = Tips::read(&input.repo, &candidates)?;
+    let local = tips.revision(&format!("refs/heads/{}", input.integration));
+    let remote = tips.revision(&format!(
+        "refs/remotes/{}/{}",
+        input.remote, input.integration
+    ));
     // Use the containing tip when one is ahead; the remote is authoritative
     // when the local integration ref diverged. No network operation is needed.
     let integration = match (local, remote) {
@@ -523,7 +560,7 @@ fn scan(input: &Input) -> Result<Findings, String> {
         // by its branch below, and one such task never fails the whole repo's
         // scan (T-431).
         if let Some(candidate) = &task.candidate {
-            if let Some(candidate) = revision(&input.repo, candidate)? {
+            if let Some(candidate) = tips.revision(candidate) {
                 if ancestor(&input.repo, &candidate, &integration)? {
                     continue;
                 }
@@ -531,13 +568,10 @@ fn scan(input: &Input) -> Result<Findings, String> {
         }
         let name =
             crate::dispatch::task_branch(&task.task_branch, &task.project, &task.lane, &task.task);
-        let local = revision(&input.repo, &format!("refs/heads/{name}"))?;
+        let local = tips.revision(&format!("refs/heads/{name}"));
         let head = match local {
             Some(head) => Some(head),
-            None => revision(
-                &input.repo,
-                &format!("refs/remotes/{}/{name}", input.remote),
-            )?,
+            None => tips.revision(&format!("refs/remotes/{}/{name}", input.remote)),
         };
         let Some(head) = head else {
             continue;
@@ -621,44 +655,129 @@ fn scan(input: &Input) -> Result<Findings, String> {
     Ok(findings)
 }
 
-fn revision(repo: &Path, reference: &str) -> Result<Option<String>, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args([
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{reference}^{{commit}}"),
-        ])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if output.status.success() {
-        Ok(Some(
-            String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        ))
-    } else if output.status.code() == Some(1) && output.stderr.is_empty() {
-        Ok(None)
-    } else {
-        Err(format!(
-            "cannot read {reference}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
+/// The branch tips and the candidate commits one pass reads (T-527): a map of
+/// the refs `refs/heads` and `refs/remotes` hold, and the candidates the store
+/// named that git knows as commits. `revision` answers from these two maps
+/// where it used to start a `rev-parse --verify` process per call.
+struct Tips {
+    refs: HashMap<String, String>,
+    commits: HashMap<String, String>,
+}
+
+impl Tips {
+    /// Read the repo's branch tips and resolve the candidates, one git process
+    /// each.
+    fn read(repo: &Path, candidates: &[String]) -> Result<Tips, String> {
+        let output = git(
+            repo,
+            &[
+                "for-each-ref",
+                "--format=%(objectname) %(refname)",
+                "refs/heads",
+                "refs/remotes",
+            ],
+        )?;
+        #[cfg(test)]
+        REF_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut refs = HashMap::new();
+        for line in String::from_utf8_lossy(&output).lines() {
+            let Some((id, name)) = line.split_once(' ') else {
+                continue;
+            };
+            if name.starts_with("refs/") && !id.is_empty() {
+                refs.insert(name.to_string(), id.to_string());
+            }
+        }
+        let mut commits = HashMap::new();
+        if !candidates.is_empty() {
+            let mut child = Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(["cat-file", "--batch-check"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            {
+                use std::io::Write;
+                let mut stdin = child
+                    .stdin
+                    .take()
+                    .ok_or_else(|| "cat-file: no stdin".to_string())?;
+                for candidate in candidates {
+                    writeln!(stdin, "{candidate}").map_err(|e| e.to_string())?;
+                }
+                // The write is done: the child reads no more and exits.
+            }
+            let output = child.wait_with_output().map_err(|e| e.to_string())?;
+            #[cfg(test)]
+            CAT_FILE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if !output.status.success() {
+                return Err(format!(
+                    "cannot read the candidates: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            // `<what was asked> <type> <size>`, or `<what was asked> missing`.
+            // Only a commit is a commit id: a candidate that names a tree, a
+            // blob or nothing git knows is no candidate (T-431).
+            for (line, candidate) in String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .zip(candidates)
+            {
+                let fields: Vec<&str> = line.split(' ').collect();
+                if fields.len() == 3 && fields[1] == "commit" {
+                    commits.insert(candidate.clone(), candidate.clone());
+                }
+            }
+        }
+        Ok(Tips { refs, commits })
+    }
+
+    /// The commit a reference names, as `rev-parse --verify` answered it: a
+    /// branch the pass read, or a candidate git resolved to a commit.
+    fn revision(&self, reference: &str) -> Option<String> {
+        if let Some(id) = self.refs.get(reference) {
+            return Some(id.clone());
+        }
+        self.commits.get(reference).cloned()
     }
 }
 
+/// Is `from` an ancestor of `to`? Read from git the first time a process asks
+/// for a pair, and from the cache after that (T-527): a pair of full commit ids
+/// names one answer that never changes. An error from git is no answer and is
+/// not kept.
 fn ancestor(repo: &Path, from: &str, to: &str) -> Result<bool, String> {
+    let key = (repo.to_path_buf(), from.to_string(), to.to_string());
+    if let Some(answer) = ANCESTORS
+        .lock()
+        .ok()
+        .and_then(|answers| answers.get(&key).copied())
+    {
+        return Ok(answer);
+    }
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
         .args(["merge-base", "--is-ancestor", from, to])
         .output()
         .map_err(|e| e.to_string())?;
-    match output.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => Err(String::from_utf8_lossy(&output.stderr).into_owned()),
+    let answer = match output.status.code() {
+        Some(0) => true,
+        Some(1) => false,
+        _ => return Err(String::from_utf8_lossy(&output.stderr).into_owned()),
+    };
+    #[cfg(test)]
+    ANCESTOR_MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut answers) = ANCESTORS.lock() {
+        if answers.len() >= ANCESTORS_MAX {
+            answers.clear();
+        }
+        answers.insert(key, answer);
     }
+    Ok(answer)
 }
 
 /// The files that changed between two commits: read from git the first time a
@@ -917,5 +1036,153 @@ profile = "codex"
         assert!(diffs.contains_key(&(path.clone(), integration.clone(), first.clone())));
         assert!(diffs.contains_key(&(path.clone(), integration.clone(), second.clone())));
         assert!(diffs.contains_key(&(path.clone(), second.clone(), integration.clone())));
+    }
+
+    /// A store of the two-task repo where each task handed in its branch tip:
+    /// the scan resolves two candidates, one per open task.
+    fn store_with_candidates(path: &Path, store: &mut Store) {
+        let candidates = [
+            ("T-1", sh(path, &["rev-parse", "heat/t1"])),
+            ("T-2", sh(path, &["rev-parse", "steady/t2"])),
+        ];
+        store
+            .write(|tx| {
+                for (n, (task, candidate)) in candidates.into_iter().enumerate() {
+                    tx.insert_attempt(&gear_store::AttemptRow {
+                        project: "p".into(),
+                        task: task.into(),
+                        n: 1,
+                        seat: format!("p:{}", if n == 0 { "heat" } else { "steady" }),
+                        generation: 1,
+                        contract_version: 1,
+                        adopted_version: 1,
+                        pending_update: None,
+                        state: gear_model::AttemptState::Delivered,
+                        candidate: Some(candidate),
+                        report: None,
+                        safe_point: None,
+                        started: T0,
+                        updated: T0,
+                        session_ref: None,
+                        session_cli: None,
+                        session_action: None,
+                        sent_at: None,
+                    })?;
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// T-527: a pass of a repo with several open tasks reads every branch tip
+    /// with one `for-each-ref` and resolves every candidate with at most one
+    /// `cat-file --batch-check`, and finds what the per-ref reads found.
+    #[test]
+    fn a_scan_reads_the_refs_and_the_candidates_in_one_process_each() {
+        let path = repo();
+        // The branches diverge from the integration branch and share one file:
+        // a scan of this repo has both an overlap and a pair to find.
+        sh(&path, &["switch", "-q", "dev"]);
+        commit(&path, "dev moves", SRC, "dev moves\n");
+        sh(&path, &["switch", "-q", "steady/t2"]);
+        commit(&path, "steady moves", SRC, "steady src\n");
+        // The same tasks without candidates: what the scan found before.
+        let mut plain = store(&path);
+        let wanted = {
+            let inputs = inputs(&mut plain, "p", T0).unwrap();
+            scan(&inputs[0]).unwrap()
+        };
+        // The store without candidates resolved none, so the counts below are
+        // the pass with candidates alone.
+        let refs_before = REF_READS.load(Ordering::Relaxed);
+        let cat_before = CAT_FILE_READS.load(Ordering::Relaxed);
+        let mut with = store(&path);
+        store_with_candidates(&path, &mut with);
+        let found = {
+            let inputs = inputs(&mut with, "p", T0).unwrap();
+            scan(&inputs[0]).unwrap()
+        };
+
+        assert_eq!(
+            REF_READS.load(Ordering::Relaxed) - refs_before,
+            1,
+            "one for-each-ref per pass"
+        );
+        assert_eq!(
+            CAT_FILE_READS.load(Ordering::Relaxed) - cat_before,
+            1,
+            "one cat-file per pass"
+        );
+        // Same findings as today: two candidates that are still open changes
+        // leave the overlap and the integration lines alone.
+        assert_eq!(format!("{:?}", found.pairs), format!("{:?}", wanted.pairs));
+        assert_eq!(
+            format!("{:?}", found.integration),
+            format!("{:?}", wanted.integration)
+        );
+        assert_eq!(
+            found.integration.keys().collect::<Vec<_>>(),
+            vec![
+                &"integration:T-1".to_string(),
+                &"integration:T-2".to_string()
+            ],
+            "both branches overlap the integration branch: {found:?}"
+        );
+        assert_eq!(
+            found.pairs.keys().collect::<Vec<_>>(),
+            vec![&"tasks:T-1:T-2".to_string()],
+            "the two branches share a file: {found:?}"
+        );
+
+        // The next pass reads the refs and the candidates again; the ancestry
+        // answers of the first pass are the cache's.
+        let ancestors_before = ANCESTOR_MISSES.load(Ordering::Relaxed);
+        let inputs = inputs(&mut with, "p", T0 + PERIOD).unwrap();
+        scan(&inputs[0]).unwrap();
+        assert_eq!(
+            REF_READS.load(Ordering::Relaxed) - refs_before,
+            2,
+            "one for-each-ref per pass"
+        );
+        assert_eq!(
+            CAT_FILE_READS.load(Ordering::Relaxed) - cat_before,
+            2,
+            "one cat-file per pass"
+        );
+        assert_eq!(
+            ANCESTOR_MISSES.load(Ordering::Relaxed),
+            ancestors_before,
+            "a pair of commit ids is asked of git once per process"
+        );
+    }
+
+    /// T-527: the ancestry of a pair of full commit ids never changes, so the
+    /// second answer is the cache's and runs no git.
+    #[test]
+    fn a_second_ancestry_answer_for_a_pair_runs_no_git() {
+        let path = repo();
+        let dev = sh(&path, &["rev-parse", "dev"]);
+        let heat = sh(&path, &["rev-parse", "heat/t1"]);
+        let before = ANCESTOR_MISSES.load(Ordering::Relaxed);
+        assert!(!ancestor(&path, &heat, &dev).unwrap(), "heat is not in dev");
+        assert_eq!(ANCESTOR_MISSES.load(Ordering::Relaxed), before + 1);
+        assert!(
+            !ancestor(&path, &heat, &dev).unwrap(),
+            "the same answer twice"
+        );
+        assert_eq!(
+            ANCESTOR_MISSES.load(Ordering::Relaxed),
+            before + 1,
+            "the second answer runs no git"
+        );
+        // A different pair is a new answer.
+        assert!(ancestor(&path, &dev, &dev).unwrap(), "a commit is its own");
+        assert_eq!(ANCESTOR_MISSES.load(Ordering::Relaxed), before + 2);
+        let answers = ANCESTORS.lock().unwrap();
+        assert_eq!(
+            answers.get(&(path.clone(), heat, dev.clone())),
+            Some(&false)
+        );
+        assert_eq!(answers.get(&(path.clone(), dev.clone(), dev)), Some(&true));
     }
 }
