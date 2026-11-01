@@ -207,17 +207,32 @@ pub fn tick(
             }
             Ok(())
         })?;
+        // T-525: the project's config shapes the profiles and prices a round's
+        // usage is read with; it is parsed once for the tick, not once per
+        // round. On a store full of rounds the reader cannot find, that parse
+        // ran nine times a second.
+        let config = store
+            .read(|tx| tx.get_project(&project))?
+            .map(|project| project.config_toml)
+            .and_then(|raw| raw.parse::<toml::Value>().ok());
         let rounds = store.read(|tx| tx.rounds_of_project(&project))?;
         for round in rounds {
             let Some(end) = round.end_at else { continue };
-            if now < end.saturating_add(60)
-                || round
-                    .counted_at
-                    .is_some_and(|at| round.input.is_some() || now < at.saturating_add(60))
-            {
+            // T-525: a round whose usage was found is counted once and kept.
+            if round.counted_at.is_some_and(|_| round.input.is_some()) {
                 continue;
             }
-            let tokens = count_round(store, cfg, &round, now)?;
+            // T-525: while the usage stays unknown the round is counted on a
+            // back-off — 1, 5 and 30 minutes after its end — and then never
+            // again. It stays unknown (never 0): a session the reader cannot
+            // find must not read as a round of no tokens.
+            let Some(due) = unknown_count_due(end, round.counted_at) else {
+                continue;
+            };
+            if now < due {
+                continue;
+            }
+            let tokens = count_round_with(store, cfg, config.as_ref(), &round, now)?;
             store.write(|tx| {
                 tx.set_round_tokens(&key_of(&round), &tokens, now)?;
                 // The overrun pass owns active-time and pause accounting.
@@ -332,11 +347,45 @@ pub fn open_round(tx: &Tx<'_>, seat: &str) -> GearResult<Option<gear_store::Roun
     tx.open_round_of_seat(seat)
 }
 
+/// How long after its end an ended round is counted again while its usage is
+/// unknown (T-525): 1, 5 and 30 minutes. After the last the round is left
+/// alone — it keeps its unknown usage instead of costing a walk of the agent's
+/// session files on every tick for the rest of the project's life.
+const UNKNOWN_COUNT_AFTER_END_S: [i64; 3] = [60, 300, 1800];
+
+/// When an ended round whose usage is still unknown is due its next count, or
+/// `None` when the back-off is spent (T-525). The count happens at the first
+/// of the three marks that its last count did not already pass.
+fn unknown_count_due(end: Ts, counted_at: Option<Ts>) -> Option<Ts> {
+    let marks = UNKNOWN_COUNT_AFTER_END_S.map(|delay| end.saturating_add(delay));
+    match counted_at {
+        None => marks.first().copied(),
+        Some(at) => marks.into_iter().find(|due| *due > at),
+    }
+}
+
 /// Count a round without writing it. Reports can use this for an open round;
 /// its exclusive upper boundary is `now`. Unreadable logs remain unknown.
 pub fn count_round(
     store: &mut Store,
     cfg: &EngineCfg,
+    round: &gear_store::RoundRow,
+    now: Ts,
+) -> GearResult<RoundTokens> {
+    // The project's config carries the profiles and prices of its rounds; a
+    // caller counting several rounds of one project parses it once (T-525).
+    let config = store
+        .read(|tx| tx.get_project(&round.project))?
+        .map(|project| project.config_toml)
+        .and_then(|raw| raw.parse::<toml::Value>().ok());
+    count_round_with(store, cfg, config.as_ref(), round, now)
+}
+
+/// `count_round` with the project's config already parsed.
+fn count_round_with(
+    store: &mut Store,
+    cfg: &EngineCfg,
+    config: Option<&toml::Value>,
     round: &gear_store::RoundRow,
     now: Ts,
 ) -> GearResult<RoundTokens> {
@@ -349,12 +398,10 @@ pub fn count_round(
         cost_usd: None,
         cost_source: "none".into(),
     };
-    let (seat, project) =
-        store.read(|tx| Ok((tx.get_seat(&round.seat)?, tx.get_project(&round.project)?)))?;
-    let (Some(seat), Some(project)) = (seat, project) else {
+    let seat = store.read(|tx| tx.get_seat(&round.seat))?;
+    let Some(seat) = seat else {
         return Ok(unknown());
     };
-    let config = project.config_toml.parse::<toml::Value>().ok();
     let resolve = |name: &str| {
         let raw = config
             .as_ref()
@@ -395,7 +442,6 @@ pub fn count_round(
     // built-in entries are read by gear-usage itself.
     let mut prices = std::collections::BTreeMap::new();
     if let Some(table) = config
-        .as_ref()
         .and_then(|c| c.get("prices"))
         .and_then(toml::Value::as_table)
     {
