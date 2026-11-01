@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1085 -->
+<!-- gear-plan project=gear base=1086 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -170,6 +170,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7454: keep course — projected 1664m; T-523 (ops read by kind) on hull is the root of the remaining engine CPU, then T-524 v0.6.8, the measure and the landing
 - station M-7465: keep course — projected 1670m; T-523 done, T-524 v0.6.8 on mast; the clause (4) measure runs on dev now, then the landing
 - 2026-11-01 04:30 scope: one more clause (4) task, an ended round's usage is counted a bounded number of times (hull), then release v0.6.9 | why: measured 04:14-04:20 on dev with T-523 (two 3-minute ps samples): our engine 7.5 % and 11.5 %, 21-22 MB; the other project's 18.3 % and 14.5 %, 24-34 MB; boards 2.8-6.6 %, 15-17 MB; a CPU sample of the other engine puts it in rounds::count_round: an ended round whose usage stays unknown is counted again every 60 s for ever (542 such rounds on the other store, 128 on ours), and each count parses the project TOML and walks ~/.codex/sessions (1105 files) | else: land with (4) not met
+- station M-7475: keep course — projected 1717m; T-524 v0.6.8 done, T-525 in review, then T-526 v0.6.9, the clause (4) measure and the landing
 
 # Queue
 
