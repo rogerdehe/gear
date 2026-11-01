@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1093 -->
+<!-- gear-plan project=gear base=1094 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -177,6 +177,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-11-01 05:58 time-box: clause (4) gets one last task, per-tick reads skip finished history (hull), then release v0.6.11; after it M6 lands with whatever the measure shows, and what is left becomes the next voyage's first goal | why: measured 05:45-05:54 on dev with T-527: engines 13.2 % and 10.1 % (3 min), 12.2 % and 11.7 % (6 min), 22-37 MB; boards 3.2-5.5 %, 15-18 MB; our engine sits at 11.7 % with every task done, and a CPU sample puts it in reading the whole history each tick (528 tasks of six voyages, 1032 rounds, 721 attempts: dispatch::ready_tasks_of, rounds::tick, busy::check, the board's idle view); the last two fixes (T-521, T-527) moved the measure within noise, and the voyage is 9 h past its eta | else: keep peeling one cost per hour
 - station M-7504: keep course — the time-box of 05:58 holds: T-529's rework in review, then T-530 v0.6.11, one measure and the landing whatever it shows
 - station M-7510: keep course — T-529 merged, the clause (4) measure runs on its build, T-530 v0.6.11 in review, then the landing
+- 2026-11-01 07:22 note: goal clause (4) met on dev with T-529 (engines restarted 07:13:05Z): 3-minute ps sample, engines 9.0 % and 7.4 % of one core, 35 MB and 20 MB; 6-minute sample, engines 9.3 % and 9.6 %, 35 MB and 34 MB; boards 3.8-6.7 %, 18-19 MB; both stores at schema 10
 
 # Queue
 

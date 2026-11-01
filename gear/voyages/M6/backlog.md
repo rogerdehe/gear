@@ -206,3 +206,6 @@
 
 ## A reviewer seat caught mid-start by an engine restart stays Starting
 - 2026-11-01 M6 (another project's review-1): its session start began at 05:31:35Z (`probe resume ... start_resume`), the engine was restarted at 05:44:49Z, and the seat stayed `starting / onboarding` with no further step for over an hour. Resume a Temp seat's start step after a restart, or release it once its start is older than the start timeout.
+
+## A lane's budget ignores the task's estimate
+- 2026-11-01 M6 (F-300, F-302, F-303, F-307): the release tasks T-526, T-528 and T-530 carry `estimate: 25` in the store, but their lanes reported "past the 15-minute budget" each time; the overrun budget a lane sees does not follow the task's estimate. Make the dev budget the task's estimate when it has one.
