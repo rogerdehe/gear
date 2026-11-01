@@ -577,8 +577,14 @@ fn codex_rollout_path(home: &Path, thread: &str) -> Option<PathBuf> {
     }
     let root = home.join(".codex").join("sessions");
     let now = now_epoch();
-    let mut newest: Option<(i64, PathBuf)> = None;
-    for (day, dir) in codex_day_dirs(&root) {
+    let suffix = format!("-{thread}.jsonl");
+    // T-525: newest day first, and the first match wins. The lookup used to
+    // read every day directory of the last fortnight to keep the newest match,
+    // which is the same file: a day directory's day is its name, so a match in
+    // a newer day is a newer rollout than any in an older one.
+    let mut days = codex_day_dirs(&root);
+    days.sort_by(|a, b| b.0.cmp(&a.0));
+    for (day, dir) in days {
         let age = now - day;
         if !(-86_400..14 * 86_400).contains(&age) {
             continue;
@@ -588,16 +594,12 @@ fn codex_rollout_path(home: &Path, thread: &str) -> Option<PathBuf> {
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.starts_with("rollout-") || !name.ends_with(&format!("-{thread}.jsonl")) {
-                continue;
-            }
-            let path = entry.path();
-            if newest.as_ref().is_none_or(|(best, _)| day > *best) {
-                newest = Some((day, path));
+            if name.starts_with("rollout-") && name.ends_with(&suffix) {
+                return Some(entry.path());
             }
         }
     }
-    newest.map(|(_, path)| path)
+    None
 }
 
 /// The day directories of the Codex sessions: the day (its epoch second) and

@@ -242,3 +242,19 @@ fn the_rollout_file_of_a_day_that_is_too_old_is_not_read() {
     let usage = usage_in(UsageLog::CodexRollout, THREAD, T12, T14, home.path());
     assert!(usage.is_none(), "{usage:?}");
 }
+
+#[test]
+fn the_lookup_takes_the_newest_day_that_holds_the_thread() {
+    // T-525: the day directories are read newest first and the first match
+    // wins — the same file the old walk of every day kept as the newest.
+    let home = tempfile::tempdir().unwrap();
+    let yesterday = codex_day_dir(home.path(), now() - 86_400);
+    let _ = write_lines(
+        &yesterday.join(format!("rollout-2026-10-25T12-00-00-{THREAD}.jsonl")),
+        &[count(T12, 5000, 0, 0, 100, 10)],
+    );
+    let _ = rollout(home.path(), &[count(T13, 1000, 200, 0, 100, 10)]);
+    let usage = usage_in(UsageLog::CodexRollout, THREAD, T12, T14, home.path()).unwrap();
+    assert_eq!(usage.input, 800, "the newer day's rollout: {usage:?}");
+    assert_eq!(usage.cache_read, 200, "{usage:?}");
+}
