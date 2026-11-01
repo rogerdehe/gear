@@ -209,3 +209,15 @@
 
 ## A lane's budget ignores the task's estimate
 - 2026-11-01 M6 (F-300, F-302, F-303, F-307): the release tasks T-526, T-528 and T-530 carry `estimate: 25` in the store, but their lanes reported "past the 15-minute budget" each time; the overrun budget a lane sees does not follow the task's estimate. Make the dev budget the task's estimate when it has one.
+
+## Closed at landing (2026-11-01)
+- No plan state holds a task back from delivery: done (state: hold, T-473); its counting gap is the item 'A held task drops out of the voyage's scope and counts'.
+- Switching a seat's model or its agent (user's request, 2026-10-29): done in S2 (model switch with handover).
+- Captain handover (user's request, 2026-10-29): done in S2 (captain handover).
+- Elastic reviewer and lane counts (user's request, 2026-10-29): done in S2 (elastic counts).
+- Dialogs never block the fleet (user's request, 2026-10-29): done in S2 (dialogs never block).
+- The captain cannot give a reviewer an audit job: done by T-505.
+- A model-switch handover names the worktree's branch, not the task's: done by T-513.
+- T-516's idle-step timing test fails under load: done by T-520.
+- A reviewer seat caught mid-start by an engine restart stays Starting: done by the captain's fix d51110e0 (v0.6.11).
+- Every other item above is postponed to gear/voyages/M7/backlog.md (postponed from M6, 2026-11-01, landing: M6 ran 11 h past its eta on goal clause (4)).

@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1096 -->
+<!-- gear-plan project=gear base=1097 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -186,6 +186,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-11-01 07:50 report: (3) met — 31 hand-fix and every hand-recovery decision line; each hand fix's code went through make gate before commit (the last two: 2344 and 2352 passed) | why: the decision lines
 - 2026-11-01 07:50 report: (4) met at landing, not over the whole station — the last build (T-529, engines restarted 07:13:05Z) measures 9.0-9.6 % and 7.4-9.6 % of one core for the two engines, 20-35 MB, boards 3.8-6.7 %, 18-19 MB (3- and 6-minute ps samples); earlier in S5 the engines ran 20-24 %, falling with T-516, T-517/T-518, T-523, T-525 and T-529 | why: ps samples in the notes above
 - 2026-11-01 07:50 report: (5) met — v0.6.0 to v0.6.11 tagged and published on GitHub, v0.6.11 the latest; main merged at v0.6.11 | why: gh release list
+- 2026-11-01 07:58 user: land M6 — the report above reviewed; clause (4) accepted as met at landing, not as a station average; lanes hull and mast retired in this step
 
 # Queue
 
