@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1075 -->
+<!-- gear-plan project=gear base=1076 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -163,6 +163,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7411: keep course — past eta by 300 min; T-517 and T-518 merging, T-520 on hull, then T-519 v0.6.6, the clause (4) measure and the landing
 - 2026-11-01 02:03 hand-recovery: restarted both engines on dev d4b74c6f+ (T-517, T-518) for the clause (4) measure; my first kill failed on a quoted pid list, and the second came one second after another project's T-407 merge O-4499 had started, so it stopped mid-merge; the new engine took the op back as Unknown and ran it again (executing at 02:03:05Z), nothing lost | why: measure the engine with the indexes and the config cache before the release | else: wait for T-519
 - 2026-11-01 02:16 scope: one more clause (4) task, the think fingerprint once a minute (hull, after T-520), then release v0.6.7 | why: measured at 02:05-02:08 on dev with T-517 and T-518 (3-minute ps sample): our engine 3.6 % of one core, 36 MB; boards 1.9 % and 4.6 %, 15-16 MB; the other project's engine 14.6 %, 34 MB; its CPU is steady at 1.2-1.4 s per 10 s, and its `quiet` step costs 500-800 ms every 5-second tick: quiet::thinks runs git rev-parse, status --porcelain and a full diff HEAD for every lane on every tick | else: land with (4) met for our fleet but not the larger one
+- station M-7438: keep course — projected 1570m; T-521 on mast is the last clause (4) fix, then T-522 v0.6.7, the measure and the landing
 
 # Queue
 
