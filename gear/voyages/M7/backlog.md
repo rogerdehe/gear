@@ -175,3 +175,6 @@ Postponed from M6 (2026-11-01, landing): the items M6 did not close, as M6 recor
 
 ## A lane's budget ignores the task's estimate
 - 2026-11-01 M6 (F-300, F-302, F-303, F-307): the release tasks T-526, T-528 and T-530 carry `estimate: 25` in the store, but their lanes reported "past the 15-minute budget" each time; the overrun budget a lane sees does not follow the task's estimate. Make the dev budget the task's estimate when it has one.
+
+## A remerge cannot carry a captain's conflict fix
+- 2026-11-01 (another project's T-441, O-4873 and O-4885): the accepted candidate conflicted with dev, and the captain pushed the resolution onto the review branch. A remerge merges the pinned candidate first and fails on the same conflict, so the review branch is never reached; T-411's earlier remerge worked only because its failure was a gate failure. Today's way out is a hand merge of the review branch into dev plus `- remerge` (F1 resolves the item), which leaves the task without a merge time and its branches undeleted. Give a remerge a supported way to merge a review branch that contains the candidate (the candidate stays pinned as an ancestor), or say in course.md that a conflict fix goes on dev by hand.
