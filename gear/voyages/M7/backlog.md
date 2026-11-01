@@ -178,3 +178,6 @@ Postponed from M6 (2026-11-01, landing): the items M6 did not close, as M6 recor
 
 ## A remerge cannot carry a captain's conflict fix (taken into M6.1, 2026-11-01)
 - 2026-11-01 (another project's T-441, O-4873 and O-4885): the accepted candidate conflicted with dev, and the captain pushed the resolution onto the review branch. A remerge merges the pinned candidate first and fails on the same conflict, so the review branch is never reached; T-411's earlier remerge worked only because its failure was a gate failure. Today's way out is a hand merge of the review branch into dev plus `- remerge` (F1 resolves the item), which leaves the task without a merge time and its branches undeleted. Give a remerge a supported way to merge a review branch that contains the candidate (the candidate stays pinned as an ancestor), or say in course.md that a conflict fix goes on dev by hand.
+
+## Installed skill copies go stale with no warning
+- 2026-11-01 M6.1: the skill copies under ~/.codex, ~/.claude, ~/.pi … are written once by `gear admin install-skill` and never updated; another project's captain read a copy from 10-25 through all of M6 while v0.6.6–v0.6.11 shipped, and the release notes' "Upgrading" never named the reinstall. Stamp each copy with the version that wrote it, and have `gear` (or the engine) warn, or rewrite the copies, when the binary is newer.
