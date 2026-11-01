@@ -138,8 +138,11 @@ pub fn idle_reason(
 
     // A declared wait (§5.3): the lane waits for a task to be merged. The
     // attempt of the task stays Started, so this comes before the working
-    // check.
-    if let Some(task) = queue.iter().find(|task| task.wait_on.is_some()) {
+    // check. A held task (Draft) is not waited for: it cannot start.
+    if let Some(task) = queue
+        .iter()
+        .find(|task| task.state != TaskState::Draft && task.wait_on.is_some())
+    {
         return Ok(Some(IdleReason::Waiting {
             on: task.wait_on.clone().unwrap_or_default(),
         }));
@@ -332,13 +335,12 @@ fn seat_id_of(project: &str, lane: &str) -> String {
     }
 }
 
-/// The tasks of a lane, in the order of the plan. A task that is not in the
-/// plan yet (a draft) is not in the queue.
+/// The tasks of a lane, in the order of the plan. A held task (Draft) is in
+/// the queue: it is work the lane still has, though it cannot start it.
 fn queue_of(tx: &Tx<'_>, project: &str, lane: &str) -> GearResult<Vec<TaskRow>> {
     let mut queue: Vec<TaskRow> = tx
         .tasks_of_project(project)?
         .into_iter()
-        .filter(|task| task.state != TaskState::Draft)
         .filter(|task| task.lane.as_deref() == Some(lane))
         .collect();
     queue.sort_by_key(|task| (task.rank, task.id.clone()));

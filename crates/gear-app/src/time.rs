@@ -675,7 +675,7 @@ pub fn work_of_with(
     let own: Vec<String> = tasks
         .iter()
         .filter(|task| task.milestone.as_deref() == Some(milestone))
-        .filter(|task| task.state != TaskState::Draft)
+        .filter(|task| !matches!(task.state, TaskState::Cancelled | TaskState::Failed))
         .map(|task| task.id.clone())
         .collect();
     // The lane seats of the project: the fleet is stopped when all of them

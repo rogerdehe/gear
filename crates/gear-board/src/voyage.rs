@@ -415,14 +415,13 @@ fn build_reports(
         if only.is_some_and(|milestone| milestone != voyage.milestone) {
             continue;
         }
+        // The voyage's tasks: a held one (Draft) is remaining work, a
+        // cancelled or failed one is not.
         let scope: Vec<_> = tasks
             .iter()
             .filter(|t| {
                 t.milestone.as_deref() == Some(&voyage.milestone)
-                    && !matches!(
-                        t.state,
-                        TaskState::Draft | TaskState::Cancelled | TaskState::Failed
-                    )
+                    && !matches!(t.state, TaskState::Cancelled | TaskState::Failed)
             })
             .collect();
         if !include_finished && !scope.iter().any(|t| !t.state.is_terminal()) {

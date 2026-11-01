@@ -64,6 +64,7 @@ mod coverage_contract;
 mod decision_contract;
 mod draft_contract;
 mod github_contract;
+mod held_contract;
 mod home_task_contract;
 mod integrated_by_contract;
 mod kickoff_contract;
