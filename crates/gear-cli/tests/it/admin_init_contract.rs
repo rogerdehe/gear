@@ -167,7 +167,7 @@ fn a_pull_request_merge_mode_is_registered() {
 
 #[test]
 fn a_lane_may_not_register_the_project() {
-    let dir = scratch("lane");
+    let dir = scratch("lane-init");
     let repo = dir.join("repo");
     std::fs::create_dir_all(&repo).expect("the repo");
     let db = dir.join("gear.db");

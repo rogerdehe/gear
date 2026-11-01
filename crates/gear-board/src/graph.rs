@@ -1184,7 +1184,7 @@ pub fn styled_panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResu
         TaskState::Ready => "queued",
         TaskState::Failed => "failed",
         TaskState::Cancelled => "cancelled",
-        TaskState::Draft => "draft",
+        TaskState::Draft => "held",
     };
     lines.push(Line::styled(
         format!("{task} · lane {lane} · {stage}"),

@@ -29,12 +29,12 @@ pub struct DepNode {
 
 /// The open tasks as a dependency tree, in the order the board draws them.
 ///
-/// Open means: in the plan (not a draft) and not finished (not done, not
-/// failed, not cancelled).
+/// Open means: not finished (not done, not failed, not cancelled). A held
+/// task (Draft) is open: it is work the voyage still has.
 pub fn tree(tasks: &[TaskRow]) -> Vec<DepNode> {
     let open: Vec<&TaskRow> = tasks
         .iter()
-        .filter(|task| task.state != TaskState::Draft && !task.state.is_terminal())
+        .filter(|task| !task.state.is_terminal())
         .collect();
     let done: Vec<&str> = tasks
         .iter()

@@ -205,6 +205,14 @@ fn a_startup_switch_timeout_or_removed_labels_rings_once() {
         .unwrap();
         let mut herdr = FakeHerdr::new();
         herdr.start_screen = Some("Build auto · wrong-model · high".into());
+        // T-531: the start makes the session and the model gate reads it; the
+        // bar never confirms, so the switch runs out of ticks.
+        herdr.api_replies.extend([
+            Ok(serde_json::json!({"data":[{"providerID":"deepseek", "id":"deepseek-flash", "variants":[]}]})),
+            Ok(serde_json::json!({"data":{"id":"ses_start", "model":{"providerID":"deepseek", "id":"deepseek-flash"}}})),
+            Ok(serde_json::json!({"data":[{"providerID":"deepseek", "id":"deepseek-flash", "variants":[]}]})),
+            Ok(serde_json::json!({"data":{"model":{"providerID":"deepseek", "id":"deepseek-flash"}}})),
+        ]);
         assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1)
             .unwrap()
             .is_empty());

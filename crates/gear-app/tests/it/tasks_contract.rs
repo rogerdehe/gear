@@ -242,3 +242,112 @@ fn verdict_must_match_the_attempt() {
     }
     assert_eq!(attempt_state(&mut s, "T-1", 1), AttemptState::Submitted);
 }
+
+/// T-457's candidate, as it was stored with an 8-character prefix.
+const FULL_SHA: &str = "7c9be5e8f1a2b3c4d5e6f708192a3b4c5d6e7f80";
+const SHA_PREFIX: &str = "7c9be5e8";
+
+/// T-1 Ready → attempt 1 Submitted under `candidate`.
+fn submitted_with(candidate: &str) -> Store {
+    let mut s = world(&[task("T-1", TaskState::Ready, &[])]);
+    s.write(|tx| {
+        start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+        on_delivery_confirmed(tx, "p", "T-1", 1, T0 + 1)?;
+        submit_result(tx, "p", "T-1", 1, 1, candidate, "report", T0 + 2)
+    })
+    .unwrap();
+    s
+}
+
+/// The verdict of the fixture, on another candidate.
+fn verdict_on(candidate: &str, pass: bool) -> Verdict {
+    Verdict {
+        candidate: candidate.into(),
+        ..verdict(pass)
+    }
+}
+
+/// A verdict names its candidate by any sha prefix of the stored one, or the
+/// stored one by a prefix of it (M7 backlog, T-457).
+#[test]
+fn a_verdict_names_its_candidate_by_any_sha_prefix() {
+    // The full sha settles the attempt stored with its 8-character prefix.
+    let mut s = submitted_with(SHA_PREFIX);
+    s.write(|tx| settle(tx, &verdict_on(FULL_SHA, false), T0 + 3))
+        .unwrap();
+    assert_eq!(
+        (task_state(&mut s, "T-1"), attempt_state(&mut s, "T-1", 1)),
+        (TaskState::Ready, AttemptState::Rejected)
+    );
+    // The reverse: the prefix settles the attempt stored with the full sha.
+    let mut s = submitted_with(FULL_SHA);
+    s.write(|tx| settle(tx, &verdict_on(SHA_PREFIX, false), T0 + 3))
+        .unwrap();
+    assert_eq!(
+        (task_state(&mut s, "T-1"), attempt_state(&mut s, "T-1", 1)),
+        (TaskState::Ready, AttemptState::Rejected)
+    );
+}
+
+/// Six shared characters are not a prefix: the verdict is refused.
+#[test]
+fn a_candidate_that_shares_six_characters_is_refused() {
+    let mut s = submitted_with(FULL_SHA);
+    for bad in ["7c9be5", "7c9be5e9"] {
+        assert_eq!(
+            s.write(|tx| settle(tx, &verdict_on(bad, true), T0 + 3))
+                .unwrap_err()
+                .code,
+            ErrorCode::BadFormat,
+            "{bad}"
+        );
+    }
+    assert_eq!(attempt_state(&mut s, "T-1", 1), AttemptState::Submitted);
+}
+
+/// A verdict replayed with the other length is the same verdict: it settles
+/// nothing.
+#[test]
+fn a_verdict_replayed_with_the_other_length_changes_nothing() {
+    let mut s = submitted_with(FULL_SHA);
+    s.write(|tx| settle(tx, &verdict_on(FULL_SHA, true), T0 + 3))
+        .unwrap();
+    let before = (
+        task_state(&mut s, "T-1"),
+        attempt_state(&mut s, "T-1", 1),
+        s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().len(),
+    );
+    s.write(|tx| settle(tx, &verdict_on(SHA_PREFIX, true), T0 + 4))
+        .unwrap();
+    assert_eq!(
+        (
+            task_state(&mut s, "T-1"),
+            attempt_state(&mut s, "T-1", 1),
+            s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().len(),
+        ),
+        before,
+        "the replay changes nothing"
+    );
+}
+
+/// A rework hand-in of the candidate that failed under a prefix is the same
+/// candidate: it is refused.
+#[test]
+fn a_hand_in_of_the_failed_candidate_by_its_full_sha_is_refused() {
+    let mut s = submitted_with(SHA_PREFIX);
+    s.write(|tx| settle(tx, &verdict_on(FULL_SHA, false), T0 + 3))
+        .unwrap();
+    s.write(|tx| {
+        start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 4)?;
+        on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 5)
+    })
+    .unwrap();
+    assert_eq!(
+        s.write(|tx| submit_result(tx, "p", "T-1", 2, 1, FULL_SHA, "report", T0 + 6))
+            .unwrap_err()
+            .code,
+        ErrorCode::BadFormat,
+        "the full sha of the failed candidate"
+    );
+    assert_eq!(attempt_state(&mut s, "T-1", 2), AttemptState::Started);
+}

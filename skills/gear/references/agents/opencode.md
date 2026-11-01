@@ -47,7 +47,7 @@ opencode api GET /api/session/<id>                # check .model
 
 The running TUI follows; check its status bar. The variant must be one of the model's variant ids (from `model.list`) or it is dropped. This changes only that session, never the machine-wide default.
 
-Fallback by keys (agent `idle`): **type** `/models` (`pane send-text`), press `enter`, type a filter specific enough to leave exactly one row (`<model> <provider>`; the same model exists under several providers, including free tiers), press `enter`, answer a "Select variant" dialog if one opens, then check the status bar. A pasted slash command (`agent prompt`, `pane run`) is sent to the model as a chat message — type it. `/effort` opens the variant dialog the same way. Setting a variant by keys changes that model's default for every new session on the machine.
+GEAR never switches by keys: the picker and `/effort` save the variant and the recent list in ~/.local/state/opencode/model.json, the default of every OpenCode session on the machine. When the API switch fails, the switch fails and the captain is told.
 
 ## Exit and resume
 

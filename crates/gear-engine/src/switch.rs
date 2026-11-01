@@ -1,17 +1,21 @@
-//! Changing an agent's model **in place** (T-33): `/model`, the picker filter,
-//! Enter — the variant dialog when it opens — then the status bar must show the
-//! wanted model. No exit, no restart: the conversation stays.
+//! Changing an agent's model **in place** (T-33): the OpenCode session's own
+//! API (`session.switchModel`), then the status bar must show the wanted
+//! model. No exit, no restart: the conversation stays. No key is typed at all
+//! (T-531): `/model`, the picker filter and the variant dialog write the
+//! variant and the recent list into `~/.local/state/opencode/model.json`, the
+//! default of every OpenCode session on the machine, which is not the seat's
+//! own change to make.
 //!
 //! The switch is a **state machine across ticks** (review F2/F3/F6): the plan
-//! (the status-bar text to reach and the next step) is stored in the seat's
-//! meta *before* the first key, at most one UI submission happens per tick, and
-//! the whole visible screen is re-read before every submission. A render that
-//! is slow gets a tick to appear instead of burning a failed attempt, and an
-//! engine restart mid-switch resumes the plan instead of retyping blindly.
+//! (the status-bar text to reach) is stored in the seat's meta *before* the
+//! first API call, the whole visible screen is re-read before every request,
+//! and a slow service or render gets a tick to answer instead of burning a
+//! failed attempt. An engine restart mid-switch resumes the plan instead of
+//! asking the service blindly.
 //!
-//! Never types into a working agent (review F8): the pane's occupant and status
-//! are read again immediately before any input; a stale `idle` from this tick's
-//! observation is not trusted.
+//! Never calls into a working agent (review F8): the pane's occupant and status
+//! are read again immediately before any request; a stale `idle` from this
+//! tick's observation is not trusted.
 //!
 //! Only the OpenCode protocol is implemented: it is the one the SOP
 //! (`gear --skill agent:opencode`, ops/bin/switch-model.sh) verifies, and
@@ -20,7 +24,7 @@
 //! starts it again on the next model ([`crate::restart`]).
 
 use gear_app::config::ModelSwitch;
-use gear_herdr::{HerdrAct, Outcome, Profile};
+use gear_herdr::{HerdrAct, Profile};
 use gear_model::{GearResult, Ts};
 use gear_store::Store;
 
@@ -34,11 +38,9 @@ const BOX_EDGES: [char; 3] = ['┃', '│', '╹'];
 /// The variant dialog's title; it is drawn in the middle of the visible screen,
 /// far above the last 16 lines when the conversation is long (review F3).
 const VARIANT_TITLE: &str = "Select variant";
-/// Marks of the model picker (SOP: a picker with "Search", "Recent", provider
-/// groups). Only used to wait for it before typing the filter.
-const PICKER_MARKS: [&str; 4] = ["Search", "Recent", "Select model", "No results"];
-/// How many ticks one step may wait for the screen to move before it counts as
-/// a failed try. A render that never comes must not hang the lane.
+/// How many ticks one step may wait for the screen or the service to answer
+/// before it counts as a failed try. A render that never comes must not hang
+/// the lane.
 const WAIT_TICKS: i64 = 6;
 
 /// What a switch attempt did.
@@ -67,70 +69,27 @@ pub fn switches_in_place(kind: &str) -> bool {
     kind == "opencode"
 }
 
-/// The keys and texts the switch sends, from the config and the profile.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SwitchSteps {
-    /// Closes a stray dialog, a quota toast, a picker left open.
-    pub escape: String,
-    /// The picker command (`/model`).
-    pub command: String,
-    /// The default answer to a variant dialog.
-    pub variant: String,
-}
-
-impl SwitchSteps {
-    /// The steps of one CLI kind. Only OpenCode's protocol is verified; any
-    /// other kind is not switched in place (the caller starts the agent again
-    /// on the next model, or flags the seat when it cannot).
-    pub fn for_kind(kind: &str, labels: &ModelSwitch) -> Option<SwitchSteps> {
-        if !switches_in_place(kind) {
-            return None;
-        }
-        Some(SwitchSteps {
-            escape: "esc".to_string(),
-            command: "/model".to_string(),
-            variant: labels.variant.clone().unwrap_or_else(|| "high".to_string()),
-        })
-    }
-}
-
-/// The next UI submission of a plan.
+/// The one step a plan has left (T-531): the service accepted the target, so
+/// the switch waits for `session.get` and the TUI bar. The stored text stays
+/// `api-confirm`: a plan written by an earlier binary with a typed step
+/// (`escape`, `command`, `filter`, `variant`, `confirm`) no longer parses and
+/// is dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     /// Service accepted the target; wait for session.get and the TUI bar.
     ApiConfirm,
-    /// `esc`: close whatever the last attempt (or a quota toast) left open.
-    Escape,
-    /// `/model`: open the picker.
-    Command,
-    /// The picker filter: type it and select the row (text + Enter).
-    Filter,
-    /// The variant dialog's answer (only for models that have variants).
-    Variant,
-    /// Read the status bar; the switch is done when it shows the model.
-    Confirm,
 }
 
 impl Step {
     fn as_str(self) -> &'static str {
         match self {
             Step::ApiConfirm => "api-confirm",
-            Step::Escape => "escape",
-            Step::Command => "command",
-            Step::Filter => "filter",
-            Step::Variant => "variant",
-            Step::Confirm => "confirm",
         }
     }
 
     fn parse(text: &str) -> Option<Step> {
         match text {
             "api-confirm" => Some(Step::ApiConfirm),
-            "escape" => Some(Step::Escape),
-            "command" => Some(Step::Command),
-            "filter" => Some(Step::Filter),
-            "variant" => Some(Step::Variant),
-            "confirm" => Some(Step::Confirm),
             _ => None,
         }
     }
@@ -204,6 +163,10 @@ pub fn pending(store: &mut Store, seat_id: &str) -> GearResult<Option<Pending>> 
         return Ok(None);
     };
     let Some(step) = Step::parse(step) else {
+        // A plan stored by an earlier binary with a typed step (`escape`,
+        // `command`, `filter`, `variant`, `confirm`): the keys path is gone, so
+        // the plan is dropped and the API path starts from the beginning.
+        clear_pending(store, seat_id)?;
         return Ok(None);
     };
     let to = parts.next().unwrap_or_default().to_string();
@@ -223,186 +186,6 @@ pub fn clear_pending(store: &mut Store, seat_id: &str) -> GearResult<()> {
     meta_set(store, &pending_key(seat_id), "")
 }
 
-/// Switch `seat`'s agent in place, one step per call.
-///
-/// `obs` is this tick's observation (used as an early gate only); `labels` are
-/// the picker and status-bar texts from the config. The plan is durable, so a
-/// second call continues it — including after an engine restart.
-pub fn switch_in_place(
-    store: &mut Store,
-    herdr: &mut dyn HerdrAct,
-    seat_id: &str,
-    profile: &Profile,
-    obs: Option<&SeatObs>,
-    labels: &ModelSwitch,
-    now: Ts,
-) -> GearResult<SwitchOutcome> {
-    // 1. never type into a working agent (design/09). The real check is below
-    //    (F8); this one keeps a busy tick from even reading the pane. `None`
-    //    means "no observation this tick" (a startup check after a start).
-    if let Some(obs) = obs {
-        if !obs.idle {
-            return Ok(SwitchOutcome::Waiting);
-        }
-    }
-    let Some(pane) = pane_of(store, seat_id)? else {
-        return Ok(SwitchOutcome::Failed);
-    };
-    let Some(steps) = SwitchSteps::for_kind(&profile.kind, labels) else {
-        return Ok(SwitchOutcome::Failed);
-    };
-
-    // 2. a plan is written before any input (F6). A plan for another target
-    //    starts over; the same target resumes where it stopped.
-    let resumed = pending(store, seat_id)?;
-    let mut plan = match resumed.clone() {
-        Some(plan) if plan.to == labels.bar => plan,
-        _ => Pending {
-            to: labels.bar.clone(),
-            step: Step::Escape,
-            tries: 0,
-            waited: 0,
-        },
-    };
-    set_pending(store, seat_id, &plan)?;
-
-    // 3. the pane's occupant and status again, right before any key (F8): the
-    //    tick's observation may be a prompt old.
-    match herdr.agent_get(&pane) {
-        Ok(Some(info)) if info.agent.as_deref() == Some(profile.kind.as_str()) => {
-            if !matches!(
-                info.agent_status,
-                gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done
-            ) {
-                return Ok(SwitchOutcome::Waiting);
-            }
-        }
-        // Not (yet) recognised as this kind — right after a start Herdr may
-        // not have classified the agent (status unknown, no kind). Wait,
-        // bounded like any other step; only a lasting mismatch fails.
-        Ok(Some(_)) | Ok(None) => {
-            plan.waited += 1;
-            if plan.waited > WAIT_TICKS {
-                return failed_try(store, seat_id, &mut plan);
-            }
-            set_pending(store, seat_id, &plan)?;
-            return Ok(SwitchOutcome::Waiting);
-        }
-        Err(_) => return Ok(SwitchOutcome::Waiting),
-    }
-
-    // 4. the whole visible screen, not the tail: dialogs are drawn mid-screen
-    //    (F3).
-    let Ok(screen) = herdr.read_screen(&pane) else {
-        return Ok(SwitchOutcome::Waiting);
-    };
-    let variant_open = screen.contains(VARIANT_TITLE);
-    let picker_open = PICKER_MARKS.iter().any(|mark| screen.contains(mark));
-
-    // 5. the status bar decides — but never while a variant dialog is open.
-    if confirmed(&screen, &labels.bar) && !variant_open {
-        clear_pending(store, seat_id)?;
-        return Ok(if resumed.is_some() {
-            SwitchOutcome::Done
-        } else {
-            SwitchOutcome::Already
-        });
-    }
-    // M4 §10.2: the screen never says that an agent is busy — Herdr's state
-    // does, and it was read above (idle or done). Nothing on the screen may
-    // keep the switch from typing into an agent Herdr says is ready.
-
-    // 6. one submission of the plan this tick. T-134: the switch types keys and
-    //    text into the agent's pane, so give the agent its seat name first —
-    //    after every gate, so a working agent or another occupant is not even
-    //    renamed.
-    if let Ok(Some(seat)) = store.read(|tx| tx.get_seat(seat_id)) {
-        crate::names::ensure(herdr, &pane, &crate::names::desired(&seat));
-    }
-    let mut sent = false;
-    match plan.step {
-        Step::ApiConfirm => {
-            // Only entered here when an API call failed during confirmation.
-            plan.step = Step::Escape;
-        }
-        Step::Escape => {
-            sent = keys(herdr, &pane, &steps.escape);
-            if sent {
-                plan.step = Step::Command;
-                plan.waited = 0;
-            }
-        }
-        Step::Command => {
-            if variant_open || picker_open {
-                // A dialog from a half-finished attempt: close it first.
-                sent = keys(herdr, &pane, &steps.escape);
-                plan.waited += 1;
-            } else {
-                sent = text(herdr, &pane, &steps.command);
-                if sent {
-                    plan.step = Step::Filter;
-                    plan.waited = 0;
-                }
-            }
-        }
-        Step::Filter => {
-            if variant_open {
-                // The model was selected already (a render from the last try):
-                // answer the dialog.
-                plan.step = Step::Variant;
-                plan.waited = 0;
-            } else if picker_open {
-                sent = text(herdr, &pane, &labels.picker);
-                if sent {
-                    plan.step = Step::Variant;
-                    plan.waited = 0;
-                }
-            } else {
-                // The picker has not rendered yet: give it a tick.
-                plan.waited += 1;
-            }
-        }
-        Step::Variant => {
-            if variant_open {
-                sent = text(herdr, &pane, &steps.variant);
-            }
-            // No dialog: the model has no variants; the bar is next.
-            plan.step = Step::Confirm;
-            plan.waited = 0;
-        }
-        Step::Confirm => {
-            // The bar is checked at the top; waiting for it is bounded.
-            plan.waited += 1;
-        }
-    }
-
-    if plan.waited > WAIT_TICKS {
-        return failed_try(store, seat_id, &mut plan);
-    }
-    if !sent && matches!(plan.step, Step::Escape | Step::Command) {
-        // A refused/failed submission (or a dialog we are closing): one try
-        // spent, the next tick repeats the step.
-        return failed_try(store, seat_id, &mut plan);
-    }
-    set_pending(store, seat_id, &plan)?;
-    let _ = now;
-    Ok(SwitchOutcome::Waiting)
-}
-
-/// One failed try: the second one flags the seat (`Failed`). The plan goes back
-/// to its first step so the retry starts from a clean dialog state.
-fn failed_try(store: &mut Store, seat_id: &str, plan: &mut Pending) -> GearResult<SwitchOutcome> {
-    plan.tries += 1;
-    plan.step = Step::Escape;
-    plan.waited = 0;
-    if plan.tries >= 2 {
-        clear_pending(store, seat_id)?;
-        return Ok(SwitchOutcome::Failed);
-    }
-    set_pending(store, seat_id, plan)?;
-    Ok(SwitchOutcome::Waiting)
-}
-
 /// The status bar shows `bar`: a line that begins with the OpenCode status-bar
 /// prefix and contains the text — a quote in the conversation does not count
 /// (F3).
@@ -412,27 +195,6 @@ pub(crate) fn confirmed(screen: &str, bar: &str) -> bool {
         let line = line.trim_start_matches(|c: char| c.is_whitespace() || BOX_EDGES.contains(&c));
         line.starts_with(STATUS_BAR_PREFIX) && line.contains(bar)
     })
-}
-
-fn keys(herdr: &mut dyn HerdrAct, pane: &str, key: &str) -> bool {
-    matches!(herdr.send_keys(pane, &[key.to_string()]), Outcome::Ok(()))
-}
-
-/// Typed text, then Enter on its own (Herdr src/app/api/panes.rs: send_input
-/// wraps text in a bracketed paste when the agent enabled it, and a pasted
-/// `/model` is a chat message, not a command; send_text writes raw bytes).
-fn text(herdr: &mut dyn HerdrAct, pane: &str, text: &str) -> bool {
-    // Typed, then Enter on its own: a pasted `/model` is not a command (L-71).
-    if !matches!(herdr.pane_type(pane, text), Outcome::Ok(())) {
-        return false;
-    }
-    // Let the TUI take the typed text before the Enter arrives. The wait
-    // belongs to the terminal (T-127): a real Herdr sleeps, a fake does not.
-    herdr.type_settle();
-    matches!(
-        herdr.send_keys(pane, &["enter".to_string()]),
-        Outcome::Ok(())
-    )
 }
 
 /// What a startup model check says about going on (F5).
@@ -506,11 +268,11 @@ fn labels_for(
 }
 
 /// Begin the in-place switch of a seat whose chain head changed model on its
-/// own CLI (T-464): the durable plan is recorded and **no key is sent here**.
-/// The tick's switch step, which resumes a pending plan, takes the first step
-/// in the same tick, so a config change never sends two submissions in one
-/// tick. `Err(reason)` when the model has no labels anywhere: the caller flags
-/// the seat and sends nothing.
+/// own CLI (T-464): the durable plan is recorded and **no request is made
+/// here**. The tick's switch step, which resumes a pending plan, makes the
+/// first request in the same tick, so a config change never sends two
+/// submissions in one tick. `Err(reason)` when the model has no labels
+/// anywhere: the caller flags the seat and sends nothing.
 pub fn begin(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -527,7 +289,7 @@ pub fn begin(
         seat_id,
         &Pending {
             to: labels.bar,
-            step: Step::Escape,
+            step: Step::ApiConfirm,
             tries: 0,
             waited: 0,
         },
@@ -535,10 +297,13 @@ pub fn begin(
     Ok(Ok(()))
 }
 
-/// API first for session-bound OpenCode agents. A durable API confirmation
-/// plan prevents dispatch while a TUI render lags, including across restart.
-/// Only a failed API call (or an old binding without a service session) enters
-/// the existing typed-key protocol.
+/// Switch a seat's OpenCode agent through the session API alone (T-531): the
+/// model is set with `session.switchModel` and the status bar confirms it; no
+/// key is ever typed into the pane. A durable plan prevents dispatch while a
+/// TUI render lags, including across an engine restart.
+///
+/// Nothing here falls back to keys: a seat the service cannot switch is
+/// `Failed` and the caller flags it.
 pub fn switch_model(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -549,14 +314,16 @@ pub fn switch_model(
     model: &str,
     now: Ts,
 ) -> GearResult<SwitchOutcome> {
-    let resumed = pending(store, seat_id)?;
-    if profile.kind != "opencode"
-        || resumed
-            .as_ref()
-            .is_some_and(|p| p.to == labels.bar && p.step != Step::ApiConfirm)
-    {
-        return switch_in_place(store, herdr, seat_id, profile, obs, labels, now);
+    let _ = now;
+    // (3) Only OpenCode's session API is driven: any other kind fails with
+    // nothing sent, as the in-place switch always did for it.
+    if !switches_in_place(&profile.kind) {
+        clear_pending(store, seat_id)?;
+        return Ok(SwitchOutcome::Failed);
     }
+    // (2) A plan written by an earlier binary with a typed step was dropped by
+    // `pending`; the API path starts from the beginning.
+    let resumed = pending(store, seat_id)?;
     if obs.is_some_and(|obs| !obs.idle) {
         return Ok(SwitchOutcome::Waiting);
     }
@@ -567,10 +334,14 @@ pub fn switch_model(
         tx.get_binding(seat_id, seat.generation)
     })?;
     let Some(binding) = binding else {
+        clear_pending(store, seat_id)?;
         return Ok(SwitchOutcome::Failed);
     };
+    // (1) A binding with no service session cannot be switched through the
+    // API, and nothing is typed for it any more.
     let Some(session) = binding.session_ref.as_deref().filter(|id| !id.is_empty()) else {
-        return switch_in_place(store, herdr, seat_id, profile, obs, labels, now);
+        clear_pending(store, seat_id)?;
+        return Ok(SwitchOutcome::Failed);
     };
     // Herdr can report a launch-pending/unknown agent before the TUI is ready.
     // Record the wait now so onboarding resumes it on the following tick.
@@ -618,16 +389,16 @@ pub fn switch_model(
             clear_pending(store, seat_id)?;
             return Ok(SwitchOutcome::Failed);
         }
-        // A catalogue that is not loaded yet, or no answer: the typed-key path
-        // is the only thing left (it never picks another model either).
+        // (1) A catalogue that is not loaded yet, or no answer: wait for the
+        // service, bounded like the agent gate, never a key.
         crate::opencode::Lookup::NotLoaded | crate::opencode::Lookup::Unavailable => {
-            return api_fallback(store, herdr, seat_id, profile, obs, labels, now)
+            return wait_for_agent(store, seat_id, &mut plan)
         }
     };
     let get = vec!["GET".into(), format!("/api/session/{session}")];
     let value = match herdr.opencode_api(&get) {
         Ok(value) => value,
-        Err(_) => return api_fallback(store, herdr, seat_id, profile, obs, labels, now),
+        Err(_) => return wait_for_agent(store, seat_id, &mut plan),
     };
     if !crate::opencode::matches(&value, &target) {
         if plan.tries == 0 || (plan.waited == WAIT_TICKS && plan.tries < 2) {
@@ -647,7 +418,7 @@ pub fn switch_model(
                 ])
                 .is_err()
             {
-                return api_fallback(store, herdr, seat_id, profile, obs, labels, now);
+                return wait_for_agent(store, seat_id, &mut plan);
             }
         }
     } else {
@@ -686,19 +457,6 @@ fn wait_for_agent(store: &mut Store, seat: &str, plan: &mut Pending) -> GearResu
     Ok(SwitchOutcome::Waiting)
 }
 
-fn api_fallback(
-    store: &mut Store,
-    herdr: &mut dyn HerdrAct,
-    seat: &str,
-    profile: &Profile,
-    obs: Option<&SeatObs>,
-    labels: &ModelSwitch,
-    now: Ts,
-) -> GearResult<SwitchOutcome> {
-    clear_pending(store, seat)?;
-    switch_in_place(store, herdr, seat, profile, obs, labels, now)
-}
-
 fn pending_key(seat_id: &str) -> String {
     format!("engine.switch.{seat_id}")
 }
@@ -718,16 +476,6 @@ fn set_pending(store: &mut Store, seat_id: &str, plan: &Pending) -> GearResult<(
         plan.to
     );
     meta_set(store, &pending_key(seat_id), &raw)
-}
-
-/// The pane of the seat's active binding.
-fn pane_of(store: &mut Store, seat_id: &str) -> GearResult<Option<String>> {
-    let seat = store.read(|tx| tx.get_seat(seat_id))?;
-    let Some(seat) = seat else { return Ok(None) };
-    // The binding of the seat's current generation: a start in progress has a
-    // pending one, and its pane is exactly where the agent was just started.
-    let binding = store.read(|tx| tx.get_binding(seat_id, seat.generation))?;
-    Ok(binding.map(|binding| binding.pane_id))
 }
 
 fn meta_get(store: &mut Store, key: &str) -> GearResult<Option<String>> {
@@ -759,25 +507,35 @@ mod tests {
 
     /// T-114: only OpenCode's picker is driven, so only OpenCode is switched
     /// in place. A CLI without one (pi) is started again on the next model.
+    /// T-531: a seat of any other kind is `Failed` and nothing is sent for it.
     #[test]
     fn only_opencode_is_switched_in_place() {
         assert!(switches_in_place("opencode"));
         for kind in ["pi", "codex", "claude", "grok"] {
             assert!(!switches_in_place(kind), "{kind} has no picker GEAR drives");
-            assert!(
-                SwitchSteps::for_kind(kind, &labels()).is_none(),
-                "{kind} has no switch steps"
-            );
         }
+        let (mut store, mut herdr) = api_world();
+        let profile = gear_herdr::builtin("codex").unwrap();
+        let outcome = switch_model(
+            &mut store,
+            &mut herdr,
+            "p:heat",
+            &profile,
+            None,
+            &labels(),
+            "opencode-go/deepseek-v4.1-flash",
+            T0,
+        )
+        .unwrap();
+        assert_eq!(outcome, SwitchOutcome::Failed);
+        assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
+        assert!(pending(&mut store, "p:heat").unwrap().is_none());
     }
 
     const T0: i64 = 1_800_000_000;
     const PANE: &str = "w1:p1";
     /// An OpenCode screen that is not on the wanted model.
     const OTHER_BAR: &str = "Build auto · MiniMax-M3.1-Flash MiniMax · high";
-    /// A picker (SOP: "Search", "Recent", provider groups).
-    const PICKER: &str =
-        "  Search\n  Recent\n  MiniMax-M3.1-Flash  MiniMax\n  DeepSeek V4.1 Flash  OpenCode Go";
 
     fn api_world() -> (Store, FakeHerdr) {
         let mut store = world();
@@ -795,6 +553,22 @@ mod tests {
             "variants":[{"id":"max"}, {"id":"high"}]}]})
     }
 
+    /// A `GET /api/session/<id>` answer naming another model.
+    fn other_session() -> serde_json::Value {
+        serde_json::json!({"data":{"model":{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash"}}})
+    }
+
+    /// The `GET` answer that says the session is already on the target.
+    fn switched_session(labels: &ModelSwitch) -> serde_json::Value {
+        let mut model = serde_json::json!({
+            "providerID":"opencode-go", "id":"deepseek-v4.1-flash"
+        });
+        if let Some(variant) = labels.variant.as_deref() {
+            model["variant"] = variant.into();
+        }
+        serde_json::json!({"data":{"model": model}})
+    }
+
     fn api_switch(store: &mut Store, herdr: &mut FakeHerdr, labels: &ModelSwitch) -> SwitchOutcome {
         switch_model(
             store,
@@ -809,13 +583,77 @@ mod tests {
         .unwrap()
     }
 
+    /// Tick the switch until it settles (a tick = one call).
+    fn run(store: &mut Store, herdr: &mut FakeHerdr, at: Ts) -> SwitchOutcome {
+        let profile = gear_herdr::builtin("opencode").unwrap();
+        for tick in 0..20 {
+            let outcome = switch_model(
+                store,
+                herdr,
+                "p:heat",
+                &profile,
+                Some(&idle()),
+                &labels(),
+                "opencode-go/deepseek-v4.1-flash",
+                at + tick,
+            )
+            .unwrap();
+            if outcome != SwitchOutcome::Waiting {
+                return outcome;
+            }
+        }
+        SwitchOutcome::Waiting
+    }
+
+    /// Everything that reached the pane: typed text and keys alike.
+    fn typed(herdr: &FakeHerdr) -> Vec<String> {
+        herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::PaneType { text, .. } => Some(text.clone()),
+                Call::SendKeys { keys, .. } => Some(keys.join("+")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn switch_requests(herdr: &FakeHerdr) -> Vec<Vec<String>> {
+        herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::OpenCodeApi { args } if args[0] == "session.switchModel" => {
+                    Some(args.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// T-531: no key reaches the pane, ever — not `/model`, not `/models`, not
+    /// the picker filter, not an escape.
+    fn assert_nothing_typed(herdr: &FakeHerdr) {
+        let typed = typed(herdr);
+        assert!(typed.is_empty(), "the pane got {typed:?}");
+        assert!(
+            !typed
+                .iter()
+                .any(|text| text.contains("/model") || text.contains("/models")),
+            "{typed:?}"
+        );
+    }
+
+    /// T-531: the session API alone switches the model and the bar confirms it
+    /// after an engine restart. Not one key is typed.
     #[test]
     fn api_switch_confirms_session_and_bar_after_restart_without_keys() {
         let (mut store, mut herdr) = api_world();
         let mut labels = labels();
         labels.variant = Some("max".into());
-        herdr.api_replies.extend([Ok(catalog()),
-            Ok(serde_json::json!({"data":{"model":{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash"}}})),
+        herdr.api_replies.extend([
+            Ok(catalog()),
+            Ok(other_session()),
             Ok(serde_json::json!({})),
         ]);
         assert_eq!(
@@ -826,39 +664,134 @@ mod tests {
             pending(&mut store, "p:heat").unwrap().unwrap().step,
             Step::ApiConfirm
         );
-        let target = serde_json::json!({"data":{"model":{"providerID":"opencode-go", "id":"deepseek-v4.1-flash", "variant":"max"}}});
         // API alone is insufficient: the TUI must have rendered the variant.
         herdr
             .api_replies
-            .extend([Ok(catalog()), Ok(target.clone())]);
+            .extend([Ok(catalog()), Ok(switched_session(&labels))]);
         herdr.set_screen(PANE, &format!("┃ Build auto · {} · high", labels.bar));
         assert_eq!(
             api_switch(&mut store, &mut herdr, &labels),
             SwitchOutcome::Waiting
         );
-        herdr.api_replies.extend([Ok(catalog()), Ok(target)]);
+        herdr
+            .api_replies
+            .extend([Ok(catalog()), Ok(switched_session(&labels))]);
         herdr.set_screen(PANE, &format!("┃ Build auto · {} · max", labels.bar));
         assert_eq!(
             api_switch(&mut store, &mut herdr, &labels),
             SwitchOutcome::Done
         );
         assert!(pending(&mut store, "p:heat").unwrap().is_none());
+        assert_nothing_typed(&herdr);
         assert!(herdr
             .calls
             .iter()
             .all(|call| matches!(call, Call::OpenCodeApi { .. })));
-        let requests: Vec<_> = herdr
-            .calls
-            .iter()
-            .filter_map(|call| match call {
-                Call::OpenCodeApi { args } if args[0] == "session.switchModel" => Some(args),
-                _ => None,
-            })
-            .collect();
+        let requests = switch_requests(&herdr);
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0][2], "sessionID=ses_api");
         let body: serde_json::Value = serde_json::from_str(&requests[0][4]).unwrap();
         assert_eq!(body["model"]["variant"], "max");
+    }
+
+    /// T-531: a binding without a service session cannot be switched through
+    /// the API, and nothing is typed for it.
+    #[test]
+    fn a_binding_without_a_session_ref_fails_without_keys() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(PANE, "opencode", gear_herdr::AgentStatus::Idle, "p-heat");
+        herdr.set_screen(PANE, OTHER_BAR);
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    &pending_meta_key("p:heat"),
+                    "api-confirm|0|2|DeepSeek V4.1 Flash OpenCode Go",
+                )
+            })
+            .unwrap();
+
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels()),
+            SwitchOutcome::Failed
+        );
+        assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
+        assert_nothing_typed(&herdr);
+        assert!(
+            pending(&mut store, "p:heat").unwrap().is_none(),
+            "the plan is cleared"
+        );
+    }
+
+    /// T-531: a service that never answers is waited for, bounded like the
+    /// agent gate, then the seat is flagged — no key, ever.
+    #[test]
+    fn an_unavailable_api_waits_to_the_bound_then_fails_without_keys() {
+        let (mut store, mut herdr) = api_world();
+        // No scripted replies: every call answers "fake API unavailable".
+        let mut outcomes = Vec::new();
+        for _ in 0..20 {
+            let outcome = api_switch(&mut store, &mut herdr, &labels());
+            outcomes.push(outcome.clone());
+            if outcome != SwitchOutcome::Waiting {
+                break;
+            }
+        }
+        let waited = outcomes
+            .iter()
+            .filter(|o| **o == SwitchOutcome::Waiting)
+            .count();
+        assert_eq!(
+            outcomes.last(),
+            Some(&SwitchOutcome::Failed),
+            "{outcomes:?}"
+        );
+        assert_eq!(waited as i64, WAIT_TICKS * 2, "{outcomes:?}");
+        assert_nothing_typed(&herdr);
+        assert!(
+            pending(&mut store, "p:heat").unwrap().is_none(),
+            "the plan is cleared"
+        );
+    }
+
+    /// T-531: a plan an earlier binary stored with a typed step (`filter`) is
+    /// cleared and the API path runs from the beginning.
+    #[test]
+    fn a_typed_plan_from_an_earlier_binary_is_cleared_and_the_api_runs() {
+        let (mut store, mut herdr) = api_world();
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    &pending_meta_key("p:heat"),
+                    "filter|0|0|DeepSeek V4.1 Flash OpenCode Go",
+                )
+            })
+            .unwrap();
+        assert!(
+            pending(&mut store, "p:heat").unwrap().is_none(),
+            "the typed step no longer parses"
+        );
+        let raw = store
+            .read(|tx| tx.get_meta(&pending_meta_key("p:heat")))
+            .unwrap()
+            .unwrap_or_default();
+        assert!(raw.is_empty(), "the stale plan is cleared: {raw:?}");
+
+        herdr.api_replies.extend([
+            Ok(catalog()),
+            Ok(other_session()),
+            Ok(serde_json::json!({})),
+        ]);
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels()),
+            SwitchOutcome::Waiting
+        );
+        assert_eq!(switch_requests(&herdr).len(), 1, "{:?}", herdr.calls);
+        assert_eq!(
+            pending(&mut store, "p:heat").unwrap().unwrap().step,
+            Step::ApiConfirm
+        );
+        assert_nothing_typed(&herdr);
     }
 
     #[test]
@@ -872,14 +805,16 @@ mod tests {
             SwitchOutcome::Failed
         );
         assert_eq!(herdr.calls.len(), 1);
+        assert_nothing_typed(&herdr);
     }
 
+    /// T-531: a failed `session.switchModel` is waited for, not typed around.
     #[test]
-    fn failed_api_switch_uses_typed_fallback_only_after_failure() {
+    fn a_failed_api_switch_waits_and_never_types() {
         let (mut store, mut herdr) = api_world();
         herdr.api_replies.extend([
             Ok(catalog()),
-            Ok(serde_json::json!({"data":{"model":{}}})),
+            Ok(other_session()),
             Err("service unavailable".into()),
         ]);
         assert_eq!(
@@ -890,18 +825,8 @@ mod tests {
             api_switch(&mut store, &mut herdr, &labels()),
             SwitchOutcome::Waiting
         );
-        assert!(herdr
-            .calls
-            .iter()
-            .any(|call| matches!(call, Call::SendKeys { .. })));
-        assert_eq!(
-            herdr
-                .calls
-                .iter()
-                .filter(|call| matches!(call, Call::OpenCodeApi { .. }))
-                .count(),
-            3
-        );
+        assert_eq!(switch_requests(&herdr).len(), 1, "{:?}", herdr.calls);
+        assert_nothing_typed(&herdr);
     }
 
     #[test]
@@ -919,15 +844,14 @@ mod tests {
         assert!(herdr.calls.is_empty());
         herdr.set_status(PANE, gear_herdr::AgentStatus::Idle);
         herdr.set_screen(PANE, &format!("┃ Build auto · {}", labels().bar));
-        herdr.api_replies.extend([
-            Ok(catalog()),
-            Ok(serde_json::json!({"data":{"model":{
-            "providerID":"opencode-go", "id":"deepseek-v4.1-flash"}}})),
-        ]);
+        herdr
+            .api_replies
+            .extend([Ok(catalog()), Ok(switched_session(&labels()))]);
         assert_eq!(
             api_switch(&mut store, &mut herdr, &labels()),
             SwitchOutcome::Done
         );
+        assert_nothing_typed(&herdr);
     }
 
     #[test]
@@ -1003,110 +927,34 @@ profile = "claude"
         }
     }
 
-    /// An OpenCode pane on another model with the scripted screens of one
-    /// switch: esc clears the toast, /model opens the picker, the filter
-    /// selects the row and the bar follows.
-    fn switching() -> FakeHerdr {
-        let mut herdr = FakeHerdr::new();
-        herdr.add_agent_named(PANE, "opencode", gear_herdr::AgentStatus::Idle, "p-heat");
-        herdr.set_screen(PANE, "  Error: Token Plan ... (2056)\n  Session failed");
-        herdr.screen_after = vec![
-            ("esc".into(), "  Ask anything…".into()),
-            ("/model".into(), PICKER.into()),
-            (
-                "DeepSeek V4.1 Flash OpenCode Go".into(),
-                "Build auto · DeepSeek V4.1 Flash OpenCode Go · high".into(),
-            ),
-        ];
-        herdr
-    }
-
-    fn texts(herdr: &FakeHerdr) -> Vec<String> {
-        herdr
-            .calls
-            .iter()
-            .filter_map(|call| match call {
-                Call::PaneType { text, .. } => Some(text.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn keys(herdr: &FakeHerdr) -> Vec<String> {
-        herdr
-            .calls
-            .iter()
-            .filter_map(|call| match call {
-                Call::SendKeys { keys, .. } => keys.first().cloned(),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Tick the switch until it settles (a tick = one call).
-    fn run(store: &mut Store, herdr: &mut FakeHerdr, at: Ts) -> SwitchOutcome {
-        let profile = gear_herdr::builtin("opencode").unwrap();
-        for tick in 0..20 {
-            let outcome = switch_in_place(
-                store,
-                herdr,
-                "p:heat",
-                &profile,
-                Some(&idle()),
-                &labels(),
-                at + tick,
-            )
-            .unwrap();
-            if outcome != SwitchOutcome::Waiting {
-                return outcome;
-            }
-        }
-        SwitchOutcome::Waiting
-    }
-
+    /// T-531: the switch runs on the API alone, one request per tick, and the
+    /// pane never sees a key.
     #[test]
-    fn the_switch_uses_the_production_sequence_one_submission_per_tick() {
-        let mut s = world();
-        let mut herdr = switching();
-
-        assert_eq!(run(&mut s, &mut herdr, T0), SwitchOutcome::Done);
-        // Each typed line gets its own Enter (L-71: a pasted line is not a
-        // command); nothing else is pressed.
+    fn the_switch_runs_on_the_api_alone() {
+        let (mut store, mut herdr) = api_world();
+        herdr.api_replies.extend([
+            Ok(catalog()),
+            Ok(other_session()),
+            Ok(serde_json::json!({})),
+        ]);
         assert_eq!(
-            keys(&herdr),
-            vec!["esc", "enter", "enter"],
-            "{:?}",
-            keys(&herdr)
+            api_switch(&mut store, &mut herdr, &labels()),
+            SwitchOutcome::Waiting
         );
+        assert_eq!(switch_requests(&herdr).len(), 1, "{:?}", herdr.calls);
+        herdr.set_screen(PANE, &format!("Build auto · {} · high", labels().bar));
+        herdr
+            .api_replies
+            .extend([Ok(catalog()), Ok(switched_session(&labels()))]);
         assert_eq!(
-            texts(&herdr),
-            vec!["/model", "DeepSeek V4.1 Flash OpenCode Go"],
-            "{:?}",
-            texts(&herdr)
+            api_switch(&mut store, &mut herdr, &labels()),
+            SwitchOutcome::Done
         );
-        // The exact order: esc, then /model typed + Enter, then the filter
-        // typed + Enter — each submission in its own tick.
-        let order: Vec<String> = herdr
-            .calls
-            .iter()
-            .map(|call| match call {
-                Call::SendKeys { keys, .. } => {
-                    format!("key:{}", keys.first().cloned().unwrap_or_default())
-                }
-                Call::PaneType { text, .. } => format!("run:{text}"),
-                other => format!("{other:?}"),
-            })
-            .collect();
-        assert_eq!(
-            order,
-            vec![
-                "key:esc",
-                "run:/model",
-                "key:enter",
-                "run:DeepSeek V4.1 Flash OpenCode Go",
-                "key:enter"
-            ],
-            "{order:?}"
+        assert_nothing_typed(&herdr);
+        assert_eq!(switch_requests(&herdr).len(), 1, "one switch request");
+        assert!(
+            pending(&mut store, "p:heat").unwrap().is_none(),
+            "the plan is cleared"
         );
         assert!(
             herdr
@@ -1115,189 +963,131 @@ profile = "claude"
                 .all(|call| !matches!(call, Call::AgentStart { .. })),
             "no restart"
         );
-        assert!(
-            pending(&mut s, "p:heat").unwrap().is_none(),
-            "the plan is cleared"
-        );
     }
 
+    /// T-531: a bar that already shows the model is `Already`, and nothing is
+    /// typed — only the catalogue and the session are read.
     #[test]
     fn an_already_correct_model_sends_nothing() {
-        let mut s = world();
-        let mut herdr = FakeHerdr::new();
-        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        let (mut store, mut herdr) = api_world();
         herdr.set_screen(PANE, "Build auto · DeepSeek V4.1 Flash OpenCode Go · high");
+        herdr
+            .api_replies
+            .extend([Ok(catalog()), Ok(switched_session(&labels()))]);
 
-        assert_eq!(run(&mut s, &mut herdr, T0), SwitchOutcome::Already);
-        assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
+        assert_eq!(run(&mut store, &mut herdr, T0), SwitchOutcome::Already);
+        assert_nothing_typed(&herdr);
+        assert!(switch_requests(&herdr).is_empty());
     }
 
-    /// F3: a conversation that quotes the model name is not a status bar.
+    /// F3: a conversation that quotes the model name is not a status bar, so
+    /// the switch waits for the real bar instead of finishing on the quote.
     #[test]
     fn a_quoted_model_label_is_not_a_status_bar() {
-        let mut s = world();
-        let mut herdr = switching();
+        let (mut store, mut herdr) = api_world();
         herdr.set_screen(
             PANE,
             "Please switch to DeepSeek V4.1 Flash OpenCode Go when you can.\nBuild auto · MiniMax-M3.1-Flash MiniMax · high",
         );
-
-        assert_eq!(run(&mut s, &mut herdr, T0), SwitchOutcome::Done);
-        assert_eq!(texts(&herdr)[0], "/model", "it did not accept the quote");
+        herdr
+            .api_replies
+            .extend([Ok(catalog()), Ok(switched_session(&labels()))]);
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels()),
+            SwitchOutcome::Waiting
+        );
+        herdr.set_screen(PANE, &format!("Build auto · {} · high", labels().bar));
+        herdr
+            .api_replies
+            .extend([Ok(catalog()), Ok(switched_session(&labels()))]);
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels()),
+            SwitchOutcome::Done
+        );
+        assert_nothing_typed(&herdr);
     }
 
-    /// F3: the variant dialog is drawn mid-screen; the tail window misses it.
+    /// F3: the variant dialog is drawn mid-screen; while it is open the bar
+    /// does not confirm, even when it already names the model and the variant.
     #[test]
-    fn a_variant_dialog_above_the_tail_window_is_answered() {
-        let mut s = world();
-        let mut herdr = switching();
+    fn an_open_variant_dialog_blocks_the_confirmation() {
+        let (mut store, mut herdr) = api_world();
+        let mut labels = labels();
+        labels.variant = Some("high".into());
         let mut screen = String::from("  Select variant\n  Search\n  none\n  low\n  high\n");
         for line in 0..40 {
             screen.push_str(&format!("  conversation line {line}\n"));
         }
+        screen.push_str(&format!("  Build auto · {} · high\n", labels.bar));
+        herdr.set_screen(PANE, &screen);
         herdr
-            .screen_after
-            .push(("DeepSeek V4.1 Flash OpenCode Go".into(), screen.clone()));
-        // The fake matches the first scripted entry for the filter: replace it.
-        herdr
-            .screen_after
-            .retain(|(trigger, _)| trigger != "DeepSeek V4.1 Flash OpenCode Go");
-        herdr
-            .screen_after
-            .push(("DeepSeek V4.1 Flash OpenCode Go".into(), screen.clone()));
-        // After the dialog is answered the bar confirms.
-        let mut with_variant = labels();
-        with_variant.variant = Some("low".into());
-        herdr.screen_after.push((
-            "low".into(),
-            "Build auto · DeepSeek V4.1 Flash OpenCode Go · low".into(),
-        ));
-
-        let profile = gear_herdr::builtin("opencode").unwrap();
-        let mut outcome = SwitchOutcome::Waiting;
-        for tick in 0..20 {
-            outcome = switch_in_place(
-                &mut s,
-                &mut herdr,
-                "p:heat",
-                &profile,
-                Some(&idle()),
-                &with_variant,
-                T0 + tick,
-            )
-            .unwrap();
-            if outcome != SwitchOutcome::Waiting {
-                break;
-            }
-        }
-        assert_eq!(outcome, SwitchOutcome::Done);
-        let sent = texts(&herdr);
-        assert!(
-            sent.contains(&"low".to_string()),
-            "the variant is answered: {sent:?}"
+            .api_replies
+            .extend([Ok(catalog()), Ok(switched_session(&labels))]);
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels),
+            SwitchOutcome::Waiting
         );
+        // The dialog closed: the bar confirms.
+        herdr.set_screen(PANE, &format!("  Build auto · {} · high\n", labels.bar));
+        herdr
+            .api_replies
+            .extend([Ok(catalog()), Ok(switched_session(&labels))]);
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels),
+            SwitchOutcome::Done
+        );
+        assert_nothing_typed(&herdr);
     }
 
     /// F8: an observation that says idle is not enough — the agent may have
     /// started a turn since.
     #[test]
-    fn a_stale_idle_observation_never_types_into_a_working_agent() {
-        let mut s = world();
-        let mut herdr = switching();
+    fn a_stale_idle_observation_never_asks_the_service() {
+        let (mut store, mut herdr) = api_world();
         herdr.set_status(PANE, gear_herdr::AgentStatus::Working);
 
-        assert_eq!(run(&mut s, &mut herdr, T0), SwitchOutcome::Waiting);
+        assert_eq!(run(&mut store, &mut herdr, T0), SwitchOutcome::Waiting);
         assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
     }
 
-    /// F8: another agent in the pane is never typed into.
+    /// F8: another agent in the pane is never asked — the wait is bounded and
+    /// the seat is flagged instead.
     #[test]
     fn a_changed_occupant_is_flagged_not_typed_into() {
-        let mut s = world();
-        let mut herdr = switching();
+        let (mut store, mut herdr) = api_world();
         herdr.add_agent(PANE, "codex", gear_herdr::AgentStatus::Idle);
 
-        assert_eq!(run(&mut s, &mut herdr, T0), SwitchOutcome::Failed);
+        assert_eq!(run(&mut store, &mut herdr, T0), SwitchOutcome::Failed);
         assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
+        assert_nothing_typed(&herdr);
+        assert!(pending(&mut store, "p:heat").unwrap().is_none());
     }
 
-    /// F3: a render that comes a tick late is waited for, not counted as a
-    /// failure.
+    /// F3: a service answer that comes a tick late is waited for, not counted
+    /// as a failure.
     #[test]
-    fn a_late_picker_is_waited_for_not_failed() {
-        let mut s = world();
-        let mut herdr = FakeHerdr::new();
-        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
-        herdr.set_screen(PANE, OTHER_BAR);
-        // /model renders nothing the first time; the tick after shows it.
-        herdr.screen_after = vec![
-            ("esc".into(), OTHER_BAR.into()),
-            (
-                "DeepSeek V4.1 Flash OpenCode Go".into(),
-                "Build auto · DeepSeek V4.1 Flash OpenCode Go · high".into(),
-            ),
-        ];
-
-        let profile = gear_herdr::builtin("opencode").unwrap();
-        // The escape step, then /model (no picker yet).
-        switch_in_place(
-            &mut s,
-            &mut herdr,
-            "p:heat",
-            &profile,
-            Some(&idle()),
-            &labels(),
-            T0,
-        )
-        .unwrap();
-        switch_in_place(
-            &mut s,
-            &mut herdr,
-            "p:heat",
-            &profile,
-            Some(&idle()),
-            &labels(),
-            T0 + 1,
-        )
-        .unwrap();
-        assert!(texts(&herdr).contains(&"/model".to_string()));
-        // The picker appears only now: the switch waits (no failure) and then
-        // types the filter.
-        herdr.set_screen(PANE, PICKER);
-        let outcome = switch_in_place(
-            &mut s,
-            &mut herdr,
-            "p:heat",
-            &profile,
-            Some(&idle()),
-            &labels(),
-            T0 + 2,
-        )
-        .unwrap();
-        assert_eq!(outcome, SwitchOutcome::Waiting);
-        assert!(texts(&herdr).contains(&"DeepSeek V4.1 Flash OpenCode Go".to_string()));
-        let outcome = switch_in_place(
-            &mut s,
-            &mut herdr,
-            "p:heat",
-            &profile,
-            Some(&idle()),
-            &labels(),
-            T0 + 3,
-        )
-        .unwrap();
-        assert_eq!(outcome, SwitchOutcome::Done);
-    }
-
-    #[test]
-    fn two_failed_tries_flag_the_seat() {
-        let mut s = world();
-        let mut herdr = FakeHerdr::new();
-        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
-        herdr.set_screen(PANE, OTHER_BAR);
-
-        assert_eq!(run(&mut s, &mut herdr, T0), SwitchOutcome::Failed);
-        assert!(pending(&mut s, "p:heat").unwrap().is_none());
+    fn a_late_service_answer_is_waited_for_not_failed() {
+        let (mut store, mut herdr) = api_world();
+        // The first call: no answer at all.
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels()),
+            SwitchOutcome::Waiting
+        );
+        assert_eq!(
+            pending(&mut store, "p:heat").unwrap().unwrap().step,
+            Step::ApiConfirm
+        );
+        assert_nothing_typed(&herdr);
+        // The service answers now: the plan resumes instead of starting over.
+        herdr
+            .api_replies
+            .extend([Ok(catalog()), Ok(switched_session(&labels()))]);
+        herdr.set_screen(PANE, &format!("Build auto · {} · high", labels().bar));
+        assert_eq!(
+            api_switch(&mut store, &mut herdr, &labels()),
+            SwitchOutcome::Done
+        );
+        assert_nothing_typed(&herdr);
     }
 
     /// T-307: a catalogue that cannot be read is flagged as unreadable, never
@@ -1370,21 +1160,21 @@ profile = "claude"
     }
 
     #[test]
-    fn a_working_agent_is_never_typed_into() {
-        let mut s = world();
-        let mut herdr = switching();
+    fn a_working_agent_is_never_asked() {
+        let (mut store, mut herdr) = api_world();
         let mut busy = idle();
         busy.idle = false;
         busy.status = Some(gear_herdr::AgentStatus::Working);
 
         let profile = gear_herdr::builtin("opencode").unwrap();
-        let outcome = switch_in_place(
-            &mut s,
+        let outcome = switch_model(
+            &mut store,
             &mut herdr,
             "p:heat",
             &profile,
             Some(&busy),
             &labels(),
+            "opencode-go/deepseek-v4.1-flash",
             T0,
         )
         .unwrap();

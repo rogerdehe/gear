@@ -25,10 +25,7 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
             .iter()
             .filter(|task| {
                 task.milestone.as_deref() == Some(&report.milestone)
-                    && !matches!(
-                        task.state,
-                        TaskState::Draft | TaskState::Cancelled | TaskState::Failed
-                    )
+                    && !matches!(task.state, TaskState::Cancelled | TaskState::Failed)
             })
             .collect();
         let done = scope.iter().filter(|t| t.state == TaskState::Done).count();

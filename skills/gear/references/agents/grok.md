@@ -10,7 +10,7 @@ Tested with grok 1.0, Herdr 0.9.1, macOS. Resume and the quota messages are not 
 |---|---|
 | Herdr kind | `grok` |
 | Unattended flag (required) | `--always-approve` — the status bar then ends with `· always-approve` |
-| Model / effort | start flags `-m <model>`, `--reasoning-effort <effort>`; `grok models` lists the models |
+| Model / effort | start flags `-m <model>`, `--reasoning-effort <effort>`; `grok models` lists the models. Change the model only by a restart with the start flag; never by `/model` in a running session, which may save the machine-wide default |
 | Session id | choose it: `-s <uuid>` starts a new session with that id; Herdr reports it |
 | Resume | `-r <session-id>` |
 | Status bar | `Grok <version> │ <effort> │ <repo> │ <branch> │ <tokens> │ N% ctx` |

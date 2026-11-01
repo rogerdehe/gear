@@ -76,6 +76,9 @@ pub struct LeftTask {
     pub estimate_min: Option<i64>,
     /// The dependency the task waits for, when it waits for one.
     pub needs: Option<String>,
+    /// Whether the task is held (`state: hold`): it is left work of the lane,
+    /// but the lane cannot start it.
+    pub held: bool,
 }
 
 /// One reviewer (a temp seat).
@@ -111,7 +114,6 @@ pub fn queue(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Queue> {
                 let mut own: Vec<_> = tasks
                     .iter()
                     .filter(|task| task.lane.as_deref() == Some(seat.name.as_str()))
-                    .filter(|task| task.state != TaskState::Draft)
                     .collect();
                 own.sort_by_key(|task| (task.rank, task.id.clone()));
                 // Why the lane is idle (design §8.2): the one function the
@@ -145,6 +147,7 @@ pub fn queue(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Queue> {
                                 })
                             })
                             .cloned(),
+                        held: task.state == TaskState::Draft,
                     })
                     .collect();
                 let left_min = left.iter().filter_map(|task| task.estimate_min).sum();
@@ -319,9 +322,19 @@ fn lane_line(lane: &Lane) -> String {
             .take(LISTED)
             .map(|task| match &task.needs {
                 Some(needs) => {
-                    format!("{} {}m needs {needs}", task.id, minutes(task.estimate_min))
+                    format!(
+                        "{} {}m needs {needs}{}",
+                        task.id,
+                        minutes(task.estimate_min),
+                        held_word(task)
+                    )
                 }
-                None => format!("{} {}m", task.id, minutes(task.estimate_min)),
+                None => format!(
+                    "{} {}m{}",
+                    task.id,
+                    minutes(task.estimate_min),
+                    held_word(task)
+                ),
             })
             .collect();
         line.push_str(&listed.join(", "));
@@ -330,6 +343,15 @@ fn lane_line(lane: &Lane) -> String {
         }
     }
     line
+}
+
+/// The word a held task is listed with: ` held`, or nothing.
+fn held_word(task: &LeftTask) -> &'static str {
+    if task.held {
+        " held"
+    } else {
+        ""
+    }
 }
 
 /// One reviewer: the task it reviews, or how long it has been standing by.

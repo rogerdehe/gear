@@ -319,7 +319,7 @@ fn a_project_without_github_mode_says_so() {
 
 #[test]
 fn a_lane_runs_no_import() {
-    let dir = scratch("lane");
+    let dir = scratch("lane-import");
     let db = dir.join("gear.db");
     drop(store_with_plan(&db, true));
     fake_gh(&dir.join("bin"), ISSUES);

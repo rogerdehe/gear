@@ -787,10 +787,8 @@ pub fn project_for(
 
     let mut totals = Totals::default();
     for task in &tasks {
-        // A draft task is not in the plan yet; the board shows the plan.
-        if task.state == TaskState::Draft {
-            continue;
-        }
+        // A held task (Draft) is remaining work and counts (decision 04:45),
+        // as the stations count it.
         // A cancelled task is not live work (T-415): it stays in the Tasks
         // view below, but the totals count only what the voyage still can
         // deliver, as the stations do (station.rs leaves it out too).
@@ -2152,7 +2150,7 @@ pub fn state_word(state: TaskState) -> &'static str {
         TaskState::Done => "done",
         TaskState::Failed => "failed",
         TaskState::Cancelled => "cancelled",
-        TaskState::Draft => "draft",
+        TaskState::Draft => "held",
     }
 }
 

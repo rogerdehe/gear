@@ -10,7 +10,7 @@ Tested with pi 1.4.0, Herdr 0.9.1, macOS.
 |---|---|
 | Herdr kind | `pi` |
 | Unattended flag (required) | `--approve` — pi's own project-trust override; without it a lane in a fresh worktree waits on a trust prompt |
-| Model | start flag `--model <provider>/<id>` (e.g. `opencode-go/deepseek-v4.1-flash`) |
+| Model | start flag `--model <provider>/<id>` (e.g. `opencode-go/deepseek-v4.1-flash`). Change the model only by a restart with the start flag; never by `/model` in a running session, which may save the machine-wide default |
 | Thinking level | start flag `--thinking <off\|minimal\|low\|medium\|high\|xhigh\|max>` (the chain entry's args) |
 | Session | Herdr reports the session **file** (`agent_session.value` is a path under `~/.pi/agent/sessions/`) |
 | Resume | `--session <path\|id>` — the path Herdr reports works; pi's own hint after an exit names the session id |

@@ -7,7 +7,7 @@ use gear_model::{
     Ts,
 };
 use gear_store::{BindingStatus, NewOp, OpRow, Store, Tx};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 /// Reason stored with an op that the engine found Executing after a restart.
@@ -1182,6 +1182,31 @@ pub fn confirm_pending_with(
     working: &[String],
     now: Ts,
 ) -> GearResult<(Vec<String>, Vec<String>)> {
+    confirm_pending_held(
+        store,
+        project,
+        budget,
+        grace_s,
+        working,
+        &BTreeSet::new(),
+        now,
+    )
+}
+
+/// [`confirm_pending_with`] with the deliveries whose text still sits in their
+/// lane's input box this tick (`held`, [`held_deliveries`], T-535). The
+/// idle-to-busy turn proves nothing for such a delivery: the lane has not
+/// taken its packet yet. Views, hand-ins and the seat's own messages still
+/// confirm it as they did.
+pub fn confirm_pending_held(
+    store: &mut Store,
+    project: &str,
+    budget: i64,
+    grace_s: i64,
+    working: &[String],
+    held: &BTreeSet<String>,
+    now: Ts,
+) -> GearResult<(Vec<String>, Vec<String>)> {
     // The seats whose screen shows a provider limit right now (T-15): their
     // deliveries cannot be answered until the quota comes back, so they spend
     // no check budget below.
@@ -1244,7 +1269,8 @@ pub fn confirm_pending_with(
                         }
                     }
                     // A delivery is proven by the task/attempt it announced.
-                    OpKind::Deliver => shown_delivery(tx, &op)?.map(|ts| (ts, false)),
+                    // T-535: not by a turn while its text is unsent.
+                    OpKind::Deliver => shown_delivery(tx, &op, held)?.map(|ts| (ts, false)),
                     // Onboard/release/title/notify have no evidence rule yet:
                     // leave them completely alone — no budget, no flag (R-46).
                     _ => continue,
@@ -1488,9 +1514,81 @@ pub const UNSENT_RESUBMIT_AFTER_S: i64 = 30;
 /// How many lines of the pane the typed text is looked for in (T-371).
 const UNSENT_READ_LINES: u32 = 12;
 
-/// The meta key that marks an op as already given its Enter (T-371).
+/// How many Enters a delivery still in the input box may get before the
+/// unconfirmed-delivery flag takes over (T-535).
+const UNSENT_ENTERS_MAX: i64 = 3;
+
+/// The meta key of a delivery's Enters: the count and the time of the last one
+/// (T-535).
 fn resubmit_key(op_id: &str) -> String {
     format!("engine.resubmit.{op_id}")
+}
+
+/// The Enters a delivery already got and when the last one was pressed
+/// (T-535), from `engine.resubmit.<op id>`: `<count>|<time>`. A value an
+/// earlier binary wrote is a bare time and counts as one Enter. `None` for a
+/// value that makes no sense.
+fn resubmit_state(value: &str) -> Option<(i64, Ts)> {
+    match value.split_once('|') {
+        Some((count, at)) => Some((count.parse().ok()?, at.parse().ok()?)),
+        None => Some((1, value.parse().ok()?)),
+    }
+}
+
+/// The deliveries whose text still sits in their lane's input box this tick
+/// (T-535): for every lane Deliver op in `Submitted` or `Unknown` whose seat is
+/// Active at the op's generation, the pane's tail is read
+/// ([`UNSENT_READ_LINES`]) and the op is listed when
+/// [`crate::composer::holds`] finds its text. A failed read lists nothing.
+/// The confirm step takes the set: such a delivery is not confirmed by the
+/// agent's idle-to-busy turn — the lane has not taken its packet yet.
+pub fn held_deliveries(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+) -> GearResult<BTreeSet<String>> {
+    // The candidates: one read transaction, the pane calls come after it.
+    let candidates = store.read(|tx| {
+        let mut out = Vec::new();
+        for state in [OpState::Submitted, OpState::Unknown] {
+            for op in tx.ops_in_state(project, state)? {
+                if op.kind != OpKind::Deliver {
+                    continue;
+                }
+                let Some(seat) = tx.get_seat(&op.seat)? else {
+                    continue;
+                };
+                if seat.role != SeatRole::Lane
+                    || seat.state != SeatState::Active
+                    || seat.generation != op.generation
+                {
+                    continue;
+                }
+                let Some(binding) = tx.get_binding(&op.seat, op.generation)? else {
+                    continue;
+                };
+                let Some(text) = op.payload.get("text").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                if crate::composer::needle(text).is_none() {
+                    continue;
+                }
+                out.push((op.id.clone(), binding.pane_id.clone(), text.to_string()));
+            }
+        }
+        Ok(out)
+    })?;
+    let mut held = BTreeSet::new();
+    for (op_id, pane, text) in candidates {
+        // A pane that cannot be read says nothing: the op is not held.
+        let Ok(tail) = herdr.read_tail(&pane, UNSENT_READ_LINES) else {
+            continue;
+        };
+        if crate::composer::holds(&tail, &text) {
+            held.insert(op_id);
+        }
+    }
+    Ok(held)
 }
 
 /// The meta key that marks an op as already typed again (T-404).
@@ -1506,14 +1604,17 @@ fn retype_key(op_id: &str) -> String {
 /// lost, and the lane sat idle with its packet waiting in the input box. For
 /// every lane Deliver op of the project in `Submitted` at least
 /// [`UNSENT_RESUBMIT_AFTER_S`] old, whose seat is Active at the op's
-/// generation, whose agent is Idle or Done and that never had its Enter
-/// (`engine.resubmit.<op id>` not set): the pane's tail is read, and when the
-/// text's first line (its first [`crate::composer::NEEDLE_CHARS`] characters)
-/// shows in one of its last [`crate::composer::TAIL_LINES`] non-empty lines, one
-/// `enter` is sent
-/// and the meta key records it — so the op gets that Enter once, never twice.
-/// A failed read or a refused key changes nothing (no meta, no second try at
-/// once). A confirmed op is never touched: the lane read its packet.
+/// generation, whose agent is Idle or Done: the pane's tail is read, and when
+/// the text's first line (its first [`crate::composer::NEEDLE_CHARS`]
+/// characters) shows in one of its last [`crate::composer::TAIL_LINES`]
+/// non-empty lines, an `enter` is sent and the meta key records the count and
+/// the time — so the op gets up to [`UNSENT_ENTERS_MAX`] Enters, each at least
+/// [`UNSENT_RESUBMIT_AFTER_S`] after the one before (T-535), and never a
+/// fourth. After the third the op is left to the unconfirmed-delivery window
+/// and its flag to the captain. A value an earlier binary wrote
+/// (`engine.resubmit.<op id>` a bare time) counts as one Enter. A failed read
+/// or a refused key changes nothing (no meta, no second try at once). A
+/// confirmed op is never touched: the lane read its packet.
 ///
 /// When the tail does **not** show the text, the delivery never reached the
 /// input box at all — a codex lane showed its empty input placeholder while
@@ -1550,11 +1651,24 @@ pub fn resubmit_unsent(
             if binding.status != BindingStatus::Active {
                 continue;
             }
-            if tx.get_meta(&resubmit_key(&op.id))?.is_some()
-                || tx.get_meta(&retype_key(&op.id))?.is_some()
-            {
+            if tx.get_meta(&retype_key(&op.id))?.is_some() {
                 continue;
             }
+            // T-535: up to three Enters, each `UNSENT_RESUBMIT_AFTER_S` after
+            // the one before. A bare time an earlier binary wrote counts as
+            // one Enter; a value that makes no sense as none.
+            let enters = match tx.get_meta(&resubmit_key(&op.id))? {
+                Some(value) => match resubmit_state(&value) {
+                    Some((count, last)) => {
+                        if count >= UNSENT_ENTERS_MAX || now - last < UNSENT_RESUBMIT_AFTER_S {
+                            continue;
+                        }
+                        count
+                    }
+                    None => 0,
+                },
+                None => 0,
+            };
             let Some(text) = op.payload.get("text").and_then(serde_json::Value::as_str) else {
                 continue;
             };
@@ -1570,12 +1684,13 @@ pub fn resubmit_unsent(
                 op.task.clone().unwrap_or_else(|| "-".to_string()),
                 op.created,
                 op.updated,
+                enters,
             ));
         }
         Ok(out)
     })?;
     let mut sent = Vec::new();
-    for (op_id, pane, text, task, created, typed_at) in candidates {
+    for (op_id, pane, text, task, created, typed_at, enters) in candidates {
         // Only an agent that has nothing better to do left the text unsent.
         let Ok(Some(agent)) = herdr.agent_get(&pane) else {
             continue;
@@ -1611,7 +1726,8 @@ pub fn resubmit_unsent(
         ) {
             continue;
         }
-        store.write(|tx| tx.set_meta(&resubmit_key(&op_id), &now.to_string()))?;
+        // T-535: the count and the time of this Enter.
+        store.write(|tx| tx.set_meta(&resubmit_key(&op_id), &format!("{}|{now}", enters + 1)))?;
         // T-407: the Enter the delivery lost is its own step, measured from
         // the typing it waited behind.
         probe(
@@ -1637,6 +1753,8 @@ pub fn resubmit_unsent(
 /// Returns the confirmed attempts ("T-n/attempt @ the view").
 pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<String>> {
     store.write(|tx| {
+        // A late view is the proof here; the turn branch is left as it was.
+        let held = BTreeSet::new();
         let mut confirmed = Vec::new();
         for op in tx.ops_in_state(project, OpState::Failed)? {
             if op.kind != OpKind::Deliver {
@@ -1647,7 +1765,7 @@ pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResu
             if is_reviewer(tx, &op.seat)? {
                 continue;
             }
-            let Some(view_ts) = shown_delivery(tx, &op)? else {
+            let Some(view_ts) = shown_delivery(tx, &op, &held)? else {
                 continue;
             };
             let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
@@ -1849,7 +1967,12 @@ fn review_verdict(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
 
 /// The time of the view that shows the delivery's task and attempt, if any.
 /// Same window as a doorbell: same seat and generation, at or after `created`.
-fn shown_delivery(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
+///
+/// `held` names the deliveries whose text still sits in the lane's input box
+/// (T-535): the agent has not taken such a packet yet, so the idle-to-busy
+/// turn proves nothing for it. Views, hand-ins and the seat's own messages
+/// still confirm it.
+fn shown_delivery(tx: &Tx<'_>, op: &OpRow, held: &BTreeSet<String>) -> GearResult<Option<Ts>> {
     let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
         return Ok(None);
     };
@@ -1864,10 +1987,15 @@ fn shown_delivery(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
     // submitted before the packet is typed), so a turn at or after the op's
     // submission is the agent taking it. The tick records the turn
     // (`note_agent_turns`); a turn from before the submit proves nothing.
-    if let Some(turn) = tx
-        .get_meta(&agent_turn_key(&op.seat, op.generation))?
-        .and_then(|value| value.parse::<Ts>().ok())
-    {
+    // T-535: a turn proves nothing either while the text is still in the
+    // input box — the agent turned busy on something else.
+    let turn = if held.contains(&op.id) {
+        None
+    } else {
+        tx.get_meta(&agent_turn_key(&op.seat, op.generation))?
+            .and_then(|value| value.parse::<Ts>().ok())
+    };
+    if let Some(turn) = turn {
         let submitted = tx
             .get_meta(&submitted_key(&op.id))?
             .and_then(|value| value.parse::<Ts>().ok())
@@ -2946,10 +3074,10 @@ mod tests {
     }
 
     #[test]
-    fn an_unsent_delivery_gets_one_enter_and_never_a_second() {
+    fn an_unsent_delivery_gets_its_first_enter_after_the_window() {
         // M-4569: the packet was typed and the Enter was lost; the lane sat
         // idle with the text in its input box. After 30 s the engine presses
-        // the key once and records it.
+        // the key once and records the count and the time (T-535).
         let mut store = lane_world();
         store
             .write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0))
@@ -2969,14 +3097,236 @@ mod tests {
         );
         assert_eq!(
             store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(),
-            Some((T0 + 40).to_string()),
-            "the press is recorded with its time"
+            Some(format!("1|{}", T0 + 40)),
+            "the press is recorded with its count and time"
         );
 
-        let again = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 50).unwrap();
+        // Less than 30 s after it: the next Enter is not due yet.
+        let again = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 69).unwrap();
 
-        assert!(again.is_empty(), "the op got its Enter already");
-        assert_eq!(enters(&herdr, LANE_PANE), 1, "a second pass sends no key");
+        assert!(again.is_empty(), "the next Enter is not due yet");
+        assert_eq!(enters(&herdr, LANE_PANE), 1, "no key in the window");
+    }
+
+    #[test]
+    fn an_unsent_delivery_gets_up_to_three_enters_and_never_a_fourth() {
+        // T-535: the one Enter became up to three, each 30 s after the one
+        // before; after the third the unconfirmed-delivery window decides.
+        let mut store = lane_world();
+        store
+            .write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0))
+            .unwrap();
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: run `gear` first");
+
+        assert_eq!(
+            resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap(),
+            vec!["O-1".to_string()]
+        );
+        assert_eq!(enters(&herdr, LANE_PANE), 1);
+
+        // The second Enter, 30 s after the first.
+        assert_eq!(
+            resubmit_unsent(&mut store, &mut herdr, "p", T0 + 70).unwrap(),
+            vec!["O-1".to_string()]
+        );
+        assert_eq!(enters(&herdr, LANE_PANE), 2);
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(),
+            Some(format!("2|{}", T0 + 70))
+        );
+
+        // The third Enter, 30 s after the second.
+        assert_eq!(
+            resubmit_unsent(&mut store, &mut herdr, "p", T0 + 100).unwrap(),
+            vec!["O-1".to_string()]
+        );
+        assert_eq!(enters(&herdr, LANE_PANE), 3);
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(),
+            Some(format!("3|{}", T0 + 100))
+        );
+
+        // Never a fourth: the op is left to the unconfirmed-delivery flag.
+        assert!(
+            resubmit_unsent(&mut store, &mut herdr, "p", T0 + 400)
+                .unwrap()
+                .is_empty(),
+            "three Enters are the most"
+        );
+        assert_eq!(enters(&herdr, LANE_PANE), 3);
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(),
+            Some(format!("3|{}", T0 + 100)),
+            "the third press stays the record"
+        );
+    }
+
+    #[test]
+    fn a_bare_time_resubmit_value_counts_as_one_enter() {
+        // T-535: an earlier binary wrote only the time of its Enter. That is
+        // one Enter, so the op may still get two more.
+        let mut store = lane_world();
+        store
+            .write(|tx| {
+                unsent_delivery(tx, UNSENT_TEXT, T0)?;
+                tx.set_meta("engine.resubmit.O-1", &(T0 + 40).to_string())
+            })
+            .unwrap();
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: run `gear` first");
+
+        // Not 30 s after that Enter yet.
+        assert!(resubmit_unsent(&mut store, &mut herdr, "p", T0 + 69)
+            .unwrap()
+            .is_empty());
+        assert_eq!(enters(&herdr, LANE_PANE), 0);
+
+        // The second Enter, counted from the bare time.
+        assert_eq!(
+            resubmit_unsent(&mut store, &mut herdr, "p", T0 + 70).unwrap(),
+            vec!["O-1".to_string()]
+        );
+        assert_eq!(enters(&herdr, LANE_PANE), 1);
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(),
+            Some(format!("2|{}", T0 + 70))
+        );
+
+        // The third, then no fourth.
+        assert_eq!(
+            resubmit_unsent(&mut store, &mut herdr, "p", T0 + 100).unwrap(),
+            vec!["O-1".to_string()]
+        );
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(),
+            Some(format!("3|{}", T0 + 100))
+        );
+        assert!(resubmit_unsent(&mut store, &mut herdr, "p", T0 + 400)
+            .unwrap()
+            .is_empty());
+        assert_eq!(enters(&herdr, LANE_PANE), 2, "the bare time was one Enter");
+    }
+
+    // ---- T-535: a delivery still in the input box is not confirmed --------
+
+    /// A lane delivery whose text was typed at `T0 + 1`, with the agent's
+    /// idle-to-busy turn at `T0 + 10`.
+    fn delivery_with_a_turn(store: &mut Store) -> String {
+        store
+            .write(|tx| {
+                let id = unsent_delivery(tx, UNSENT_TEXT, T0)?;
+                tx.set_meta(&submitted_key(&id), &(T0 + 1).to_string())?;
+                tx.set_meta(&agent_turn_key("p:heat", 1), &(T0 + 10).to_string())?;
+                Ok(id)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_turn_does_not_confirm_a_delivery_still_in_the_input_box() {
+        // T-535: the agent turned busy on something else while the packet
+        // still sat in its input box. The turn is no proof then; the delivery
+        // stays Submitted.
+        let mut store = lane_world();
+        let _op = delivery_with_a_turn(&mut store);
+        let mut herdr = unsent_herdr(
+            AgentStatus::Working,
+            "> earlier output\n> Continue T-1: run `gear` first",
+        );
+
+        let held = held_deliveries(&mut store, &mut herdr, "p").unwrap();
+        assert_eq!(
+            held.iter().cloned().collect::<Vec<_>>(),
+            vec!["O-1".to_string()]
+        );
+        let (confirmed, _) =
+            confirm_pending_held(&mut store, "p", 3, 60, &[], &held, T0 + 20).unwrap();
+        assert!(
+            confirmed.is_empty(),
+            "the text is still in the box: {confirmed:?}"
+        );
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Submitted, "not confirmed by the turn");
+    }
+
+    #[test]
+    fn a_turn_confirms_the_delivery_once_the_box_is_empty() {
+        // T-535: the Enter took — the tail no longer shows the text — so the
+        // turn is the agent taking the packet.
+        let mut store = lane_world();
+        let _op = delivery_with_a_turn(&mut store);
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> \n  ? for shortcuts, 0 tokens");
+
+        let held = held_deliveries(&mut store, &mut herdr, "p").unwrap();
+        assert!(held.is_empty(), "{held:?}");
+        let (confirmed, _) =
+            confirm_pending_held(&mut store, "p", 3, 60, &[], &held, T0 + 20).unwrap();
+        assert_eq!(confirmed, vec!["O-1".to_string()]);
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Confirmed);
+        assert!(
+            op.result
+                .as_deref()
+                .is_some_and(|result| result.contains(&format!("turn p:heat/1 @ {}", T0 + 10))),
+            "the turn is the evidence: {:?}",
+            op.result
+        );
+    }
+
+    #[test]
+    fn a_view_still_confirms_a_delivery_whose_text_is_in_the_box() {
+        // T-535: only the turn branch is skipped for a held op. A view of the
+        // task and attempt is proof that the lane read its packet.
+        let mut store = lane_world();
+        let _op = delivery_with_a_turn(&mut store);
+        store
+            .write(|tx| {
+                tx.insert_view(&gear_store::ViewRecord {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    ts: T0 + 15,
+                    shown_msgs: vec![],
+                    shown_ops: vec![],
+                    shown_task: Some("T-1".into()),
+                    shown_attempt: Some(1),
+                    shown_contract: None,
+                })
+            })
+            .unwrap();
+        let mut herdr = unsent_herdr(
+            AgentStatus::Working,
+            "> earlier output\n> Continue T-1: run `gear` first",
+        );
+
+        let held = held_deliveries(&mut store, &mut herdr, "p").unwrap();
+        assert!(held.contains("O-1"), "{held:?}");
+        let (confirmed, _) =
+            confirm_pending_held(&mut store, "p", 3, 60, &[], &held, T0 + 20).unwrap();
+        assert_eq!(confirmed, vec!["O-1".to_string()]);
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert!(
+            op.result
+                .as_deref()
+                .is_some_and(|result| result.contains(&format!("view p:heat/1 @ {}", T0 + 15))),
+            "the view is the evidence: {:?}",
+            op.result
+        );
+    }
+
+    #[test]
+    fn a_failed_pane_read_holds_nothing() {
+        // T-535: a pane that cannot be read says nothing about the text.
+        let mut store = lane_world();
+        let _op = delivery_with_a_turn(&mut store);
+        let mut herdr = unsent_herdr(
+            AgentStatus::Idle,
+            "> earlier output\n> Continue T-1: run `gear` first",
+        );
+        herdr.observe_fails = true;
+
+        assert!(held_deliveries(&mut store, &mut herdr, "p")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

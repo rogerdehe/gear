@@ -599,7 +599,6 @@ pub fn tick(
                 .resubmitted
                 .extend(ops::resubmit_unsent(store, herdr, &project, now)?);
             note_slow(report, "resubmit", step);
-            let step = std::time::Instant::now();
             let delivery_grace = gear_app::config::latest(store, &project)
                 .map(|config| i64::from(config.timing.delivery_grace_s))
                 .unwrap_or(cfg.delivery_grace_s);
@@ -614,12 +613,20 @@ pub fn tick(
                 })
                 .map(|obs| obs.seat.id.clone())
                 .collect();
-            let (confirmed, flagged) = ops::confirm_pending_with(
+            // T-535: the deliveries whose text still sits in their lane's
+            // input box this tick. Such a delivery is not confirmed by the
+            // agent's idle-to-busy turn: the lane has not taken its packet.
+            let step = std::time::Instant::now();
+            let held = ops::held_deliveries(store, herdr, &project)?;
+            note_slow(report, "held deliveries", step);
+            let step = std::time::Instant::now();
+            let (confirmed, flagged) = ops::confirm_pending_held(
                 store,
                 &project,
                 cfg.doorbell_check_budget,
                 delivery_grace,
                 &working,
+                &held,
                 now,
             )?;
             report.confirmed.extend(confirmed);

@@ -50,7 +50,7 @@ herdr agent start <name> --kind claude --pane <pane> --timeout 60000 -- \
   --dangerously-skip-permissions --resume <session-id>
 ```
 
-Resume from the directory the session was created in; the resumed session shows its old `ctx N%`. Change the model or effort by restarting with other flags (a resume with new flags keeps the conversation).
+Resume from the directory the session was created in; the resumed session shows its old `ctx N%`. Change the model or effort by restarting with other flags (a resume with new flags keeps the conversation). Never type `/model` or `/effort` into a running Claude Code: it answers 'saved as your default for new sessions' and rewrites ~/.claude/settings.json, the model of every Claude started on this machine without `--model`.
 
 ## Quota
 
