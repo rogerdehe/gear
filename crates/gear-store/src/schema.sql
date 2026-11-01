@@ -106,6 +106,10 @@ CREATE TABLE IF NOT EXISTS attempts (
   -- fresh | new-unconfirmed | compact-fallback | resume-fallback.
   session_ref TEXT, session_cli TEXT, session_action TEXT, sent_at INTEGER,
   PRIMARY KEY (project, task, n));
+-- T-517 (v8): the attempts a seat holds, and the ones it still works, are read
+-- by seat on every tick; without this index each read scanned the whole
+-- attempts table.
+CREATE INDEX IF NOT EXISTS attempts_seat ON attempts (seat, state, task, n);
 
 CREATE TABLE IF NOT EXISTS messages (
   project TEXT NOT NULL, id TEXT NOT NULL, thread TEXT NOT NULL, task TEXT, attempt INTEGER,
@@ -118,6 +122,10 @@ CREATE TABLE IF NOT EXISTS messages (
   meta TEXT,
   created INTEGER NOT NULL, resolved INTEGER, PRIMARY KEY (project, id));
 CREATE INDEX IF NOT EXISTS messages_recipient ON messages (project, recipient, state);
+-- T-517 (v8): a thread is read as a whole many times a tick (overrun items,
+-- merge-lost items, failed merges); without this index every read scanned the
+-- project's whole message history.
+CREATE INDEX IF NOT EXISTS messages_thread ON messages (project, thread, created, id);
 
 -- What a `gear` home/show call actually displayed (design/13). Evidence for op confirmation.
 CREATE TABLE IF NOT EXISTS views (
@@ -133,6 +141,16 @@ CREATE TABLE IF NOT EXISTS operations (
   check_budget INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL, updated INTEGER NOT NULL,
   PRIMARY KEY (project, id));
 CREATE INDEX IF NOT EXISTS operations_seat ON operations (seat, state);
+-- T-517 (v8): the engine reads the ops of one state (Confirmed, Failed,
+-- Submitted, …) on every tick; without this index each read scanned the whole
+-- operations table.
+CREATE INDEX IF NOT EXISTS operations_state ON operations (project, state, created, id);
+-- T-523 (v9): the engine asks for the ops of one kind in a project (the merge
+-- step's keys and its queue, the confirmed deliveries of a review) and for the
+-- ops of one seat's task attempt (the lane's deliveries); the callers used to
+-- read every op of a state and filter by kind in Rust, parsing every payload.
+CREATE INDEX IF NOT EXISTS operations_kind ON operations (project, kind, state);
+CREATE INDEX IF NOT EXISTS operations_attempt ON operations (seat, kind, task, attempt);
 
 CREATE TABLE IF NOT EXISTS verdicts (project TEXT NOT NULL, task TEXT NOT NULL, attempt INTEGER NOT NULL,
   contract_version INTEGER NOT NULL, candidate TEXT NOT NULL, passed INTEGER NOT NULL,
@@ -184,6 +202,9 @@ CREATE TABLE IF NOT EXISTS rounds (
   cost_usd REAL, cost_source TEXT,    -- agent | prices | none
   counted_at INTEGER,                 -- when the tokens were last read
   PRIMARY KEY (project, task, attempt, role));
+-- T-517 (v8): the open round of a seat and its last round are read by seat;
+-- without this index each read scanned the whole rounds table.
+CREATE INDEX IF NOT EXISTS rounds_seat ON rounds (seat, start_at);
 
 -- Every stretch a seat could not work (§5.4): a quota park, a declared wait.
 -- The key carries the kind: the two stretches of one seat — a quota park and
@@ -219,3 +240,12 @@ CREATE TABLE IF NOT EXISTS decisions (
   line TEXT,                          -- the plan line, verbatim (source = plan)
   plan_version INTEGER, created INTEGER NOT NULL,
   PRIMARY KEY (project, key));
+
+-- T-529 (v10): the tick reads the live work, not the whole history. A task is
+-- live when it is not terminal or when its voyage still has a task that is not;
+-- `tasks_state` serves the first half of that read and `tasks_milestone` the
+-- second (the voyage's still-open tasks). `rounds_open` serves "the rounds that
+-- are not closed" and the ended rounds whose usage is still being counted.
+CREATE INDEX IF NOT EXISTS tasks_state ON tasks (project, state);
+CREATE INDEX IF NOT EXISTS tasks_milestone ON tasks (project, milestone, state);
+CREATE INDEX IF NOT EXISTS rounds_open ON rounds (project, end_at);

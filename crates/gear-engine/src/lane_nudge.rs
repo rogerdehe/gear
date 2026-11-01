@@ -110,14 +110,11 @@ pub fn nudge_stopped_lanes(
             // The delivery was never confirmed: the turn ended before the
             // lane took the packet. It is delivered again, once, the same
             // way (T-206).
-            let deliveries: Vec<_> = store
-                .read(|tx| tx.ops_of_seat_kind(&seat.id, OpKind::Deliver))?
-                .into_iter()
-                .filter(|op| {
-                    op.task.as_deref() == Some(attempt.task.as_str())
-                        && op.attempt == Some(attempt.attempt)
-                })
-                .collect();
+            // T-523: this attempt's deliveries, read by (seat, kind, task,
+            // attempt) — not every delivery the seat ever had.
+            let deliveries = store.read(|tx| {
+                tx.ops_of_seat_kind_task(&seat.id, OpKind::Deliver, &attempt.task, attempt.attempt)
+            })?;
             let Some(last) = deliveries.last() else {
                 continue;
             };
@@ -254,11 +251,7 @@ fn nudges_used(
     attempt: i64,
     now: Ts,
 ) -> GearResult<i64> {
-    let ops: Vec<_> = store
-        .read(|tx| tx.ops_of_seat_kind(seat, OpKind::Deliver))?
-        .into_iter()
-        .filter(|op| op.task.as_deref() == Some(task) && op.attempt == Some(attempt))
-        .collect();
+    let ops = store.read(|tx| tx.ops_of_seat_kind_task(seat, OpKind::Deliver, task, attempt))?;
     let progress = store
         .read(|tx| tx.progress_of_attempt(project, task, attempt))?
         .into_iter()
@@ -343,13 +336,9 @@ pub fn retry_eligible(
 /// retry spends its marker — the fact stands and the captain hears about it.
 pub fn retry_failed(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearResult<bool> {
     Ok(tx
-        .ops_of_seat_kind(seat, OpKind::Deliver)?
+        .ops_of_seat_kind_task(seat, OpKind::Deliver, task, attempt)?
         .into_iter()
-        .filter(|op| {
-            op.task.as_deref() == Some(task)
-                && op.attempt == Some(attempt)
-                && op.payload.get("redeliver").is_some()
-        })
+        .filter(|op| op.payload.get("redeliver").is_some())
         .any(|op| op.state == gear_model::OpState::Failed))
 }
 
@@ -365,11 +354,7 @@ pub fn delivery_in_flight(tx: &Tx<'_>, seat: &str, now: Ts) -> GearResult<bool> 
 
 /// The nudge of a lane that stopped, as the reviewer's path counts it.
 pub fn nudges_of(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearResult<i64> {
-    let ops: Vec<_> = tx
-        .ops_of_seat_kind(seat, OpKind::Deliver)?
-        .into_iter()
-        .filter(|op| op.task.as_deref() == Some(task) && op.attempt == Some(attempt))
-        .collect();
+    let ops = tx.ops_of_seat_kind_task(seat, OpKind::Deliver, task, attempt)?;
     Ok(ops
         .iter()
         .filter(|op| op.payload.get("nudge").is_some())

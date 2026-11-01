@@ -333,7 +333,7 @@ pub fn merge_passed(
     let Some(row) = store.read(|tx| tx.get_project(project))? else {
         return Ok(merged);
     };
-    let config = match gear_app::config::parse(&row.config_toml) {
+    let config = match gear_app::config::parse_row(&row) {
         Ok(config) => config,
         Err(_) => return Ok(merged),
     };
@@ -1794,27 +1794,11 @@ fn merge_keys(
     store: &mut Store,
     project: &str,
 ) -> GearResult<std::collections::HashSet<(String, i64)>> {
-    store.read(|tx| {
-        let mut keys = std::collections::HashSet::new();
-        for state in [
-            OpState::Intended,
-            OpState::Executing,
-            OpState::Submitted,
-            OpState::Unknown,
-            OpState::Confirmed,
-            OpState::Failed,
-            OpState::Void,
-        ] {
-            for op in tx.ops_in_state(project, state)? {
-                if op.kind == OpKind::Merge {
-                    if let (Some(task), Some(attempt)) = (op.task, op.attempt) {
-                        keys.insert((task, attempt));
-                    }
-                }
-            }
-        }
-        Ok(keys)
-    })
+    // T-523: the keys of the project's merge ops, read in SQL and without the
+    // payload — every state counts, and this used to parse every op of the
+    // store in seven states to keep the merge ones.
+    let keys = store.read(|tx| tx.op_keys_of_kind(project, OpKind::Merge))?;
+    Ok(keys.into_iter().collect())
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1826,26 +1810,13 @@ fn merge_op_of(
 ) -> GearResult<Option<OpRow>> {
     // Every state counts, Failed and Void too: a merge that failed waits for
     // the captain (one item) and is never re-queued tick after tick — a new
-    // passing attempt gets its own merge.
+    // passing attempt gets its own merge. T-523: the merge ops of the project
+    // are read by kind, not out of every op of the store.
     store.read(|tx| {
-        for state in [
-            OpState::Intended,
-            OpState::Executing,
-            OpState::Submitted,
-            OpState::Unknown,
-            OpState::Confirmed,
-            OpState::Failed,
-            OpState::Void,
-        ] {
-            if let Some(op) = tx.ops_in_state(project, state)?.into_iter().find(|op| {
-                op.kind == OpKind::Merge
-                    && op.task.as_deref() == Some(task)
-                    && op.attempt == Some(attempt)
-            }) {
-                return Ok(Some(op));
-            }
-        }
-        Ok(None)
+        Ok(tx
+            .ops_of_kind_in_states(project, OpKind::Merge, &[])?
+            .into_iter()
+            .find(|op| op.task.as_deref() == Some(task) && op.attempt == Some(attempt)))
     })
 }
 
@@ -1856,14 +1827,12 @@ fn merge_op_of(
 /// while newer merges kept arriving.
 fn ready_merges(store: &mut Store, project: &str) -> GearResult<Vec<OpRow>> {
     store.read(|tx| {
-        let mut ready = Vec::new();
-        for state in [OpState::Intended, OpState::Unknown] {
-            for op in tx.ops_in_state(project, state)? {
-                if op.kind == OpKind::Merge {
-                    ready.push(op);
-                }
-            }
-        }
+        // T-523: the merge ops in those two states, read by kind.
+        let mut ready = tx.ops_of_kind_in_states(
+            project,
+            OpKind::Merge,
+            &[OpState::Intended, OpState::Unknown],
+        )?;
         // The order of ops: the time they were created, then their number —
         // not their id as a string, where O-999 sorts after O-1000 (T-268).
         let op_number = |id: &str| -> i64 {

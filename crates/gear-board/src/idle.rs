@@ -244,7 +244,9 @@ pub fn helping(tx: &Tx<'_>, project: &str, seat: &SeatRow, now: Ts) -> GearResul
 /// in when no step wrote one).
 fn work_spans(tx: &Tx<'_>, project: &str, seat: &SeatRow) -> GearResult<Vec<(Ts, Ts)>> {
     let mut spans = Vec::new();
-    for task in tx.tasks_of_project(project)? {
+    // T-529: the live tasks — a landed voyage's tasks are history, and this
+    // runs for every lane on every tick.
+    for task in tx.tasks_live_of_project(project)? {
         if task.lane.as_deref() != Some(seat.name.as_str()) {
             continue;
         }

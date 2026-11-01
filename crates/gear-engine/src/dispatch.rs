@@ -449,19 +449,18 @@ fn empty_view(obs: Option<SeatObs>) -> LaneView {
 /// This lane's Ready tasks in rank order: not `wont`, every dependency Done.
 pub(crate) fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<TaskRow>> {
     use std::collections::BTreeSet;
-    let tasks = tx.tasks_of_project(&seat.project)?;
+    // T-529: the project's live tasks — a task that is not terminal, or one of
+    // a voyage that still is. A landed voyage's tasks are history.
+    let tasks = tx.tasks_live_of_project(&seat.project)?;
     let lane_repo = tx
         .get_project(&seat.project)?
-        .and_then(|p| gear_app::config::parse(&p.config_toml).ok())
+        .and_then(|p| gear_app::config::parse_row(&p).ok())
         .map(|config| config.repo_of_lane(&seat.name).path);
     // A dependency counts only when its work is merged (T-236, F-76): Done is
     // set at the review pass, before the merge reaches the integration branch.
-    let mut done: BTreeSet<String> = BTreeSet::new();
-    for task in tasks.iter().filter(|task| task.state == TaskState::Done) {
-        if gear_app::tasks::merged_at(tx, &seat.project, &task.id)?.is_some() {
-            done.insert(task.id.clone());
-        }
-    }
+    // T-529: one query answers it, over the whole project — the landed voyages'
+    // done tasks included, which are no live work but are still dependencies.
+    let done: BTreeSet<String> = tx.merged_done_tasks(&seat.project)?.into_iter().collect();
     Ok(tasks
         .into_iter()
         .filter(|task| task.lane.as_deref() == Some(seat.name.as_str()))
@@ -503,7 +502,7 @@ pub(crate) fn conventions(tx: &Tx<'_>, project: &str) -> gear_app::config::Conve
     tx.get_project(project)
         .ok()
         .flatten()
-        .and_then(|row| gear_app::config::parse(&row.config_toml).ok())
+        .and_then(|row| gear_app::config::parse_row(&row).ok())
         .map(|config| config.conventions)
         .unwrap_or_default()
 }
@@ -516,7 +515,7 @@ pub fn integration_branch(tx: &Tx<'_>, project: &str, lane: &str) -> String {
         .get_project(project)
         .ok()
         .flatten()
-        .and_then(|row| gear_app::config::parse(&row.config_toml).ok());
+        .and_then(|row| gear_app::config::parse_row(&row).ok());
     let integration = match parsed {
         Some(config) => config.repo_of_lane(lane).integration,
         None => gear_app::config::Conventions::default().integration,
@@ -1291,6 +1290,59 @@ mod tests {
                 Ok(ops[0].payload["text"].as_str().unwrap().to_string())
             })
             .unwrap()
+    }
+
+    /// T-529: a landed voyage's 500 done tasks are history — the lane view
+    /// reads the one ready task and assigns it.
+    #[test]
+    fn a_landed_voyage_of_five_hundred_done_tasks_leaves_the_ready_task_to_the_lane() {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+                project.config_toml = config_toml("trunk");
+                tx.update_project(&project)?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    NOW,
+                )?;
+                // A landed voyage: 500 tasks, all done, in one milestone.
+                for n in 0..500 {
+                    let mut task = ready_task(&format!("T-{n}"));
+                    task.state = TaskState::Done;
+                    task.milestone = Some("M1".into());
+                    task.rank = n + 1;
+                    tx.insert_task(&task)?;
+                }
+                // The one task of the open voyage.
+                let mut ready = ready_task("T-500");
+                ready.milestone = Some("M2".into());
+                ready.rank = 501;
+                tx.insert_task(&ready)?;
+                Ok(())
+            })
+            .unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let ready = store.read(|tx| ready_tasks_of(tx, &seat)).unwrap();
+        assert_eq!(
+            ready
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["T-500"],
+            "the landed voyage's tasks are not ready work"
+        );
+        // The lane view carries it, with the packet the engine would send.
+        let view = store.read(|tx| lane_view(tx, &seat, None, NOW)).unwrap();
+        assert_eq!(
+            view.ready_tasks.first().map(|task| task.id.as_str()),
+            Some("T-500")
+        );
     }
 
     /// T-222 (F-75): the first packet of a task says how to start its branch

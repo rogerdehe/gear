@@ -531,8 +531,11 @@ pub(crate) fn prepare_review_role(
     // a seat carries on its open round, and the seat still carries that one
     // until the resume runs). The round this one continues is attempt n-1's
     // review: S1 must resume that session, not the previous job's.
-    if round.is_some() && role == Role::Review && attempt >= 2 {
-        if let Some(session) = facts.earlier_session.clone() {
+    // Only a session of the same CLI can be resumed: after a reviewer model
+    // switch to another CLI, the earlier Codex session is no Claude
+    // conversation (another project's review-3, 2026-11-01).
+    if round.is_some() {
+        if let Some(session) = continued_review_session(&facts, attempt) {
             facts.open_round_session = Some(session);
         }
     }
@@ -566,6 +569,17 @@ pub(crate) fn prepare_review_role(
     crate::session_runner::run(
         store, herdr, cfg, seat, task, attempt, role, &action, false, now,
     )
+}
+
+/// The session an open re-review round continues (T-499): attempt n-1's
+/// review session on this seat, and only when it ran on the CLI the seat runs
+/// now. A session of another CLI is no conversation of this one (another
+/// project's review-3, 2026-11-01: `claude --resume <a Codex session>`).
+fn continued_review_session(facts: &Facts, attempt: i64) -> Option<String> {
+    if facts.role != Role::Review || attempt < 2 || !facts.ran_here_with_the_same_cli() {
+        return None;
+    }
+    facts.earlier_session.clone()
 }
 
 fn context_large(
@@ -986,6 +1000,136 @@ mod tests {
                 .as_deref(),
             Some("")
         );
+    }
+
+    /// Another project's T-417 packet waited forever behind a pending
+    /// compaction because the same lane held T-435 in a declared wait.
+    #[test]
+    fn a_wait_on_another_task_does_not_hold_the_delivery_compaction() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        store
+            .write(|tx| {
+                let mut waiting = tx.get_task("p", "T-1")?.unwrap();
+                waiting.id = "T-2".into();
+                waiting.rank = 2;
+                waiting.state = gear_model::TaskState::Running;
+                waiting.wait_on = Some("T-9".into());
+                tx.insert_task(&waiting)?;
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    project: "p".into(),
+                    task: "T-2".into(),
+                    n: 1,
+                    seat: seat.id.clone(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: gear_model::AttemptState::Started,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                })?;
+                assert!(crate::waits::waiting_seat(tx, &seat.id)?);
+                tx.set_meta(&crate::quiet::compact_key(&seat.id), "pending")?;
+                tx.insert_op(&gear_store::NewOp {
+                    project: "p".into(),
+                    seat: seat.id.clone(),
+                    generation: 1,
+                    kind: gear_model::OpKind::Deliver,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({"text":"packet"}),
+                    created: T0,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        // T-1's own wait holds its packet: nothing is typed.
+        store
+            .write(|tx| {
+                let mut own = tx.get_task("p", "T-1")?.unwrap();
+                own.wait_on = Some("T-9".into());
+                tx.update_task(&own)
+            })
+            .unwrap();
+        crate::quiet::prepare_pending_deliveries(&mut store, &mut herdr, &cfg(), "p", T0 + 1)
+            .unwrap();
+        assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
+        // T-2's wait does not: T-1's session step and compaction go ahead.
+        store
+            .write(|tx| {
+                let mut own = tx.get_task("p", "T-1")?.unwrap();
+                own.wait_on = None;
+                tx.update_task(&own)
+            })
+            .unwrap();
+        crate::quiet::prepare_pending_deliveries(&mut store, &mut herdr, &cfg(), "p", T0 + 2)
+            .unwrap();
+        assert!(
+            !herdr.calls.is_empty(),
+            "the packet of T-1 is not held by T-2's wait"
+        );
+    }
+
+    /// Another project's review-3 (2026-11-01): the reviewers moved from
+    /// Codex to Claude, and T-421's re-review reopened on the seat that
+    /// reviewed attempt 1 under Codex; the engine typed `claude --resume <the
+    /// Codex session>`. A session of another CLI is never continued.
+    #[test]
+    fn a_rereview_continues_only_a_session_of_the_same_cli() {
+        let mut facts = review_facts_for_test();
+        facts.earlier_seat = Some("p:review-1".into());
+        facts.earlier_session = Some("earlier".into());
+        facts.earlier_cli = Some("codex".into());
+        facts.current_cli = Some("codex".into());
+        assert_eq!(
+            continued_review_session(&facts, 2).as_deref(),
+            Some("earlier"),
+            "same CLI: the earlier review goes on"
+        );
+        facts.current_cli = Some("claude".into());
+        assert_eq!(
+            continued_review_session(&facts, 2),
+            None,
+            "another CLI: a new conversation"
+        );
+        facts.current_cli = Some("codex".into());
+        assert_eq!(
+            continued_review_session(&facts, 1),
+            None,
+            "a first review continues nothing"
+        );
+    }
+
+    fn review_facts_for_test() -> Facts {
+        Facts {
+            seat: "p:review-1".into(),
+            seat_state: SeatState::Active,
+            role: Role::Review,
+            attempt: 2,
+            followup_of: None,
+            fresh: false,
+            last_round_cli: None,
+            earlier_seat: None,
+            earlier_cli: None,
+            earlier_session: None,
+            current_session: None,
+            current_cli: None,
+            agent_live: true,
+            open_round_session: None,
+            sessions_elsewhere: Default::default(),
+        }
     }
 
     #[test]

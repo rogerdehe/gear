@@ -578,15 +578,134 @@ fn closed_round_waits_for_late_logs_and_missing_logs_stay_unknown() {
     assert_eq!(round_of(&mut store, "T-1", 1, "dev").counted_at, None);
     gear_engine::rounds::tick(&mut store, &mut h, &cfg, T0 + 160).unwrap();
     assert_eq!(round_of(&mut store, "T-1", 1, "dev").input, None);
+    // The round ended at T0+100, so the next count is 5 minutes after that
+    // (T-525: the back-off is 1, 5 and 30 minutes, not every minute).
     std::fs::write(path,format!("{}\n",serde_json::json!({"type":"message","timestamp":T0+20,"message":{"role":"assistant","usage":{"input":42,"cost":{"total":0.25}}}}))).unwrap();
-    gear_engine::rounds::tick(&mut store, &mut h, &cfg, T0 + 219).unwrap();
+    gear_engine::rounds::tick(&mut store, &mut h, &cfg, T0 + 200).unwrap();
     assert_eq!(round_of(&mut store, "T-1", 1, "dev").input, None);
-    gear_engine::rounds::tick(&mut store, &mut h, &cfg, T0 + 220).unwrap();
+    gear_engine::rounds::tick(&mut store, &mut h, &cfg, T0 + 400).unwrap();
     let row = round_of(&mut store, "T-1", 1, "dev");
     assert_eq!(row.input, Some(42));
     assert_eq!(row.cost_usd, Some(0.25));
     assert_eq!(row.cost_source.as_deref(), Some("agent"));
-    assert_eq!(row.counted_at, Some(T0 + 220));
+    assert_eq!(row.counted_at, Some(T0 + 400));
+}
+
+/// T-525: an ended round whose usage the reader never finds is counted at 1, 5
+/// and 30 minutes after its end and then not again — it stays unknown, never 0.
+/// The count is visible in `counted_at`, which only a count moves.
+#[test]
+fn an_unknown_round_is_counted_three_times_and_then_left_alone() {
+    let mut store = world();
+    round(&mut store, "T-1", 1, "dev", T0);
+    let key = RoundKey {
+        project: "p".into(),
+        task: "T-1".into(),
+        attempt: 1,
+        role: "dev".into(),
+    };
+    let end = T0 + 100;
+    store
+        .write(|tx| {
+            // A session no reader can find: the log is not on disk.
+            tx.add_round_session(&key, "/nonexistent/gear-t525-rollout.jsonl")?;
+            tx.close_round(&key, end)
+        })
+        .unwrap();
+    let mut cfg = gear_engine::EngineCfg::default();
+    let mut p = gear_herdr::builtin("opencode").unwrap();
+    p.usage_log = Some("pi-jsonl".into());
+    cfg.profiles.insert("opencode".into(), p);
+    let mut h = FakeHerdr::new();
+
+    // Before the first mark: not counted.
+    gear_engine::rounds::tick(&mut store, &mut h, &cfg, end + 59).unwrap();
+    assert_eq!(round_of(&mut store, "T-1", 1, "dev").counted_at, None);
+
+    // 1 minute: counted once, and the usage stays unknown.
+    gear_engine::rounds::tick(&mut store, &mut h, &cfg, end + 60).unwrap();
+    let row = round_of(&mut store, "T-1", 1, "dev");
+    assert_eq!(row.counted_at, Some(end + 60));
+    assert_eq!(row.input, None, "unknown stays unknown, never 0");
+    assert_eq!(row.cost_source.as_deref(), Some("none"));
+
+    // Between the marks: no count.
+    gear_engine::rounds::tick(&mut store, &mut h, &cfg, end + 299).unwrap();
+    assert_eq!(
+        round_of(&mut store, "T-1", 1, "dev").counted_at,
+        Some(end + 60)
+    );
+
+    // 5 minutes: counted again.
+    gear_engine::rounds::tick(&mut store, &mut h, &cfg, end + 300).unwrap();
+    assert_eq!(
+        round_of(&mut store, "T-1", 1, "dev").counted_at,
+        Some(end + 300)
+    );
+    gear_engine::rounds::tick(&mut store, &mut h, &cfg, end + 1_799).unwrap();
+    assert_eq!(
+        round_of(&mut store, "T-1", 1, "dev").counted_at,
+        Some(end + 300)
+    );
+
+    // 30 minutes: the third and last count.
+    gear_engine::rounds::tick(&mut store, &mut h, &cfg, end + 1_800).unwrap();
+    assert_eq!(
+        round_of(&mut store, "T-1", 1, "dev").counted_at,
+        Some(end + 1_800)
+    );
+
+    // After the last mark: never again, however long the store lives.
+    for later in [end + 1_801, end + 7_200, end + 86_400, end + 30 * 86_400] {
+        gear_engine::rounds::tick(&mut store, &mut h, &cfg, later).unwrap();
+        let row = round_of(&mut store, "T-1", 1, "dev");
+        assert_eq!(
+            row.counted_at,
+            Some(end + 1_800),
+            "counted again at {later}"
+        );
+        assert_eq!(row.input, None, "unknown stays unknown at {later}");
+    }
+}
+
+/// T-525: a round whose usage is found is counted once and kept — the
+/// back-off only concerns the rounds that stay unknown.
+#[test]
+fn a_found_round_is_counted_once_and_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("found.jsonl");
+    std::fs::write(&path,format!("{}\n",serde_json::json!({"type":"message","timestamp":T0+20,"message":{"role":"assistant","usage":{"input":7}}}))).unwrap();
+    let mut store = world();
+    round(&mut store, "T-1", 1, "dev", T0);
+    let key = RoundKey {
+        project: "p".into(),
+        task: "T-1".into(),
+        attempt: 1,
+        role: "dev".into(),
+    };
+    let end = T0 + 100;
+    store
+        .write(|tx| {
+            tx.add_round_session(&key, path.to_str().unwrap())?;
+            tx.close_round(&key, end)
+        })
+        .unwrap();
+    let mut cfg = gear_engine::EngineCfg::default();
+    let mut p = gear_herdr::builtin("opencode").unwrap();
+    p.usage_log = Some("pi-jsonl".into());
+    cfg.profiles.insert("opencode".into(), p);
+    let mut h = FakeHerdr::new();
+    gear_engine::rounds::tick(&mut store, &mut h, &cfg, end + 60).unwrap();
+    let row = round_of(&mut store, "T-1", 1, "dev");
+    assert_eq!(row.input, Some(7));
+    assert_eq!(row.counted_at, Some(end + 60));
+    // The later marks do not count it again.
+    for later in [end + 300, end + 1_800, end + 86_400] {
+        gear_engine::rounds::tick(&mut store, &mut h, &cfg, later).unwrap();
+        let row = round_of(&mut store, "T-1", 1, "dev");
+        assert_eq!(row.input, Some(7), "kept at {later}");
+        assert_eq!(row.counted_at, Some(end + 60), "counted again at {later}");
+    }
 }
 
 #[test]

@@ -21,6 +21,8 @@ use gear_store::{BindingStatus, SeatRow, Store};
 /// How long a reviewer just started is left alone by the "agent gone" check:
 /// its agent may not be reported by Herdr yet.
 const START_GRACE_S: i64 = 60;
+/// A reviewer start that names no job and is older than this is cancelled.
+const JOBLESS_START_S: i64 = 600;
 
 /// The reason a release this module itself decided records: such a seat logs
 /// its release where it is decided, not again when the sweep frees it (T-398).
@@ -435,6 +437,17 @@ pub fn release_finished_reviews(
                     continue;
                 }
                 let Some(task) = pending.or_else(|| seat.task_id.clone()) else {
+                    // A start that names no job at all and is long past any
+                    // real start has nothing to finish: an engine restart can
+                    // leave one so, holding a temp slot for good (another
+                    // project's review-1, 2026-11-01). Its start is cancelled.
+                    if now.saturating_sub(seat.state_since) >= JOBLESS_START_S {
+                        match cancel_start(store, herdr, project, &seat, now) {
+                            Ok(true) => report.released.push(seat.id.clone()),
+                            Ok(false) => {}
+                            Err(_) => report.failed.push(seat.id.clone()),
+                        }
+                    }
                     continue;
                 };
                 if under_review(store, project, &seat, &task)? {
@@ -2495,6 +2508,39 @@ profile = "codex"
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Starting, "it goes on");
         assert_eq!(exits(&herdr), 0, "its pane stays open");
+    }
+
+    /// Another project's review-1 (2026-11-01): an engine restart left a
+    /// reviewer Starting with an idle agent in its pane and no job at all; it
+    /// held a temp slot for an hour. Past the jobless limit its start is
+    /// cancelled; before it the seat is left alone.
+    #[test]
+    fn a_jobless_starting_reviewer_is_cancelled_after_the_limit() {
+        let (mut store, mut herdr) = failed_start_world("w2:p2");
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        store
+            .write(|tx| {
+                tx.set_meta("engine.review_pending.p:r-1", "")?;
+                tx.clear_seat_task("p:r-1")
+            })
+            .unwrap();
+
+        let report =
+            release_finished_reviews(&mut store, &mut herdr, "p", T0 + JOBLESS_START_S - 1)
+                .unwrap();
+        assert!(report.released.is_empty(), "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(
+            seat.state,
+            SeatState::Starting,
+            "inside the limit it goes on"
+        );
+
+        let report =
+            release_finished_reviews(&mut store, &mut herdr, "p", T0 + JOBLESS_START_S).unwrap();
+        assert_eq!(report.released, vec!["p:r-1".to_string()], "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Released, "the slot is free");
     }
 
     /// A pane that cannot be read is an observation failure, not an absence

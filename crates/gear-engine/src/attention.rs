@@ -6,9 +6,10 @@ use gear_model::{GearResult, MsgState, SeatRole, Ts};
 use gear_store::{MessageRow, Store, Tx};
 
 pub(crate) fn period(tx: &Tx<'_>, project: &str) -> GearResult<i64> {
-    let config = tx
-        .get_project(project)?
-        .and_then(|row| gear_app::config::parse(&row.config_toml).ok());
+    let config = match tx.get_project(project)? {
+        Some(row) => gear_app::config::parse_row(&row).ok(),
+        None => None,
+    };
     Ok(i64::from(
         config
             .map(|c| c.timing.captain_item_stale_min)

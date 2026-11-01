@@ -176,3 +176,36 @@
 
 ## A lane move does not interrupt the old lane
 - 2026-10-31 M6 (another project's T-435 moved surface → prompt): plan apply closes the old lane's attempt and sends "<task> moved to lane <new>; stop work on it" as a non-urgent instruction (crates/gear-app/src/plan.rs, T-311), which waits for the agent's next idle moment, so a busy old lane keeps working on the moved task. Send it urgent, as the direction-check-closed notice is, so it interrupts the old lane's turn.
+
+## A moved task's branches count twice toward the branch cap
+- 2026-10-31 M6 (another project's M-6096, 13 > 12: surface/t435 vs prompt/t435, api/t430 vs money/t430): the branch cap in crates/gear-engine/src/merge.rs counts every lane that ever held an open task, so a moved task holds two places until it is done (only then does the sweep delete the old lane's ref if its tip is on the integration branch). Count one branch per open task. Delete an old lane's ref at once when the task has moved and that ref's tip is an ancestor of the new lane's branch or the integration branch.
+
+## Deps do not hold an accepted task's merge
+- 2026-11-01 M6 (another project's plan 658: T-407 got `deps: T-448` and its pass in one apply, merged at once on the old CI workflow and failed): deps order only dispatch; the merge step never reads them, so a pass or `- remerge T-n` merges at once. Let a merge wait for its task's unmerged deps (or take `- remerge T-n after=T-m`), and say in plan apply output when a dep is ignored.
+
+## T-516's idle-step timing test fails under load
+- 2026-11-01 M6 (F-293): the test that asserts an idle `merge_passed` returns in under 100 ms failed in a full gear-engine gate under parallel load and passed alone. Replace the wall-clock bound with a count of lost scans (the scan runs once, not every tick).
+
+## A later switch_at_once does not speed up a pending switch
+- 2026-11-01 M6 (another project's config 47 → 48, money): config 47 changed money's model and the engine planned a safe-point switch; config 48 set `[timing] switch_at_once = true`, but the plan is made only when the model or args fingerprint changes (crates/gear-engine/src/restart.rs, config-change step), so the pending plan kept `at_once: false` and waited for the lane's next idle. Re-read the timing for a pending plan that has not exited yet.
+
+## No supported restart of a lane whose model is unchanged
+- 2026-11-01 M6 (another project's prompt and surface): the user changed Pi's own model registry (context window 1.0M → 600K); a running Pi keeps the model object it started with, and `/reload` does not replace it. GEAR restarts a lane (wrap-up, grace, exit, resume of the same session, handover) only when its model or args change in the config, so the captain has no way to ask for that managed restart. Add `- restart <lane>` under `# Staff`, using the same at-once path. Found by that project's captain on Pi 1.4.0: at idle, typing `/model <provider/model>` with the lane's current model reloads the active model from the refreshed registry in place (footers 1.0M → 600K, same session file, no restart, no picker). So Pi can also switch models in place by that command: let `switches_in_place` cover pi with `/model <id>` and confirm by the footer, instead of restarting Pi for every model change.
+
+## One rebind's overlap error blocks every pending rebind
+- 2026-11-01 M6 (another project's question on moving paths from surface to api): `reconcile_rebinds` (crates/gear-app/src/plan.rs) applies all due rebinds in one transaction and re-validates each; a rebind that adds paths the other lane still owns (its own rebind still waiting) fails the overlap check, and the error rolls back the whole transaction every tick, so a lane earlier in seat order can block the one that would free the paths. Apply each rebind in its own transaction, skip one that would overlap until the other lane's rebind lands, and let a paired move (owns out of one lane, into another, with the tasks) be one request.
+
+## Rebind cannot name the project root
+- 2026-11-01 M6 (another project, root only: no [[repos]], only `project.repo`): `- rebind <lane> repo=<name> owns=[...]` needs a named `[[repos]]` entry, the root's name is empty and the draft parser refuses `repo=`, so a root-only project cannot move owned paths between lanes by rebind; its only path is a whole-config re-init with `--confirmed`. Accept `repo=.` (or omit `repo=`) for the root.
+
+## The board's idle view drops the last task's work span at landing
+- 2026-11-01 M6 (T-529 review F2): `work_spans` (crates/gear-board/src/idle.rs) now reads only open voyages' tasks, so a captain instruction sent while a lane worked the voyage's final task, still unanswered when the voyage lands, reads as "help" for up to HELP_LIMIT_S (30 min) instead of part of that work (T-463). Keep the work spans of tasks done within HELP_LIMIT_S.
+
+## A held task drops out of the voyage's scope and counts
+- 2026-11-01 M6 (another project's M3: 10 required tasks set to `state: hold`): `hold` stores the task as Draft, and every count treats Draft as "not in the plan yet" — the `gear` home voyage line, the board header, Stations progress and totals (crates/gear-board/src/stations.rs, voyage.rs, lib.rs), the forecast and station items, the flow graph and deps view — so the board showed 34 tasks / 1368 m instead of 44 / 1799 m. Give a held task its own state (Held) that is in scope and counted as remaining, never dispatched until `ready`; keep Draft for tasks not yet planned.
+
+## A reviewer seat caught mid-start by an engine restart stays Starting
+- 2026-11-01 M6 (another project's review-1): its session start began at 05:31:35Z (`probe resume ... start_resume`), the engine was restarted at 05:44:49Z, and the seat stayed `starting / onboarding` with no further step for over an hour. Resume a Temp seat's start step after a restart, or release it once its start is older than the start timeout.
+
+## A lane's budget ignores the task's estimate
+- 2026-11-01 M6 (F-300, F-302, F-303, F-307): the release tasks T-526, T-528 and T-530 carry `estimate: 25` in the store, but their lanes reported "past the 15-minute budget" each time; the overrun budget a lane sees does not follow the task's estimate. Make the dev budget the task's estimate when it has one.
