@@ -1193,6 +1193,77 @@ pub fn parse(text: &str) -> GearResult<ProjectConfig> {
         .map_err(|e| GearError::new(ErrorCode::BadFormat, e.to_string()))
 }
 
+/// The parsed configs of the projects a process reads, one entry per project
+/// (T-518): a tick reads the same config text dozens of times (dispatch,
+/// attention, the feed, `latest`) and `toml_edit` is not free, so the text is
+/// parsed once per version and the entry is replaced when the text changes.
+#[derive(Default)]
+pub struct ConfigCache {
+    /// `project` → the text it was parsed from and the config.
+    entries: std::collections::HashMap<String, (String, std::sync::Arc<ProjectConfig>)>,
+    /// How many parses were run: the cost the cache saves, and what the tests
+    /// read.
+    parses: u64,
+}
+
+impl ConfigCache {
+    /// The parsed config of `project` for `text`: the cached value when the
+    /// same text was parsed before, else the text is parsed now (once) and
+    /// kept in place of the project's older entry.
+    pub fn parse(
+        &mut self,
+        project: &str,
+        text: &str,
+    ) -> GearResult<std::sync::Arc<ProjectConfig>> {
+        if let Some((cached_text, config)) = self.entries.get(project) {
+            if cached_text == text {
+                return Ok(std::sync::Arc::clone(config));
+            }
+        }
+        let config = std::sync::Arc::new(parse(text)?);
+        self.parses += 1;
+        self.entries.insert(
+            project.to_string(),
+            (text.to_string(), std::sync::Arc::clone(&config)),
+        );
+        Ok(config)
+    }
+
+    /// How many parses this cache ran (T-518).
+    pub fn parses(&self) -> u64 {
+        self.parses
+    }
+
+    /// How many projects this cache holds: one entry per project (T-518).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the cache holds nothing.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// The process-wide config cache (T-518): the cache the engine's per-tick
+/// readers share.
+static CACHE: std::sync::OnceLock<std::sync::Mutex<ConfigCache>> = std::sync::OnceLock::new();
+
+/// The process-wide cache, locked.
+fn cache() -> std::sync::MutexGuard<'static, ConfigCache> {
+    CACHE
+        .get_or_init(|| std::sync::Mutex::new(ConfigCache::default()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// `parse` through the process-wide cache (T-518): the same project text is
+/// parsed once however many times a tick asks for it, and a changed text
+/// replaces the entry.
+pub fn parse_cached(project: &str, text: &str) -> GearResult<ProjectConfig> {
+    cache().parse(project, text).map(|config| (*config).clone())
+}
+
 /// The config a project is registered with: the text the store holds for its
 /// **latest** config version, parsed. A project that is not registered →
 /// `NoTarget`; stored text that does not parse → `BadFormat`.
@@ -1209,7 +1280,8 @@ pub fn latest(store: &mut Store, project: &str) -> GearResult<ProjectConfig> {
             format!("no project {project} in the store"),
         )
     })?;
-    parse(&row.config_toml)
+    // T-518: the same text is parsed once per process.
+    parse_cached(project, &row.config_toml)
 }
 
 /// The project's `[conventions]` for a reader that only needs the branch names
@@ -2507,5 +2579,48 @@ mod tests {
         assert_eq!(join_path("/repo", ""), "/repo");
         assert_eq!(join_path("/repo", "."), "/repo");
         assert_eq!(join_path("/", "crates/api"), "/crates/api");
+    }
+
+    /// T-518: a project's config text is parsed once per version, not once per
+    /// reader: the same text returns the cached value, a changed text is parsed
+    /// again and replaces the entry, and the cache keeps one entry per project.
+    #[test]
+    fn a_config_text_is_parsed_once_per_project_version() {
+        let mut cache = ConfigCache::default();
+        let first =
+            "\n[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/repo\"\n\n[quota]\nlanes = 1\ntemps = 0\n\n[captain]\npane = \"w1:p1\"\nkind = \"claude\"\nprofile = \"claude\"\n";
+        let second = first.replace("lanes = 1", "lanes = 3");
+
+        let once = cache.parse("p", first).unwrap();
+        let again = cache.parse("p", first).unwrap();
+        assert_eq!(cache.parses(), 1, "the same text is parsed once");
+        assert_eq!(once.quota.lanes, again.quota.lanes);
+        assert!(
+            std::sync::Arc::ptr_eq(&once, &again),
+            "the cached value is returned"
+        );
+
+        // A changed text is parsed again, and its value is what comes back.
+        let changed = cache.parse("p", &second).unwrap();
+        assert_eq!(cache.parses(), 2, "a new version parses once");
+        assert_eq!(changed.quota.lanes, 3);
+        assert_eq!(cache.parse("p", &second).unwrap().quota.lanes, 3);
+        assert_eq!(cache.parses(), 2, "the new version is cached in its turn");
+
+        // One entry per project: another project gets its own, and the first
+        // project's older entry was replaced, not kept.
+        cache.parse("q", first).unwrap();
+        assert_eq!(cache.len(), 2, "one entry per project");
+        assert_eq!(cache.parses(), 3);
+        // The first project still answers with the newest value it was given.
+        assert_eq!(cache.parse("p", &second).unwrap().quota.lanes, 3);
+        assert_eq!(cache.parses(), 3);
+
+        // Text that does not parse is an error, and it is not cached as a
+        // value: the next call parses again.
+        assert!(cache.parse("r", "not a config").is_err());
+        assert_eq!(cache.len(), 2, "nothing was kept for the broken text");
+        assert!(cache.parse("r", "not a config").is_err());
+        assert_eq!(cache.parses(), 3, "a failed parse is not a cached value");
     }
 }

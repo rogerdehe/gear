@@ -452,7 +452,7 @@ pub(crate) fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<Task
     let tasks = tx.tasks_of_project(&seat.project)?;
     let lane_repo = tx
         .get_project(&seat.project)?
-        .and_then(|p| gear_app::config::parse(&p.config_toml).ok())
+        .and_then(|p| gear_app::config::parse_cached(&seat.project, &p.config_toml).ok())
         .map(|config| config.repo_of_lane(&seat.name).path);
     // A dependency counts only when its work is merged (T-236, F-76): Done is
     // set at the review pass, before the merge reaches the integration branch.
@@ -503,7 +503,7 @@ pub(crate) fn conventions(tx: &Tx<'_>, project: &str) -> gear_app::config::Conve
     tx.get_project(project)
         .ok()
         .flatten()
-        .and_then(|row| gear_app::config::parse(&row.config_toml).ok())
+        .and_then(|row| gear_app::config::parse_cached(project, &row.config_toml).ok())
         .map(|config| config.conventions)
         .unwrap_or_default()
 }
@@ -516,7 +516,7 @@ pub fn integration_branch(tx: &Tx<'_>, project: &str, lane: &str) -> String {
         .get_project(project)
         .ok()
         .flatten()
-        .and_then(|row| gear_app::config::parse(&row.config_toml).ok());
+        .and_then(|row| gear_app::config::parse_cached(project, &row.config_toml).ok());
     let integration = match parsed {
         Some(config) => config.repo_of_lane(lane).integration,
         None => gear_app::config::Conventions::default().integration,

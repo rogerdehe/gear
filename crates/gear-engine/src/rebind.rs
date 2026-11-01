@@ -258,7 +258,7 @@ fn prepare_onboard(store: &mut Store, seat: &SeatRow, generation: i64, now: Ts) 
         }
         let config = tx
             .get_project(&seat.project)?
-            .and_then(|p| gear_app::config::parse(&p.config_toml).ok());
+            .and_then(|p| gear_app::config::parse_cached(&seat.project, &p.config_toml).ok());
         let destination = config.map(|c| c.repo_of_lane(&seat.name).path);
         let path = match destination {
             Some(repo) => tx
