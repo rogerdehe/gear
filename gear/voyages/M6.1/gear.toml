@@ -1,4 +1,4 @@
-# GEAR's own project config for voyage M6.1, copied from gear/voyages/M6/gear.toml: lanes on the self-hosted DeepSeek, reviewers on Claude Sonnet.
+# GEAR's own project config for voyage M6.1, copied from gear/voyages/M6/gear.toml: lanes on DeepSeek V4.1 Flash via TokenRhythm, reviewers on Claude Sonnet.
 # Registered with: GEAR_ADMIN=1 gear admin init gear/voyages/M6.1/gear.toml
 
 [project]
@@ -19,7 +19,7 @@ pane = "w2:p2"
 kind = "claude"
 profile = "claude"
 
-# M6.1: two lanes on the self-hosted DeepSeek V4.1 Flash (hk-dgx-1), thinking high, 600K context (user, 2026-11-01).
+# M6.1: two lanes on DeepSeek V4.1 Flash via TokenRhythm (user, 2026-11-01: replaces the self-hosted hk-dgx-1 after its key was revoked), thinking high, 600K context.
 [[lanes]]
 name = "hull"
 duty = "M6.1 engine, model and usage: crates/gear-engine, gear-model, gear-usage"
@@ -28,7 +28,7 @@ charter = """You run on a flash model. Implement the packet exactly as written, 
 kind = "pi"
 profile = "pi"
 models = [
-  { model = "hk-dgx-1/DeepSeek-V4.1-Flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 600 },
+  { model = "tokenrhythm/deepseek-v4.1-flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 600 },
 ]
 
 [[lanes]]
@@ -39,7 +39,7 @@ charter = """You run on a flash model. Implement the packet exactly as written, 
 kind = "pi"
 profile = "pi"
 models = [
-  { model = "hk-dgx-1/DeepSeek-V4.1-Flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 600 },
+  { model = "tokenrhythm/deepseek-v4.1-flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 600 },
 ]
 
 # GEAR lanes run pi without pi-lens (uninstalled 2026-10-28).
@@ -53,7 +53,7 @@ profile = "claude"
 
 [models]
 lanes = [
-  { model = "hk-dgx-1/DeepSeek-V4.1-Flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 600 },
+  { model = "tokenrhythm/deepseek-v4.1-flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 600 },
 ]
 # The reviewer never runs the model it reviews.
 review = [
