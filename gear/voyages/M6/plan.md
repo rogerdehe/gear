@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1088 -->
+<!-- gear-plan project=gear base=1089 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -173,6 +173,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7475: keep course — projected 1717m; T-524 v0.6.8 done, T-525 in review, then T-526 v0.6.9, the clause (4) measure and the landing
 - 2026-11-01 05:15 scope: one more clause (4) task, the overlap scan resolves refs in one git call (hull), then release v0.6.10 | why: measured 04:59-05:11 on dev with T-525: engines 12.6 % then 6.1 % and 9.8 % then 10.0 % (3-minute samples), 11.0 % and 12.3 % over 6 minutes, 21-35 MB; boards 2.9-5.9 %, 15-17 MB; a CPU sample of our engine now shows the database and config costs gone and most on-CPU time in process spawns from parallel::check (one `git rev-parse` per ref, one `git merge-base` per pair) on every hand-in | else: land with (4) at 6-12 %, not met
 - station M-7484: keep course — T-526 v0.6.9 done; clause (4) at 6-12 %, so T-527 (the overlap scan in one git call) and T-528 v0.6.10 run, then the measure and the landing
+- station M-7489: keep course — projected 1777m; T-527 in review, then T-528 v0.6.10, the clause (4) measure and the landing
 
 # Queue
 
