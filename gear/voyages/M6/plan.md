@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1082 -->
+<!-- gear-plan project=gear base=1084 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -169,6 +169,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-11-01 03:30 scope: one more clause (4) task, the merge and nudge steps read only the ops they need (hull), then release v0.6.8 | why: measured 03:23-03:29 on dev with T-521 (two 3-minute ps samples): engines 20.2-20.7 % and 14.4-14.7 % of one core, 33-38 MB; boards 3.0-3.1 % and 6.4-6.5 %, 15-16 MB; a CPU sample of our engine puts it in ops_in_state and op_from_row parsing payload JSON: the merge step reads every op of every state each tick (our store 5900 ops, about 10 MB of payloads) to keep the merge ops, and the lane nudge reads every delivery a seat ever had | else: land with (4) not met
 - station M-7454: keep course — projected 1664m; T-523 (ops read by kind) on hull is the root of the remaining engine CPU, then T-524 v0.6.8, the measure and the landing
 - station M-7465: keep course — projected 1670m; T-523 done, T-524 v0.6.8 on mast; the clause (4) measure runs on dev now, then the landing
+- 2026-11-01 04:30 scope: one more clause (4) task, an ended round's usage is counted a bounded number of times (hull), then release v0.6.9 | why: measured 04:14-04:20 on dev with T-523 (two 3-minute ps samples): our engine 7.5 % and 11.5 %, 21-22 MB; the other project's 18.3 % and 14.5 %, 24-34 MB; boards 2.8-6.6 %, 15-17 MB; a CPU sample of the other engine puts it in rounds::count_round: an ended round whose usage stays unknown is counted again every 60 s for ever (542 such rounds on the other store, 128 on ours), and each count parses the project TOML and walks ~/.codex/sessions (1105 files) | else: land with (4) not met
 
 # Queue
 
@@ -565,4 +566,15 @@ estimate: 30
 goal: [S5] Release v0.6.8. Change, no other design: (1) the version is 0.6.8 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.8.md, in the form of docs/releases/v0.6.7.md: one line per task merged on origin/dev since v0.6.7 at the hand-in.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.8"; docs/releases/v0.6.8.md lists every task merged since v0.6.7. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
 deps: T-522, T-523
+estimate: 15
+
+## T-525 [now] lane=hull milestone=M6 station=S5 required
+goal: [S3] An ended round's usage is counted a bounded number of times. crates/gear-engine/src/rounds.rs `tick` counts every ended round again 60 s after its last count while its `input` is still unknown, with no end: on a store with 542 such rounds (sessions the reader cannot find: a Codex rollout no longer on disk, a CLI with no transcript) that is about nine `count_round` calls a second, and each parses the project's TOML (`project.config_toml.parse::<toml::Value>()`) and walks `~/.codex/sessions` (`gear_usage::codex_rollout_path`, about 1100 files). A CPU sample puts most of the engine's time there. Count an ended round again only on a back-off (1, 5 and 30 minutes after it ended), then never again while its usage stays unknown, and keep it unknown (never 0). Parse the config once per `tick`, not once per round. In gear-usage, `codex_rollout_path` reads the day directories newest first and stops at the first match. Same results as today for a round whose usage is found. No other change.
+accept: gear-engine tests: an ended round whose usage stays unknown is counted at 1, 5 and 30 minutes after its end and then not again (a counter or a fake session); a round whose usage is found is counted once and kept; the existing round-usage tests pass. gear-usage tests: the rollout lookup still finds the newest matching file. No wall-clock assertion. Run make check CRATE=gear-engine and CRATE=gear-usage.
+estimate: 25
+
+## T-526 [now] lane=mast milestone=M6 station=S5 required
+goal: [S5] Release v0.6.9. Change, no other design: (1) the version is 0.6.9 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.9.md, in the form of docs/releases/v0.6.8.md: one line per task merged on origin/dev since v0.6.8 at the hand-in.
+accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.9"; docs/releases/v0.6.9.md lists every task merged since v0.6.8. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+deps: T-524, T-525
 estimate: 15
