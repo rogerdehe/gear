@@ -172,7 +172,7 @@ deps: -
 
 ### Changing a lane's model mid-voyage
 
-Change a lane's model (or its CLI) only when the user asks and has confirmed it in a dialog. Re-init with the new chain (`--confirmed` after departure), then leave the lane **Active**: the engine restarts it in place on the new model at its next safe point — the same pane and worktree — and it continues its task (`Continue T-<n>` when an attempt is open). Check `engine.model.<seat>`. Never hold, kill or release a lane for this: a change made while the lane was held is applied when it is released and `Active` again.
+Change a lane's model (or its CLI) only when the user asks and has confirmed it in a dialog. Re-init with the new chain (`--confirmed` after departure), then leave the lane **Active**: the engine restarts it in place on the new model at its next safe point — the same pane and worktree — and it continues its task (`Continue T-<n>` when an attempt is open). Check `engine.model.<seat>`. Never hold, kill or release a lane for this: a change made while the lane was held is applied when it is released and `Active` again. Never type `/model` into a seat yourself: the CLI saves it as the machine's default, and every project's agents on this machine start on it.
 
 **Becoming the captain** in a fresh pane: start your CLI there and run `gear captain take` in the project's root; the pane becomes the captain seat at a new generation. Nothing sent to the old captain is lost: its open messages are yours in `gear`; `git status` shows a plan it never applied. The take asks the previous captain for its handover document; if none arrives within 10 minutes, it names the previous session in its item — read that session and write part 2 of the handover yourself before you work.
 
