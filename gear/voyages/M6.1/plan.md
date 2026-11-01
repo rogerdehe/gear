@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1112 -->
+<!-- gear-plan project=gear base=1114 -->
 # Goal
 Fix the bugs the user reports while the projects that use GEAR run on it, and get each fix into their hands at once: every batch ships as a v0.6.x release that the shared engines, the CLI and the installed skill copies run, and each project's captain is told. M6.1 is planned as it goes: its first bugs are below, and each further bug the user reports becomes tasks here. It lands on the user's word.
 
@@ -28,6 +28,7 @@ depart: now
 - 2026-11-01 05:35 move: T-532 (merge.rs only) from hull to mast as an allowed edit, moved for balance (M5.1's T-434 precedent) | why: mast is idle (M-7552) while hull holds T-531, T-535 and T-532; T-532 shares no file with them | else: mast idle until the release
 - station M-7566: keep course 56 min in; 6 done (T-533, T-536..T-539 merged or accepted), projected finish 95 min from departure; hull on T-531 then T-535, mast on T-532 then the release T-534
 - station M-7571: keep course 60 min in; nothing changed since M-7566 four minutes earlier (projected finish 99 min from departure)
+- 2026-11-01 05:55 scope: a false captain item after a merge (M-7576): the branch sweep deleted mast/t538 (M-7575, 20 s earlier) while T-538's merge ran; the merge's close step then failed to delete the branch that was already gone and reported it as "left on origin (… not merged: )" with no commit. A branch already gone at close is closed, not left. Queued on mast after T-532, in the same file | why: false items cost the captain a check each | else: M7
 
 # Queue
 
@@ -71,8 +72,13 @@ goal: [v0.6.12] The role charter reaches the user and the packets (decision 05:0
 accept: The departure form shows a Charters line; the captain.md bullet carries the packet clause; `make check CRATE=gear-app TESTS='test(skill)'` passes (the embedded skill builds). The merge gate runs `make gate`.
 estimate: 15
 
+## T-540 [now] lane=mast milestone=M6.1 required
+goal: [v0.6.12] A merge never reports a branch as left on the remote when the branch is already gone (decision 05:55, M-7576). Change crates/gear-engine/src/merge.rs only (an allowed edit for mast, moved from hull for balance), no other design: in fn close_branches, wherever a `delete_remote` that fails today pushes a name into `left` (the task branch past the candidate, and a branch whose tip is the candidate), first ask the remote whether the branch still exists (`git ls-remote --exit-code --heads <remote> <branch>`, run in `dir`); when it does not, count the branch as closed (push it into `closed`) instead of `left`. A branch that still exists after a failed delete stays in `left` as today.
+accept: Tests in crates/gear-engine/src/merge.rs `mod tests` with the Scratch repos: a task branch deleted on the remote after the merge's fetch and before its close step is reported under "closed on", and no "left on" line is written; a branch whose delete fails while it still exists is still reported under "left on". Run only `make check CRATE=gear-engine TESTS='test(close_branches) | test(left_on)'` (adjust the names to your tests); the merge gate runs `make gate`.
+estimate: 20
+
 ## T-534 [now] lane=mast milestone=M6.1 required
 goal: [v0.6.12] Release v0.6.12. Change, no other design: (1) the version is 0.6.12 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.12.md, in the form of docs/releases/v0.6.11.md: one line per task merged on origin/dev since v0.6.11 at the hand-in, and an "Upgrading" section that says the engine changed (restart it) and the skill changed (`gear admin install-skill --agent <cli>` for each agent CLI).
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.12"; docs/releases/v0.6.12.md lists every task merged since v0.6.11. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-531, T-532, T-533, T-535, T-536, T-537, T-538, T-539
+deps: T-531, T-532, T-533, T-535, T-536, T-537, T-538, T-539, T-540
 estimate: 25
