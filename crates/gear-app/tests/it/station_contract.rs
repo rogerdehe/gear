@@ -315,15 +315,17 @@ fn reply(
 fn only_a_plan_decision_naming_the_item_can_close_it() {
     let mut store = world("4h", 5);
     let id = check(&mut store, 3600).remove(0);
-    for (mode, rid) in [
-        (mail::ReplyMode::Resolve, "resolve"),
-        (mail::ReplyMode::Wait, "wait"),
-    ] {
-        let error = reply(&mut store, vec![id.clone()], mode, rid).unwrap_err();
-        assert_eq!(error.code, ErrorCode::BadFormat);
-        assert!(error.detail.contains("# Decisions"));
-        assert_eq!(item(&mut store, &id).state, MsgState::Open);
-    }
+    // T-542: a resolve is still refused on a station item; a wait is not.
+    let error = reply(
+        &mut store,
+        vec![id.clone()],
+        mail::ReplyMode::Resolve,
+        "resolve",
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat);
+    assert!(error.detail.contains("# Decisions"));
+    assert_eq!(item(&mut store, &id).state, MsgState::Open);
     reply(&mut store, vec![id.clone()], mail::ReplyMode::Note, "note").unwrap();
     assert_eq!(item(&mut store, &id).state, MsgState::Open);
     apply(&mut store, "- keep course", "unrelated", T0 + 3602).unwrap();
@@ -581,4 +583,136 @@ fn the_first_three_quarters_are_unchanged() {
         assert!(!message.body.contains("past eta by"), "{}", message.body);
         assert!(!message.body.contains("Past the eta:"), "{}", message.body);
     }
+}
+
+/// T-542: a station item waits for the user quietly — no doorbell until its
+/// time, and it is the captain's item again after it.
+#[test]
+fn a_station_item_can_wait_for_the_user_quietly() {
+    let mut store = world("8h", 6);
+    assert!(check(&mut store, 0).is_empty(), "watch the voyage first");
+    for n in 1..=6 {
+        finish(&mut store, n);
+    }
+    let ids = check(&mut store, 7200);
+    let land = ids
+        .iter()
+        .find(|id| item(&mut store, id).body.contains("ready to land"))
+        .unwrap()
+        .clone();
+    let until = T0 + 7200 + 12 * 3600;
+    let (env, fp) = captain();
+    let waited = mail::reply(
+        &mut store,
+        &env,
+        Some(&fp),
+        &mail::ReplyArgs {
+            ids: vec![land.clone()],
+            mode: mail::ReplyMode::Wait,
+            text: "waiting for the user's word on the landing".into(),
+            wait_on: Some("user".into()),
+            wait_until: Some(until),
+            downgrade: false,
+            request_id: "wait-land".into(),
+        },
+        T0 + 7201,
+    )
+    .unwrap();
+    assert_eq!(waited.handled, vec![(land.clone(), "waiting".to_string())]);
+    let message = item(&mut store, &land);
+    assert_eq!(message.state, MsgState::Waiting);
+    assert_eq!(message.wait_on.as_deref(), Some("user"));
+    assert_eq!(message.wait_until, Some(until));
+
+    // No doorbell before its time: the captain's waiting list leaves it out.
+    let captain_id = store
+        .read(|tx| tx.captain_of("p"))
+        .unwrap()
+        .expect("the captain")
+        .id;
+    let before = store
+        .read(|tx| {
+            let list = tx.actionable_for("p", &captain_id, T0 + 7202)?;
+            let batch = mail::select_batch(
+                tx,
+                "p",
+                &captain_id,
+                T0 + 7202,
+                mail::BatchLimits::default(),
+            )?;
+            Ok((list, batch))
+        })
+        .unwrap();
+    assert!(
+        !before.0.iter().any(|m| m.id == land),
+        "not in the waiting list: {:?}",
+        before.0.iter().map(|m| &m.id).collect::<Vec<_>>()
+    );
+    assert!(
+        !before
+            .1
+            .iter()
+            .any(|thread| thread.open.iter().any(|m| m.id == land)),
+        "no doorbell: {:?}",
+        before.1
+    );
+
+    // After its time it is the captain's item again.
+    let after = store
+        .read(|tx| tx.actionable_for("p", &captain_id, until + 1))
+        .unwrap();
+    assert!(
+        after.iter().any(|m| m.id == land),
+        "due again: {:?}",
+        after.iter().map(|m| &m.id).collect::<Vec<_>>()
+    );
+}
+
+/// T-542: a plan `station <id>: land` settles a station item that waits.
+#[test]
+fn a_station_item_in_waiting_is_settled_by_a_plan_line() {
+    let mut store = world("8h", 6);
+    assert!(check(&mut store, 0).is_empty(), "watch the voyage first");
+    for n in 1..=6 {
+        finish(&mut store, n);
+    }
+    let ids = check(&mut store, 7200);
+    let land = ids
+        .iter()
+        .find(|id| item(&mut store, id).body.contains("ready to land"))
+        .unwrap()
+        .clone();
+    let (env, fp) = captain();
+    mail::reply(
+        &mut store,
+        &env,
+        Some(&fp),
+        &mail::ReplyArgs {
+            ids: vec![land.clone()],
+            mode: mail::ReplyMode::Wait,
+            text: "waiting for the user".into(),
+            wait_on: Some("user".into()),
+            wait_until: Some(T0 + 7200 + 12 * 3600),
+            downgrade: false,
+            request_id: "wait-land-2".into(),
+        },
+        T0 + 7201,
+    )
+    .unwrap();
+    assert_eq!(item(&mut store, &land).state, MsgState::Waiting);
+
+    let decision = format!("- station {land}: land");
+    apply(
+        &mut store,
+        &format!("- done (1): met | evidence: all 6 tasks merged\n{decision}"),
+        "land-from-waiting",
+        T0 + 7202,
+    )
+    .unwrap();
+    let message = item(&mut store, &land);
+    assert_eq!(message.state, MsgState::Resolved);
+    assert_eq!(
+        message.result.as_deref(),
+        Some(decision.trim_start_matches("- "))
+    );
 }
