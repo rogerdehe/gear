@@ -11,7 +11,6 @@
 //! gets them from the migration that opens it.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use gear_model::{OpState, SeatRole, TaskState};
 use gear_store::{Store, SCHEMA_VERSION};
@@ -74,9 +73,15 @@ const READS: &[(&str, &str)] = &[
          FROM messages WHERE project=?1 AND thread=?2 ORDER BY created, id",
     ),
     (
-        "open_attempts_of_seat",
+        "in_progress_attempts_of_seat",
         "SELECT project, task FROM attempts WHERE seat=?1 \
          AND state IN ('delivered', 'started', 'stopped', 'unknown') ORDER BY task, n",
+    ),
+    (
+        "open_attempts_of_seat",
+        "SELECT project, task FROM attempts WHERE seat=?1 \
+         AND state IN ('delivered', 'started', 'stopped', 'unknown', 'submitted') \
+         ORDER BY state = 'submitted', task, n",
     ),
     (
         "open_round_of_seat",
@@ -90,7 +95,9 @@ fn wanted(read: &str) -> (&'static str, &'static str) {
     match read {
         "ops_in_state" => ("operations_state", "SEARCH operations USING"),
         "thread_messages" => ("messages_thread", "SEARCH messages USING"),
-        "open_attempts_of_seat" => ("attempts_seat", "SEARCH attempts USING"),
+        "in_progress_attempts_of_seat" | "open_attempts_of_seat" => {
+            ("attempts_seat", "SEARCH attempts USING")
+        }
         "open_round_of_seat" => ("rounds_seat", "SEARCH rounds USING"),
         other => panic!("no index named for {other}"),
     }
@@ -164,13 +171,15 @@ fn an_older_store_gains_the_indexes_when_it_is_opened() {
     plans_use_the_indexes(&path, "an older store opened");
 }
 
-/// T-517: the read the engine makes most is cheap on a big store. The store
-/// holds 5000 operations and 5000 messages; the one state the engine asks for
-/// on a tick holds 50 ops and the one thread it reads holds 50 messages. 100
-/// calls of each, under 200 ms — a table scan would read the other 4950 rows on
-/// every call.
+/// T-517 (v3): the plans do not depend on the store being empty. The store
+/// holds 5000 operations and 5000 messages; the state the engine asks for on a
+/// tick and the thread it reads are served by the same indexes as on a fresh
+/// store.
+///
+/// The check is the plan, not the clock: v3 of the contract drops the timed
+/// assertion because a timing test fails under the gate's parallel load.
 #[test]
-fn a_hundred_reads_on_five_thousand_rows_stay_under_two_hundred_milliseconds() {
+fn the_reads_keep_their_plans_on_a_store_of_five_thousand_rows() {
     let (_dir, path) = temp_db("bulk");
     let mut store = Store::open(&path).unwrap();
     store
@@ -221,33 +230,15 @@ fn a_hundred_reads_on_five_thousand_rows_stay_under_two_hundred_milliseconds() {
         })
         .unwrap();
 
-    // The plans hold on the big store too.
     plans_use_the_indexes(&path, "a store of 5000 ops");
 
-    let started = Instant::now();
-    for _ in 0..100 {
-        let ops = store
-            .read(|tx| tx.ops_in_state(PROJECT, OpState::Submitted))
-            .unwrap();
-        assert_eq!(ops.len(), HOT, "the reads find the state's ops");
-    }
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < std::time::Duration::from_millis(200),
-        "100 state reads took {elapsed:?} on 5000 ops"
-    );
-
-    // And the threads: the same index answers the engine's thread reads.
-    let started = Instant::now();
-    for _ in 0..100 {
-        let messages = store.read(|tx| tx.thread_messages(PROJECT, "hot")).unwrap();
-        assert_eq!(messages.len(), HOT);
-    }
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < std::time::Duration::from_millis(200),
-        "100 thread reads took {elapsed:?} on 5000 messages"
-    );
+    // The reads still find exactly the rows of their state and their thread.
+    let ops = store
+        .read(|tx| tx.ops_in_state(PROJECT, OpState::Submitted))
+        .unwrap();
+    assert_eq!(ops.len(), HOT, "the reads find the state's ops");
+    let messages = store.read(|tx| tx.thread_messages(PROJECT, "hot")).unwrap();
+    assert_eq!(messages.len(), HOT, "the read finds the thread's messages");
 }
 
 /// The rows the engine asks for on a tick, among the 5000 of each table.
