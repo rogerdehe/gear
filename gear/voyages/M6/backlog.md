@@ -194,3 +194,6 @@
 
 ## One rebind's overlap error blocks every pending rebind
 - 2026-11-01 M6 (another project's question on moving paths from surface to api): `reconcile_rebinds` (crates/gear-app/src/plan.rs) applies all due rebinds in one transaction and re-validates each; a rebind that adds paths the other lane still owns (its own rebind still waiting) fails the overlap check, and the error rolls back the whole transaction every tick, so a lane earlier in seat order can block the one that would free the paths. Apply each rebind in its own transaction, skip one that would overlap until the other lane's rebind lands, and let a paired move (owns out of one lane, into another, with the tasks) be one request.
+
+## Rebind cannot name the project root
+- 2026-11-01 M6 (another project, root only: no [[repos]], only `project.repo`): `- rebind <lane> repo=<name> owns=[...]` needs a named `[[repos]]` entry, the root's name is empty and the draft parser refuses `repo=`, so a root-only project cannot move owned paths between lanes by rebind; its only path is a whole-config re-init with `--confirmed`. Accept `repo=.` (or omit `repo=`) for the root.
