@@ -2695,8 +2695,15 @@ fn close_branches(
             left.push(name);
             continue;
         }
-        if delete_remote(dir, &name, remote) && !closed.contains(&name) {
-            closed.push(name);
+        if delete_remote(dir, &name, remote) || !branch_on_remote(dir, remote, &name) {
+            // T-540: a delete that failed because the branch was already gone
+            // (another merge, the captain) is a closed branch, not one left.
+            if !closed.contains(&name) {
+                closed.push(name);
+            }
+        } else if !left.contains(&name) {
+            // It is still there: the captain hears of it.
+            left.push(name);
         }
     }
     // The task's own branch whose tip moved past the candidate (a push after
@@ -2709,11 +2716,18 @@ fn close_branches(
     // pruned, and the lane's own branch has it).
     let task_ref = format!("{}/{task_branch}", remote.name);
     if !closed.iter().any(|name| name == task_branch)
+        && !left.iter().any(|name| name == task_branch)
         && pushed.refs.iter().any(|name| name == &task_ref)
     {
         if git(dir, &["merge-base", "--is-ancestor", &task_ref, "HEAD"]).is_ok() {
-            if delete_remote(dir, task_branch, remote) {
+            if delete_remote(dir, task_branch, remote)
+                || !branch_on_remote(dir, remote, task_branch)
+            {
                 closed.push(task_branch.to_string());
+            } else {
+                // The delete did not go through: the branch stays, and the
+                // captain hears of it.
+                left.push(task_branch.to_string());
             }
         } else {
             let changed = git(dir, &["diff", "--name-only", &format!("HEAD...{task_ref}")])
@@ -2738,6 +2752,10 @@ fn close_branches(
                         commits.join("; ")
                     ));
                 }
+            } else if !branch_on_remote(dir, remote, task_branch) {
+                // T-540: the branch was already gone; the delete failed because
+                // there was nothing to delete.
+                closed.push(task_branch.to_string());
             } else {
                 // The delete did not go through: the branch stays, and the
                 // captain hears of the commits it holds.
@@ -2771,6 +2789,16 @@ fn is_task_branch(branch: &str, task_branch: &str) -> bool {
 /// Close a branch on the remote. A branch that is already gone is closed too.
 fn delete_remote(dir: &Path, branch: &str, remote: Target<'_>) -> bool {
     remote.delete(dir, branch)
+}
+
+/// Whether the remote still has `branch` (T-540): asked before a failed delete
+/// is reported as a branch left on the remote.
+fn branch_on_remote(dir: &Path, remote: Target<'_>, branch: &str) -> bool {
+    git(
+        dir,
+        &["ls-remote", "--exit-code", "--heads", remote.name, branch],
+    )
+    .is_ok()
 }
 
 /// The gate of the project: its build and test command, in `dir`.
@@ -8418,6 +8446,80 @@ gate = "{project_gate}"
             ) && line.contains("sneaky"),
             "{line}"
         );
+    }
+
+    /// T-540 (M-7576): a task branch deleted on the remote between the merge's
+    /// fetch and its close step is closed, not reported as left on the remote.
+    #[test]
+    fn a_branch_deleted_on_the_remote_before_the_close_is_closed() {
+        let scratch = Scratch::new("close-gone");
+        let candidate = scratch.head_of("heat/t5");
+        // The gate runs between the fetch and the close: the branch is gone
+        // from the remote meanwhile.
+        let gate = "git --git-dir=../origin.git update-ref -d refs/heads/heat/t5";
+        let (mut store, mut herdr, cfg) = queued_merge_candidate(&scratch, gate, &candidate);
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let merged = wait_merge(&mut store, &mut herdr, &cfg);
+        assert_eq!(merged.len(), 1, "the candidate merged");
+        assert!(scratch.dev_has_task_commit());
+        let result = op_result(&mut store, "O-1");
+        assert!(result.contains("closed on origin: "), "{result}");
+        assert!(
+            result.contains("heat/t5"),
+            "the branch that was already gone is closed: {result}"
+        );
+        assert!(
+            !result.contains("left on"),
+            "no branch is reported as left on: {result}"
+        );
+        assert!(!scratch.origin_branches().contains("heat/t5"));
+    }
+
+    /// A runner whose delete of one branch fails while the branch stays
+    /// (T-540): every other branch is deleted as [`FetchRemote`] does.
+    #[derive(Debug)]
+    struct KeepsBranchRemote(&'static str);
+
+    impl Remote for KeepsBranchRemote {
+        fn push(&self, dir: &Path, remote: &str, dst: &str) -> Result<(), String> {
+            FetchRemote.push(dir, remote, dst)
+        }
+
+        fn delete(&self, dir: &Path, remote: &str, branch: &str) -> bool {
+            if branch == self.0 {
+                false
+            } else {
+                FetchRemote.delete(dir, remote, branch)
+            }
+        }
+    }
+
+    /// T-540: a branch whose delete fails while it still exists is still
+    /// reported under "left on".
+    #[test]
+    fn a_branch_that_stays_after_a_failed_delete_is_left_on_the_remote() {
+        let scratch = Scratch::new("close-kept");
+        let candidate = scratch.head_of("heat/t5");
+        let (mut store, mut herdr, mut cfg) = queued_merge_candidate(&scratch, "true", &candidate);
+        cfg.remote = std::sync::Arc::new(KeepsBranchRemote("heat/t5"));
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let merged = wait_merge(&mut store, &mut herdr, &cfg);
+        assert_eq!(merged.len(), 1, "the candidate merged");
+        let result = op_result(&mut store, "O-1");
+        assert!(result.contains("left on origin"), "{result}");
+        assert!(
+            result.contains("heat/t5"),
+            "the branch that stays is named: {result}"
+        );
+        assert!(
+            result.contains("closed on origin: review/t5"),
+            "the review branch is closed as usual: {result}"
+        );
+        let branches = scratch.origin_branches();
+        assert!(branches.contains("heat/t5"), "the branch stays: {branches}");
+        assert!(!branches.contains("review/t5"), "{branches}");
     }
 
     /// T-402: lanes often push their report after the hand-in. A task branch
