@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1094 -->
+<!-- gear-plan project=gear base=1095 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -178,6 +178,8 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7504: keep course — the time-box of 05:58 holds: T-529's rework in review, then T-530 v0.6.11, one measure and the landing whatever it shows
 - station M-7510: keep course — T-529 merged, the clause (4) measure runs on its build, T-530 v0.6.11 in review, then the landing
 - 2026-11-01 07:22 note: goal clause (4) met on dev with T-529 (engines restarted 07:13:05Z): 3-minute ps sample, engines 9.0 % and 7.4 % of one core, 35 MB and 20 MB; 6-minute sample, engines 9.3 % and 9.6 %, 35 MB and 34 MB; boards 3.8-6.7 %, 18-19 MB; both stores at schema 10
+- 2026-11-01 07:05 hand-fix: crates/gear-engine/src/release.rs cancels a reviewer that is Starting with no job for 10 minutes (JOBLESS_START_S; test a_jobless_starting_reviewer_is_cancelled_after_the_limit; make gate 2344 passed; commit d51110e0) | why: another project's review-1 sat Starting with an idle agent and no job for an hour after my 05:44 engine restart and held a temp slot; no plan line could release it | else: none supported
+- 2026-11-01 07:35 hand-fix: crates/gear-engine/src/session.rs continued_review_session resumes attempt n-1's review session only when it ran on the same CLI (test a_rereview_continues_only_a_session_of_the_same_cli; make gate 2352 passed; commit 1434f88a) | why: another project's reviewers moved from Codex to Claude and review-3 was told claude --resume <a Codex session>, leaving a shell and two failed deliveries | else: release the seat by hand each time
 
 # Queue
 
