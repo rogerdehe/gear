@@ -1,9 +1,9 @@
-<!-- gear-plan project=gear base=1104 -->
+<!-- gear-plan project=gear base=1108 -->
 # Goal
 Fix the bugs the user reports while the projects that use GEAR run on it, and get each fix into their hands at once: every batch ships as a v0.6.x release that the shared engines, the CLI and the installed skill copies run, and each project's captain is told. M6.1 is planned as it goes: its first bugs are below, and each further bug the user reports becomes tasks here. It lands on the user's word.
 
 # Milestone M6.1: bug fixes that reach the users
-done: (1) every M6.1 task merged; (2) every bug the user reports during M6.1 becomes tasks here within minutes, or is shown to be no GEAR fault; (3) each batch is released as v0.6.x and is live for every project on this machine: the binary rebuilt at the release, the skill reinstalled for each agent CLI, the engines restarted on it, and each project's captain told what changed
+done: (1) every M6.1 task merged; (2) every bug the user reports during M6.1 becomes tasks here within minutes, or is shown to be no GEAR fault; (3) each batch is released as v0.6.x and is live for every project on this machine: the binary rebuilt at the release, the skill reinstalled for each agent CLI, the engines restarted on it, and each project's captain told what changed; (4) before landing, this voyage's lessons are read against the skill GEAR ships and the skill is iterated: what is wrong or misleads its users is fixed, nothing is added for its own sake
 bar: DELIVERABLE: an error in normal use blocks the task; edge cases outside normal use are logged
 eta: 8h
 depart: now
@@ -20,6 +20,10 @@ depart: now
 - 2026-11-01 04:09 hand-recovery: mast's first packet (T-533) sat typed in pi's input box without Enter for about 2 min after onboarding; the captain pressed Enter and the lane started | why: the lane idled with work delivered | else: wait for the engine's delivery check
 - 2026-11-01 04:30 scope: a delivery left typed in a lane's input box is confirmed falsely and never sent (user, screenshot of mast at T-533): O-5916 was typed with Enter at 10:05:59Z five seconds after mast's onboarding, the Enter added a line instead of submitting, the resubmit step's one extra Enter at 10:06:30Z did the same, and at 10:06:34Z the confirm step took a Working flicker of pi as the agent's turn (evidence "turn gear:mast/38") while the text still sat in the box; the captain's Enter at 04:09 submitted it. 42 of 351 GEAR deliveries and 85 of 643 of the other project's since 10-30 were confirmed by a turn. Fix: a turn is no proof while the text is still in the box, and the Enter is retried while it is | why: the user's first M6 complaint, still open | else: -
 - 2026-11-01 04:45 scope: taken from gear/voyages/M7/backlog.md into M6.1 for mast, which has nothing to start before the release: a held task drops out of the voyage's scope and counts (the user asked about it on 11-01: the other project's 10 held tasks vanished from its board). `state: hold` is the only way a task becomes Draft (plan.rs), so Draft is read as held: in scope and remaining everywhere, never startable | why: done clause (2) and no idle lane | else: a new Held state in gear-model (hull's crate, a migration)
+- 2026-11-01 04:55 scope: two more M7 backlog bugs taken for mast, which would idle after T-536 while hull has three tasks: a verdict naming a candidate by a longer or shorter sha than the stored one is refused (hit in M6 at T-457 and at the M6 landing), and two gear-cli tests share a scratch tag and race under plain cargo test (F-153) | why: no idle lane; both are bugs users hit | else: -
+- 2026-11-01 05:00 confirmed: done clause (4) added: the lessons recorded during the voyage are read against the shipped skill before landing, and the skill is iterated, never grown (user) | why: user: two standing rules — record every pit in the voyage's lessons as it happens; before the end, iterate the skill against them | else: -
+- 2026-11-01 05:00 config: charters written for both roles (lanes on the flash model implement the packet exactly and ask instead of guessing; reviewers on Sonnet judge against the contract and the DELIVERABLE bar); the kickoff left them out | why: user: role charters follow the model, a decision of M6 (station S2) the captain skipped at this kickoff | else: -
+- 2026-11-01 05:00 scope: the role-charter design reaches the user and the captain's packets: the departure sheet shows the proposed charter per role, and the kickoff line on charters says what the model means for the captain's packets (a flash lane gets files, functions and steps; a strong lane gets the goal, boundaries and acceptance) | why: user: the charter is a recommendation to the user by model; M6 built the mechanism but the sheet never shows it and the skill does not tie it to the packets | else: the landing's skill review
 
 # Queue
 
@@ -48,8 +52,23 @@ goal: [v0.6.12] A held task stays in its voyage's scope and counts (decision 04:
 accept: Tests: a voyage of three tasks with one held (`state: hold` applied through a plan): the station scope, the voyage header totals and remaining minutes, and `gear report time` count all three; the deps tree lists the held task as open; the lane's queue lists it as held; a lane whose only queued task is held is not reported as having work it can start. The existing board and app tests pass, changed only where they asserted that a held task is left out. Run only `make check CRATE=gear-board TESTS='<filter>'` and `make check CRATE=gear-app TESTS='<filter>'`; the merge gate runs `make gate`.
 estimate: 45
 
+## T-537 [now] lane=mast milestone=M6.1 required
+goal: [v0.6.12] A verdict names its candidate by any sha prefix of the stored one, or the stored one by a prefix of it (M7 backlog: T-457's fail with the full sha of a candidate stored as 7c9be5e8 was refused as "already settled with a different verdict"). Change crates/gear-app/src/tasks.rs only, no other design: add `fn same_candidate(a: &str, b: &str) -> bool` — true when both are at least 7 characters of hex and one is a prefix of the other, ignoring ASCII case, or when they are equal — and use it for every comparison of a verdict's candidate with a stored candidate in that file (the checks near lines 324, 546, 693, 713 and 743 today); the error near line 743 keeps naming the stored candidate.
+accept: Tests in crates/gear-app (where the verdict tests are): a fail verdict with the full sha settles an attempt stored with its 8-character prefix, and the reverse; a candidate that only shares 6 characters is refused; a verdict replayed with the other length is the same verdict and changes nothing. Run only `make check CRATE=gear-app TESTS='<filter>'`; the merge gate runs `make gate`.
+estimate: 25
+
+## T-538 [now] lane=mast milestone=M6.1 required
+goal: [v0.6.12] No two gear-cli tests share a scratch directory (M7 backlog, F-153: two tests use the scratch tag "stale" and race under plain `cargo test`). Change only crates/gear-cli/tests: give every `scratch("<tag>")` call a tag no other test uses (the one at crates/gear-cli/tests/it/admin_init_contract.rs line 205 and any other duplicate `git grep -n 'scratch("' crates/gear-cli/tests` shows).
+accept: `git grep -ho 'scratch("[^"]*")' crates/gear-cli/tests | sort | uniq -d` prints nothing; `make check CRATE=gear-cli` passes. The merge gate runs `make gate`.
+estimate: 10
+
+## T-539 [now] lane=mast milestone=M6.1 required
+goal: [v0.6.12] The role charter reaches the user and the packets (decision 05:00). Change only these two files, rewriting, not adding paragraphs, no other design: (1) skills/gear/references/departure.md, the form's table: one line after "Reviewers": "| Charters | lanes: <one line, from the model they run>; reviewers: <one line> |", and in the rules above it, the sentence that lists what every line comes from also names the charters in gear.toml; (2) skills/gear/references/captain.md, the kickoff bullet that starts "one charter per role": after "a lane on a strong agent and model designs inside its own task and owned paths and never decides for the whole project" add, in the same sentence, "— so the captain's packet for a fast lane names the files, functions and steps, and for a strong lane the goal, the boundaries and the acceptance". Keep both files' other text as it is.
+accept: The departure form shows a Charters line; the captain.md bullet carries the packet clause; `make check CRATE=gear-app TESTS='test(skill)'` passes (the embedded skill builds). The merge gate runs `make gate`.
+estimate: 15
+
 ## T-534 [now] lane=mast milestone=M6.1 required
 goal: [v0.6.12] Release v0.6.12. Change, no other design: (1) the version is 0.6.12 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.12.md, in the form of docs/releases/v0.6.11.md: one line per task merged on origin/dev since v0.6.11 at the hand-in, and an "Upgrading" section that says the engine changed (restart it) and the skill changed (`gear admin install-skill --agent <cli>` for each agent CLI).
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.12"; docs/releases/v0.6.12.md lists every task merged since v0.6.11. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-531, T-532, T-533, T-535, T-536
+deps: T-531, T-532, T-533, T-535, T-536, T-537, T-538, T-539
 estimate: 25

@@ -24,6 +24,7 @@ profile = "claude"
 name = "hull"
 duty = "M6.1 engine, model and usage: crates/gear-engine, gear-model, gear-usage"
 owns = ["crates/gear-engine/", "crates/gear-model/", "crates/gear-usage/"]
+charter = """You run on a flash model. Implement the packet exactly as written, in the files it names; never design, widen or reinterpret it. When the packet is unclear, contradicts the code, or cannot be done as written, ask the captain with `gear send --kind question` and give a default, instead of guessing."""
 kind = "pi"
 profile = "pi"
 models = [
@@ -34,6 +35,7 @@ models = [
 name = "mast"
 duty = "M6.1 app, store, board, CLI, herdr, forge, skills, docs and build files: everything outside hull's crates"
 owns = ["crates/gear-app/", "crates/gear-store/", "crates/gear-cli/", "crates/gear-herdr/", "crates/gear-board/", "crates/gear-forge/", "skills/", "Makefile", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml", "Cargo.lock"]
+charter = """You run on a flash model. Implement the packet exactly as written, in the files it names; never design, widen or reinterpret it. When the packet is unclear, contradicts the code, or cannot be done as written, ask the captain with `gear send --kind question` and give a default, instead of guessing."""
 kind = "pi"
 profile = "pi"
 models = [
@@ -45,6 +47,7 @@ models = [
 unattended_args = ["--approve"]
 
 [temps]                  # reviewers: Claude Code on Claude Sonnet 5.5, no fallback (user, 2026-11-01)
+charter = """You run on a strong model. Judge one candidate against its contract and the voyage's bar (DELIVERABLE): an error in normal use blocks it, an edge case outside normal use is logged, a style preference is neither. Check what the contract asks, in the files it names, and run only the acceptance it names."""
 kind = "claude"
 profile = "claude"
 
