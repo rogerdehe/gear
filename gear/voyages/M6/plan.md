@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1084 -->
+<!-- gear-plan project=gear base=1085 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -577,4 +577,4 @@ estimate: 25
 goal: [S5] Release v0.6.9. Change, no other design: (1) the version is 0.6.9 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.9.md, in the form of docs/releases/v0.6.8.md: one line per task merged on origin/dev since v0.6.8 at the hand-in.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.9"; docs/releases/v0.6.9.md lists every task merged since v0.6.8. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
 deps: T-524, T-525
-estimate: 15
+estimate: 25
