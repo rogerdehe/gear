@@ -79,7 +79,7 @@ pub fn start_reviews_with_tips(
     let Some(row) = store.read(|tx| tx.get_project(project))? else {
         return Ok(report);
     };
-    let config = match gear_app::config::parse_cached(project, &row.config_toml) {
+    let config = match gear_app::config::parse_row(&row) {
         Ok(config) => config,
         // A config that does not parse: the project is parked elsewhere and
         // no reviewer is started for it.
@@ -3055,7 +3055,7 @@ pub(crate) fn job_for_seat(
     let Some(row) = store.read(|tx| tx.get_project(project))? else {
         return Ok(None);
     };
-    let Ok(config) = gear_app::config::parse_cached(project, &row.config_toml) else {
+    let Ok(config) = gear_app::config::parse_row(&row) else {
         return Ok(None);
     };
     let Some(attempt) = store

@@ -31,7 +31,7 @@ pub fn observation_lost(tx: &Tx<'_>, project: &str) -> GearResult<()> {
 pub fn check(tx: &Tx<'_>, project: &str, observed: &[SeatObs], now: Ts) -> GearResult<Vec<String>> {
     let config = tx
         .get_project(project)?
-        .and_then(|p| gear_app::config::parse_cached(project, &p.config_toml).ok());
+        .and_then(|p| gear_app::config::parse_row(&p).ok());
     let threshold = i64::from(
         config
             .map(|c| c.timing.lane_busy_idle_min)

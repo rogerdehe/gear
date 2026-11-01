@@ -309,7 +309,7 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
         let Some(row) = tx.get_project(project)? else {
             return Ok(Vec::new());
         };
-        let Ok(config) = gear_app::config::parse_cached(project, &row.config_toml) else {
+        let Ok(config) = gear_app::config::parse_row(&row) else {
             return Ok(Vec::new());
         };
         let tasks = tx.tasks_of_project(project)?;
@@ -337,7 +337,9 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
             .filter(|other| other != project)
             .filter_map(|other| {
                 let row = tx.get_project(&other).ok().flatten()?;
-                let config = gear_app::config::parse_cached(project, &row.config_toml).ok()?;
+                // The row keys its own entry (T-518): reading it under this
+                // project's name would overwrite this project's config.
+                let config = gear_app::config::parse_row(&row).ok()?;
                 Some((other, config))
             })
             .collect();

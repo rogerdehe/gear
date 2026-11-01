@@ -182,7 +182,7 @@ impl Limits {
 /// does not parse.
 fn limits_of(store: &mut Store, project: &str) -> Limits {
     match store.read(|tx| tx.get_project(project)) {
-        Ok(Some(row)) => match gear_app::config::parse_cached(project, &row.config_toml) {
+        Ok(Some(row)) => match gear_app::config::parse_row(&row) {
             Ok(config) => Limits::of(&config.health),
             Err(_) => Limits::default(),
         },
@@ -198,7 +198,7 @@ fn volumes_of(store: &mut Store, cfg: &crate::EngineCfg, project: &str) -> Vec<S
         volumes.push(dir.to_string_lossy().into_owned());
     }
     if let Ok(Some(row)) = store.read(|tx| tx.get_project(project)) {
-        if let Ok(config) = gear_app::config::parse_cached(project, &row.config_toml) {
+        if let Ok(config) = gear_app::config::parse_row(&row) {
             for repo in config.repos() {
                 volumes.push(repo.path.clone());
             }

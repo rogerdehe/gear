@@ -7,7 +7,7 @@ use gear_store::{MessageRow, Store, Tx};
 
 pub(crate) fn period(tx: &Tx<'_>, project: &str) -> GearResult<i64> {
     let config = match tx.get_project(project)? {
-        Some(row) => gear_app::config::parse_cached(project, &row.config_toml).ok(),
+        Some(row) => gear_app::config::parse_row(&row).ok(),
         None => None,
     };
     Ok(i64::from(

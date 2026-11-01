@@ -1264,6 +1264,14 @@ pub fn parse_cached(project: &str, text: &str) -> GearResult<ProjectConfig> {
     cache().parse(project, text).map(|config| (*config).clone())
 }
 
+/// `parse_cached` for a project row read from the store (T-518): the key is
+/// the row's own project and the text is the row's own config, so a reader that
+/// loops over several projects cannot file a config under another project's
+/// name.
+pub fn parse_row(row: &gear_store::ProjectRow) -> GearResult<ProjectConfig> {
+    parse_cached(&row.id, &row.config_toml)
+}
+
 /// The config a project is registered with: the text the store holds for its
 /// **latest** config version, parsed. A project that is not registered →
 /// `NoTarget`; stored text that does not parse → `BadFormat`.
@@ -2622,5 +2630,45 @@ mod tests {
         assert_eq!(cache.len(), 2, "nothing was kept for the broken text");
         assert!(cache.parse("r", "not a config").is_err());
         assert_eq!(cache.parses(), 3, "a failed parse is not a cached value");
+    }
+
+    /// T-518: a reader that loops over several projects keys each config by the
+    /// row's own project (`parse_row`), so one project's text never replaces
+    /// another's entry — the direction check of the first attempt found the
+    /// loop caching the other project's config under this project's name.
+    #[test]
+    fn a_row_is_cached_under_its_own_project() {
+        let text = |id: &str, lanes: u32| {
+            format!(
+                "\n[project]\nid = \"{id}\"\nherdr_session = \"sess\"\nrepo = \"/repo\"\n\n[quota]\nlanes = {lanes}\ntemps = 0\n\n[captain]\npane = \"w1:p1\"\nkind = \"claude\"\nprofile = \"claude\"\n"
+            )
+        };
+        let row = |id: &str, lanes: u32| gear_store::ProjectRow {
+            id: id.to_string(),
+            herdr_session: "sess".into(),
+            config_toml: text(id, lanes),
+            config_version: 1,
+            quota_lanes: 1,
+            quota_temps: 0,
+            quota_includes_captain: false,
+            plan_version: 0,
+            created: 0,
+        };
+
+        // What the engine's loop does: each row is parsed and cached by its own
+        // project, so both entries survive and each keeps its own value.
+        let mut cache = ConfigCache::default();
+        let first = cache
+            .parse(&row("p", 1).id, &row("p", 1).config_toml)
+            .unwrap();
+        let other = row("q", 4);
+        let second = cache.parse(&other.id, &other.config_toml).unwrap();
+        assert_eq!(cache.len(), 2, "one entry per project");
+        assert_eq!(first.quota.lanes, 1);
+        assert_eq!(second.quota.lanes, 4);
+        // The first project's text is still the one it was cached with.
+        let again = cache.parse("p", &row("p", 1).config_toml).unwrap();
+        assert_eq!(again.quota.lanes, 1);
+        assert_eq!(cache.parses(), 2, "no re-parse: both entries were kept");
     }
 }
