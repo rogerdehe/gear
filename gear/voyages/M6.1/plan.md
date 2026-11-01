@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1120 -->
+<!-- gear-plan project=gear base=1121 -->
 # Goal
 Fix the bugs the user reports while the projects that use GEAR run on it, and get each fix into their hands at once: every batch ships as a v0.6.x release that the shared engines, the CLI and the installed skill copies run, and each project's captain is told. M6.1 is planned as it goes: its first bugs are below, and each further bug the user reports becomes tasks here. It lands on the user's word.
 
@@ -42,6 +42,7 @@ depart: now
 - 2026-11-01 06:35 scope: the landing item M-7600 rang the captain every few minutes while it waited for the user's word, and the user saw each ring (M7 backlog since M5.3: "nothing the captain could do answered it"). `gear reply --wait <who> --until <t>` parks an item quietly until its time, but mail.rs refuses every reply mode except --note on a station item. Allow --wait on station items too; `station <id>: land` still closes it. Then v0.6.13 | why: done clause (2): a bug the user sees now; both lanes idle | else: M7
 - station M-7601: keep course 147 min in; T-542 (station items can wait for the user) on mast, then the release T-543
 - station M-7608: keep course 156 min in; 12 done, T-543 left; M-7600 stays open for the user's landing word and is parked with --wait once T-542 ships
+- 2026-11-01 06:50 hand-recovery: the gear binary rebuilt from dev at T-542's merge (fa39b46b) before the v0.6.13 release, so the landing item M-7600 could be parked (`gear reply --wait user --until +12h`) and stop ringing; the engines still run 0.6.12 until the release restarts them | why: the user saw every ring | else: let it ring until T-543 merges
 
 # Queue
 
