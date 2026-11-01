@@ -59,3 +59,5 @@ Reviewed: <branch> @ <short sha>   Reviewer: <agent name> (<model>)   Round: 1 |
 Do not report the Result's `Branch:` sha naming the code commit rather than the hand-in tip, or the absence of diff counts — that is the format (the voyage's CONVENTIONS.md, lesson L-32).
 
 A `fail` becomes the writer's rework: write each finding so the writer can act on it without asking.
+
+Search the code with `git grep` (tracked files only), never `grep -r` over the worktree: `target/` holds gigabytes of build output, and one such grep held a review for 21 minutes.
