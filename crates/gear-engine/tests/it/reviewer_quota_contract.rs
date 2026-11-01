@@ -138,6 +138,9 @@ fn world(on_quota_review: &str) -> (Store, SeatRow) {
             task.state = TaskState::Verifying;
             tx.update_task(&task)?;
             let seat = testing::seed_temp_seat(tx, "p", "r-1", "T-7", REVIEW_PANE, "codex", T0)?;
+            // T-531: the restart onto OpenCode makes the reviewer's service
+            // session in its worktree; the path is what it needs for that.
+            tx.set_meta("engine.worktree_path.p:r-1", "/fake-worktrees/p-review-1")?;
             // The packet it was given, delivered.
             let op = tx.insert_op(&gear_store::NewOp {
                 project: "p".into(),
@@ -300,6 +303,14 @@ fn a_spent_codex_reviewer_is_restarted_on_the_review_fallback() {
     // The agent leaves: OpenCode starts in the same pane on the fallback model
     // and the reviewer gets its packet again.
     herdr.exit_agent(REVIEW_PANE);
+    // T-531: the start makes the session and the model gate reads it; the bar
+    // confirms, so no key is typed.
+    herdr.api_replies.extend([
+        Ok(serde_json::json!({"data":[{"providerID":"opencode-go", "id":"deepseek-v4-pro", "variants":[]}]})),
+        Ok(serde_json::json!({"data":{"id":"ses_review", "model":{"providerID":"opencode-go", "id":"deepseek-v4-pro"}}})),
+        Ok(serde_json::json!({"data":[{"providerID":"opencode-go", "id":"deepseek-v4-pro", "variants":[]}]})),
+        Ok(serde_json::json!({"data":{"model":{"providerID":"opencode-go", "id":"deepseek-v4-pro"}}})),
+    ]);
     let report = tick(&mut store, &mut herdr, false, T0 + 30);
 
     let started = starts(&herdr);
@@ -308,8 +319,12 @@ fn a_spent_codex_reviewer_is_restarted_on_the_review_fallback() {
     assert_eq!(started[0].1, REVIEW_PANE, "the same pane");
     assert_eq!(
         started[0].2,
-        vec!["--auto".to_string()],
-        "the model is carried in the environment, not as a flag: {started:?}"
+        vec![
+            "--auto".to_string(),
+            "--session".to_string(),
+            "ses_review".to_string()
+        ],
+        "the model is carried in the environment, and the session is the one the switch uses: {started:?}"
     );
 
     let seat = reviewer(&mut store);
