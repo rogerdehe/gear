@@ -1663,7 +1663,12 @@ pub fn reply(
                         format!("message {id} is {}, it cannot be handled again", message.state.as_str()),
                     ));
                 }
-                if crate::station::is_station(&message) && args.mode != ReplyMode::Note {
+                // A station item is settled by a plan `# Decisions` line, not
+                // by a resolve; a note is bookkeeping, and a wait (T-542) asks
+                // the captain's inbox to leave it quiet until its time.
+                if crate::station::is_station(&message)
+                    && !matches!(args.mode, ReplyMode::Note | ReplyMode::Wait)
+                {
                     return Err(GearError::new(ErrorCode::BadFormat, format!(
                         "station {} needs a plan # Decisions line: station {}: keep course|time-box|cut|move",
                         message.id, message.id,
