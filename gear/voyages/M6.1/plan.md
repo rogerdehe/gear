@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1109 -->
+<!-- gear-plan project=gear base=1110 -->
 # Goal
 Fix the bugs the user reports while the projects that use GEAR run on it, and get each fix into their hands at once: every batch ships as a v0.6.x release that the shared engines, the CLI and the installed skill copies run, and each project's captain is told. M6.1 is planned as it goes: its first bugs are below, and each further bug the user reports becomes tasks here. It lands on the user's word.
 
@@ -25,6 +25,7 @@ depart: now
 - 2026-11-01 05:00 config: charters written for both roles (lanes on the flash model implement the packet exactly and ask instead of guessing; reviewers on Sonnet judge against the contract and the DELIVERABLE bar); the kickoff left them out | why: user: role charters follow the model, a decision of M6 (station S2) the captain skipped at this kickoff | else: -
 - 2026-11-01 05:00 scope: the role-charter design reaches the user and the captain's packets: the departure sheet shows the proposed charter per role, and the kickoff line on charters says what the model means for the captain's packets (a flash lane gets files, functions and steps; a strong lane gets the goal, boundaries and acceptance) | why: user: the charter is a recommendation to the user by model; M6 built the mechanism but the sheet never shows it and the skill does not tie it to the packets | else: the landing's skill review
 - station M-7548: keep course 40 min in; T-533, T-536 and T-537 accepted, T-538 in review, T-539 on mast; hull on T-531 (its question M-7545 answered: an OpenCode reviewer starts with a service session, review.rs), then T-535 and T-532; the release T-534 waits on all seven
+- 2026-11-01 05:35 move: T-532 (merge.rs only) from hull to mast as an allowed edit, moved for balance (M5.1's T-434 precedent) | why: mast is idle (M-7552) while hull holds T-531, T-535 and T-532; T-532 shares no file with them | else: mast idle until the release
 
 # Queue
 
@@ -38,8 +39,8 @@ goal: [v0.6.12] A delivery still sitting in a lane's input box is never confirme
 accept: Tests in crates/gear-engine/src/ops.rs `mod tests` with FakeHerdr: an idle-to-working turn after the submit does not confirm a delivery whose text the pane tail still shows, and does confirm it once the tail no longer shows it; a delivery still in the box gets a second Enter after `UNSENT_RESUBMIT_AFTER_S` and a third after another, never a fourth; a stored bare-time resubmit value counts as one Enter; the existing delivery tests pass. Run only `make check CRATE=gear-engine TESTS='<a nextest filter: ops tests>'`; the merge gate runs `make gate`.
 estimate: 45
 
-## T-532 [now] lane=hull milestone=M6.1 required
-goal: [v0.6.12] A remerge carries the captain's conflict fix on the review branch (decision 03:55). Change crates/gear-engine/src/merge.rs only, no other design: in the merge step that builds `pinned_refs` (step 6), when the op's payload has `"remerge": true`, the review ref `<remote>/<review>` exists, the attempt is not mechanical, and `git merge-base --is-ancestor <candidate sha> <review ref>` succeeds, resolve the review ref to its sha once and merge only that sha (the candidate is inside it); the merge commit's `source` names the review ref as today. In every other case `pinned_refs` is built as today. Steps 7 to 9 (markers, gate, push, closing the branches) stay as they are.
+## T-532 [now] lane=mast milestone=M6.1 required
+goal: [v0.6.12] A remerge carries the captain's conflict fix on the review branch (decision 03:55). Change crates/gear-engine/src/merge.rs only (an allowed edit for mast, moved from hull for balance), no other design: in the merge step that builds `pinned_refs` (step 6), when the op's payload has `"remerge": true`, the review ref `<remote>/<review>` exists, the attempt is not mechanical, and `git merge-base --is-ancestor <candidate sha> <review ref>` succeeds, resolve the review ref to its sha once and merge only that sha (the candidate is inside it); the merge commit's `source` names the review ref as today. In every other case `pinned_refs` is built as today. Steps 7 to 9 (markers, gate, push, closing the branches) stay as they are.
 accept: Tests in crates/gear-engine/src/merge.rs `mod tests`, with the Scratch repos the conflict tests use: (1) a candidate that conflicts with dev, whose review branch merged dev and resolved the conflict: a remerge op merges, the gate runs, dev holds both the candidate and the resolution, and the op is confirmed; (2) the same repos with a first merge op (no `remerge`) still fails with "conflict merging <candidate>"; (3) a remerge whose review branch does not contain the candidate merges the candidate, then the review branch, as today. Run only `make check CRATE=gear-engine TESTS='<a nextest filter: merge tests>'`; the merge gate runs `make gate`.
 estimate: 40
 
