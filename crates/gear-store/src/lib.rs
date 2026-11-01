@@ -2195,6 +2195,32 @@ impl<'s> Tx<'s> {
         Ok(tasks)
     }
 
+    /// The project's tasks whose work is merged (T-529): Done and holding an
+    /// attempt whose merge landed. A dependency counts only when its work is
+    /// merged (T-236), and the dispatch step used to read every done task's
+    /// attempts (`merged_at`, `attempt_times_of_task`) on every tick. The
+    /// attempts' primary key (project, task) serves the join; a landed voyage's
+    /// tasks stay readable this way even though they are no live work.
+    pub fn merged_done_tasks(&self, project: &str) -> GearResult<Vec<String>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(
+                "SELECT DISTINCT t.id FROM tasks t
+                   JOIN attempts a ON a.project=t.project AND a.task=t.id
+                  WHERE t.project=?1 AND t.state='done' AND a.merged_at IS NOT NULL
+                  ORDER BY t.id",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], |row| row.get::<_, String>(0))
+            .map_err(map_sqlite)?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row.map_err(map_sqlite)?);
+        }
+        Ok(tasks)
+    }
+
     /// Replace every column of an existing task (raw write, no transition
     /// check — callers use `require_transition`). Missing → NoTarget.
     pub fn update_task(&self, row: &TaskRow) -> GearResult<()> {
@@ -3298,6 +3324,32 @@ impl<'s> Tx<'s> {
             .tx
             .prepare_cached(&round_select(
                 " WHERE project=?1 AND end_at IS NULL ORDER BY start_at, task, role",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], round_from_row)
+            .map_err(map_sqlite)?;
+        let mut rounds = Vec::new();
+        for row in rows {
+            rounds.push(row.map_err(map_sqlite)?);
+        }
+        Ok(rounds)
+    }
+
+    /// The closed rounds whose attempt is still in progress (T-529): the ones a
+    /// parked attempt reopens. The rounds bookkeeping used to read every round
+    /// of the project to find them; a closed round with no open attempt (the
+    /// overwhelming majority, a project's whole history) never comes back.
+    pub fn closed_rounds_with_open_attempt(&self, project: &str) -> GearResult<Vec<RoundRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(&round_select(
+                " WHERE project=?1 AND end_at IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM attempts a
+                                 WHERE a.project=rounds.project AND a.task=rounds.task
+                                   AND a.n=rounds.attempt
+                                   AND a.state IN ('delivered', 'started', 'stopped', 'unknown'))
+                  ORDER BY start_at, task, role",
             ))
             .map_err(map_sqlite)?;
         let rows = stmt

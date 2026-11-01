@@ -105,10 +105,9 @@ pub fn tick(
                     live.push(round);
                 }
             }
-            for round in &tx.open_rounds_of_project(&project)? {
-                if !attempt_in_progress(tx, round)? {
-                    continue;
-                }
+            // T-529: the closed rounds whose attempt is still going — the ones
+            // a parked attempt reopens — instead of every round the project ran.
+            for round in &tx.closed_rounds_with_open_attempt(&project)? {
                 // T-515 (F1 of the review of attempt 1): a direction round is
                 // never a parked attempt to resume. A check whose result is in
                 // ends in step 1a and stays closed; reopening it would ring the
