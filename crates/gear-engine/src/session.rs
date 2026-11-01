@@ -988,6 +988,86 @@ mod tests {
         );
     }
 
+    /// Another project's T-417 packet waited forever behind a pending
+    /// compaction because the same lane held T-435 in a declared wait.
+    #[test]
+    fn a_wait_on_another_task_does_not_hold_the_delivery_compaction() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        store
+            .write(|tx| {
+                let mut waiting = tx.get_task("p", "T-1")?.unwrap();
+                waiting.id = "T-2".into();
+                waiting.rank = 2;
+                waiting.state = gear_model::TaskState::Running;
+                waiting.wait_on = Some("T-9".into());
+                tx.insert_task(&waiting)?;
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    project: "p".into(),
+                    task: "T-2".into(),
+                    n: 1,
+                    seat: seat.id.clone(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: gear_model::AttemptState::Started,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                })?;
+                assert!(crate::waits::waiting_seat(tx, &seat.id)?);
+                tx.set_meta(&crate::quiet::compact_key(&seat.id), "pending")?;
+                tx.insert_op(&gear_store::NewOp {
+                    project: "p".into(),
+                    seat: seat.id.clone(),
+                    generation: 1,
+                    kind: gear_model::OpKind::Deliver,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({"text":"packet"}),
+                    created: T0,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        // T-1's own wait holds its packet: nothing is typed.
+        store
+            .write(|tx| {
+                let mut own = tx.get_task("p", "T-1")?.unwrap();
+                own.wait_on = Some("T-9".into());
+                tx.update_task(&own)
+            })
+            .unwrap();
+        crate::quiet::prepare_pending_deliveries(&mut store, &mut herdr, &cfg(), "p", T0 + 1)
+            .unwrap();
+        assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
+        // T-2's wait does not: T-1's session step and compaction go ahead.
+        store
+            .write(|tx| {
+                let mut own = tx.get_task("p", "T-1")?.unwrap();
+                own.wait_on = None;
+                tx.update_task(&own)
+            })
+            .unwrap();
+        crate::quiet::prepare_pending_deliveries(&mut store, &mut herdr, &cfg(), "p", T0 + 2)
+            .unwrap();
+        assert!(
+            !herdr.calls.is_empty(),
+            "the packet of T-1 is not held by T-2's wait"
+        );
+    }
+
     #[test]
     fn completed_step_resumes_the_round_after_an_idle_replacement() {
         let mut store = world();

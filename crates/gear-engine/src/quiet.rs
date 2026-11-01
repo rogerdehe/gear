@@ -574,17 +574,15 @@ pub fn prepare_pending_deliveries(
             else {
                 continue;
             };
+            // Only the delivery's own task in a declared wait holds it: a
+            // seat waiting on one task still takes the next task it was given.
             let active = tx
                 .get_attempt(project, &task, attempt)?
                 .is_some_and(|a| !a.state.is_terminal())
                 && tx
                     .get_task(project, &task)?
-                    .is_some_and(|t| !t.state.is_terminal());
-            if active
-                && seat.generation == op.generation
-                && seat.role == SeatRole::Lane
-                && !crate::waits::waiting_seat(tx, &seat.id)?
-            {
+                    .is_some_and(|t| !t.state.is_terminal() && t.wait_on.is_none());
+            if active && seat.generation == op.generation && seat.role == SeatRole::Lane {
                 work.push((seat, task, attempt));
             }
         }
