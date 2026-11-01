@@ -2931,38 +2931,29 @@ quota_reset_h = {reset_h}
         let mut herdr = FakeHerdr::new();
         herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
         herdr.set_screen(PANE, QUOTA_SCREEN);
-        // The screens one switch produces: the toast cleared, the picker, the
-        // bar.
-        herdr.screen_after = vec![
-            ("esc".into(), "  Ask anything…".into()),
-            (
-                "/model".into(),
-                "  Search\n  Recent\n  DeepSeek V4.1 Flash  OpenCode Go".into(),
-            ),
-            (
-                "DeepSeek V4.1 Flash".into(),
-                "Build auto · DeepSeek V4.1 Flash · high".into(),
-            ),
-        ];
+        // T-531: the switch is the session API's — the service answers the
+        // catalogue, the session and the accepted switch; no key is typed.
+        queue_switch(&mut herdr, "deepseek", "deepseek-flash");
 
         // Tick 1: one quota screen is not enough (`confirm_rounds` is 2).
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
-        assert!(texts(&herdr).is_empty(), "nothing typed on the first tick");
-        // Tick 2: the limit is confirmed — the switch starts (esc this tick).
+        assert!(herdr.calls.is_empty(), "nothing asked on the first tick");
+        // Tick 2: the limit is confirmed — the switch asks the service.
         let report = tick_quota(&mut store, &mut herdr, true, T0 + 20);
         assert!(report.events.is_empty(), "{:?}", report.events);
-        assert!(texts(&herdr).is_empty(), "only the escape so far");
+        assert_eq!(switch_requests(&herdr).len(), 1, "{:?}", herdr.calls);
         assert!(
             deliveries(&mut store).is_empty(),
             "no continue before the bar confirms"
         );
 
-        // Ticks 3..6: /model, the filter, then the bar check.
-        for tick in 0..4 {
-            tick_quota(&mut store, &mut herdr, true, T0 + 30 + tick);
-        }
+        // The TUI renders the bar: the next tick confirms and delivers.
+        herdr.set_screen(PANE, "Build auto · DeepSeek V4.1 Flash · high");
+        queue_confirm(&mut herdr, "deepseek", "deepseek-flash");
+        tick_quota(&mut store, &mut herdr, true, T0 + 30);
 
-        // In place: no exit keys (the profile's ctrl+c), no agent start.
+        // In place: no exit keys (the profile's ctrl+c), no agent start, no key
+        // or `/model` text.
         let exit_keys = gear_herdr::builtin("opencode").unwrap().exit_keys;
         let sent: Vec<Vec<String>> = herdr
             .calls
@@ -2981,16 +2972,7 @@ quota_reset_h = {reset_h}
             "no restart: {:?}",
             starts(&herdr)
         );
-        assert!(
-            texts(&herdr).iter().any(|t| t == "/model"),
-            "{:?}",
-            texts(&herdr)
-        );
-        assert!(
-            texts(&herdr).iter().any(|t| t == "DeepSeek V4.1 Flash"),
-            "{:?}",
-            texts(&herdr)
-        );
+        assert_nothing_typed(&herdr);
         // Exactly one Continue, on the new model.
         let delivered = deliveries(&mut store);
         assert_eq!(delivered.len(), 1, "{delivered:?}");
@@ -3003,19 +2985,6 @@ quota_reset_h = {reset_h}
         // More quota ticks add no second Continue.
         tick_quota(&mut store, &mut herdr, true, T0 + 60);
         assert_eq!(deliveries(&mut store).len(), 1, "one continue only");
-    }
-
-    /// The screens one in-place switch produces: the toast cleared, the
-    /// picker, the bar.
-    fn switch_screens(bar: &str) -> Vec<(String, String)> {
-        vec![
-            ("esc".into(), "  Ask anything…".into()),
-            (
-                "/model".into(),
-                format!("  Search\n  Recent\n  {bar}  OpenCode Go"),
-            ),
-            (bar.into(), format!("Build auto · {bar} · high")),
-        ]
     }
 
     /// The model the lane runs on now, from its meta.
@@ -3043,14 +3012,17 @@ quota_reset_h = {reset_h}
         }
         let mut store = world(&text);
         let mut herdr = herdr_with_quota();
-        herdr.screen_after = switch_screens("DeepSeek V4.1 Flash");
+        // T-531: the switch is the session API's; no key is typed.
+        queue_switch(&mut herdr, "deepseek", "deepseek-flash");
 
-        // The fallback: the limit is confirmed and the switch takes its ticks.
+        // The fallback: the limit is confirmed and the switch asks the service.
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        for tick in 0..4 {
-            tick_quota(&mut store, &mut herdr, true, T0 + 30 + tick);
-        }
+        // The TUI renders the bar: the next tick confirms the switch.
+        herdr.set_screen(PANE, "Build auto · DeepSeek V4.1 Flash · high");
+        queue_confirm(&mut herdr, "deepseek", "deepseek-flash");
+        tick_quota(&mut store, &mut herdr, true, T0 + 30);
+        assert_nothing_typed(&herdr);
         assert_eq!(
             lane_model(&mut store).as_deref(),
             Some("deepseek/deepseek-flash")
@@ -3086,7 +3058,7 @@ quota_reset_h = {reset_h}
                 )
             })
             .unwrap();
-        herdr.screen_after = switch_screens("MiniMax M3.1 Flash");
+        queue_switch(&mut herdr, "minimax-cn", "MiniMax-M3.1-Flash");
         let report = tick_quota(&mut store, &mut herdr, false, T0 + 5 * 3600 + 31);
         assert!(
             report.events.iter().any(|line| {
@@ -3095,9 +3067,10 @@ quota_reset_h = {reset_h}
             "{:?}",
             report.events
         );
-        for tick in 0..4 {
-            tick_quota(&mut store, &mut herdr, false, T0 + 5 * 3600 + 40 + tick);
-        }
+        herdr.set_screen(PANE, "Build auto · MiniMax M3.1 Flash · high");
+        queue_confirm(&mut herdr, "minimax-cn", "MiniMax-M3.1-Flash");
+        tick_quota(&mut store, &mut herdr, false, T0 + 5 * 3600 + 40);
+        assert_nothing_typed(&herdr);
         assert_eq!(
             lane_model(&mut store).as_deref(),
             Some("minimax-cn/MiniMax-M3.1-Flash")
@@ -3242,14 +3215,16 @@ quota_reset_h = {reset_h}
         }
         let mut store = world(&text);
         let mut herdr = herdr_with_quota();
-        herdr.screen_after = switch_screens("MiniMax M3.1 Flash");
+        // T-531: the switch is the session API's; no key is typed.
+        queue_switch(&mut herdr, "minimax-cn", "MiniMax-M3.1-Flash");
 
         // No source yet: the fallback happens on the policy.
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        for tick in 0..4 {
-            tick_quota(&mut store, &mut herdr, true, T0 + 30 + tick);
-        }
+        // The TUI renders the bar: the next tick confirms the switch.
+        herdr.set_screen(PANE, "Build auto · MiniMax M3.1 Flash · high");
+        queue_confirm(&mut herdr, "minimax-cn", "MiniMax-M3.1-Flash");
+        tick_quota(&mut store, &mut herdr, true, T0 + 30);
         assert_eq!(
             lane_model(&mut store).as_deref(),
             Some("minimax-cn/MiniMax-M3.1-Flash")
@@ -3296,7 +3271,7 @@ quota_reset_h = {reset_h}
 
         // The window is free: the return happens.
         api.spent.set(false);
-        herdr.screen_after = switch_screens("GPT-5 Codex");
+        queue_switch(&mut herdr, "codex", "gpt-5");
         let report = tick_quota_api(&mut store, &mut herdr, &api, false, boundary + 661);
         assert!(
             report
@@ -3306,9 +3281,10 @@ quota_reset_h = {reset_h}
             "{:?}",
             report.events
         );
-        for tick in 0..4 {
-            tick_quota_api(&mut store, &mut herdr, &api, false, boundary + 670 + tick);
-        }
+        herdr.set_screen(PANE, "Build auto · GPT-5 Codex · high");
+        queue_confirm(&mut herdr, "codex", "gpt-5");
+        tick_quota_api(&mut store, &mut herdr, &api, false, boundary + 670);
+        assert_nothing_typed(&herdr);
         assert_eq!(lane_model(&mut store).as_deref(), Some("codex/gpt-5"));
     }
 
@@ -3350,22 +3326,16 @@ quota_reset_h = {reset_h}
         let mut herdr = FakeHerdr::new();
         herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
         herdr.set_screen(PANE, QUOTA_SCREEN);
-        herdr.screen_after = vec![
-            ("esc".into(), "  Ask anything…".into()),
-            (
-                "/model".into(),
-                "  Search\n  Recent\n  DeepSeek V4.1 Flash  OpenCode Go".into(),
-            ),
-            (
-                "DeepSeek V4.1 Flash".into(),
-                "Build auto · DeepSeek V4.1 Flash · high".into(),
-            ),
-        ];
+        // T-531: the switch is the session API's; no key is typed.
+        queue_switch(&mut herdr, "deepseek", "deepseek-flash");
 
-        // Two quota ticks start the switch; the rest confirm it.
-        for tick in 0..6 {
-            tick_quota(&mut store, &mut herdr, true, T0 + 10 + tick);
-        }
+        // Two quota ticks start the switch; the bar confirms it after.
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 11);
+        herdr.set_screen(PANE, "Build auto · DeepSeek V4.1 Flash · high");
+        queue_confirm(&mut herdr, "deepseek", "deepseek-flash");
+        tick_quota(&mut store, &mut herdr, true, T0 + 12);
+        assert_nothing_typed(&herdr);
 
         let retired = store.read(|tx| tx.get_op("p", &op)).unwrap().unwrap();
         assert_eq!(retired.state, OpState::Failed, "{retired:?}");
@@ -3698,6 +3668,23 @@ quota_reset_h = {reset_h}
         tick_quota(&mut store, &mut herdr, false, reset);
         herdr.exit_agent(PANE);
         herdr.start_screen = Some("Build auto · wrong-model · high".into());
+        // The restart starts OpenCode through the service: its session is made
+        // before the TUI, so the model gate has one to switch (T-531).
+        store
+            .write(|tx| tx.set_meta(&crate::onboard::worktree_path_key("p:heat"), "/wt/heat"))
+            .unwrap();
+        // T-531: the start's catalogue and session, then the model gate's
+        // catalogue and session (the switch needs a session binding), then the
+        // onboarding tick that continues the same plan.
+        let session = serde_json::json!({"data":{"id":"ses_reset", "model":{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash"}}});
+        herdr.api_replies.extend([
+            Ok(catalogue("minimax-cn", "MiniMax-M3.1-Flash")),
+            Ok(session),
+            Ok(catalogue("minimax-cn", "MiniMax-M3.1-Flash")),
+            Ok(session_on("minimax-cn", "MiniMax-M3.1-Flash")),
+            Ok(catalogue("minimax-cn", "MiniMax-M3.1-Flash")),
+            Ok(session_on("minimax-cn", "MiniMax-M3.1-Flash")),
+        ]);
         tick_quota(&mut store, &mut herdr, false, reset + 10);
         assert_eq!(agent_starts(&herdr).last().unwrap().0, "opencode");
         assert!(
@@ -3711,7 +3698,16 @@ quota_reset_h = {reset_h}
                 .is_empty()
         );
         herdr.set_screen(PANE, "Build auto · MiniMax-M3.1-Flash MiniMax · high");
+        // T-531: the gate reads the catalogue and the session; no key.
+        queue_confirm(&mut herdr, "minimax-cn", "MiniMax-M3.1-Flash");
         tick_quota(&mut store, &mut herdr, false, reset + 20);
+        // T-531: the model gate types nothing; only the restart's exit key.
+        assert_no_model_text(&herdr);
+        assert!(
+            texts(&herdr).is_empty(),
+            "no model text typed: {:?}",
+            texts(&herdr)
+        );
         assert_eq!(lane_seat(&mut store).state, SeatState::Active);
         assert_eq!(lane_seat(&mut store).generation, 3);
         assert_eq!(
@@ -3738,22 +3734,16 @@ quota_reset_h = {reset_h}
         let mut herdr = FakeHerdr::new();
         herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
         herdr.set_screen(PANE, QUOTA_SCREEN);
-        herdr.screen_after = vec![
-            ("esc".into(), "  Ask anything…".into()),
-            (
-                "/model".into(),
-                "  Search\n  Recent\n  DeepSeek V4.1 Flash  OpenCode Go".into(),
-            ),
-            (
-                "DeepSeek V4.1 Flash".into(),
-                "Build auto · DeepSeek V4.1 Flash · high".into(),
-            ),
-        ];
+        // T-531: the switch is the session API's; no key is typed.
+        queue_switch(&mut herdr, "deepseek", "deepseek-flash");
 
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
-        for tick in 0..5 {
-            tick_quota(&mut store, &mut herdr, true, T0 + 20 + tick);
-        }
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        // The TUI renders the bar: the next tick confirms the switch.
+        herdr.set_screen(PANE, "Build auto · DeepSeek V4.1 Flash · high");
+        queue_confirm(&mut herdr, "deepseek", "deepseek-flash");
+        tick_quota(&mut store, &mut herdr, true, T0 + 21);
+        assert_nothing_typed(&herdr);
 
         assert!(
             agent_starts(&herdr).is_empty(),
@@ -3784,35 +3774,26 @@ quota_reset_h = {reset_h}
         let mut herdr = FakeHerdr::new();
         herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
         herdr.set_screen(PANE, QUOTA_SCREEN);
-        herdr.screen_after = vec![
-            ("esc".into(), "  Ask anything…".into()),
-            (
-                "/model".into(),
-                "  Search\n  Recent\n  DeepSeek V4.1 Flash  OpenCode Go".into(),
-            ),
-            (
-                "DeepSeek V4.1 Flash".into(),
-                "Build auto · DeepSeek V4.1 Flash · high".into(),
-            ),
-        ];
+        // T-531: the switch is the session API's; no key is typed.
+        queue_switch(&mut herdr, "deepseek", "deepseek-flash");
 
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
         assert!(crate::switch::pending(&mut store, "p:heat")
             .unwrap()
             .is_some());
+        assert_eq!(switch_requests(&herdr).len(), 1, "{:?}", herdr.calls);
 
         // The marker is gone from the screen from now on: the switch goes on.
-        for tick in 0..4 {
+        herdr.set_screen(PANE, "Build auto · DeepSeek V4.1 Flash · high");
+        queue_confirm(&mut herdr, "deepseek", "deepseek-flash");
+        for tick in 0..2 {
             tick_quota(&mut store, &mut herdr, false, T0 + 30 + tick);
         }
 
-        let sent = texts(&herdr);
-        assert_eq!(
-            sent.iter().filter(|t| *t == "/model").count(),
-            1,
-            "typed once: {sent:?}"
-        );
+        // T-531: one API switch, and no `/model` or `/models` in the pane.
+        assert_eq!(switch_requests(&herdr).len(), 1, "{:?}", herdr.calls);
+        assert_nothing_typed(&herdr);
         assert_eq!(deliveries(&mut store).len(), 1, "one Continue");
         assert_eq!(
             meta_get(&mut store, &meta_key("model", "p:heat"))
@@ -4038,25 +4019,17 @@ quota_reset_h = {reset_h}
         let mut herdr = FakeHerdr::new();
         herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
         herdr.set_screen(PANE, QUOTA_SCREEN);
-        herdr.screen_after = vec![
-            ("esc".into(), "  Ask anything…".into()),
-            (
-                "/model".into(),
-                "  Search\n  Recent\n  DeepSeek V4.1 Flash  OpenCode Go".into(),
-            ),
-            (
-                "DeepSeek V4.1 Flash".into(),
-                "Build auto · DeepSeek V4.1 Flash · high".into(),
-            ),
-        ];
+        // T-531: the switch is the session API's; no key is typed.
+        queue_switch(&mut herdr, "deepseek", "deepseek-flash");
 
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         let report = tick_quota(&mut store, &mut herdr, true, T0 + 20);
         assert!(report.events.is_empty(), "{:?}", report.events);
-        // Ticks 3..6: /model, the filter, then the bar check.
-        for tick in 0..4 {
-            tick_quota(&mut store, &mut herdr, true, T0 + 30 + tick);
-        }
+        // The TUI renders the bar: the next tick confirms the switch.
+        herdr.set_screen(PANE, "Build auto · DeepSeek V4.1 Flash · high");
+        queue_confirm(&mut herdr, "deepseek", "deepseek-flash");
+        tick_quota(&mut store, &mut herdr, true, T0 + 30);
+        assert_nothing_typed(&herdr);
 
         // The switch worked: the lane runs on the new model.
         assert_eq!(deliveries(&mut store).len(), 1, "one Continue");
@@ -4213,8 +4186,10 @@ quota_reset_h = {reset_h}
         assert_eq!(seat.state, SeatState::Parked);
         let calls_before = herdr.calls.len();
 
-        // The provider has reset: the wake-up switches in place.
+        // The provider has reset: the wake-up switches in place (T-531: the
+        // session API's answers, no key).
         herdr.set_screen(PANE, "Build auto · MiniMax-M3.1-Flash MiniMax · high");
+        queue_confirm(&mut herdr, "minimax-cn", "MiniMax-M3.1-Flash");
         let mut events = Vec::new();
         for tick in 0..6 {
             // The screen no longer shows the limit: the wake-up tick.
@@ -4237,6 +4212,7 @@ quota_reset_h = {reset_h}
             SeatState::Active,
             "the lane is back: {events:?}"
         );
+        assert_nothing_typed(&herdr);
     }
 
     /// M-266: a stale limit line on a **working** agent is not a quota turn: it
@@ -4283,6 +4259,82 @@ quota_reset_h = {reset_h}
                 _ => None,
             })
             .collect()
+    }
+
+    /// Everything that reached the pane: typed text and keys alike. T-531: an
+    /// OpenCode switch sends none of it.
+    fn pane_input(herdr: &FakeHerdr) -> Vec<String> {
+        herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::PaneType { text, .. } => Some(text.clone()),
+                Call::SendKeys { keys, .. } => Some(keys.join("+")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// T-531: no `/model`/`/models` text reaches the pane, whatever keys the
+    /// other paths of the tick send (a cross-CLI restart sends `ctrl+c`).
+    fn assert_no_model_text(herdr: &FakeHerdr) {
+        let sent = texts(herdr);
+        assert!(
+            !sent
+                .iter()
+                .any(|text| text.contains("/model") || text.contains("/models")),
+            "the pane got model keys: {sent:?}"
+        );
+    }
+
+    fn assert_nothing_typed(herdr: &FakeHerdr) {
+        let typed = pane_input(herdr);
+        assert!(typed.is_empty(), "the pane got {typed:?}");
+        assert!(
+            !typed
+                .iter()
+                .any(|text| text.contains("/model") || text.contains("/models")),
+            "{typed:?}"
+        );
+    }
+
+    fn switch_requests(herdr: &FakeHerdr) -> Vec<Vec<String>> {
+        herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::OpenCodeApi { args } if args[0] == "session.switchModel" => Some(args.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A `model.list` answer holding exactly one model.
+    fn catalogue(provider: &str, id: &str) -> serde_json::Value {
+        serde_json::json!({"data":[{"providerID":provider, "id":id, "variants":[]}]})
+    }
+
+    /// A `GET /api/session/<id>` answer naming `provider/id`.
+    fn session_on(provider: &str, id: &str) -> serde_json::Value {
+        serde_json::json!({"data":{"model":{"providerID":provider, "id":id}}})
+    }
+
+    /// The service answers of one API switch (T-531): the catalogue, a session
+    /// on another model and the accepted `session.switchModel`.
+    fn queue_switch(herdr: &mut FakeHerdr, provider: &str, id: &str) {
+        herdr.api_replies.extend([
+            Ok(catalogue(provider, id)),
+            Ok(session_on("elsewhere", "another-model")),
+            Ok(serde_json::json!({})),
+        ]);
+    }
+
+    /// The service answers of a tick that only confirms the switch (the bar is
+    /// on the model).
+    fn queue_confirm(herdr: &mut FakeHerdr, provider: &str, id: &str) {
+        herdr
+            .api_replies
+            .extend([Ok(catalogue(provider, id)), Ok(session_on(provider, id))]);
     }
 
     // ------------------------------------------- the quota of the providers (§9.2)
