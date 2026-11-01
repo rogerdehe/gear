@@ -181,3 +181,6 @@ Postponed from M6 (2026-11-01, landing): the items M6 did not close, as M6 recor
 
 ## Installed skill copies go stale with no warning
 - 2026-11-01 M6.1: the skill copies under ~/.codex, ~/.claude, ~/.pi … are written once by `gear admin install-skill` and never updated; another project's captain read a copy from 10-25 through all of M6 while v0.6.6–v0.6.11 shipped, and the release notes' "Upgrading" never named the reinstall. Stamp each copy with the version that wrote it, and have `gear` (or the engine) warn, or rewrite the copies, when the binary is newer.
+
+## A merge waiting on a carried task does not name the way out
+- 2026-11-01 (the other project, O-4959): T-449 integrates T-441's accepted work with repairs, so its candidate carries T-441's candidate. The merge waits for T-441 to land, but T-441 never can, because its own candidate conflicts with dev. The supported exit is to cancel T-441 (a cancelled task's carried work is the carrier's own), but neither the wait item nor the skill says so, and that captain asked. The wait item should name it when the carried task's last merge failed.
