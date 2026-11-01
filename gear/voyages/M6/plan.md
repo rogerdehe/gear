@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1072 -->
+<!-- gear-plan project=gear base=1073 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -161,6 +161,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - 2026-11-01 01:20 scope: T-517's accept drops its wall-clock test and keeps the query-plan check | why: F-293, T-516's 100 ms idle-step test already fails under the gate's parallel load; a second timing test would flake the same way | else: -
 - station M-7410: keep course — T-517 merging, T-518 rework in review, then T-519 v0.6.6, a new measure of clause (4) and the landing; hull, idle, takes the flaky timing tests that already cost T-517 one gate run and can fail the next merges
 - station M-7411: keep course — past eta by 300 min; T-517 and T-518 merging, T-520 on hull, then T-519 v0.6.6, the clause (4) measure and the landing
+- 2026-11-01 02:03 hand-recovery: restarted both engines on dev d4b74c6f+ (T-517, T-518) for the clause (4) measure; my first kill failed on a quoted pid list, and the second came one second after another project's T-407 merge O-4499 had started, so it stopped mid-merge; the new engine took the op back as Unknown and ran it again (executing at 02:03:05Z), nothing lost | why: measure the engine with the indexes and the config cache before the release | else: wait for T-519
 
 # Queue
 
