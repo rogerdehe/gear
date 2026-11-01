@@ -1914,7 +1914,7 @@ lanes = [{{model="{model}", cli="{kind}"}}]
             .write(|tx| {
                 tx.set_meta(
                     &crate::switch::pending_meta_key("p:heat"),
-                    "escape|0|0|other-model",
+                    "api-confirm|0|0|other-model",
                 )
             })
             .unwrap();
@@ -3467,6 +3467,38 @@ bar = "New Provider"
             .collect()
     }
 
+    /// T-531: no `/model`/`/models` text reaches the pane.
+    fn assert_no_model_text(herdr: &FakeHerdr) {
+        let sent = texts(herdr);
+        assert!(
+            !sent
+                .iter()
+                .any(|text| text.contains("/model") || text.contains("/models")),
+            "the pane got model keys: {sent:?}"
+        );
+    }
+
+    /// A `model.list` answer holding exactly one model.
+    fn catalogue(provider: &str, id: &str) -> serde_json::Value {
+        serde_json::json!({"data":[{"providerID":provider, "id":id, "variants":[]}]})
+    }
+
+    /// A `GET /api/session/<id>` answer naming `provider/id`.
+    fn session_on(provider: &str, id: &str) -> serde_json::Value {
+        serde_json::json!({"data":{"model":{"providerID":provider, "id":id}}})
+    }
+
+    fn switch_requests(herdr: &FakeHerdr) -> Vec<Vec<String>> {
+        herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::OpenCodeApi { args } if args[0] == "session.switchModel" => Some(args.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn a_chain_head_model_change_on_the_same_cli_switches_in_place() {
         let (mut store, mut herdr, cfg) = world("opencode");
@@ -3475,14 +3507,14 @@ bar = "New Provider"
         herdr.calls.clear();
         change_head(&mut store, "opencode", "provider/new");
 
-        // A working agent is waited for: nothing is typed into it.
+        // A working agent is waited for: nothing is asked of it.
         herdr.set_status(PANE, AgentStatus::Working);
         for n in 1..4 {
             tick(&mut store, &mut herdr, &cfg, false, T + n);
         }
         assert!(
-            texts(&herdr).is_empty() && keys(&herdr).is_empty(),
-            "no key into a working agent: {:?}",
+            herdr.calls.is_empty(),
+            "nothing asked of a working agent: {:?}",
             herdr.calls
         );
         assert!(
@@ -3492,31 +3524,35 @@ bar = "New Provider"
             "the switch waits as a durable plan"
         );
 
-        // At the next idle moment the CLI's own model command is driven to
-        // the chain head; the switch confirms on the status bar.
+        // At the next idle moment the session API puts the seat on the chain
+        // head (T-531); the switch confirms on the status bar.
         herdr.set_status(PANE, AgentStatus::Idle);
-        for n in 4..12 {
-            tick(&mut store, &mut herdr, &cfg, true, T + n);
-            if crate::switch::pending(&mut store, "p:heat")
-                .unwrap()
-                .is_none()
-            {
-                break;
-            }
-        }
-
-        // The model command: /model and the picker filter, each with its own
-        // Enter. No exit key and no start: the agent and the conversation stay.
-        let sent = texts(&herdr);
+        herdr.api_replies.extend([
+            Ok(catalogue("provider", "new")),
+            Ok(session_on("elsewhere", "another-model")),
+            Ok(serde_json::json!({})),
+        ]);
+        tick(&mut store, &mut herdr, &cfg, true, T + 4);
+        assert_eq!(switch_requests(&herdr).len(), 1, "{:?}", herdr.calls);
+        herdr.set_screen(PANE, "Build auto · New Provider");
+        herdr.api_replies.extend([
+            Ok(catalogue("provider", "new")),
+            Ok(session_on("provider", "new")),
+        ]);
+        tick(&mut store, &mut herdr, &cfg, true, T + 5);
         assert!(
-            sent.contains(&"/model".to_string()) && sent.contains(&"New Provider".to_string()),
-            "the model command was driven: {sent:?}"
+            crate::switch::pending(&mut store, "p:heat")
+                .unwrap()
+                .is_none(),
+            "the switch plan is cleared"
         );
-        assert_eq!(
-            keys(&herdr).iter().filter(|key| *key == "enter").count(),
-            2,
-            "{:?}",
-            keys(&herdr)
+
+        // T-531: the switch is the API's — no key, no `/model`, no restart.
+        assert_no_model_text(&herdr);
+        assert!(
+            texts(&herdr).is_empty() && keys(&herdr).is_empty(),
+            "the pane got no key: {:?}",
+            herdr.calls
         );
         assert!(
             !keys(&herdr).iter().any(|key| key == "ctrl+c"),
