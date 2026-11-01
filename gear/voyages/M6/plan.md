@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1086 -->
+<!-- gear-plan project=gear base=1087 -->
 # Goal
 A fleet that runs a whole voyage without the captain nursing it, on a machine it does not load. Every failure mode the two fleets hit in M5 (deliveries that never land, reviewers locked or pointed at the wrong commit, false alarms, dialogs that stop a seat) is fixed at its root. A seat's model or agent can be switched mid-voyage without losing work, by a handover the incoming agent reads first; the captain itself can hand over. Reviewer and lane counts stretch for a backlog and return by themselves. GEAR runs near idle, and it watches the fleet's and the machine's health. Released at each station: S1 deliveries and reviews that never stall (v0.6.0); S2 switching models, agents and captains, elastic counts, dialogs that never block, and role charters that fit the chosen models (v0.6.1); S3 GEAR near idle and the health watch (v0.6.2); S4 the captain's plan tools (v0.6.3); S5 one captain runs several independent projects, each in its own hours and time zone, and a v0.5 project upgrades with no hand step (v0.6.4).
 
@@ -171,6 +171,7 @@ station S5: one captain, several projects; a v0.5 project upgrades painlessly, r
 - station M-7465: keep course — projected 1670m; T-523 done, T-524 v0.6.8 on mast; the clause (4) measure runs on dev now, then the landing
 - 2026-11-01 04:30 scope: one more clause (4) task, an ended round's usage is counted a bounded number of times (hull), then release v0.6.9 | why: measured 04:14-04:20 on dev with T-523 (two 3-minute ps samples): our engine 7.5 % and 11.5 %, 21-22 MB; the other project's 18.3 % and 14.5 %, 24-34 MB; boards 2.8-6.6 %, 15-17 MB; a CPU sample of the other engine puts it in rounds::count_round: an ended round whose usage stays unknown is counted again every 60 s for ever (542 such rounds on the other store, 128 on ours), and each count parses the project TOML and walks ~/.codex/sessions (1105 files) | else: land with (4) not met
 - station M-7475: keep course — projected 1717m; T-524 v0.6.8 done, T-525 in review, then T-526 v0.6.9, the clause (4) measure and the landing
+- 2026-11-01 05:15 scope: one more clause (4) task, the overlap scan resolves refs in one git call (hull), then release v0.6.10 | why: measured 04:59-05:11 on dev with T-525: engines 12.6 % then 6.1 % and 9.8 % then 10.0 % (3-minute samples), 11.0 % and 12.3 % over 6 minutes, 21-35 MB; boards 2.9-5.9 %, 15-17 MB; a CPU sample of our engine now shows the database and config costs gone and most on-CPU time in process spawns from parallel::check (one `git rev-parse` per ref, one `git merge-base` per pair) on every hand-in | else: land with (4) at 6-12 %, not met
 
 # Queue
 
@@ -578,4 +579,15 @@ estimate: 25
 goal: [S5] Release v0.6.9. Change, no other design: (1) the version is 0.6.9 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.9.md, in the form of docs/releases/v0.6.8.md: one line per task merged on origin/dev since v0.6.8 at the hand-in.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.9"; docs/releases/v0.6.9.md lists every task merged since v0.6.8. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
 deps: T-524, T-525
+estimate: 25
+
+## T-527 [now] lane=hull milestone=M6 station=S5 required
+goal: [S3] The overlap scan starts a few git processes per pass, not one per ref. crates/gear-engine/src/parallel.rs `scan` calls `revision` (one `git rev-parse --verify` process) for the integration branch, the remote integration branch and, per open task, its candidate, its local branch and its remote branch, and `ancestor` (one `git merge-base --is-ancestor` process) per candidate; the scan runs at every hand-in and every ten minutes, and a CPU sample of a running engine puts most of its on-CPU time in those process spawns. Read every branch tip a pass needs with one `git for-each-ref --format='%(objectname) %(refname)' refs/heads refs/remotes` and resolve the candidate ids with one `git cat-file --batch-check` (the commit check `revision` does today), then answer `revision` from that map; keep an `ancestor` answer for a pair of full commit ids for the life of the process, as the diff cache does (T-435), since it never changes. Same findings as today. No other change.
+accept: gear-engine tests: a scan of a repo with several open tasks runs `git for-each-ref` once and `git cat-file` at most once per pass (a counting wrapper or a fake git on PATH), and gives the same overlap and integration findings as before; a second `ancestor` call for the same pair runs no git. The existing parallel tests pass. No wall-clock assertion. Run make check CRATE=gear-engine.
+estimate: 25
+
+## T-528 [now] lane=mast milestone=M6 station=S5 required
+goal: [S5] Release v0.6.10. Change, no other design: (1) the version is 0.6.10 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.10.md, in the form of docs/releases/v0.6.9.md: one line per task merged on origin/dev since v0.6.9 at the hand-in.
+accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.10"; docs/releases/v0.6.10.md lists every task merged since v0.6.9. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+deps: T-527
 estimate: 25
