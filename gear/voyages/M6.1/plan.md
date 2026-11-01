@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1102 -->
+<!-- gear-plan project=gear base=1104 -->
 # Goal
 Fix the bugs the user reports while the projects that use GEAR run on it, and get each fix into their hands at once: every batch ships as a v0.6.x release that the shared engines, the CLI and the installed skill copies run, and each project's captain is told. M6.1 is planned as it goes: its first bugs are below, and each further bug the user reports becomes tasks here. It lands on the user's word.
 
@@ -19,6 +19,7 @@ depart: now
 - 2026-11-01 04:20 confirmed: depart M6.1 (user); reviewers at effort high (captain's call) | why: the user gave the bug and the staffing as the order to start; the captain wrongly held for a sheet
 - 2026-11-01 04:09 hand-recovery: mast's first packet (T-533) sat typed in pi's input box without Enter for about 2 min after onboarding; the captain pressed Enter and the lane started | why: the lane idled with work delivered | else: wait for the engine's delivery check
 - 2026-11-01 04:30 scope: a delivery left typed in a lane's input box is confirmed falsely and never sent (user, screenshot of mast at T-533): O-5916 was typed with Enter at 10:05:59Z five seconds after mast's onboarding, the Enter added a line instead of submitting, the resubmit step's one extra Enter at 10:06:30Z did the same, and at 10:06:34Z the confirm step took a Working flicker of pi as the agent's turn (evidence "turn gear:mast/38") while the text still sat in the box; the captain's Enter at 04:09 submitted it. 42 of 351 GEAR deliveries and 85 of 643 of the other project's since 10-30 were confirmed by a turn. Fix: a turn is no proof while the text is still in the box, and the Enter is retried while it is | why: the user's first M6 complaint, still open | else: -
+- 2026-11-01 04:45 scope: taken from gear/voyages/M7/backlog.md into M6.1 for mast, which has nothing to start before the release: a held task drops out of the voyage's scope and counts (the user asked about it on 11-01: the other project's 10 held tasks vanished from its board). `state: hold` is the only way a task becomes Draft (plan.rs), so Draft is read as held: in scope and remaining everywhere, never startable | why: done clause (2) and no idle lane | else: a new Held state in gear-model (hull's crate, a migration)
 
 # Queue
 
@@ -42,8 +43,13 @@ goal: [v0.6.12] Every SOP says that a model or effort is changed only by a resta
 accept: `git grep -n "Fallback by keys" skills` finds nothing; each of the six files carries its sentence; `make check CRATE=gear-app TESTS='skill'` passes (the embedded skill builds). The merge gate runs `make gate`.
 estimate: 20
 
+## T-536 [now] lane=mast milestone=M6.1 required
+goal: [v0.6.12] A held task stays in its voyage's scope and counts (decision 04:45). A task is Draft only through `state: hold` (crates/gear-app/src/plan.rs), so read Draft as held. Change, no other design: (1) the scope and progress counts include Draft tasks as remaining work: crates/gear-board/src/stations.rs (the scope filter near line 186 and its doc comment near line 54), crates/gear-board/src/voyage.rs (near line 424), crates/gear-app/src/station.rs (near line 30) and crates/gear-app/src/time.rs (near line 678) stop excluding Draft, and still exclude Cancelled and Failed; (2) the listings show held tasks: crates/gear-board/src/deps.rs `tree` counts a Draft task as open, and the lane queues in crates/gear-app/src/queue.rs (near line 114) and crates/gear-board/src/idle.rs `queue_of` list it; (3) where a state name is shown, Draft reads "held" (crates/gear-board/src/graph.rs near line 1187, crates/gear-board/src/lib.rs near line 2155, and any `gear` CLI text in crates/gear-cli that prints "draft" for a task); (4) anything that decides that a lane has a task it can start still skips Draft: check every caller of `queue_of` and the queue in queue.rs, and keep a held task out of "can start" and out of the idle view's "has work". Nothing in crates/gear-engine changes.
+accept: Tests: a voyage of three tasks with one held (`state: hold` applied through a plan): the station scope, the voyage header totals and remaining minutes, and `gear report time` count all three; the deps tree lists the held task as open; the lane's queue lists it as held; a lane whose only queued task is held is not reported as having work it can start. The existing board and app tests pass, changed only where they asserted that a held task is left out. Run only `make check CRATE=gear-board TESTS='<filter>'` and `make check CRATE=gear-app TESTS='<filter>'`; the merge gate runs `make gate`.
+estimate: 45
+
 ## T-534 [now] lane=mast milestone=M6.1 required
 goal: [v0.6.12] Release v0.6.12. Change, no other design: (1) the version is 0.6.12 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.6.12.md, in the form of docs/releases/v0.6.11.md: one line per task merged on origin/dev since v0.6.11 at the hand-in, and an "Upgrading" section that says the engine changed (restart it) and the skill changed (`gear admin install-skill --agent <cli>` for each agent CLI).
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.12"; docs/releases/v0.6.12.md lists every task merged since v0.6.11. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
-deps: T-531, T-532, T-533, T-535
+deps: T-531, T-532, T-533, T-535, T-536
 estimate: 25

@@ -170,7 +170,7 @@ Postponed from M6 (2026-11-01, landing): the items M6 did not close, as M6 recor
 ## The board's idle view drops the last task's work span at landing
 - 2026-11-01 M6 (T-529 review F2): `work_spans` (crates/gear-board/src/idle.rs) now reads only open voyages' tasks, so a captain instruction sent while a lane worked the voyage's final task, still unanswered when the voyage lands, reads as "help" for up to HELP_LIMIT_S (30 min) instead of part of that work (T-463). Keep the work spans of tasks done within HELP_LIMIT_S.
 
-## A held task drops out of the voyage's scope and counts
+## A held task drops out of the voyage's scope and counts (taken into M6.1 as T-536, 2026-11-01)
 - 2026-11-01 M6 (another project's M3: 10 required tasks set to `state: hold`): `hold` stores the task as Draft, and every count treats Draft as "not in the plan yet" — the `gear` home voyage line, the board header, Stations progress and totals (crates/gear-board/src/stations.rs, voyage.rs, lib.rs), the forecast and station items, the flow graph and deps view — so the board showed 34 tasks / 1368 m instead of 44 / 1799 m. Give a held task its own state (Held) that is in scope and counted as remaining, never dispatched until `ready`; keep Draft for tasks not yet planned.
 
 ## A lane's budget ignores the task's estimate
