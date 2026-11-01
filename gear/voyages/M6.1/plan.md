@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1123 -->
+<!-- gear-plan project=gear base=1124 -->
 # Goal
 Fix the bugs the user reports while the projects that use GEAR run on it, and get each fix into their hands at once: every batch ships as a v0.6.x release that the shared engines, the CLI and the installed skill copies run, and each project's captain is told. M6.1 is planned as it goes: its first bugs are below, and each further bug the user reports becomes tasks here. It lands on the user's word.
 
@@ -45,6 +45,7 @@ depart: now
 - 2026-11-01 06:50 hand-recovery: the gear binary rebuilt from dev at T-542's merge (fa39b46b) before the v0.6.13 release, so the landing item M-7600 could be parked (`gear reply --wait user --until +12h`) and stop ringing; the engines still run 0.6.12 until the release restarts them | why: the user saw every ring | else: let it ring until T-543 merges
 - 2026-11-01 10:03 staffing: lanes hull and mast move from hk-dgx-1/DeepSeek-V4.1-Flash-1017 to tokenrhythm/deepseek-v4.1-flash-1017 (same pi CLI, thinking high, 600K; config v39); both lanes restarted on it at their safe point | why: the hk-dgx-1 service revoked the shared key (401 invalid_api_key from every caller) and the user directed the move to TokenRhythm | else: wait for a restored hk-dgx-1 key
 - 2026-11-01 10:07 release: v0.6.13 tagged at 45f9bffb, main merged, GitHub release published; binary rebuilt, both engines restarted 16:07:21Z in the window Prometheus offered, with no merge or other op intended or executing in either store; captains of Prometheus and goldmine told; skill unchanged | why: a release is done only when user projects run it | else: none
+- 2026-11-01 10:30 scope: Prometheus F-468 (T-423 attempt 2 never read its rework) is a GEAR fault: the rework was stored and `gear --show` renders it, but the delivery of attempt n >= 2 opens "New task", the same words as a first delivery, so the lane read only `gear` and guessed; the fix is the new rework task below, released as v0.6.14 | why: an error in normal use (every failed review) | else: log it in the M7 backlog
 
 # Queue
 
@@ -114,3 +115,9 @@ goal: [v0.6.13] Release v0.6.13. Change, no other design: (1) the version is 0.6
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.6.13"; docs/releases/v0.6.13.md lists every task merged since v0.6.12. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
 deps: T-542
 estimate: 20
+
+## T-544 [now] lane=hull milestone=M6.1 required
+goal: [v0.6.14] A rework delivery says it is a rework. Change crates/gear-engine/src/dispatch.rs only, no other design: `assign_text` (line ~287, used only for attempt n >= 2 at line ~911) takes the attempt number as a new second argument and its text becomes exactly: "Rework {task} attempt {n} (contract v{version}): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: {branch} (in your worktree). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle." Pass `attempt.n` at the call site (line ~911). Update its doc comment (lines ~282-286) to this wording. Update every caller and test of `assign_text`: crates/gear-engine/src/dispatch.rs test `the_two_packet_writings` (~line 1466) and any other test in that file that asserts the old "New task … (in your worktree)" text; crates/gear-engine/tests/it/deliver_contract.rs lines 29-30 and 64. An allowed edit for hull, moved from mast for balance: docs/design/09-dispatch.md line 27 (the `assign:` line) gets the new wording with `Rework T-31 attempt 2 (contract v1): …`. `first_attempt_text` and `continue_text` do not change.
+accept: `grep -rn "assign_text" crates` shows only the new two-argument-plus form; no test asserts the old rework wording. Run only `make check CRATE=gear-engine TESTS='test(packet_writings) | test(rework) | test(texts_)'`; the merge gate runs `make gate`.
+estimate: 20
+
