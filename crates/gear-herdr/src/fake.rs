@@ -23,6 +23,10 @@ pub enum Call {
         pane: String,
         name: String,
     },
+    /// Herdr `agent.rename` with no name: the agent loses its name.
+    ClearName {
+        pane: String,
+    },
     /// Herdr `tab.rename` (T-278): the board names its own tab.
     TabRename {
         tab_id: String,
@@ -574,6 +578,28 @@ impl HerdrAct for FakeHerdr {
                     p.revision += 1;
                     Outcome::Ok(())
                 }
+            }
+        })
+    }
+
+    fn agent_clear_name(&mut self, pane_id: &str) -> Outcome<()> {
+        let call = Call::ClearName {
+            pane: pane_id.into(),
+        };
+        let pane = pane_id.to_string();
+        self.act(call, move |s| match s.panes.get_mut(&pane) {
+            None => Outcome::Refused {
+                code: "not_found".into(),
+                message: "no pane".into(),
+            },
+            Some(p) if p.agent.is_none() => Outcome::Refused {
+                code: "agent_not_found".into(),
+                message: "no agent".into(),
+            },
+            Some(p) => {
+                p.name = None;
+                p.revision += 1;
+                Outcome::Ok(())
             }
         })
     }

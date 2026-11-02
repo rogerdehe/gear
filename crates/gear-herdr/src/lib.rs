@@ -230,6 +230,15 @@ pub trait HerdrAct: HerdrRead {
     /// Herdr `agent.rename`: give the agent in `pane_id` the name `name`
     /// (T-134). A name another pane holds is refused, never stolen.
     fn agent_rename(&mut self, pane_id: &str, name: &str) -> Outcome<()>;
+    /// Herdr `agent.rename` with no name: the agent in `pane_id` loses its
+    /// name, so another pane may carry it (a captain handed over to another
+    /// pane takes its name along).
+    fn agent_clear_name(&mut self, pane_id: &str) -> Outcome<()> {
+        Outcome::Refused {
+            code: "unsupported".into(),
+            message: format!("cannot clear the name of the agent in {pane_id}"),
+        }
+    }
     /// Herdr `tab.rename`: give the tab `tab_id` the label `label` (T-278).
     /// `gear board` names its own tab, so the tab bar shows the board's name
     /// instead of a number.
@@ -483,6 +492,14 @@ impl HerdrAct for SocketHerdr {
 
     fn agent_rename(&mut self, pane_id: &str, name: &str) -> Outcome<()> {
         let params = json!({ "target": pane_id, "name": name });
+        match self.client.call("agent.rename", params) {
+            Ok(_) => Outcome::Ok(()),
+            Err(e) => outcome_from_error(&e),
+        }
+    }
+
+    fn agent_clear_name(&mut self, pane_id: &str) -> Outcome<()> {
+        let params = json!({ "target": pane_id, "name": serde_json::Value::Null });
         match self.client.call("agent.rename", params) {
             Ok(_) => Outcome::Ok(()),
             Err(e) => outcome_from_error(&e),

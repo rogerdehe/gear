@@ -47,6 +47,12 @@ pub struct Handover {
     pub kind: String,
     /// Who asked: the captain's own agent, or the user's own terminal.
     pub asker: Asker,
+    /// What moving the captain's agent name to the new pane did (M6.2).
+    pub named: gear_herdr::Ensured,
+    /// The handover document named to the new captain, when one was there.
+    pub document: Option<String>,
+    /// The request for a handover document, when none was there yet.
+    pub request: Option<HandoverRequest>,
 }
 
 /// Who asked for the handover.
@@ -67,7 +73,7 @@ pub enum Asker {
 pub fn handover(
     store: &mut Store,
     env: &Env,
-    herdr: &mut dyn HerdrRead,
+    herdr: &mut dyn gear_herdr::HerdrAct,
     ancestors: &[u32],
     // The caller's working directory: a handover from the user's own terminal
     // (no GEAR_CTX) names its project by it.
@@ -165,6 +171,24 @@ pub fn handover(
         now,
     )?;
 
+    // 6. The new captain learns it from GEAR alone (M6.2): the same steps as a
+    //    take — the handover document named (or asked for), one urgent item,
+    //    and the captain's agent name moved to the new pane.
+    let finished = finish_rebind(
+        store,
+        herdr,
+        &project,
+        &captain,
+        &config,
+        Some(&binding),
+        pane,
+        generation,
+        &kind,
+        cwd,
+        Rebound::HandedOver,
+        now,
+    )?;
+
     Ok(Handover {
         project,
         captain,
@@ -173,6 +197,9 @@ pub fn handover(
         generation,
         kind,
         asker,
+        named: finished.named,
+        document: finished.document,
+        request: finished.request,
     })
 }
 
@@ -417,6 +444,72 @@ fn take_one(
         now,
     )?;
 
+    let finished = finish_rebind(
+        store,
+        herdr,
+        project,
+        &captain,
+        &config,
+        previous.as_ref(),
+        pane,
+        generation,
+        &kind,
+        cwd,
+        Rebound::Taken,
+        now,
+    )?;
+    let (named, document, request) = (finished.named, finished.document, finished.request);
+
+    Ok(Taken {
+        project: project.to_string(),
+        captain,
+        from,
+        to: pane.to_string(),
+        generation,
+        kind,
+        named,
+        document,
+        request,
+    })
+}
+
+/// How the captain seat reached its new pane: the new captain took it, or it
+/// was handed over to the pane (by the outgoing captain or the user).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rebound {
+    Taken,
+    HandedOver,
+}
+
+/// What the steps after a rebind did.
+struct Finished {
+    named: gear_herdr::Ensured,
+    document: Option<String>,
+    request: Option<HandoverRequest>,
+}
+
+/// The steps a `captain take` and a `captain handover --pane` share after the
+/// rebind (M6.2): the previous captain's handover document is found (or asked
+/// for), one urgent item tells the new captain where it stands and which
+/// document to read, and the captain's agent name moves to the new pane.
+#[allow(clippy::too_many_arguments)]
+fn finish_rebind(
+    store: &mut Store,
+    herdr: &mut dyn gear_herdr::HerdrAct,
+    project: &str,
+    captain: &str,
+    config: &config::ProjectConfig,
+    previous: Option<&BindingRow>,
+    pane: &str,
+    generation: i64,
+    kind: &str,
+    cwd: &Path,
+    how: Rebound,
+    now: Ts,
+) -> GearResult<Finished> {
+    let captain = captain.to_string();
+    let kind = kind.to_string();
+    let from = previous.map(|binding| binding.pane_id.clone());
     // 5. The previous captain's handover (handover.md part B): a document it
     //    already wrote is named to the new captain; when there is none, the
     //    previous captain is asked for it, and after a bounded time the new
@@ -424,7 +517,7 @@ fn take_one(
     let mut document: Option<String> = None;
     let mut directory: Option<String> = None;
     let mut request: Option<HandoverRequest> = None;
-    if let Some(previous) = &previous {
+    if let Some(previous) = previous {
         let voyage = store.read(|tx| plan::current_voyage(tx, project))?;
         if !voyage.is_empty() {
             let dir = format!(
@@ -463,7 +556,11 @@ fn take_one(
     //    the user reads it on the captain's home page), with the handover
     //    pointer the new captain needs before its task packet.
     let mut line = format!(
-        "{captain}: pane {pane} took the captain of {project} ({kind}), {}. This pane answers as the captain now: there is no GEAR_CTX to set — the pane's active binding is the seat.",
+        "{captain}: pane {pane} {} the captain of {project} ({kind}) at generation {generation}, {}. This pane answers as the captain now: there is no GEAR_CTX to set — the pane's active binding is the seat.",
+        match how {
+            Rebound::Taken => "took",
+            Rebound::HandedOver => "was handed",
+        },
         match &from {
             Some(from) => format!("it left pane {from}"),
             None => "it had no pane recorded".to_string(),
@@ -471,7 +568,8 @@ fn take_one(
     );
     if let Some(document) = &document {
         line.push_str(&format!(
-            "\n\nThe previous captain left its handover at {document}: read it before the task packet."
+            "\n\nThe previous captain left its handover at {document}{}: read it before the task packet.",
+            document_place(cwd, document)
         ));
     } else if let (Some(request), Some(directory)) = (&request, &directory) {
         line.push_str(&handover_pointer(request, directory));
@@ -508,20 +606,52 @@ fn take_one(
     // 7. The new captain's agent carries the captain's name (T-134): Herdr
     //    clears a name when it re-detects the occupant, and a prompt to an
     //    unnamed agent is refused, so the seat must not start out nameless.
-    let named =
-        gear_herdr::ensure_agent_name(herdr, pane, &crate::config::agent_name(project, "captain"));
+    let name = crate::config::agent_name(project, "captain");
+    if let Some(from) = from.as_deref().filter(|from| *from != pane) {
+        let held_by_old = herdr
+            .agent_names()
+            .ok()
+            .and_then(|names| names.get(from).cloned().flatten())
+            .is_some_and(|held| held == name);
+        if held_by_old {
+            let _ = herdr.agent_clear_name(from);
+        }
+    }
+    let named = gear_herdr::ensure_agent_name(herdr, pane, &name);
 
-    Ok(Taken {
-        project: project.to_string(),
-        captain,
-        from,
-        to: pane.to_string(),
-        generation,
-        kind,
+    Ok(Finished {
         named,
         document,
         request,
     })
+}
+
+/// Where a handover document lives, for the new captain to find it: the branch
+/// of the checkout it was found in and the commit that last touched it, when
+/// git can answer (the document may sit on a notes branch, not in the root
+/// checkout).
+fn document_place(cwd: &Path, document: &str) -> String {
+    let git = |args: &[&str]| -> Option<String> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!text.is_empty()).then_some(text)
+    };
+    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"]);
+    let commit = git(&["log", "-1", "--format=%h", "--", document]);
+    match (branch, commit) {
+        (Some(branch), Some(commit)) => format!(" (branch {branch}, commit {commit})"),
+        (Some(branch), None) => format!(" (branch {branch}, not committed)"),
+        (None, Some(commit)) => format!(" (commit {commit})"),
+        (None, None) => String::new(),
+    }
 }
 
 /// What `gear captain release` did (T-485): the pane let one project's
@@ -628,17 +758,6 @@ fn request_key(project: &str) -> String {
     format!("captain-handover:{project}")
 }
 
-/// The request recorded for `project`, when there is one.
-fn load_request(tx: &Tx<'_>, project: &str) -> GearResult<Option<HandoverRequest>> {
-    let Some(raw) = tx.get_meta(&request_key(project))? else {
-        return Ok(None);
-    };
-    if raw.trim().is_empty() {
-        return Ok(None);
-    }
-    Ok(serde_json::from_str(&raw).ok())
-}
-
 /// The newest handover document under `directory` (relative to `root`), when
 /// there is one. The names carry the date and time, so the last one in name
 /// order is the newest.
@@ -722,12 +841,12 @@ pub fn handover_facts(
         layout::voyage_dir(&config.conventions.voyage_dir, &project, &milestone)
     );
     let document = newest_handover(cwd, &directory);
-    let request = store.read(|tx| load_request(tx, &project))?;
     let plan_path = layout::plan_file(&config.conventions.voyage_dir, &project, &milestone);
     let plan_text = std::fs::read_to_string(cwd.join(&plan_path)).ok();
     let plan_base = plan_text.as_deref().and_then(plan_base_of);
     let plan_state = git_plan_state(&config.root_repo().path, &plan_path);
-    let releases = git_releases(&config.root_repo().path);
+    let root = config.root_repo();
+    let releases = git_releases(&root.path, &config.conventions.remote, &root.release);
     let text = store.read(|tx| {
         render_facts(
             tx,
@@ -737,7 +856,6 @@ pub fn handover_facts(
             &config,
             &directory,
             document.as_deref(),
-            request.as_ref(),
             &plan_path,
             plan_text.is_some(),
             plan_base,
@@ -791,7 +909,7 @@ fn git_plan_state(repo: &str, plan_path: &str) -> Option<String> {
 
 /// The releases tagged in the checkout, newest first; `None` when git cannot
 /// answer. GEAR records no releases itself.
-fn git_releases(repo: &str) -> Option<String> {
+fn git_releases(repo: &str, remote: &str, release: &str) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -809,12 +927,45 @@ fn git_releases(repo: &str) -> Option<String> {
         .take(5)
         .collect();
     if tags.is_empty() {
-        return Some("none tagged in this checkout".to_string());
+        // No version tags (the project may release by branch): name the
+        // release branch's tip, so "none" is never read as "never released".
+        let tip = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args([
+                "log",
+                "-1",
+                "--format=%h %cs",
+                &format!("{remote}/{release}"),
+            ])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|tip| !tip.is_empty());
+        return Some(match tip {
+            Some(tip) => format!(
+                "no v* tags; the release branch {remote}/{release} is at {tip} (GEAR records no releases itself)"
+            ),
+            None => format!(
+                "no v* tags, and {remote}/{release} cannot be read here (GEAR records no releases itself)"
+            ),
+        });
     }
     Some(format!(
         "{} (from `git tag`; GEAR records no releases itself)",
         tags.join(", ")
     ))
+}
+
+/// A lane's owned paths in a few words (M6.2): the count and the first three,
+/// so a lane that owns hundreds of paths does not fill the handover.
+fn owns_summary(owns: &[String]) -> String {
+    match owns.len() {
+        0 => "no paths".to_string(),
+        1..=3 => owns.join(", "),
+        n => format!("{n} paths ({}, …)", owns[..3].join(", ")),
+    }
 }
 
 /// `YYYY-MM-DD HH:MM UTC`.
@@ -867,7 +1018,6 @@ fn render_facts(
     config: &config::ProjectConfig,
     directory: &str,
     document: Option<&str>,
-    request: Option<&HandoverRequest>,
     plan_path: &str,
     plan_present: bool,
     plan_base: Option<i64>,
@@ -1016,11 +1166,16 @@ fn render_facts(
             Some(seat) => tx.get_binding(&seat.id, seat.generation)?,
             None => None,
         };
+        // A retired lane (or one with no seat) is history: one line (M6.2).
+        if seat.is_none_or(|seat| seat.state == SeatState::Retired) {
+            lines.push(format!("    - {}: retired", lane.name));
+            continue;
+        }
         lines.push(format!(
             "    - {}: {} · owns {} · {}/{} · model {} · seat {} · pane {}",
             lane.name,
             lane.duty,
-            lane.owns.join(", "),
+            owns_summary(&lane.owns),
             lane.kind,
             lane.profile,
             match seat {
@@ -1135,14 +1290,19 @@ fn render_facts(
             None => "git could not answer".to_string(),
         }
     );
+    // Three states apart (M6.2): a file behind the store is stale, never a
+    // draft to apply; a file on the applied base with edits is a draft.
     if !plan_present {
         plan_line.push_str(" · plan file missing");
-    } else if let Some(base) = plan_base {
-        if base < plan_version {
-            plan_line.push_str(&format!(
-                " · edits not applied (file base={base}, applied {plan_version})"
-            ));
-        }
+    } else if plan_base.is_some_and(|base| base < plan_version) {
+        plan_line.push_str(&format!(
+            " · STALE: the file's base={} is behind the applied version {plan_version}; do not apply it: the store holds the plan (`gear plan show T-<n>` prints a task's block)",
+            plan_base.unwrap_or_default()
+        ));
+    } else if matches!(plan_state, Some("modified") | Some("untracked")) {
+        plan_line.push_str(" · DRAFT: edits on the applied base, not applied yet");
+    } else {
+        plan_line.push_str(" · clean: the file is the applied plan");
     }
     lines.push(plan_line);
 
@@ -1172,7 +1332,7 @@ fn render_facts(
         ));
     }
     lines.push(format!(
-        "- Shared machine: other projects: {} · reach another captain with `gear captain take <project>` from its checkout or in its pane · engine: {}",
+        "- Shared machine: other projects: {} · reach another project's captain with `herdr --session <session> agent prompt <project>-captain \"…\"` (never `gear captain take`: that takes its seat) · engine: {}",
         if others.is_empty() {
             "none".to_string()
         } else {
@@ -1181,32 +1341,13 @@ fn render_facts(
         engine.unwrap_or("not known to this caller")
     ));
 
-    // The previous captain's handover: the document when it is there, else the
-    // request and the session to read after its bounded time.
+    // The last handover document of this voyage, when there is one (M6.2): a
+    // fact for the reader, never an instruction — an older request belongs to
+    // the take that made it, not to the captain writing this document.
     if let Some(document) = document {
         lines.push(format!(
-            "- Previous captain's handover: {document} (read it before the task packet)"
+            "- Last handover document of this voyage: {document}"
         ));
-    } else if let Some(request) = request {
-        if request.deadline <= now {
-            lines.push(format!(
-                "- Previous captain's handover: none under {directory} after the request ({}); read its {} and write part 2 yourself",
-                utc_date_time(request.deadline),
-                match &request.session_ref {
-                    Some(session) => format!("session {session} ({})", request.kind),
-                    None => "session (not recorded)".to_string(),
-                }
-            ));
-        } else {
-            lines.push(format!(
-                "- Previous captain's handover: asked under {directory} (deadline {}); none yet, read its {} if it does not arrive",
-                utc_date_time(request.deadline),
-                match &request.session_ref {
-                    Some(session) => format!("session {session} ({})", request.kind),
-                    None => "session (not recorded)".to_string(),
-                }
-            ));
-        }
     }
 
     lines.push(String::new());
@@ -1259,6 +1400,7 @@ fn project_of(store: &mut Store, env: &Env, cwd: &Path) -> GearResult<String> {
         return Ok(ctx.project.clone());
     }
     let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let mut registered: Vec<String> = Vec::new();
     for project in store.read(|tx| tx.project_ids())? {
         let Ok(config) = config::latest(store, &project) else {
             continue;
@@ -1271,12 +1413,20 @@ fn project_of(store: &mut Store, env: &Env, cwd: &Path) -> GearResult<String> {
         if holds {
             return Ok(project);
         }
+        registered.push(format!("{project} ({})", config.root_repo().path));
     }
+    // Say what is true (M6.2): the directory is in none of the registered
+    // projects' checkouts, and a project that is not listed is not registered.
     Err(GearError::new(
         ErrorCode::BadFormat,
         format!(
-            "no GEAR_CTX and {} belongs to no registered project: run it from the project's checkout (`gear captain take`) or in the captain's pane",
-            cwd.display()
+            "{} is in no registered project's checkout. Registered in this store: {}. Run it in the captain's pane or in a listed checkout; a project not listed here is not registered with GEAR — registering one is a kickoff (`gear admin init`)",
+            cwd.display(),
+            if registered.is_empty() {
+                "none".to_string()
+            } else {
+                registered.join(", ")
+            }
         ),
     ))
 }
