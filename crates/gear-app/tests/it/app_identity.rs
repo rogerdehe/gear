@@ -891,19 +891,29 @@ fn a_caller_in_no_pane_is_known_only_by_the_pane_it_names() {
     );
 }
 
-/// A caller that runs in a pane cannot name another one.
+/// A named pane wins over the process ancestry: a CLI that hands its
+/// commands to a shared background process runs them under the pane that
+/// started it, which is not the caller's.
 #[test]
-fn a_caller_in_a_pane_cannot_name_another_pane() {
+fn a_named_pane_wins_over_the_pane_the_process_runs_under() {
     let mut s = world();
     let mut herdr = FakeHerdr::new();
-    herdr.add_agent(CAP_PANE, "claude", AgentStatus::Idle);
-    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.add_agent(LANE_PANE, "codex", AgentStatus::Idle);
     herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
     herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
+    // Unnamed, the call is the pane it runs under.
+    let bare = env(None, 1, None, false);
+    let under = gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &LANE_CALLER).unwrap();
+    assert_eq!(under.pane_id.as_deref(), Some(LANE_PANE));
+    // Named, it is the pane it names.
     gear_app::identity::set_explicit_pane(true);
-    let named = env(None, 1, Some(LANE_PANE), false);
-    let error =
-        gear_app::identity::resolve_env(&mut s, &named, &mut herdr, &CAP_CALLER).unwrap_err();
-    assert_eq!(error.code, ErrorCode::Forbidden);
-    assert!(error.detail.contains(CAP_PANE), "{}", error.detail);
+    let named = env(None, 1, Some(CAP_PANE), false);
+    let resolved =
+        gear_app::identity::resolve_env(&mut s, &named, &mut herdr, &LANE_CALLER).unwrap();
+    assert_eq!(resolved.pane_id.as_deref(), Some(CAP_PANE));
+    assert_eq!(
+        resolved.ctx.map(|ctx| ctx.seat),
+        Some("captain".to_string())
+    );
 }
