@@ -24,7 +24,7 @@ Invariants upheld: at most one needs-check delivery per lane; no resend when the
 ## Delivery content (templates, versioned, validated to contain no screen marker)
 
 - continue: `Continue T-17 (contract v4). Task packet: <path>. Report progress/blocked/done with gear send.`
-- assign: `New task T-31 (contract v1). Branch: <lane>/T-31-<slug> (in your worktree). Task packet: <path>. Read it before starting; report with gear send.`
+- assign: `Rework T-31 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: <lane>/T-31-<slug> (in your worktree). Task packet: <path>. Read it before starting; report with gear send.`
 - Rules live only in the lane instructions and task packets; they are not broadcast with nudges.
 
 ## Determining "verifiable progress" (resets `nudges_since_progress`)
