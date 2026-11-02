@@ -645,7 +645,9 @@ pub fn resolve_env(
     if env.ctx.is_some() {
         return Ok(env.clone());
     }
-    let pane = match caller_pane(herdr, ancestors, env.pane_id.as_deref()) {
+    let own_pane = caller_pane(herdr, ancestors, env.pane_id.as_deref());
+    let in_daemon = own_pane.is_none();
+    let pane = match own_pane {
         Some(pane) => Some(pane),
         None => daemon_pane(store, herdr, true, daemon)?,
     };
@@ -659,6 +661,28 @@ pub fn resolve_env(
         return Ok(env.clone());
     };
     let seat = store.read(|tx| seat_bound_to(tx, &pane))?;
+    // A daemon caller found its seat's pane without a known session (a
+    // captain handed over by `--pane`): its own session is recorded on the
+    // binding, so a second captain of the same CLI in the session can never
+    // be mistaken for it.
+    if let (true, Some(seat), Some(session)) = (
+        in_daemon,
+        seat.as_ref(),
+        daemon.codex.as_ref().or(daemon.opencode.as_ref()),
+    ) {
+        store.write(|tx| {
+            if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
+                if binding
+                    .session_ref
+                    .as_deref()
+                    .is_none_or(|known| known.trim().is_empty())
+                {
+                    tx.set_binding_session_ref(&seat.id, seat.generation, session)?;
+                }
+            }
+            Ok(())
+        })?;
+    }
     let Some(seat) = seat else {
         // The pane holds no seat: the caller stays anonymous, with its pane.
         return Ok(Env {
