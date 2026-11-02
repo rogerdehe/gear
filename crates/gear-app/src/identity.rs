@@ -103,6 +103,10 @@ pub fn observe_via(
             format!("cannot read the processes of pane {pane}: {}", e.0),
         )
     })?;
+    // The pane the caller named is its claim (see [`caller_pane`]).
+    if explicit_pane() {
+        return Ok(occupant.as_ref().map(|info| (fingerprint_of(info), false)));
+    }
     if !claims_pane(&processes, ancestors) {
         let real = real_pane(herdr, ancestors);
         // OpenCode (`opencode serve`) and Codex in daemon mode (`codex
@@ -111,9 +115,6 @@ pub fn observe_via(
         // Such a caller keeps the env claim for an OpenCode pane, still checked
         // against the seat's binding; a caller that runs in another pane, or
         // that claims a pane whose agent runs its tools in the pane, is refused.
-        if real.is_none() && explicit_pane() {
-            return Ok(occupant.as_ref().map(|info| (fingerprint_of(info), false)));
-        }
         let where_ = match real {
             Some(real) if real.as_str() != pane.as_str() => format!("this process runs in pane {real}"),
             Some(_) => "the pane does not list this process".to_string(),
@@ -430,18 +431,15 @@ pub fn caller_pane(
     ancestors: &[u32],
     env_pane: Option<&str>,
 ) -> Option<String> {
-    if let Some(pane) = real_pane(herdr, ancestors) {
-        return Some(pane);
-    }
-    // A caller in no pane runs its commands outside its pane (a CLI that hands
-    // them to a shared background process). The `HERDR_PANE_ID` it inherited
-    // is the pane that started that process, not the caller's, so it is never
-    // trusted; only a pane the caller named itself (`gear --session <s>
-    // --pane <p>`, as GEAR's messages write it) is.
+    // A pane the caller named itself (`gear --session <s> --pane <p>`, as
+    // GEAR's messages write it) wins. A CLI that hands its commands to a
+    // shared background process runs them under whichever pane started that
+    // process: neither the process ancestry nor the inherited
+    // `HERDR_PANE_ID` is the caller's pane then.
     if explicit_pane() {
         return env_pane.map(str::to_string);
     }
-    None
+    real_pane(herdr, ancestors)
 }
 
 static EXPLICIT_PANE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -611,16 +609,6 @@ pub fn resolve_env(
 ) -> GearResult<Env> {
     if env.ctx.is_some() {
         return Ok(env.clone());
-    }
-    if explicit_pane() {
-        if let (Some(real), Some(named)) = (real_pane(herdr, ancestors), env.pane_id.as_deref()) {
-            if real != named {
-                return Err(GearError::new(
-                    ErrorCode::Forbidden,
-                    format!("--pane {named} is not this process's pane: it runs in pane {real}"),
-                ));
-            }
-        }
     }
     let pane = caller_pane(herdr, ancestors, env.pane_id.as_deref());
     let Some(pane) = pane else {
