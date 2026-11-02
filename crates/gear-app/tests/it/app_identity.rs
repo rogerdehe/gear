@@ -819,13 +819,26 @@ fn a_daemon_caller_among_several_daemon_panes_finds_its_own_kind() {
         gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service, &opencode).unwrap();
     assert_eq!(resolved.pane_id.as_deref(), Some(LANE_PANE));
 
-    // The Codex pane runs another known thread: it is not the caller's.
-    herdr.set_agent_session(CAP_PANE, "thread-2");
+    // The pick records the caller's thread on the seat's binding.
+    let binding = s
+        .read(|tx| tx.get_binding("p:captain", 1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.session_ref.as_deref(), Some("thread-1"));
+    let first_lane = s.read(|tx| tx.get_seat("p:heat")).unwrap();
+    let _ = first_lane;
+
+    // Another Codex thread: the captain's pane now knows thread-1, so it is
+    // not this caller's, and no other Codex pane is left.
+    let other = gear_app::identity::DaemonSessions {
+        codex: Some("thread-2".into()),
+        opencode: None,
+    };
     let error =
-        gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service, &codex).unwrap_err();
+        gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service, &other).unwrap_err();
     assert_eq!(error.code, ErrorCode::NotRegistered);
-    // Its own thread wins outright.
-    herdr.set_agent_session(CAP_PANE, "thread-1");
+    // Its own thread wins outright, whatever Herdr reports for the pane.
+    herdr.set_agent_session(CAP_PANE, "thread-9");
     let resolved =
         gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service, &codex).unwrap();
     assert_eq!(resolved.pane_id.as_deref(), Some(CAP_PANE));
