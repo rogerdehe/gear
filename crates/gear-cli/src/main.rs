@@ -1361,7 +1361,8 @@ fn resolve_caller(
     env: gear_app::Env,
 ) -> GearResult<gear_app::Env> {
     let ancestors = gear_app::identity::process_ancestors();
-    gear_app::identity::resolve_env(store, &env, herdr, &ancestors)
+    let daemon = gear_app::identity::DaemonSessions::from_vars(|name| std::env::var(name).ok());
+    gear_app::identity::resolve_env(store, &env, herdr, &ancestors, &daemon)
 }
 
 fn open_store_at(vars: impl Fn(&str) -> Option<String>) -> GearResult<gear_store::Store> {
