@@ -1638,7 +1638,10 @@ mod tests {
         let text = first_packet(&mut store, &mut h, &cfg, "T-1");
         assert_eq!(
             text,
-            first_attempt_text("T-1", 1, "heat/t1", "origin", "trunk", "`gear --show T-1`")
+            gear_store::with_seat_command(
+                &first_attempt_text("T-1", 1, "heat/t1", "origin", "trunk", "`gear --show T-1`"),
+                "gear --session sess --pane w1:p2"
+            )
         );
     }
 
@@ -1694,7 +1697,10 @@ mod tests {
         let text = first_packet(&mut store, &mut h, &cfg, "T-1");
         assert_eq!(
             text,
-            first_attempt_text("T-1", 1, "heat/t1", "origin", "trunk", "`gear --show T-1`")
+            gear_store::with_seat_command(
+                &first_attempt_text("T-1", 1, "heat/t1", "origin", "trunk", "`gear --show T-1`"),
+                "gear --session sess --pane w1:p2"
+            )
         );
         assert_eq!(
             store

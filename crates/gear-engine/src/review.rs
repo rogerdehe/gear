@@ -5555,7 +5555,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             packet.starts_with("Direction check of T-1 attempt 1."),
             "the direction packet opens with its kind and binding: {packet}"
         );
-        assert!(packet.contains("Run `gear` first"), "{packet}");
+        assert!(packet.contains("Run `gear --session "), "{packet}");
         assert!(
             packet.contains("Binding: task T-1, attempt 1, candidate ")
                 && packet
@@ -8534,7 +8534,7 @@ review = [
         );
         // The rules come from the binary, not from a file of the gear repo
         // (T-30): the packet names `gear --skill review` and no `ops/` path.
-        assert!(text.contains("gear --skill review"), "{text}");
+        assert!(text.contains("--skill review`"), "{text}");
         assert!(
             !text.contains("ops/"),
             "no gear-repo path in the packet:\n{text}"

@@ -77,7 +77,10 @@ fn herdr() -> FakeHerdr {
     herdr
 }
 
+/// The caller is a Codex agent whose commands run outside its pane: it names
+/// its pane (`gear --session <s> --pane <p>`), as GEAR's messages write it.
 fn bare() -> Env {
+    gear_app::identity::set_explicit_pane(true);
     Env {
         ctx: None,
         pane_id: Some(CAP_PANE.into()),

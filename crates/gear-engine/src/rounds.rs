@@ -42,7 +42,7 @@ pub fn tick(
     now: Ts,
 ) -> GearResult<RoundReport> {
     let mut report = RoundReport::default();
-    let projects = store.read(|tx| tx.project_ids())?;
+    let projects = store.read(|tx| tx.active_project_ids())?;
     for project in projects {
         store.write(|tx| {
             // T-529: only the open rounds are bookkeeping; a project's closed

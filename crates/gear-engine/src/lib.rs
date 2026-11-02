@@ -268,7 +268,7 @@ pub fn tick(
     // on; one bad project never stops the tick.
     // T-386: every step of the tick is timed, and one over 200 ms is named.
     let step = std::time::Instant::now();
-    for project in store.read(|tx| tx.project_ids())? {
+    for project in store.read(|tx| tx.active_project_ids())? {
         if let Err(error) = gear_app::plan::reconcile_rebinds(store, &project) {
             report.project_failed.push(project_error(&project, &error));
         }
@@ -302,7 +302,7 @@ pub fn tick(
     let step = std::time::Instant::now();
     waits::tick(store, herdr, cfg, now)?;
     note_slow(&mut report, "waits", step);
-    let projects = store.read(|tx| tx.project_ids())?;
+    let projects = store.read(|tx| tx.active_project_ids())?;
     let step = std::time::Instant::now();
     for project in &projects {
         match parallel::check(store, project, now) {
@@ -1289,7 +1289,7 @@ fn restart_missing_jobs(
 fn settle_reviews(store: &mut Store, now: Ts) -> GearResult<(Vec<String>, Vec<String>)> {
     let mut settled = Vec::new();
     let mut failed = Vec::new();
-    for project in store.read(|tx| tx.project_ids())? {
+    for project in store.read(|tx| tx.active_project_ids())? {
         // Only passes settle themselves: a pass merges without the captain's
         // hands (M1). A fail goes to the captain, who judges its findings
         // against the voyage's goal and bar and writes the rework (L-57).
@@ -1546,7 +1546,9 @@ fn doorbell_inputs(
             })
             .map(|op| op.updated);
 
+        let command = gear_app::identity::seat_command(&binding.session, &binding.pane_id);
         inputs.push(doorbell::DoorbellInput {
+            command,
             project: project.to_string(),
             seat: seat.id.clone(),
             generation: seat.generation,

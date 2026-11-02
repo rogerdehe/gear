@@ -111,12 +111,8 @@ pub fn observe_via(
         // Such a caller keeps the env claim for an OpenCode pane, still checked
         // against the seat's binding; a caller that runs in another pane, or
         // that claims a pane whose agent runs its tools in the pane, is refused.
-        let tools_outside_pane = occupant
-            .as_ref()
-            .and_then(|info| info.agent.as_deref())
-            .is_some_and(is_daemon_kind);
-        if real.is_none() && tools_outside_pane {
-            return Ok(occupant.as_ref().map(|info| (fingerprint_of(info), true)));
+        if real.is_none() && explicit_pane() {
+            return Ok(occupant.as_ref().map(|info| (fingerprint_of(info), false)));
         }
         let where_ = match real {
             Some(real) if real.as_str() != pane.as_str() => format!("this process runs in pane {real}"),
@@ -437,14 +433,48 @@ pub fn caller_pane(
     if let Some(pane) = real_pane(herdr, ancestors) {
         return Some(pane);
     }
-    // A caller in no pane runs its tools in a daemon, and the daemon's
-    // HERDR_PANE_ID is the pane (or even the Herdr session) it was started
-    // from, not the caller's: trust it only when that pane hosts a daemon agent.
-    env_pane
-        .filter(|pane| {
-            matches!(herdr.agent_get(pane), Ok(Some(info)) if info.agent.as_deref().is_some_and(is_daemon_kind))
-        })
-        .map(str::to_string)
+    // A caller in no pane runs its commands outside its pane (a CLI that hands
+    // them to a shared background process). The `HERDR_PANE_ID` it inherited
+    // is the pane that started that process, not the caller's, so it is never
+    // trusted; only a pane the caller named itself (`gear --session <s>
+    // --pane <p>`, as GEAR's messages write it) is.
+    if explicit_pane() {
+        return env_pane.map(str::to_string);
+    }
+    None
+}
+
+static EXPLICIT_PANE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set by the CLI when the caller named its pane (`--session` and `--pane`).
+pub fn set_explicit_pane(explicit: bool) {
+    EXPLICIT_PANE.store(explicit, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether the caller named its pane itself.
+pub fn explicit_pane() -> bool {
+    EXPLICIT_PANE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The command a seat runs GEAR with: its Herdr session and pane named, so
+/// GEAR knows the caller whatever CLI it is and wherever that CLI runs its
+/// commands. Every text GEAR sends a seat writes its commands with this.
+pub fn seat_command(session: &str, pane: &str) -> String {
+    format!("gear --session {session} --pane {pane}")
+}
+
+/// [`seat_command`] for the seat's active binding; plain `gear` when it has
+/// none.
+pub fn seat_command_of(tx: &Tx<'_>, seat_id: &str) -> GearResult<String> {
+    let Some(seat) = tx.get_seat(seat_id)? else {
+        return Ok("gear".to_string());
+    };
+    Ok(match tx.get_binding(seat_id, seat.generation)? {
+        Some(binding) if binding.status == gear_store::BindingStatus::Active => {
+            seat_command(&binding.session, &binding.pane_id)
+        }
+        _ => "gear".to_string(),
+    })
 }
 
 /// The seat whose **active** binding is on `pane` (T-126): the pane a caller
@@ -550,68 +580,6 @@ pub fn env_of_captain(
     })
 }
 
-/// The **one** pane of the session that hosts an agent of a daemon kind and is
-/// (`bound`) or is not (`!bound`) bound to a seat (T-126). More than one such
-/// pane is no answer: the caller has to name itself then.
-///
-/// Several projects in one Herdr session run several such panes at once. The
-/// caller's daemon session narrows them first: a Codex tool shell carries
-/// `CODEX_THREAD_ID`, an OpenCode one `OPENCODE_SESSION_ID`, so only panes of
-/// that CLI count, a pane whose known session is the caller's wins outright,
-/// and a pane whose known session is another one is never the caller's. A
-/// pane's known sessions are Herdr's session of its agent and, for a bound
-/// pane, its binding's `session_ref`.
-pub fn daemon_pane(
-    store: &mut Store,
-    herdr: &mut dyn HerdrRead,
-    bound: bool,
-    daemon: &DaemonSessions,
-) -> GearResult<Option<String>> {
-    let caller = match (&daemon.codex, &daemon.opencode) {
-        (Some(thread), _) => Some(("codex", thread.as_str())),
-        (None, Some(session)) => Some(("opencode", session.as_str())),
-        (None, None) => None,
-    };
-    let panes = herdr.panes().unwrap_or_default();
-    let mut found: Vec<String> = Vec::new();
-    for pane in panes {
-        let Ok(Some(info)) = herdr.agent_get(&pane) else {
-            continue;
-        };
-        let Some(kind) = info.agent.as_deref().filter(|kind| is_daemon_kind(kind)) else {
-            continue;
-        };
-        let seat = store.read(|tx| seat_bound_to(tx, &pane))?;
-        if seat.is_some() != bound {
-            continue;
-        }
-        if let Some((caller_kind, caller_session)) = caller {
-            if kind != caller_kind {
-                continue;
-            }
-            let mut known: Vec<String> = info
-                .agent_session
-                .as_ref()
-                .map(|session| session.value.clone())
-                .into_iter()
-                .collect();
-            if let Some(seat) = &seat {
-                let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
-                known.extend(binding.and_then(|binding| binding.session_ref));
-            }
-            known.retain(|session| !session.trim().is_empty());
-            if known.iter().any(|session| session == caller_session) {
-                return Ok(Some(pane));
-            }
-            if !known.is_empty() {
-                continue;
-            }
-        }
-        found.push(pane);
-    }
-    Ok(if found.len() == 1 { found.pop() } else { None })
-}
-
 /// Whether any pane of the session hosts an agent at all: the difference
 /// between "a shell outside Herdr" (anonymous) and "an agent whose tools run
 /// in a daemon, so in no pane" (a caller that needs `gear captain take`).
@@ -640,49 +608,31 @@ pub fn resolve_env(
     env: &Env,
     herdr: &mut dyn HerdrRead,
     ancestors: &[u32],
-    daemon: &DaemonSessions,
 ) -> GearResult<Env> {
     if env.ctx.is_some() {
         return Ok(env.clone());
     }
-    let own_pane = caller_pane(herdr, ancestors, env.pane_id.as_deref());
-    let in_daemon = own_pane.is_none();
-    let pane = match own_pane {
-        Some(pane) => Some(pane),
-        None => daemon_pane(store, herdr, true, daemon)?,
-    };
+    if explicit_pane() {
+        if let (Some(real), Some(named)) = (real_pane(herdr, ancestors), env.pane_id.as_deref()) {
+            if real != named {
+                return Err(GearError::new(
+                    ErrorCode::Forbidden,
+                    format!("--pane {named} is not this process's pane: it runs in pane {real}"),
+                ));
+            }
+        }
+    }
+    let pane = caller_pane(herdr, ancestors, env.pane_id.as_deref());
     let Some(pane) = pane else {
         if any_agent_pane(herdr) {
             return Err(GearError::new(
                 ErrorCode::NotRegistered,
-                "this process runs in no pane of the Herdr session — an agent whose tools run in a shared daemon (codex, opencode) does. To become the project's captain: start your CLI in the project's checkout and run `gear captain take`",
+                "this process runs in no pane of the Herdr session (its CLI runs commands outside the agent's pane): run gear as GEAR's messages to you write it, `gear --session <session> --pane <your pane>`; to take a captain seat, `gear --session <session> --pane <your pane> captain take <project>`",
             ));
         }
         return Ok(env.clone());
     };
     let seat = store.read(|tx| seat_bound_to(tx, &pane))?;
-    // A daemon caller found its seat's pane without a known session (a
-    // captain handed over by `--pane`): its own session is recorded on the
-    // binding, so a second captain of the same CLI in the session can never
-    // be mistaken for it.
-    if let (true, Some(seat), Some(session)) = (
-        in_daemon,
-        seat.as_ref(),
-        daemon.codex.as_ref().or(daemon.opencode.as_ref()),
-    ) {
-        store.write(|tx| {
-            if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
-                if binding
-                    .session_ref
-                    .as_deref()
-                    .is_none_or(|known| known.trim().is_empty())
-                {
-                    tx.set_binding_session_ref(&seat.id, seat.generation, session)?;
-                }
-            }
-            Ok(())
-        })?;
-    }
     let Some(seat) = seat else {
         // The pane holds no seat: the caller stays anonymous, with its pane.
         return Ok(Env {
@@ -927,8 +877,7 @@ pub fn whoami(
     // The effective environment: the same resolution every command does, so
     // whoami explains the commands (a caller in a bound pane without a
     // context is the seat of that pane).
-    let daemon = DaemonSessions::from_vars(|name| std::env::var(name).ok());
-    let effective = match resolve_env(store, env, herdr, &ancestors, &daemon) {
+    let effective = match resolve_env(store, env, herdr, &ancestors) {
         Ok(env) => env,
         Err(error) => {
             let pane = caller_pane(herdr, &ancestors, env.pane_id.as_deref());

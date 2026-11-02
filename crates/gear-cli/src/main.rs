@@ -27,6 +27,14 @@ struct Cli {
     skill: Option<String>,
     #[arg(long, global = true)]
     json: bool,
+    /// The Herdr session of the seat this call is for, as GEAR's messages to
+    /// the seat write it. With `--pane`, it names the caller for a CLI that
+    /// runs its commands outside the agent's pane.
+    #[arg(long, global = true)]
+    session: Option<String>,
+    /// The seat's Herdr pane, as GEAR's messages to the seat write it.
+    #[arg(long, global = true)]
+    pane: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -332,6 +340,20 @@ enum AdminOp {
     /// Every store on this machine and the projects in it (T-322): the shared
     /// store, one per Herdr session, and the registered ones. Read-only.
     Projects,
+    /// Pause one project: its engine stops dispatching, ringing and merging
+    /// for it; the other projects of the same engine go on.
+    Pause {
+        /// The project id.
+        project: String,
+        /// Why, kept with the pause.
+        #[arg(long, default_value = "paused by the user")]
+        reason: String,
+    },
+    /// Lift `gear admin pause`: the engine works on the project again.
+    Resume {
+        /// The project id.
+        project: String,
+    },
 }
 
 fn main() {
@@ -339,6 +361,10 @@ fn main() {
     // without touching the user's home (design/13: a read-only command writes
     // nothing).
     let cli = Cli::parse();
+    if let Err(e) = name_the_caller(cli.session.as_deref(), cli.pane.as_deref()) {
+        eprintln!("ERROR {}: {}", e.code, e.detail);
+        std::process::exit(e.code.exit_code());
+    }
     // T-228 (review F1): `admin init --check` validates a config and changes
     // nothing, and that includes the directories of the default store.
     if !writes_nothing(&cli.cmd) {
@@ -352,6 +378,63 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// `--session` and `--pane`: the caller names its Herdr session and pane. The
+/// session replaces whatever Herdr session the process inherited (a CLI that
+/// runs commands in a shared background process inherits the session and pane
+/// of whoever started that process), so the store, the Herdr door and the
+/// pane all come from what the caller named.
+fn name_the_caller(session: Option<&str>, pane: Option<&str>) -> GearResult<()> {
+    if pane.is_some() && session.is_none() {
+        return Err(GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            "--pane needs --session: a pane id is only unique inside its Herdr session",
+        ));
+    }
+    let Some(session) = session else {
+        return Ok(());
+    };
+    if session.is_empty() || session.contains('/') || session.contains("..") {
+        return Err(GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("--session {session:?} is not a Herdr session name"),
+        ));
+    }
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return Err(GearError::new(
+            gear_model::ErrorCode::NoTarget,
+            "HOME is not set: the Herdr session's socket cannot be found",
+        ));
+    };
+    let socket = if session == "default" {
+        home.join(".config/herdr/herdr.sock")
+    } else {
+        home.join(".config/herdr/sessions")
+            .join(session)
+            .join("herdr.sock")
+    };
+    if !socket.exists() {
+        return Err(GearError::new(
+            gear_model::ErrorCode::NoTarget,
+            format!(
+                "no running Herdr session {session:?} (no socket at {})",
+                socket.display()
+            ),
+        ));
+    }
+    std::env::set_var("HERDR_SOCKET_PATH", &socket);
+    std::env::set_var("HERDR_SESSION", session);
+    // The store follows the named session, not an inherited one.
+    std::env::remove_var(gear_model::ctx::ENV_DB);
+    for inherited in ["HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"] {
+        std::env::remove_var(inherited);
+    }
+    if let Some(pane) = pane {
+        std::env::set_var("HERDR_PANE_ID", pane);
+        gear_app::identity::set_explicit_pane(true);
+    }
+    Ok(())
 }
 
 /// True for the commands that write nothing at all, not even the directory of
@@ -470,6 +553,12 @@ fn run(cli: Cli) -> GearResult<()> {
         Some(Cmd::Admin {
             op: AdminOp::Projects,
         }) => cmd_admin_projects(cli.json),
+        Some(Cmd::Admin {
+            op: AdminOp::Pause { project, reason },
+        }) => cmd_admin_pause(&project, Some(&reason)),
+        Some(Cmd::Admin {
+            op: AdminOp::Resume { project },
+        }) => cmd_admin_pause(&project, None),
         Some(Cmd::Captain {
             op: CaptainOp::Handover { pane, facts },
         }) => match (facts, pane) {
@@ -525,6 +614,12 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
         })
         | Some(Cmd::Admin {
             op: AdminOp::Projects,
+        })
+        | Some(Cmd::Admin {
+            op: AdminOp::Pause { .. },
+        })
+        | Some(Cmd::Admin {
+            op: AdminOp::Resume { .. },
         })
         | Some(Cmd::Admin {
             op: AdminOp::InstallSkill { .. },
@@ -586,6 +681,61 @@ fn cmd_admin_kickoff(json: bool) -> GearResult<()> {
 /// store the registry names, existing files only, each once (by canonical
 /// path), in path order. Each is opened read-only, so nothing is written and
 /// no engine starts.
+/// Pause (`reason` given) or resume (`None`) one project in whichever store
+/// on this machine registers it: no Herdr session or pane is needed.
+fn cmd_admin_pause(project: &str, reason: Option<&str>) -> GearResult<()> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut found = Vec::new();
+    for path in stores_in(home.as_deref()) {
+        let Ok(mut store) = gear_store::Store::open(&path) else {
+            continue;
+        };
+        if store.read(|tx| tx.get_project(project))?.is_some() {
+            found.push((path, store));
+        }
+    }
+    let (path, mut store) = match found.len() {
+        1 => found.pop().expect("one store"),
+        0 => {
+            return Err(GearError::new(
+                gear_model::ErrorCode::NoTarget,
+                format!(
+                "no store on this machine registers project {project:?}: see `gear admin projects`"
+            ),
+            ))
+        }
+        _ => {
+            let paths: Vec<String> = found
+                .iter()
+                .map(|(path, _)| path.display().to_string())
+                .collect();
+            return Err(GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!(
+                    "project {project:?} is registered in several stores: {}",
+                    paths.join(", ")
+                ),
+            ));
+        }
+    };
+    let key = gear_store::Tx::project_paused_key(project);
+    match reason {
+        Some(reason) => {
+            let value = format!("{} {reason}", now_ts());
+            store.write(|tx| tx.set_meta(&key, &value))?;
+            println!(
+                "{project} paused in {}: its engine no longer dispatches, rings or merges for it; `gear admin resume {project}` lifts it",
+                path.display()
+            );
+        }
+        None => {
+            store.write(|tx| tx.set_meta(&key, ""))?;
+            println!("{project} resumed in {}", path.display());
+        }
+    }
+    Ok(())
+}
+
 fn cmd_admin_projects(json: bool) -> GearResult<()> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let stores: Vec<StoreProjects> = stores_in(home.as_deref())
@@ -1361,8 +1511,7 @@ fn resolve_caller(
     env: gear_app::Env,
 ) -> GearResult<gear_app::Env> {
     let ancestors = gear_app::identity::process_ancestors();
-    let daemon = gear_app::identity::DaemonSessions::from_vars(|name| std::env::var(name).ok());
-    gear_app::identity::resolve_env(store, &env, herdr, &ancestors, &daemon)
+    gear_app::identity::resolve_env(store, &env, herdr, &ancestors)
 }
 
 fn open_store_at(vars: impl Fn(&str) -> Option<String>) -> GearResult<gear_store::Store> {

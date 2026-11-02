@@ -305,15 +305,11 @@ pub fn take_all(
     now: Ts,
 ) -> GearResult<Vec<Taken>> {
     // 1. The pane: the caller's own, else the one unbound daemon pane.
-    let daemon = identity::DaemonSessions::from_vars(|name| std::env::var(name).ok());
-    let own_pane = identity::caller_pane(herdr, ancestors, env.pane_id.as_deref());
-    let in_daemon = own_pane.is_none();
-    let pane = own_pane
-        .or(identity::daemon_pane(store, herdr, false, &daemon)?)
+    let pane = identity::caller_pane(herdr, ancestors, env.pane_id.as_deref())
         .ok_or_else(|| {
             GearError::new(
                 ErrorCode::Forbidden,
-                "`gear captain take` cannot tell which pane this is: run it from the agent's own pane, or from an agent whose CLI runs its tools in a daemon (codex, opencode) with exactly one such pane bound to no seat",
+                "`gear captain take` cannot tell which pane this is: name it, `gear --session <session> --pane <your pane> captain take <project>`",
             )
         })?;
     // 2. The projects: the ones named, else the one whose checkout holds the
@@ -371,23 +367,10 @@ pub fn take_all(
         }
     }
     let kind = occupant.agent.clone().filter(|kind| !kind.is_empty());
-    // A caller whose tools run in a daemon names its own session when Herdr
-    // knows none for the pane: recorded on the binding, it tells this captain
-    // apart from another captain of the same CLI in the session later.
     let session_ref = occupant
         .agent_session
         .as_ref()
-        .map(|session| session.value.clone())
-        .or_else(|| {
-            if !in_daemon {
-                return None;
-            }
-            match kind.as_deref() {
-                Some("codex") => daemon.codex.clone(),
-                Some("opencode") => daemon.opencode.clone(),
-                _ => None,
-            }
-        });
+        .map(|session| session.value.clone());
     let mut taken = Vec::new();
     for project in projects {
         taken.push(take_one(
@@ -692,11 +675,10 @@ pub fn release(
     now: Ts,
 ) -> GearResult<Released> {
     let pane = identity::caller_pane(herdr, ancestors, env.pane_id.as_deref())
-        .or(identity::daemon_pane(store, herdr, true, &identity::DaemonSessions::from_vars(|name| std::env::var(name).ok()))?)
         .ok_or_else(|| {
             GearError::new(
                 ErrorCode::Forbidden,
-                "`gear captain release` cannot tell which pane this is: run it from the captain's own pane",
+                "`gear captain release` cannot tell which pane this is: name it, `gear --session <session> --pane <your pane> captain release <project>`",
             )
         })?;
     let captain = format!("{project}:captain");

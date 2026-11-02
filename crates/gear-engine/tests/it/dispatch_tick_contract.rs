@@ -117,7 +117,11 @@ fn idle_lane_is_assigned_and_delivered() {
     );
     assert_eq!(
         ops[0].payload["text"],
-        first_attempt_text("T-7", 1, "heat/t7", "origin", "dev", "`gear --show T-7`").as_str()
+        gear_store::with_seat_command(
+            &first_attempt_text("T-7", 1, "heat/t7", "origin", "dev", "`gear --show T-7`"),
+            "gear --session sess --pane w1:p2"
+        )
+        .as_str()
     );
     assert_eq!(
         s.read(|tx| tx.get_attempt("p", "T-7", 1))
@@ -147,7 +151,11 @@ fn continue_uses_the_open_attempt() {
         .unwrap();
     assert_eq!(
         ops[0].payload["text"],
-        continue_text("T-7", 1, "`gear --show T-7`").as_str()
+        gear_store::with_seat_command(
+            &continue_text("T-7", 1, "`gear --show T-7`"),
+            "gear --session sess --pane w1:p2"
+        )
+        .as_str()
     );
     assert_eq!(ops[0].attempt, Some(1));
     let none = vec![(heat, Action::None { reason: "x".into() })];

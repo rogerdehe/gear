@@ -520,7 +520,7 @@ pub fn onboard_queued(
     now: Ts,
 ) -> GearResult<Vec<String>> {
     let mut active = Vec::new();
-    for project in store.read(|tx| tx.project_ids())? {
+    for project in store.read(|tx| tx.active_project_ids())? {
         // One snapshot: the config text and the seats it is read against.
         let (config_text, seats) = store.read(|tx| {
             let config_text = tx.get_project(&project)?.map(|row| row.config_toml);

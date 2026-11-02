@@ -90,7 +90,10 @@ fn delivery_is_intended_then_executed() {
         (op.kind, op.state, op.task.as_deref(), op.attempt),
         (OpKind::Deliver, OpState::Intended, Some("T-1"), Some(2))
     );
-    assert_eq!(op.payload["text"], text.as_str());
+    assert_eq!(
+        op.payload["text"],
+        gear_store::with_seat_command(&text, "gear --session sess --pane w1:p2").as_str()
+    );
     // the attempt the delivery is for exists and is the seat's open attempt (T-44, T-47)
     s.write(|tx| {
         tx.insert_attempt(&gear_store::AttemptRow {
@@ -122,5 +125,11 @@ fn delivery_is_intended_then_executed() {
     herdr.add_agent_named(LANE_PANE, "opencode", AgentStatus::Idle, "p-heat");
     let done = execute_intended(&mut s, &mut herdr, "p", T0 + 1).unwrap();
     assert_eq!(done, vec![(op.id.clone(), "submitted".to_string())]);
-    assert_eq!(herdr.prompts_to(LANE_PANE), vec![text.as_str()]);
+    assert_eq!(
+        herdr.prompts_to(LANE_PANE),
+        vec![gear_store::with_seat_command(
+            &text,
+            "gear --session sess --pane w1:p2"
+        )]
+    );
 }

@@ -309,18 +309,18 @@ fn the_taskless_doorbell_text_says_so() {
             cut: false,
         },
     ];
-    let said = text(&items, true);
+    let said = text(&items, true, "gear --session s --pane w1:p1");
     assert_eq!(
         said,
-        "GEAR: 2 item(s) for you: M-12 M-13. Run the command `gear` (no arguments) in your own shell, answer them, then end your turn. You have no task now: do not continue earlier work."
+        "GEAR: 2 item(s) for you: M-12 M-13. Run the command `gear --session s --pane w1:p1` (exactly this, nothing added) in your own shell, answer them, then end your turn. You have no task now: do not continue earlier work."
     );
     assert!(!said.contains('\n'), "one line: {said}");
 
     // With a task, the usual text is unchanged.
-    let said = text(&items, false);
+    let said = text(&items, false, "gear --session s --pane w1:p1");
     assert_eq!(
         said,
-        "GEAR: 2 item(s) waiting for you (1 urgent): M-12 M-13. Run the command `gear` (no arguments) in your own shell; it shows only your items."
+        "GEAR: 2 item(s) waiting for you (1 urgent): M-12 M-13. Run the command `gear --session s --pane w1:p1` (exactly this, nothing added) in your own shell; it shows only your items."
     );
 }
 

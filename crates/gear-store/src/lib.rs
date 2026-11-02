@@ -1125,6 +1125,30 @@ impl<'s> Tx<'s> {
         rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
     }
 
+    /// The meta key that pauses one project in the engine.
+    pub fn project_paused_key(project: &str) -> String {
+        format!("project_paused:{project}")
+    }
+
+    /// Whether the user paused this project (`gear admin pause`): the value is
+    /// the time and reason; an empty value is not a pause.
+    pub fn project_paused(&self, project: &str) -> GearResult<Option<String>> {
+        Ok(self
+            .get_meta(&Self::project_paused_key(project))?
+            .filter(|value| !value.is_empty()))
+    }
+
+    /// The projects the engine works on: every registered one but the paused.
+    pub fn active_project_ids(&self) -> GearResult<Vec<String>> {
+        let mut active = Vec::new();
+        for project in self.project_ids()? {
+            if self.project_paused(&project)?.is_none() {
+                active.push(project);
+            }
+        }
+        Ok(active)
+    }
+
     /// Replace the mutable fields of a registered project (raw write): the
     /// config text, its version and the quotas. `id` and `created` stay.
     /// Missing → NoTarget.
@@ -1757,6 +1781,17 @@ impl<'s> Tx<'s> {
     /// Allocates `O-<n>`, inserts in state Intended. Returns the stored row.
     pub fn insert_op(&self, op: &NewOp) -> GearResult<OpRow> {
         let id = self.next_id(&op.project, 'O')?;
+        // Every text typed into a seat's pane names that seat's GEAR command
+        // in full (`gear --session <s> --pane <p>`): a CLI that runs commands
+        // outside its pane cannot be told apart otherwise. One place, so no
+        // text sent to a seat can miss it.
+        let mut payload = op.payload.clone();
+        if let Some(text) = payload.get("text").and_then(|text| text.as_str()) {
+            if let Some(command) = self.seat_command(&op.seat)? {
+                let named = with_seat_command(text, &command);
+                payload["text"] = serde_json::Value::String(named);
+            }
+        }
         self.tx
             .execute(
                 "INSERT INTO operations
@@ -1773,7 +1808,7 @@ impl<'s> Tx<'s> {
                     op.attempt,
                     op.ref_msg,
                     op.plan_version,
-                    json_to_text(&op.payload).map_err(map_sqlite)?,
+                    json_to_text(&payload).map_err(map_sqlite)?,
                     OpState::Intended.as_str(),
                     op.created,
                 ],
@@ -1789,13 +1824,30 @@ impl<'s> Tx<'s> {
             attempt: op.attempt,
             ref_msg: op.ref_msg.clone(),
             plan_version: op.plan_version,
-            payload: op.payload.clone(),
+            payload,
             state: OpState::Intended,
             result: None,
             check_budget: 0,
             created: op.created,
             updated: op.created,
         })
+    }
+
+    /// The command `seat` runs GEAR with, from its active binding:
+    /// `gear --session <session> --pane <pane>`. `None` without one.
+    pub fn seat_command(&self, seat: &str) -> GearResult<Option<String>> {
+        let Some(row) = self.get_seat(seat)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .get_binding(seat, row.generation)?
+            .filter(|binding| binding.status == BindingStatus::Active)
+            .map(|binding| {
+                format!(
+                    "gear --session {} --pane {}",
+                    binding.session, binding.pane_id
+                )
+            }))
     }
 
     pub fn get_op(&self, project: &str, id: &str) -> GearResult<Option<OpRow>> {
@@ -4711,5 +4763,51 @@ mod tests {
         .unwrap();
         let err = s.read(|tx| tx.get_seat("p:x")).unwrap_err();
         assert_eq!(err.code, ErrorCode::BadFormat);
+    }
+}
+
+/// `text` with every GEAR command in it spelled as `command`
+/// (`gear --session <s> --pane <p>`): `` `gear` `` and `` `gear <sub>`` in
+/// backticks, and the bare "gear send". A text that already names a pane is
+/// left as it is.
+pub fn with_seat_command(text: &str, command: &str) -> String {
+    if text.contains(" --pane ") {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut rest = text;
+    while let Some(at) = rest.find("`gear") {
+        let after = &rest[at + "`gear".len()..];
+        out.push_str(&rest[..at]);
+        if after.starts_with('`') || after.starts_with(' ') {
+            out.push('`');
+            out.push_str(command);
+        } else {
+            out.push_str("`gear");
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out.replace("with gear send", &format!("with `{command} send`"))
+}
+
+#[cfg(test)]
+mod seat_command_tests {
+    use super::with_seat_command;
+
+    #[test]
+    fn every_gear_command_in_a_text_names_the_seat_once() {
+        let c = "gear --session s --pane w1:p2";
+        assert_eq!(
+            with_seat_command("Run `gear` first; then `gear --show T-1`. Report with gear send.", c),
+            "Run `gear --session s --pane w1:p2` first; then `gear --session s --pane w1:p2 --show T-1`. Report with `gear --session s --pane w1:p2 send`."
+        );
+        let named = with_seat_command("Run `gear` first", c);
+        assert_eq!(
+            with_seat_command(&named, c),
+            named,
+            "applied twice, same text"
+        );
+        assert_eq!(with_seat_command("`gearbox` stays", c), "`gearbox` stays");
     }
 }
