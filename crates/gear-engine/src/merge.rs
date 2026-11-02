@@ -72,7 +72,10 @@ pub struct Merged {
 /// own only git inputs; SQLite and Herdr remain on the tick thread.
 #[derive(Debug, Clone, Default)]
 pub struct MergeWorkers {
-    /// The one worker per repo, keyed by project and repo.
+    /// The one worker per repo and integration branch, whichever project
+    /// it merges for: two projects that land on the same branch of the same
+    /// repo merge one after the other, never gate side by side on a base
+    /// the other is about to move.
     workers: Arc<Mutex<BTreeMap<String, Worker>>>,
     /// Bumped whenever the merge step moves: a worker reports its result, and
     /// the tick collects one. A caller that must know whether a step did
@@ -118,12 +121,11 @@ impl MergeWorkers {
 
     /// Whether a merge of this project is running in any of its repos.
     pub fn running(&self, project: &str) -> bool {
-        let prefix = format!("{project}\u{1f}");
         self.workers
             .lock()
             .unwrap()
-            .keys()
-            .any(|key| key.starts_with(&prefix))
+            .values()
+            .any(|worker| worker.op.project == project)
     }
 }
 
@@ -422,9 +424,8 @@ pub fn merge_passed(
         })?;
     let finished_keys: Vec<String> = workers
         .iter()
-        .filter(|(key, worker)| {
-            key.starts_with(&format!("{project}\u{1f}"))
-                && worker.finished.lock().unwrap().is_some()
+        .filter(|(_, worker)| {
+            worker.op.project == project && worker.finished.lock().unwrap().is_some()
         })
         .map(|(key, _)| key.clone())
         .collect();
@@ -612,8 +613,9 @@ pub fn merge_passed(
             // queued and runs again on a later tick).
             PrClaim::Pending => continue,
         };
-        let key = worker_key(project, &repo);
-        // A merge of this repo is already running: this one waits for it.
+        let key = worker_key(&repo);
+        // A merge into this repo's integration branch is already running,
+        // for this project or another one: this one waits for it.
         if workers.contains_key(&key) {
             continue;
         }
@@ -1919,8 +1921,14 @@ fn repo_of_op(
 
 /// The key of a merge worker: one worker per repo (T-53), so a merge in one
 /// repo does not wait for the merge of another.
-fn worker_key(project: &str, repo: &Repo) -> String {
-    format!("{project}\u{1f}{}", repo.name)
+/// The key of a repo's merge worker: the repo's real path and its
+/// integration branch. Another project with a checkout of the same repo
+/// that lands on the same branch shares the key.
+fn worker_key(repo: &Repo) -> String {
+    let path = std::fs::canonicalize(&repo.path)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| repo.path.clone());
+    format!("{path}\u{1f}{}", repo.integration)
 }
 
 /// Merge one op's task branches and run the gate, once. `Ok(lines)` = merged
@@ -7629,6 +7637,54 @@ gate = "{project_gate}"
         // The worktree's `.git` is a file, not a directory: the path is
         // resolved through it, and the lock is still one file for both sides.
         assert!(scratch.root.join("merge/.git").is_file());
+    }
+
+    /// Two projects in one repo that land on the same integration branch
+    /// merge one after the other: while another project's merge holds the
+    /// branch, this project's merge stays queued, and the other project's
+    /// result is never collected as this project's.
+    #[test]
+    fn another_projects_merge_into_the_same_branch_goes_first() {
+        let scratch = Scratch::new("shared");
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, "true");
+        let mut other = op("abc1234");
+        other.project = "q".into();
+        other.seat = "q:heat".into();
+        let finished = Arc::new(Mutex::new(Some(Finished {
+            result: Report::Merged("q merged".into()),
+            at: 20,
+        })));
+        cfg.merges.workers.lock().unwrap().insert(
+            worker_key(&repo("true")),
+            Worker {
+                op: other,
+                finished,
+            },
+        );
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        assert_eq!(op_state(&mut store, "O-1"), Some(OpState::Intended));
+        assert!(cfg.merges.running("q"), "q's result stays for q's own tick");
+        assert!(!cfg.merges.running("p"));
+        assert_eq!(
+            scratch.dev_log(),
+            "dev",
+            "no merge while q holds the branch"
+        );
+        cfg.merges.workers.lock().unwrap().clear();
+        assert_eq!(wait_merge(&mut store, &mut herdr, &cfg).len(), 1);
+    }
+
+    /// Another integration branch of the same repo is another key: those
+    /// merges do not wait for each other.
+    #[test]
+    fn the_merge_worker_key_is_the_repo_and_its_integration_branch() {
+        let dev = repo("true");
+        let mut staging = dev.clone();
+        staging.integration = "staging".into();
+        let mut child = dev.clone();
+        child.name = "child".into();
+        assert_ne!(worker_key(&dev), worker_key(&staging));
+        assert_eq!(worker_key(&dev), worker_key(&child));
     }
 
     #[test]
