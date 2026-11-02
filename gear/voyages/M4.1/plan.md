@@ -8,8 +8,8 @@ bar: FASTEST (user, 2026-10-28: one hour): block only a wrong restart, a missed 
 eta: 1h
 
 # Decisions
-- 2026-10-28 23:45 scope: M4.1 carries only the two fixes another project's captain needs before its M1 (user: "把他那边必须要的东西放进 4.1"); every other collected item moves to M4.2, opened when the user says | why: user, one hour | else: the full list, about 10 h
-- 2026-10-28 23:45 model: lanes hull and keel on MiniMax M3.1 Flash, reviewers on Codex gpt-6.1-sol (user: "开发线用 MiniMax，审核用 Codex"); deck and mast stay retired | why: user | else: hull on Codex Terra as in M4
+- 2026-10-28 23:45 scope: M4.1 carries only the two fixes another project's captain needs before its M1 (user: put what the other project needs into M4.1); every other collected item moves to M4.2, opened when the user says | why: user, one hour | else: the full list, about 10 h
+- 2026-10-28 23:45 model: lanes hull and keel on MiniMax M3.1 Flash, reviewers on Codex gpt-6.1-sol (user: MiniMax for the lanes, Codex for review); deck and mast stay retired | why: user | else: hull on Codex Terra as in M4
 - station M-3932: keep course — 15m gone: T-226 handed in after ~10 min and is in review; keel on T-227 at 14/30m.
 - station M-3940: keep course — 30m gone: T-226 merged; keel on T-227 at 30/30m after the contract fix (v2, push check dropped).
 - station M-3948: keep course — 45m gone: T-226 merged; T-227 at 45/30m after two contract fixes (captain's unclear points), tests running; v0.4.7 likely ~15-30 min past the hour.
