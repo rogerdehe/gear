@@ -161,14 +161,7 @@ fn take_from_a_fresh_pane_with_no_env_makes_it_the_captain() {
     assert!(items[0].body.contains(CAP_PANE), "{}", items[0].body);
 
     // And `gear` from that pane is the captain, with no environment.
-    let resolved = resolve_env(
-        &mut s,
-        &bare(),
-        &mut herdr,
-        &NEW_CALLER,
-        &Default::default(),
-    )
-    .unwrap();
+    let resolved = resolve_env(&mut s, &bare(), &mut herdr, &NEW_CALLER).unwrap();
     assert_eq!(
         resolved.ctx,
         Some(GearCtx {
@@ -338,35 +331,24 @@ fn take_needs_an_agent_in_the_pane() {
     assert_eq!(seat.generation, 1);
 }
 
-/// A daemon CLI's tools run in no pane: with exactly one daemon-kind pane bound
-/// to no seat, that is the pane `take` means (T-126).
+/// A CLI that runs its commands outside its pane names the pane it takes
+/// (`gear --session <s> --pane <p> captain take`): that pane becomes the seat.
 #[test]
-fn a_daemon_caller_in_no_pane_takes_the_one_unbound_daemon_pane() {
+fn a_caller_in_no_pane_takes_the_pane_it_names() {
     let root = tempfile::tempdir().unwrap();
     let mut s = world(root.path());
     let mut herdr = herdr();
-    // The panes a daemon caller could mean: the captain's (bound) and one free
-    // codex pane nobody onboarded.
     herdr.add_agent("w1:p5", "codex", AgentStatus::Idle);
     herdr.set_pane_processes("w1:p5", Some(1_000_001), &[]);
-
-    let taken = take(
-        &mut s,
-        &bare(),
-        &mut herdr,
-        &SERVICE,
-        root.path(),
-        None,
-        NOW,
-    )
-    .unwrap();
-    assert_eq!(taken.to, "w1:p5", "the one daemon pane with no seat");
+    gear_app::identity::set_explicit_pane(true);
+    let named = Env {
+        ctx: None,
+        pane_id: Some("w1:p5".into()),
+        admin: false,
+    };
+    let taken = take(&mut s, &named, &mut herdr, &SERVICE, root.path(), None, NOW).unwrap();
+    assert_eq!(taken.to, "w1:p5");
     assert_eq!(taken.kind, "codex");
-    let new = s
-        .read(|tx| tx.get_binding("p:captain", 2))
-        .unwrap()
-        .unwrap();
-    assert_eq!(new.pane_id, "w1:p5");
 }
 
 /// A shell outside every pane of the session that could be it says so, and

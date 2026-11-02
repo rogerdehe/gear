@@ -32,7 +32,7 @@ pub fn tick(
     cfg: &EngineCfg,
     now: Ts,
 ) -> GearResult<()> {
-    for project in store.read(|tx| tx.project_ids())? {
+    for project in store.read(|tx| tx.active_project_ids())? {
         for seat in store.read(|tx| tx.seats_of_project(&project))? {
             if seat.role != SeatRole::Lane {
                 continue;

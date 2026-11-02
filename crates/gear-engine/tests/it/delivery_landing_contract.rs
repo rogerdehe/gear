@@ -15,7 +15,7 @@ use gear_store::{testing, ContractRow, NewOp, Store, TaskRow};
 const T0: i64 = 1_800_000_000;
 const CAP: &str = "w1:p1";
 const LANE: &str = "w1:p2";
-const PACKET: &str = "Continue T-1: run `gear` first";
+const PACKET: &str = "Continue T-1: read your packet first";
 
 fn seed(store: &mut Store, kind: &str, state: TaskState) {
     store

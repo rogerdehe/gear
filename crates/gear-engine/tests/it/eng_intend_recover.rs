@@ -130,7 +130,7 @@ fn payload_has_text_and_covers() {
 
     assert_eq!(
         ops[0].payload["text"],
-        "GEAR: 1 item(s) waiting for you: M-1. Run the command `gear` (no arguments) in your own shell; it shows only your items."
+        "GEAR: 1 item(s) waiting for you: M-1. Run the command `gear --session sess-p --pane w1:p1` (no arguments) in your own shell; it shows only your items."
     );
     assert_eq!(ops[0].payload["covers"], serde_json::json!(["M-3", "M-1"]));
 }

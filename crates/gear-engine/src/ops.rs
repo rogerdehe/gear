@@ -145,18 +145,22 @@ pub fn deliver_doorbell_now(
     }];
     // Design §10.4: a lane with no open attempt gets the text that tells it
     // to stop working on earlier things.
-    let (no_task, goal) = store.read(|tx| {
+    let (no_task, goal, command) = store.read(|tx| {
+        let command = gear_app::identity::seat_command_of(tx, seat)?;
         let Some(row) = tx.get_seat(seat)? else {
-            return Ok((false, None));
+            return Ok((false, None, command));
         };
         let goal = if row.role == gear_model::SeatRole::Captain {
             crate::doorbell::goal_line(tx, &row.project)?
         } else {
             None
         };
-        Ok((crate::no_task_of(tx, &row)?, goal))
+        Ok((crate::no_task_of(tx, &row)?, goal, command))
     })?;
-    let text = crate::doorbell::with_goal(crate::doorbell::text(&items, no_task), goal.as_deref());
+    let text = crate::doorbell::with_goal(
+        crate::doorbell::text(&items, no_task, &command),
+        goal.as_deref(),
+    );
     // One write transaction: check the seat, the binding and the coverage, and
     // claim the message with this path's own doorbell op before Herdr runs.
     let claimed = store.write(|tx| {
@@ -3034,7 +3038,7 @@ mod tests {
 
     // ---- T-371: a delivery that sits unsent in the input box ---------------
 
-    const UNSENT_TEXT: &str = "Continue T-1: run `gear` first";
+    const UNSENT_TEXT: &str = "Continue T-1: read your packet first";
 
     /// A lane Deliver op carrying `text`, Submitted, created `created`.
     fn unsent_delivery(tx: &Tx<'_>, text: &str, created: Ts) -> GearResult<String> {
@@ -3084,7 +3088,7 @@ mod tests {
             .unwrap();
         let mut herdr = unsent_herdr(
             AgentStatus::Idle,
-            "> earlier output\n> Continue T-1: run `gear` first",
+            "> earlier output\n> Continue T-1: read your packet first",
         );
 
         let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap();
@@ -3116,7 +3120,7 @@ mod tests {
         store
             .write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0))
             .unwrap();
-        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: run `gear` first");
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: read your packet first");
 
         assert_eq!(
             resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap(),
@@ -3172,7 +3176,7 @@ mod tests {
                 tx.set_meta("engine.resubmit.O-1", &(T0 + 40).to_string())
             })
             .unwrap();
-        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: run `gear` first");
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: read your packet first");
 
         // Not 30 s after that Enter yet.
         assert!(resubmit_unsent(&mut store, &mut herdr, "p", T0 + 69)
@@ -3230,7 +3234,7 @@ mod tests {
         let _op = delivery_with_a_turn(&mut store);
         let mut herdr = unsent_herdr(
             AgentStatus::Working,
-            "> earlier output\n> Continue T-1: run `gear` first",
+            "> earlier output\n> Continue T-1: read your packet first",
         );
 
         let held = held_deliveries(&mut store, &mut herdr, "p").unwrap();
@@ -3295,7 +3299,7 @@ mod tests {
             .unwrap();
         let mut herdr = unsent_herdr(
             AgentStatus::Working,
-            "> earlier output\n> Continue T-1: run `gear` first",
+            "> earlier output\n> Continue T-1: read your packet first",
         );
 
         let held = held_deliveries(&mut store, &mut herdr, "p").unwrap();
@@ -3320,7 +3324,7 @@ mod tests {
         let _op = delivery_with_a_turn(&mut store);
         let mut herdr = unsent_herdr(
             AgentStatus::Idle,
-            "> earlier output\n> Continue T-1: run `gear` first",
+            "> earlier output\n> Continue T-1: read your packet first",
         );
         herdr.observe_fails = true;
 
@@ -3337,7 +3341,7 @@ mod tests {
         store
             .write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0))
             .unwrap();
-        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: run `gear` first");
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: read your packet first");
 
         let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 20).unwrap();
 
@@ -3449,7 +3453,10 @@ mod tests {
         store
             .write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0))
             .unwrap();
-        let mut herdr = unsent_herdr(AgentStatus::Working, "> Continue T-1: run `gear` first");
+        let mut herdr = unsent_herdr(
+            AgentStatus::Working,
+            "> Continue T-1: read your packet first",
+        );
 
         let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap();
 
@@ -3482,7 +3489,7 @@ mod tests {
                 tx.set_op_state("p", &id, OpState::Confirmed, Some("view p:heat/1"), T0 + 5)
             })
             .unwrap();
-        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: run `gear` first");
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: read your packet first");
 
         let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap();
 
@@ -3508,7 +3515,7 @@ mod tests {
         store
             .write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0))
             .unwrap();
-        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: run `gear` first");
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: read your packet first");
 
         herdr.observe_fails = true;
         assert!(resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40)

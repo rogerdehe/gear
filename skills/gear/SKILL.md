@@ -13,6 +13,8 @@ No `GEAR_CTX` in your environment and no seat bound to your pane → GEAR did no
 
 ## 2. Start every turn with `gear`
 
+**Run every `gear` command the way GEAR's messages to you write it:** `gear --session <session> --pane <your pane> …`. Some CLIs run commands outside the agent's pane, and only these two arguments tell GEAR who you are; keep them on every `gear` command (`send`, `reply`, `plan apply`, …), and never use another seat's pane.
+
 `gear` prints your home page: who you are, your task, what is waiting for you. Running it records that you saw it — that is how GEAR knows a message reached you. Run it whenever you are woken.
 
 ## 3. Lanes
@@ -35,7 +37,7 @@ A temp reviewer judges one task and hands in with `gear send --kind review --tas
 
 ## 5. Captain
 
-To become a project's captain, run `gear captain take` in the project's root (with several projects it lists them: ask the user which). It needs no `GEAR_CTX` and no pane id: the pane you run in becomes the captain seat at a new generation, and `gear` there is the captain's home page.
+To become a project's captain, run `gear --session <session> --pane <your pane> captain take <project>` (the user or the handing-over captain gives you the session and pane). Your pane becomes the captain seat at a new generation.
 
 The captain's guide: `gear --skill captain`. Holding the course: `gear --skill course`. Cutting work into tasks: `gear --skill decompose`.
 
@@ -59,7 +61,7 @@ The user installs this skill into an agent CLI with `gear admin install-skill --
 
 | Code | Meaning | Do |
 |---|---|---|
-| `NOT_REGISTERED` | no valid seat for this process | stop write commands; tell the captain/user |
+| `NOT_REGISTERED` | no valid seat for this process | run the command with `--session` and `--pane` as GEAR's messages write it; if it still fails, stop write commands and tell the captain/user |
 | `STALE_GENERATION` | your seat was restarted or taken over | stop; run `gear` |
 | `FORBIDDEN` | your role or state may not do this | do not retry; ask |
 | `BAD_FORMAT` | arguments or text malformed (the detail says where) | fix and resend |

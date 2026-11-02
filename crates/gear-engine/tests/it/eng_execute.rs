@@ -99,7 +99,10 @@ fn ok_is_submitted_and_prompts_text() {
     assert_eq!(op_state(&mut store, "p", "O-1"), OpState::Submitted);
     assert_eq!(
         herdr.prompts_to(CAP_PANE),
-        vec![TEXT],
+        vec![gear_store::with_seat_command(
+            TEXT,
+            "gear --session sess-p --pane w1:p1"
+        )],
         "the doorbell text is prompted"
     );
 }

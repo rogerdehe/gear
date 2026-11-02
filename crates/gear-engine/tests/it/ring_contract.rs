@@ -226,7 +226,7 @@ fn a_single_project_rings_as_today() {
     );
     assert!(prompts[0].contains(&item), "{}", prompts[0]);
     assert!(
-        prompts[0].contains("Run the command `gear` (no arguments)"),
+        prompts[0].contains("Run the command `gear --session "),
         "{}",
         prompts[0]
     );

@@ -58,6 +58,9 @@ pub struct DoorbellInput {
     /// lose the destination): every captain doorbell repeats it. None for
     /// lanes and reviewers, and for a project with no departed voyage.
     pub goal: Option<String>,
+    /// The command this seat runs GEAR with (`gear --session <s> --pane <p>`,
+    /// [`gear_app::identity::seat_command`]): every doorbell spells it out.
+    pub command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +104,10 @@ pub fn decide(inputs: &[DoorbellInput], cooldown_s: i64, now: Ts) -> Vec<Doorbel
                 seat: input.seat.clone(),
                 generation: input.generation,
                 pane_id: input.pane_id.clone(),
-                text: with_goal(text(&named, input.no_task), input.goal.as_deref()),
+                text: with_goal(
+                    text(&named, input.no_task, &input.command),
+                    input.goal.as_deref(),
+                ),
                 covers: named.into_iter().map(|item| item.id).collect(),
             }
         })
@@ -199,7 +205,10 @@ pub fn rings(
         }
         let text = if ringing.len() == 1 {
             let input = ringing[0];
-            with_goal(text(&all, input.no_task), input.goal.as_deref())
+            with_goal(
+                text(&all, input.no_task, &input.command),
+                input.goal.as_deref(),
+            )
         } else {
             // Urgent items first: a project with urgent items leads.
             lines.sort_by_key(|(urgent, _)| !*urgent);
@@ -218,7 +227,8 @@ pub fn rings(
                 text.push_str(line);
                 text.push('\n');
             }
-            text.push_str("Run the command `gear` (no arguments) in your own shell; it shows only your items. An item of another project: `gear reply <project>:<M-n>`.");
+            let command = &ringing[0].command;
+            text.push_str(&format!("Run the command `{command}` (exactly this, nothing added) in your own shell; it shows only your items. An item of another project: `{command} reply <project>:<M-n>`."));
             for input in &ringing {
                 if let Some(goal) = &input.goal {
                     text.push('\n');
@@ -299,21 +309,21 @@ pub fn reaches_while_working(
 /// The one-line doorbell text.
 ///
 /// With a task (`no_task` false):
-/// `GEAR: <n> item(s) waiting for you[ (<urgent> urgent)]: <ids>. Run the command `gear` (no arguments) in your own shell; it shows only your items.`
+/// `GEAR: <n> item(s) waiting for you[ (<urgent> urgent)]: <ids>. Run the command `gear --session <s> --pane <p>` (exactly this, nothing added) in your own shell; it shows only your items.`
 ///
 /// Without a task (design §10.4 — a lane with no open attempt):
-/// `GEAR: <n> item(s) for you: <ids>. Run the command `gear` (no arguments) in your own shell, answer them, then end your turn. You have no task now: do not continue earlier work.`
+/// `GEAR: <n> item(s) for you: <ids>. Run the command `gear --session <s> --pane <p>` (exactly this, nothing added) in your own shell, answer them, then end your turn. You have no task now: do not continue earlier work.`
 ///
 /// The command is always spelled out, because the backticks are lost as soon as
 /// the text is pasted or shown: "Run gear now" reads as a command `gear now`
 /// (T-248).
 ///
 /// Never message bodies.
-pub fn text(items: &[DoorbellItem], no_task: bool) -> String {
+pub fn text(items: &[DoorbellItem], no_task: bool, command: &str) -> String {
     let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
     if no_task {
         return format!(
-            "GEAR: {} item(s) for you: {}. Run the command `gear` (no arguments) in your own shell, answer them, then end your turn. You have no task now: do not continue earlier work.",
+            "GEAR: {} item(s) for you: {}. Run the command `{command}` (exactly this, nothing added) in your own shell, answer them, then end your turn. You have no task now: do not continue earlier work.",
             items.len(),
             ids.join(" ")
         );
@@ -325,7 +335,7 @@ pub fn text(items: &[DoorbellItem], no_task: bool) -> String {
         String::new()
     };
     format!(
-        "GEAR: {} item(s) waiting for you{urgent}: {}. Run the command `gear` (no arguments) in your own shell; it shows only your items.",
+        "GEAR: {} item(s) waiting for you{urgent}: {}. Run the command `{command}` (exactly this, nothing added) in your own shell; it shows only your items.",
         items.len(),
         ids.join(" ")
     )

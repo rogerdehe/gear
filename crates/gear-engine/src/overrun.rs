@@ -441,7 +441,7 @@ pub fn tick(
     _cfg: &EngineCfg,
     now: Ts,
 ) -> GearResult<()> {
-    let projects = store.read(|tx| tx.project_ids())?;
+    let projects = store.read(|tx| tx.active_project_ids())?;
     for project in projects {
         store.write(|tx| {
             reconcile_quota_pauses(tx, &project)?;
