@@ -2363,6 +2363,11 @@ fn cmd_captain_handover(pane: &str, json: bool) -> GearResult<()> {
                 "to": result.to,
                 "generation": result.generation,
                 "kind": result.kind,
+                "named": named_line(&result.named),
+                "document": result.document,
+                "previous_pane": result.request.as_ref().map(|request| request.pane.clone()),
+                "asked": result.request.as_ref().map(|request| request.asked),
+                "deadline": result.request.as_ref().map(|request| request.deadline),
             })
         );
         return Ok(());
@@ -2371,6 +2376,24 @@ fn cmd_captain_handover(pane: &str, json: bool) -> GearResult<()> {
         "captain of {} handed over from pane {} to pane {} (generation {}, {})",
         result.project, result.from, result.to, result.generation, result.kind
     );
+    println!("agent name: {}", named_line(&result.named));
+    match (&result.document, &result.request) {
+        (Some(document), _) => println!(
+            "the new captain was told to read {document}, in one urgent item; the doorbell wakes it"
+        ),
+        (None, Some(request)) => println!(
+            "no handover document yet: pane {} {}; the new captain was told in one urgent item, and the doorbell wakes it",
+            request.pane,
+            if request.asked {
+                "was asked to write it"
+            } else {
+                "hosts no agent to ask"
+            }
+        ),
+        (None, None) => println!(
+            "the new captain was told in one urgent item; the doorbell wakes it"
+        ),
+    }
     Ok(())
 }
 

@@ -6,11 +6,14 @@
 
 use std::path::Path;
 
-use gear_app::captain::{handover_facts, take, HandoverRequest, Machine, HANDOVER_ASK_MIN};
+use gear_app::captain::{
+    handover, handover_facts, take, HandoverRequest, Machine, HANDOVER_ASK_MIN,
+};
 use gear_app::Env;
 use gear_herdr::fake::FakeHerdr;
 use gear_herdr::AgentStatus;
-use gear_model::{GearCtx, MsgKind, MsgState, SeatRole, TaskState};
+use gear_herdr::{Ensured, HerdrRead};
+use gear_model::{GearCtx, MsgKind, MsgState, SeatRole, SeatState, TaskState};
 use gear_store::{
     testing, ContractRow, NewMessage, PlanRow, Store, TaskRow, VoyageRow, VoyageStation,
 };
@@ -312,10 +315,12 @@ fn take_asks_the_previous_captain_and_points_at_its_session() {
     assert!(body.contains("write part 2 yourself"), "{body}");
 }
 
-/// After the bounded time with no document, `--facts` points the new captain
-/// at the previous session to read and summarise.
+/// After the bounded time with no document, the pointer to the previous
+/// session stays in the take item only: `--facts` is the template the captain
+/// writes its own handover from, so an older request is no instruction there
+/// (M6.2: the Prometheus captain read it as one).
 #[test]
-fn facts_point_at_the_previous_session_when_no_document_arrived() {
+fn facts_carry_no_instruction_from_an_older_request() {
     let root = crate::scratch::temp("captain-handover-deadline");
     let mut s = world(&root);
     let mut herdr = herdr();
@@ -331,12 +336,9 @@ fn facts_point_at_the_previous_session_when_no_document_arrived() {
     .unwrap();
     assert!(facts.document.is_none());
     let text = &facts.text;
-    assert!(
-        text.contains("none under gear/voyages/M6/handovers after the request"),
-        "{text}"
-    );
-    assert!(text.contains("session sess-abc (codex)"), "{text}");
-    assert!(text.contains("write part 2 yourself"), "{text}");
+    assert!(!text.contains("write part 2 yourself"), "{text}");
+    assert!(!text.contains("Previous captain's handover"), "{text}");
+    assert!(!text.contains("Last handover document"), "{text}");
 }
 
 /// A document the previous captain already wrote is named to the new captain
@@ -360,7 +362,7 @@ fn facts_name_an_existing_handover_document() {
     );
     assert!(
         facts.text.contains(
-            "Previous captain's handover: gear/voyages/M6/handovers/captain-2026-10-31-1730.md"
+            "Last handover document of this voyage: gear/voyages/M6/handovers/captain-2026-10-31-1730.md"
         ),
         "{}",
         facts.text
@@ -508,4 +510,144 @@ fn facts_work_for_a_stale_generation() {
     };
     let facts = handover_facts(&mut s, &env, &root, &engine(), NOW).unwrap();
     assert!(facts.text.contains("# Captain handover — p · voyage M6"));
+}
+
+/// Run git in `root`, failing the test on an error.
+fn git(root: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+/// M6.2 (the Prometheus handover): `handover --pane` tells the new captain on
+/// its own — the captain's name moves to the new pane and leaves the old one,
+/// and one urgent item names the handover document with its branch and commit.
+#[test]
+fn a_handover_moves_the_name_and_tells_the_new_captain_where_the_document_is() {
+    let root = crate::scratch::temp("captain-handover-pane");
+    let mut s = world(&root);
+    let mut herdr = herdr();
+    git(&root, &["init", "-q", "-b", "notes"]);
+    let dir = root.join("gear/voyages/M6/handovers");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("captain-2026-11-02-0228.md"),
+        "# Captain handover\n",
+    )
+    .unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "handover"]);
+    let captain = Env {
+        ctx: Some(GearCtx {
+            project: "p".into(),
+            seat: "captain".into(),
+            generation: 1,
+        }),
+        pane_id: Some(CAP_PANE.to_string()),
+        admin: false,
+    };
+
+    let done = handover(
+        &mut s,
+        &captain,
+        &mut herdr,
+        &CAP_CALLER,
+        &root,
+        NEW_PANE,
+        NOW,
+    )
+    .unwrap();
+
+    let document = "gear/voyages/M6/handovers/captain-2026-11-02-0228.md";
+    assert_eq!(done.document.as_deref(), Some(document));
+    assert_eq!(done.named, Ensured::Renamed);
+    let names = herdr.agent_names().unwrap();
+    assert_eq!(
+        names.get(NEW_PANE).cloned().flatten().as_deref(),
+        Some("p-captain")
+    );
+    assert_eq!(
+        names.get(CAP_PANE).cloned().flatten(),
+        None,
+        "the old pane lets the name go"
+    );
+
+    let items = s
+        .read(|tx| tx.thread_messages("p", "captain:take"))
+        .unwrap();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(items[0].urgent);
+    assert_eq!(items[0].recipient, "p:captain");
+    let body = &items[0].body;
+    assert!(
+        body.contains("pane w1:p3 was handed the captain of p"),
+        "{body}"
+    );
+    assert!(body.contains(document), "{body}");
+    assert!(body.contains("(branch notes, commit "), "{body}");
+}
+
+/// M6.2: the facts are short and true — a retired lane is one line, another
+/// captain is reached through Herdr (never `gear captain take`), a checkout
+/// with no version tags says so instead of "none", and the plan file is named
+/// stale, draft or clean.
+#[test]
+fn the_facts_are_short_and_name_the_plan_state() {
+    let root = crate::scratch::temp("captain-handover-true-facts");
+    let mut s = world(&root);
+    git(&root, &["init", "-q", "-b", "main"]);
+    s.write(|tx| tx.set_seat_state("p:heat", SeatState::Retired, Some("landed"), NOW))
+        .unwrap();
+    let plan = root.join("gear/voyages/M6/plan.md");
+    std::fs::create_dir_all(plan.parent().unwrap()).unwrap();
+    let facts_of = |s: &mut Store| {
+        handover_facts(s, &bare(), &root, &engine(), NOW)
+            .unwrap()
+            .text
+    };
+
+    // A file behind the store: stale, never a draft.
+    std::fs::write(&plan, "<!-- gear-plan project=p base=5 -->\n# Goal\n").unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "plan"]);
+    let text = facts_of(&mut s);
+    assert!(
+        text.contains("STALE: the file's base=5 is behind the applied version 7; do not apply it"),
+        "{text}"
+    );
+    assert!(!text.contains("DRAFT"), "{text}");
+
+    // On the applied base and committed: clean.
+    std::fs::write(&plan, "<!-- gear-plan project=p base=7 -->\n# Goal\n").unwrap();
+    git(&root, &["commit", "-q", "-am", "plan 7"]);
+    assert!(facts_of(&mut s).contains("clean: the file is the applied plan"));
+
+    // On the applied base with edits: a draft.
+    std::fs::write(&plan, "<!-- gear-plan project=p base=7 -->\n# Goal\nmore\n").unwrap();
+    let text = facts_of(&mut s);
+    assert!(
+        text.contains("DRAFT: edits on the applied base, not applied yet"),
+        "{text}"
+    );
+
+    assert!(text.contains("    - heat: retired"), "{text}");
+    assert!(!text.contains("heat: the engine and the CLI"), "{text}");
+    assert!(text.contains("agent prompt <project>-captain"), "{text}");
+    assert!(
+        !text.contains("reach another captain with `gear captain take"),
+        "{text}"
+    );
+    assert!(text.contains("no v* tags"), "{text}");
 }
