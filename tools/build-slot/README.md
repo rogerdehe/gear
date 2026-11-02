@@ -63,25 +63,3 @@ sh tools/build-slot/test.sh
 
 `BUILD_SLOT_CORES`, `BUILD_SLOT_LOAD`, `BUILD_SLOT_RUNNING` and
 `BUILD_SLOT_FREE` replace the four readings.
-
-## macOS: first-launch scans
-
-macOS scans each new executable on its first launch (every relinked test
-binary, every build script) unless the process responsible for it is a
-Developer Tool (System Settings → Privacy & Security → Developer Tools). A
-process started under Herdr is its own responsible process, so the list never
-applies there; the scans run one at a time, 40-80 s per test binary, and one
-gate spent 13 minutes on them. A process started over ssh has `sshd-session`
-responsible, which the list exempts.
-
-So when `~/.ssh/gear_localhost` (or `BUILD_SLOT_SSH_KEY`) exists, build-slot
-runs the command over `ssh localhost`, in the same directory and with the same
-environment, and ends it when the caller goes away. Without the key, or when
-ssh does not answer within 3 s, the command runs here as before. One-time setup:
-
-```sh
-ssh-keygen -q -t ed25519 -N "" -C gear-localhost-gate -f ~/.ssh/gear_localhost
-echo "from=\"127.0.0.1,::1\" $(cat ~/.ssh/gear_localhost.pub)" >> ~/.ssh/authorized_keys
-```
-
-Remote Login must be on, and `sshd-session` must be in Developer Tools.

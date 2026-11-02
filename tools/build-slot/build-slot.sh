@@ -116,62 +116,13 @@ echo "build-slot: $jobs (cores $cores, load $load, running $running, free memory
 BUILD_SLOT=1 BUILD_JOBS=$jobs CARGO_BUILD_JOBS=$jobs NEXTEST_TEST_THREADS=$jobs GOMAXPROCS=$gomax
 export BUILD_SLOT BUILD_JOBS CARGO_BUILD_JOBS NEXTEST_TEST_THREADS GOMAXPROCS
 
-# macOS scans every new executable on its first launch (each test binary, each
-# build script) unless the process responsible for it is a Developer Tool in
-# System Settings. A process started under Herdr is its own responsible
-# process, so the Developer Tools list never applies there, and the scans run
-# one at a time: 40-80 s per test binary, 13 minutes for one gate. A process
-# started over ssh has sshd-session responsible, which the list exempts. So
-# with a localhost-only key at ~/.ssh/gear_localhost (BUILD_SLOT_SSH_KEY), the
-# command runs over `ssh localhost` in the same directory with the same
-# environment; without the key, or when ssh does not answer, it runs here.
-# Stopgap: gear/STOPGAPS.md.
-via_ssh() {
-    key=${BUILD_SLOT_SSH_KEY:-$HOME/.ssh/gear_localhost}
-    if [ "$(uname)" != Darwin ] || [ -n "${BUILD_SLOT_VIA_SSH:-}" ] || [ ! -r "$key" ]; then
-        "$@"; return
-    fi
-    opts="-i $key -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=3 -o LogLevel=ERROR -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/gear_localhost_known_hosts"
-    # shellcheck disable=SC2086
-    if ! ssh $opts localhost true </dev/null >/dev/null 2>&1; then
-        "$@"; return
-    fi
-    dir=$(mktemp -d "${TMPDIR:-/tmp}/build-slot-ssh.XXXXXX") || { "$@"; return; }
-    # The environment, minus what belongs to this shell or to the ssh session.
-    export -p | grep -vE '^(export|declare -x) (BASH[A-Z_]*|SHELLOPTS|PPID|UID|EUID|SHLVL|PWD|OLDPWD|_|SSH_[A-Z_]*|BUILD_SLOT_VIA_SSH)(=|$)' > "$dir/env"
-    {
-        printf 'cd %s || exit 1\n' "$(quote "$PWD")"
-        printf 'exec'
-        for arg in "$@"; do printf ' %s' "$(quote "$arg")"; done
-        printf '\n'
-    } > "$dir/cmd"
-    # The far side runs the command in its own process group and ends it when
-    # this side goes away: the loop below keeps ssh's stdin open while this
-    # shell lives, and its end reaches the far side as end of input; it ends
-    # on its own once ssh has returned.
-    # shellcheck disable=SC2086
-    ( while kill -0 $$ 2>/dev/null && [ ! -e "$dir/done" ]; do sleep 1; done ) | { ssh $opts localhost "/bin/sh -c '
-        . $dir/env; export BUILD_SLOT_VIA_SSH=1
-        exec 3>&2 2>/dev/null; set -m
-        /bin/sh $dir/cmd </dev/null 2>&3 & job=\$!
-        ( cat >/dev/null; kill -TERM -\$job ) <&0 & watch=\$!
-        wait \$job; rc=\$?
-        kill -TERM -\$watch
-        exit \$rc'"
-        echo $? > "$dir/rc"; : > "$dir/done"; }
-    rc=$(cat "$dir/rc" 2>/dev/null || echo 1)
-    rm -rf "$dir"
-    return $rc
-}
-quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
-
 # A child, not exec: this process stays counted until the command ends.
 # BUILD_SLOT_PRIORITY=normal skips the lower priority, for the one run
 # everybody waits on (a merge gate); the memory clamps above still hold.
 if [ "${BUILD_SLOT_PRIORITY:-}" = normal ]; then
-    via_ssh "$@"
+    "$@"
 elif command -v taskpolicy >/dev/null 2>&1; then
-    via_ssh taskpolicy -c utility "$@"
+    taskpolicy -c utility "$@"
 else
     nice -n 10 "$@"
 fi
