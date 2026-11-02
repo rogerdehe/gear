@@ -730,8 +730,14 @@ fn a_caller_without_ctx_in_a_bound_pane_is_that_seat() {
     herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
 
     let bare = env(None, 1, None, false);
-    let resolved =
-        gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &LANE_CALLER).unwrap();
+    let resolved = gear_app::identity::resolve_env(
+        &mut s,
+        &bare,
+        &mut herdr,
+        &LANE_CALLER,
+        &Default::default(),
+    )
+    .unwrap();
     assert_eq!(
         resolved.ctx,
         Some(GearCtx {
@@ -765,12 +771,64 @@ fn a_caller_without_ctx_in_an_unbound_pane_stays_anonymous() {
     herdr.set_pane_processes(CLAUDE_PANE, Some(CLAUDE_CALLER[1]), &[]);
 
     let bare = env(None, 1, None, false);
-    let resolved =
-        gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &CLAUDE_CALLER).unwrap();
+    let resolved = gear_app::identity::resolve_env(
+        &mut s,
+        &bare,
+        &mut herdr,
+        &CLAUDE_CALLER,
+        &Default::default(),
+    )
+    .unwrap();
     assert_eq!(resolved.ctx, None, "no seat is bound to this pane");
     assert_eq!(resolved.pane_id.as_deref(), Some(CLAUDE_PANE));
     let caller = s.read(|tx| classify(tx, &resolved, None)).unwrap();
     assert!(matches!(caller, Caller::Anonymous), "{caller:?}");
+}
+
+/// Two projects in one Herdr session run several daemon-kind panes (a Codex
+/// captain, an OpenCode lane): the caller's own daemon session picks its pane.
+/// A Codex tool shell counts only Codex panes, and a pane whose agent is in
+/// another known session is not the caller's.
+#[test]
+fn a_daemon_caller_among_several_daemon_panes_finds_its_own_kind() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
+    herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
+    let service: Vec<u32> = vec![4_000_001, 4_000_000, 1];
+    let bare = env(None, 1, None, false);
+    let codex = gear_app::identity::DaemonSessions {
+        codex: Some("thread-1".into()),
+        opencode: None,
+    };
+    let resolved =
+        gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service, &codex).unwrap();
+    assert_eq!(resolved.pane_id.as_deref(), Some(CAP_PANE));
+    assert_eq!(
+        resolved.ctx.map(|ctx| ctx.seat),
+        Some("captain".to_string())
+    );
+
+    let opencode = gear_app::identity::DaemonSessions {
+        codex: None,
+        opencode: Some("ses-1".into()),
+    };
+    let resolved =
+        gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service, &opencode).unwrap();
+    assert_eq!(resolved.pane_id.as_deref(), Some(LANE_PANE));
+
+    // The Codex pane runs another known thread: it is not the caller's.
+    herdr.set_agent_session(CAP_PANE, "thread-2");
+    let error =
+        gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service, &codex).unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotRegistered);
+    // Its own thread wins outright.
+    herdr.set_agent_session(CAP_PANE, "thread-1");
+    let resolved =
+        gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service, &codex).unwrap();
+    assert_eq!(resolved.pane_id.as_deref(), Some(CAP_PANE));
 }
 
 /// A caller whose tools run in a daemon runs in no pane: the one daemon-kind
@@ -789,7 +847,9 @@ fn a_daemon_caller_without_ctx_finds_the_one_bound_daemon_pane() {
     let service: Vec<u32> = vec![4_000_001, 4_000_000, 1];
 
     let bare = env(None, 1, None, false);
-    let resolved = gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service).unwrap();
+    let resolved =
+        gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service, &Default::default())
+            .unwrap();
     assert_eq!(
         resolved.ctx,
         Some(GearCtx {
@@ -803,7 +863,9 @@ fn a_daemon_caller_without_ctx_finds_the_one_bound_daemon_pane() {
     // A second bound daemon pane: no answer, and the error names the one
     // command that works.
     herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
-    let error = gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service).unwrap_err();
+    let error =
+        gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service, &Default::default())
+            .unwrap_err();
     assert_eq!(error.code, ErrorCode::NotRegistered);
     assert!(error.detail.contains("no pane"), "{}", error.detail);
     assert!(
@@ -823,7 +885,14 @@ fn a_set_ctx_is_not_replaced_by_the_pane() {
     herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
 
     let captain = env(Some("captain"), 1, Some(CAP_PANE), false);
-    let same = gear_app::identity::resolve_env(&mut s, &captain, &mut herdr, &LANE_CALLER).unwrap();
+    let same = gear_app::identity::resolve_env(
+        &mut s,
+        &captain,
+        &mut herdr,
+        &LANE_CALLER,
+        &Default::default(),
+    )
+    .unwrap();
     assert_eq!(same, captain);
 }
 

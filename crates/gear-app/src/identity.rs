@@ -553,30 +553,63 @@ pub fn env_of_captain(
 /// The **one** pane of the session that hosts an agent of a daemon kind and is
 /// (`bound`) or is not (`!bound`) bound to a seat (T-126). More than one such
 /// pane is no answer: the caller has to name itself then.
+///
+/// Several projects in one Herdr session run several such panes at once. The
+/// caller's daemon session narrows them first: a Codex tool shell carries
+/// `CODEX_THREAD_ID`, an OpenCode one `OPENCODE_SESSION_ID`, so only panes of
+/// that CLI count, a pane whose known session is the caller's wins outright,
+/// and a pane whose known session is another one is never the caller's. A
+/// pane's known sessions are Herdr's session of its agent and, for a bound
+/// pane, its binding's `session_ref`.
 pub fn daemon_pane(
     store: &mut Store,
     herdr: &mut dyn HerdrRead,
     bound: bool,
+    daemon: &DaemonSessions,
 ) -> GearResult<Option<String>> {
+    let caller = match (&daemon.codex, &daemon.opencode) {
+        (Some(thread), _) => Some(("codex", thread.as_str())),
+        (None, Some(session)) => Some(("opencode", session.as_str())),
+        (None, None) => None,
+    };
     let panes = herdr.panes().unwrap_or_default();
-    let mut found = None;
+    let mut found: Vec<String> = Vec::new();
     for pane in panes {
         let Ok(Some(info)) = herdr.agent_get(&pane) else {
             continue;
         };
-        if !info.agent.as_deref().is_some_and(is_daemon_kind) {
+        let Some(kind) = info.agent.as_deref().filter(|kind| is_daemon_kind(kind)) else {
+            continue;
+        };
+        let seat = store.read(|tx| seat_bound_to(tx, &pane))?;
+        if seat.is_some() != bound {
             continue;
         }
-        let is_bound = store.read(|tx| seat_bound_to(tx, &pane))?.is_some();
-        if is_bound != bound {
-            continue;
+        if let Some((caller_kind, caller_session)) = caller {
+            if kind != caller_kind {
+                continue;
+            }
+            let mut known: Vec<String> = info
+                .agent_session
+                .as_ref()
+                .map(|session| session.value.clone())
+                .into_iter()
+                .collect();
+            if let Some(seat) = &seat {
+                let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
+                known.extend(binding.and_then(|binding| binding.session_ref));
+            }
+            known.retain(|session| !session.trim().is_empty());
+            if known.iter().any(|session| session == caller_session) {
+                return Ok(Some(pane));
+            }
+            if !known.is_empty() {
+                continue;
+            }
         }
-        if found.is_some() {
-            return Ok(None);
-        }
-        found = Some(pane);
+        found.push(pane);
     }
-    Ok(found)
+    Ok(if found.len() == 1 { found.pop() } else { None })
 }
 
 /// Whether any pane of the session hosts an agent at all: the difference
@@ -607,12 +640,15 @@ pub fn resolve_env(
     env: &Env,
     herdr: &mut dyn HerdrRead,
     ancestors: &[u32],
+    daemon: &DaemonSessions,
 ) -> GearResult<Env> {
     if env.ctx.is_some() {
         return Ok(env.clone());
     }
-    let pane =
-        caller_pane(herdr, ancestors, env.pane_id.as_deref()).or(daemon_pane(store, herdr, true)?);
+    let pane = match caller_pane(herdr, ancestors, env.pane_id.as_deref()) {
+        Some(pane) => Some(pane),
+        None => daemon_pane(store, herdr, true, daemon)?,
+    };
     let Some(pane) = pane else {
         if any_agent_pane(herdr) {
             return Err(GearError::new(
@@ -867,7 +903,8 @@ pub fn whoami(
     // The effective environment: the same resolution every command does, so
     // whoami explains the commands (a caller in a bound pane without a
     // context is the seat of that pane).
-    let effective = match resolve_env(store, env, herdr, &ancestors) {
+    let daemon = DaemonSessions::from_vars(|name| std::env::var(name).ok());
+    let effective = match resolve_env(store, env, herdr, &ancestors, &daemon) {
         Ok(env) => env,
         Err(error) => {
             let pane = caller_pane(herdr, &ancestors, env.pane_id.as_deref());

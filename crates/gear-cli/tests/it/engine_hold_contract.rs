@@ -1,8 +1,8 @@
 //! `gear admin stop --hold` (T-394): a stop the user asked for stays stopped.
 //!
 //! Every `gear` call runs `ensure_engine`, which starts an engine whenever none
-//! holds the lock, so a stopped engine came back seconds later — the user's
-//! "关都关不掉". A hold file in the engine dir keeps it down until
+//! holds the lock, so a stopped engine came back seconds later — the user
+//! could not keep it stopped. A hold file in the engine dir keeps it down until
 //! `gear admin start` lifts it.
 
 use std::path::{Path, PathBuf};

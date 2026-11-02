@@ -306,7 +306,7 @@ pub fn take_all(
 ) -> GearResult<Vec<Taken>> {
     // 1. The pane: the caller's own, else the one unbound daemon pane.
     let pane = identity::caller_pane(herdr, ancestors, env.pane_id.as_deref())
-        .or(identity::daemon_pane(store, herdr, false)?)
+        .or(identity::daemon_pane(store, herdr, false, &identity::DaemonSessions::from_vars(|name| std::env::var(name).ok()))?)
         .ok_or_else(|| {
             GearError::new(
                 ErrorCode::Forbidden,
@@ -676,7 +676,7 @@ pub fn release(
     now: Ts,
 ) -> GearResult<Released> {
     let pane = identity::caller_pane(herdr, ancestors, env.pane_id.as_deref())
-        .or(identity::daemon_pane(store, herdr, true)?)
+        .or(identity::daemon_pane(store, herdr, true, &identity::DaemonSessions::from_vars(|name| std::env::var(name).ok()))?)
         .ok_or_else(|| {
             GearError::new(
                 ErrorCode::Forbidden,

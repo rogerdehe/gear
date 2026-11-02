@@ -161,7 +161,14 @@ fn take_from_a_fresh_pane_with_no_env_makes_it_the_captain() {
     assert!(items[0].body.contains(CAP_PANE), "{}", items[0].body);
 
     // And `gear` from that pane is the captain, with no environment.
-    let resolved = resolve_env(&mut s, &bare(), &mut herdr, &NEW_CALLER).unwrap();
+    let resolved = resolve_env(
+        &mut s,
+        &bare(),
+        &mut herdr,
+        &NEW_CALLER,
+        &Default::default(),
+    )
+    .unwrap();
     assert_eq!(
         resolved.ctx,
         Some(GearCtx {
