@@ -2743,8 +2743,9 @@ fn cmd_admin_install_skill(agent: &str, json: bool) -> GearResult<()> {
         )
     })?;
     let home = std::path::PathBuf::from(home);
-    let files = gear_app::skill::install(agent, &home)?;
-    let dir = agent.skills_root(&home).join(gear_app::skill::SKILL_NAME);
+    let root = agent.skills_dir(&home);
+    let files = gear_app::skill::install_into(&root)?;
+    let dir = root.join(gear_app::skill::SKILL_NAME);
     if json {
         let out = serde_json::json!({
             "agent": agent.as_str(),

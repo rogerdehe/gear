@@ -133,3 +133,18 @@ fn an_agent_never_installs_into_the_users_home() {
     assert!(!home.join(".claude").exists(), "{}", home.display());
     std::fs::remove_dir_all(&home).ok();
 }
+
+/// Codex reads its skills from `$CODEX_HOME/skills` when `CODEX_HOME` is set:
+/// the skill goes there, not under `~/.codex`, where no agent would read it.
+#[test]
+fn the_codex_skill_goes_to_codex_home_when_it_is_set() {
+    let home = scratch_home("codex-home");
+    let codex_home = home.join("codex-home");
+    let o = scratch::gear(&home, &["admin", "install-skill", "--agent", "codex"])
+        .env("CODEX_HOME", &codex_home)
+        .output()
+        .expect("run gear");
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(codex_home.join("skills/gear/SKILL.md").is_file());
+    assert!(!home.join(".codex/skills/gear/SKILL.md").exists());
+}

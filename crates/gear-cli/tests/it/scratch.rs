@@ -71,7 +71,10 @@ pub fn gear(home: &Path, args: &[&str]) -> Command {
         .env_remove("GEAR_DB")
         .env_remove("GEAR_ADMIN")
         .env_remove("HERDR_PANE_ID")
-        .env_remove("HERDR_SOCKET_PATH");
+        .env_remove("HERDR_SOCKET_PATH")
+        // The user's own CODEX_HOME would send a skill install out of the
+        // scratch home into the real one.
+        .env_remove("CODEX_HOME");
     cmd
 }
 
