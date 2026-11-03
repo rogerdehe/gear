@@ -3284,7 +3284,7 @@ fn sweep_in(
     let mut body = String::new();
     if !crowded.is_empty() {
         body.push_str(&format!(
-            "{} task branches of the open voyage(s) are on the remote, over the limit of {cap} ({} lanes × `[conventions] branch_max_per_lane` {}): work is piling up unmerged and branches rot. Clean up: get the oldest reviewed and merged, finish the reworks before new work, cancel what will not land. Oldest first:\n",
+            "{} task branches of the open voyage(s) are on the remote, over the limit of {cap} ({} lanes × `[conventions] branch_max_per_lane` {}): work is piling up unmerged and branches rot. Clean up: get the oldest reviewed and merged, finish the reworks, cancel what will not land. Oldest first:\n",
             crowded.len(),
             config.lanes.len().max(1),
             config.conventions.branch_max_per_lane.max(1)
