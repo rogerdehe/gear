@@ -596,6 +596,22 @@ fn apply_queue(
                 ));
             }
         }
+        // `carried-by:` names another task of the project, whose merge lands
+        // this task's work.
+        if let Some(by) = item.carried_by.as_deref().filter(|by| !by.is_empty()) {
+            if by == id {
+                return Err(bad(
+                    item.line,
+                    format!("{id}: `carried-by` names the task itself"),
+                ));
+            }
+            if !known.contains(by) {
+                return Err(bad(
+                    item.line,
+                    format!("{id}: `carried-by` {by} does not exist"),
+                ));
+            }
+        }
         // The `review-model:` of a task (T-500): it names an entry of
         // `[models] review` and differs from the task's lane model, so the
         // captain can send one task to a light reviewer and another to a
@@ -788,6 +804,9 @@ fn apply_queue(
                 if let Some(model) = &item.review_model {
                     tx.set_task_review_model(project, &id, model)?;
                 }
+                if let Some(by) = &item.carried_by {
+                    tx.set_task_carried_by(project, &id, by)?;
+                }
                 // The `audit:` mark of a task (T-505): a voyage audit is run
                 // by reviewers and never assigned to its lane.
                 if let Some(audit) = item.audit {
@@ -854,6 +873,9 @@ fn apply_queue(
                 // has.
                 if let Some(model) = &item.review_model {
                     tx.set_task_review_model(project, id, model)?;
+                }
+                if let Some(by) = &item.carried_by {
+                    tx.set_task_carried_by(project, id, by)?;
                 }
                 // The `audit:` mark of a task (T-505): a block that names the
                 // field sets it; a block without it keeps the mark.
@@ -2854,6 +2876,9 @@ pub fn show(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<String> {
     // of it runs on.
     if let Some(model) = tx.task_review_model(project, task)? {
         text.push_str(&format!("review-model: {model}\n"));
+    }
+    if let Some(by) = tx.task_carried_by(project, task)? {
+        text.push_str(&format!("carried-by: {by}\n"));
     }
     // The `audit:` mark of a task (T-505): a voyage audit, run by reviewers.
     if tx.task_audit(project, task)?.is_some() {

@@ -417,6 +417,7 @@ pub fn merge_passed(
         .is_some_and(|at| at >= last_lost);
     if settled || now - last_lost >= LOST_SCAN_EVERY_S {
         store.write(|tx| tx.set_meta(&lost_scan_key(project), &now.to_string()))?;
+        land_carried(store, project, &config)?;
         tell_captain_lost(store, project, &config, now)?;
         close_landed_failures(store, project, now)?;
     }
@@ -1624,6 +1625,10 @@ fn passed_tasks(
             {
                 continue;
             }
+            // `carried-by: T-m`: the work lands with T-m's merge, never alone.
+            if tx.task_carried_by(project, &task.id)?.is_some() {
+                continue;
+            }
             let Some(verdict) = tx
                 .verdicts_of_task(project, &task.id)?
                 .into_iter()
@@ -1711,6 +1716,10 @@ fn other_candidates(
             // A cancelled task never lands: work of it that this candidate
             // carries is this candidate's own, never a task to wait for.
             if row.state == gear_model::TaskState::Cancelled {
+                continue;
+            }
+            // A task carried by this one lands with this merge.
+            if tx.task_carried_by(project, &row.id)?.as_deref() == Some(task) {
                 continue;
             }
             let attempts = tx.attempts_of_task(project, &row.id)?;
@@ -4122,6 +4131,75 @@ fn candidate_held(repo: &Repo, candidate: &str) -> Option<bool> {
     Some(git(dir, &["cat-file", "-e", &format!("{candidate}^{{commit}}")]).is_ok())
 }
 
+/// Mark merged the tasks carried by another (`carried-by: T-m`) once T-m's
+/// merge has landed and the carried candidate is on the integration branch:
+/// the attempt takes T-m's merge time, as an `integrated-by` pass would give
+/// it. A carried candidate that is not on the branch stays unmerged, and the
+/// lost scan tells the captain.
+fn land_carried(store: &mut Store, project: &str, config: &ProjectConfig) -> GearResult<()> {
+    let pending = store.read(|tx| {
+        let mut pending = Vec::new();
+        for task in tx.tasks_of_project(project)? {
+            if task.state != TaskState::Done {
+                continue;
+            }
+            let Some(by) = tx.task_carried_by(project, &task.id)? else {
+                continue;
+            };
+            let Some(merged_at) = gear_app::tasks::merged_at(tx, project, &by)? else {
+                continue;
+            };
+            let Some(latest) = tx.attempts_of_task(project, &task.id)?.into_iter().last() else {
+                continue;
+            };
+            if latest.state != gear_model::AttemptState::Accepted
+                || tx
+                    .attempt_times(project, &task.id, latest.n)?
+                    .merged
+                    .is_some()
+            {
+                continue;
+            }
+            let Some(candidate) = latest.candidate.clone() else {
+                continue;
+            };
+            pending.push((
+                task.id.clone(),
+                task.lane.clone(),
+                latest.n,
+                candidate,
+                by,
+                merged_at,
+            ));
+        }
+        Ok(pending)
+    })?;
+    for (task, lane, attempt, candidate, by, merged_at) in pending {
+        let repo = match lane.as_deref() {
+            Some(lane) => config.repo_of_lane(lane),
+            None => config.root_repo(),
+        };
+        let dir = Path::new(&repo.path);
+        let reference = format!("{}/{}", config.conventions.remote, repo.integration);
+        let _ = git(
+            dir,
+            &[
+                "fetch",
+                "--quiet",
+                &config.conventions.remote,
+                &repo.integration,
+            ],
+        );
+        if !is_ancestor(dir, &candidate, &reference) {
+            continue;
+        }
+        store.write(|tx| {
+            gear_app::tasks::mark_integrated_by(tx, project, &task, attempt, &by, merged_at)
+        })?;
+    }
+    Ok(())
+}
+
 /// Close the merge-failed items of work that landed after all: the attempt
 /// the item names has a merge time (its own later merge, or another task's
 /// merge that carried it, `integrated-by`). Such an item asks for a remerge of
@@ -4262,6 +4340,12 @@ fn tell_captain_lost(
             let Some(candidate) = latest.candidate.clone() else {
                 continue;
             };
+            // A carried task waits for its carrier's merge, which lands it.
+            if let Some(by) = tx.task_carried_by(project, &task.id)? {
+                if gear_app::tasks::merged_at(tx, project, &by)?.is_none() {
+                    continue;
+                }
+            }
             // The old filters of T-397 say only whether a **new** item is
             // opened. They are kept here rather than skipping the task
             // (T-458): a task they drop may still hold an open merge-lost item
@@ -5518,6 +5602,49 @@ mod tests {
             .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
             .unwrap();
         assert_eq!(items.len(), 1, "a second tick added an item: {items:?}");
+    }
+
+    /// `carried-by: T-m` (Lawrence T-31, 2026-11-03): a passed task whose work
+    /// lands with another task's merge gets no merge of its own, and it is not
+    /// named lost while its carrier has not merged.
+    #[test]
+    fn a_carried_task_queues_no_merge_and_is_not_named_lost() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        store
+            .write(|tx| {
+                gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-5", 1, 1, "abc1234", "report", 0)?;
+                let mut attempt = tx.get_attempt("p", "T-5", 1)?.unwrap();
+                attempt.state = gear_model::AttemptState::Accepted;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+                tx.set_task_carried_by("p", "T-5", "T-9")
+            })
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20 + LOST_SCAN_EVERY_S).unwrap();
+        let merges = store
+            .read(|tx| tx.ops_of_kind_in_states("p", OpKind::Merge, &[]))
+            .unwrap();
+        assert!(merges.is_empty(), "a carried task got a merge: {merges:?}");
+        let lost = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert!(lost.is_empty(), "a carried task was named lost: {lost:?}");
+
+        // Without the mark, the same task is queued as usual.
+        store
+            .write(|tx| tx.set_task_carried_by("p", "T-5", ""))
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 30 + LOST_SCAN_EVERY_S).unwrap();
+        let merges = store
+            .read(|tx| tx.ops_of_kind_in_states("p", OpKind::Merge, &[]))
+            .unwrap();
+        assert_eq!(merges.len(), 1, "{merges:?}");
     }
 
     /// T-397: a merge that is still queued will merge the attempt itself: it is

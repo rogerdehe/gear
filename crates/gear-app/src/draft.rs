@@ -55,6 +55,9 @@ pub struct QueueItem {
     /// `review-model: gpt-6.1-sol`. It names an entry of `[models] review`
     /// and must differ from the lane's model.
     pub review_model: Option<String>,
+    /// `carried-by: T-<m>`: this task's work lands with T-m's merge; `-`
+    /// clears it.
+    pub carried_by: Option<String>,
     /// The voyage audit mark (T-505): `audit: true`. The task is run by
     /// reviewers against the integration branch and is never assigned to its
     /// lane.
@@ -642,6 +645,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
         mechanical: None,
         fresh: None,
         review_model: None,
+        carried_by: None,
         audit: None,
     })
 }
@@ -675,6 +679,7 @@ fn parse_queue_field(
         "mechanical" => "mechanical",
         "fresh" => "fresh",
         "review-model" => "review-model",
+        "carried-by" => "carried-by",
         "audit" => "audit",
         other => return Err(bad(line, format!("unknown queue field {other:?}"))),
     };
@@ -765,6 +770,23 @@ fn parse_queue_field(
                 ));
             }
             item.review_model = Some(value.to_string());
+        }
+        "carried-by" => {
+            let ok = value == "-"
+                || value
+                    .strip_prefix("T-")
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            if !ok {
+                return Err(bad(
+                    line,
+                    format!("`carried-by` is the task whose merge lands this work (T-<n>), or `-` to clear it; got {value:?}"),
+                ));
+            }
+            item.carried_by = Some(if value == "-" {
+                String::new()
+            } else {
+                value.to_string()
+            });
         }
         "audit" => {
             // T-505: the mark is `true` (an audit) or `false` (no longer one).

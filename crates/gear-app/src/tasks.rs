@@ -649,7 +649,7 @@ pub fn require_merged_at(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<T
 /// Written once: the attempt's merge time is the first one (the store keeps
 /// it) and the attribution names the same merge, so a replay of the verdict
 /// changes nothing.
-fn mark_integrated_by(
+pub fn mark_integrated_by(
     tx: &Tx<'_>,
     project: &str,
     task: &str,
@@ -1214,8 +1214,15 @@ pub fn settle_review(
     // A pass is merged by the engine (T-12): the op is Intended here and the
     // merge op's executor knows how to run it. Booked to the lane's seat (the
     // branch is the lane's), or to the captain for a task without a lane seat.
+    // A task carried by another (`carried-by: T-m`) has no merge of its own:
+    // its work lands with T-m's merge, and the engine marks it merged then.
+    let carried_by = if accepted {
+        tx.task_carried_by(project, task)?
+    } else {
+        None
+    };
     let mut merge_op = None;
-    if accepted {
+    if accepted && carried_by.is_none() {
         merge_op = Some(queue_merge(
             tx,
             project,
@@ -1232,6 +1239,10 @@ pub fn settle_review(
     let mut line = match (&merge_op, stale) {
         (Some(op), _) => format!(
             "{task}: review pass — attempt {attempt} accepted, task done, merge queued ({op})"
+        ),
+        (None, _) if carried_by.is_some() => format!(
+            "{task}: review pass — attempt {attempt} accepted, task done; no merge of its own: it lands with {}'s merge",
+            carried_by.as_deref().unwrap_or_default()
         ),
         (None, true) => format!(
             "{task}: review passed attempt {attempt} on contract v{}, but the task is on v{} — attempt rejected, rework on the current contract, task ready at the head of {lane}'s queue",

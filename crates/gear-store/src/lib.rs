@@ -3137,6 +3137,20 @@ impl<'s> Tx<'s> {
         self.set_meta(&format!("task_review_model:{project}:{task}"), model)
     }
 
+    /// The task whose merge lands this task's work (`carried-by:`): a pass of
+    /// this task queues no merge of its own, and the task counts as merged
+    /// when the carrier's merge has landed its candidate. None when unset.
+    pub fn task_carried_by(&self, project: &str, task: &str) -> GearResult<Option<String>> {
+        Ok(self
+            .get_meta(&format!("task_carried_by:{project}:{task}"))?
+            .filter(|by| !by.is_empty()))
+    }
+
+    /// Set `carried-by:` of a task; an empty value clears it.
+    pub fn set_task_carried_by(&self, project: &str, task: &str, by: &str) -> GearResult<()> {
+        self.set_meta(&format!("task_carried_by:{project}:{task}"), by)
+    }
+
     /// The `audit:` mark of a task (T-505): the task is a voyage audit, run by
     /// reviewers and never assigned to its lane. None when the block does not
     /// mark it.
