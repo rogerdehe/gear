@@ -418,6 +418,7 @@ pub fn merge_passed(
     if settled || now - last_lost >= LOST_SCAN_EVERY_S {
         store.write(|tx| tx.set_meta(&lost_scan_key(project), &now.to_string()))?;
         tell_captain_lost(store, project, &config, now)?;
+        close_landed_failures(store, project, now)?;
     }
 
     // 1c. the task branches on the remote (the branch sweep): a cancelled
@@ -4121,6 +4122,51 @@ fn candidate_held(repo: &Repo, candidate: &str) -> Option<bool> {
     Some(git(dir, &["cat-file", "-e", &format!("{candidate}^{{commit}}")]).is_ok())
 }
 
+/// Close the merge-failed items of work that landed after all: the attempt
+/// the item names has a merge time (its own later merge, or another task's
+/// merge that carried it, `integrated-by`). Such an item asks for a remerge of
+/// work that is already on the integration branch, and a reply cannot close it
+/// (Lawrence M-182, 2026-11-03: T-14 landed with T-26).
+fn close_landed_failures(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
+    store.write(|tx| {
+        for task in tx.merged_done_tasks(project)? {
+            let thread = failed_thread(&task);
+            let open: Vec<_> = tx
+                .thread_messages(project, &thread)?
+                .into_iter()
+                .filter(|item| matches!(item.state, MsgState::Open | MsgState::Waiting))
+                .collect();
+            if open.is_empty() {
+                continue;
+            }
+            let merged: Vec<i64> = tx
+                .attempt_times_of_task(project, &task)?
+                .into_iter()
+                .filter(|(_, times)| times.merged.is_some())
+                .map(|(n, _)| n)
+                .collect();
+            for item in open {
+                let landed = match item.attempt {
+                    Some(attempt) => merged.contains(&attempt),
+                    None => !merged.is_empty(),
+                };
+                if landed {
+                    tx.update_message_state(
+                        project,
+                        &item.id,
+                        MsgState::Resolved,
+                        Some(LOST_LANDED),
+                        None,
+                        None,
+                        now,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 /// Close the lost-merge item of a task the scan no longer checks (T-408): the
 /// captain can no longer act on it.
 fn resolve_lost(store: &mut Store, project: &str, task: &str, now: Ts) -> GearResult<()> {
@@ -5793,6 +5839,56 @@ mod tests {
             .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
             .unwrap();
         assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
+        assert_eq!(items[0].result.as_deref(), Some(LOST_LANDED));
+    }
+
+    /// A merge-failed item closes once the attempt it names has landed after
+    /// all (Lawrence M-182: T-14 landed with T-26, `integrated-by`).
+    #[test]
+    fn a_failed_merge_item_closes_once_its_work_landed() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 5);
+        store
+            .write(|tx| {
+                tx.insert_message(&gear_store::NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: failed_thread("T-5"),
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: gear_model::MsgKind::System,
+                    urgent: false,
+                    body: "the merge of T-5 failed".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: 5,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 10).unwrap();
+        let open = |store: &mut Store| {
+            store
+                .read(|tx| tx.thread_messages("p", &failed_thread("T-5")))
+                .unwrap()[0]
+                .state
+        };
+        assert_eq!(open(&mut store), MsgState::Open, "nothing landed yet");
+
+        store
+            .write(|tx| tx.set_attempt_time("p", "T-5", 1, AttemptStep::Merged, 30))
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 31 + LOST_SCAN_EVERY_S).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", &failed_thread("T-5")))
+            .unwrap();
         assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
         assert_eq!(items[0].result.as_deref(), Some(LOST_LANDED));
     }
