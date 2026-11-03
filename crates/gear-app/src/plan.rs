@@ -460,14 +460,21 @@ fn apply_queue(
                         }
                     }
                     Some("hold") => {
-                        // T-473: a task can be kept out of delivery only
-                        // before it is delivered; a running or waiting task
-                        // already has an attempt on it.
-                        if !matches!(task.state, TaskState::Draft | TaskState::Ready) {
+                        // T-473: a draft or ready task is kept out of
+                        // delivery. A running or waiting one is set aside for
+                        // more urgent work: its attempt closes, its branch
+                        // stays. A handed-in task waits for its review.
+                        if !matches!(
+                            task.state,
+                            TaskState::Draft
+                                | TaskState::Ready
+                                | TaskState::Running
+                                | TaskState::Waiting
+                        ) {
                             return Err(bad(
                                 item.line,
                                 format!(
-                                    "task {id} is {}, only a draft or ready task is held here",
+                                    "task {id} is {}, only a draft, ready, running or waiting task is held here",
                                     task.state.as_str()
                                 ),
                             ));
@@ -940,7 +947,12 @@ fn apply_queue(
                         )?);
                     }
                     Some("ready") => task.state = TaskState::Ready,
-                    Some("hold") => task.state = TaskState::Draft,
+                    Some("hold") => {
+                        if matches!(task.state, TaskState::Running | TaskState::Waiting) {
+                            set_aside_task(tx, project, &task, by_seat, by_gen, now)?;
+                        }
+                        task.state = TaskState::Draft;
+                    }
                     _ => {}
                 }
                 // A task moved to another lane takes its work with it (T-311):
@@ -4240,6 +4252,48 @@ fn cancel_task(
             urgent: false,
             body: format!(
                 "{} is cancelled; stop work on it, nothing to hand in",
+                task.id
+            ),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+    }
+    Ok(())
+}
+
+/// Set a running task aside for more urgent work (`state: hold` on a
+/// running or waiting task): its open attempt closes, so the lane's seat is
+/// free for the next task, and the lane is told to save its work on the
+/// task's branch. The task keeps its branch and comes back with `state: ready`.
+fn set_aside_task(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &TaskRow,
+    by_seat: &str,
+    by_gen: i64,
+    now: Ts,
+) -> GearResult<()> {
+    let closed = abandon_open_attempts(tx, project, &task.id, now)?;
+    let Some(lane) = task.lane.as_deref() else {
+        return Ok(());
+    };
+    let lane_seat = format!("{project}:{lane}");
+    if closed && tx.get_seat(&lane_seat)?.is_some() {
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: project.to_string(),
+            thread: format!("{}:hold", task.id),
+            task: Some(task.id.clone()),
+            attempt: None,
+            sender: by_seat.to_string(),
+            sender_gen: by_gen,
+            recipient: lane_seat,
+            kind: MsgKind::Instruction,
+            urgent: true,
+            body: format!(
+                "{} is set aside for more urgent work: commit and push what you have to its branch now, then end your turn; nothing to hand in. It comes back later on the same branch.",
                 task.id
             ),
             reply_to: None,

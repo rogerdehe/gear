@@ -3813,6 +3813,14 @@ fn sweep_in(
             // A done task whose merge is queued or running is landing, not
             // lost: its branch is not news to the captain.
             let landing = store.read(|tx| {
+                // A carried task lands with its carrier's merge: until the
+                // carrier has merged, its branches are the work in flight.
+                if let Some(by) = tx.task_carried_by(project, &branch.task)? {
+                    let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, &by);
+                    if gear_app::tasks::merged_at(tx, carrier_project, carrier)?.is_none() {
+                        return Ok(true);
+                    }
+                }
                 for state in [OpState::Intended, OpState::Executing, OpState::Submitted] {
                     if tx.ops_in_state(project, state)?.iter().any(|op| {
                         op.kind == OpKind::Merge && op.task.as_deref() == Some(branch.task.as_str())
@@ -6910,6 +6918,126 @@ gate = "{gate}"
             body[0].contains("heat/t8") && body[0].contains("extra") && body[0].contains("T-8"),
             "{}",
             body[0]
+        );
+    }
+
+    /// A done task carried by another task that has not merged yet (Lawrence
+    /// T-31 / M-603, 2026-11-03): its branch holds the work in flight, so it is
+    /// kept and not named to the captain.
+    #[test]
+    fn the_branch_sweep_leaves_a_carried_task_waiting_for_its_carrier() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(
+            root.path(),
+            &format!("git init -q --bare {}", origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git init -q -b dev {}", work.display()),
+        );
+        sh(
+            &work,
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base",
+        );
+        sh(
+            &work,
+            &format!("git remote add origin {}", origin.display()),
+        );
+        for branch in ["dev", "api/t8"] {
+            sh(
+                &work,
+                &format!("git push -q origin HEAD:refs/heads/{branch}"),
+            );
+        }
+        // The lane it moved to left work the integration branch does not have.
+        sh(
+            &work,
+            "git checkout -q -b heat/t8 && git -c user.email=t@t -c user.name=t \
+             commit -q --allow-empty -m extra && git push -q origin HEAD:refs/heads/heat/t8",
+        );
+        sh(&work, "git checkout -q dev");
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.id = "T-8".into();
+                task.rank = 8;
+                task.state = TaskState::Done;
+                task.lane = Some("heat".into());
+                task.milestone = Some("M5".into());
+                tx.insert_task(&task)?;
+                // First held by `api`, then moved to `heat`.
+                for (n, seat) in [(1, "p:api"), (2, "p:heat")] {
+                    tx.insert_attempt(&gear_store::AttemptRow {
+                        project: "p".into(),
+                        task: "T-8".into(),
+                        n,
+                        seat: seat.into(),
+                        generation: 1,
+                        contract_version: 1,
+                        adopted_version: 1,
+                        pending_update: None,
+                        state: gear_model::AttemptState::Accepted,
+                        candidate: None,
+                        report: None,
+                        safe_point: None,
+                        started: 0,
+                        updated: 0,
+                        session_ref: None,
+                        session_cli: None,
+                        session_action: None,
+                        sent_at: None,
+                    })?;
+                }
+                tx.set_task_carried_by("p", "T-8", "other:T-9")
+            })
+            .unwrap();
+        let config = gear_app::config::parse(&config_text_in("true", &work)).unwrap();
+        let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
+        let repo = config.repo_of_task(&tasks[1]);
+        let now = 3 * 3600;
+        let heads = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        let found = task_branches(&mut store, "p", &config, &tasks, &repo, &heads).unwrap();
+        let dev = git(&work, &["rev-parse", "dev"]).unwrap();
+        let remote = Target {
+            name: "origin",
+            runner: &GitRemote,
+        };
+        sweep_in(
+            &mut store,
+            "p",
+            &config,
+            &work,
+            remote,
+            found,
+            now,
+            "dev",
+            Some(dev.trim()),
+        )
+        .unwrap();
+
+        let branches = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        assert!(
+            !branches.contains("api/t8"),
+            "the old lane's merged branch is deleted: {branches}"
+        );
+        assert!(
+            branches.contains("heat/t8"),
+            "the branch holding work is kept: {branches}"
+        );
+        let items = store
+            .read(|tx| tx.actionable_for("p", "p:captain", now))
+            .unwrap();
+        let branches = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        assert!(
+            branches.contains("heat/t8"),
+            "the carried work is kept: {branches}"
+        );
+        assert!(
+            !items.iter().any(|m| m.body.contains("heat/t8")),
+            "{items:?}"
         );
     }
 
