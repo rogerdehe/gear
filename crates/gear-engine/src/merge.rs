@@ -468,7 +468,8 @@ pub fn merge_passed(
     // One worker per repo. Unknown ops are restart recovery: merge_one
     // resets to the remote before doing any merges, and adopts a completed push.
     let ready = ready_merges(store, project)?;
-    let ready = merge_order(waits_cleared(store, project, ready)?);
+    let ready = waits_cleared(store, project, ready)?;
+    let ready = merge_order(now_first(store, project, ready)?);
     // The merges a train took (or voided) in this tick.
     let mut taken: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (position, op) in ready.iter().enumerate() {
@@ -1060,6 +1061,31 @@ fn waits_cleared(store: &mut Store, project: &str, ready: Vec<OpRow>) -> GearRes
             out.push(op);
         }
         Ok(out)
+    })
+}
+
+/// The merges of tasks the plan marks `now` run before the others, each group
+/// in its queue order (Prometheus, 2026-11-03: the user's top-priority test
+/// gate waited behind older ordinary merges on the shared merge line).
+fn now_first(store: &mut Store, project: &str, ready: Vec<OpRow>) -> GearResult<Vec<OpRow>> {
+    store.read(|tx| {
+        let mut now = Vec::new();
+        let mut rest = Vec::new();
+        for op in ready {
+            let urgent = match op.task.as_deref() {
+                Some(task) => tx
+                    .get_task(project, task)?
+                    .is_some_and(|row| row.priority == "now"),
+                None => false,
+            };
+            if urgent {
+                now.push(op);
+            } else {
+                rest.push(op);
+            }
+        }
+        now.extend(rest);
+        Ok(now)
     })
 }
 
@@ -5293,6 +5319,36 @@ mod tests {
 
         assert_eq!(order[0].id, running.id, "the merge that can run goes first");
         assert_eq!(order[1].id, waiting.id, "the waiting merge goes last");
+    }
+
+    /// A merge of a task the plan marks `now` runs before older ordinary ones
+    /// (Prometheus T-579, 2026-11-03).
+    #[test]
+    fn a_now_task_merges_before_older_ordinary_ones() {
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.priority = "must".into();
+                tx.update_task(&task)?;
+                task.id = "T-6".into();
+                task.rank = 6;
+                task.priority = "now".into();
+                tx.insert_task(&task)
+            })
+            .unwrap();
+        let mut older = op("abc1234");
+        older.id = "O-1".into();
+        older.task = Some("T-5".into());
+        let mut urgent = op("abc1234");
+        urgent.id = "O-2".into();
+        urgent.task = Some("T-6".into());
+        urgent.created = older.created + 10;
+
+        let order = merge_order(now_first(&mut store, "p", vec![older, urgent]).unwrap());
+
+        assert_eq!(order[0].id, "O-2", "the now task goes first");
+        assert_eq!(order[1].id, "O-1");
     }
 
     /// A merge that waited for a task which has merged since is back in the
