@@ -467,7 +467,8 @@ pub fn merge_passed(
 
     // One worker per repo. Unknown ops are restart recovery: merge_one
     // resets to the remote before doing any merges, and adopts a completed push.
-    let ready = merge_order(ready_merges(store, project)?);
+    let ready = ready_merges(store, project)?;
+    let ready = merge_order(waits_cleared(store, project, ready)?);
     // The merges a train took (or voided) in this tick.
     let mut taken: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (position, op) in ready.iter().enumerate() {
@@ -1029,6 +1030,37 @@ const WAITS: &str = "waits for ";
 /// The tasks a merge op waits for, if it waits (T-62).
 fn waits_for(op: &OpRow) -> Option<&str> {
     op.result.as_deref()?.strip_prefix(WAITS)
+}
+
+/// A waiting merge whose tasks have all merged since is waiting no longer: it
+/// goes back into the ordinary queue (Prometheus T-482, 2026-11-03: it waited
+/// for T-481 nine hours after T-481 landed, because the busy merge line never
+/// reached the waiting group to look again). Only the order changes here; the
+/// merge itself checks what its candidate carries before it gates.
+fn waits_cleared(store: &mut Store, project: &str, ready: Vec<OpRow>) -> GearResult<Vec<OpRow>> {
+    store.read(|tx| {
+        let mut out = Vec::with_capacity(ready.len());
+        for mut op in ready {
+            if let Some(list) = waits_for(&op) {
+                let mut all_landed = true;
+                for task in list.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+                    let landed = gear_app::tasks::merged_at(tx, project, task)?.is_some()
+                        || tx
+                            .get_task(project, task)?
+                            .is_some_and(|row| row.state == TaskState::Cancelled);
+                    if !landed {
+                        all_landed = false;
+                        break;
+                    }
+                }
+                if all_landed {
+                    op.result = None;
+                }
+            }
+            out.push(op);
+        }
+        Ok(out)
+    })
 }
 
 /// The ready merges in the order they run: a merge that waits for another task
@@ -2709,8 +2741,10 @@ fn run_gate(
         );
         // 126 and 127 are the shell's own "cannot run that" (126: not
         // executable, 127: not found): the toolchain is missing or broken,
-        // not the work. That can clear, so it is retried; every other exit
-        // status is the project's own gate saying no.
+        // not the work. 75 (EX_TEMPFAIL) is the gate's own "I could not judge
+        // this time" (a CI service refusing a request, say). All three can
+        // clear, so they are retried; every other exit status is the
+        // project's own gate saying no.
         let status = output.status.code().unwrap_or(0);
         let mut reason = format!("gate failed ({gate}):\n");
         if !failures.is_empty() {
@@ -2719,7 +2753,7 @@ fn run_gate(
         }
         reason.push_str(&tail);
         probe.step("gate");
-        return Err(Step::Failed(if status == 126 || status == 127 {
+        return Err(Step::Failed(if matches!(status, 75 | 126 | 127) {
             Failed::clear(reason)
         } else {
             Failed::stuck(reason)
@@ -5241,6 +5275,35 @@ mod tests {
 
         assert_eq!(order[0].id, running.id, "the merge that can run goes first");
         assert_eq!(order[1].id, waiting.id, "the waiting merge goes last");
+    }
+
+    /// A merge that waited for a task which has merged since is back in the
+    /// ordinary queue, ahead of newer merges (Prometheus T-482, 2026-11-03).
+    #[test]
+    fn a_merge_whose_awaited_task_landed_waits_no_longer() {
+        let mut store = world(TaskState::Ready);
+        lost_task(&mut store, "abc1234", OpState::Confirmed, 5);
+        let mut waiting = op("abc1234");
+        waiting.id = "O-1".into();
+        waiting.state = OpState::Unknown;
+        waiting.result = Some("waits for T-5".into());
+        let mut newer = op("abc1234");
+        newer.id = "O-2".into();
+        newer.created = waiting.created + 10;
+
+        let still = merge_order(
+            waits_cleared(&mut store, "p", vec![waiting.clone(), newer.clone()]).unwrap(),
+        );
+        assert_eq!(
+            still[0].id, "O-2",
+            "T-5 has not merged yet: O-1 still waits"
+        );
+
+        store
+            .write(|tx| tx.set_attempt_time("p", "T-5", 1, AttemptStep::Merged, 30))
+            .unwrap();
+        let order = merge_order(waits_cleared(&mut store, "p", vec![waiting, newer]).unwrap());
+        assert_eq!(order[0].id, "O-1", "T-5 landed: O-1 runs first again");
     }
 
     /// T-62: a task built on another task's branch does not merge before that
@@ -8287,6 +8350,27 @@ gate = "{gate}"
         // second one runs.
         let gate = format!(
             "if [ ! -e '{ran}' ]; then touch '{ran}'; exit 127; fi",
+            ran = ran.display()
+        );
+
+        let line =
+            merge_retried(&worktree, &repo(&gate), &op(&scratch.head_of("heat/t5"))).unwrap();
+
+        assert!(line.contains("merged T-5 into dev"), "{line}");
+        assert!(scratch.dev_has_task_commit());
+    }
+
+    /// A gate that exits 75 (EX_TEMPFAIL) could not judge this time (a CI
+    /// service refused a request): the merge is retried and lands, as for a
+    /// missing toolchain (Prometheus, 2026-11-03: GitHub HTTP 403 failed three
+    /// merges outright).
+    #[test]
+    fn a_gate_that_could_not_judge_is_retried_and_the_merge_lands() {
+        let scratch = Scratch::new("gate-tempfail");
+        let worktree = scratch.merge_worktree();
+        let ran = scratch.root.join("gate-ran");
+        let gate = format!(
+            "if [ ! -e '{ran}' ]; then touch '{ran}'; exit 75; fi",
             ran = ran.display()
         );
 

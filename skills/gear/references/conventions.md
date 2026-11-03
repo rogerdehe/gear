@@ -111,7 +111,7 @@ Send it with `gear send --kind question`, then continue with other ready work if
 [conventions]
 integration = "dev"     # the integration branch
 release = "main"        # the release branch
-gate = "make test"      # the project's own build + test, run before every merge; no default
+gate = "make test"      # the project's own build + test, run before every merge; no default; exit 75 when it could not judge (a CI service refused a request): the merge is retried, not failed
 merge_parallel = 1      # how many merges gate at once (a merge train); default 1: one after the other
 max_task_min = 60       # no task is planned longer than this; a plan that asks for more is refused
 branch_max_age_min = 120  # a task branch older than this is named to the captain
