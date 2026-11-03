@@ -67,4 +67,5 @@ A provider limit looks like a finished turn: Herdr says `done`. The screen shows
 - **The first prompt right after a start can be lost.** Wait until the status bar is drawn; a prompt counts as delivered only when the agent is seen `working`.
 - **Dialogs are drawn mid-screen.** Read the whole visible screen; anything typed while a dialog is open goes into its search box (`esc` closes it).
 - **A shell command typed into an OpenCode pane** is submitted as a prompt; `herdr agent send-keys <name> esc` stops the turn.
+- **A provider error retries for ever** (`⚠ Retrying in 3s · attempt 4 · Resource exhausted`): `esc` does not stop it; `opencode api session.interrupt --param sessionID=<id>` does. GEAR interrupts such a turn when a model switch waits for it.
 - **Environment exported in the pane** before the start reaches the agent's commands, and stays in the shell after the agent exits.

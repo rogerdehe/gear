@@ -324,7 +324,14 @@ pub fn switch_model(
     // (2) A plan written by an earlier binary with a typed step was dropped by
     // `pending`; the API path starts from the beginning.
     let resumed = pending(store, seat_id)?;
-    if obs.is_some_and(|obs| !obs.idle) {
+    // A turn that only retries its provider (a 429, "resource exhausted")
+    // never ends on its own: waiting for it to finish would wait for ever.
+    // Such a turn is interrupted below and the switch goes on.
+    let backing_off = obs.is_some_and(|obs| {
+        obs.flags
+            .contains(&gear_herdr::profile::ScreenFlag::Backoff)
+    });
+    if obs.is_some_and(|obs| !obs.idle) && !backing_off {
         return Ok(SwitchOutcome::Waiting);
     }
     let binding = store.read(|tx| {
@@ -362,6 +369,20 @@ pub fn switch_model(
                 gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done
             ) {
                 if info.agent_status != gear_herdr::AgentStatus::Unknown {
+                    let stuck = backing_off
+                        || herdr
+                            .read_screen(&binding.pane_id)
+                            .is_ok_and(|screen| profile.backoff(&screen));
+                    if stuck {
+                        // The session API stops the turn; a key does not stop
+                        // OpenCode's retry loop. The next tick finds the agent
+                        // idle and switches it; the lane is then told to go on.
+                        let _ = herdr.opencode_api(&[
+                            "session.interrupt".into(),
+                            "--param".into(),
+                            format!("sessionID={session}"),
+                        ]);
+                    }
                     return Ok(SwitchOutcome::Waiting);
                 }
                 return wait_for_agent(store, seat_id, &mut plan);
@@ -1180,5 +1201,44 @@ profile = "claude"
         .unwrap();
         assert_eq!(outcome, SwitchOutcome::Waiting);
         assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
+    }
+    /// A turn that only retries its provider never ends: a switch waiting for
+    /// it interrupts it through the session API, and the next tick switches.
+    #[test]
+    fn a_turn_stuck_retrying_its_provider_is_interrupted_for_the_switch() {
+        let (mut store, mut herdr) = api_world();
+        herdr.add_agent_named(PANE, "opencode", gear_herdr::AgentStatus::Working, "p-heat");
+        herdr.set_screen(
+            PANE,
+            "⚠ Retrying in 3s · attempt 4 · Resource exhausted. Please try again later.",
+        );
+        herdr
+            .api_replies
+            .push_back(Ok(serde_json::json!({"interrupted": true})));
+        let mut busy = idle();
+        busy.idle = false;
+        busy.status = Some(gear_herdr::AgentStatus::Working);
+        busy.flags.insert(gear_herdr::profile::ScreenFlag::Backoff);
+
+        let profile = gear_herdr::builtin("opencode").unwrap();
+        let outcome = switch_model(
+            &mut store,
+            &mut herdr,
+            "p:heat",
+            &profile,
+            Some(&busy),
+            &labels(),
+            "opencode-go/deepseek-v4.1-flash",
+            T0,
+        )
+        .unwrap();
+        assert_eq!(outcome, SwitchOutcome::Waiting);
+        assert!(
+            herdr.calls.iter().any(|call| matches!(call,
+                gear_herdr::fake::Call::OpenCodeApi { args } if args.first().map(String::as_str) == Some("session.interrupt")
+                    && args.iter().any(|arg| arg == "sessionID=ses_api"))),
+            "{:?}",
+            herdr.calls
+        );
     }
 }
