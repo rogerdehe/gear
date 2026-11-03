@@ -4146,7 +4146,8 @@ fn land_carried(store: &mut Store, project: &str, config: &ProjectConfig) -> Gea
             let Some(by) = tx.task_carried_by(project, &task.id)? else {
                 continue;
             };
-            let Some(merged_at) = gear_app::tasks::merged_at(tx, project, &by)? else {
+            let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, &by);
+            let Some(merged_at) = gear_app::tasks::merged_at(tx, carrier_project, carrier)? else {
                 continue;
             };
             let Some(latest) = tx.attempts_of_task(project, &task.id)?.into_iter().last() else {
@@ -4342,7 +4343,8 @@ fn tell_captain_lost(
             };
             // A carried task waits for its carrier's merge, which lands it.
             if let Some(by) = tx.task_carried_by(project, &task.id)? {
-                if gear_app::tasks::merged_at(tx, project, &by)?.is_none() {
+                let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, &by);
+                if gear_app::tasks::merged_at(tx, carrier_project, carrier)?.is_none() {
                     continue;
                 }
             }

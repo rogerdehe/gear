@@ -605,7 +605,11 @@ fn apply_queue(
                     format!("{id}: `carried-by` names the task itself"),
                 ));
             }
-            if !known.contains(by) {
+            let named = match by.split_once(':') {
+                Some((other, task)) => tx.get_task(other, task)?.is_some(),
+                None => known.contains(by),
+            };
+            if !named {
                 return Err(bad(
                     item.line,
                     format!("{id}: `carried-by` {by} does not exist"),

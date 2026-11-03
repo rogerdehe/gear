@@ -3146,6 +3146,12 @@ impl<'s> Tx<'s> {
             .filter(|by| !by.is_empty()))
     }
 
+    /// The project and task a `carried-by:` value names: `T-m` is a task of
+    /// `project`, `<other>:T-m` a task of another project on the same repo.
+    pub fn carrier_of<'a>(project: &'a str, by: &'a str) -> (&'a str, &'a str) {
+        by.split_once(':').unwrap_or((project, by))
+    }
+
     /// Set `carried-by:` of a task; an empty value clears it.
     pub fn set_task_carried_by(&self, project: &str, task: &str, by: &str) -> GearResult<()> {
         self.set_meta(&format!("task_carried_by:{project}:{task}"), by)

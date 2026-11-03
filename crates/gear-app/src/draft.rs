@@ -772,14 +772,15 @@ fn parse_queue_field(
             item.review_model = Some(value.to_string());
         }
         "carried-by" => {
+            let task = value.rsplit_once(':').map_or(value, |(_, task)| task);
             let ok = value == "-"
-                || value
+                || task
                     .strip_prefix("T-")
                     .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
             if !ok {
                 return Err(bad(
                     line,
-                    format!("`carried-by` is the task whose merge lands this work (T-<n>), or `-` to clear it; got {value:?}"),
+                    format!("`carried-by` is the task whose merge lands this work (T-<n>, or <project>:T-<n> for another project on the same repository), or `-` to clear it; got {value:?}"),
                 ));
             }
             item.carried_by = Some(if value == "-" {
