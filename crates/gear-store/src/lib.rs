@@ -1059,6 +1059,14 @@ impl<'s> Tx<'s> {
         Ok(keys)
     }
 
+    /// Remove one meta key (absent is fine).
+    pub fn delete_meta(&self, key: &str) -> GearResult<()> {
+        self.tx
+            .execute("DELETE FROM meta WHERE key=?1", params![key])
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
     pub fn set_meta(&self, key: &str, value: &str) -> GearResult<()> {
         self.tx
             .execute(
@@ -2729,6 +2737,43 @@ impl<'s> Tx<'s> {
              SET departure=NULL, departure_tasks=NULL, departure_estimate_min=NULL
              WHERE project=?1 AND milestone=?2",
                 params![project, milestone],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// Move a voyage's departure (the user's resume, `voyage_clock`): the
+    /// scope at departure stays.
+    pub fn move_voyage_departure(
+        &self,
+        project: &str,
+        milestone: &str,
+        departure: Ts,
+    ) -> GearResult<()> {
+        self.tx
+            .execute(
+                "UPDATE voyages SET departure=?3 WHERE project=?1 AND milestone=?2",
+                params![project, milestone, departure],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// Depart a voyage again (the user's redepart, `voyage_clock`): the
+    /// departure and the scope at departure are replaced.
+    pub fn redepart_voyage(
+        &self,
+        project: &str,
+        milestone: &str,
+        departure: Ts,
+        tasks: i64,
+        estimate_min: i64,
+    ) -> GearResult<()> {
+        self.tx
+            .execute(
+                "UPDATE voyages SET departure=?3, departure_tasks=?4, departure_estimate_min=?5, updated=?3
+                 WHERE project=?1 AND milestone=?2",
+                params![project, milestone, departure, tasks, estimate_min],
             )
             .map_err(map_sqlite)?;
         Ok(())

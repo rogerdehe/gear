@@ -36,6 +36,7 @@ pub mod station;
 pub mod tasks;
 pub mod time;
 pub mod voyage;
+pub mod voyage_clock;
 
 use gear_model::GearCtx;
 

@@ -349,10 +349,20 @@ enum AdminOp {
         #[arg(long, default_value = "paused by the user")]
         reason: String,
     },
-    /// Lift `gear admin pause`: the engine works on the project again.
+    /// Lift `gear admin pause`: the engine works on the project again, and
+    /// the paused hours do not count in its voyages' elapsed time.
     Resume {
         /// The project id.
         project: String,
+    },
+    /// Depart a voyage again now: its elapsed time and time stations start
+    /// from zero, its scope at departure is what it has today. The user's
+    /// call only.
+    Redepart {
+        /// The project id.
+        project: String,
+        /// The voyage's milestone.
+        milestone: String,
     },
 }
 
@@ -555,10 +565,13 @@ fn run(cli: Cli) -> GearResult<()> {
         }) => cmd_admin_projects(cli.json),
         Some(Cmd::Admin {
             op: AdminOp::Pause { project, reason },
-        }) => cmd_admin_pause(&project, Some(&reason)),
+        }) => cmd_admin_pause(&project, ProjectClock::Pause(&reason)),
         Some(Cmd::Admin {
             op: AdminOp::Resume { project },
-        }) => cmd_admin_pause(&project, None),
+        }) => cmd_admin_pause(&project, ProjectClock::Resume),
+        Some(Cmd::Admin {
+            op: AdminOp::Redepart { project, milestone },
+        }) => cmd_admin_pause(&project, ProjectClock::Redepart(&milestone)),
         Some(Cmd::Captain {
             op: CaptainOp::Handover { pane, facts },
         }) => match (facts, pane) {
@@ -622,6 +635,9 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
             op: AdminOp::Resume { .. },
         })
         | Some(Cmd::Admin {
+            op: AdminOp::Redepart { .. },
+        })
+        | Some(Cmd::Admin {
             op: AdminOp::InstallSkill { .. },
         })
         | Some(Cmd::Board { .. })
@@ -683,7 +699,20 @@ fn cmd_admin_kickoff(json: bool) -> GearResult<()> {
 /// no engine starts.
 /// Pause (`reason` given) or resume (`None`) one project in whichever store
 /// on this machine registers it: no Herdr session or pane is needed.
-fn cmd_admin_pause(project: &str, reason: Option<&str>) -> GearResult<()> {
+/// What `gear admin` does to one project's run and clock.
+enum ProjectClock<'a> {
+    Pause(&'a str),
+    Resume,
+    Redepart(&'a str),
+}
+
+fn cmd_admin_pause(project: &str, action: ProjectClock<'_>) -> GearResult<()> {
+    if matches!(action, ProjectClock::Redepart(_)) && !env_from_process()?.admin {
+        return Err(GearError::new(
+            gear_model::ErrorCode::Forbidden,
+            "`gear admin redepart` is the user's call: it needs GEAR_ADMIN=1",
+        ));
+    }
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let mut found = Vec::new();
     for path in stores_in(home.as_deref()) {
@@ -719,18 +748,34 @@ fn cmd_admin_pause(project: &str, reason: Option<&str>) -> GearResult<()> {
         }
     };
     let key = gear_store::Tx::project_paused_key(project);
-    match reason {
-        Some(reason) => {
-            let value = format!("{} {reason}", now_ts());
+    let now = now_ts();
+    match action {
+        ProjectClock::Pause(reason) => {
+            let value = format!("{now} {reason}");
             store.write(|tx| tx.set_meta(&key, &value))?;
             println!(
                 "{project} paused in {}: its engine no longer dispatches, rings or merges for it; `gear admin resume {project}` lifts it",
                 path.display()
             );
         }
-        None => {
-            store.write(|tx| tx.set_meta(&key, ""))?;
+        ProjectClock::Resume => {
+            let moved = store.write(|tx| gear_app::voyage_clock::resume(tx, project, now))?;
             println!("{project} resumed in {}", path.display());
+            for (milestone, minutes) in moved {
+                println!(
+                    "  {milestone}: the {minutes} paused min do not count in its elapsed time"
+                );
+            }
+        }
+        ProjectClock::Redepart(milestone) => {
+            let (tasks, estimate) =
+                store.write(|tx| gear_app::voyage_clock::redepart(tx, project, milestone, now))?;
+            println!(
+                "{project} {milestone} departs again now: elapsed 0, {tasks} tasks, {estimate} min estimated"
+            );
+            if store.read(|tx| tx.project_paused(project))?.is_some() {
+                println!("  {project} is still paused: its clock starts counting at `gear admin resume {project}`");
+            }
         }
     }
     Ok(())
