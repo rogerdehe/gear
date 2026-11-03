@@ -1283,7 +1283,11 @@ fn still_current(store: &mut Store, project: &str, op: &OpRow) -> GearResult<Res
             return Ok(Err(format!("a newer attempt {} was handed in", latest.n)));
         }
         let candidate = op.payload["candidate"].as_str().unwrap_or("");
-        if latest.candidate.as_deref() != Some(candidate) {
+        if !latest
+            .candidate
+            .as_deref()
+            .is_some_and(|stored| gear_app::tasks::same_candidate(stored, candidate))
+        {
             return Ok(Err("the attempt's candidate changed".to_string()));
         }
         Ok(Ok(()))
@@ -4411,6 +4415,17 @@ mod tests {
         let passed = passed_tasks(&mut store, "p").unwrap();
         assert_eq!(passed.len(), 1);
         assert_eq!(passed[0].0, "T-1");
+    }
+
+    /// A queued merge naming the full sha of the attempt's short candidate
+    /// still merges what was passed.
+    #[test]
+    fn a_merge_naming_the_full_sha_of_a_short_candidate_is_still_current() {
+        let mut store = pair_world("ea91cbf12", "486aeaa77");
+        let mut merge = op("ea91cbf12d23ef97e04c06cf9f60bdedcf759b2f");
+        merge.task = Some("T-1".into());
+        merge.attempt = Some(1);
+        assert!(still_current(&mut store, "p", &merge).unwrap().is_ok());
     }
 
     /// T-62: a merge that waits for another task goes last in the queue: the

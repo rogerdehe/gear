@@ -611,3 +611,61 @@ fn a_remerge_of_a_candidate_not_on_the_integration_branch_queues_the_op() {
         "the engine's retry answers it"
     );
 }
+
+/// A voided merge merged nothing: the accepted attempt is queued again.
+#[test]
+fn a_remerge_retries_a_voided_merge() {
+    let mut s = world(None);
+    accepted_task(&mut s);
+    let id = s
+        .write(|tx| {
+            let op = tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: OpKind::Merge,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({}),
+                created: T0 + 10,
+            })?;
+            tx.set_op_state("p", &op.id, OpState::Void, Some("voided"), T0 + 11)?;
+            Ok(op.id)
+        })
+        .unwrap();
+    let state = s.read(|tx| tx.get_op("p", &id)).unwrap().unwrap().state;
+    assert_eq!(state, OpState::Void);
+    run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap();
+    assert_eq!(queued_merge(&mut s).payload["candidate"], "c1");
+}
+
+/// A captain's pass that names the stored short candidate by its full sha
+/// keeps the attempt's own spelling.
+#[test]
+fn a_pass_by_full_sha_stores_the_attempts_candidate() {
+    let mut s = world(None);
+    run(
+        &mut s,
+        "# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
+        "v1",
+        T0,
+    )
+    .unwrap();
+    s.write(|tx| {
+        gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 1)?;
+        gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0 + 1)?;
+        gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, "ea91cbf12", "report", T0 + 2)
+    })
+    .unwrap();
+    run(
+        &mut s,
+        "# Verdicts\n- T-1 attempt=1 contract=1 candidate=ea91cbf12d23ef97e04c06cf9f60bdedcf759b2f pass evidence=logs/t1.md\n",
+        "v2",
+        T0 + 3,
+    )
+    .unwrap();
+    let verdicts = s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap();
+    assert_eq!(verdicts.last().unwrap().candidate, "ea91cbf12");
+}

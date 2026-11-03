@@ -2618,7 +2618,9 @@ fn remerge(
         ));
     };
     match last.state {
-        gear_model::OpState::Failed => {}
+        // A voided merge merged nothing: the accepted attempt above may be
+        // queued again.
+        gear_model::OpState::Failed | gear_model::OpState::Void => {}
         gear_model::OpState::Confirmed => {
             return Err(bad(
                 line,
