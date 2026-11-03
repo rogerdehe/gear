@@ -662,7 +662,16 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
             Style::fg(Color::Warn).and_bold(),
         );
         row += 1;
-        for line in wrap(voyage.done.as_deref().unwrap_or_default(), inside) {
+        // Folded, a long goal keeps to its first lines and ends in `…`, so it
+        // never pushes the task list off the screen; `d` shows all of it.
+        let mut lines = wrap(voyage.done.as_deref().unwrap_or_default(), inside);
+        if !screen.detail && lines.len() > GOAL_FOLDED_LINES {
+            lines.truncate(GOAL_FOLDED_LINES);
+            let last = lines.last_mut().expect("folded lines are not empty");
+            let keep = last.chars().count().min(inside.saturating_sub(2));
+            *last = format!("{} …", last.chars().take(keep).collect::<String>());
+        }
+        for line in lines {
             canvas.put_styled(
                 1,
                 row,
@@ -1258,6 +1267,9 @@ fn voyage_style(shown: Option<&VoyageEntry>, entry: &VoyageEntry) -> Style {
 fn is_wide(character: char) -> bool {
     matches!(character, '⛵' | '⚓' | '⏳')
 }
+
+/// How many lines of the goal the folded header shows (`d` shows all).
+const GOAL_FOLDED_LINES: usize = 3;
 
 /// The prototype's `wrap`: the words split on whitespace; a word that would
 /// pass `width` starts a new line.

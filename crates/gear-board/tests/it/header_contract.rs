@@ -820,3 +820,44 @@ fn a_station_ahead_without_a_projection_is_planned_by_nothing() {
     );
     assert_eq!(milestone_text(station_row(&rows, "S2")), "· S2 the views");
 }
+
+/// A long goal keeps to three lines in the folded header and ends in `…`, so
+/// the task list keeps its room; `d` shows the whole goal.
+#[test]
+fn a_long_goal_is_folded_to_three_lines_and_d_shows_it_all() {
+    let mut store = world_of(&[("T-1", TaskState::Ready)], "4h", 600);
+    let long = (1..=60)
+        .map(|n| format!("clause{n} keeps the board readable"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    store
+        .write(|tx| {
+            let mut voyage = tx.get_voyage("p", "M5")?.unwrap();
+            voyage.done = Some(long.clone());
+            tx.upsert_voyage(&voyage)
+        })
+        .unwrap();
+
+    let goal_rows = |rows: &[String]| {
+        let top = rows.iter().position(|r| r.contains("GOAL")).unwrap();
+        let bottom = rows.iter().skip(top).position(|r| r.contains('╚')).unwrap() + top;
+        rows[top + 1..bottom].to_vec()
+    };
+    let (_, _, _, folded) = drawn(&mut store);
+    let folded = goal_rows(&folded);
+    // Three lines of the goal and the quality bar.
+    assert_eq!(folded.len(), 4, "{folded:#?}");
+    assert!(folded[2].contains('…'), "{folded:#?}");
+    assert!(
+        !folded.iter().any(|r| r.contains("clause60")),
+        "{folded:#?}"
+    );
+
+    let (_, _, unfolded) = unfolded(&mut store);
+    let unfolded = goal_rows(&unfolded);
+    assert!(unfolded.len() > 4, "{unfolded:#?}");
+    assert!(
+        unfolded.iter().any(|r| r.contains("clause60")),
+        "{unfolded:#?}"
+    );
+}
