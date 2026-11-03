@@ -2363,7 +2363,16 @@ fn start_reviewer(
                 .as_deref()
                 .is_some_and(|started| started != cli)
         });
-        if model_moved || cli_moved {
+        // The chain's arguments alone (a reasoning effort, say) are a change
+        // too: the warm agent was started with the old ones.
+        let recorded_args = store
+            .read(|tx| tx.get_meta(&review_model_key(&seat.id)))?
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|record| record.get("args").cloned());
+        let args_moved = entry
+            .zip(recorded_args)
+            .is_some_and(|(entry, recorded)| recorded != serde_json::json!(entry.args()));
+        if model_moved || cli_moved || args_moved {
             crate::release::release_one(
                 store,
                 herdr,
@@ -11736,6 +11745,114 @@ profile = "opencode"
                 .as_deref(),
             Some("gpt-6.1-luna")
         );
+    }
+
+    /// T-501: a reviewer that fell back keeps the model it fell back to for
+    /// its next job while the model it left has not reset; after the reset its
+    /// next job runs on the first entry again.
+    /// Only the review chain's arguments changed (same model, same CLI): the
+    /// warm reviewer was started with the old ones, so it is released too.
+    #[test]
+    fn warm_reviewer_whose_chain_args_changed_is_released() {
+        let changed = CONFIG.replace(
+            REVIEW_CHAIN,
+            r#"review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=low"] }]"#,
+        );
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        assert_eq!(
+            start_reviews(
+                &mut store,
+                &mut herdr,
+                &cfg(),
+                &cfg().profiles,
+                "p",
+                T0 + 10
+            )
+            .unwrap()
+            .started,
+            vec!["p:review-1"]
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&crate::model::model_meta_key("p:review-1")))
+                .unwrap()
+                .as_deref(),
+            Some("gpt-6.1-sol")
+        );
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
+                tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
+                tx.clear_seat_task("p:review-1")?;
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = changed.clone();
+                tx.update_project(&project)
+            })
+            .unwrap();
+        queue_review_job(&mut store, 2, "heat");
+        let _ = crate::release::take_release_log();
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 12,
+        )
+        .unwrap();
+        assert!(
+            report.started.is_empty(),
+            "the warm seat is not reused with the old arguments: {report:?}"
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat("p:review-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            SeatState::Releasing
+        );
+        let log = crate::release::take_release_log();
+        assert!(
+            log.iter().any(|line| line.contains("p:review-1")
+                && line.contains("caller=the review chain changed")),
+            "{log:?}"
+        );
+        crate::release::release_finished_reviews(&mut store, &mut herdr, "p", T0 + 13).unwrap();
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat("p:review-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            SeatState::Released
+        );
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 14,
+        )
+        .unwrap();
+        assert_eq!(report.started, vec!["p:review-1"], "{report:?}");
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&crate::model::model_meta_key("p:review-1")))
+                .unwrap()
+                .as_deref(),
+            Some("gpt-6.1-sol")
+        );
+        let entry = store
+            .read(|tx| tx.get_meta(&review_model_key("p:review-1")))
+            .unwrap()
+            .unwrap();
+        assert!(entry.contains("model_reasoning_effort=low"), "{entry}");
     }
 
     /// T-501: a reviewer that fell back keeps the model it fell back to for
