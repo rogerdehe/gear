@@ -531,6 +531,10 @@ pub(crate) fn effective_temps(
         .unwrap_or(configured))
 }
 
+/// How long a seat a raise added stays idle before it goes, when the project
+/// sets no reviewer idle time (T-467).
+const RAISE_IDLE_MIN: u32 = 30;
+
 /// What the raise step of this tick did (T-467).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RaiseStep {
@@ -544,9 +548,9 @@ enum RaiseStep {
 }
 
 /// The reviewer count and the reviewer idle time (T-467): from the project's
-/// config, or the store's own count and the default 30 minutes when the config
-/// is empty or cannot be read.
-fn release_timing(store: &mut Store, project: &str) -> GearResult<(u32, u32)> {
+/// config, or the store's own count and no idle release when the config is
+/// empty or cannot be read. `None`: an idle reviewer is kept.
+fn release_timing(store: &mut Store, project: &str) -> GearResult<(u32, Option<u32>)> {
     match gear_app::config::latest(store, project) {
         Ok(config) => Ok((config.quota.temps, config.quota.reviewer_release_idle_min)),
         Err(_) => {
@@ -554,7 +558,7 @@ fn release_timing(store: &mut Store, project: &str) -> GearResult<(u32, u32)> {
                 .read(|tx| tx.get_project(project))?
                 .map(|row| row.quota_temps.max(0) as u32)
                 .unwrap_or(0);
-            Ok((count, 30))
+            Ok((count, None))
         }
     }
 }
@@ -577,8 +581,10 @@ fn settle_review_raise(
     if hand_ins_waiting(store, project)? > 0 {
         return Ok(RaiseStep::Active);
     }
+    // The seats a raise added go back once idle: the user's own count is the
+    // floor, so the default idle time stands in when none is set.
     let (configured, reviewer_idle_min) = release_timing(store, project)?;
-    let idle_min = i64::from(reviewer_idle_min) * 60;
+    let idle_min = i64::from(reviewer_idle_min.unwrap_or(RAISE_IDLE_MIN)) * 60;
     let _ = release_standby_above(store, herdr, project, configured as usize, idle_min, now)?;
     if temp_seats_in_use(store, herdr, project)? > configured as usize {
         return Ok(RaiseStep::Active);
@@ -691,11 +697,11 @@ fn release_standby_above(
 
 /// The Standby reviewers that the rule of design §3.6 releases.
 ///
-/// With W = the lane seats that work on a task (an attempt in `Started`), the
-/// Standby reviewers beyond W are released — the one idle longest first: it
-/// has waited longest for a review that is not coming. With W = 0 every
-/// Standby reviewer is released at once: no lane works, so no hand-in can
-/// come (a hand-in that does come starts a reviewer again in seconds).
+/// The sweep runs only when the project sets `[quota]
+/// reviewer_release_idle_min`; by default an idle reviewer is kept. With W =
+/// the lane seats that work on a task (an attempt in `Started`), the Standby
+/// reviewers beyond W that were idle that long are released — the one idle
+/// longest first: it has waited longest for a review that is not coming.
 ///
 /// A Standby seat whose `engine.review_pending.<seat id>` is set has a job:
 /// `fn start` (review.rs) started it for a review that `fn start_reviews`
@@ -730,8 +736,11 @@ pub fn release_idle_standby(
         return Ok(report);
     }
     // T-467: a seat is released only after its role's idle time; a seat that
-    // just got its verdict stays for the next review (M-2603).
-    let (_, reviewer_idle_min) = release_timing(store, project)?;
+    // just got its verdict stays for the next review (M-2603). Without an
+    // idle time set, an idle reviewer is kept: the user's `temps` stay up.
+    let (_, Some(reviewer_idle_min)) = release_timing(store, project)? else {
+        return Ok(report);
+    };
     let idle_min = i64::from(reviewer_idle_min) * 60;
     let working = working_lanes(store, project)?;
     let excess = standby.len().saturating_sub(working.max(0) as usize);
@@ -4155,6 +4164,38 @@ profile = "codex"
                 .state,
             SeatState::Releasing,
             "after its idle time the seat goes"
+        );
+    }
+
+    /// By default an idle reviewer is kept: with no idle time set, a Standby
+    /// reviewer stays up for hours with no lane working.
+    #[test]
+    fn an_idle_reviewer_is_kept_by_default() {
+        let mut store = world(TaskState::Done, "w2:p2", "codex");
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = project
+                    .config_toml
+                    .replace("reviewer_release_idle_min = 0\n", "");
+                tx.update_project(&project)
+            })
+            .unwrap();
+        store
+            .write(|tx| tx.set_seat_state("p:r-1", SeatState::Standby, Some("review done"), T0))
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 6 * 3600).unwrap();
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat("p:r-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            SeatState::Standby,
+            "an idle reviewer stays up"
         );
     }
 

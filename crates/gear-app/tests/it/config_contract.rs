@@ -57,7 +57,7 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
     assert_eq!(cfg.lanes[1].not, vec!["UI".to_string()]);
     assert!(!cfg.quota.includes_captain);
     // T-467: the idle time before a seat of a role is released, default 30.
-    assert_eq!(cfg.quota.reviewer_release_idle_min, 30);
+    assert_eq!(cfg.quota.reviewer_release_idle_min, None);
     assert_eq!(cfg.quota.lane_release_idle_min, 30);
     assert_eq!(cfg.temps, None);
     assert_eq!(
@@ -260,7 +260,7 @@ fn the_release_idle_times_are_config() {
         "temps = 4\nreviewer_release_idle_min = 5\nlane_release_idle_min = 90",
     );
     let cfg = parse(&text).unwrap();
-    assert_eq!(cfg.quota.reviewer_release_idle_min, 5);
+    assert_eq!(cfg.quota.reviewer_release_idle_min, Some(5));
     assert_eq!(cfg.quota.lane_release_idle_min, 90);
 }
 
