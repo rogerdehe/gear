@@ -162,6 +162,9 @@ pub fn apply(
             // before the queue writes so the guard can tell a new milestone
             // from one that already carried tasks.
             let guard = planned_guard(tx, &ctx.project, draft)?;
+            // A voyage never stands still on the captain's word alone: read
+            // whether the fleet had work before this apply.
+            let stopped_before = fleet_withheld(tx, &ctx.project, now)?.is_some();
             let mut result = apply_queue(
                 tx,
                 &ctx.project,
@@ -212,6 +215,21 @@ pub fn apply(
             // milestone's departure and a move between milestones need the
             // user's word: --confirmed and its `confirmed:` line.
             require_confirmed_changes(draft, &guard.0, &guard.1)?;
+            // An apply that leaves no lane any work while the departed voyage
+            // still has work held back is a stop of the voyage: the user's,
+            // like a change of its goal.
+            if !stopped_before {
+                if let Some(withheld) = fleet_withheld(tx, &ctx.project, now)? {
+                    if !draft.confirmed || confirmed_decisions(draft).is_empty() {
+                        return Err(GearError::new(
+                            ErrorCode::BadFormat,
+                            format!(
+                                "this apply leaves no lane any work while voyage {withheld}: a voyage never stands still on the captain's word. Stopping it is the user's: ask them in your dialog; if they confirm, apply again with --confirmed and a `confirmed:` line in # Decisions. A merge backlog is the merge queue's, never a reason to stop the lanes"
+                            ),
+                        ));
+                    }
+                }
+            }
             // T-461: the captain's goal check of the voyage's done clauses,
             // written before a landing of this same apply reads it.
             let checked = voyage_of(tx, &ctx.project, draft)?;
@@ -3870,6 +3888,60 @@ fn planned_guard(
         departing.insert(milestone.clone());
     }
     Ok((departing, moved))
+}
+
+/// Whether the fleet stands still while the departed voyage holds work back:
+/// no lane that is up has a task it can start (after its current one), and
+/// the voyage has tasks on hold or ready for a held or parked lane. `Some`
+/// names the voyage and the work held back.
+fn fleet_withheld(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<String>> {
+    let voyage = current_voyage(tx, project)?;
+    if voyage.is_empty()
+        || !tx
+            .get_voyage(project, &voyage)?
+            .is_some_and(|v| v.departure.is_some())
+    {
+        return Ok(None);
+    }
+    let seats = tx.seats_of_project(project)?;
+    let lane_down = |lane: &str| {
+        seats.iter().any(|seat| {
+            seat.role == SeatRole::Lane
+                && seat.name == lane
+                && matches!(seat.state, SeatState::Held | SeatState::Parked)
+        })
+    };
+    let (mut held, mut ready_for_down) = (0, 0);
+    for task in tx.tasks_of_project(project)? {
+        if task.milestone.as_deref() != Some(voyage.as_str()) {
+            continue;
+        }
+        match task.state {
+            TaskState::Draft => held += 1,
+            TaskState::Ready if task.lane.as_deref().is_some_and(lane_down) => ready_for_down += 1,
+            _ => {}
+        }
+    }
+    if held + ready_for_down == 0 {
+        return Ok(None);
+    }
+    let idle: BTreeSet<String> = idle_lanes(tx, project, now)?
+        .into_iter()
+        .map(|lane| lane.lane)
+        .collect();
+    let working = seats.iter().any(|seat| {
+        seat.role == SeatRole::Lane
+            && matches!(seat.state, SeatState::Active | SeatState::Standby)
+            && !idle.contains(&seat.name)
+            && !lane_in_tail_at(tx, project, &seat.name, now).unwrap_or(false)
+    });
+    if working {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{voyage} holds {} tasks back ({held} on hold, {ready_for_down} ready for held or parked lanes)",
+        held + ready_for_down
+    )))
 }
 
 /// T-461: a new milestone's departure and a move between milestones are
