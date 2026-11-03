@@ -531,11 +531,28 @@ pub(crate) fn run(
             }
             if action_name == "new" {
                 let old = state.get("old_session_ref").and_then(Value::as_str);
-                let changed = binding
+                let mut changed = binding
                     .session_ref
                     .as_deref()
                     .filter(|s| !s.is_empty())
                     .is_some_and(|s| Some(s) != old);
+                // Herdr reports no session for an OpenCode pane: ask OpenCode
+                // for the session `/new` opened in the lane's worktree.
+                if !changed && binding.kind == "opencode" {
+                    let directory = store
+                        .read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(&seat.id)))?;
+                    if let Some(directory) = directory.filter(|d| !d.is_empty()) {
+                        let since = time(&state, "t0");
+                        if let Some(id) =
+                            crate::opencode::new_session_since(herdr, &directory, since, old)
+                        {
+                            store.write(|tx| {
+                                tx.set_binding_session_ref(&seat.id, binding.generation, &id)
+                            })?;
+                            changed = true;
+                        }
+                    }
+                }
                 if is_ready && elapsed >= 5 && (changed || binding.kind == "codex") {
                     return record(
                         store,

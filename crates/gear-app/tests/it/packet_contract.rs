@@ -358,3 +358,45 @@ fn a_finished_task_has_no_rework_section() {
         "the plain review history stays:\n{text}"
     );
 }
+
+/// T-469: a lane with a charter is told its charter rules how it works; the
+/// footer never repeats the default "you never design" over it.
+#[test]
+fn a_chartered_lanes_packet_does_not_repeat_the_default_stance() {
+    let mut s = world(true);
+    let config = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "heat"
+duty = "thermal calculation"
+owns = ["src/heat/"]
+kind = "opencode"
+profile = "opencode"
+charter = """You own the design of your task."""
+
+[conventions]
+gate = "make test"
+"#;
+    s.write(|tx| {
+        let mut project = tx.get_project("p")?.unwrap();
+        project.config_toml = config.into();
+        tx.update_project(&project)
+    })
+    .unwrap();
+    let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(!text.contains("you never design"), "{text}");
+    assert!(text.contains("Your charter says how you work"), "{text}");
+}

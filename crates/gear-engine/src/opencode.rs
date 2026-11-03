@@ -225,10 +225,55 @@ pub(crate) fn start_args(
     Ok(vec!["--session".into(), id.into()])
 }
 
+/// The session OpenCode opened in `directory` after `/new` (Herdr reports no
+/// session for an OpenCode pane): the newest one created at or after
+/// `since` (seconds) that is not `old`. `None` when the service cannot say.
+pub(crate) fn new_session_since(
+    herdr: &mut dyn HerdrAct,
+    directory: &str,
+    since: i64,
+    old: Option<&str>,
+) -> Option<String> {
+    let list = herdr
+        .opencode_api(&[
+            "session.list".into(),
+            "--param".into(),
+            format!("location[directory]={directory}"),
+        ])
+        .ok()?;
+    data(&list)
+        .as_array()?
+        .iter()
+        .filter(|session| session["location"]["directory"].as_str() == Some(directory))
+        .filter(|session| session["id"].as_str().is_some_and(|id| Some(id) != old))
+        .filter_map(|session| {
+            let created = session["time"]["created"].as_i64()?;
+            let id = session["id"].as_str()?.to_string();
+            (created >= since * 1000).then_some((created, id))
+        })
+        .max()
+        .map(|(_, id)| id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gear_herdr::fake::{Call, FakeHerdr};
+
+    /// Herdr reports no OpenCode session: the one `/new` opened is the
+    /// newest in the lane's worktree since the step began, not another lane's
+    /// and not the old one.
+    #[test]
+    fn the_session_new_opened_is_the_newest_in_the_worktree() {
+        let mut herdr = FakeHerdr::new();
+        herdr.api_replies.push_back(Ok(json!({"data": [
+            {"id": "ses_old", "location": {"directory": "/w/dialogue"}, "time": {"created": 1_000_000}},
+            {"id": "ses_other_lane", "location": {"directory": "/w/pipeline"}, "time": {"created": 1_002_000}},
+            {"id": "ses_new", "location": {"directory": "/w/dialogue"}, "time": {"created": 1_001_000}},
+        ]})));
+        let id = new_session_since(&mut herdr, "/w/dialogue", 1_000, Some("ses_old"));
+        assert_eq!(id.as_deref(), Some("ses_new"));
+    }
 
     fn world() -> Store {
         let mut store = Store::open_in_memory().unwrap();

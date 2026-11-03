@@ -4977,7 +4977,22 @@ pub fn render_task_packet(
             row.contract_version, row.contract_version, pending.goal, row.contract_version, pending.accept, row.contract_version
         ));
     }
-    text.push_str("\nYou implement; you never design. If anything here is unclear or contradicts the design or a message, stop and send gear send --kind question (Question / Options / Context / Default) at once, then go on with your default. Commit and push this branch at least every 15 minutes.\n");
+    // The stance is the lane's charter when the project wrote one (T-469):
+    // the footer repeats only the default stance, never over a charter.
+    let chartered = match row.lane.as_deref() {
+        Some(lane) => project_config(tx, project)?.is_some_and(|config| {
+            config
+                .lanes
+                .iter()
+                .any(|l| l.name == lane && l.charter.is_some())
+        }),
+        None => false,
+    };
+    if chartered {
+        text.push_str("\nYour charter says how you work on this task. If anything here contradicts the design or a message, send gear send --kind question (Question / Options / Context / Default) and go on with your default. Commit and push this branch at least every 15 minutes.\n");
+    } else {
+        text.push_str("\nYou implement; you never design. If anything here is unclear or contradicts the design or a message, stop and send gear send --kind question (Question / Options / Context / Default) at once, then go on with your default. Commit and push this branch at least every 15 minutes.\n");
+    }
     Ok(text)
 }
 
