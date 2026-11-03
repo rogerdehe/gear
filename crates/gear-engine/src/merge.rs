@@ -4070,6 +4070,8 @@ fn merge_lost_landed_key(project: &str, task: &str, attempt: i64) -> String {
 /// The word that closes a lost-merge item whose task the scan no longer
 /// checks (T-408).
 const LOST_SKIPPED: &str = "no longer checked: its voyage is finished or its candidate is gone";
+/// The word an open merge-lost item closes with once the work landed.
+const LOST_LANDED: &str = "its work landed";
 
 /// The accepted attempt the lost-merge scan looks at (T-397, T-408): what it
 /// needs to name the work, and why it may leave it alone.
@@ -4090,6 +4092,9 @@ struct Lost {
     /// merge landed, a merge op is queued or running, or its merge-failed item
     /// is open.
     settled: bool,
+    /// The attempt carries a merge time: its work landed, by its own merge or
+    /// with another task's (`integrated-by`).
+    merged: bool,
 }
 
 /// Is the task's voyage open (T-408)? A voyage is its milestone, and it is open
@@ -4119,6 +4124,17 @@ fn candidate_held(repo: &Repo, candidate: &str) -> Option<bool> {
 /// Close the lost-merge item of a task the scan no longer checks (T-408): the
 /// captain can no longer act on it.
 fn resolve_lost(store: &mut Store, project: &str, task: &str, now: Ts) -> GearResult<()> {
+    resolve_lost_with(store, project, task, LOST_SKIPPED, now)
+}
+
+/// Close the open merge-lost items of a task with `why`.
+fn resolve_lost_with(
+    store: &mut Store,
+    project: &str,
+    task: &str,
+    why: &str,
+    now: Ts,
+) -> GearResult<()> {
     store.write(|tx| {
         let thread = lost_thread(task);
         for item in tx.thread_messages(project, &thread)? {
@@ -4127,7 +4143,7 @@ fn resolve_lost(store: &mut Store, project: &str, task: &str, now: Ts) -> GearRe
                     project,
                     &item.id,
                     MsgState::Resolved,
-                    Some(LOST_SKIPPED),
+                    Some(why),
                     None,
                     None,
                     now,
@@ -4248,6 +4264,7 @@ fn tell_captain_lost(
                 voyage: voyage_open(&open_voyages, task),
                 open_item,
                 settled: merged || in_flight || failed_open,
+                merged,
             });
         }
         Ok(lost)
@@ -4261,8 +4278,15 @@ fn tell_captain_lost(
         voyage,
         open_item,
         settled,
+        merged,
     } in lost
     {
+        // The work landed (its own merge, or another task's that carried it):
+        // an item still open about it is answered.
+        if open_item && merged {
+            resolve_lost_with(store, project, &task, LOST_LANDED, now)?;
+            continue;
+        }
         // T-408: a lost merge of a finished voyage was settled with the voyage,
         // and a candidate the repository no longer holds is work that cannot be
         // remerged. Either way the task is not checked, and an item still open
@@ -5742,6 +5766,35 @@ mod tests {
         assert_eq!(items.len(), 1, "a second item was opened: {items:?}");
         assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
         assert_eq!(items[0].result.as_deref(), Some(LOST_SKIPPED));
+    }
+
+    /// A merge-lost item closes once the work landed with another task's
+    /// merge (`integrated-by`): the item asked for a remerge of work that is
+    /// already on the integration branch (Lawrence M-81).
+    #[test]
+    fn a_lost_item_closes_once_the_work_landed_with_another_task() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items[0].state, MsgState::Open, "{items:?}");
+
+        // The work lands with another task's merge.
+        store
+            .write(|tx| tx.set_attempt_time("p", "T-5", 1, AttemptStep::Merged, 30))
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 31 + LOST_SCAN_EVERY_S).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
+        assert_eq!(items[0].result.as_deref(), Some(LOST_LANDED));
     }
 
     /// The worktree of a merge train's second stage, beside the pair's own.
