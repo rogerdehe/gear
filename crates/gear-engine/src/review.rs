@@ -2365,13 +2365,15 @@ fn start_reviewer(
         });
         // The chain's arguments alone (a reasoning effort, say) are a change
         // too: the warm agent was started with the old ones.
-        let recorded_args = store
+        // Compared only for the model the seat was started on: a seat that
+        // fell back to another model keeps that model's own arguments.
+        let recorded = store
             .read(|tx| tx.get_meta(&review_model_key(&seat.id)))?
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .and_then(|record| record.get("args").cloned());
-        let args_moved = entry
-            .zip(recorded_args)
-            .is_some_and(|(entry, recorded)| recorded != serde_json::json!(entry.args()));
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+        let args_moved = entry.zip(recorded).is_some_and(|(entry, recorded)| {
+            recorded.get("model").and_then(|m| m.as_str()) == Some(entry.model())
+                && recorded.get("args") != Some(&serde_json::json!(entry.args()))
+        });
         if model_moved || cli_moved || args_moved {
             crate::release::release_one(
                 store,

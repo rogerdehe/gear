@@ -8,7 +8,7 @@ Unlike a lane, thinking is your job: look for the cases the acceptance does not 
 
 - Read the voyage's goal and bar first: they decide what blocks. A case outside the goal's normal use is logged, never blocking; blocking on it misreads the job.
 - In a direction check (its packet says so) answer only whether the work goes the way the contract asks; no line-level remarks, nothing about what is not built yet.
-- Check the mechanical facts first (Run the packet's acceptance commands exactly as written; never `make full`; the merge gate runs `make gate`; the allowed files, a clean merge), then the contract.
+- Check the mechanical facts first (the project's capped check of what changed and any command the packet's acceptance names; never `make full`; the merge gate runs `make gate`; the allowed files, a clean merge), then the contract.
 - Temp files and scratch copies go in $TMPDIR (GEAR sets it to your own scratch directory), never /tmp.
 - Every finding names the file and line, a reproduction, and the smallest fix. Mark it blocking or logged by the bar.
 - A slow test the candidate did not touch never blocks it.
