@@ -4977,6 +4977,11 @@ pub fn render_task_packet(
             row.contract_version, row.contract_version, pending.goal, row.contract_version, pending.accept, row.contract_version
         ));
     }
+    // T-195: a CLI that takes no rules at its start (OpenCode, Grok) gets its
+    // role's rules — the lane's charter and the working rules — in the packet.
+    if let Some(rules) = packet_rules(tx, project, row.lane.as_deref())? {
+        text.push_str(&format!("\n## Your role\n{rules}"));
+    }
     // The stance is the lane's charter when the project wrote one (T-469):
     // the footer repeats only the default stance, never over a charter.
     let chartered = match row.lane.as_deref() {
@@ -4994,6 +4999,46 @@ pub fn render_task_packet(
         text.push_str("\nYou implement; you never design. If anything here is unclear or contradicts the design or a message, stop and send gear send --kind question (Question / Options / Context / Default) at once, then go on with your default. Commit and push this branch at least every 15 minutes.\n");
     }
     Ok(text)
+}
+
+/// The rules a lane's agent gets in its packet (T-195): only when its CLI
+/// takes none when it starts, so an agent is never told them twice.
+fn packet_rules(tx: &Tx<'_>, project: &str, lane: Option<&str>) -> GearResult<Option<String>> {
+    let Some(lane) = lane else {
+        return Ok(None);
+    };
+    let seat_id = format!("{project}:{lane}");
+    let Some(seat) = tx.get_seat(&seat_id)? else {
+        return Ok(None);
+    };
+    let Some(binding) = tx.get_binding(&seat_id, seat.generation)? else {
+        return Ok(None);
+    };
+    let takes_rules_at_start = gear_herdr::profile::builtin(&binding.kind)
+        .is_none_or(|profile| !profile.instructions_args.is_empty());
+    if takes_rules_at_start {
+        return Ok(None);
+    }
+    let config = project_config(tx, project)?;
+    let voyage = match current_voyage(tx, project)? {
+        id if id.is_empty() => None,
+        id => tx.get_voyage(project, &id)?,
+    };
+    let done = voyage
+        .as_ref()
+        .and_then(|v| v.done.as_deref())
+        .unwrap_or("-");
+    let bar = voyage
+        .as_ref()
+        .and_then(|v| v.bar.as_deref())
+        .unwrap_or("-");
+    Ok(crate::charter::text(
+        config.as_ref(),
+        gear_model::SeatRole::Lane,
+        lane,
+        done,
+        bar,
+    ))
 }
 
 /// The attempt whose round failed, if the task has one (T-118): the highest

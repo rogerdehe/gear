@@ -14,10 +14,15 @@ const CANDIDATE: &str = "aaa1111";
 const FINDINGS: &str = "F1: the rework is missing\nF2: the wording of a comment";
 
 fn world(attempt: bool) -> Store {
+    world_on(attempt, "opencode")
+}
+
+/// The world with lane `heat` running on the CLI `kind`.
+fn world_on(attempt: bool, kind: &str) -> Store {
     let mut s = Store::open_in_memory().unwrap();
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", T0)?;
-        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", kind, T0)?;
         tx.insert_task(&TaskRow {
             repo: None,
             base: None,
@@ -399,4 +404,19 @@ gate = "make test"
     let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
     assert!(!text.contains("you never design"), "{text}");
     assert!(text.contains("Your charter says how you work"), "{text}");
+    // T-195: an OpenCode lane takes no rules at its start, so its packet
+    // carries its charter.
+    assert!(
+        text.contains("## Your role\nYou own the design of your task."),
+        "{text}"
+    );
+}
+
+/// T-195: a lane whose CLI takes its rules when it starts (Codex) is not told
+/// them again in every packet.
+#[test]
+fn a_codex_lanes_packet_does_not_repeat_its_rules() {
+    let mut s = world_on(true, "codex");
+    let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(!text.contains("## Your role"), "{text}");
 }
