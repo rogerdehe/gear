@@ -2716,6 +2716,8 @@ fn run_gate(
         Ok(stdin) => stdin,
         Err(error) => return Err(Step::Failed(Failed::clear(format!("gate lock: {error}")))),
     };
+    let tempfail = gate_tempfail_path(dir);
+    let _ = std::fs::remove_file(&tempfail);
     let output = match gate_command(&gate, dir).stdin(stdin).output() {
         Ok(output) => output,
         // The gate could not run at all: the environment is broken, not the
@@ -2746,6 +2748,8 @@ fn run_gate(
         // clear, so they are retried; every other exit status is the
         // project's own gate saying no.
         let status = output.status.code().unwrap_or(0);
+        let asked_retry = tempfail.exists();
+        let _ = std::fs::remove_file(&tempfail);
         let mut reason = format!("gate failed ({gate}):\n");
         if !failures.is_empty() {
             reason.push_str(&failures.join("\n"));
@@ -2753,11 +2757,13 @@ fn run_gate(
         }
         reason.push_str(&tail);
         probe.step("gate");
-        return Err(Step::Failed(if matches!(status, 75 | 126 | 127) {
-            Failed::clear(reason)
-        } else {
-            Failed::stuck(reason)
-        }));
+        return Err(Step::Failed(
+            if asked_retry || matches!(status, 75 | 126 | 127) {
+                Failed::clear(reason)
+            } else {
+                Failed::stuck(reason)
+            },
+        ));
     }
     probe.step("gate");
     Ok(())
@@ -3464,8 +3470,20 @@ fn gate_command(gate: &str, dir: &Path) -> Command {
         .arg(gate)
         .current_dir(dir)
         .env_remove(gear_model::ctx::ENV_DB)
-        .env_remove(gear_model::ctx::ENV_CTX);
+        .env_remove(gear_model::ctx::ENV_CTX)
+        .env(GATE_TEMPFAIL_ENV, gate_tempfail_path(dir));
     cmd
+}
+
+/// The variable naming the file a gate creates when it could not judge this
+/// time (a CI service refused a request): the merge is retried, not failed.
+/// It reaches the engine through any wrapper (`make` turns a recipe's exit 75
+/// into its own exit 2), so it is the bridge for gates run through one.
+pub const GATE_TEMPFAIL_ENV: &str = "GEAR_GATE_TEMPFAIL";
+
+/// The file of [`GATE_TEMPFAIL_ENV`] for a gate run in `dir`.
+fn gate_tempfail_path(dir: &Path) -> std::path::PathBuf {
+    dir.join(".git-gear-gate-tempfail")
 }
 
 /// Run one git command in `dir`; the output tail comes back as the error.
@@ -8371,6 +8389,26 @@ gate = "{gate}"
         let ran = scratch.root.join("gate-ran");
         let gate = format!(
             "if [ ! -e '{ran}' ]; then touch '{ran}'; exit 75; fi",
+            ran = ran.display()
+        );
+
+        let line =
+            merge_retried(&worktree, &repo(&gate), &op(&scratch.head_of("heat/t5"))).unwrap();
+
+        assert!(line.contains("merged T-5 into dev"), "{line}");
+        assert!(scratch.dev_has_task_commit());
+    }
+
+    /// A gate behind a wrapper that hides exit 75 (`make` turns it into its
+    /// own exit 2) asks for a retry by creating the file `GEAR_GATE_TEMPFAIL`
+    /// names; the merge is retried and lands (Prometheus, 2026-11-03).
+    #[test]
+    fn a_gate_that_marks_the_tempfail_file_is_retried_and_the_merge_lands() {
+        let scratch = Scratch::new("gate-tempfail-file");
+        let worktree = scratch.merge_worktree();
+        let ran = scratch.root.join("gate-ran");
+        let gate = format!(
+            "if [ ! -e '{ran}' ]; then touch '{ran}'; touch $GEAR_GATE_TEMPFAIL; exit 2; fi",
             ran = ran.display()
         );
 
