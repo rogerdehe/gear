@@ -1461,6 +1461,26 @@ fn other_candidates(
     task: &str,
 ) -> GearResult<Vec<(String, String, bool)>> {
     store.read(|tx| {
+        // The state of each task's latest merge op (by creation, then number).
+        let mut last_merge: std::collections::BTreeMap<String, (Ts, u64, OpState)> =
+            std::collections::BTreeMap::new();
+        for op in tx.ops_of_kind_in_states(project, OpKind::Merge, &[])? {
+            let Some(of) = op.task.clone() else {
+                continue;
+            };
+            let number = op
+                .id
+                .strip_prefix("O-")
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap_or(0);
+            let entry = (op.created, number, op.state);
+            if last_merge
+                .get(&of)
+                .is_none_or(|seen| (seen.0, seen.1) < (entry.0, entry.1))
+            {
+                last_merge.insert(of, entry);
+            }
+        }
         let mut others = Vec::new();
         for row in tx.tasks_of_project(project)? {
             if row.id == task {
@@ -1487,6 +1507,17 @@ fn other_candidates(
                             gear_app::tasks::same_candidate(&verdict.candidate, stored)
                         })
                 });
+            // A reviewed task whose own merge failed cannot land alone: a
+            // candidate that carries it (with the fix) is the way it lands,
+            // and that candidate's gate runs on both. Waiting for it would
+            // deadlock the two merges.
+            if passed
+                && last_merge
+                    .get(&row.id)
+                    .is_some_and(|(_, _, state)| *state == OpState::Failed)
+            {
+                continue;
+            }
             for attempt in attempts {
                 if let Some(candidate) = attempt.candidate {
                     others.push((row.id.clone(), candidate, passed));
@@ -4415,6 +4446,47 @@ mod tests {
         let passed = passed_tasks(&mut store, "p").unwrap();
         assert_eq!(passed.len(), 1);
         assert_eq!(passed[0].0, "T-1");
+    }
+
+    /// A reviewed task whose own merge failed is not waited for: a candidate
+    /// that carries it with the fix is how it lands (Lawrence T-17 carried
+    /// T-2, and each waited for the other).
+    #[test]
+    fn a_reviewed_task_whose_merge_failed_is_not_waited_for() {
+        let mut store = pair_world("aaa1111", "bbb2222");
+        pass(&mut store, "T-1", "aaa1111", 1);
+        let carried = |store: &mut Store| {
+            other_candidates(store, "p", "T-2")
+                .unwrap()
+                .into_iter()
+                .any(|(task, _, _)| task == "T-1")
+        };
+        assert!(
+            carried(&mut store),
+            "a passed task not yet merged is waited for"
+        );
+        store
+            .write(|tx| {
+                let op = tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({}),
+                    created: 2,
+                })?;
+                tx.set_op_state("p", &op.id, OpState::Executing, None, 2)?;
+                tx.set_op_state("p", &op.id, OpState::Failed, Some("gate failed"), 3)
+            })
+            .unwrap();
+        assert!(
+            !carried(&mut store),
+            "its merge failed: the carrier lands it"
+        );
     }
 
     /// A queued merge naming the full sha of the attempt's short candidate
