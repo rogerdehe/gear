@@ -20,7 +20,9 @@ phase() {
 }
 
 phase fmt   cargo fmt --all --check
-phase build env BUILD_SLOT_MIN=4 BUILD_SLOT_PRIORITY=normal tools/build-slot/build-slot.sh cargo build --workspace --all-targets
+# The build is what the suite runs: libraries, binaries and tests. Examples
+# (manual live probes) are built by `make full`, not on every merge.
+phase build env BUILD_SLOT_MIN=4 BUILD_SLOT_PRIORITY=normal tools/build-slot/build-slot.sh cargo build --workspace --lib --bins --tests
 phase test  env BUILD_SLOT_MIN=4 BUILD_SLOT_PRIORITY=normal tools/build-slot/build-slot.sh scripts/test.sh
 
 total=$(( $(date +%s) - start ))

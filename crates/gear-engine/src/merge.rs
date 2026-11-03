@@ -468,6 +468,7 @@ pub fn merge_passed(
     // One worker per repo. Unknown ops are restart recovery: merge_one
     // resets to the remote before doing any merges, and adopts a completed push.
     let ready = ready_merges(store, project)?;
+    let ready = void_carried(store, project, ready, now)?;
     let ready = waits_cleared(store, project, ready)?;
     let ready = merge_order(now_first(store, project, ready)?);
     // The merges a train took (or voided) in this tick.
@@ -1611,26 +1612,55 @@ fn neutrino_void(tx: &gear_store::Tx<'_>, project: &str, id: &str, now: Ts) -> G
 /// A merge that is already running (Executing) is left alone: its worker
 /// finishes on its own and the completion is kept.
 fn void_merged_op(tx: &gear_store::Tx<'_>, project: &str, id: &str, now: Ts) -> GearResult<()> {
+    void_op(tx, project, id, "the work is already merged", now)
+}
+
+/// A queued merge of a task that is carried by another (`carried-by:` set
+/// after the merge was queued) never runs on its own: its work lands with the
+/// carrier's merge. The op is closed, and the task's waits with it
+/// (Prometheus T-574/T-577, 2026-11-03).
+fn void_carried(
+    store: &mut Store,
+    project: &str,
+    ready: Vec<OpRow>,
+    now: Ts,
+) -> GearResult<Vec<OpRow>> {
+    let mut keep = Vec::with_capacity(ready.len());
+    for op in ready {
+        let carried = match op.task.as_deref() {
+            Some(task) => store.read(|tx| tx.task_carried_by(project, task))?,
+            None => None,
+        };
+        let Some(by) = carried else {
+            keep.push(op);
+            continue;
+        };
+        let reason = format!("the work lands with {by}'s merge (carried-by)");
+        store.write(|tx| void_op(tx, project, &op.id, &reason, now))?;
+        if let Some(task) = op.task.as_deref() {
+            resolve_wait(store, project, task, now)?;
+        }
+    }
+    Ok(keep)
+}
+
+/// Close a queued merge op that will not run: Intended becomes Void, Unknown
+/// (a restart's leftover) becomes Failed with the reason.
+fn void_op(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    id: &str,
+    reason: &str,
+    now: Ts,
+) -> GearResult<()> {
     let from = tx
         .get_op(project, id)?
         .map(|op| op.state)
         .unwrap_or(OpState::Intended);
     match from {
-        OpState::Intended => tx.set_op_state(
-            project,
-            id,
-            OpState::Void,
-            Some("the work is already merged"),
-            now,
-        )?,
+        OpState::Intended => tx.set_op_state(project, id, OpState::Void, Some(reason), now)?,
         OpState::Unknown => {
-            tx.set_op_state(
-                project,
-                id,
-                OpState::Failed,
-                Some("the work is already merged"),
-                now,
-            )?;
+            tx.set_op_state(project, id, OpState::Failed, Some(reason), now)?;
             tx.set_meta(&settled_key(project), &now.to_string())?;
         }
         _ => {}
@@ -5792,6 +5822,28 @@ mod tests {
             .read(|tx| tx.ops_of_kind_in_states("p", OpKind::Merge, &[]))
             .unwrap();
         assert_eq!(merges.len(), 1, "{merges:?}");
+    }
+
+    /// A merge queued before the task was marked `carried-by` is closed, not
+    /// run: the work lands with its carrier (Prometheus T-574/T-577).
+    #[test]
+    fn a_queued_merge_of_a_task_that_became_carried_is_voided() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Intended, 10);
+        store
+            .write(|tx| tx.set_task_carried_by("p", "T-5", "T-9"))
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Void, "{op:?}");
+        assert!(
+            op.result
+                .as_deref()
+                .is_some_and(|r| r.contains("carried-by")),
+            "{op:?}"
+        );
     }
 
     /// T-397: a merge that is still queued will merge the attempt itself: it is
