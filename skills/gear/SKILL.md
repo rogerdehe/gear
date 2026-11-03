@@ -9,7 +9,7 @@ GEAR runs one piece of work — a new product, or one requirement inside an exis
 
 ## 1. Guard
 
-No `GEAR_CTX` in your environment and no seat bound to your pane → GEAR did not start you. Run no write command (`gear send`, `gear reply`, `gear plan apply`, `gear admin …`); tell the user. A seat bound to the pane you really run in needs no variable at all: `gear` there is that seat's home page.
+Run `gear --session <session> --pane <your pane>`. If it names no seat of yours, GEAR did not start you: run no write command (`gear send`, `gear reply`, `gear plan apply`, `gear admin …`); tell the user. If it names your seat, that seat is yours, with or without `GEAR_CTX` in your environment: a CLI that runs commands outside its pane never has it.
 
 ## 2. Start every turn with `gear`
 
