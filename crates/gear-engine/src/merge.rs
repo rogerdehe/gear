@@ -10411,9 +10411,10 @@ gate = "{project_gate}"
     #[should_panic(expected = "did not happen within")]
     fn a_fifo_handshake_that_never_happens_gives_up_instead_of_hanging() {
         let scratch = Scratch::new("fifo-bound");
-        // Nobody opens the other end of this fifo: the await gives up at its bound.
+        // Nobody opens the other end of this fifo: the await gives up at its
+        // bound. The bound is what is tested, so it is short.
         let running = fifo(&scratch.root, "nobody-running");
-        await_fifo_within(&running, std::time::Duration::from_secs(1));
+        await_fifo_within(&running, std::time::Duration::from_millis(50));
     }
 
     /// T-395: a merge that lost its push race (Unknown) is not starved by newer
