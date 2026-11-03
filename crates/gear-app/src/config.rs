@@ -446,6 +446,11 @@ pub struct Conventions {
     /// The open voyages' task branches on the remote may number at most
     /// lanes × this; more are named to the captain. Default 3.
     pub branch_max_per_lane: u32,
+    /// How many merges of the project gate at once (the merge train): each
+    /// one on the commit the merge ahead of it will land, so every gate checks
+    /// what the integration branch will be. They land in order. Default 1:
+    /// one merge after the other.
+    pub merge_parallel: u32,
     /// A lane working this many minutes without a push is asked to tell the
     /// captain why. Default 20.
     pub push_interval_min: u32,
@@ -507,6 +512,7 @@ impl Default for Conventions {
             max_task_min: MAX_TASK_MIN,
             branch_max_age_min: BRANCH_MAX_AGE_MIN,
             branch_max_per_lane: BRANCH_MAX_PER_LANE,
+            merge_parallel: 1,
             push_interval_min: PUSH_INTERVAL_MIN,
             push_reply_min: PUSH_REPLY_MIN,
             gate: String::new(),
@@ -1444,6 +1450,12 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         issues.push(issue(
             "conventions.branch_max_age_min",
             format!("must be at least one minute (the default is {BRANCH_MAX_AGE_MIN})"),
+        ));
+    }
+    if cfg.conventions.merge_parallel == 0 {
+        issues.push(issue(
+            "conventions.merge_parallel",
+            "must be at least one (the default is 1: one merge after the other)".to_string(),
         ));
     }
     if cfg.conventions.branch_max_per_lane == 0 {
