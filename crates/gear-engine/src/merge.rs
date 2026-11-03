@@ -1406,7 +1406,9 @@ fn passed_tasks(
                     verdict.passed
                         && verdict.attempt == latest.n
                         && verdict.contract_version == task.contract_version
-                        && Some(&verdict.candidate) == latest.candidate.as_ref()
+                        && latest.candidate.as_deref().is_some_and(|stored| {
+                            gear_app::tasks::same_candidate(&verdict.candidate, stored)
+                        })
                 })
             else {
                 continue;
@@ -1477,7 +1479,9 @@ fn other_candidates(
                     verdict.passed
                         && verdict.attempt == latest.n
                         && verdict.contract_version == row.contract_version
-                        && Some(&verdict.candidate) == latest.candidate.as_ref()
+                        && latest.candidate.as_deref().is_some_and(|stored| {
+                            gear_app::tasks::same_candidate(&verdict.candidate, stored)
+                        })
                 });
             for attempt in attempts {
                 if let Some(candidate) = attempt.candidate {
@@ -4391,6 +4395,22 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    /// A pass that names the candidate by its full sha while the attempt
+    /// stored a short one is the same commit: its merge is queued.
+    #[test]
+    fn a_pass_naming_the_full_sha_of_a_short_candidate_is_merged() {
+        let mut store = pair_world("ea91cbf12", "486aeaa77");
+        pass(
+            &mut store,
+            "T-1",
+            "ea91cbf12d23ef97e04c06cf9f60bdedcf759b2f",
+            1,
+        );
+        let passed = passed_tasks(&mut store, "p").unwrap();
+        assert_eq!(passed.len(), 1);
+        assert_eq!(passed[0].0, "T-1");
     }
 
     /// T-62: a merge that waits for another task goes last in the queue: the

@@ -539,7 +539,7 @@ pub fn verdict_hint(
 /// both at least 7 characters of hex and one a prefix of the other, ignoring
 /// ASCII case. A verdict may name a candidate by any sha prefix of the stored
 /// one, or the stored one by a prefix of it.
-fn same_candidate(a: &str, b: &str) -> bool {
+pub fn same_candidate(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
@@ -853,12 +853,20 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
         task_name,
     )?;
 
+    // The verdict keeps the attempt's own spelling of the candidate: a pass
+    // that names it by a longer or shorter sha is the same commit, and every
+    // reader compares against the attempt's.
+    let candidate = attempt
+        .candidate
+        .clone()
+        .filter(|stored| same_candidate(stored, &v.candidate))
+        .unwrap_or_else(|| v.candidate.clone());
     tx.insert_verdict(&VerdictRow {
         project: v.project.clone(),
         task: v.task.clone(),
         attempt: v.attempt,
         contract_version: v.contract_version,
-        candidate: v.candidate.clone(),
+        candidate,
         passed: v.pass,
         evidence: v.evidence.clone(),
         by_seat: v.by_seat.clone(),
