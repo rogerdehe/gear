@@ -1462,7 +1462,8 @@ fn failed_thread(task: &str) -> String {
 }
 
 /// Tell the captain that a merge failed, naming the plan line that retries it
-/// (T-92). An item that is still open is refreshed rather than duplicated. The
+/// (T-92). One open item per task: the same failure again changes nothing, a
+/// new failure replaces the open item with a fresh one that rings. The
 /// item names the task and attempt it is about, so the captain's home page can
 /// suggest the verdict that settles it (T-90).
 fn tell_captain_failed(
@@ -1500,10 +1501,21 @@ fn tell_captain_failed(
             .into_iter()
             .find(|message| message.state == MsgState::Open);
         if let Some(item) = open {
-            if item.body != body {
-                tx.update_message_body(project, &item.id, &body)?;
+            if item.body == body {
+                return Ok(());
             }
-            return Ok(());
+            // A new failure is new news: the captain may have seen the old
+            // item already, and a seen item does not ring again. Close it and
+            // open a fresh one so the doorbell names it.
+            tx.update_message_state(
+                project,
+                &item.id,
+                MsgState::Resolved,
+                Some("a newer failure of this merge replaced it"),
+                None,
+                None,
+                now,
+            )?;
         }
         tx.insert_message(&NewMessage {
             meta: None,
@@ -6217,6 +6229,26 @@ mod tests {
             .unwrap();
         assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
         assert_eq!(items[0].result.as_deref(), Some(LOST_LANDED));
+    }
+
+    /// A new failure of a merge whose failed item is still open rings again
+    /// (Prometheus T-597: the third failure only rewrote an item the captain
+    /// had seen, so no doorbell named it). The same failure again stays quiet.
+    #[test]
+    fn a_new_failure_of_the_same_merge_opens_a_fresh_item() {
+        let mut store = world(TaskState::Ready);
+        lost_task(&mut store, "abc1234", OpState::Failed, 5);
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        tell_captain_failed(&mut store, "p", &op, "the gate said no", 10).unwrap();
+        tell_captain_failed(&mut store, "p", &op, "the gate said no", 11).unwrap();
+        assert_eq!(failed_items(&mut store, "T-5").len(), 1, "the same failure");
+
+        tell_captain_failed(&mut store, "p", &op, "a test failed", 20).unwrap();
+        let items = failed_items(&mut store, "T-5");
+        let open: Vec<_> = items.iter().filter(|m| m.state == MsgState::Open).collect();
+        assert_eq!(open.len(), 1, "{items:?}");
+        assert!(open[0].body.contains("a test failed"), "{}", open[0].body);
+        assert_eq!(items.len(), 2, "the old item closed, a fresh one opened");
     }
 
     /// The worktree of a merge train's second stage, beside the pair's own.
