@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1130 -->
+<!-- gear-plan project=gear base=1131 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -94,4 +94,10 @@ deps: -
 goal: [v0.6.52] The release notes for the batch merge, written now so the release goes out the minute the engine tasks land. Create docs/releases/v0.6.52.md in the form of docs/releases/v0.6.51.md: Added: the batch merge (`[conventions] merge_batch`, default 1: with N above 1 up to N passed merges of a project are merged together onto the integration branch, gated once, and land together; a red batch fails only the task whose changes match the paths the gate wrote to the file `$GEAR_GATE_FAILED` names, the others merge again; with no such match the batch is halved; `merge_batch` above 1 together with `merge_parallel` above 1 is refused) and the gate contract for `GEAR_GATE_FAILED` (repo-relative files or directories whose tests failed, one per line; a gate that writes nothing is fine). Fixed: a project with no unfinished task releases its standby reviewers at once, without `reviewer_release_idle_min`. Upgrading from 0.6.51: the same steps as in v0.6.51.md (binary, skill reinstall, engine restart), then to use it set `merge_batch` in the project's `[conventions]` and re-apply the config. Read crates/gear-app/src/config.rs after T-545 for the exact wording of the setting.
 accept: docs/releases/v0.6.52.md exists, follows v0.6.51.md's sections, and every setting, variable and default it names matches crates/gear-app/src/config.rs and skills/gear/references/conventions.md on dev. No command to run.
 estimate: 15
+deps: -
+
+## T-550 [now] lane=mast milestone=M6.2
+goal: [v0.6.52] An item addressed to a retired seat closes with it. Lawrence M1 landed with 8 open instructions addressed to its retired lanes and reviewers (M-327, M-564, M-581, M-595, M-722, M-757, M-758, M-780 in the selyra store): nobody can resolve them (only the recipient may) and nothing rings for them, so they stay "open" for ever. In crates/gear-store/src/lib.rs fn set_seat_state: when `state` is SeatState::Retired, in the same transaction set every message whose `recipient` is that seat id and whose state may move to MsgState::Resolved (MsgState::can_transition in crates/gear-model/src/state.rs) to resolved, with result "closed: its seat retired" and `resolved` = now. Nothing else changes: messages of a seat that is released (not retired) stay as they are.
+accept: Tests in gear-store's tests: a seat with an open and a waiting item retires and both become resolved with that result; an item to another seat and an already resolved item are untouched; a seat set to Released keeps its open item. Run only `make check CRATE=gear-store TESTS='test(seat)'`; the merge gate runs `make gate`.
+estimate: 25
 deps: -

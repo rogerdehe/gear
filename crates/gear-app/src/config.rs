@@ -454,6 +454,11 @@ pub struct Conventions {
     /// what the integration branch will be. They land in order. Default 1:
     /// one merge after the other.
     pub merge_parallel: u32,
+    /// How many passed merges of the project are merged together onto the
+    /// integration branch and gated once (a batch merge). A batch that fails
+    /// is split: the task whose changes match the paths the gate names fails,
+    /// else the batch is halved. Default 1: each merge is gated alone.
+    pub merge_batch: u32,
     /// A lane working this many minutes without a push is asked to tell the
     /// captain why. Default 20.
     pub push_interval_min: u32,
@@ -516,6 +521,7 @@ impl Default for Conventions {
             branch_max_age_min: BRANCH_MAX_AGE_MIN,
             branch_max_per_lane: BRANCH_MAX_PER_LANE,
             merge_parallel: 1,
+            merge_batch: 1,
             push_interval_min: PUSH_INTERVAL_MIN,
             push_reply_min: PUSH_REPLY_MIN,
             gate: String::new(),
@@ -1459,6 +1465,24 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         issues.push(issue(
             "conventions.merge_parallel",
             "must be at least one (the default is 1: one merge after the other)".to_string(),
+        ));
+    }
+    if cfg.conventions.merge_batch == 0 {
+        issues.push(issue(
+            "conventions.merge_batch",
+            "must be at least one (the default is 1: each merge is gated alone)".to_string(),
+        ));
+    }
+    // A batch merge and a merge train are two answers to the same queue: a
+    // batch already lands several merges at once, so it is gated once and
+    // never side by side (T-545).
+    if cfg.conventions.merge_batch > 1 && cfg.conventions.merge_parallel > 1 {
+        issues.push(issue(
+            "conventions.merge_batch",
+            format!(
+                "conventions.merge_batch and conventions.merge_parallel cannot both be above 1: a batch merge is gated once, so it cannot also be a train (merge_batch is {} and merge_parallel is {})",
+                cfg.conventions.merge_batch, cfg.conventions.merge_parallel
+            ),
         ));
     }
     if cfg.conventions.branch_max_per_lane == 0 {
