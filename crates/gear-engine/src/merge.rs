@@ -2632,7 +2632,18 @@ fn merge_one_locked(
         Ok(prepared) => prepared,
         Err(step) => return step,
     };
-    if let Err(step) = run_gate(worktree, repo, lock, remote, probe) {
+    let tasks = vec![op.task.clone().unwrap_or_default()];
+    let round = gate_round(op);
+    if let Err(step) = run_gate(
+        worktree,
+        repo,
+        lock,
+        remote,
+        &op.project,
+        &round,
+        &tasks,
+        probe,
+    ) {
         return step;
     }
     land_merge(worktree, repo, lock, remote, pr, commit, probe, &prepared)
@@ -2955,6 +2966,9 @@ fn run_gate(
     repo: &Repo,
     lock: &File,
     remote: Target<'_>,
+    project: &str,
+    round: &str,
+    tasks: &[String],
     probe: &mut Probe,
 ) -> Result<(), Step> {
     let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(lock));
@@ -2978,7 +2992,10 @@ fn run_gate(
     // earlier gate must not name a culprit here. It is not removed after a
     // failure: the red batch reads it.
     let _ = std::fs::remove_file(gate_failed_path(dir));
-    let output = match gate_command(&gate, dir).stdin(stdin).output() {
+    let output = match gate_command(&gate, dir, project, round, tasks)
+        .stdin(stdin)
+        .output()
+    {
         Ok(output) => output,
         // The gate could not run at all: the environment is broken, not the
         // work. That can clear (a toolchain coming back), so it is retried.
@@ -3250,10 +3267,19 @@ fn run_train(
     let gates: Vec<Result<(), Step>> = std::thread::scope(|scope| {
         let handles: Vec<_> = stages
             .iter_mut()
-            .map(|(_, slot, _, probe)| {
+            .map(|(index, slot, _, probe)| {
                 let worktree = &worktrees[*slot];
                 let lock = &locks[*slot];
-                scope.spawn(move || run_gate(worktree, repo, lock, remote, probe))
+                // This stage's own merge names the gate run (T-555).
+                let train_op = &ops[*index];
+                let project = train_op.op.project.clone();
+                let round = gate_round(&train_op.op);
+                let tasks = vec![train_op.op.task.clone().unwrap_or_default()];
+                scope.spawn(move || {
+                    run_gate(
+                        worktree, repo, lock, remote, &project, &round, &tasks, probe,
+                    )
+                })
             })
             .collect();
         handles
@@ -3467,8 +3493,24 @@ fn run_batch(
         return (collect(reports), cap);
     }
     let built_count = built.len();
-    // One gate for the whole batch.
-    if let Err(step) = run_gate(worktree, repo, &lock, remote, &mut built[0].3) {
+    // One gate for the whole batch, named by its first merge and judging every
+    // merge it built (T-555).
+    let project = ops[0].op.project.clone();
+    let round = gate_round(&ops[0].op);
+    let tasks: Vec<String> = built
+        .iter()
+        .map(|(index, ..)| ops[*index].op.task.clone().unwrap_or_default())
+        .collect();
+    if let Err(step) = run_gate(
+        worktree,
+        repo,
+        &lock,
+        remote,
+        &project,
+        &round,
+        &tasks,
+        &mut built[0].3,
+    ) {
         let clear = matches!(&step, Step::Failed(failed) if failed.blocker == Blocker::Clear);
         if clear {
             single.store(true, Ordering::SeqCst);
@@ -4034,7 +4076,7 @@ fn branch_on_remote(dir: &Path, remote: Target<'_>, branch: &str) -> bool {
 /// project's own build and test command, and it must never see the store of
 /// this machine (L-59). A test that inherited `GEAR_DB` would write to the
 /// production store; the tests give themselves a scratch home instead.
-fn gate_command(gate: &str, dir: &Path) -> Command {
+fn gate_command(gate: &str, dir: &Path, project: &str, round: &str, tasks: &[String]) -> Command {
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg(gate)
@@ -4042,7 +4084,10 @@ fn gate_command(gate: &str, dir: &Path) -> Command {
         .env_remove(gear_model::ctx::ENV_DB)
         .env_remove(gear_model::ctx::ENV_CTX)
         .env(GATE_TEMPFAIL_ENV, gate_tempfail_path(dir))
-        .env(GATE_FAILED_ENV, gate_failed_path(dir));
+        .env(GATE_FAILED_ENV, gate_failed_path(dir))
+        .env(GATE_PROJECT_ENV, project)
+        .env(GATE_ROUND_ENV, round)
+        .env(GATE_TASKS_ENV, tasks.join(" "));
     cmd
 }
 
@@ -4067,6 +4112,26 @@ pub const GATE_FAILED_ENV: &str = "GEAR_GATE_FAILED";
 /// The file of [`GATE_FAILED_ENV`] for a gate run in `dir`.
 fn gate_failed_path(dir: &Path) -> std::path::PathBuf {
     dir.join(".git-gear-gate-failed")
+}
+
+/// The variable naming the project whose merge this gate run judges (T-555):
+/// a project's gate can name the CI branch it uses, and read the run it is.
+pub const GATE_PROJECT_ENV: &str = "GEAR_GATE_PROJECT";
+
+/// The variable naming this gate run (T-555): the id of its first merge op,
+/// lowercase without the dash — `O-6543` is `o6543` — so every gate run of a
+/// project has a name of its own to give its CI work.
+pub const GATE_ROUND_ENV: &str = "GEAR_GATE_ROUND";
+
+/// The variable naming the tasks whose merges this gate run judges (T-555),
+/// space-separated in merge order (`T-637 T-646 T-662`): a single merge names
+/// one task, a batch every merge it built.
+pub const GATE_TASKS_ENV: &str = "GEAR_GATE_TASKS";
+
+/// The round of the gate run that starts at `op` (T-555): its id, lowercase
+/// without the dash.
+fn gate_round(op: &OpRow) -> String {
+    op.id.to_lowercase().replace('-', "")
 }
 
 /// The paths a failed gate named (T-548): the repo-relative files or
@@ -6954,6 +7019,76 @@ mod tests {
                 "{line:?} names a commit of dev: {heads}"
             );
         }
+    }
+
+    /// T-555: a gate run is told which project it judges, which run it is (the
+    /// id of its first merge op, `o1`) and which task it judges.
+    #[test]
+    fn a_single_merges_gate_names_its_project_round_and_task() {
+        let pair = Pair::new("gate-vars", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        // The gate's own record, in a file outside the worktree.
+        let got = pair.root.join("gate-run");
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text(&format!(
+                    "echo $GEAR_GATE_PROJECT $GEAR_GATE_ROUND $GEAR_GATE_TASKS > {}; true",
+                    got.display()
+                ));
+                tx.update_project(&project)
+            })
+            .unwrap();
+        pass(&mut store, "T-1", &pair.a, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Confirmed)
+        });
+
+        let line = fs::read_to_string(&got).unwrap_or_default();
+        assert_eq!(line.trim(), "p o1 T-1");
+    }
+
+    /// T-555: a batch's one gate names its first merge as the round and every
+    /// merge it judges, in merge order.
+    #[test]
+    fn a_batchs_gate_names_the_round_and_every_task_it_judges() {
+        let pair = Pair::new("gate-vars-batch", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        let got = pair.root.join("gate-run");
+        batch_of_two(
+            &mut store,
+            &format!(
+                "echo $GEAR_GATE_PROJECT $GEAR_GATE_ROUND $GEAR_GATE_TASKS > {}; true",
+                got.display()
+            ),
+        );
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Confirmed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let line = fs::read_to_string(&got).unwrap_or_default();
+        assert_eq!(line.trim(), "p o1 T-1 T-2");
     }
 
     /// T-547: a red batch is halved — its first merge runs alone and fails as
@@ -10921,7 +11056,13 @@ gate = "{project_gate}"
     /// write to the production store (L-59).
     #[test]
     fn the_gate_runs_without_the_store_of_this_machine() {
-        let command = gate_command("cargo test", Path::new("/tmp"));
+        let command = gate_command(
+            "cargo test",
+            Path::new("/tmp"),
+            "p",
+            "o1",
+            &["T-1".to_string()],
+        );
         let removes = |name: &str| {
             command
                 .get_envs()
