@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1136 -->
+<!-- gear-plan project=gear base=1137 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -108,4 +108,3 @@ goal: [v0.6.52] `gear admin init` never moves a Herdr session to another store w
 accept: Tests in gear-app's tests: init with a different store for a session whose registered store exists is refused and the error names both paths and `--move-store`; with `--move-store` the line is replaced; the same store, and a registered store that is gone, change nothing from today. Run only `make check CRATE=gear-app TESTS='test(init)'`; the merge gate runs `make gate`.
 estimate: 30
 deps: -
-
