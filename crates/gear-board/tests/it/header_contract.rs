@@ -825,11 +825,10 @@ fn a_station_ahead_without_a_projection_is_planned_by_nothing() {
     assert_eq!(milestone_text(station_row(&rows, "S2")), "· S2 the views");
 }
 
-/// A long goal keeps to the box's eight rows in the folded header and ends in
-/// `…`, so the task list keeps its room (T-567 raised it from three: eight
-/// clauses are read whole); `d` shows the whole goal.
+/// A long goal keeps to three lines in the folded header and ends in `…`, so
+/// the task list keeps its room; `d` shows the whole goal.
 #[test]
-fn a_long_goal_is_folded_to_eight_rows_and_d_shows_it_all() {
+fn a_long_goal_is_folded_to_three_lines_and_d_shows_it_all() {
     let mut store = world_of(&[("T-1", TaskState::Ready)], "4h", 600);
     let long = (1..=60)
         .map(|n| format!("clause{n} keeps the board readable"))
@@ -850,9 +849,9 @@ fn a_long_goal_is_folded_to_eight_rows_and_d_shows_it_all() {
     };
     let (_, _, _, folded) = drawn(&mut store);
     let folded = goal_rows(&folded);
-    // Eight rows of the goal and the quality bar; the eighth ends in `…`.
-    assert_eq!(folded.len(), 9, "{folded:#?}");
-    assert!(folded[7].contains('…'), "{folded:#?}");
+    // Three lines of the goal and the quality bar.
+    assert_eq!(folded.len(), 4, "{folded:#?}");
+    assert!(folded[2].contains('…'), "{folded:#?}");
     assert!(
         !folded.iter().any(|r| r.contains("clause60")),
         "{folded:#?}"

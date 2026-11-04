@@ -664,15 +664,15 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
             Style::fg(Color::Warn).and_bold(),
         );
         row += 1;
-        // The box shows every clause of the done sentence (T-567): as many
-        // rows as the clauses wrap to, up to the box's own limit, so a goal of
-        // eight clauses is read whole instead of cut after the fifth. A goal
-        // longer than the box ends in `…`; `d` shows all of it.
-        let lines = goal_lines(
-            voyage.done.as_deref().unwrap_or_default(),
-            inside,
-            screen.detail,
-        );
+        // Folded, a long goal keeps to its first lines and ends in `…`, so it
+        // never pushes the task list off the screen; `d` shows all of it.
+        let mut lines = wrap(voyage.done.as_deref().unwrap_or_default(), inside);
+        if !screen.detail && lines.len() > GOAL_FOLDED_LINES {
+            lines.truncate(GOAL_FOLDED_LINES);
+            let last = lines.last_mut().expect("folded lines are not empty");
+            let keep = last.chars().count().min(inside.saturating_sub(2));
+            *last = format!("{} …", last.chars().take(keep).collect::<String>());
+        }
         for line in lines {
             canvas.put_styled(
                 1,
@@ -1346,26 +1346,8 @@ fn is_wide(character: char) -> bool {
     matches!(character, '⛵' | '⚓' | '⏳')
 }
 
-/// How many rows of the goal the box shows (`d` shows all): the clauses of a
-/// goal run to eight, so the box does too (T-567).
-const GOAL_BOX_LINES: usize = 8;
-
-/// The goal box's rows for a done sentence (T-567): word-wrapped to `inside`
-/// columns, up to [`GOAL_BOX_LINES`] rows in the folded header — the last one
-/// cut with `…` when the goal needs more — and all of them with `d`. Every
-/// clause the box shows is shown whole: eight clauses wrap to eight rows and
-/// the eighth is read, not dropped.
-fn goal_lines(done: &str, inside: usize, detail: bool) -> Vec<String> {
-    let mut lines = wrap(done, inside);
-    if detail || lines.len() <= GOAL_BOX_LINES {
-        return lines;
-    }
-    lines.truncate(GOAL_BOX_LINES);
-    let last = lines.last_mut().expect("folded lines are not empty");
-    let keep = last.chars().count().min(inside.saturating_sub(2));
-    *last = format!("{} …", last.chars().take(keep).collect::<String>());
-    lines
-}
+/// How many lines of the goal the folded header shows (`d` shows all).
+const GOAL_FOLDED_LINES: usize = 3;
 
 /// The prototype's `wrap`: the words split on whitespace; a word that would
 /// pass `width` starts a new line.
@@ -2660,35 +2642,6 @@ mod tests {
         let (expected, blocked) = expected_of(0, &ends[..1]);
         assert_eq!(expected, 2 * 60);
         assert_eq!(blocked, None);
-    }
-
-    /// T-567: the goal box shows every clause — eight clauses wrap to eight
-    /// rows and the eighth is read, not cut after the fifth.
-    #[test]
-    fn the_goal_box_shows_all_eight_clauses() {
-        // One word of 28 characters per clause, in a box 30 wide: no row holds
-        // two clauses, so eight clauses need eight rows.
-        let clauses: Vec<String> = (1..=8)
-            .map(|n| format!("clause({n})-{};", "x".repeat(18)))
-            .collect();
-        let done = clauses.join(" ");
-        let lines = goal_lines(&done, 30, false);
-        assert_eq!(lines.len(), 8, "{lines:?}");
-        for (n, line) in lines.iter().enumerate() {
-            let clause = format!("clause({})", n + 1);
-            assert!(line.contains(&clause), "row {n} is {line}");
-        }
-        // A goal longer than the box still ends in `…`; `d` shows all of it.
-        let long = format!("{done} {done}");
-        let folded = goal_lines(&long, 30, false);
-        assert_eq!(folded.len(), GOAL_BOX_LINES);
-        assert!(
-            folded.last().is_some_and(|line| line.ends_with('…')),
-            "{folded:?}"
-        );
-        assert!(goal_lines(&long, 30, true).len() > GOAL_BOX_LINES);
-        // A short goal is untouched.
-        assert_eq!(goal_lines("one clause", 30, false), vec!["one clause"]);
     }
 
     #[test]
