@@ -2913,21 +2913,71 @@ fn prepare_merge(
     let review_ref = format!("{remote_name}/{review}");
     let review_found = git(dir, &["rev-parse", "--verify", &review_ref]);
     let has_review = review_found.is_ok() && !mechanical;
-    if !has_review && !mechanical && !already {
-        let reason = review_found.unwrap_err();
+    // T-558: a review leaves no branch of its own on the remote — the reviewer
+    // pushes its review commit onto the TASK branch, and that branch is what
+    // merges. A task already in review before this change still has the old
+    // review branch on the remote: that one merges exactly as before
+    // (`has_review`), and the sweep and `close_branches` still delete it.
+    let task_ref = format!("{remote_name}/{branch}");
+    let has_task_branch =
+        !branch.is_empty() && git(dir, &["rev-parse", "--verify", &task_ref]).is_ok();
+    // A restart after the push finds none of them and the candidate on the
+    // integration branch: that merge already happened (`already`).
+    if !has_review && !mechanical && !has_task_branch && !already {
+        let reason = if branch.is_empty() {
+            "the merge op names no task branch".to_string()
+        } else {
+            format!(
+                "{}: the task branch {task_ref} is missing on {remote_name}",
+                git(dir, &["rev-parse", "--verify", &task_ref])
+                    .err()
+                    .unwrap_or_default()
+            )
+        };
         return Err(Step::Failed(Failed::stuck(format!(
-            "{task}: the review branch {review_ref} is missing on {remote_name}\n{reason}\n\
-             a merge publishes the approved candidate and its review branch together"
+            "{task}: no branch to merge from on {remote_name}\n{reason}\n\
+             a merge publishes the approved candidate and the review commit pushed on its task branch"
         ))));
     }
-    // What merges, and the source the merge commit names for it: as today, the
-    // candidate by sha and then the review branch by its name.
-    let mut merges: Vec<(String, String)> = Vec::new();
-    if !already {
-        merges.push((sha.clone(), sha.clone()));
+    // The task branch must hold the approved candidate: the review commit is
+    // pushed on top of it, never instead of it.
+    if !has_review
+        && has_task_branch
+        && git(dir, &["merge-base", "--is-ancestor", &sha, &task_ref]).is_err()
+    {
+        return Err(Step::Failed(Failed::stuck(format!(
+            "{task}: the task branch {task_ref} does not hold the approved candidate {sha}\n\
+             the review commit is pushed on top of the candidate, so the merge would publish work nobody reviewed"
+        ))));
     }
+    // Where the task branch is, when it is there: a restart after the push may
+    // still see the last one locally, at the candidate itself.
+    let task_tip = if has_task_branch {
+        git(dir, &["rev-parse", &task_ref])
+            .ok()
+            .map(|tip| tip.trim().to_string())
+    } else {
+        None
+    };
+    // What merges, and the source the merge commit names for it: as today, the
+    // candidate by sha and then the review branch by its name; without a review
+    // branch, the task branch alone, which holds both.
+    let mut merges: Vec<(String, String)> = Vec::new();
     if has_review {
+        if !already {
+            merges.push((sha.clone(), sha.clone()));
+        }
         merges.push((review_ref.clone(), review_ref.clone()));
+    } else if !mechanical {
+        // Nothing to merge when the candidate is already on the integration
+        // branch and the task branch is exactly it, or is gone with it.
+        let only_the_candidate =
+            already && task_tip.as_deref().map_or(true, |tip| tip == sha.as_str());
+        if !only_the_candidate {
+            merges.push((task_ref.clone(), task_ref.clone()));
+        }
+    } else if !already {
+        merges.push((sha.clone(), sha.clone()));
     }
     // T-532: a remerge whose review branch contains the candidate — the captain
     // merged the integration branch into it and resolved the conflict there —
@@ -2950,8 +3000,9 @@ fn prepare_merge(
         }
     }
     if merges.is_empty() {
-        // The candidate is on the integration branch and its review branch is
-        // gone: a restart after the push. Nothing to merge, nothing to push.
+        // The candidate is on the integration branch and its review commit is
+        // gone with the branch: a restart after the push. Nothing to merge,
+        // nothing to push.
         return Err(Step::Merged(format!(
             "{task} was already merged: {sha} is on {remote_name}/{integration}"
         )));
@@ -11382,45 +11433,109 @@ gate = "{project_gate}"
         assert!(log.contains("review"), "{log}");
     }
 
+    /// T-558: the review commit is pushed onto the task branch and no review
+    /// branch exists on the remote: the merge takes the task branch, which
+    /// holds the approved candidate and the review commit on top of it.
     #[test]
-    fn a_missing_review_branch_does_not_publish_a_partial_merge() {
-        // F6 of the review: a merge publishes the approved candidate *and* its
-        // review branch. A review branch that is gone on origin is not
-        // silently skipped: the merge fails with the git diagnostic, dev
-        // stays where it was, and nothing is pushed.
-        let scratch = Scratch::new("noreview");
-        // Only the review branch is gone; the task branch and the candidate
-        // are intact.
+    fn a_review_on_the_task_branch_merges_candidate_and_review() {
+        let scratch = Scratch::new("task-branch-review");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The reviewer's commit goes onto the task branch, and no review
+        // branch is on the remote.
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm r5",
+        );
+        publish(&scratch.work, "heat/t5");
         sh(
             &scratch.root,
             "git -C origin.git update-ref -d refs/heads/review/t5",
         );
+
+        let line = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap();
+
+        assert!(line.contains("merged T-5"), "{line}");
+        assert!(
+            line.contains("origin/heat/t5"),
+            "the task branch is the source: {line}"
+        );
+        let log = scratch.dev_log();
+        assert!(log.contains("task"), "the candidate landed: {log}");
+        assert!(log.contains("r5"), "the review commit landed: {log}");
+        assert!(scratch.dev_has_task_commit());
+        // The task branch is closed with the merge, as before.
+        assert!(
+            !scratch.origin_branches().contains("heat/t5"),
+            "{:?}",
+            scratch.origin_branches()
+        );
+    }
+
+    /// T-558, the transition: a task reviewed before the change still has its
+    /// review branch on the remote, and that one merges exactly as it did.
+    #[test]
+    fn an_old_review_branch_still_on_the_remote_merges_as_before() {
+        let scratch = Scratch::new("old-review-branch");
         let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The task branch has moved on since the hand-in; the review is on the
+        // review branch, as reviews of before T-558 were.
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo late > late.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm late",
+        );
+        publish(&scratch.work, "heat/t5");
+
+        let line = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap();
+
+        assert!(
+            line.contains("origin/review/t5"),
+            "the review branch is the source: {line}"
+        );
+        let log = scratch.dev_log();
+        assert!(log.contains("task"), "the candidate landed: {log}");
+        assert!(log.contains("review"), "the review landed: {log}");
+        assert!(
+            !log.contains("late"),
+            "work pushed after the hand-in is not merged: {log}"
+        );
+    }
+
+    #[test]
+    fn a_missing_task_branch_does_not_publish_a_partial_merge() {
+        // F6 of the review, for T-558: the review commit is pushed onto the
+        // task branch, so the task branch is what a merge publishes. One that
+        // is gone on origin (and no old review branch either) is not silently
+        // skipped: the merge fails with the git diagnostic, dev stays where it
+        // was, and nothing is pushed.
+        let scratch = Scratch::new("noreview");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The task branch and the old review branch are gone; the approved
+        // candidate is still on a pushed ref of its own.
+        sh(
+            &scratch.root,
+            &format!(
+                "git -C origin.git update-ref refs/heads/keep/t5 {candidate} \
+                 && git -C origin.git update-ref -d refs/heads/review/t5 \
+                 && git -C origin.git update-ref -d refs/heads/heat/t5"
+            ),
+        );
         let before = scratch.dev_log();
 
-        let failed =
-            merge_one(&worktree, &repo("true"), &op(&scratch.head_of("heat/t5"))).unwrap_err();
+        let failed = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap_err();
 
-        assert!(failed.reason.contains("review branch"), "{}", failed.reason);
+        assert_eq!(failed.blocker, Blocker::Stuck, "it does not clear");
         assert!(
-            failed.reason.contains("origin/review/t5"),
-            "{}",
+            failed.reason.contains("task branch") && failed.reason.contains("origin/heat/t5"),
+            "the missing branch is named: {}",
             failed.reason
-        );
-        assert!(
-            failed.reason.contains("rev-parse"),
-            "the git diagnostic: {}",
-            failed.reason
-        );
-        assert_eq!(
-            failed.blocker,
-            Blocker::Stuck,
-            "a missing review does not clear"
         );
         assert_eq!(scratch.dev_log(), before, "dev is untouched");
         assert!(!scratch.dev_has_task_commit(), "no partial merge on dev");
-        let branches = scratch.origin_branches();
-        assert!(branches.contains("heat/t5"), "{branches}");
         // The worktree is back at the integration branch (nothing half-merged
         // for the next run).
         let head = sh(Path::new(&worktree.path), "git log --format=%s -1");
@@ -11428,16 +11543,24 @@ gate = "{project_gate}"
     }
 
     #[test]
-    fn a_missing_review_branch_fails_the_op_and_tells_the_captain() {
-        // The public path: the engine's merge step runs, the review branch is
-        // gone on origin, so the op fails with the git diagnostic, dev is
-        // untouched and the captain gets one item (F6 of the review).
+    fn a_missing_task_branch_fails_the_op_and_tells_the_captain() {
+        // The public path (T-558): the engine's merge step runs, the task
+        // branch is gone on origin and there is no old review branch, so the
+        // op fails with the git diagnostic, dev is untouched and the captain
+        // gets one item — as the missing review branch did before.
         let scratch = Scratch::new("noreview-op");
+        let (worktree, candidate) = scratch.prepared();
+        // The task branch and the old review branch are gone before the merge
+        // runs, and the candidate is on a ref of its own, so the op reaches the
+        // merge's own check rather than the "never pushed" one.
         sh(
             &scratch.root,
-            "git -C origin.git update-ref -d refs/heads/review/t5",
+            &format!(
+                "git -C origin.git update-ref refs/heads/keep/t5 {candidate} \
+                 && git -C origin.git update-ref -d refs/heads/review/t5 \
+                 && git -C origin.git update-ref -d refs/heads/heat/t5"
+            ),
         );
-        let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
         herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
@@ -11485,8 +11608,8 @@ gate = "{project_gate}"
         let op = merge_op(&mut store);
         assert_eq!(op.state, OpState::Failed, "{op:?}");
         let reason = op.result.clone().unwrap_or_default();
-        assert!(reason.contains("review branch"), "{reason}");
-        assert!(reason.contains("origin/review/t5"), "{reason}");
+        assert!(reason.contains("task branch"), "{reason}");
+        assert!(reason.contains("origin/heat/t5"), "{reason}");
         // dev is untouched: no partial merge.
         assert_eq!(scratch.dev_log(), "dev", "dev is untouched");
         assert!(!scratch.dev_has_task_commit());
@@ -11495,7 +11618,7 @@ gate = "{project_gate}"
             .read(|tx| tx.actionable_for("p", "p:captain", op.updated + 1))
             .unwrap();
         assert_eq!(inbox.len(), 1, "{inbox:?}");
-        assert!(inbox[0].body.contains("review branch"), "{}", inbox[0].body);
+        assert!(inbox[0].body.contains("task branch"), "{}", inbox[0].body);
     }
 
     #[test]

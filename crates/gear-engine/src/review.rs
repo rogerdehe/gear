@@ -1839,25 +1839,12 @@ fn prepare_review_tree(
         &["checkout", "-f", "-B", branch, &task.candidate],
     )
     .map_err(git_error)?;
-    // T-483: the review branch on the remote is cut at **this** attempt's
-    // candidate before the reviewer starts, so the reviewer's push of its
-    // review commit is a fast-forward. An earlier attempt's review stays in
-    // that attempt's record: the branch is only a pointer, and the earlier
-    // review commit stays reachable through it. A direction check has no
-    // review branch of the task (T-456): its own branch is not pointed.
-    if !direction {
-        review_git(
-            git,
-            path,
-            &[
-                "push",
-                "--force",
-                remote,
-                &format!("HEAD:refs/heads/{branch}"),
-            ],
-        )
-        .map_err(git_error)?;
-    }
+    // T-558: the review branch stays local — the reviewer works on it inside
+    // its own worktree (git refuses one branch in two worktrees, and the lane's
+    // worktree may hold the task branch), and pushes its review commit onto the
+    // TASK branch. So no branch of the review's own is created on the remote
+    // any more; `prepare_review_tree` only cuts the local one at the candidate.
+    let _ = (remote, direction);
     Ok(true)
 }
 
@@ -3289,6 +3276,14 @@ fn review_packet_for(
             &lane,
             task,
         ),
+        // T-558: the review commit is pushed onto the task branch, not onto a
+        // branch of the review's own.
+        &crate::dispatch::task_branch(
+            &config.conventions.task_branch,
+            &config.project.id,
+            &lane,
+            task,
+        ),
         &commit,
         worktree,
         &review_recovery_line(store, config, task, attempt)?,
@@ -3572,6 +3567,7 @@ fn review_packet(
     integration: &str,
     audit: bool,
     branch: &str,
+    task_branch: &str,
     commit: &str,
     worktree: &str,
     recovery: &str,
@@ -3621,8 +3617,11 @@ fn review_packet(
          \n\
          Write the review in your worktree at the path your project uses for reviews, commit it \
          on `{branch}` with the message `{commit}` (replace `{{what}}` with what the commit does) \
-         and push it with exactly `git push {remote} HEAD:refs/heads/{branch}` (the candidate \
-         stays untouched; GEAR refuses the verdict until `{remote}/{branch}` holds your commit).\n\
+         and push it with exactly `git push {remote} HEAD:refs/heads/{task_branch}` (the review \
+         commit goes onto the task branch, which is what merges; GEAR refuses the verdict until \
+         `{remote}/{task_branch}` holds your commit). If that push is refused because the lane \
+         pushed meanwhile, `git pull --no-rebase {remote} {task_branch}` (a merge, never a \
+         rebase), then push again.\n\
          \n\
          Every finding is either blocking or logged: a blocking finding names the part of the \
          done-sentence or the bar it breaks. Fail only for a failed mechanical fact, a P0, or a \
@@ -7470,10 +7469,11 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
     /// branch at **that** attempt's candidate, so the reviewer's push of its
     /// review commit is a fast-forward. Before this, `origin/review/t<n>` held
     /// the earlier attempt's review, the new candidate did not descend from
-    /// it, and the reviewer's push was refused (T-457 attempt 2). The earlier
-    /// review stays in that attempt's record: the branch is only a pointer.
+    /// it, and the reviewer's push was refused (T-457 attempt 2). T-558: the
+    /// review branch is local only — it is cut at the new candidate in the
+    /// reviewer's worktree and the remote's is left exactly as it was.
     #[test]
-    fn a_second_attempts_review_branch_is_pointed_at_its_candidate() {
+    fn a_second_attempts_review_branch_is_cut_at_its_candidate_and_not_pushed() {
         let root = crate::testtmp::temp("gear-review-second-attempt");
         sh(
             &root,
@@ -7542,24 +7542,18 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             T0
         )
         .unwrap());
-        // The remote's review branch is at the new candidate …
-        assert_eq!(sh(&root, "git -C origin.git rev-parse review/t1"), second);
+        // The reviewer's own branch is cut at the new candidate …
         assert_eq!(sh(&seat, "git rev-parse HEAD"), second);
-        // … and the reviewer's push of its review commit is a fast-forward.
-        let review = sh(
-            &seat,
-            "echo r2 > r2.txt && git add -A \
-             && git -c user.name=a -c user.email=a@b commit -qm r2 \
-             && git push -q origin HEAD:refs/heads/review/t1 && git rev-parse HEAD",
-        );
-        assert_eq!(sh(&root, "git -C origin.git rev-parse review/t1"), review);
         assert_eq!(
-            sh(
-                &root,
-                &format!("git -C origin.git merge-base --is-ancestor {second} review/t1; echo $?")
-            ),
-            "0",
-            "the review commit is a fast-forward of the candidate"
+            sh(&seat, "git rev-parse --abbrev-ref HEAD"),
+            "review/t1".to_string()
+        );
+        // … and the remote keeps the review branch it had: nothing is pushed
+        // there any more (T-558).
+        assert_eq!(
+            sh(&root, "git -C origin.git rev-parse review/t1"),
+            earlier_review,
+            "the remote's review branch is left as it was"
         );
         // The earlier attempt's review is still in the repository: moving the
         // branch deleted nothing.
@@ -8379,39 +8373,47 @@ review = [
         assert!(packet.contains("Goal: the goal"), "{packet}");
     }
 
-    /// T-438: the packet names the exact push of the review branch onto the
-    /// project's remote — a reviewer of T-265 and of T-375 pushed to the
-    /// second remote its worktree also had, and the merge could not find
-    /// `<origin>/<review branch>` afterwards.
+    /// T-438, T-558: the packet names the exact push of the review commit onto
+    /// the project's remote — a reviewer of T-265 and of T-375 pushed to the
+    /// second remote its worktree also had, and the merge could not find the
+    /// review afterwards. It goes onto the TASK branch: a review leaves no
+    /// branch of its own on the remote.
     #[test]
-    fn the_review_packet_names_the_exact_push_of_the_review_branch() {
+    fn the_review_packet_names_the_exact_push_of_the_task_branch() {
         let mut store = world(CONFIG);
         let config = gear_app::config::parse(CONFIG).unwrap();
         let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
         assert!(
-            packet.contains("`git push origin HEAD:refs/heads/review/t1`"),
+            packet.contains("`git push origin HEAD:refs/heads/heat/t1`"),
             "{packet}"
         );
         assert!(
-            packet.contains("GEAR refuses the verdict until `origin/review/t1` holds your commit"),
-            "{packet}"
-        );
-
-        // A team's own remote and review branch are named as they are.
-        let text = format!(
-            "{CONFIG}\n[conventions]\nremote = \"upstream\"\nreview_branch = \"b/review/t{{n}}\"\n"
-        );
-        let config = gear_app::config::parse(&text).unwrap();
-        let mut store = world(&text);
-        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
-        assert!(
-            packet.contains("`git push upstream HEAD:refs/heads/b/review/t1`"),
+            packet.contains("GEAR refuses the verdict until `origin/heat/t1` holds your commit"),
             "{packet}"
         );
         assert!(
             packet.contains(
-                "GEAR refuses the verdict until `upstream/b/review/t1` holds your commit"
+                "If that push is refused because the lane pushed meanwhile, `git pull --no-rebase origin heat/t1` (a merge, never a rebase), then push again."
             ),
+            "{packet}"
+        );
+        assert!(
+            !packet.contains("refs/heads/review/t1"),
+            "no review branch is pushed: {packet}"
+        );
+
+        // A team's own remote and task branch are named as they are.
+        let text =
+            format!("{CONFIG}\n[conventions]\nremote = \"upstream\"\ntask_branch = \"b/t{{n}}\"\n");
+        let config = gear_app::config::parse(&text).unwrap();
+        let mut store = world(&text);
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
+        assert!(
+            packet.contains("`git push upstream HEAD:refs/heads/b/t1`"),
+            "{packet}"
+        );
+        assert!(
+            packet.contains("GEAR refuses the verdict until `upstream/b/t1` holds your commit"),
             "{packet}"
         );
     }
