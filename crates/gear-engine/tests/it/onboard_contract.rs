@@ -39,7 +39,7 @@ fn lane_gets_worktree_env_and_unattended_args() {
         plan.worktree,
         Some(WorktreeStep {
             repo: "/repo".into(),
-            branch: "harbor/heat".into(),
+            branch: "harbor/heat/home".into(),
             base: "dev".into(),
             label: "harbor-heat".into()
         })
