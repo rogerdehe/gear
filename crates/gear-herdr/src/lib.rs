@@ -32,6 +32,11 @@ pub enum Ensured {
     Renamed,
     /// Another pane holds the name: it is reported, never stolen.
     Taken { holder: Option<String> },
+    /// The pane already carries another project's captain name, and it was
+    /// kept (T-552): a pane may hold two projects' captain seats, and renaming
+    /// the agent after the second would take the first captain's name away, so
+    /// every prompt to it would fail.
+    Kept,
     /// The pane hosts no agent (between agents, or a shell).
     NoAgent,
     /// Herdr refused the rename or the outcome is unknown.
