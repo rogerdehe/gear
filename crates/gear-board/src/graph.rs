@@ -163,6 +163,7 @@ impl Stage {
             &task.deps,
             task.rounds,
             task.moved_to.as_deref(),
+            &task.integration,
         )
     }
 
@@ -174,6 +175,7 @@ impl Stage {
         deps: &[String],
         rounds: usize,
         moved_to: Option<&str>,
+        integration: &str,
     ) -> String {
         match stage {
             Stage::Deps => format!(
@@ -194,10 +196,10 @@ impl Stage {
             Stage::Verdict => "waits for the captain's verdict".to_string(),
             Stage::SentBack => "sent back, rework queued".to_string(),
             Stage::Rework => format!("reworking (round {rounds})"),
-            Stage::Passed => "passed, waits to merge".to_string(),
+            Stage::Passed => format!("passed, not on {integration} yet"),
             Stage::Merging => "merging (gate running)".to_string(),
-            Stage::MergeFailed => "merge failed, waits for the captain".to_string(),
-            Stage::Merged => "merged".to_string(),
+            Stage::MergeFailed => format!("merge into {integration} failed, waits for the captain"),
+            Stage::Merged => format!("on {integration}"),
             Stage::Failed => "failed (rounds used up)".to_string(),
             Stage::Moved => format!("moved to {}", moved_to.unwrap_or("-")),
         }
@@ -208,6 +210,10 @@ impl Stage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphTask {
     pub id: String,
+    /// The branch the task merges into (its `base`, from the project's
+    /// `[conventions] integration` when it was created): `dev` in one project,
+    /// `main` or `testing` in another.
+    pub integration: String,
     /// The queue position of the task in the plan, ascending (the store's
     /// rank).
     pub rank: i64,
@@ -279,6 +285,7 @@ fn tasks_of(
         let (actual, finished) = actual_of(&history, now);
         tasks.push(GraphTask {
             id: row.id.clone(),
+            integration: integration_of(row),
             rank: row.rank,
             lane: row.lane.clone().unwrap_or_default(),
             stage: stage_of(tx, project, row)?,
@@ -293,6 +300,15 @@ fn tasks_of(
         });
     }
     Ok(order(tasks))
+}
+
+/// The branch a task merges into, by name: its `base`, else words that name
+/// no branch (a task from before bases were recorded).
+pub(crate) fn integration_of(task: &gear_store::TaskRow) -> String {
+    task.base
+        .clone()
+        .filter(|base| !base.is_empty())
+        .unwrap_or_else(|| "the integration branch".to_string())
 }
 
 /// The order of the prototype (its `order_of`): the tasks that wait for a
@@ -750,7 +766,28 @@ pub(crate) fn stage_of(
 ) -> GearResult<Stage> {
     // Done and failed are endings of the task itself.
     match task.state {
-        TaskState::Done => return Ok(Stage::Merged),
+        // Done is accepted; it is merged only when its work is recorded on the
+        // integration branch (user, 2026-11-04: 58 accepted Prometheus tasks
+        // showed "merged" while their work was not on dev). An accepted task
+        // whose merge has not landed shows where that merge is.
+        TaskState::Done => {
+            if tx
+                .attempt_times_of_task(project, &task.id)?
+                .iter()
+                .any(|(_, times)| times.merged.is_some())
+            {
+                return Ok(Stage::Merged);
+            }
+            return Ok(
+                match newest_merge_op(tx, project, &task.id)?.map(|op| op.state) {
+                    Some(OpState::Failed) => Stage::MergeFailed,
+                    Some(OpState::Executing | OpState::Submitted | OpState::Unknown) => {
+                        Stage::Merging
+                    }
+                    _ => Stage::Passed,
+                },
+            );
+        }
         TaskState::Failed => return Ok(Stage::Failed),
         TaskState::Draft => return Ok(Stage::Held),
         _ => {}

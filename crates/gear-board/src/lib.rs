@@ -477,6 +477,8 @@ pub struct DownSeat {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskBoard {
     pub id: String,
+    /// The branch the task merges into (see `graph::GraphTask::integration`).
+    pub integration: String,
     /// The queue position in the plan, ascending (the store's rank): the Now
     /// view's items to handle follow the plan, not the lanes' grouping (T-360).
     pub rank: i64,
@@ -809,7 +811,13 @@ pub fn project_for(
         // The stage the graph gives this task, and its words (T-347): one
         // reading for the views and the lane lines.
         let stage = graph::stage_of(tx, project, task)?;
-        let stage_words = graph::Stage::words_of(stage, &task.deps, rounds, None);
+        let stage_words = graph::Stage::words_of(
+            stage,
+            &task.deps,
+            rounds,
+            None,
+            &graph::integration_of(task),
+        );
         // The latest attempt's round, for the new-session recovery mark
         // (T-481).
         let recovery = match tx.attempts_of_task(project, &task.id)?.last() {
@@ -817,6 +825,7 @@ pub fn project_for(
             None => false,
         };
         let line = TaskBoard {
+            integration: graph::integration_of(task),
             id: task.id.clone(),
             rank: task.rank,
             state: task.state,
