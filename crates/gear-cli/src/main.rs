@@ -2768,6 +2768,7 @@ fn named_line(named: &gear_herdr::Ensured) -> &'static str {
         gear_herdr::Ensured::Taken { .. } => {
             "held by another pane: GEAR reports it and never steals it"
         }
+        gear_herdr::Ensured::Kept => "kept: the pane already holds another project's captain name",
         gear_herdr::Ensured::Failed(_) => "could not be given: the engine tries again next tick",
     }
 }

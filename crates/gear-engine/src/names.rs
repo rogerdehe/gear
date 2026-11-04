@@ -202,6 +202,10 @@ pub fn restore(
                     .write(|tx| report_taken(tx, project, &seat, &name, holder.as_deref(), now))?;
             }
             Ensure::NoAgent => {}
+            // `ensure_snapshot` never keeps a name: only a `captain take` on a
+            // pane that already holds another project's captain seat does
+            // (T-552), and the engine has nothing to do about it.
+            Ensure::Kept => {}
             Ensure::Failed(reason) => {
                 restored.failed.push(format!("{}: {reason}", seat.id));
             }

@@ -995,6 +995,8 @@ fn aim(
                                 format!("the name is held by {holder:?}")
                             }
                             crate::names::Ensure::NoAgent => "the agent is gone".to_string(),
+                            // Only a `captain take` keeps a name (T-552).
+                            crate::names::Ensure::Kept => "its name was kept".to_string(),
                             crate::names::Ensure::Failed(reason) => {
                                 format!("the rename failed ({reason})")
                             }
