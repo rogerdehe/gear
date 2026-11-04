@@ -404,7 +404,9 @@ fn start_hand_in_reviews(
         //    `[quota].temps`). A `Released` seat used to skip this check, so
         //    several seats recovered by `release_dead_temps` started at once
         //    and passed the quota (F1 of the T-116 review).
-        if !occupies_quota(seat.state) && !has_free_slot(store, herdr, project, quota)? {
+        if !occupies_quota(seat.state)
+            && !has_free_slot(store, herdr, project, quota, Some(&seat.id))?
+        {
             note_waiting(report, &task.task);
             tell_captain(store, project, task, "every temp seat is in use", now)?;
             continue;
@@ -1052,7 +1054,9 @@ fn start_direction_checks(
                 None => continue,
             },
         };
-        if !occupies_quota(seat.state) && !has_free_slot(store, herdr, project, quota)? {
+        if !occupies_quota(seat.state)
+            && !has_free_slot(store, herdr, project, quota, Some(&seat.id))?
+        {
             continue;
         }
         let direction_branch = gear_model::branch::direction_branch(
@@ -2086,7 +2090,7 @@ fn seats_free_for_new(
     if seats >= quota {
         return Ok(false);
     }
-    let live = crate::names::live_of_role(store, herdr, project, SeatRole::Temp);
+    let live = crate::names::live_of_role(store, herdr, project, SeatRole::Temp, None);
     Ok((live.len() as i64) < quota)
 }
 
@@ -2236,6 +2240,7 @@ fn has_free_slot(
     herdr: &mut dyn HerdrAct,
     project: &str,
     quota: i64,
+    except: Option<&str>,
 ) -> GearResult<bool> {
     let seats = store.read(|tx| tx.seats_of_project(project))?;
     let mut occupying = 0;
@@ -2252,8 +2257,9 @@ fn has_free_slot(
         }
     }
     // T-561: the seats are not the whole count. A reviewer whose seat says
-    // `Released` but whose agent is still in a pane holds a slot the user sees.
-    let live = crate::names::live_of_role(store, herdr, project, SeatRole::Temp);
+    // `Released` but whose agent is still in a pane holds a slot the user sees
+    // (the seat that is being started itself does not add one).
+    let live = crate::names::live_of_role(store, herdr, project, SeatRole::Temp, except);
     Ok(occupying < quota && (live.len() as i64) < quota)
 }
 
@@ -13007,11 +13013,11 @@ profile = "opencode"
         // The count itself: the standby reviewer holds the slot, the released
         // one holds nothing.
         assert!(
-            !has_free_slot(&mut store, &mut herdr, "p", 1).unwrap(),
+            !has_free_slot(&mut store, &mut herdr, "p", 1, None).unwrap(),
             "the standby reviewer holds the slot"
         );
         assert!(
-            has_free_slot(&mut store, &mut herdr, "p", 2).unwrap(),
+            has_free_slot(&mut store, &mut herdr, "p", 2, None).unwrap(),
             "a second slot is free"
         );
 
@@ -13023,7 +13029,7 @@ profile = "opencode"
             })
             .unwrap();
         assert!(
-            !has_free_slot(&mut store, &mut herdr, "p", 1).unwrap(),
+            !has_free_slot(&mut store, &mut herdr, "p", 1, None).unwrap(),
             "the reviewer on its way out holds the slot"
         );
         store

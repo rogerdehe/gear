@@ -148,11 +148,14 @@ pub fn read(
 /// a start must wait for it. Counted from the same snapshot `restore` works
 /// from, so one read serves the tick. An unreadable list is no evidence
 /// either way: the caller gets no panes and its own seat-state count stands.
+/// `except` leaves one seat out: a seat that is resumed or reused does not add
+/// a pane, so its own agent must not stop its own start.
 pub fn live_of_role(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
     project: &str,
     role: SeatRole,
+    except: Option<&str>,
 ) -> Vec<String> {
     let Ok(names) = read(herdr) else {
         return Vec::new();
@@ -163,6 +166,7 @@ pub fn live_of_role(
     let wanted: Vec<String> = seats
         .iter()
         .filter(|seat| seat.role == role)
+        .filter(|seat| except.is_none_or(|except| except != seat.id))
         .map(desired)
         .collect();
     names

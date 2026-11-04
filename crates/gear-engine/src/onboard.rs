@@ -607,7 +607,8 @@ pub fn onboard_queued(
             // only the seats the store calls live: a lane the store released
             // whose agent still runs is a lane the user sees, and the next one
             // waits for it instead of starting beside it.
-            let live = crate::names::live_of_role(store, herdr, &project, SeatRole::Lane);
+            let live =
+                crate::names::live_of_role(store, herdr, &project, SeatRole::Lane, Some(&seat.id));
             if live.len() as u32 >= config.quota.lanes {
                 continue;
             }
