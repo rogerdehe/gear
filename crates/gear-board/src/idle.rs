@@ -11,6 +11,7 @@
 //! | `Held { reason }` | the seat is held | `held: …` |
 //! | `Waiting { on }` | the lane waits for a task to be merged (§5.3) | `waiting for T-m (lane, stage)` |
 //! | `DepWait { task, on }` | the next task of the lane waits for a dependency | `next T-x waits for T-y (lane, stage)` |
+//! | `Retired { tasks }` | the seat is retired and ready tasks sit on it (T-563) | `retired: T-a, T-b are on it and will not start` |
 //! | `Undelivered { task }` | the next task is ready and was not delivered | `next T-x is ready but not delivered` |
 //! | `NoWork` | nothing is left in the lane's queue | `nothing left planned` |
 //!
@@ -81,6 +82,13 @@ pub enum IdleReason {
         /// The dependency it waits for.
         on: String,
     },
+    /// The seat is retired and ready tasks sit on its lane: nobody will start
+    /// them (T-563, prometheus 2026-11-04: four `now` tasks went to retired
+    /// lanes and sat "ready but not delivered" while the server lane idled).
+    Retired {
+        /// The ready tasks on it, in the plan's order.
+        tasks: Vec<String>,
+    },
     /// The next task of the lane is ready and was never delivered.
     Undelivered {
         /// The task that waits for the lane.
@@ -128,6 +136,18 @@ pub fn idle_reason(
                 return Ok(Some(IdleReason::Held {
                     reason: held_reason(seat),
                 }));
+            }
+            // A retired lane starts nothing; say what sits on it instead of
+            // "ready but not delivered" (T-563).
+            SeatState::Retired => {
+                let ready: Vec<String> = queue_of(tx, project, &seat.name)?
+                    .into_iter()
+                    .filter(|task| task.state == TaskState::Ready)
+                    .map(|task| task.id)
+                    .collect();
+                if !ready.is_empty() {
+                    return Ok(Some(IdleReason::Retired { tasks: ready }));
+                }
             }
             _ => {}
         }
@@ -180,32 +200,48 @@ pub fn idle_reason(
         }
     }
 
-    // The next task of the queue: the first one that is queued. A task that
+    // The next task of the queue: the first one, in the order of the plan,
+    // that is queued and whose dependencies are all merged — the rule the
+    // engine dispatches by (T-562, `dispatch::ready_tasks_of`). A task that
     // was handed in waits for its review in the background and does not hide
     // the work that is left (the engine gives the lane its next task while
     // the review runs).
+    let merged = merged_tasks(tx, project)?;
+    let startable = queue
+        .iter()
+        .find(|task| is_queued(task.state) && task.deps.iter().all(|dep| merged.contains(dep)));
+    if let Some(next) = startable {
+        // The task can start and nobody gave it to the lane.
+        return Ok(Some(IdleReason::Undelivered {
+            task: next.id.clone(),
+        }));
+    }
+
+    // Nothing can start: the first queued task says which dependency holds it
+    // (T-562: before, the lane named its first queued task even when a later
+    // one was ready).
     let Some(next) = queue.iter().find(|task| is_queued(task.state)) else {
         return Ok(Some(IdleReason::NoWork));
     };
-
-    // A dependency of it that is not done yet.
-    for dep in &next.deps {
-        let done = tx
-            .get_task(project, dep)?
-            .map(|task| task.state == TaskState::Done)
-            .unwrap_or(false);
-        if !done {
-            return Ok(Some(IdleReason::DepWait {
-                task: next.id.clone(),
-                on: dep.clone(),
-            }));
-        }
+    match next.deps.iter().find(|dep| !merged.contains(*dep)) {
+        Some(dep) => Ok(Some(IdleReason::DepWait {
+            task: next.id.clone(),
+            on: dep.clone(),
+        })),
+        // No dependency holds it, so it is one the dispatch passes over for
+        // another reason (its repo, a voyage audit): it still waits for the
+        // lane.
+        None => Ok(Some(IdleReason::Undelivered {
+            task: next.id.clone(),
+        })),
     }
+}
 
-    // The task is queued and nobody gave it to the lane.
-    Ok(Some(IdleReason::Undelivered {
-        task: next.id.clone(),
-    }))
+/// The tasks whose work is merged (T-562): one query for the project, the rule
+/// `dispatch::ready_tasks_of` uses. A dependency counts as done only once its
+/// merge reached the integration branch (T-236, F-76).
+fn merged_tasks(tx: &Tx<'_>, project: &str) -> GearResult<std::collections::BTreeSet<String>> {
+    Ok(tx.merged_done_tasks(project)?.into_iter().collect())
 }
 
 /// The instruction of the captain the lane still has to answer, if any
@@ -339,6 +375,9 @@ pub fn describe(reason: &IdleReason, tx: &Tx<'_>, project: &str) -> String {
                 "next {task} waits for {on} ({})",
                 lane_and_stage(tx, project, on)
             )
+        }
+        IdleReason::Retired { tasks } => {
+            format!("retired: {} are on it and will not start", tasks.join(", "))
         }
         IdleReason::Undelivered { task } => format!("next {task} is ready but not delivered"),
         IdleReason::NoWork => "nothing left planned".to_string(),

@@ -15,10 +15,13 @@
 //!   of work that has not started (§8.4) — one item for the project.
 //!
 //! When no lane of the project has work left to start, none of it is told:
-//! the lane items close with that fact and the project stays quiet (T-232).
+//! the lane items close with that fact (T-232). If the project's open voyage
+//! still has tasks that are not done or cancelled, one urgent item rings the
+//! captain on the thread `stalled` instead (T-560): a voyage whose lanes all
+//! stand still is stopped, not finished.
 
 use gear_model::{GearResult, MsgKind, MsgState, SeatRole, SeatState, TaskState, Ts};
-use gear_store::{MessageRow, NewMessage, Store, Tx};
+use gear_store::{MessageRow, NewMessage, SeatRow, Store, TaskRow, Tx};
 
 use crate::dispatch;
 
@@ -30,6 +33,17 @@ const BALANCE_THREAD: &str = "balance";
 
 /// Why a lane item closes when the whole project has nothing left to start.
 const NO_WORK_LEFT: &str = "no lane has work left to start";
+
+/// The thread the stalled voyage's item lives in (T-560).
+const STALLED_THREAD: &str = "stalled";
+
+/// Why the stalled item closes: a task can start again, or none is left.
+const STARTABLE_AGAIN: &str = "a task can start again";
+/// Why the stalled item closes when the voyage has no task left.
+const NO_TASK_LEFT: &str = "no task is left in the voyage";
+
+/// How many of the tasks left the stalled item names (T-560).
+const STALLED_SHOWN: usize = 5;
 
 /// What happened to one lane this tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,9 +67,20 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
     // item per lane would ring for every lane at once (M4.1). Every lane item
     // closes and the project stays quiet (T-232).
     if startable_tasks(tx, project)? == 0 {
-        return close_all_lanes(tx, project, &captain.id, now);
+        let mut changes = close_all_lanes(tx, project, &captain.id, now)?;
+        // The voyage itself: no lane can start anything, and its tasks are
+        // still not done (T-560).
+        if let Some(change) = stalled(tx, project, &captain.id, now)? {
+            changes.push(change);
+        }
+        return Ok(changes);
     }
     let mut changes = Vec::new();
+    // Work can start again: an item that rang while the voyage was stopped
+    // closes with that fact (T-560).
+    if let Some(change) = close_stalled(tx, project, &captain.id, now, STARTABLE_AGAIN)? {
+        changes.push(change);
+    }
     // The lanes that are one task from dry: the engine checks this every
     // tick, not only at plan apply (§10.7 row B3, T-66).
     let about_to_dry = gear_app::plan::idle_lanes(tx, project, now)?;
@@ -537,4 +562,224 @@ fn close(
         now,
     )?;
     Ok(true)
+}
+
+/// The stalled voyage: no lane can start anything, yet the project's open
+/// voyage still has tasks that are not done or cancelled (T-560).
+///
+/// One urgent item on the thread `stalled`, opened once, updated while the
+/// state lasts and closed when a task can start again or none is left. Each of
+/// the first [`STALLED_SHOWN`] tasks left is named with what it waits for.
+fn stalled(tx: &Tx<'_>, project: &str, captain: &str, now: Ts) -> GearResult<Option<FeedChange>> {
+    let voyage = gear_app::plan::current_voyage(tx, project)?;
+    // No open voyage: nothing is stopped, the project stays quiet (T-232).
+    let left: Vec<TaskRow> = if voyage.is_empty() {
+        Vec::new()
+    } else {
+        tx.tasks_live_of_project(project)?
+            .into_iter()
+            .filter(|task| !task.state.is_terminal())
+            // The tasks of the voyage that departed last, and the tasks that
+            // were never put in one: both are work the lanes cannot start.
+            .filter(|task| match task.milestone.as_deref() {
+                None => true,
+                Some(milestone) => milestone == voyage,
+            })
+            .collect()
+    };
+    if left.is_empty() {
+        return close_stalled(tx, project, captain, now, NO_TASK_LEFT);
+    }
+    let seats = tx.seats_of_project(project)?;
+    let mut named = Vec::new();
+    for task in left.iter().take(STALLED_SHOWN) {
+        named.push(format!(
+            "{} {}",
+            task.id,
+            wait_words(tx, project, task, &seats, now)?
+        ));
+    }
+    let rest = left.len().saturating_sub(named.len());
+    let more = if rest > 0 {
+        format!(" and {rest} more")
+    } else {
+        String::new()
+    };
+    let body = format!(
+        "voyage {voyage} is stopped: no lane can start anything, {} tasks left. {}{more}. Plan work that moves the goal, unblock or move these, or ask the user to stop the voyage.",
+        left.len(),
+        named.join("; ")
+    );
+    match open_stalled(tx, project, captain)? {
+        Some(item) => {
+            if item.body != body {
+                tx.update_message_body(project, &item.id, &body)?;
+            }
+            Ok(Some(FeedChange {
+                lane: STALLED_THREAD.to_string(),
+                action: "updated",
+            }))
+        }
+        None => {
+            tx.insert_message(&NewMessage {
+                meta: None,
+                project: project.to_string(),
+                thread: STALLED_THREAD.to_string(),
+                task: None,
+                attempt: None,
+                sender: "engine".to_string(),
+                sender_gen: 0,
+                recipient: captain.to_string(),
+                kind: MsgKind::System,
+                urgent: true,
+                body,
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: now,
+            })?;
+            Ok(Some(FeedChange {
+                lane: STALLED_THREAD.to_string(),
+                action: "opened",
+            }))
+        }
+    }
+}
+
+/// What the task waits for, in the words of `gear_board::idle` (T-560):
+/// `is on retired lane surface`, `waits for T-665 (review, verifying)`,
+/// `waits for lane surface (held: …)`.
+fn wait_words(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &TaskRow,
+    seats: &[SeatRow],
+    now: Ts,
+) -> GearResult<String> {
+    let Some(lane) = task.lane.as_deref() else {
+        return Ok("is on no lane".to_string());
+    };
+    match seats.iter().find(|seat| seat.name == lane) {
+        // A task on a lane whose seat is gone is left where it is: no lane can
+        // start it.
+        None => return Ok(format!("is on lane {lane}, which has no seat")),
+        Some(seat) if seat.state == SeatState::Retired => {
+            return Ok(format!("is on retired lane {lane}"))
+        }
+        Some(_) => {}
+    }
+    // A task that is already underway is not waiting for its lane's queue: it
+    // sits in its own step (T-560).
+    if matches!(task.state, TaskState::Running | TaskState::Verifying) {
+        return Ok(format!("is {}", gear_board::state_word(task.state)));
+    }
+    // The task's own waits come before the lane's: a task that waits for a
+    // dependency or for a merge waits for that, whatever its lane's queue says.
+    if let Some(on) = task.wait_on.as_deref() {
+        return Ok(format!(
+            "waits for {on} ({})",
+            lane_and_state(tx, project, on)
+        ));
+    }
+    for dep in &task.deps {
+        let done = tx
+            .get_task(project, dep)?
+            .map(|row| row.state == TaskState::Done)
+            .unwrap_or(false);
+        if !done {
+            return Ok(format!(
+                "waits for {dep} ({})",
+                lane_and_state(tx, project, dep)
+            ));
+        }
+    }
+    // The lane's own reason (§8.2): the words of `gear_board::idle`, with the
+    // task's name in place of the lane's.
+    let Some(reason) = gear_board::idle::idle_reason(tx, project, lane, now)? else {
+        return Ok(format!("is {}", gear_board::state_word(task.state)));
+    };
+    let words = gear_board::idle::describe(&reason, tx, project);
+    Ok(match &reason {
+        gear_board::idle::IdleReason::Waiting { .. } => {
+            words.replacen("waiting for ", "waits for ", 1)
+        }
+        gear_board::idle::IdleReason::DepWait { task: head, .. } if head == &task.id => {
+            words.replacen(&format!("next {head} "), "", 1)
+        }
+        gear_board::idle::IdleReason::Undelivered { task: head } if head == &task.id => {
+            words.replacen(&format!("next {head} "), "", 1)
+        }
+        // A task behind another one of its lane's queue: it waits for that one.
+        gear_board::idle::IdleReason::DepWait { task: head, .. }
+        | gear_board::idle::IdleReason::Undelivered { task: head } => {
+            format!("waits behind {head} in lane {lane}")
+        }
+        // The lane itself cannot run: parked, held or on quota.
+        gear_board::idle::IdleReason::Quota { .. }
+        | gear_board::idle::IdleReason::Parked { .. }
+        | gear_board::idle::IdleReason::Held { .. } => {
+            format!("waits for lane {lane} ({words})")
+        }
+        // The lane is retired: nobody will start the task (T-563).
+        gear_board::idle::IdleReason::Retired { .. } => {
+            format!("is on retired lane {lane}")
+        }
+        // The lane has nothing queued: the task is in the review or the verdict
+        // steps, not in the lane's queue.
+        gear_board::idle::IdleReason::NoWork => {
+            format!("is {}", gear_board::state_word(task.state))
+        }
+    })
+}
+
+/// The lane and the state of a task as `gear_board::idle` says it:
+/// `review, verifying`; `-` for a task the store does not know (T-560).
+fn lane_and_state(tx: &Tx<'_>, project: &str, task: &str) -> String {
+    match tx.get_task(project, task) {
+        Ok(Some(row)) => format!(
+            "{}, {}",
+            row.lane.unwrap_or_else(|| "-".to_string()),
+            gear_board::state_word(row.state)
+        ),
+        _ => "-".to_string(),
+    }
+}
+
+/// The open item of the stalled voyage, if there is one.
+fn open_stalled(tx: &Tx<'_>, project: &str, captain: &str) -> GearResult<Option<MessageRow>> {
+    Ok(tx
+        .thread_messages(project, STALLED_THREAD)?
+        .into_iter()
+        .find(|message| {
+            matches!(message.state, MsgState::Open | MsgState::Waiting)
+                && message.kind == MsgKind::System
+                && message.recipient == captain
+        }))
+}
+
+/// Close the stalled item once its state ends (T-560): true when one was
+/// closed.
+fn close_stalled(
+    tx: &Tx<'_>,
+    project: &str,
+    captain: &str,
+    now: Ts,
+    reason: &str,
+) -> GearResult<Option<FeedChange>> {
+    let Some(item) = open_stalled(tx, project, captain)? else {
+        return Ok(None);
+    };
+    tx.update_message_state(
+        project,
+        &item.id,
+        MsgState::Resolved,
+        Some(reason),
+        None,
+        None,
+        now,
+    )?;
+    Ok(Some(FeedChange {
+        lane: STALLED_THREAD.to_string(),
+        action: "closed",
+    }))
 }

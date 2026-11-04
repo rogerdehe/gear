@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1156 -->
+<!-- gear-plan project=gear base=1169 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -72,6 +72,11 @@ eta: 4h
 - 2026-11-04 02:33 hand-fix: the engine names a pane that holds several captain seats after the seat bound to it first (names::restore); the Prometheus captain flipped between prometheus-captain and lawrence-captain on every pass after `gear captain take lawrence`, T-552 had fixed only the take path; the lawrence seat was also released from that pane at once | why: user, urgent: prompts by name failed | else: none
 - station M-7727: keep course | why: T-555 merging, then release v0.6.53 (gate variables, Resume text, git switch, captain name fix) | else: none
 - 2026-11-04 03:58 hand-fix: a merge whose fetch cannot read the remote after its retries goes back to the queue like a lost push race (merge.rs unreachable) instead of failing | why: GitHub refused SSH on and off from 03:40, T-675 (critical path for 31 carried tasks), T-678 and T-680 failed and waited for a captain remerge | else: none
+- 2026-11-04 08:29 hand-fix: renamed GEAR's seat branches gear/<seat> to gear/<seat>/home by hand (git branch -m); v0.6.55's new default never ran the rename for a project with no seat_branch line, and gear/merge blocked gear/merge/home | why: every GEAR merge waited; T-565 makes it automatic
+- station M-7767: keep course T-558 and T-559 shipped as v0.6.55; T-560..T-565 are the v0.6.56 batch, four in review
+- station M-7869: keep course T-561 merged, T-562 merging, T-560 queued, T-563..T-565 in review; v0.6.56 ships when the six are on dev
+- station M-7912: keep course T-563 hand-merged, T-564 merging after rework, T-565 and T-567 in rework/review; v0.6.56 ships when they are on dev
+- 2026-11-04 08:44 override: T-563 passes over F1 | why: the retired-lane test exists and passes as idle_contract::a_retired_lane_with_ready_tasks_says_they_will_not_start; only the contract's filter test(idle::) named the wrong place, and that wording was mine; every behaviour (1)-(3) the review found ok | changes: none to delivered behaviour
 # Queue
 
 ## T-545 [now] lane=mast milestone=M6.2 required
@@ -185,5 +190,29 @@ deps: -
 ## T-563 [now] lane=mast milestone=M6.2
 goal: [v0.6.55] A task placed on a lane nobody works is named at apply and in the queue (prometheus, 2026-11-04: four `now` tasks went to retired lanes and sat "ready but not delivered" while the server lane idled). (1) crates/gear-app/src/plan.rs, next to the run-dry warnings (near "has nothing to start after"): for each task not done or cancelled whose lane has no seat in Active or Standby, print `warning: T-<n> is on lane <lane>, which is retired: move it to a working lane or bring the lane back`, one line per task. (2) crates/gear-board/src/idle.rs: a retired lane with ready tasks says `retired: T-a, T-b are on it and will not start` instead of "ready but not delivered". Also (3) the merge result kept for a failed gate (crates/gear-engine/src/merge.rs, where the gate output becomes the op result) drops git push noise lines starting `remote:` or `To ` and the ` * [new branch]` / ` - [deleted]` lines, so the board and the captain's item lead with the gate's own refusal.
 accept: Tests: plan.rs `mod tests`, an apply with a ready task on a retired lane prints the warning and still applies; idle.rs, a retired lane with a ready task reads "retired: T-x … will not start"; merge.rs, a failed gate output with push lines and a "refuses at judge" line keeps the refusal first and no `remote:` line. Run only `make check CRATE=gear-app TESTS='test(plan::)'`, `make check CRATE=gear-board TESTS='test(idle::)'` and `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
+estimate: 45
+deps: -
+
+## T-564 [now] lane=mast milestone=M6.2
+goal: [v0.6.56] The merge never publishes a lane commit nobody reviewed (found 2026-11-04 after v0.6.55: the merge now takes the task branch tip, so a lane commit pushed after hand-in, like hull's fix on T-562, would land unreviewed). In crates/gear-engine/src/merge.rs `prepare_merge`, on the task-branch path (no old review branch), before merging `task_ref`: list the non-merge commits in `<candidate>..<task_ref>` (`git log --no-merges --format=%H%x09%s`); each subject must start with the review message prefix (`[conventions] review_message` filled with the task, up to `{what}`; the default gives `review(T-7): `). If any does not, merge the candidate plus only the review commits is not possible safely, so fail the op `stuck` naming each foreign commit: "T-x: the task branch holds commits after the approved candidate that are not the review: <sha> <subject>; a change after hand-in needs a new attempt". Resolve the ref to one sha once, so a later push cannot slip in.
+accept: merge.rs `mod tests`: a task branch of candidate + one review commit merges; candidate + review + one lane commit fails stuck naming the lane commit; a pulled-in lane commit under a merge commit is caught too. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
+estimate: 40
+deps: -
+
+## T-565 [now] lane=hull milestone=M6.2
+goal: [v0.6.56] A changed default seat branch moves the seat branches too (2026-11-04: GEAR's own project sets no seat_branch, so v0.6.55's new default `{project}/{seat}/home` never ran the rename that an explicit config change runs; `gear/merge` blocked creating `gear/merge/home` — git cannot hold both — and every GEAR merge waited until the captain renamed the branches by hand). Where T-559 renames seat branches on a changed `seat_branch` (crates/gear-app, the apply path), also run it when the engine starts or onboards a seat and finds the seat's worktree on the branch the previous default names (`{project}/{seat}`) while the current template names another; and before creating any seat branch, if a ref is a path prefix of the new name (git's D/F conflict), rename that ref when it is the seat's old branch, else fail naming it.
+accept: Tests: a project with no seat_branch line whose seat worktree stands on `p/hull` is moved to `p/hull/home` at the next start, locally and on the remote when pushed; a foreign ref `p/hull` that is not the seat's branch is named, never touched. Run only the crates the change touches with `make check CRATE=<crate> TESTS='…'`; the merge gate runs `make gate`.
+estimate: 45
+deps: -
+
+## T-566 [now] lane=hull milestone=M6.2
+goal: [v0.6.56] One merge-wait cause rings one item (2026-11-04: the gear/merge/home worktree failure opened 47 separate items, M-7808..M-7859, one per engine retry between 08:25 and 08:27, and they kept arriving one doorbell at a time for 15 minutes after the fix). Find where the merge's "merge waits: <reason>" item is created (grep "merge waits" in crates/gear-engine/src) and give it one thread per project and cause class (e.g. `merge-wait:<project>:worktree`): opened once, its body updated while the cause lasts, closed by the engine when a merge op next starts for that project. No new table.
+accept: A test where the same worktree_create failure repeats over five ticks leaves one open item with the latest reason, and the next successful merge start closes it. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
+estimate: 30
+deps: -
+
+## T-567 [now] lane=mast milestone=M6.2
+goal: [v0.6.56] The board's time line never shows an impossible forecast, and names what can never merge (user, 2026-11-04, prometheus M4: "expected 16716h25m of 50h00m, 16666h25m behind"). Cause: crates/gear-board/src/forecast.rs gives a dependency no job speaks for the start `NO_DEP` (1,000,000 min), so a task waiting on a done-but-unmerged task (T-570 on T-665, whose merge keeps failing) puts its lane's end a million minutes out, and frame.rs `header_numbers` takes the max. Fix: a lane end at or beyond `NO_DEP` is left out of `expected`; instead the time line ends with `· blocked: T-570 waits for T-665, which nothing will merge` (the first such task and dep; `+N more` when there are several). The forecast for the other lanes stays as today.
+accept: Tests in forecast.rs / frame.rs `mod tests`: a lane whose task waits on a dep no job speaks for leaves `expected` at the other lanes' max and the time line names the blocked task and its dep. Run only `make check CRATE=gear-board`; the merge gate runs `make gate`.
 estimate: 45
 deps: -

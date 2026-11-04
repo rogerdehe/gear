@@ -592,6 +592,9 @@ pub fn merge_passed(
                 match integration_worktree(store, herdr, &repo, project, &config, &cfg.merges, now)
                 {
                     Ok(worktree) => {
+                        // T-566: a merge of this project starts: the wait's
+                        // item has done its work.
+                        close_merge_waits(store, project, now)?;
                         launch_batch(
                             store,
                             cfg,
@@ -610,7 +613,7 @@ pub fn merge_passed(
                         continue;
                     }
                     Err(reason) => {
-                        tell_captain(store, project, None, &format!("merge waits: {reason}"), now)?;
+                        tell_captain_merge_wait(store, project, &reason, now)?;
                         return Ok(merged);
                     }
                 }
@@ -646,15 +649,12 @@ pub fn merge_passed(
                         now,
                         stage,
                     ) {
-                        Ok(worktree) => worktrees.push(worktree),
+                        Ok(worktree) => {
+                            close_merge_waits(store, project, now)?;
+                            worktrees.push(worktree)
+                        }
                         Err(reason) if stage == 0 => {
-                            tell_captain(
-                                store,
-                                project,
-                                None,
-                                &format!("merge waits: {reason}"),
-                                now,
-                            )?;
+                            tell_captain_merge_wait(store, project, &reason, now)?;
                             return Ok(merged);
                         }
                         Err(_) => break,
@@ -683,9 +683,13 @@ pub fn merge_passed(
         }
         let worktree =
             match integration_worktree(store, herdr, &repo, project, &config, &cfg.merges, now) {
-                Ok(worktree) => worktree,
+                Ok(worktree) => {
+                    // T-566: the merge starts, so whatever held it is gone.
+                    close_merge_waits(store, project, now)?;
+                    worktree
+                }
                 Err(reason) => {
-                    tell_captain(store, project, None, &format!("merge waits: {reason}"), now)?;
+                    tell_captain_merge_wait(store, project, &reason, now)?;
                     return Ok(merged);
                 }
             };
@@ -710,6 +714,8 @@ pub fn merge_passed(
             &config.conventions.merge_message,
             &[("project", project), ("task", &task)],
         );
+        // T-564: what a review commit's subject starts with for this task.
+        let prefix = review_prefix(&config, project, &task, &op_attempt(&op));
         let finished = Arc::new(Mutex::new(None));
         let output = finished.clone();
         let job = op.clone();
@@ -747,6 +753,7 @@ pub fn merge_passed(
                         pr.as_ref(),
                         &fallback,
                         &commit,
+                        &prefix,
                         &db_path,
                     ) {
                         Step::Merged(lines) => Report::Merged(lines),
@@ -977,6 +984,7 @@ fn launch_train(
                 &config.conventions.merge_message,
                 &[("project", project), ("task", &task)],
             ),
+            review_prefix: review_prefix(config, project, &task, &op_attempt(&op)),
         });
     }
     let finished = Arc::new(Mutex::new(None));
@@ -1071,6 +1079,7 @@ fn launch_batch(
                 &lane,
                 &task,
             ),
+            review_prefix: review_prefix(config, project, &task, &op_attempt(op)),
             commit,
         });
     }
@@ -1381,6 +1390,7 @@ fn merge_with_retries(
     pr: Option<&PrTarget>,
     review_fallback: &str,
     commit: &str,
+    review_prefix: &str,
     db_path: &str,
 ) -> Step {
     let mut attempt = 0;
@@ -1403,6 +1413,7 @@ fn merge_with_retries(
             pr,
             review_fallback,
             commit,
+            review_prefix,
             &mut probe,
         ) {
             Step::Merged(lines) => {
@@ -2498,7 +2509,9 @@ fn stage_worktree(
     if let Err(reason) =
         gear_app::seat_branch::settle(&repo.path, &old, &branch, &config.conventions.remote)
     {
-        return Err(reason);
+        // Named as the merge worktree's, so the wait files under its worktree
+        // cause (T-566).
+        return Err(format!("the merge worktree's branch {branch}: {reason}"));
     }
     let worktree = match herdr.worktree_open(&repo.path, &branch, &label) {
         Outcome::Ok(worktree) => worktree,
@@ -2594,6 +2607,8 @@ fn merge_one_with_db(
         gear_model::commit::MERGE_MESSAGE,
         &[("task", op.task.as_deref().unwrap_or_default())],
     );
+    // The tests' default review message, as the engine fills it (T-564).
+    let prefix = test_review_prefix(op);
     let mut probe = Probe::new(
         op.task.as_deref().unwrap_or("-"),
         op.created,
@@ -2614,6 +2629,7 @@ fn merge_one_with_db(
         None,
         &review,
         &commit,
+        &prefix,
         &mut probe,
     );
     // T-407: the operation's own completion line, as the retry loop writes it.
@@ -2621,6 +2637,18 @@ fn merge_one_with_db(
         probe.done();
     }
     step_result(step)
+}
+
+/// A review commit's subject prefix for the fixtures (T-564): the default
+/// `review(<task>): ` message, cut at `{what}`.
+#[cfg(test)]
+fn test_review_prefix(op: &OpRow) -> String {
+    let task = op.task.as_deref().unwrap_or_default();
+    gear_model::commit::fill(gear_model::commit::REVIEW_MESSAGE, &[("task", task)])
+        .split("{what}")
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -2673,6 +2701,7 @@ fn merge_one_locked(
     pr: Option<&PrTarget>,
     review_fallback: &str,
     commit: &str,
+    review_prefix: &str,
     probe: &mut Probe,
 ) -> Step {
     let prepared = match prepare_merge(
@@ -2684,6 +2713,7 @@ fn merge_one_locked(
         remote,
         review_fallback,
         commit,
+        review_prefix,
         probe,
         None,
     ) {
@@ -2720,6 +2750,28 @@ struct Prepared {
     pushed: Pushed,
 }
 
+/// The attempt the merge op names, as the review message's `{attempt}`.
+fn op_attempt(op: &OpRow) -> String {
+    op.attempt
+        .map(|attempt| attempt.to_string())
+        .unwrap_or_default()
+}
+
+/// The prefix a review commit's subject starts with (T-564): the project's
+/// `[conventions].review_message` filled with the task and the attempt, cut at
+/// `{what}` — what the commit carries is the reviewer's to write. The default
+/// gives `review(T-7): `.
+fn review_prefix(config: &ProjectConfig, project: &str, task: &str, attempt: &str) -> String {
+    let filled = gear_model::commit::fill(
+        &config.conventions.review_message,
+        &[("project", project), ("task", task), ("attempt", attempt)],
+    );
+    match filled.find("{what}") {
+        Some(at) => filled[..at].to_string(),
+        None => filled,
+    }
+}
+
 /// Steps 1 to 7 of a merge: a clean base (the remote integration branch, or
 /// `base`: the commit of the train's stage ahead), the approved candidate and
 /// its review branch merged onto it, no conflict. `Err` is the merge's end.
@@ -2733,6 +2785,7 @@ fn prepare_merge(
     remote: Target<'_>,
     review_fallback: &str,
     commit: &str,
+    review_prefix: &str,
     probe: &mut Probe,
     base: Option<&str>,
 ) -> Result<Prepared, Step> {
@@ -2951,19 +3004,10 @@ fn prepare_merge(
              a merge publishes the approved candidate and the review commit pushed on its task branch"
         ))));
     }
-    // The task branch must hold the approved candidate: the review commit is
-    // pushed on top of it, never instead of it.
-    if !has_review
-        && has_task_branch
-        && git(dir, &["merge-base", "--is-ancestor", &sha, &task_ref]).is_err()
-    {
-        return Err(Step::Failed(Failed::stuck(format!(
-            "{task}: the task branch {task_ref} does not hold the approved candidate {sha}\n\
-             the review commit is pushed on top of the candidate, so the merge would publish work nobody reviewed"
-        ))));
-    }
     // Where the task branch is, when it is there: a restart after the push may
-    // still see the last one locally, at the candidate itself.
+    // still see the last one locally, at the candidate itself. T-564: the ref
+    // is resolved to one sha here and that sha is what merges below, so a push
+    // that lands after this read cannot slip in unreviewed.
     let task_tip = if has_task_branch {
         git(dir, &["rev-parse", &task_ref])
             .ok()
@@ -2971,6 +3015,63 @@ fn prepare_merge(
     } else {
         None
     };
+    // The task branch must hold the approved candidate: the review commit is
+    // pushed on top of it, never instead of it.
+    if !has_review
+        && task_tip
+            .as_deref()
+            .is_some_and(|tip| git(dir, &["merge-base", "--is-ancestor", &sha, tip]).is_err())
+    {
+        return Err(Step::Failed(Failed::stuck(format!(
+            "{task}: the task branch {task_ref} does not hold the approved candidate {sha}\n\
+             the review commit is pushed on top of the candidate, so the merge would publish work nobody reviewed"
+        ))));
+    }
+    // T-564: the task branch holds the approved candidate, the review commit
+    // and nothing else. A lane commit pushed after the hand-in (prometheus
+    // 2026-11-04: hull's fix on T-562) would land unreviewed: each non-merge
+    // commit after the candidate must be the review, whose subject starts with
+    // the project's review message up to `{what}`. A merge commit on top of it
+    // is no way out either — its parents are in the range as well.
+    //
+    // Only the commits the merge newly brings in are judged (T-564 review F1):
+    // a task branch that merged the integration branch into it — the
+    // documented conflict fix (course.md: merge dev into the task branch,
+    // resolve, push, remerge) — carries dev's own commits, and those are
+    // reviewed work already on the branch. `--not <base>` leaves them out.
+    if !has_review && !mechanical && task_tip.is_some() {
+        let tip = task_tip.as_deref().unwrap_or_default();
+        let log = git(
+            dir,
+            &[
+                "log",
+                "--no-merges",
+                "--format=%H%x09%s",
+                &format!("{sha}..{tip}"),
+                "--not",
+                &base_ref,
+            ],
+        )
+        .map_err(|reason| {
+            Step::Failed(Failed::clear(format!(
+                "{task}: the commits of the task branch {task_ref} could not be read: {reason}"
+            )))
+        })?;
+        let foreign: Vec<String> = log
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| {
+                let (commit, subject) = line.split_once('\t')?;
+                (!subject.starts_with(review_prefix)).then(|| format!("{commit} {subject}"))
+            })
+            .collect();
+        if !foreign.is_empty() {
+            return Err(Step::Failed(Failed::stuck(format!(
+                "{task}: the task branch holds commits after the approved candidate that are not the review: {}; a change after hand-in needs a new attempt",
+                foreign.join(", ")
+            ))));
+        }
+    }
     // What merges, and the source the merge commit names for it: as today, the
     // candidate by sha and then the review branch by its name; without a review
     // branch, the task branch alone, which holds both.
@@ -2986,7 +3087,11 @@ fn prepare_merge(
         let only_the_candidate =
             already && task_tip.as_deref().map_or(true, |tip| tip == sha.as_str());
         if !only_the_candidate {
-            merges.push((task_ref.clone(), task_ref.clone()));
+            // The pinned sha merges; the merge commit still names the branch.
+            merges.push((
+                task_tip.clone().unwrap_or_else(|| task_ref.clone()),
+                task_ref.clone(),
+            ));
         }
     } else if !already {
         merges.push((sha.clone(), sha.clone()));
@@ -3119,6 +3224,10 @@ fn run_gate(
         // errors on stderr.
         let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        // T-563: a gate that pushes (or a push that ran beside it) leaves the
+        // remote's chatter in the output; the captain's item and the board
+        // must lead with the gate's own refusal.
+        let combined = without_push_noise(&combined);
         let tail = tail(&combined, 12);
         // T-219: the tail is often slow-test timings, and the captain cannot
         // see what failed in it. The lines that name a failure come first.
@@ -3275,6 +3384,7 @@ struct TrainOp {
     others: Vec<(String, String, bool)>,
     review_fallback: String,
     commit: String,
+    review_prefix: String,
 }
 
 /// A merge train (`[conventions] merge_parallel` above 1): each merge is
@@ -3337,6 +3447,7 @@ fn run_train(
             remote,
             &train_op.review_fallback,
             &train_op.commit,
+            &train_op.review_prefix,
             &mut probe,
             base.as_deref(),
         ) {
@@ -3547,6 +3658,7 @@ fn run_batch(
             remote,
             &batch_op.review_fallback,
             &batch_op.commit,
+            &batch_op.review_prefix,
             &mut probe,
             base.as_deref(),
         ) {
@@ -4331,6 +4443,23 @@ fn tail(text: &str, lines: usize) -> String {
     all[start..].join("\n")
 }
 
+/// T-563: a gate's output without the remote's chatter: the lines git prints
+/// for a push — `remote: …` (the remote's own messages), `To …` (the target),
+/// and the branch lines ` * [new branch] …` / ` - [deleted] …`. A failed gate
+/// keeps its own refusal first instead of leading with lines nobody can act on.
+fn without_push_noise(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !(line.starts_with("remote:")
+                || line.starts_with("To ")
+                || trimmed.starts_with("* [new branch]")
+                || trimmed.starts_with("- [deleted]"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The lines of a gate's output that name a failure (T-219). A line counts
 /// when it starts (after spaces) with `FAIL`, `TIMEOUT` or `SIGSEGV`, or when
 /// it holds `panicked at`, `error[` or `error:`. The lines keep their order,
@@ -4395,6 +4524,137 @@ fn tell_captain(
             state: MsgState::Open,
             created: now,
         })?;
+        Ok(())
+    })
+}
+
+/// The cause of a merge wait, as one item per class (T-566).
+///
+/// A merge that cannot start retries every tick, and each retry used to open
+/// its own item: 47 of them for one worktree that git could not create. One
+/// item per project and cause class says the same thing once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeWaitCause {
+    /// The merge worktree: it could not be created, opened, or it belongs to
+    /// another repository.
+    Worktree,
+    /// Anything else the merge step named.
+    Other,
+}
+
+impl MergeWaitCause {
+    /// The class a reason belongs to: the worktree steps name themselves in
+    /// their reason (`worktree_create: refused …`, `the worktree … belongs to
+    /// another repository …`).
+    fn of(reason: &str) -> MergeWaitCause {
+        if reason.to_lowercase().contains("worktree") {
+            MergeWaitCause::Worktree
+        } else {
+            MergeWaitCause::Other
+        }
+    }
+
+    /// The thread's last part.
+    fn as_str(self) -> &'static str {
+        match self {
+            MergeWaitCause::Worktree => "worktree",
+            MergeWaitCause::Other => "other",
+        }
+    }
+
+    /// Every class: closing a wait closes all of them, since a merge that
+    /// starts has left every cause behind.
+    fn all() -> [MergeWaitCause; 2] {
+        [MergeWaitCause::Worktree, MergeWaitCause::Other]
+    }
+}
+
+/// The thread of a project's merge wait for one cause class (T-566):
+/// `merge-wait:<project>:worktree`.
+fn merge_wait_thread(project: &str, cause: MergeWaitCause) -> String {
+    format!("merge-wait:{project}:{}", cause.as_str())
+}
+
+/// The open item of a thread, if there is one.
+fn open_item(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    thread: &str,
+) -> GearResult<Option<gear_store::MessageRow>> {
+    Ok(tx
+        .thread_messages(project, thread)?
+        .into_iter()
+        .find(|message| matches!(message.state, MsgState::Open | MsgState::Waiting)))
+}
+
+/// Tell the captain that the merge waits, once per project and cause class
+/// (T-566): the body follows the latest reason while the cause lasts, and the
+/// item closes when a merge of the project next starts.
+fn tell_captain_merge_wait(
+    store: &mut Store,
+    project: &str,
+    reason: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let cause = MergeWaitCause::of(reason);
+    let body = format!("merge waits: {reason}");
+    store.write(|tx| {
+        let captain = tx.captain_of(project)?.ok_or_else(|| {
+            GearError::new(
+                ErrorCode::NoTarget,
+                format!("project {project} has no captain"),
+            )
+        })?;
+        let thread = merge_wait_thread(project, cause);
+        if let Some(item) = open_item(tx, project, &thread)? {
+            if item.body != body {
+                tx.update_message_body(project, &item.id, &body)?;
+            }
+            return Ok(());
+        }
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: project.to_string(),
+            thread,
+            task: None,
+            attempt: None,
+            sender: captain.id.clone(),
+            sender_gen: 1,
+            recipient: captain.id,
+            kind: MsgKind::Question,
+            urgent: false,
+            body,
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+        Ok(())
+    })
+}
+
+/// Why a merge wait's item closes: a merge of the project started (T-566).
+const MERGE_WAIT_OVER: &str = "a merge of this project started, so the wait is over";
+
+/// Close the project's merge-wait items: a merge op started, so whatever held
+/// it is gone (T-566).
+fn close_merge_waits(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
+    store.write(|tx| {
+        for cause in MergeWaitCause::all() {
+            let thread = merge_wait_thread(project, cause);
+            let Some(item) = open_item(tx, project, &thread)? else {
+                continue;
+            };
+            tx.update_message_state(
+                project,
+                &item.id,
+                MsgState::Resolved,
+                Some(MERGE_WAIT_OVER),
+                None,
+                None,
+                now,
+            )?;
+        }
         Ok(())
     })
 }
@@ -7044,6 +7304,96 @@ mod tests {
         assert_eq!(open.len(), 1, "{items:?}");
         assert!(open[0].body.contains("a test failed"), "{}", open[0].body);
         assert_eq!(items.len(), 2, "the old item closed, a fresh one opened");
+    }
+
+    /// T-566: a merge worktree that cannot be used rings once, not once per
+    /// retry, and the next merge that starts closes the item.
+    #[test]
+    fn a_repeating_worktree_failure_keeps_one_item_and_a_merge_that_starts_closes_it() {
+        let scratch = Scratch::new("merge-wait-item");
+        let foreign_a = Scratch::new("merge-wait-foreign-a");
+        let foreign_b = Scratch::new("merge-wait-foreign-b");
+        let mut store = world(TaskState::Ready);
+        let candidate = scratch.head_of("heat/t5");
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        lost_task(&mut store, &candidate, OpState::Intended, 5);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        // A checkout of another repository stands where the merge worktree goes.
+        herdr.add_worktree(
+            "p/merge/home",
+            &foreign_a.work.display().to_string(),
+            "wt-merge:p1",
+        );
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        // Five retries of the same blocked merge.
+        for tick in 0..3 {
+            merge_passed(&mut store, &mut herdr, &cfg, "p", 20 + tick * 30).unwrap();
+        }
+        // The cause changes (another repository's checkout): the same item
+        // carries the latest reason.
+        herdr.add_worktree(
+            "p/merge/home",
+            &foreign_b.work.display().to_string(),
+            "wt-merge:p1",
+        );
+        for tick in 3..5 {
+            merge_passed(&mut store, &mut herdr, &cfg, "p", 20 + tick * 30).unwrap();
+        }
+
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-wait:p:worktree"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "one item, not one per retry: {items:?}");
+        assert_eq!(items[0].state, MsgState::Open, "still waiting");
+        assert!(
+            items[0].body.starts_with("merge waits: "),
+            "{}",
+            items[0].body
+        );
+        assert!(
+            items[0]
+                .body
+                .contains(&foreign_b.work.display().to_string()),
+            "the latest reason: {}",
+            items[0].body
+        );
+        assert!(
+            !items[0]
+                .body
+                .contains(&foreign_a.work.display().to_string()),
+            "the earlier reason is gone: {}",
+            items[0].body
+        );
+
+        // The merge worktree is right now: the merge starts and the item closes.
+        let path = scratch.root.join("merge");
+        sh(
+            &scratch.root,
+            &format!(
+                "git -C {} worktree add -q -b p/merge/home {} origin/dev",
+                scratch.work.display(),
+                path.display()
+            ),
+        );
+        herdr.add_worktree("p/merge/home", &path.display().to_string(), "wt-merge:p1");
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 400).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-wait:p:worktree"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
+        assert_eq!(items[0].result.as_deref(), Some(MERGE_WAIT_OVER));
     }
 
     /// T-565: the merge seat is not a `SeatRow`, so no apply and no lane pass
@@ -9713,6 +10063,7 @@ gate = "{gate}"
             gear_model::commit::MERGE_MESSAGE,
             &[("task", op.task.as_deref().unwrap_or_default())],
         );
+        let prefix = test_review_prefix(op);
         step_result(merge_with_retries(
             worktree,
             repo,
@@ -9727,6 +10078,7 @@ gate = "{gate}"
             None,
             &review,
             &commit,
+            &prefix,
             "",
         ))
     }
@@ -11264,6 +11616,30 @@ gate = "{project_gate}"
         );
     }
 
+    /// T-563: a gate that pushed leaves the remote's chatter in its output;
+    /// the refusal the captain reads comes first and no `remote:` line is kept
+    /// (prometheus: the item led with push noise).
+    #[test]
+    fn a_failed_gate_keeps_its_refusal_and_drops_the_push_noise() {
+        let text =
+            "remote: \nremote: Create a pull request for 'p/heat/t1' on GitHub by visiting: \n\
+                    remote:      https://github.com/o/r/pull/new/p/heat/t1\n\
+                    To github.com:o/r.git\n\
+                     * [new branch]      p/heat/t1 -> p/heat/t1\n\
+                     - [deleted]         p/heat/t0\n\
+                    make gate\n  FAIL [t] the_broken_test\n\
+                    the judge refuses at judge: T-1 has no report\n";
+        let kept = without_push_noise(text);
+        assert!(!kept.contains("remote:"), "{kept}");
+        assert!(!kept.contains("To github.com"), "{kept}");
+        assert!(!kept.contains("[new branch]"), "{kept}");
+        assert!(!kept.contains("[deleted]"), "{kept}");
+        // The refusal is still what the captain reads first (T-219's lines).
+        let failures = failure_lines(&kept, 20);
+        assert_eq!(failures, vec!["  FAIL [t] the_broken_test"], "{failures:?}");
+        assert!(tail(&kept, 12).ends_with("the judge refuses at judge: T-1 has no report"));
+    }
+
     /// T-219: the failure lines are the ones that name a failure: a line that
     /// starts (after spaces) with FAIL, TIMEOUT or SIGSEGV, or one that holds
     /// `panicked at`, `error[` or `error:`.
@@ -11577,11 +11953,13 @@ gate = "{project_gate}"
         let worktree = scratch.merge_worktree();
         let candidate = scratch.head_of("heat/t5");
         // The reviewer's commit goes onto the task branch, and no review
-        // branch is on the remote.
+        // branch is on the remote. Its subject is the project's review message
+        // (T-564): anything else on the branch is a lane commit made after the
+        // hand-in.
         sh(
             &scratch.work,
             "git switch -q heat/t5 && echo r > r5.txt && git add -A \
-             && git -c user.name=a -c user.email=a@b commit -qm r5",
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass, r5'",
         );
         publish(&scratch.work, "heat/t5");
         sh(
@@ -11606,6 +11984,123 @@ gate = "{project_gate}"
             "{:?}",
             scratch.origin_branches()
         );
+    }
+
+    /// T-564: a lane commit pushed onto the task branch after the hand-in is
+    /// not merged (prometheus, 2026-11-04: hull's fix on T-562 would have
+    /// landed unreviewed). The op fails `stuck` and names the commit.
+    #[test]
+    fn a_lane_commit_after_the_candidate_on_the_task_branch_is_refused() {
+        let scratch = Scratch::new("task-branch-lane-commit");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The review, then the lane's own fix on top of it.
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass' \
+             && echo w > w5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'fix the thing after hand-in'",
+        );
+        publish(&scratch.work, "heat/t5");
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+        let lane_commit = scratch.head_of("heat/t5");
+
+        let failed = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap_err();
+
+        assert_eq!(failed.blocker, Blocker::Stuck, "{}", failed.reason);
+        assert!(
+            failed.reason.contains(&lane_commit),
+            "the lane commit is named: {}",
+            failed.reason
+        );
+        assert!(
+            failed.reason.contains("fix the thing after hand-in"),
+            "{}",
+            failed.reason
+        );
+        assert!(
+            failed
+                .reason
+                .contains("a change after hand-in needs a new attempt"),
+            "{}",
+            failed.reason
+        );
+        // Nothing landed: dev is where it was.
+        assert!(!scratch.dev_log().contains("fix the thing"));
+    }
+
+    /// T-564: the lane commit merged in under a merge commit is caught too: the
+    /// range keeps every commit, and the merge commit's own subject is no pass.
+    #[test]
+    fn a_pulled_in_lane_commit_under_a_merge_commit_is_refused() {
+        let scratch = Scratch::new("task-branch-merge-commit");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass' \
+             && git checkout -q -b lane-side \
+             && echo w > w5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'lane fix' \
+             && git switch -q heat/t5 \
+             && git -c user.name=a -c user.email=a@b merge -q --no-ff lane-side -m 'review(T-5): pass'",
+        );
+        publish(&scratch.work, "heat/t5");
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+
+        let failed = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap_err();
+
+        assert_eq!(failed.blocker, Blocker::Stuck, "{}", failed.reason);
+        assert!(
+            failed.reason.contains("lane fix"),
+            "the pulled-in commit is named: {}",
+            failed.reason
+        );
+    }
+
+    /// T-564 review F1: the documented conflict fix is `merge dev into the
+    /// task branch, resolve, push, remerge` (course.md). That merge brings the
+    /// integration branch's own commits into the range, and they are reviewed
+    /// work already on the branch, not lane commits: the merge goes through.
+    #[test]
+    fn a_task_branch_that_merged_the_integration_branch_still_merges() {
+        let scratch = Scratch::new("task-branch-dev-merge");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The integration branch moves after the hand-in, and the task branch
+        // takes it in: the captain's conflict fix, with nothing to resolve.
+        sh(
+            &scratch.work,
+            "git switch -q dev && echo d > devd.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'dev moved'",
+        );
+        publish(&scratch.work, "dev");
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass' \
+             && git -c user.name=a -c user.email=a@b merge -q --no-edit dev",
+        );
+        publish(&scratch.work, "heat/t5");
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+
+        let line = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap();
+
+        assert!(line.contains("merged T-5"), "{line}");
+        let log = scratch.dev_log();
+        assert!(log.contains("review(T-5)"), "the review landed: {log}");
+        assert!(log.contains("dev moved"), "dev's commit is there: {log}");
     }
 
     /// T-558, the transition: a task reviewed before the change still has its

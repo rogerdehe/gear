@@ -404,11 +404,16 @@ use std::path::{Path, PathBuf};
 
 /// An open `merge-failed:T-1` item, as the engine leaves it when a merge fails.
 fn open_failed_item(s: &mut Store) -> String {
+    open_item(s, "merge-failed:T-1")
+}
+
+/// An open engine item of T-1 in `thread`.
+fn open_item(s: &mut Store, thread: &str) -> String {
     s.write(|tx| {
         tx.insert_message(&NewMessage {
             meta: None,
             project: "p".into(),
-            thread: "merge-failed:T-1".into(),
+            thread: thread.into(),
             task: Some("T-1".into()),
             attempt: Some(1),
             sender: "engine".into(),
@@ -563,6 +568,8 @@ fn a_remerge_of_a_candidate_already_on_the_integration_branch_queues_nothing() {
     accepted_task_on(&mut s, &candidate);
     failed_merge(&mut s, T0 + 10);
     open_failed_item(&mut s);
+    // The lost-merge scan may have spoken too (T-563, M-7875).
+    open_item(&mut s, "merge-lost:T-1");
     assert_eq!(merge_op_count(&mut s), 1, "the failed op is history");
 
     let result = run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap();
@@ -585,6 +592,15 @@ fn a_remerge_of_a_candidate_already_on_the_integration_branch_queues_nothing() {
     assert_eq!(
         items[0].result.as_deref(),
         Some(format!("the candidate {candidate} is already on the integration branch").as_str())
+    );
+    let lost = s
+        .read(|tx| tx.thread_messages("p", "merge-lost:T-1"))
+        .unwrap();
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert_eq!(
+        lost[0].state,
+        MsgState::Resolved,
+        "the lost-merge item closes too: {lost:?}"
     );
     // The attempt is recorded merged, so its dependants may start (T-609).
     let merged = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap().merged;

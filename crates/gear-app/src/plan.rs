@@ -1455,6 +1455,9 @@ fn apply_queue(
         Some(config) => config.lanes.into_iter().map(|lane| lane.name).collect(),
         None => Vec::new(),
     };
+    // The lanes this apply brings back (T-563): the warning about a task on a
+    // lane nobody works must not fire for a lane it has just staffed.
+    let mut revived: Vec<String> = Vec::new();
     if !lanes.is_empty() {
         let tasks = tx.tasks_of_project(project)?;
         let quota = tx
@@ -1502,7 +1505,15 @@ fn apply_queue(
             )?;
             running += 1;
             staffed.push(format!("start {}", seat.name));
+            revived.push(seat.name.clone());
         }
+    }
+
+    // T-563: a task on a lane nobody works will never start (prometheus,
+    // 2026-11-04: four `now` tasks went to retired lanes). A warning, never a
+    // refusal: the apply stands, the captain is told.
+    for warning in retired_lane_warnings(tx, project, &revived)? {
+        warnings.push(warning);
     }
 
     // T-473: two Ready tasks on different lanes that name one file are a
@@ -1814,8 +1825,8 @@ fn on_integration(
 }
 
 /// Close the open merge items of a task (T-112: a cancelled task; T-92 F1: a
-/// remerge of an already-merged candidate): its failed merge and its push
-/// refusal are history. `result` is the line the captain reads — "cancelled by
+/// remerge of an already-merged candidate): its failed merge, its push refusal
+/// and its lost-merge word are history (T-563 left M-7875 open). `result` is the line the captain reads — "cancelled by
 /// the captain" or "the candidate <sha> is already on the integration branch".
 /// Returns the message ids that were closed.
 fn resolve_merge_items(
@@ -1826,7 +1837,11 @@ fn resolve_merge_items(
     now: Ts,
 ) -> GearResult<Vec<String>> {
     let mut resolved = Vec::new();
-    for thread in [format!("merge-failed:{task}"), format!("push:{task}")] {
+    for thread in [
+        format!("merge-failed:{task}"),
+        format!("push:{task}"),
+        format!("merge-lost:{task}"),
+    ] {
         for message in tx.thread_messages(project, &thread)? {
             if !matches!(
                 message.state,
@@ -3024,6 +3039,46 @@ mod tests {
         let draft = parse(text).unwrap();
         let (env, fp) = cap();
         apply(s, &env, Some(&fp), None, &draft, text, rid, NOW)
+    }
+
+    /// T-563: a task on a lane nobody works is named after the apply, one line
+    /// per task, and the apply still stands (prometheus, 2026-11-04: four
+    /// `now` tasks went to retired lanes and sat ready).
+    #[test]
+    fn a_task_on_a_retired_lane_is_named_and_the_apply_stands() {
+        let mut s = world();
+        s.write(|tx| {
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "codex", NOW)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p3", "codex", NOW)?;
+            tx.set_seat_state("p:heat", SeatState::Retiring, None, NOW)?;
+            tx.set_seat_state("p:heat", SeatState::Retired, None, NOW)
+        })
+        .unwrap();
+        let r = run(
+            &mut s,
+            &draft_text(
+                0,
+                "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\
+                 ## NEW [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n\
+                 ## NEW [must] lane=hull\ngoal: C\naccept: c\nestimate: 30\ndeps: -\n",
+            ),
+            "r1",
+        )
+        .unwrap();
+        assert_eq!(
+            r.warnings,
+            vec![
+                "warning: T-1 is on lane heat, which is retired: move it to a working lane or bring the lane back",
+                "warning: T-2 is on lane heat, which is retired: move it to a working lane or bring the lane back",
+            ],
+            "{:?}",
+            r.warnings
+        );
+        // The apply stands: the tasks are in the store.
+        assert_eq!(
+            s.read(|tx| tx.get_task("p", "T-2")).unwrap().unwrap().state,
+            TaskState::Ready
+        );
     }
 
     #[test]
@@ -4808,6 +4863,43 @@ fn drop_milestone(
     }
     tx.delete_voyage(project, milestone)?;
     Ok(())
+}
+
+/// T-563: one warning per open task on a lane no seat works (no seat of the
+/// lane is Active or Standby), in plan order:
+/// `warning: T-3 is on lane heat, which is retired: move it to a working lane or
+/// bring the lane back`. Read-only: the apply writes what it wrote.
+fn retired_lane_warnings(
+    tx: &Tx<'_>,
+    project: &str,
+    revived: &[String],
+) -> GearResult<Vec<String>> {
+    let seats = tx.seats_of_project(project)?;
+    let mut warnings = Vec::new();
+    for task in tx.tasks_of_project(project)? {
+        if matches!(task.state, TaskState::Done | TaskState::Cancelled) {
+            continue;
+        }
+        let Some(lane) = task.lane.as_deref() else {
+            continue;
+        };
+        if revived.iter().any(|name| name == lane) {
+            continue;
+        }
+        let worked = seats.iter().any(|seat| {
+            seat.role == SeatRole::Lane
+                && seat.name == lane
+                && matches!(seat.state, SeatState::Active | SeatState::Standby)
+        });
+        if worked {
+            continue;
+        }
+        warnings.push(format!(
+            "warning: {} is on lane {lane}, which is retired: move it to a working lane or bring the lane back",
+            task.id
+        ));
+    }
+    Ok(warnings)
 }
 
 /// T-473: one warning per file two Ready tasks on different lanes name. The
