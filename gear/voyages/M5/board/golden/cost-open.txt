@@ -13,7 +13,7 @@
                · S3 goal lock + v0.5.0 — planned by 8h00m                                                                                                       
  Time          ██████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░◆░│  used 3h32m · planned 8h00m · expected 7h35m (slowest lane: mast), 0h25m ahead of plan        
                █ used   ◆ expected finish   │ planned end                                                                                                       
- Tasks         ████████████████████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░  5 of 12 merged · 4 in progress · 3 not started                                               
+ Tasks         ████████████████████▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░  5 of 12 on dev · 1 passed, not on dev · 3 in progress · 3 not started                        
                █ merged   ▓ in progress   ░ not started                                                                                                         
                                                                                                                                             d: fold             
  ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 

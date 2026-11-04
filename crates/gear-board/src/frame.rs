@@ -13,6 +13,7 @@ use crate::graph;
 use crate::idle::IdleReason;
 use crate::style::{lane_color, Color, Line, Style};
 use crate::{Board, LaneBoard, ProjectBoard, QuotaReading, QuotaWindow, TaskBoard, VoyageEntry};
+use std::collections::BTreeMap;
 
 /// The four views of the board: the tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -777,7 +778,7 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
 
 /// The numbers the header's time and tasks rows read (T-354), all in
 /// minutes.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct HeaderNumbers {
     /// The time the voyage used: from its departure to now while it sails, to
     /// its merge once it landed.
@@ -794,8 +795,12 @@ struct HeaderNumbers {
     diff: i64,
     /// The voyage's tasks: the cancelled ones are not work.
     tasks: usize,
-    /// The tasks merged, in progress and not started.
+    /// The branch the voyage merges into: the one most of its tasks name.
+    integration: String,
+    /// The tasks on that branch, passed but not on it yet, in progress and
+    /// not started.
     merged: usize,
+    unlanded: usize,
     going: usize,
     waiting: usize,
 }
@@ -826,6 +831,7 @@ fn header_numbers(board: &Board, project: &ProjectBoard) -> HeaderNumbers {
     let mut tasks = 0usize;
     let mut merged = 0usize;
     let mut waiting = 0usize;
+    let mut unlanded = 0usize;
     for task in project.lanes.iter().flat_map(|lane| lane.tasks.iter()) {
         if task.state == gear_model::TaskState::Cancelled {
             continue;
@@ -833,11 +839,23 @@ fn header_numbers(board: &Board, project: &ProjectBoard) -> HeaderNumbers {
         tasks += 1;
         match task.stage {
             graph::Stage::Merged => merged += 1,
+            graph::Stage::Passed | graph::Stage::Merging | graph::Stage::MergeFailed => {
+                unlanded += 1
+            }
             graph::Stage::Deps | graph::Stage::Queued | graph::Stage::Held => waiting += 1,
             _ => {}
         }
     }
-    let going = tasks.saturating_sub(merged + waiting);
+    let going = tasks.saturating_sub(merged + waiting + unlanded);
+    let mut names: BTreeMap<&str, usize> = BTreeMap::new();
+    for task in project.lanes.iter().flat_map(|lane| lane.tasks.iter()) {
+        *names.entry(task.integration.as_str()).or_default() += 1;
+    }
+    let integration = names
+        .into_iter()
+        .max_by_key(|(_, n)| *n)
+        .map(|(name, _)| name.to_string())
+        .unwrap_or_else(|| "the integration branch".to_string());
 
     HeaderNumbers {
         used,
@@ -846,7 +864,9 @@ fn header_numbers(board: &Board, project: &ProjectBoard) -> HeaderNumbers {
         sailing,
         diff,
         tasks,
+        integration,
         merged,
+        unlanded,
         going,
         waiting,
     }
@@ -900,9 +920,11 @@ fn folded_rows(
         diff,
         tasks,
         merged,
+        unlanded,
+        integration,
         going,
         waiting,
-    } = numbers;
+    } = numbers.clone();
 
     // The folded header's bar: the prototype's shorter one.
     let n = (width.saturating_sub(60) / 2).clamp(20, 40);
@@ -993,7 +1015,7 @@ fn folded_rows(
     canvas.put_styled(
         mx + 12 + n,
         row,
-        &format!("{merged}/{tasks} merged · {going} going · {waiting} waiting"),
+        &format!("{merged}/{tasks} on {integration} · {unlanded} passed, not on {integration} · {going} going · {waiting} waiting"),
         Style::PLAIN,
     );
     row += 1;
@@ -1032,9 +1054,11 @@ fn unfolded_rows(
         diff,
         tasks,
         merged,
+        unlanded,
+        integration,
         going,
         waiting,
-    } = numbers;
+    } = numbers.clone();
 
     // The unfolded header's bar: the prototype's wider one.
     let n = width.saturating_sub(95).clamp(20, 50);
@@ -1169,7 +1193,7 @@ fn unfolded_rows(
         Style::fg(Color::Dim),
     );
     let mut words =
-        format!("{merged} of {tasks} merged · {going} in progress · {waiting} not started");
+        format!("{merged} of {tasks} on {integration} · {unlanded} passed, not on {integration} · {going} in progress · {waiting} not started");
     if !project.moved_out.is_empty() {
         let moved: Vec<&str> = project
             .moved_out
@@ -2337,7 +2361,8 @@ pub fn styled_lane_panel(lane: &LaneBoard, tasks: &[graph::GraphTask], color: Co
                     task.stage,
                     &task.deps,
                     task.rounds,
-                    task.moved_to.as_deref()
+                    task.moved_to.as_deref(),
+                    &task.integration
                 )
             ),
             Style::fg(task.stage.color()),

@@ -89,8 +89,9 @@ STAGE = {  # M5 change 7: one stage per task, in time order, in words
     "working": "working", "asking": "waits for the captain's answer",
     "handed": "handed in, waits for a reviewer", "review": "in review",
     "verdict": "waits for the captain's verdict", "sentback": "sent back, rework queued",
-    "rework": "reworking (round {round})", "passed": "passed, waits to merge", "merging": "merging (gate running)",
-    "mergefail": "merge failed, waits for the captain", "done": "merged", "failed": "failed (rounds used up)",
+    "rework": "reworking (round {round})", "passed": "passed, not on dev yet", "merging": "merging (gate running)",
+    "mergefail": "merge into dev failed, waits for the captain", "done": "on dev",
+    "failed": "failed (rounds used up)",
     "moved": "moved to {to}",
 }
 OPEN = ("delivered", "working", "asking", "handed", "review", "verdict", "sentback", "rework", "passed", "merging",
@@ -210,7 +211,10 @@ def header(w, view):
         when = f"took {hm(V['used_m'])} · planned {hm(V['eta_m'])} · " + (f"{hm(diff)} under plan" if diff >= 0 else f"{hm(-diff)} over plan")
     tasks = [t for t in T if t[2] != "moved"]
     merged = sum(1 for t in tasks if t[2] == "done"); waiting = sum(1 for t in tasks if t[2] in ("queued", "deps"))
-    going = len(tasks) - merged - waiting; moved = [t[0] for t in T if t[2] == "moved"]
+    # v0.6.54: passed, merging and merge-failed are on no branch yet; they are
+    # counted apart from the work going on.
+    unlanded = sum(1 for t in tasks if t[2] in ("passed", "merging", "mergefail"))
+    going = len(tasks) - merged - waiting - unlanded; moved = [t[0] for t in T if t[2] == "moved"]
     k = max(1, len(tasks)); a_, b_ = merged * n // k, going * n // k
     met = sum(d[0] for d in G["DONE"])
     now = next((st for st in G["STATIONS"] if st[2] == "now"), G["STATIONS"][-1])
@@ -232,7 +236,7 @@ def header(w, view):
         put(w, y, 1, "Time", L); put(w, y, 15, "".join(cells), C["ok"] if diff >= 0 else C["bad"])
         put(w, y, 16 + n, short, C["ok"] if diff >= 0 else C["bad"])
         put(w, y, mx, "Tasks", L); taskbar(mx + 11, y)
-        put(w, y, mx + 12 + n, f"{merged}/{len(tasks)} merged · {going} going · {waiting} waiting")
+        put(w, y, mx + 12 + n, f"{merged}/{len(tasks)} on dev · {unlanded} passed, not on dev · {going} going · {waiting} waiting")
         y += 1
         put(w, y, 1, "d: unfold the goal check, milestones, time and tasks", C["dim"]); y += 1
     else:
@@ -249,7 +253,7 @@ def header(w, view):
         put(w, y, 15, "".join(cells), C["ok"] if diff >= 0 else C["bad"]); put(w, y, 17 + n, when, C["b"]); y += 1
         put(w, y, 15, "█ used   ◆ expected finish   │ planned end", C["dim"]); y += 1
         put(w, y, 1, "Tasks", L); taskbar(15, y)
-        put(w, y, 17 + n, f"{merged} of {len(tasks)} merged · {going} in progress · {waiting} not started"
+        put(w, y, 17 + n, f"{merged} of {len(tasks)} on dev · {unlanded} passed, not on dev · {going} in progress · {waiting} not started"
                           + (f" · moved out: {', '.join(moved)}" if moved else ""), C["b"]); y += 1
         put(w, y, 15, "█ merged   ▓ in progress   ░ not started", C["dim"]); y += 1
         put(w, y, wd - 20, "d: fold", C["dim"]); y += 1
