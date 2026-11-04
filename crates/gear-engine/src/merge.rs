@@ -857,12 +857,17 @@ fn settle_report(
         // the new tip on the next tick.
         Report::Raced(reason) => {
             let first = reason.lines().next().unwrap_or_default();
+            let why = if unreachable(&reason) {
+                "the remote could not be read"
+            } else {
+                "the integration branch moved"
+            };
             retry_merge(
                 store,
                 project,
                 op,
                 &format!(
-                    "{first} — the integration branch moved during each of {} tries; \
+                    "{first} — {why} during each of {} tries; \
                      it merges again from the new tip on the next tick",
                     MERGE_RETRIES + 1
                 ),
@@ -1290,6 +1295,8 @@ fn merge_order(ready: Vec<OpRow>) -> Vec<OpRow> {
 
 /// A push rejected because the integration branch moved meanwhile.
 const RACE: &str = "push race: ";
+/// A fetch of the remote that failed.
+const FETCH: &str = "fetch remote failed: ";
 /// How many times a merge that failed for a reason that can clear is retried
 /// before it fails (T-61).
 const MERGE_RETRIES: u32 = 3;
@@ -1418,7 +1425,13 @@ fn merge_with_retries(
                     // merge goes back to the queue. A "cannot lock ref"
                     // failure is not that — it can be a stale local lock —
                     // and PR mode keeps its Failed end (T-280 §3).
-                    if pr.is_none() && lost_the_race(&failed.reason) {
+                    // A remote that could not be read through every retry
+                    // (the network or the host refused) says nothing about
+                    // the work: it goes back to the queue too (2026-11-04,
+                    // GitHub refused SSH for minutes and T-675 failed).
+                    if pr.is_none()
+                        && (lost_the_race(&failed.reason) || unreachable(&failed.reason))
+                    {
                         probe.done();
                         return Step::Raced(failed.reason);
                     }
@@ -2600,6 +2613,11 @@ fn step_result(step: Step) -> Result<String, Failed> {
 /// another merge landed on the integration branch between the fetch and the
 /// push. A "cannot lock ref" failure is not that: it can be a stale local
 /// lock, so it keeps the failed end.
+/// Whether a merge failed only because its fetch could not read the remote.
+fn unreachable(reason: &str) -> bool {
+    reason.starts_with(FETCH)
+}
+
 fn lost_the_race(reason: &str) -> bool {
     reason.starts_with(RACE)
         && (reason.contains("non-fast-forward") || reason.contains("fetch first"))
@@ -2725,7 +2743,7 @@ fn prepare_merge(
             ) {
                 probe.step("fetch");
                 return Err(Step::Failed(Failed::clear(format!(
-                    "fetch {remote_name}: {reason}"
+                    "{FETCH}{remote_name}: {reason}"
                 ))));
             }
             if let Err(reason) = git(
