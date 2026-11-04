@@ -81,17 +81,46 @@ pub fn handover(
     pane: &str,
     now: Ts,
 ) -> GearResult<Handover> {
+    handover_of(store, env, herdr, ancestors, cwd, None, pane, now)
+}
+
+/// [`handover`] with the project named by the caller (`--project`): two
+/// projects may share one checkout, so the user's terminal names the one whose
+/// captain moves. The caller is proven exactly as without it.
+#[allow(clippy::too_many_arguments)]
+pub fn handover_of(
+    store: &mut Store,
+    env: &Env,
+    herdr: &mut dyn gear_herdr::HerdrAct,
+    ancestors: &[u32],
+    cwd: &Path,
+    named: Option<&str>,
+    pane: &str,
+    now: Ts,
+) -> GearResult<Handover> {
     // 1. Where does this process really run? Without a pane nothing can be
     //    proven about the caller.
     let Some(real) = identity::real_pane(herdr, ancestors) else {
         return Err(GearError::new(
             ErrorCode::Forbidden,
-            "the handover runs in no pane of this session: run it in the captain's pane or in your own terminal",
+            "the handover runs in no pane of this session (a CLI that runs its commands outside its pane cannot prove it is the captain): run it in the captain's pane, or in a shell pane of this session with no agent, as `gear --session <session> captain handover --project <project> --pane <new pane>`",
         ));
     };
     // 2. The project: the caller's own, else the one whose checkout holds the
     //    working directory (the user's terminal in the project).
-    let project = project_of(store, env, cwd)?;
+    let project = match (named, &env.ctx) {
+        (Some(named), Some(ctx)) if ctx.project != named => {
+            return Err(GearError::new(
+                ErrorCode::Forbidden,
+                format!(
+                    "--project {named} names another project than this seat's ({})",
+                    ctx.project
+                ),
+            ));
+        }
+        (Some(named), _) => named.to_string(),
+        (None, _) => project_of(store, env, cwd)?,
+    };
     let captain = format!("{project}:captain");
     let seat = store
         .read(|tx| tx.get_seat(&captain))?
@@ -643,6 +672,27 @@ fn document_place(cwd: &Path, document: &str) -> String {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
         (!text.is_empty()).then_some(text)
     };
+    if !cwd.join(document).exists() {
+        // Committed on another branch only: name where to read it.
+        let Some(commit) = git(&["log", "--all", "-1", "--format=%h", "--", document]) else {
+            return " (not committed)".to_string();
+        };
+        let branch = git(&[
+            "for-each-ref",
+            "--contains",
+            &commit,
+            "--format=%(refname:short)",
+            "refs/heads",
+            "refs/remotes",
+        ])
+        .and_then(|refs| refs.lines().next().map(str::to_string));
+        return match branch {
+            Some(branch) => format!(
+                " (branch {branch}, commit {commit}, not in this checkout: `git show {commit}:{document}`)"
+            ),
+            None => format!(" (commit {commit}, not in this checkout: `git show {commit}:{document}`)"),
+        };
+    }
     let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"]);
     let commit = git(&["log", "-1", "--format=%h", "--", document]);
     match (branch, commit) {
@@ -760,12 +810,32 @@ fn request_key(project: &str) -> String {
 /// there is one. The names carry the date and time, so the last one in name
 /// order is the newest.
 fn newest_handover(root: &Path, directory: &str) -> Option<String> {
+    // The checkout's own files, and every document committed on any branch:
+    // the outgoing captain commits it on its home branch, which is rarely the
+    // branch this checkout is on. The names carry the date, so the last one
+    // sorted is the newest.
     let mut names: Vec<String> = std::fs::read_dir(root.join(directory))
-        .ok()?
-        .flatten()
-        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
-        .filter(|name| name.starts_with("captain-") && name.ends_with(".md"))
-        .collect();
+        .map(|dir| {
+            dir.flatten()
+                .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Ok(output) = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["log", "--all", "--format=", "--name-only", "--", directory])
+        .output()
+    {
+        if output.status.success() {
+            names.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter_map(|line| line.rsplit('/').next().map(str::to_string)),
+            );
+        }
+    }
+    names.retain(|name| name.starts_with("captain-") && name.ends_with(".md"));
     names.sort();
     names.pop().map(|name| format!("{directory}/{name}"))
 }

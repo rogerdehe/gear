@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use gear_app::captain::{handover, Asker};
+use gear_app::captain::{handover, handover_of, Asker};
 use gear_app::identity::{observe, require_seat};
 use gear_app::Env;
 use gear_herdr::fake::FakeHerdr;
@@ -283,4 +283,49 @@ fn a_handover_from_the_users_own_shell_is_allowed() {
         "{}",
         error.detail
     );
+}
+
+/// Two projects may share one checkout: the user's terminal names the project
+/// with `--project`, wherever it runs; a seat may not name another project.
+#[test]
+fn a_handover_from_the_users_terminal_may_name_its_project() {
+    let root = tempfile::tempdir().unwrap();
+    let mut s = world(root.path());
+    let mut herdr = herdr();
+    let user = Env {
+        ctx: None,
+        pane_id: None,
+        admin: false,
+    };
+    let elsewhere = tempfile::tempdir().unwrap();
+
+    let done = handover_of(
+        &mut s,
+        &user,
+        &mut herdr,
+        &USER_CALLER,
+        elsewhere.path(),
+        Some("p"),
+        NEW_PANE,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        (done.project.as_str(), done.to.as_str(), done.asker),
+        ("p", NEW_PANE, Asker::UserShell)
+    );
+
+    let captain = env(Some("captain"), 2, Some(NEW_PANE));
+    let error = handover_of(
+        &mut s,
+        &captain,
+        &mut herdr,
+        &NEW_CALLER,
+        root.path(),
+        Some("other"),
+        CAP_PANE,
+        NOW + 1,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Forbidden, "{}", error.detail);
 }

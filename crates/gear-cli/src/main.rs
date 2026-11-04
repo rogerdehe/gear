@@ -103,6 +103,10 @@ enum CaptainOp {
         /// rebind nothing.
         #[arg(long)]
         facts: bool,
+        /// The project whose captain moves, when the working directory is a
+        /// checkout two projects share (the user's own terminal).
+        #[arg(long, value_name = "PROJECT")]
+        project: Option<String>,
     },
     /// Become the captain of one or more projects from the agent in this
     /// pane: no GEAR_CTX, no pane id. Every named project's captain seat is
@@ -584,10 +588,15 @@ fn run(cli: Cli) -> GearResult<()> {
             op: AdminOp::Redepart { project, milestone },
         }) => cmd_admin_pause(&project, ProjectClock::Redepart(&milestone)),
         Some(Cmd::Captain {
-            op: CaptainOp::Handover { pane, facts },
+            op:
+                CaptainOp::Handover {
+                    pane,
+                    facts,
+                    project,
+                },
         }) => match (facts, pane) {
             (true, _) => cmd_captain_handover_facts(cli.json),
-            (false, Some(pane)) => cmd_captain_handover(&pane, cli.json),
+            (false, Some(pane)) => cmd_captain_handover(&pane, project.as_deref(), cli.json),
             (false, None) => Err(GearError::new(
                 gear_model::ErrorCode::BadFormat,
                 "`gear captain handover` needs --pane <id>, or --facts for the template",
@@ -2547,7 +2556,7 @@ fn engine_line() -> String {
 /// (T-104). Allowed from the captain's own real pane or the user's own terminal
 /// (a shell with no agent); a lane or reviewer asking is refused and the
 /// captain is told which pane asked.
-fn cmd_captain_handover(pane: &str, json: bool) -> GearResult<()> {
+fn cmd_captain_handover(pane: &str, project: Option<&str>, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
     let mut herdr = open_herdr()?;
@@ -2559,12 +2568,13 @@ fn cmd_captain_handover(pane: &str, json: bool) -> GearResult<()> {
             format!("cannot read the working directory: {e}"),
         )
     })?;
-    let result = gear_app::captain::handover(
+    let result = gear_app::captain::handover_of(
         &mut store,
         &env,
         &mut herdr,
         &ancestors,
         &cwd,
+        project,
         pane,
         now_ts(),
     )?;
