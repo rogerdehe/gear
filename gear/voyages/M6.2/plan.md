@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1160 -->
+<!-- gear-plan project=gear base=1161 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -201,4 +201,10 @@ deps: -
 goal: [v0.6.56] A changed default seat branch moves the seat branches too (2026-11-04: GEAR's own project sets no seat_branch, so v0.6.55's new default `{project}/{seat}/home` never ran the rename that an explicit config change runs; `gear/merge` blocked creating `gear/merge/home` — git cannot hold both — and every GEAR merge waited until the captain renamed the branches by hand). Where T-559 renames seat branches on a changed `seat_branch` (crates/gear-app, the apply path), also run it when the engine starts or onboards a seat and finds the seat's worktree on the branch the previous default names (`{project}/{seat}`) while the current template names another; and before creating any seat branch, if a ref is a path prefix of the new name (git's D/F conflict), rename that ref when it is the seat's old branch, else fail naming it.
 accept: Tests: a project with no seat_branch line whose seat worktree stands on `p/hull` is moved to `p/hull/home` at the next start, locally and on the remote when pushed; a foreign ref `p/hull` that is not the seat's branch is named, never touched. Run only the crates the change touches with `make check CRATE=<crate> TESTS='…'`; the merge gate runs `make gate`.
 estimate: 45
+deps: -
+
+## T-566 [now] lane=hull milestone=M6.2
+goal: [v0.6.56] One merge-wait cause rings one item (2026-11-04: the gear/merge/home worktree failure opened 47 separate items, M-7808..M-7859, one per engine retry between 08:25 and 08:27, and they kept arriving one doorbell at a time for 15 minutes after the fix). Find where the merge's "merge waits: <reason>" item is created (grep "merge waits" in crates/gear-engine/src) and give it one thread per project and cause class (e.g. `merge-wait:<project>:worktree`): opened once, its body updated while the cause lasts, closed by the engine when a merge op next starts for that project. No new table.
+accept: A test where the same worktree_create failure repeats over five ticks leaves one open item with the latest reason, and the next successful merge start closes it. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
+estimate: 30
 deps: -
