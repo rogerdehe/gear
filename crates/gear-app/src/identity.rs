@@ -118,7 +118,13 @@ pub fn observe_via(
         let where_ = match real {
             Some(real) if real.as_str() != pane.as_str() => format!("this process runs in pane {real}"),
             Some(_) => "the pane does not list this process".to_string(),
-            None => "no pane of this session runs this process (its tools run outside every pane, and the pane's agent is not one GEAR knows to do that)".to_string(),
+            // A CLI whose tools run in a shared daemon (OpenCode, Codex)
+            // names its pane on the command line (v0.6.19); say so, with the
+            // exact command (Lawrence M-681).
+            None => format!(
+                "no pane of this session runs this process: a CLI whose tools run outside its pane (OpenCode, Codex) names the pane on the command line, so run `{} ...`, the command every GEAR message to the seat spells out",
+                seat_command(&session_of_socket(herdr.socket().as_deref()), pane)
+            ),
         };
         // T-314: a refusal has to be traceable afterwards — which Herdr door
         // was asked, and the ancestry that was matched against its panes.
@@ -452,6 +458,20 @@ pub fn set_explicit_pane(explicit: bool) {
 /// Whether the caller named its pane itself.
 pub fn explicit_pane() -> bool {
     EXPLICIT_PANE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The Herdr session a socket belongs to (`…/sessions/<name>/herdr.sock`);
+/// `<session>` when the path does not say.
+fn session_of_socket(socket: Option<&str>) -> String {
+    socket
+        .map(std::path::Path::new)
+        .and_then(|path| {
+            let dir = path.parent()?;
+            (dir.parent()?.file_name()? == "sessions")
+                .then(|| dir.file_name()?.to_str().map(str::to_string))
+                .flatten()
+        })
+        .unwrap_or_else(|| "<session>".to_string())
 }
 
 /// The command a seat runs GEAR with: its Herdr session and pane named, so

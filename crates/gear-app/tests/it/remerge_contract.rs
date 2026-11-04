@@ -669,3 +669,25 @@ fn a_pass_by_full_sha_stores_the_attempts_candidate() {
     let verdicts = s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap();
     assert_eq!(verdicts.last().unwrap().candidate, "ea91cbf12");
 }
+
+/// A task accepted while it was carried never had a merge of its own
+/// (Lawrence T-34): while it is still carried, remerge refuses and names the
+/// carrier; once `carried-by` is cleared, remerge queues its first merge.
+#[test]
+fn a_remerge_queues_the_first_merge_of_a_task_that_is_no_longer_carried() {
+    let mut s = world(None);
+    accepted_task(&mut s);
+    s.write(|tx| tx.set_task_carried_by("p", "T-1", "q:T-9"))
+        .unwrap();
+    let error = run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap_err();
+    assert!(
+        error.detail.contains("carried by q:T-9"),
+        "{}",
+        error.detail
+    );
+
+    s.write(|tx| tx.set_task_carried_by("p", "T-1", ""))
+        .unwrap();
+    run(&mut s, "# Staff\n- remerge T-1\n", "v4", T0 + 30).unwrap();
+    assert_eq!(queued_merge(&mut s).payload["candidate"], "c1");
+}

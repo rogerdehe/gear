@@ -2665,33 +2665,43 @@ fn remerge(
             .unwrap_or(0)
     };
     merges.sort_by(|a, b| (a.created, op_number(&a.id)).cmp(&(b.created, op_number(&b.id))));
-    let Some(last) = merges.into_iter().last() else {
-        return Err(bad(
-            line,
-            format!(
-                "{task_id} has no merge to retry: the engine queues one when its review passes"
-            ),
-        ));
-    };
-    match last.state {
-        // A voided merge merged nothing: the accepted attempt above may be
-        // queued again.
-        gear_model::OpState::Failed | gear_model::OpState::Void => {}
-        gear_model::OpState::Confirmed => {
-            return Err(bad(
-                line,
-                format!("{task_id} is already merged ({})", last.id),
-            ))
+    // A task accepted while it was carried by another never had a merge of
+    // its own (Lawrence T-34): once its carried-by is cleared, remerge queues
+    // its first one. While it is still carried, it lands with its carrier.
+    let last_state = match merges.into_iter().last() {
+        Some(last) => Some((last.state, last.id)),
+        None => {
+            if let Some(by) = tx.task_carried_by(project, task_id)? {
+                return Err(bad(
+                    line,
+                    format!(
+                        "{task_id} is carried by {by}: it lands with that merge; clear `carried-by` to merge it alone"
+                    ),
+                ));
+            }
+            None
         }
-        state => {
-            return Err(bad(
-                line,
-                format!(
-                    "a merge of {task_id} is already {} ({}), not failed: nothing to retry",
+    };
+    if let Some((state, last_id)) = last_state {
+        match state {
+            // A voided merge merged nothing: the accepted attempt above may be
+            // queued again.
+            gear_model::OpState::Failed | gear_model::OpState::Void => {}
+            gear_model::OpState::Confirmed => {
+                return Err(bad(
+                    line,
+                    format!("{task_id} is already merged ({last_id})"),
+                ))
+            }
+            state => {
+                return Err(bad(
+                    line,
+                    format!(
+                    "a merge of {task_id} is already {} ({last_id}), not failed: nothing to retry",
                     state.as_str(),
-                    last.id
                 ),
-            ))
+                ))
+            }
         }
     }
     // The same payload the engine writes when a review passes: the lane's

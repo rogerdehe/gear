@@ -5688,10 +5688,12 @@ mod tests {
             })
             .unwrap();
         accept(&mut store, "T-5", 0);
-        let error = plan_remerge(&mut store, "T-5", 40).unwrap_err();
-        assert!(error.detail.contains("no merge to retry"), "{error:?}");
-        let error = plan_remerge(&mut store, "T-99", 41).unwrap_err();
+        // An accepted task with no merge of its own (it was carried, Lawrence
+        // T-34) gets its first one from a remerge.
+        let error = plan_remerge(&mut store, "T-99", 40).unwrap_err();
         assert!(error.detail.contains("no task T-99"), "{error:?}");
+        plan_remerge(&mut store, "T-5", 41).unwrap();
+        assert_eq!(merge_op(&mut store).state, OpState::Intended);
     }
 
     /// A done task whose attempt was accepted with `candidate`, whose merge op
