@@ -17,6 +17,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 mod migrate;
+mod remap;
+pub use remap::CommitMap;
 
 pub const SCHEMA_SQL: &str = include_str!("schema.sql");
 pub use migrate::{OLDEST_VERSION, SCHEMA_VERSION, STEPS};

@@ -349,6 +349,14 @@ enum AdminOp {
         #[arg(long, default_value = "paused by the user")]
         reason: String,
     },
+    /// After the repository's history was rewritten: every commit id the
+    /// session's store names (candidates, merge payloads, items) becomes the
+    /// new one, from `git filter-repo`'s commit-map. Needs GEAR_ADMIN=1 and a
+    /// stopped engine (`gear admin stop --hold`); start it again after.
+    RemapCommits {
+        /// The commit-map file (`<old> <new>` per line).
+        map: std::path::PathBuf,
+    },
     /// Lift `gear admin pause`: the engine works on the project again, and
     /// the paused hours do not count in its voyages' elapsed time.
     Resume {
@@ -570,6 +578,9 @@ fn run(cli: Cli) -> GearResult<()> {
             op: AdminOp::Resume { project },
         }) => cmd_admin_pause(&project, ProjectClock::Resume),
         Some(Cmd::Admin {
+            op: AdminOp::RemapCommits { map },
+        }) => cmd_admin_remap_commits(&map),
+        Some(Cmd::Admin {
             op: AdminOp::Redepart { project, milestone },
         }) => cmd_admin_pause(&project, ProjectClock::Redepart(&milestone)),
         Some(Cmd::Captain {
@@ -633,6 +644,9 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
         })
         | Some(Cmd::Admin {
             op: AdminOp::Resume { .. },
+        })
+        | Some(Cmd::Admin {
+            op: AdminOp::RemapCommits { .. },
         })
         | Some(Cmd::Admin {
             op: AdminOp::Redepart { .. },
@@ -3964,6 +3978,48 @@ fn hold_engine(dir: &std::path::Path) -> GearResult<()> {
 
 /// `gear admin stop`: signal the engine named in its lock file. With `hold`
 /// it writes `engine.hold` as well, so the stop stays (T-394).
+/// `gear admin remap-commits <map>`: rewrite the commit ids of this
+/// session's store after a history rewrite, with the engine held off.
+fn cmd_admin_remap_commits(map_path: &std::path::Path) -> GearResult<()> {
+    let env = env_from_process()?;
+    if env.ctx.is_some() || !env.admin {
+        return Err(GearError::new(
+            gear_model::ErrorCode::Forbidden,
+            "`gear admin remap-commits` is the user's call: it needs GEAR_ADMIN=1 outside every seat",
+        ));
+    }
+    let dir = engine_dir()
+        .ok_or_else(|| GearError::new(gear_model::ErrorCode::NoTarget, "GEAR_DB is not set"))?;
+    // Holding the engine's lock keeps the engine off while the ids change.
+    let _lock = take_engine_lock(&dir).map_err(|_| {
+        GearError::new(
+            gear_model::ErrorCode::Forbidden,
+            "the engine of this session is running: `gear admin stop --hold` first",
+        )
+    })?;
+    let text = std::fs::read_to_string(map_path).map_err(|e| {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot read {}: {e}", map_path.display()),
+        )
+    })?;
+    let map = gear_store::CommitMap::parse(&text);
+    if map.is_empty() {
+        return Err(GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("{} maps no commit", map_path.display()),
+        ));
+    }
+    let mut store = open_store()?;
+    let counts = store.write(|tx| tx.remap_commits(&map))?;
+    let total: usize = counts.iter().map(|(_, n)| n).sum();
+    println!("{} commits mapped; {total} values rewritten", map.len());
+    for (table, n) in counts {
+        println!("  {table}: {n}");
+    }
+    Ok(())
+}
+
 fn cmd_admin_stop(hold: bool) -> GearResult<()> {
     let env = env_from_process()?;
     if env.ctx.is_some() {
