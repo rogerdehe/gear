@@ -2474,6 +2474,12 @@ fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
 fn cmd_captain_handover_facts(json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
+    // The caller's seat first, as the handover itself does: two projects may
+    // share one checkout, so the working directory alone can name the wrong one.
+    let env = match open_herdr() {
+        Ok(mut herdr) => resolve_caller(&mut store, &mut herdr, env.clone()).unwrap_or(env),
+        Err(_) => env,
+    };
     let cwd = std::env::current_dir().map_err(|e| {
         GearError::new(
             gear_model::ErrorCode::BadFormat,
