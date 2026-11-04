@@ -92,6 +92,10 @@ pub struct MergeWorkers {
     /// their next merge runs alone, with its bounded retries, so such a
     /// reason ends as it would without a train.
     single: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    /// The batch size a repo's next batch merge starts with (T-547): the
+    /// project's `merge_batch`, doubled by every batch that landed whole and
+    /// halved by a batch a gate turned red, up to `merge_batch` again.
+    batch_cap: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 impl MergeWorkers {
@@ -548,6 +552,64 @@ pub fn merge_passed(
         // branch, each gated on the commit the one ahead of it lands.
         let parallel = config.conventions.merge_parallel.max(1) as usize;
         let single = cfg.merges.single.lock().unwrap().remove(&key);
+        // A batch merge (T-547): up to `cap` passed merges of this project are
+        // merged into one worktree and gated once. `merge_parallel` is not
+        // consulted then; a batch of one op takes the normal single path.
+        let batch = config.conventions.merge_batch.max(1) as usize;
+        if pr.is_none() && batch > 1 && !single {
+            let cap = cfg
+                .merges
+                .batch_cap
+                .lock()
+                .unwrap()
+                .get(&key)
+                .copied()
+                .unwrap_or(batch)
+                .clamp(1, batch);
+            let mut members = vec![op.clone()];
+            for later in ready.iter().skip(position + 1) {
+                if members.len() >= cap {
+                    break;
+                }
+                if taken.contains(&later.id) {
+                    continue;
+                }
+                match train_member(store, project, later, &config, &key, now)? {
+                    Member::Joins => members.push(later.clone()),
+                    Member::Voided => {
+                        taken.insert(later.id.clone());
+                    }
+                    Member::Not => {}
+                }
+            }
+            if members.len() > 1 {
+                match integration_worktree(store, herdr, &repo, project, &config, &cfg.merges, now)
+                {
+                    Ok(worktree) => {
+                        launch_batch(
+                            store,
+                            cfg,
+                            project,
+                            &config,
+                            &repo,
+                            &key,
+                            members.clone(),
+                            worktree,
+                            &mut workers,
+                            now,
+                        )?;
+                        for member in &members {
+                            taken.insert(member.id.clone());
+                        }
+                        continue;
+                    }
+                    Err(reason) => {
+                        tell_captain(store, project, None, &format!("merge waits: {reason}"), now)?;
+                        return Ok(merged);
+                    }
+                }
+            }
+        }
         if pr.is_none() && parallel > 1 && !single {
             let mut train = vec![op.clone()];
             for later in ready.iter().skip(position + 1) {
@@ -954,6 +1016,111 @@ fn launch_train(
                     project,
                     op,
                     &format!("start merge train: {error}"),
+                    wall_time(),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Start a batch merge's worker (T-547): its merges are Executing until it
+/// reports. One worktree and one gate for the whole batch; the cap the batch
+/// ends with is kept for this repo's next one.
+#[allow(clippy::too_many_arguments)]
+fn launch_batch(
+    store: &mut Store,
+    cfg: &EngineCfg,
+    project: &str,
+    config: &ProjectConfig,
+    repo: &Repo,
+    key: &str,
+    batch: Vec<OpRow>,
+    worktree: gear_herdr::Worktree,
+    workers: &mut BTreeMap<String, Worker>,
+    now: Ts,
+) -> GearResult<()> {
+    let mut members = Vec::new();
+    for op in &batch {
+        let task = op.task.clone().unwrap_or_default();
+        if matches!(op.state, OpState::Intended | OpState::Unknown) {
+            store.write(|tx| tx.set_op_state(project, &op.id, OpState::Executing, None, now))?;
+        }
+        let lane = lane_of(store, project, op.task.as_deref())?;
+        let commit = gear_model::commit::fill(
+            &config.conventions.merge_message,
+            &[("project", project), ("task", &task)],
+        );
+        members.push(TrainOp {
+            op: op.clone(),
+            others: other_candidates(store, project, &task)?,
+            review_fallback: review_branch(
+                &config.conventions.review_branch,
+                project,
+                &lane,
+                &task,
+            ),
+            commit,
+        });
+    }
+    let finished = Arc::new(Mutex::new(None));
+    let output = finished.clone();
+    let repo = repo.clone();
+    let remote_name = config.conventions.remote.clone();
+    let remote = cfg.remote.clone();
+    let progress = cfg.merges.progress.clone();
+    let db_path = cfg.db_path.clone();
+    let single_set = cfg.merges.single.clone();
+    let single_key = key.to_string();
+    let cap_set = cfg.merges.batch_cap.clone();
+    let batch_size = config.conventions.merge_batch.max(1) as usize;
+    let cap = {
+        let caps = cfg.merges.batch_cap.lock().unwrap();
+        caps.get(key).copied().unwrap_or(batch_size)
+    };
+    let spawned = std::thread::Builder::new()
+        .name(format!("merge-batch-{project}-{}", repo.name))
+        .spawn(move || {
+            let single = std::sync::atomic::AtomicBool::new(false);
+            let (result, cap) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let target = Target {
+                    name: &remote_name,
+                    runner: remote.as_ref(),
+                };
+                run_batch(
+                    &worktree, &repo, &members, target, &db_path, &single, batch_size, cap,
+                )
+            }))
+            .unwrap_or_else(|_| {
+                let results: Vec<(OpRow, Report)> = members
+                    .iter()
+                    .map(|m| (m.op.clone(), Report::Requeue("merge batch panicked".into())))
+                    .collect();
+                (results, cap)
+            });
+            if single.load(std::sync::atomic::Ordering::SeqCst) {
+                single_set.lock().unwrap().insert(single_key.clone());
+            }
+            cap_set.lock().unwrap().insert(single_key, cap);
+            *output.lock().unwrap() = Some(Finished {
+                result: Report::Train(result),
+                at: wall_time(),
+            });
+            *progress.0.lock().unwrap() += 1;
+            progress.1.notify_all();
+        });
+    let head = batch[0].clone();
+    match spawned {
+        Ok(_) => {
+            workers.insert(key.to_string(), Worker { op: head, finished });
+        }
+        Err(error) => {
+            for op in &batch {
+                retry_merge(
+                    store,
+                    project,
+                    op,
+                    &format!("start merge batch: {error}"),
                     wall_time(),
                 )?;
             }
@@ -2876,13 +3043,10 @@ fn land_merge(
     let integration = repo.integration.clone();
     let remote_name = remote.name;
     let Prepared {
-        task,
         sha,
-        branch,
-        review,
         review_ref,
         has_review,
-        pushed,
+        ..
     } = prepared;
     let has_review = *has_review;
     // 9. PR mode (design §11.2 step 2): the integration branch is not pushed.
@@ -2913,8 +3077,39 @@ fn land_merge(
     }
     probe.step("push");
     probe.begin("close");
-    let (closed, left, moved) = close_branches(dir, repo, &branch, &review, remote, &pushed);
+    let step = closed_and_line(
+        dir,
+        repo,
+        remote,
+        &integration,
+        remote_name,
+        prepared,
+        |dir, args| git(dir, args),
+    );
     probe.step("close");
+    step
+}
+
+/// Step 10 of a merge: close the branches the merge consumed and write the
+/// `merged <task> into <integration>: ...` line (T-547: a single merge and a
+/// batch, which pushes once for all of its merges, say it the same way).
+fn closed_and_line(
+    dir: &Path,
+    repo: &Repo,
+    remote: Target<'_>,
+    integration: &str,
+    remote_name: &str,
+    prepared: &Prepared,
+    git: impl Fn(&Path, &[&str]) -> Result<String, String>,
+) -> Step {
+    let Prepared {
+        task,
+        branch,
+        review,
+        pushed,
+        ..
+    } = prepared;
+    let (closed, left, moved) = close_branches(dir, repo, branch, review, remote, pushed);
 
     let head = git(dir, &["log", "-1", "--oneline"]).unwrap_or_default();
     let mut line = format!("merged {task} into {integration}: {head}");
@@ -3116,6 +3311,212 @@ fn run_train(
             )
         })
         .collect()
+}
+
+/// A batch merge (T-547, `[conventions] merge_batch` above 1): the passed
+/// merges of one project are merged one after the other into the integration
+/// worktree, each onto the commit the one ahead of it built, and the gate runs
+/// once for all of them. Green: one push lands all of them, then each closes
+/// its own branches. Red: when the gate's reason can clear, every built op
+/// goes back to the queue and the next merge of this branch runs alone; a
+/// single built op fails as it would alone; a batch of several is retried in a
+/// smaller one — the cap comes back halved, and `min(merge_batch, cap * 2)`
+/// after a batch that landed. A merge that cannot be built steps aside on the
+/// base the merges before it left behind, as it does in a train.
+///
+/// The returned cap is what this repo's next batch starts with.
+#[allow(clippy::too_many_arguments)]
+fn run_batch(
+    worktree: &gear_herdr::Worktree,
+    repo: &Repo,
+    ops: &[TrainOp],
+    remote: Target<'_>,
+    db_path: &str,
+    single: &std::sync::atomic::AtomicBool,
+    batch: usize,
+    cap: usize,
+) -> (Vec<(OpRow, Report)>, usize) {
+    use std::sync::atomic::Ordering;
+    let dir = Path::new(&worktree.path);
+    let collect = |reports: Vec<Option<Report>>| -> Vec<(OpRow, Report)> {
+        ops.iter()
+            .zip(reports)
+            .map(|(batch_op, report)| {
+                (
+                    batch_op.op.clone(),
+                    report.unwrap_or_else(|| Report::Requeue("it waits for the next batch".into())),
+                )
+            })
+            .collect()
+    };
+    let lock = match merge_lock(dir) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            return (
+                ops.iter().map(|t| (t.op.clone(), Report::Busy)).collect(),
+                cap,
+            )
+        }
+        Err(reason) => {
+            return (
+                ops.iter()
+                    .map(|t| {
+                        (
+                            t.op.clone(),
+                            Report::Requeue(format!("merge lock: {reason}")),
+                        )
+                    })
+                    .collect(),
+                cap,
+            )
+        }
+    };
+    let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(&lock));
+    let integration = repo.integration.clone();
+    let remote_name = remote.name;
+    let first_base = format!("{remote_name}/{integration}");
+    let mut reports: Vec<Option<Report>> = vec![None; ops.len()];
+    // The merges that built, in order: the op's index, its prepared merge, the
+    // paths its commits added, and its probe. The next task names the culprit
+    // of a red batch from these paths (T-548).
+    let mut built: Vec<(usize, Prepared, Vec<String>, Probe)> = Vec::new();
+    let mut base: Option<String> = None;
+    for (index, batch_op) in ops.iter().enumerate() {
+        let mut probe = Probe::new(
+            batch_op.op.task.as_deref().unwrap_or("-"),
+            batch_op.op.created,
+            db_path,
+            &batch_op.op.id,
+        );
+        let before = base.clone().unwrap_or_else(|| first_base.clone());
+        match prepare_merge(
+            worktree,
+            repo,
+            &batch_op.op,
+            &lock,
+            &batch_op.others,
+            remote,
+            &batch_op.review_fallback,
+            &batch_op.commit,
+            &mut probe,
+            base.as_deref(),
+        ) {
+            Ok(prepared) => {
+                let head = match git(dir, &["rev-parse", "HEAD"]) {
+                    Ok(head) => head.trim().to_string(),
+                    Err(reason) => {
+                        probe.done();
+                        reports[index] = Some(Report::Requeue(format!(
+                            "the batch could not read its merge: {reason}"
+                        )));
+                        let _ = git(dir, &["reset", "--hard", &before]);
+                        continue;
+                    }
+                };
+                let changed: Vec<String> = git(dir, &["diff", "--name-only", &before, &head])
+                    .map(|paths| {
+                        paths
+                            .lines()
+                            .map(str::trim)
+                            .filter(|path| !path.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                base = Some(head);
+                built.push((index, prepared, changed, probe));
+            }
+            // A merge that cannot be built steps aside (as in a train): the
+            // next one is built on the same base, so it does not wait behind a
+            // conflict.
+            Err(step) => {
+                probe.done();
+                reports[index] = Some(match step {
+                    Step::Failed(failed) if failed.blocker == Blocker::Clear => {
+                        single.store(true, Ordering::SeqCst);
+                        Report::Requeue(failed.reason)
+                    }
+                    Step::Merged(line) if base.is_none() => Report::Merged(line),
+                    Step::Merged(_) => {
+                        Report::Requeue("its work is in a merge ahead of it in the batch".into())
+                    }
+                    other => step_report(other),
+                });
+                // Back to where the last good merge left the worktree: a
+                // failed prepare may have reset it to the remote.
+                let _ = git(dir, &["reset", "--hard", &before]);
+            }
+        }
+    }
+    if built.is_empty() {
+        return (collect(reports), cap);
+    }
+    let built_count = built.len();
+    // One gate for the whole batch.
+    if let Err(step) = run_gate(worktree, repo, &lock, remote, &mut built[0].3) {
+        let clear = matches!(&step, Step::Failed(failed) if failed.blocker == Blocker::Clear);
+        if clear {
+            single.store(true, Ordering::SeqCst);
+        }
+        let red = if clear {
+            match &step {
+                Step::Failed(failed) => failed.reason.clone(),
+                _ => "the batch could not be gated".to_string(),
+            }
+        } else {
+            "its batch failed the gate: it is gated again in a smaller batch".to_string()
+        };
+        // A single built merge fails as it would alone (the gate's own end).
+        let alone = step_report(step);
+        for (index, _, _, mut probe) in built {
+            probe.done();
+            reports[index] = Some(if clear || built_count > 1 {
+                Report::Requeue(red.clone())
+            } else {
+                // A single built merge fails as it would alone.
+                alone.clone()
+            });
+        }
+        let cap = if clear || built_count == 1 {
+            cap
+        } else {
+            built_count.div_ceil(2)
+        };
+        return (collect(reports), cap);
+    }
+    // Green: one push lands the whole batch, as step 9b of a single merge.
+    for (_, _, _, probe) in built.iter_mut() {
+        probe.begin("push");
+    }
+    if let Err(reason) = remote.push(dir, &integration) {
+        if !lost_the_race(&reason) {
+            single.store(true, Ordering::SeqCst);
+        }
+        for (index, _, _, mut probe) in built {
+            probe.step("push");
+            probe.done();
+            reports[index] = Some(Report::Requeue(format!("push failed: {reason}")));
+        }
+        return (collect(reports), cap);
+    }
+    // Green: each merge of the batch closes its branches and says so.
+    for (index, prepared, _changed, mut probe) in built {
+        probe.step("push");
+        probe.begin("close");
+        let step = closed_and_line(
+            dir,
+            repo,
+            remote,
+            &integration,
+            remote_name,
+            &prepared,
+            |dir, args| git(dir, args),
+        );
+        probe.step("close");
+        probe.done();
+        reports[index] = Some(step_report(step));
+    }
+    (collect(reports), batch.min(cap.saturating_mul(2)))
 }
 
 /// A merge's end, as the worker reports it.
@@ -6349,6 +6750,133 @@ mod tests {
                 tx.update_project(&project)
             })
             .unwrap();
+    }
+
+    /// The project merges in batches of two, with `gate` as its gate (T-547).
+    fn batch_of_two(store: &mut Store, gate: &str) {
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text(gate)
+                    .replace("[conventions]\n", "[conventions]\nmerge_batch = 2\n");
+                tx.update_project(&project)
+            })
+            .unwrap();
+    }
+
+    /// A batch merge (T-547): the two passed merges are merged into one
+    /// worktree and gated once; both land together.
+    #[test]
+    fn two_merges_are_merged_together_and_gated_once() {
+        let pair = Pair::new("batch", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        // The gate's own tally, in a file neither the worktree nor the remote
+        // holds.
+        let ran = pair.root.join("gate-runs");
+        batch_of_two(&mut store, &format!("echo x >> {}; true", ran.display()));
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Confirmed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let log = pair.dev_log();
+        for subject in ["a", "b", "r1", "r2"] {
+            assert!(log_has(&log, subject), "{subject} landed: {log}");
+        }
+        let runs = fs::read_to_string(&ran).unwrap_or_default();
+        assert_eq!(runs.lines().count(), 1, "one gate for both: {runs}");
+    }
+
+    /// T-547: a red batch is halved — its first merge runs alone and fails as
+    /// it would, the other lands alone. Two gates after the red one.
+    #[test]
+    fn a_red_batch_is_halved_and_its_merges_run_alone() {
+        let pair = Pair::new("batch-red", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        // The gate says no to T-1's work (a.txt) and yes to T-2's alone.
+        batch_of_two(&mut store, "test ! -f a.txt");
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Failed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let log = pair.dev_log();
+        assert!(!log_has(&log, "a"), "T-1 did not land: {log}");
+        assert!(log_has(&log, "b"), "T-2 landed: {log}");
+        assert!(
+            op_result(&mut store, "O-1").contains("gate failed"),
+            "{}: {}",
+            "the gate's own reason is kept",
+            op_result(&mut store, "O-1")
+        );
+    }
+
+    /// T-547: a batch member whose merge conflicts with the integration branch
+    /// steps aside on the base the merges before it left; the other lands.
+    #[test]
+    fn a_conflicting_batch_member_steps_aside_and_the_other_lands() {
+        let pair = Pair::new("batch-conflict", false);
+        // dev moves on the file T-1 adds: merging T-1 into it conflicts.
+        sh(
+            &pair.root,
+            &format!(
+                "set -e\n\\
+                 git -C {work} checkout -q dev\n\\
+                 printf 'dev\\n' > {work}/a.txt\n\\
+                 git -C {work} add a.txt\n\\
+                 git -C {work} commit -q -m dev-a\n\\
+                 git -C {work} push -q origin dev\n",
+                work = pair.work.display()
+            ),
+        );
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        batch_of_two(&mut store, "true");
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Failed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let log = pair.dev_log();
+        assert!(log_has(&log, "b"), "T-2 landed: {log}");
+        assert!(!log_has(&log, "a"), "T-1 kept out by its conflict: {log}");
+        assert!(
+            op_result(&mut store, "O-1").contains("conflict"),
+            "the conflict is named: {}",
+            op_result(&mut store, "O-1")
+        );
     }
 
     /// A merge train: two passed tasks gate side by side, the second on the
