@@ -29,6 +29,7 @@ pub mod mail;
 pub mod plan;
 pub mod queue;
 pub mod review;
+pub mod seat_branch;
 pub mod seats;
 pub mod skill;
 pub mod standard;
