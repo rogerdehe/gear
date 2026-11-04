@@ -1979,6 +1979,26 @@ fn settled_mechanically(verdict: &gear_store::VerdictRow) -> bool {
 /// that reworked hands in a new candidate, and the task built on the older
 /// branch carries that older, rejected work. Its verdict was rejected, but its
 /// commits are still in the branch.
+/// Whether `row`'s `carried-by:` chain, within `project`, reaches `task`.
+fn carried_into(tx: &gear_store::Tx<'_>, project: &str, row: &str, task: &str) -> GearResult<bool> {
+    let mut at = row.to_string();
+    // A chain longer than the project's tasks is a loop.
+    for _ in 0..64 {
+        let Some(by) = tx.task_carried_by(project, &at)? else {
+            return Ok(false);
+        };
+        let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, &by);
+        if carrier_project != project {
+            return Ok(false);
+        }
+        if carrier == task {
+            return Ok(true);
+        }
+        at = carrier.to_string();
+    }
+    Ok(false)
+}
+
 fn other_candidates(
     store: &mut Store,
     project: &str,
@@ -2015,8 +2035,10 @@ fn other_candidates(
             if row.state == gear_model::TaskState::Cancelled {
                 continue;
             }
-            // A task carried by this one lands with this merge.
-            if tx.task_carried_by(project, &row.id)?.as_deref() == Some(task) {
+            // A task carried by this one lands with this merge, and so does a
+            // task carried by a task this one carries (T-517 by T-614 by
+            // T-675: the merge of T-675 waited for T-517, which waited for it).
+            if carried_into(tx, project, &row.id, task)? {
                 continue;
             }
             let attempts = tx.attempts_of_task(project, &row.id)?;
