@@ -1825,8 +1825,8 @@ fn on_integration(
 }
 
 /// Close the open merge items of a task (T-112: a cancelled task; T-92 F1: a
-/// remerge of an already-merged candidate): its failed merge and its push
-/// refusal are history. `result` is the line the captain reads — "cancelled by
+/// remerge of an already-merged candidate): its failed merge, its push refusal
+/// and its lost-merge word are history (T-563 left M-7875 open). `result` is the line the captain reads — "cancelled by
 /// the captain" or "the candidate <sha> is already on the integration branch".
 /// Returns the message ids that were closed.
 fn resolve_merge_items(
@@ -1837,7 +1837,11 @@ fn resolve_merge_items(
     now: Ts,
 ) -> GearResult<Vec<String>> {
     let mut resolved = Vec::new();
-    for thread in [format!("merge-failed:{task}"), format!("push:{task}")] {
+    for thread in [
+        format!("merge-failed:{task}"),
+        format!("push:{task}"),
+        format!("merge-lost:{task}"),
+    ] {
         for message in tx.thread_messages(project, &thread)? {
             if !matches!(
                 message.state,
