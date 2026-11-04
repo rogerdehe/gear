@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1163 -->
+<!-- gear-plan project=gear base=1164 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -211,7 +211,7 @@ estimate: 30
 deps: -
 
 ## T-567 [now] lane=mast milestone=M6.2
-goal: [v0.6.56] The board's time line never shows an impossible forecast, and names what can never merge (user, 2026-11-04, prometheus M4: "expected 16716h25m of 50h00m, 16666h25m behind"). Cause: crates/gear-board/src/forecast.rs gives a dependency no job speaks for the start `NO_DEP` (1,000,000 min), so a task waiting on a done-but-unmerged task (T-570 on T-665, whose merge keeps failing) puts its lane's end a million minutes out, and frame.rs `header_numbers` takes the max. Fix: a lane end at or beyond `NO_DEP` is left out of `expected`; instead the time line ends with `· blocked: T-570 waits for T-665, which nothing will merge` (the first such task and dep; `+N more` when there are several). The forecast for the other lanes stays as today. Also in frame.rs, the GOAL box shows every done clause: wrap the text to the box's rows (as many as the clauses need, up to 8) instead of cutting it with `…` after clause (5).
-accept: Tests in forecast.rs / frame.rs `mod tests`: a lane whose task waits on a dep no job speaks for leaves `expected` at the other lanes' max and the time line names the blocked task and its dep; a board with eight done clauses shows clause (8). Run only `make check CRATE=gear-board`; the merge gate runs `make gate`.
+goal: [v0.6.56] The board's time line never shows an impossible forecast, and names what can never merge (user, 2026-11-04, prometheus M4: "expected 16716h25m of 50h00m, 16666h25m behind"). Cause: crates/gear-board/src/forecast.rs gives a dependency no job speaks for the start `NO_DEP` (1,000,000 min), so a task waiting on a done-but-unmerged task (T-570 on T-665, whose merge keeps failing) puts its lane's end a million minutes out, and frame.rs `header_numbers` takes the max. Fix: a lane end at or beyond `NO_DEP` is left out of `expected`; instead the time line ends with `· blocked: T-570 waits for T-665, which nothing will merge` (the first such task and dep; `+N more` when there are several). The forecast for the other lanes stays as today.
+accept: Tests in forecast.rs / frame.rs `mod tests`: a lane whose task waits on a dep no job speaks for leaves `expected` at the other lanes' max and the time line names the blocked task and its dep. Run only `make check CRATE=gear-board`; the merge gate runs `make gate`.
 estimate: 45
 deps: -
