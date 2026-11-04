@@ -9,6 +9,7 @@
 //! is cut at the right edge, the footer keeps the last row, and the panel is
 //! drawn over the view (as the prototype draws its window over the board).
 
+use crate::forecast;
 use crate::graph;
 use crate::idle::IdleReason;
 use crate::style::{lane_color, Color, Line, Style};
@@ -663,15 +664,15 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
             Style::fg(Color::Warn).and_bold(),
         );
         row += 1;
-        // Folded, a long goal keeps to its first lines and ends in `…`, so it
-        // never pushes the task list off the screen; `d` shows all of it.
-        let mut lines = wrap(voyage.done.as_deref().unwrap_or_default(), inside);
-        if !screen.detail && lines.len() > GOAL_FOLDED_LINES {
-            lines.truncate(GOAL_FOLDED_LINES);
-            let last = lines.last_mut().expect("folded lines are not empty");
-            let keep = last.chars().count().min(inside.saturating_sub(2));
-            *last = format!("{} …", last.chars().take(keep).collect::<String>());
-        }
+        // The box shows every clause of the done sentence (T-567): as many
+        // rows as the clauses wrap to, up to the box's own limit, so a goal of
+        // eight clauses is read whole instead of cut after the fifth. A goal
+        // longer than the box ends in `…`; `d` shows all of it.
+        let lines = goal_lines(
+            voyage.done.as_deref().unwrap_or_default(),
+            inside,
+            screen.detail,
+        );
         for line in lines {
             canvas.put_styled(
                 1,
@@ -786,8 +787,11 @@ struct HeaderNumbers {
     /// The plan's eta.
     eta: i64,
     /// The end the lane forecast expects: the slowest lane's end after what is
-    /// used.
+    /// used, once the lanes no forecast can reach are left out (T-567).
     expected: i64,
+    /// The jobs that can never start, in the time line's words (T-567): the
+    /// first job, the dependency nothing will merge, and `+N more`.
+    blocked: Option<String>,
     /// The voyage still sails.
     sailing: bool,
     /// The plan's eta less the expected end (sailing) or the used time
@@ -816,13 +820,7 @@ fn header_numbers(board: &Board, project: &ProjectBoard) -> HeaderNumbers {
         .and_then(|voyage| voyage.eta.as_deref())
         .map(duration_minutes)
         .unwrap_or(0);
-    let expected = project
-        .forecast
-        .iter()
-        .map(|end| end.end_min)
-        .max()
-        .map(|end| used + end)
-        .unwrap_or(used);
+    let (expected, blocked) = expected_of(used, &project.forecast);
     let sailing = voyage.is_some_and(|voyage| voyage.sailing);
     let diff = if sailing { eta - expected } else { eta - used };
 
@@ -861,6 +859,7 @@ fn header_numbers(board: &Board, project: &ProjectBoard) -> HeaderNumbers {
         used,
         eta,
         expected,
+        blocked,
         sailing,
         diff,
         tasks,
@@ -869,6 +868,54 @@ fn header_numbers(board: &Board, project: &ProjectBoard) -> HeaderNumbers {
         unlanded,
         going,
         waiting,
+    }
+}
+
+/// The end the forecast expects and the tasks nothing will ever merge (T-567).
+///
+/// A lane end at or past [`forecast::NO_DEP`] is no forecast: the lane waits
+/// for a dependency no job of the queue speaks for, so it is left out of the
+/// expected end — one such lane used to put the whole time line 16 666 hours
+/// behind the plan. The lane is named instead: `blocked: T-570 waits for
+/// T-665, which nothing will merge`, the first such job, and `+N more` when
+/// there are several. The other lanes' forecast is what it always was.
+fn expected_of(used: i64, ends: &[forecast::LaneEnd]) -> (i64, Option<String>) {
+    let reachable = ends
+        .iter()
+        .map(|end| end.end_min)
+        .filter(|end| *end < forecast::NO_DEP);
+    let expected = reachable.max().map(|end| used + end).unwrap_or(used);
+    // The forecast of the lanes that can reach the branch is the whole
+    // forecast: a blocked job only speaks when there is one.
+    let blocked: Vec<&(String, String)> = ends
+        .iter()
+        .filter(|end| end.end_min >= forecast::NO_DEP)
+        .flat_map(|end| end.blocked.iter())
+        .collect();
+    let Some((task, dep)) = blocked.first() else {
+        return (expected, None);
+    };
+    let more = blocked.len() - 1;
+    let more = if more == 0 {
+        String::new()
+    } else {
+        format!(" (+{more} more)")
+    };
+    (
+        expected,
+        Some(format!(
+            "blocked: {task} waits for {dep}, which nothing will merge{more}"
+        )),
+    )
+}
+
+/// A time line's words with the jobs that can never start appended (T-567):
+/// `expected 8h00m of 50h00m, 42h behind · blocked: T-570 waits for T-665,
+/// which nothing will merge`.
+fn with_blocked(text: String, blocked: &Option<String>) -> String {
+    match blocked {
+        Some(blocked) => format!("{text} · {blocked}"),
+        None => text,
     }
 }
 
@@ -916,6 +963,7 @@ fn folded_rows(
         used,
         eta,
         expected,
+        blocked,
         sailing,
         diff,
         tasks,
@@ -1002,6 +1050,7 @@ fn folded_rows(
     } else {
         format!("took {} of {}, {} over", hm(used), hm(eta), hm(-diff))
     };
+    let short = with_blocked(short, &blocked);
     canvas.put_styled(16 + n, row, &short, time_style);
     canvas.put_styled(mx, row, "Tasks", Style::bold());
     canvas.put_styled(mx + 11, row, &"█".repeat(a), Style::fg(Color::Ok));
@@ -1050,6 +1099,7 @@ fn unfolded_rows(
         used,
         eta,
         expected,
+        blocked,
         sailing,
         diff,
         tasks,
@@ -1132,9 +1182,12 @@ fn unfolded_rows(
     // The time against the plan in words, and the key of the bar's marks.
     canvas.put_styled(1, row, "Time", Style::bold());
     canvas.put_styled(15, row, &bar, time_style);
+    // The slowest lane the forecast can name (T-567): a lane waiting on a
+    // dependency nothing will merge is no finish at all, and is named apart.
     let slow = project
         .forecast
         .iter()
+        .filter(|end| end.end_min < forecast::NO_DEP)
         .max_by_key(|end| end.end_min)
         .map(|end| end.lane.clone())
         .unwrap_or_default();
@@ -1171,6 +1224,7 @@ fn unfolded_rows(
             hm(-diff)
         )
     };
+    let when = with_blocked(when, &blocked);
     canvas.put_styled(17 + n, row, &when, Style::bold());
     row += 1;
     canvas.put_styled(
@@ -1292,8 +1346,26 @@ fn is_wide(character: char) -> bool {
     matches!(character, '⛵' | '⚓' | '⏳')
 }
 
-/// How many lines of the goal the folded header shows (`d` shows all).
-const GOAL_FOLDED_LINES: usize = 3;
+/// How many rows of the goal the box shows (`d` shows all): the clauses of a
+/// goal run to eight, so the box does too (T-567).
+const GOAL_BOX_LINES: usize = 8;
+
+/// The goal box's rows for a done sentence (T-567): word-wrapped to `inside`
+/// columns, up to [`GOAL_BOX_LINES`] rows in the folded header — the last one
+/// cut with `…` when the goal needs more — and all of them with `d`. Every
+/// clause the box shows is shown whole: eight clauses wrap to eight rows and
+/// the eighth is read, not dropped.
+fn goal_lines(done: &str, inside: usize, detail: bool) -> Vec<String> {
+    let mut lines = wrap(done, inside);
+    if detail || lines.len() <= GOAL_BOX_LINES {
+        return lines;
+    }
+    lines.truncate(GOAL_BOX_LINES);
+    let last = lines.last_mut().expect("folded lines are not empty");
+    let keep = last.chars().count().min(inside.saturating_sub(2));
+    *last = format!("{} …", last.chars().take(keep).collect::<String>());
+    lines
+}
 
 /// The prototype's `wrap`: the words split on whitespace; a word that would
 /// pass `width` starts a new line.
@@ -2532,6 +2604,91 @@ mod tests {
         assert_eq!(canvas.char_at(5, 0), ' ');
         assert_eq!(canvas.style_at(5, 0), Style::fg(Color::Warn));
         assert_eq!(canvas.text().lines().next().unwrap_or_default(), " M5 y");
+    }
+
+    /// T-567: the incident of prometheus M4 — "expected 16716h25m of 50h00m,
+    /// 16666h25m behind". A lane waiting on a dependency no job speaks for ends
+    /// a million minutes out; it is left out of `expected` (the other lanes'
+    /// max) and the time line names it instead.
+    #[test]
+    fn a_lane_only_a_dependency_nothing_merges_holds_is_named_not_forecast() {
+        let ends = vec![
+            forecast::LaneEnd {
+                lane: "mast".to_string(),
+                end_min: 2 * 60,
+                waits: Vec::new(),
+                blocked: Vec::new(),
+                pace: 1.0,
+            },
+            forecast::LaneEnd {
+                lane: "hull".to_string(),
+                end_min: forecast::NO_DEP + 30,
+                waits: vec![(forecast::NO_DEP, "T-665".to_string())],
+                blocked: vec![("T-570".to_string(), "T-665".to_string())],
+                pace: 1.0,
+            },
+        ];
+        // The expected end is the reachable lane's, after the time used.
+        let (expected, blocked) = expected_of(50 * 60, &ends);
+        assert_eq!(expected, 50 * 60 + 2 * 60);
+        assert_eq!(
+            blocked.as_deref(),
+            Some("blocked: T-570 waits for T-665, which nothing will merge")
+        );
+        // And it ends the time line, folded and unfolded alike.
+        assert_eq!(
+            with_blocked("expected 2h00m of 50h00m".to_string(), &blocked),
+            "expected 2h00m of 50h00m · blocked: T-570 waits for T-665, which nothing will merge"
+        );
+        assert_eq!(
+            with_blocked("expected 2h00m".to_string(), &None),
+            "expected 2h00m"
+        );
+
+        // Several blocked jobs: the first names the line, the rest are counted.
+        let mut more = ends.clone();
+        more[1]
+            .blocked
+            .push(("T-571".to_string(), "T-665".to_string()));
+        let (_, blocked) = expected_of(50 * 60, &more);
+        assert_eq!(
+            blocked.as_deref(),
+            Some("blocked: T-570 waits for T-665, which nothing will merge (+1 more)")
+        );
+
+        // A forecast with no blocked lane is the forecast it always was.
+        let (expected, blocked) = expected_of(0, &ends[..1]);
+        assert_eq!(expected, 2 * 60);
+        assert_eq!(blocked, None);
+    }
+
+    /// T-567: the goal box shows every clause — eight clauses wrap to eight
+    /// rows and the eighth is read, not cut after the fifth.
+    #[test]
+    fn the_goal_box_shows_all_eight_clauses() {
+        // One word of 28 characters per clause, in a box 30 wide: no row holds
+        // two clauses, so eight clauses need eight rows.
+        let clauses: Vec<String> = (1..=8)
+            .map(|n| format!("clause({n})-{};", "x".repeat(18)))
+            .collect();
+        let done = clauses.join(" ");
+        let lines = goal_lines(&done, 30, false);
+        assert_eq!(lines.len(), 8, "{lines:?}");
+        for (n, line) in lines.iter().enumerate() {
+            let clause = format!("clause({})", n + 1);
+            assert!(line.contains(&clause), "row {n} is {line}");
+        }
+        // A goal longer than the box still ends in `…`; `d` shows all of it.
+        let long = format!("{done} {done}");
+        let folded = goal_lines(&long, 30, false);
+        assert_eq!(folded.len(), GOAL_BOX_LINES);
+        assert!(
+            folded.last().is_some_and(|line| line.ends_with('…')),
+            "{folded:?}"
+        );
+        assert!(goal_lines(&long, 30, true).len() > GOAL_BOX_LINES);
+        // A short goal is untouched.
+        assert_eq!(goal_lines("one clause", 30, false), vec!["one clause"]);
     }
 
     #[test]
