@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1140 -->
+<!-- gear-plan project=gear base=1141 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -67,6 +67,7 @@ eta: 4h
 - station M-7644: keep course | why: the batch merge (T-547, T-548) is the critical path on hull; mast finishes T-550 and T-551; release v0.6.52 when T-548 lands | else: none
 - station M-7677: keep course | why: T-547 rework is the last critical step; mast takes the captain-take naming fix for the same release | else: none
 - 2026-11-04 02:40 hand-fix: T-548 merge conflicted with T-547 rework (tests only, both sides added tests at one spot); captain merged it keeping all four tests, `make check merge::` 105/105, `make gate` 56 s, pushed to dev 8458a3aa | why: release v0.6.52 waits on it | else: rework round for hull
+- station M-7693: keep course | why: v0.6.52 (batch merge) is live; T-553 (two wrong signals) goes out as v0.6.53; landing is decided after that | else: land now
 # Queue
 
 ## T-545 [now] lane=mast milestone=M6.2 required
