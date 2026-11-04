@@ -2205,17 +2205,13 @@ fn idle_reason_text(project: &ProjectBoard, lane: &LaneBoard, landed: bool) -> (
         );
     };
     if let Some(dep) = next.deps_open.first() {
-        if let Some((owner, task)) = project
-            .lanes
-            .iter()
-            .find_map(|owner| {
-                owner
-                    .tasks
-                    .iter()
-                    .find(|task| &task.id == dep)
-                    .map(|task| (owner, task))
-            })
-        {
+        if let Some((owner, task)) = project.lanes.iter().find_map(|owner| {
+            owner
+                .tasks
+                .iter()
+                .find(|task| &task.id == dep)
+                .map(|task| (owner, task))
+        }) {
             return (
                 format!(
                     "next {} waits for {} ({}, {})",

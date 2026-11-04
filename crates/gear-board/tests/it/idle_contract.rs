@@ -63,14 +63,7 @@ fn task(
 
 /// A task of another lane (T-562): the queue of one lane names the work of
 /// another as what holds it.
-fn task_in(
-    store: &mut Store,
-    id: &str,
-    rank: i64,
-    lane: &str,
-    state: TaskState,
-    deps: Vec<&str>,
-) {
+fn task_in(store: &mut Store, id: &str, rank: i64, lane: &str, state: TaskState, deps: Vec<&str>) {
     store
         .write(|tx| {
             tx.insert_task(&TaskRow {
@@ -282,7 +275,14 @@ fn a_lane_whose_first_task_waits_names_the_later_one_that_can_start() {
 #[test]
 fn a_lane_whose_tasks_all_wait_names_the_first_one_and_its_first_dependency() {
     let mut store = world();
-    task(&mut store, "T-2", 1, TaskState::Ready, vec!["T-9", "T-8"], None);
+    task(
+        &mut store,
+        "T-2",
+        1,
+        TaskState::Ready,
+        vec!["T-9", "T-8"],
+        None,
+    );
     task(&mut store, "T-3", 2, TaskState::Ready, vec!["T-9"], None);
     // The dependencies are another lane's work, in progress and not merged.
     task_in(&mut store, "T-9", 3, "mast", TaskState::Running, vec![]);

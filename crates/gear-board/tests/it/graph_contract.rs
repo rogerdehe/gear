@@ -1243,8 +1243,9 @@ fn the_git_graph_has_the_rows_of_the_prototype_m5_voyage() {
         "{:?}",
         last_waiting.text
     );
+    // T-562: the words name the dependency that holds the task.
     assert!(
-        last_waiting.text.contains("waits for T-1 to merge"),
+        last_waiting.text.contains("waits for T-262 to merge"),
         "{:?}",
         last_waiting.text
     );
