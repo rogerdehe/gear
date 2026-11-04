@@ -42,7 +42,7 @@ Read the task packet (`gear --show T-<n>`): the contract (goal, acceptance, the 
   gear send --kind review --task T-<n> --attempt <a> --verdict pass|fail [--blocking F1,F3] [--friction "<what cost time>"] "<the path to your review file, or the text>"
   ```
 
-  `--blocking` names findings that must be fixed; the others are logged. `--friction` reports a missing permission, slow build or test, unclear contract, missing tool or fixture, or costly step; it is required when the review round exceeds its budget.
+  `--blocking` names findings that must be fixed; the others are logged. `--friction` reports a missing permission, slow build or test, unclear contract, missing tool or fixture, or costly step, and the checks the captain asked for when they took a fifth of the round or more (name them and their minutes); it is required when the review round exceeds its budget.
 
   GEAR reads the file and keeps the **text** of your findings: the writer reads them from GEAR — the rework note and the task packet — so your worktree, your branch and your file may be gone afterwards. A path that names no file is refused (`BAD_FORMAT`) and nothing is stored; a file longer than 64 KiB is cut with a note.
 - A `fail` becomes the writer's rework: write every finding so the writer can act on it without asking. A `pass` lets the captain merge.
