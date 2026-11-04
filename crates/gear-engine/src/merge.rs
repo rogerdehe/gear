@@ -2974,6 +2974,10 @@ fn run_gate(
     };
     let tempfail = gate_tempfail_path(dir);
     let _ = std::fs::remove_file(&tempfail);
+    // T-548: the failed-paths file belongs to this run, too: a line left by an
+    // earlier gate must not name a culprit here. It is not removed after a
+    // failure: the red batch reads it.
+    let _ = std::fs::remove_file(gate_failed_path(dir));
     let output = match gate_command(&gate, dir).stdin(stdin).output() {
         Ok(output) => output,
         // The gate could not run at all: the environment is broken, not the
@@ -3468,6 +3472,58 @@ fn run_batch(
         let clear = matches!(&step, Step::Failed(failed) if failed.blocker == Blocker::Clear);
         if clear {
             single.store(true, Ordering::SeqCst);
+        }
+        // T-548: a red batch names its culprit when the gate says which paths
+        // failed. The gate may write the repo-relative files or directories
+        // whose tests failed to `$GEAR_GATE_FAILED`, one per line; a built merge
+        // whose changed paths hold one of them is a suspect. Exactly one
+        // suspect fails with the gate's reason and the others merge again
+        // without it; with no suspect, several, or no file the batch is halved
+        // as before. The file is read once and removed, so a line an earlier
+        // gate left is never read here.
+        let failed_paths = if clear {
+            Vec::new()
+        } else {
+            gate_failed_paths(dir)
+        };
+        let suspects: Vec<(usize, Vec<String>)> = if failed_paths.is_empty() {
+            Vec::new()
+        } else {
+            built
+                .iter()
+                .filter_map(|(index, _, changed, _)| {
+                    let matching = matching_paths(&failed_paths, changed);
+                    (!matching.is_empty()).then_some((*index, matching))
+                })
+                .collect()
+        };
+        if built_count > 1 && suspects.len() == 1 {
+            let (culprit, matching) = &suspects[0];
+            let culprit = *culprit;
+            let task = ops[culprit].op.task.clone().unwrap_or_default();
+            let (gate_reason, blocker) = match &step {
+                Step::Failed(failed) => (failed.reason.clone(), failed.blocker),
+                _ => (String::new(), Blocker::Stuck),
+            };
+            let reason = format!(
+                "{gate_reason}\nthe batch's failed paths match only {task}'s changes: {}",
+                matching.join(", ")
+            );
+            for (index, _, _, mut probe) in built {
+                probe.done();
+                reports[index] = Some(if index == culprit {
+                    Report::Failed(Failed {
+                        reason: reason.clone(),
+                        blocker,
+                    })
+                } else {
+                    Report::Requeue(format!(
+                        "its batch failed on {task}'s changes: it merges again without it"
+                    ))
+                });
+            }
+            // The culprit is known: the batch is not halved.
+            return (collect(reports), cap);
         }
         let red = if clear {
             match &step {
@@ -3985,7 +4041,8 @@ fn gate_command(gate: &str, dir: &Path) -> Command {
         .current_dir(dir)
         .env_remove(gear_model::ctx::ENV_DB)
         .env_remove(gear_model::ctx::ENV_CTX)
-        .env(GATE_TEMPFAIL_ENV, gate_tempfail_path(dir));
+        .env(GATE_TEMPFAIL_ENV, gate_tempfail_path(dir))
+        .env(GATE_FAILED_ENV, gate_failed_path(dir));
     cmd
 }
 
@@ -3998,6 +4055,51 @@ pub const GATE_TEMPFAIL_ENV: &str = "GEAR_GATE_TEMPFAIL";
 /// The file of [`GATE_TEMPFAIL_ENV`] for a gate run in `dir`.
 fn gate_tempfail_path(dir: &Path) -> std::path::PathBuf {
     dir.join(".git-gear-gate-tempfail")
+}
+
+/// The variable naming the file a gate writes the repo-relative paths of the
+/// files or directories whose tests failed to, one per line (T-548): a red
+/// batch merge reads it to name the task whose changes match them, and `fn
+/// run_gate` removes it before the gate runs, so only this run's lines are
+/// read. A gate that writes nothing leaves no file, which is fine.
+pub const GATE_FAILED_ENV: &str = "GEAR_GATE_FAILED";
+
+/// The file of [`GATE_FAILED_ENV`] for a gate run in `dir`.
+fn gate_failed_path(dir: &Path) -> std::path::PathBuf {
+    dir.join(".git-gear-gate-failed")
+}
+
+/// The paths a failed gate named (T-548): the repo-relative files or
+/// directories whose tests failed, one per line, as the gate wrote them to the
+/// file [`GATE_FAILED_ENV`] names — trimmed, empty lines skipped, a trailing
+/// `/` dropped. The file belongs to the run that wrote it: it is read once and
+/// removed here, so a line an earlier gate left behind is never read.
+fn gate_failed_paths(dir: &Path) -> Vec<String> {
+    let path = gate_failed_path(dir);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let _ = std::fs::remove_file(&path);
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.strip_suffix('/').unwrap_or(line).to_string())
+        .filter(|path| !path.is_empty())
+        .collect()
+}
+
+/// The listed paths that name one of `changed` (T-548): a listed path is a
+/// changed path itself, or the directory one of them is in.
+fn matching_paths(listed: &[String], changed: &[String]) -> Vec<String> {
+    listed
+        .iter()
+        .filter(|listed| {
+            changed
+                .iter()
+                .any(|changed| *changed == **listed || changed.starts_with(&format!("{listed}/")))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Run one git command in `dir`; the output tail comes back as the error.
@@ -6934,6 +7036,139 @@ mod tests {
             !log_has(&log, "a") && !log_has(&log, "b"),
             "nothing landed: {log}"
         );
+    }
+
+    /// T-548: the gate names a.txt in `$GEAR_GATE_FAILED`, and only T-1's
+    /// changes hold it: T-1 fails with that line, T-2 merges again and lands
+    /// alone. The gate runs twice in all.
+    #[test]
+    fn a_red_batch_names_the_culprit_the_gate_points_at() {
+        let pair = Pair::new("batch-culprit", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        let ran = pair.root.join("gate-runs");
+        batch_of_two(
+            &mut store,
+            &format!(
+                "echo x >> {}; echo a.txt > $GEAR_GATE_FAILED; test ! -f a.txt",
+                ran.display()
+            ),
+        );
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Failed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let result = op_result(&mut store, "O-1");
+        assert!(
+            result.contains("match only T-1"),
+            "the culprit is named: {result}"
+        );
+        // T-2 was requeued from a batch whose culprit is known: it is gated
+        // again alone, not in a smaller batch of its own.
+        let log = pair.dev_log();
+        assert!(!log_has(&log, "a"), "T-1 did not land: {log}");
+        assert!(log_has(&log, "b"), "T-2 landed: {log}");
+        let runs = fs::read_to_string(&ran).unwrap_or_default();
+        assert_eq!(
+            runs.lines().count(),
+            2,
+            "the red batch, then T-2 alone: {runs}"
+        );
+    }
+
+    /// T-548: the gate names a path no merge touched: nothing is a culprit, so
+    /// the batch is halved as before and its merges are gated one by one.
+    #[test]
+    fn a_red_batch_naming_no_change_is_halved() {
+        let pair = Pair::new("batch-nobody", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        let ran = pair.root.join("gate-runs");
+        batch_of_two(
+            &mut store,
+            &format!(
+                "echo x >> {}; echo nobody.txt > $GEAR_GATE_FAILED; test ! -f a.txt",
+                ran.display()
+            ),
+        );
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Failed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        assert!(
+            !op_result(&mut store, "O-1").contains("match only"),
+            "no culprit is named: {}",
+            op_result(&mut store, "O-1")
+        );
+        let log = pair.dev_log();
+        assert!(!log_has(&log, "a"), "T-1 did not land: {log}");
+        assert!(log_has(&log, "b"), "T-2 landed: {log}");
+        // The red batch of two, then T-1 and T-2 one by one: the cap halved.
+        let runs = fs::read_to_string(&ran).unwrap_or_default();
+        assert_eq!(runs.lines().count(), 3, "the halving: {runs}");
+    }
+
+    /// T-548: the failed-paths file belongs to the run that wrote it. A file an
+    /// earlier gate left in the worktree is removed before the gate runs, so
+    /// its lines never name a culprit here.
+    #[test]
+    fn a_failed_paths_file_left_from_an_earlier_gate_is_not_read() {
+        let pair = Pair::new("batch-leftover", false);
+        let worktree = pair.merge_worktree();
+        // An earlier run's leftovers, naming T-1's own file.
+        fs::write(
+            Path::new(&worktree.path).join(".git-gear-gate-failed"),
+            "a.txt\n",
+        )
+        .unwrap();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        // The gate says no without naming any path.
+        batch_of_two(&mut store, "test ! -f a.txt");
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Failed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        assert!(
+            !op_result(&mut store, "O-1").contains("match only"),
+            "the leftover is not read: {}",
+            op_result(&mut store, "O-1")
+        );
+        let log = pair.dev_log();
+        assert!(!log_has(&log, "a"), "T-1 did not land: {log}");
+        assert!(log_has(&log, "b"), "T-2 landed: {log}");
     }
     /// T-547: a batch member whose merge conflicts with the integration branch
     /// steps aside on the base the merges before it left; the other lands.
