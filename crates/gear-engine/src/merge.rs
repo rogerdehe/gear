@@ -3084,6 +3084,7 @@ fn land_merge(
         &integration,
         remote_name,
         prepared,
+        None,
         |dir, args| git(dir, args),
     );
     probe.step("close");
@@ -3100,6 +3101,7 @@ fn closed_and_line(
     integration: &str,
     remote_name: &str,
     prepared: &Prepared,
+    commit: Option<&str>,
     git: impl Fn(&Path, &[&str]) -> Result<String, String>,
 ) -> Step {
     let Prepared {
@@ -3111,7 +3113,12 @@ fn closed_and_line(
     } = prepared;
     let (closed, left, moved) = close_branches(dir, repo, branch, review, remote, pushed);
 
-    let head = git(dir, &["log", "-1", "--oneline"]).unwrap_or_default();
+    // The merge commit this line is about: a batch's op names the one it built
+    // (T-547, F2 of the review), a single merge its own HEAD.
+    let head = match commit {
+        Some(commit) => git(dir, &["log", "-1", "--oneline", commit]).unwrap_or_default(),
+        None => git(dir, &["log", "-1", "--oneline"]).unwrap_or_default(),
+    };
     let mut line = format!("merged {task} into {integration}: {head}");
     if !closed.is_empty() {
         line.push_str(&format!("\nclosed on {remote_name}: {}", closed.join(", ")));
@@ -3380,6 +3387,9 @@ fn run_batch(
     // paths its commits added, and its probe. The next task names the culprit
     // of a red batch from these paths (T-548).
     let mut built: Vec<(usize, Prepared, Vec<String>, Probe)> = Vec::new();
+    // The commit each built merge left at the head, in the same order: its own
+    // line names it (F2 of the review).
+    let mut heads: Vec<String> = Vec::new();
     let mut base: Option<String> = None;
     for (index, batch_op) in ops.iter().enumerate() {
         let mut probe = Probe::new(
@@ -3423,6 +3433,7 @@ fn run_batch(
                             .collect()
                     })
                     .unwrap_or_default();
+                heads.push(head.clone());
                 base = Some(head);
                 built.push((index, prepared, changed, probe));
             }
@@ -3489,18 +3500,30 @@ fn run_batch(
         probe.begin("push");
     }
     if let Err(reason) = remote.push(dir, &integration) {
+        // A push the remote rejects because the integration branch moved is a
+        // race, read exactly as step 9b of `land_merge` reads it (F1 of the
+        // review): the batch goes back to the queue with the race reason and
+        // the next merge of this branch still batches.
+        let reason = if reason.contains("non-fast-forward")
+            || reason.contains("fetch first")
+            || reason.contains("cannot lock ref")
+        {
+            format!("{RACE}{reason}")
+        } else {
+            format!("push failed: {reason}")
+        };
         if !lost_the_race(&reason) {
             single.store(true, Ordering::SeqCst);
         }
         for (index, _, _, mut probe) in built {
             probe.step("push");
             probe.done();
-            reports[index] = Some(Report::Requeue(format!("push failed: {reason}")));
+            reports[index] = Some(Report::Requeue(reason.clone()));
         }
         return (collect(reports), cap);
     }
     // Green: each merge of the batch closes its branches and says so.
-    for (index, prepared, _changed, mut probe) in built {
+    for ((index, prepared, _changed, mut probe), head) in built.into_iter().zip(heads) {
         probe.step("push");
         probe.begin("close");
         let step = closed_and_line(
@@ -3510,6 +3533,7 @@ fn run_batch(
             &integration,
             remote_name,
             &prepared,
+            Some(&head),
             |dir, args| git(dir, args),
         );
         probe.step("close");
@@ -6796,6 +6820,28 @@ mod tests {
         }
         let runs = fs::read_to_string(&ran).unwrap_or_default();
         assert_eq!(runs.lines().count(), 1, "one gate for both: {runs}");
+        // Each merge's line names its own commit, not the last one's (F2 of the
+        // review): both are commits of dev and they differ.
+        let line_of = |store: &mut Store, id: &str| {
+            op_result(store, id)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
+        let first = line_of(&mut store, "O-1");
+        let second = line_of(&mut store, "O-2");
+        assert_ne!(first, second, "each merge names its own commit");
+        let heads = sh(&pair.root, "git -C origin.git log --format=%h dev");
+        for line in [&first, &second] {
+            // `merged <task> into <integration>: <sha> <subject>`
+            let commit = line.split(": ").nth(1).unwrap_or_default();
+            let sha = commit.split_whitespace().next().unwrap_or_default();
+            assert!(
+                heads.lines().any(|head| head == sha),
+                "{line:?} names a commit of dev: {heads}"
+            );
+        }
     }
 
     /// T-547: a red batch is halved — its first merge runs alone and fails as
@@ -6833,6 +6879,62 @@ mod tests {
         );
     }
 
+    /// F1 of the review of T-547: a batch whose push is rejected because the
+    /// integration branch moved during its gate is a race, not a failure: both
+    /// merges go back to the queue with the race reason and the next merge of
+    /// this branch still batches (no `single`).
+    #[test]
+    fn dev_moving_during_a_batch_gate_is_a_race() {
+        let pair = Pair::new("batch-race", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        // The gate moves origin/dev under the batch: its push cannot be a
+        // fast-forward.
+        let racer = format!(
+            "cd {} && git fetch -q origin && git switch -q dev && git reset -q --hard origin/dev \
+             && echo x >> other.txt && git add other.txt \
+             && git -c user.email=a@b -c user.name=a commit -qm racer \
+             && git -C ../origin.git fetch -q $(pwd) +HEAD:refs/heads/dev",
+            pair.work.display()
+        );
+        batch_of_two(&mut store, &racer);
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        // One batch: it is launched, it runs, and its push is rejected.
+        let seen = cfg.merges.progress();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
+        assert!(cfg.merges.running("p"), "the batch runs");
+        assert!(cfg.merges.wait_progress(seen, WAIT), "the batch reports");
+        // The next step collects it.
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 31).unwrap();
+
+        for id in ["O-1", "O-2"] {
+            assert_eq!(
+                op_state(&mut store, id),
+                Some(OpState::Unknown),
+                "{id} is queued again"
+            );
+            let reason = op_result(&mut store, id);
+            assert!(reason.starts_with(RACE), "{id}: {reason}");
+        }
+        assert!(
+            cfg.merges.single.lock().unwrap().is_empty(),
+            "a race does not leave the batch path"
+        );
+        let log = pair.dev_log();
+        assert!(
+            !log_has(&log, "a") && !log_has(&log, "b"),
+            "nothing landed: {log}"
+        );
+    }
     /// T-547: a batch member whose merge conflicts with the integration branch
     /// steps aside on the base the merges before it left; the other lands.
     #[test]
