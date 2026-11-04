@@ -234,15 +234,17 @@ fn send_inner(
             }
         }
     }
-    // A reviewer's verdict is only taken once its branch is on the project's
+    // A reviewer's verdict is only taken once its commit is on the project's
     // remote (T-438): T-265 and T-375 pushed to a second remote that their
     // worktrees also had, the verdict was accepted, and the merge then could
     // not find `<remote>/<review branch>`, so the captain pushed and remerged
     // by hand. As a lane's hand-in is checked (T-83), and before the
     // transaction: the reviewer's own commit — its worktree's HEAD — must be
-    // on the review branch the project's template names. Only a temp seat
-    // hands in a full review, and only a caller that brought the hand-in gate
-    // is one handing in from its worktree (a direction check is a result).
+    // on the TASK branch (T-558: the review commit is pushed onto the task
+    // branch, there is no review branch on the remote any more). Only a temp
+    // seat hands in a full review, and only a caller that brought the hand-in
+    // gate is one handing in from its worktree (a direction check is a
+    // result).
     if args.kind == MsgKind::Review && args.verdict.is_some() && !direction && args.base.is_some() {
         if let (Some(ctx), Some(task)) = (env.ctx.as_ref(), args.task.as_deref()) {
             let is_temp = store
@@ -253,12 +255,7 @@ fn send_inner(
                 .and_then(|row| row.lane);
             if let (true, Some(lane)) = (is_temp, lane) {
                 let conventions = crate::config::conventions_or_default(store, &ctx.project)?;
-                let branch = gear_model::branch::review_branch(
-                    &conventions.review_branch,
-                    &ctx.project,
-                    &lane,
-                    task,
-                );
+                let branch = crate::base::task_branch(&conventions, &ctx.project, &lane, task);
                 let worktree = std::env::current_dir().map_err(|error| {
                     GearError::new(
                         ErrorCode::BadFormat,

@@ -280,16 +280,23 @@ pub fn continue_text(task: &str, version: i64, packet: &str) -> String {
 }
 
 /// design/09 "Delivery content", exactly (T-544):
-/// `Rework <task> attempt <n> (contract v<version>): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: <branch>. Before you change anything: git switch <branch> (your worktree may still be on the branch of the task you did last). Run `gear` first (…). Task packet: <packet>. Read it before starting; report with gear send. After your result, end your turn: …`
+/// `Rework <task> attempt <n> (contract v<version>): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: <branch>. Before you change anything: git switch <branch> (your worktree may still be on the branch of the task you did last), then git pull --no-rebase <remote> <branch>: the review is committed on it. Run `gear` first (…). Task packet: <packet>. Read it before starting; report with gear send. After your result, end your turn: …`
 ///
 /// This is the wording of a **rework** (attempt n ≥ 2): it says so, and that
 /// the fixes are in the packet's Rework section. The branch exists, but the
 /// lane's worktree may still be on the branch of its previous task, so the
 /// rework says how to get onto it (T-554, hull F-312: a rework was committed on
 /// the branch of the task before).
-pub fn assign_text(task: &str, attempt: i64, version: i64, branch: &str, packet: &str) -> String {
+pub fn assign_text(
+    task: &str,
+    attempt: i64,
+    version: i64,
+    branch: &str,
+    remote: &str,
+    packet: &str,
+) -> String {
     format!(
-        "Rework {task} attempt {attempt} (contract v{version}): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: {branch}. Before you change anything: git switch {branch} (your worktree may still be on the branch of the task you did last). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+        "Rework {task} attempt {attempt} (contract v{version}): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: {branch}. Before you change anything: git switch {branch} (your worktree may still be on the branch of the task you did last), then git pull --no-rebase {remote} {branch}: the review is committed on it. Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
     )
 }
 
@@ -303,7 +310,8 @@ pub fn assign_text(task: &str, attempt: i64, version: i64, branch: &str, packet:
 /// `Resume <task> attempt <n> (contract v<version>): it was set aside for more
 /// urgent work, not failed: there is no Rework section. Branch: <branch>.
 /// Before you change anything: git switch <branch> (your worktree may still be
-/// on the branch of the task you did last). Continue from what you pushed on
+/// on the branch of the task you did last), then git pull --no-rebase <remote>
+/// <branch>: the review is committed on it. Continue from what you pushed on
 /// <branch> (in your worktree); merge <remote>/<integration> into it first.
 /// Run `gear` first (…). …`
 pub fn resume_text(
@@ -316,7 +324,7 @@ pub fn resume_text(
     packet: &str,
 ) -> String {
     format!(
-        "Resume {task} attempt {attempt} (contract v{version}): it was set aside for more urgent work, not failed: there is no Rework section. Branch: {branch}. Before you change anything: git switch {branch} (your worktree may still be on the branch of the task you did last). Continue from what you pushed on {branch} (in your worktree); merge {remote}/{integration} into it first. Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+        "Resume {task} attempt {attempt} (contract v{version}): it was set aside for more urgent work, not failed: there is no Rework section. Branch: {branch}. Before you change anything: git switch {branch} (your worktree may still be on the branch of the task you did last), then git pull --no-rebase {remote} {branch}: the review is committed on it. Continue from what you pushed on {branch} (in your worktree); merge {remote}/{integration} into it first. Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
     )
 }
 
@@ -900,7 +908,7 @@ fn attempt_set_aside(tx: &Tx<'_>, project: &str, task: &str, n: i64) -> GearResu
 
 /// Turn decisions into Deliver ops in the caller's transaction:
 /// - Assign → `gear_app::tasks::start_attempt(tx, project, task, seat.id, seat.generation, now)`
-///   then a delivery with `assign_text(task, attempt.n, contract_version, task_branch(template, project, seat.name, task), packet_ref(task))`;
+///   then a delivery with `assign_text(task, attempt.n, contract_version, task_branch(template, project, seat.name, task), conventions.remote, packet_ref(task))`;
 /// - Continue → a delivery for the seat's open attempt with `continue_text(task, adopted_version, packet_ref(task))`;
 /// - None / Escalate → nothing.
 /// Returns the Intended ops (via `ops::intend_deliveries`).
@@ -968,6 +976,7 @@ pub fn intend_dispatch(
                         attempt.n,
                         attempt.contract_version,
                         &branch,
+                        &conventions.remote,
                         &packet_ref(task),
                     )
                 };
@@ -1483,7 +1492,7 @@ mod tests {
             .unwrap();
         let text = assign_delivery_text(&mut store, "T-1", 2);
         assert!(
-            text.contains("Rework T-1 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last)."),
+            text.contains("Rework T-1 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last), then git pull --no-rebase origin heat/t1: the review is committed on it."),
             "{text}"
         );
         assert!(
@@ -1524,8 +1533,8 @@ mod tests {
             "New task T-1 (contract v1). Branch: heat/t1. Before you read any repository file, start it from the integration branch: git fetch origin && git switch -c heat/t1 origin/dev (if it exists already: git switch heat/t1). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
         );
         assert_eq!(
-            assign_text("T-1", 2, 1, "heat/t1", "`gear --show T-1`"),
-            "Rework T-1 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+            assign_text("T-1", 2, 1, "heat/t1", "origin", "`gear --show T-1`"),
+            "Rework T-1 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last), then git pull --no-rebase origin heat/t1: the review is committed on it. Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
         );
     }
 
@@ -1585,7 +1594,7 @@ mod tests {
 
         assert!(
             text.contains(
-                "Resume T-1 attempt 2 (contract v1): it was set aside for more urgent work, not failed: there is no Rework section. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last). Continue from what you pushed on heat/t1 (in your worktree); merge origin/trunk into it first."
+                "Resume T-1 attempt 2 (contract v1): it was set aside for more urgent work, not failed: there is no Rework section. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last), then git pull --no-rebase origin heat/t1: the review is committed on it. Continue from what you pushed on heat/t1 (in your worktree); merge origin/trunk into it first."
             ),
             "{text}"
         );
@@ -1615,7 +1624,7 @@ mod tests {
     /// did last, and a rework was once committed there by mistake.
     #[test]
     fn a_rework_and_a_resume_say_how_to_get_onto_the_branch() {
-        let rework = assign_text("T-1", 2, 1, "heat/t1", "`gear --show T-1`");
+        let rework = assign_text("T-1", 2, 1, "heat/t1", "origin", "`gear --show T-1`");
         let resume = resume_text(
             "T-1",
             2,
@@ -1636,9 +1645,9 @@ mod tests {
             );
             assert!(
                 text.contains(
-                    "Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last)."
+                    "Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last), then git pull --no-rebase origin heat/t1: the review is committed on it."
                 ),
-                "the switch comes before any change: {text}"
+                "the switch and the pull come before any change: {text}"
             );
         }
     }
@@ -1656,7 +1665,7 @@ mod tests {
                 "trunk",
                 "`gear --show T-1`"
             ),
-            "Resume T-1 attempt 2 (contract v1): it was set aside for more urgent work, not failed: there is no Rework section. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last). Continue from what you pushed on heat/t1 (in your worktree); merge origin/trunk into it first. Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+            "Resume T-1 attempt 2 (contract v1): it was set aside for more urgent work, not failed: there is no Rework section. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last), then git pull --no-rebase origin heat/t1: the review is committed on it. Continue from what you pushed on heat/t1 (in your worktree); merge origin/trunk into it first. Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
         );
     }
 
