@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1135 -->
+<!-- gear-plan project=gear base=1136 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -64,7 +64,7 @@ eta: 4h
 - 2026-11-04 01:40 scope: (9) batch merge, user order, top priority, released as v0.6.52 to Prometheus at once: the SelyraAI merge queue held 22 passed tasks (about 2 h) because every merge ran one full CI round of about 4 min, one at a time per repo; the v0.6.30 train (each merge its own gate, side by side) was turned off after its rounds queued for GitHub runners. A batch merges several passed tasks onto the integration branch and gates them once; red ones are told apart by the paths the gate names, else by halving the batch | why: user: one round per merge is too slow for agent output | else: faster CI only (ai206 needs a repo admin)
 - 2026-11-04 01:40 scope: (10) a project with no unfinished task releases its standby reviewers (Lawrence M1 landed with two reviewers left up, `reviewer_release_idle_min` unset) | why: user asked why they were not reclaimed | else: none
 - 2026-11-04 01:40 note: audit of (9) is the captain's own: after the release, Prometheus sets merge_batch and the captain reads the first batches in the SelyraAI store (several tasks confirmed by one gate run; a red batch ejects only its culprit) | why: the proof is the real queue | else: none
-- 2026-11-04 02:05 station M-7644: keep course | why: the batch merge (T-547, T-548) is the critical path on hull; mast finishes T-550 and T-551; release v0.6.52 when T-548 lands | else: none
+- station M-7644: keep course | why: the batch merge (T-547, T-548) is the critical path on hull; mast finishes T-550 and T-551; release v0.6.52 when T-548 lands | else: none
 # Queue
 
 ## T-545 [now] lane=mast milestone=M6.2 required
