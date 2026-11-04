@@ -291,6 +291,31 @@ pub fn assign_text(task: &str, attempt: i64, version: i64, branch: &str, packet:
     )
 }
 
+/// The delivery of a task whose last attempt was set aside, not failed
+/// (T-553): `state: hold` closes the attempt as `abandoned`, and the task comes
+/// back to the lane with the work it pushed still on its branch. The rework
+/// wording would send the lane looking for a Rework section the packet does
+/// not have (Hull F-311: T-548 came back as a rework with an empty Rework
+/// section).
+///
+/// `Resume <task> attempt <n> (contract v<version>): it was set aside for more
+/// urgent work, not failed: there is no Rework section. Continue from what you
+/// pushed on <branch> (in your worktree); merge <remote>/<integration> into it
+/// first. Run `gear` first (…). …`
+pub fn resume_text(
+    task: &str,
+    attempt: i64,
+    version: i64,
+    branch: &str,
+    remote: &str,
+    integration: &str,
+    packet: &str,
+) -> String {
+    format!(
+        "Resume {task} attempt {attempt} (contract v{version}): it was set aside for more urgent work, not failed: there is no Rework section. Continue from what you pushed on {branch} (in your worktree); merge {remote}/{integration} into it first. Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+    )
+}
+
 /// design/09 "Delivery content" for the **first attempt** of a task (attempt
 /// 1), with the command that starts the branch (T-222, F-75: four lanes
 /// started a task on the previous task's branch, so the candidate carried
@@ -857,6 +882,18 @@ pub fn recover_open_rounds(
     Ok(())
 }
 
+/// Whether the attempt before `n` was set aside rather than failed (T-553):
+/// `state: hold` closes an attempt as `abandoned`, so the delivery to the next
+/// one resumes the work instead of announcing a rework. An attempt a review
+/// rejected is not set aside and keeps the rework wording.
+fn attempt_set_aside(tx: &Tx<'_>, project: &str, task: &str, n: i64) -> GearResult<bool> {
+    Ok(tx
+        .attempts_of_task(project, task)?
+        .into_iter()
+        .find(|attempt| attempt.n == n - 1)
+        .is_some_and(|attempt| attempt.state == AttemptState::Abandoned))
+}
+
 /// Turn decisions into Deliver ops in the caller's transaction:
 /// - Assign → `gear_app::tasks::start_attempt(tx, project, task, seat.id, seat.generation, now)`
 ///   then a delivery with `assign_text(task, attempt.n, contract_version, task_branch(template, project, seat.name, task), packet_ref(task))`;
@@ -899,13 +936,26 @@ pub fn intend_dispatch(
                 // a rework (attempt n ≥ 2) says it is a rework (T-544) — the
                 // branch and the worktree are already there.
                 let branch = task_branch(&conventions.task_branch, project, &seat.name, task);
+                let integration = integration_branch(tx, project, &seat.name);
                 let mut text = if attempt.n == 1 {
                     first_attempt_text(
                         task,
                         attempt.contract_version,
                         &branch,
                         &conventions.remote,
-                        &integration_branch(tx, project, &seat.name),
+                        &integration,
+                        &packet_ref(task),
+                    )
+                } else if attempt_set_aside(tx, project, task, attempt.n)? {
+                    // T-553: the attempt before this one was set aside, not
+                    // rejected: the lane resumes its own work.
+                    resume_text(
+                        task,
+                        attempt.n,
+                        attempt.contract_version,
+                        &branch,
+                        &conventions.remote,
+                        &integration,
                         &packet_ref(task),
                     )
                 } else {
@@ -1472,6 +1522,104 @@ mod tests {
         assert_eq!(
             assign_text("T-1", 2, 1, "heat/t1", "`gear --show T-1`"),
             "Rework T-1 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t1 (in your worktree). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+        );
+    }
+
+    /// A store with the lane `heat` and `T-1` ready, and attempt 1 of `T-1` in
+    /// `state` (T-553).
+    fn world_with_a_first_attempt(state: AttemptState) -> gear_store::Store {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+                project.config_toml = config_toml("trunk");
+                tx.update_project(&project)?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    NOW,
+                )?;
+                tx.insert_task(&ready_task("T-1"))?;
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: NOW,
+                    updated: NOW,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// T-553: a task whose attempt 1 was set aside (`state: hold` abandons the
+    /// attempt) comes back to the lane as a Resume: there is no Rework section
+    /// to look for (Hull F-311: T-548 came back as a rework with an empty one).
+    #[test]
+    fn a_set_aside_attempt_comes_back_as_a_resume() {
+        let mut store = world_with_a_first_attempt(AttemptState::Abandoned);
+
+        let text = assign_delivery_text(&mut store, "T-1", 2);
+
+        assert!(
+            text.contains(
+                "Resume T-1 attempt 2 (contract v1): it was set aside for more urgent work, not failed: there is no Rework section. Continue from what you pushed on heat/t1 (in your worktree); merge origin/trunk into it first."
+            ),
+            "{text}"
+        );
+        assert!(text.starts_with("Resume T-1 attempt 2"), "{text}");
+        assert!(!text.contains("review failed"), "not a rework: {text}");
+        assert!(!text.starts_with("Rework"), "not a rework: {text}");
+    }
+
+    /// T-553: an attempt the review rejected keeps the rework wording.
+    #[test]
+    fn a_rejected_attempt_still_comes_back_as_a_rework() {
+        let mut store = world_with_a_first_attempt(AttemptState::Rejected);
+
+        let text = assign_delivery_text(&mut store, "T-1", 2);
+
+        assert!(
+            text.contains(
+                "Rework T-1 attempt 2 (contract v1): the review failed your last attempt;"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("Resume"), "not a resume: {text}");
+    }
+
+    /// The exact wording of the three packets (T-553 adds the resume).
+    #[test]
+    fn the_three_packet_writings() {
+        assert_eq!(
+            resume_text(
+                "T-1",
+                2,
+                1,
+                "heat/t1",
+                "origin",
+                "trunk",
+                "`gear --show T-1`"
+            ),
+            "Resume T-1 attempt 2 (contract v1): it was set aside for more urgent work, not failed: there is no Rework section. Continue from what you pushed on heat/t1 (in your worktree); merge origin/trunk into it first. Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
         );
     }
 
