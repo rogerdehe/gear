@@ -4224,6 +4224,15 @@ fn git_with_lock(dir: &Path, args: &[&str], lock: Option<&File>) -> Result<Strin
         .env_remove("GEAR_CTX")
         .env_remove("GEAR_DB")
         .env_remove("GEAR_ADMIN");
+    // A connection the host stops answering ends within about a minute
+    // instead of holding the merge for ever (2026-11-04: a fetch hung on
+    // GitHub SSH for 7 minutes). A user's own ssh command is kept.
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() && std::env::var_os("GIT_SSH").is_none() {
+        command.env(
+            "GIT_SSH_COMMAND",
+            "ssh -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4",
+        );
+    }
     if let Some(lock) = lock {
         command.stdin(
             lock.try_clone()
