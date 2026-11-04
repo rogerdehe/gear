@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1141 -->
+<!-- gear-plan project=gear base=1142 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -68,6 +68,7 @@ eta: 4h
 - station M-7677: keep course | why: T-547 rework is the last critical step; mast takes the captain-take naming fix for the same release | else: none
 - 2026-11-04 02:40 hand-fix: T-548 merge conflicted with T-547 rework (tests only, both sides added tests at one spot); captain merged it keeping all four tests, `make check merge::` 105/105, `make gate` 56 s, pushed to dev 8458a3aa | why: release v0.6.52 waits on it | else: rework round for hull
 - station M-7693: keep course | why: v0.6.52 (batch merge) is live; T-553 (two wrong signals) goes out as v0.6.53; landing is decided after that | else: land now
+- station M-7702: keep course | why: T-553 is merging; hull takes F-312 (git switch in rework/resume texts); both go out as v0.6.53 | else: none
 # Queue
 
 ## T-545 [now] lane=mast milestone=M6.2 required
@@ -122,4 +123,10 @@ deps: -
 goal: [v0.6.53] Two wrong signals found while T-548 waited for T-547 (M6.2 backlog, 2026-11-04). (1) crates/gear-engine/src/merge.rs, the branch sweep (`let landing = store.read(...)`, line ~4483): a merge op in OpState::Unknown (a merge that waits for another task: Report::Waiting leaves it there) counts as landing too, like Intended, Executing and Submitted; today M-7680 told the captain "nothing will merge them" for T-548 while its merge was queued behind T-547. (2) crates/gear-engine/src/dispatch.rs, where the delivery text is chosen (line ~901: `if attempt.n == 1 { first_attempt_text(..) } else { assign_text(..) }`): when the task's previous attempt (n - 1) is in state abandoned (the task was set aside with `state: hold`), send a new `resume_text(task, attempt, version, branch, remote, integration, packet)`: "Resume <task> attempt <n> (contract v<version>): it was set aside for more urgent work, not failed: there is no Rework section. Continue from what you pushed on <branch> (in your worktree); merge <remote>/<integration> into it first. Run `gear` first (it records that you got this). Task packet: <packet>. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle." A previous attempt that was rejected keeps assign_text. Hull F-311: T-548 came back as a "rework" with an empty Rework section.
 accept: Tests: in merge.rs `mod tests` a done task whose merge op is Unknown (waiting) gets no unlanded-branch item; in dispatch.rs `mod tests` a task whose attempt 1 is abandoned is delivered attempt 2 with the Resume text and no "review failed" words, and a task whose attempt 1 is rejected still gets the Rework text. Run only `make check CRATE=gear-engine TESTS='test(merge::) | test(dispatch::)'`; the merge gate runs `make gate`.
 estimate: 30
+deps: -
+
+## T-554 [now] lane=hull milestone=M6.2
+goal: [v0.6.53] A rework or a resume tells the lane how to get onto the task's branch, as the first attempt does (hull F-312, T-547: the worktree was still on hull/t548 and the rework was committed there first). In crates/gear-engine/src/dispatch.rs, after T-553 (the Resume text): fn assign_text and fn resume_text replace "Branch: <branch> (in your worktree)." with "Branch: <branch>. Before you change anything: git switch <branch> (your worktree may still be on the branch of the task you did last)." Nothing else in either text changes.
+accept: The dispatch tests that pin the Rework and Resume texts are updated to the new sentence and pass, and a test asserts both texts contain "git switch <branch>". Run only `make check CRATE=gear-engine TESTS='test(dispatch::)'`; the merge gate runs `make gate`.
+estimate: 15
 deps: -
