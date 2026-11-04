@@ -134,13 +134,19 @@ pub fn forecast(jobs: &[Job], lanes: &[String], review_merge_min: i64) -> Vec<La
                 let mut start = free;
                 if matches!(job.stage, Stage::Queued | Stage::Deps) {
                     let (ready, blocker) = ready(&merged, &job.deps);
-                    // A dependency nothing will merge leaves this job
-                    // unstartable (T-567): the lane's end is no forecast, and
-                    // the board names what holds it.
-                    if ready >= NO_DEP {
-                        if let Some(blocker) = blocker.clone() {
-                            blocked.push((job.id.clone(), blocker));
-                        }
+                    // A dependency no job of the queue speaks for is what makes
+                    // a job unstartable (T-567; review F1): only that job is
+                    // named. A job that waits behind another queued job which is
+                    // itself blocked is not — the board names the task whose own
+                    // dependency nothing will merge (X waits for Y, Y waits for
+                    // Z: `Y waits for Z`), never a real queued job as the one
+                    // "nothing will merge".
+                    if let Some(dep) = job
+                        .deps
+                        .iter()
+                        .find(|dep| !dep.is_empty() && !merged.contains_key(*dep))
+                    {
+                        blocked.push((job.id.clone(), dep.clone()));
                     }
                     if ready > free {
                         if let Some(blocker) = blocker {
@@ -410,6 +416,44 @@ mod tests {
         assert!(lane(&ends, "mast").blocked.is_empty());
         assert!(lane(&ends, "keel").blocked.is_empty());
         assert_eq!(lane(&ends, "mast").end_min, 10 + REVIEW_MERGE_MIN);
+    }
+
+    /// T-567 review F1: a job that waits behind another queued job which is
+    /// itself blocked is not the one named — the board names the task whose own
+    /// dependency nothing will merge (X waits for Y, Y waits for Z: `Y waits
+    /// for Z`), so a real queued job is never called "nothing will merge".
+    #[test]
+    fn a_job_blocked_through_another_queued_job_is_not_named() {
+        let job = |id: &str, lane: &str, stage: Stage, deps: &[&str]| Job {
+            id: id.to_string(),
+            lane: lane.to_string(),
+            stage,
+            est_min: 10,
+            actual_min: 0,
+            deps: deps.iter().map(|dep| dep.to_string()).collect(),
+        };
+        let jobs = vec![
+            // X waits for Y, a real queued job of another lane; Y waits for Z,
+            // and no job of the queue is Z.
+            job("X", "hull", Stage::Deps, &["Y"]),
+            job("Y", "mast", Stage::Queued, &["Z"]),
+        ];
+        let ends = forecast(
+            &jobs,
+            &["hull".to_string(), "mast".to_string()],
+            REVIEW_MERGE_MIN,
+        );
+        assert!(
+            lane(&ends, "hull").blocked.is_empty(),
+            "X waits for a real job: {:?}",
+            lane(&ends, "hull").blocked
+        );
+        assert_eq!(
+            lane(&ends, "mast").blocked,
+            vec![("Y".to_string(), "Z".to_string())],
+            "{:?}",
+            lane(&ends, "mast").blocked
+        );
     }
 
     #[test]

@@ -909,6 +909,17 @@ fn expected_of(used: i64, ends: &[forecast::LaneEnd]) -> (i64, Option<String>) {
     )
 }
 
+/// The unfolded header's slowest-lane clause (T-567 review F3): ` (slowest
+/// lane: heat)`, and nothing at all when no lane has a forecast — every lane
+/// blocked prints no empty clause.
+fn slowest_lane_clause(lane: &str) -> String {
+    if lane.is_empty() {
+        String::new()
+    } else {
+        format!(" (slowest lane: {lane})")
+    }
+}
+
 /// A time line's words with the jobs that can never start appended (T-567):
 /// `expected 8h00m of 50h00m, 42h behind · blocked: T-570 waits for T-665,
 /// which nothing will merge`.
@@ -1191,10 +1202,11 @@ fn unfolded_rows(
         .max_by_key(|end| end.end_min)
         .map(|end| end.lane.clone())
         .unwrap_or_default();
+    let slow = slowest_lane_clause(&slow);
     let when = if sailing {
         if diff >= 0 {
             format!(
-                "used {} · planned {} · expected {} (slowest lane: {slow}), {} ahead of plan",
+                "used {} · planned {} · expected {}{slow}, {} ahead of plan",
                 hm(used),
                 hm(eta),
                 hm(expected),
@@ -1202,7 +1214,7 @@ fn unfolded_rows(
             )
         } else {
             format!(
-                "used {} · planned {} · expected {} (slowest lane: {slow}), {} behind plan",
+                "used {} · planned {} · expected {}{slow}, {} behind plan",
                 hm(used),
                 hm(eta),
                 hm(expected),
@@ -2642,6 +2654,14 @@ mod tests {
         let (expected, blocked) = expected_of(0, &ends[..1]);
         assert_eq!(expected, 2 * 60);
         assert_eq!(blocked, None);
+    }
+
+    /// T-567 review F3: when every lane is blocked there is no slowest lane,
+    /// and the unfolded header prints no empty `(slowest lane: )`.
+    #[test]
+    fn a_header_with_no_lane_to_name_prints_no_slowest_lane() {
+        assert_eq!(slowest_lane_clause("heat"), " (slowest lane: heat)");
+        assert_eq!(slowest_lane_clause(""), "");
     }
 
     #[test]
