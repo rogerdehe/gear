@@ -75,6 +75,8 @@ pub enum Stage {
     Deps,
     /// It is queued: the lane has not started it.
     Queued,
+    /// The captain holds it (`state: hold` in the plan): in the voyage, not delivered.
+    Held,
     /// It was delivered to its lane and nothing has started yet.
     Delivered,
     /// The lane works on it.
@@ -110,6 +112,7 @@ impl Stage {
     pub fn symbol(self) -> &'static str {
         match self {
             Stage::Deps | Stage::Queued => "○",
+            Stage::Held => "‖",
             Stage::Delivered => "◌",
             Stage::Working | Stage::Asking => "◉",
             Stage::Handed | Stage::Review | Stage::Verdict => "◎",
@@ -125,7 +128,9 @@ impl Stage {
     pub fn color(self) -> Color {
         match self {
             Stage::Deps | Stage::Queued | Stage::Delivered | Stage::Moved => Color::Dim,
-            Stage::Working | Stage::Asking | Stage::Verdict | Stage::Rework => Color::Warn,
+            Stage::Working | Stage::Asking | Stage::Verdict | Stage::Rework | Stage::Held => {
+                Color::Warn
+            }
             Stage::Handed | Stage::Review | Stage::Passed | Stage::Merging => Color::Acc,
             Stage::SentBack | Stage::MergeFailed | Stage::Failed => Color::Bad,
             Stage::Merged => Color::Ok,
@@ -180,6 +185,7 @@ impl Stage {
                 }
             ),
             Stage::Queued => "queued".to_string(),
+            Stage::Held => "on hold (the captain holds it)".to_string(),
             Stage::Delivered => "delivered, not started".to_string(),
             Stage::Working => "working".to_string(),
             Stage::Asking => "waits for the captain's answer".to_string(),
@@ -261,10 +267,6 @@ fn tasks_of(
         if !keep(row.id.as_str()) {
             continue;
         }
-        if row.state == TaskState::Draft {
-            // A task that is not in the plan yet is not in the flow.
-            continue;
-        }
         if row.state == TaskState::Failed || row.state == TaskState::Cancelled {
             // A task that ended without a result is not a step of the flow.
             continue;
@@ -311,7 +313,7 @@ fn order(mut tasks: Vec<GraphTask>) -> Vec<GraphTask> {
     let mut ordered: Vec<GraphTask> = Vec::new();
     ordered.extend(
         rest.iter()
-            .filter(|task| matches!(task.stage, Stage::Deps | Stage::Queued))
+            .filter(|task| matches!(task.stage, Stage::Deps | Stage::Queued | Stage::Held))
             .cloned(),
     );
     ordered.extend(rest.iter().filter(|task| task.stage.is_open()).cloned());
@@ -685,7 +687,7 @@ fn git_info(task: &GraphTask, tw: usize) -> Vec<Span> {
     let live = is_live(task.stage);
     let (head, time_style) = if task.stage == Stage::Merged {
         (Style::fg(Color::Dim), Style::fg(Color::Dim))
-    } else if matches!(task.stage, Stage::Deps | Stage::Queued) {
+    } else if matches!(task.stage, Stage::Deps | Stage::Queued | Stage::Held) {
         (Style::fg(Color::Dim), Style::fg(Color::Dim))
     } else if live {
         (Style::bold(), Style::PLAIN)
@@ -750,6 +752,7 @@ pub(crate) fn stage_of(
     match task.state {
         TaskState::Done => return Ok(Stage::Merged),
         TaskState::Failed => return Ok(Stage::Failed),
+        TaskState::Draft => return Ok(Stage::Held),
         _ => {}
     }
     // The attempt the task is on: the one with the highest n; an abandoned
@@ -1130,6 +1133,7 @@ fn info(task: &GraphTask) -> String {
         }
         Stage::Deps
         | Stage::Queued
+        | Stage::Held
         | Stage::Delivered
         | Stage::Working
         | Stage::Asking

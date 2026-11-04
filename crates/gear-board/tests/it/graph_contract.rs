@@ -581,6 +581,7 @@ fn stage_world() -> Store {
                 ("T-30", TaskState::Verifying, vec![]),
                 ("T-31", TaskState::Verifying, vec![]),
                 ("T-32", TaskState::Done, vec![]),
+                ("T-33", TaskState::Draft, vec![]),
             ];
             for (rank, (id, state, deps)) in tasks.iter().enumerate() {
                 tx.insert_task(&TaskRow {
@@ -738,8 +739,10 @@ fn stage_and_words(store: &mut Store, task: &str) -> (Stage, String) {
 #[test]
 fn each_stage_comes_from_a_fact_of_the_store() {
     let mut store = stage_world();
-    let table: [(&str, Stage, &str); 14] = [
+    let table: [(&str, Stage, &str); 15] = [
         ("T-20", Stage::Deps, "waits for 1 to merge"),
+        // A held task stays on the board: a hold that drops it from the list hides it from the user.
+        ("T-33", Stage::Held, "on hold (the captain holds it)"),
         ("T-1", Stage::Queued, "queued"),
         ("T-23", Stage::Delivered, "delivered, not started"),
         ("T-21", Stage::Working, "working"),

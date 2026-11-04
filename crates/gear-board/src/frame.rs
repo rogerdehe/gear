@@ -833,7 +833,7 @@ fn header_numbers(board: &Board, project: &ProjectBoard) -> HeaderNumbers {
         tasks += 1;
         match task.stage {
             graph::Stage::Merged => merged += 1,
-            graph::Stage::Deps | graph::Stage::Queued => waiting += 1,
+            graph::Stage::Deps | graph::Stage::Queued | graph::Stage::Held => waiting += 1,
             _ => {}
         }
     }
