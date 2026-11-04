@@ -19,6 +19,7 @@
 //! across the tasks it reviews (T-482).
 
 use gear_herdr::{HerdrAct, Outcome};
+use gear_model::SeatRole;
 use gear_model::{GearResult, MsgKind, MsgState, Ts};
 use gear_store::{BindingStatus, NewMessage, SeatRow, Store, Tx};
 use std::collections::BTreeMap;
@@ -180,6 +181,16 @@ pub fn restore(
         ) {
             continue;
         }
+        // A pane may hold the captain seats of several projects (T-485): its
+        // agent carries one name, the name of the captain seat bound to it
+        // first. Naming it after each seat in turn flipped the Prometheus
+        // captain between `prometheus-captain` and `lawrence-captain` every
+        // pass, and every prompt by the other name failed.
+        if seat.role == SeatRole::Captain
+            && store.read(|tx| older_captain_on_pane(tx, &seat.id, &binding))?
+        {
+            continue;
+        }
         let name = desired(&seat);
         match ensure_snapshot(herdr, &names, &binding.pane_id, &name) {
             Ensure::Named => {
@@ -212,6 +223,33 @@ pub fn restore(
         }
     }
     Ok(restored)
+}
+
+/// Whether another project's captain seat is bound Active to the same pane
+/// since before `binding` (ties broken by seat id): that seat names the pane.
+fn older_captain_on_pane(
+    tx: &Tx<'_>,
+    seat: &str,
+    binding: &gear_store::BindingRow,
+) -> GearResult<bool> {
+    for project in tx.project_ids()? {
+        let Some(other) = tx.captain_of(&project)? else {
+            continue;
+        };
+        if other.id == seat {
+            continue;
+        }
+        let Some(theirs) = tx.get_binding(&other.id, other.generation)? else {
+            continue;
+        };
+        if theirs.status == BindingStatus::Active
+            && theirs.pane_id == binding.pane_id
+            && (theirs.created, other.id.as_str()) < (binding.created, seat)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The thread a seat's taken-name item lives in.

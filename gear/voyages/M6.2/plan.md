@@ -69,6 +69,7 @@ eta: 4h
 - 2026-11-04 02:40 hand-fix: T-548 merge conflicted with T-547 rework (tests only, both sides added tests at one spot); captain merged it keeping all four tests, `make check merge::` 105/105, `make gate` 56 s, pushed to dev 8458a3aa | why: release v0.6.52 waits on it | else: rework round for hull
 - station M-7693: keep course | why: v0.6.52 (batch merge) is live; T-553 (two wrong signals) goes out as v0.6.53; landing is decided after that | else: land now
 - station M-7702: keep course | why: T-553 is merging; hull takes F-312 (git switch in rework/resume texts); both go out as v0.6.53 | else: none
+- 2026-11-04 02:33 hand-fix: the engine names a pane that holds several captain seats after the seat bound to it first (names::restore); the Prometheus captain flipped between prometheus-captain and lawrence-captain on every pass after `gear captain take lawrence`, T-552 had fixed only the take path; the lawrence seat was also released from that pane at once | why: user, urgent: prompts by name failed | else: none
 # Queue
 
 ## T-545 [now] lane=mast milestone=M6.2 required
