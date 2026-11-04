@@ -714,6 +714,8 @@ pub fn merge_passed(
             &config.conventions.merge_message,
             &[("project", project), ("task", &task)],
         );
+        // T-564: what a review commit's subject starts with for this task.
+        let prefix = review_prefix(&config, project, &task, &op_attempt(&op));
         let finished = Arc::new(Mutex::new(None));
         let output = finished.clone();
         let job = op.clone();
@@ -751,6 +753,7 @@ pub fn merge_passed(
                         pr.as_ref(),
                         &fallback,
                         &commit,
+                        &prefix,
                         &db_path,
                     ) {
                         Step::Merged(lines) => Report::Merged(lines),
@@ -981,6 +984,7 @@ fn launch_train(
                 &config.conventions.merge_message,
                 &[("project", project), ("task", &task)],
             ),
+            review_prefix: review_prefix(config, project, &task, &op_attempt(&op)),
         });
     }
     let finished = Arc::new(Mutex::new(None));
@@ -1075,6 +1079,7 @@ fn launch_batch(
                 &lane,
                 &task,
             ),
+            review_prefix: review_prefix(config, project, &task, &op_attempt(op)),
             commit,
         });
     }
@@ -1385,6 +1390,7 @@ fn merge_with_retries(
     pr: Option<&PrTarget>,
     review_fallback: &str,
     commit: &str,
+    review_prefix: &str,
     db_path: &str,
 ) -> Step {
     let mut attempt = 0;
@@ -1407,6 +1413,7 @@ fn merge_with_retries(
             pr,
             review_fallback,
             commit,
+            review_prefix,
             &mut probe,
         ) {
             Step::Merged(lines) => {
@@ -2587,6 +2594,8 @@ fn merge_one_with_db(
         gear_model::commit::MERGE_MESSAGE,
         &[("task", op.task.as_deref().unwrap_or_default())],
     );
+    // The tests' default review message, as the engine fills it (T-564).
+    let prefix = test_review_prefix(op);
     let mut probe = Probe::new(
         op.task.as_deref().unwrap_or("-"),
         op.created,
@@ -2607,6 +2616,7 @@ fn merge_one_with_db(
         None,
         &review,
         &commit,
+        &prefix,
         &mut probe,
     );
     // T-407: the operation's own completion line, as the retry loop writes it.
@@ -2614,6 +2624,18 @@ fn merge_one_with_db(
         probe.done();
     }
     step_result(step)
+}
+
+/// A review commit's subject prefix for the fixtures (T-564): the default
+/// `review(<task>): ` message, cut at `{what}`.
+#[cfg(test)]
+fn test_review_prefix(op: &OpRow) -> String {
+    let task = op.task.as_deref().unwrap_or_default();
+    gear_model::commit::fill(gear_model::commit::REVIEW_MESSAGE, &[("task", task)])
+        .split("{what}")
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -2666,6 +2688,7 @@ fn merge_one_locked(
     pr: Option<&PrTarget>,
     review_fallback: &str,
     commit: &str,
+    review_prefix: &str,
     probe: &mut Probe,
 ) -> Step {
     let prepared = match prepare_merge(
@@ -2677,6 +2700,7 @@ fn merge_one_locked(
         remote,
         review_fallback,
         commit,
+        review_prefix,
         probe,
         None,
     ) {
@@ -2713,6 +2737,28 @@ struct Prepared {
     pushed: Pushed,
 }
 
+/// The attempt the merge op names, as the review message's `{attempt}`.
+fn op_attempt(op: &OpRow) -> String {
+    op.attempt
+        .map(|attempt| attempt.to_string())
+        .unwrap_or_default()
+}
+
+/// The prefix a review commit's subject starts with (T-564): the project's
+/// `[conventions].review_message` filled with the task and the attempt, cut at
+/// `{what}` — what the commit carries is the reviewer's to write. The default
+/// gives `review(T-7): `.
+fn review_prefix(config: &ProjectConfig, project: &str, task: &str, attempt: &str) -> String {
+    let filled = gear_model::commit::fill(
+        &config.conventions.review_message,
+        &[("project", project), ("task", task), ("attempt", attempt)],
+    );
+    match filled.find("{what}") {
+        Some(at) => filled[..at].to_string(),
+        None => filled,
+    }
+}
+
 /// Steps 1 to 7 of a merge: a clean base (the remote integration branch, or
 /// `base`: the commit of the train's stage ahead), the approved candidate and
 /// its review branch merged onto it, no conflict. `Err` is the merge's end.
@@ -2726,6 +2772,7 @@ fn prepare_merge(
     remote: Target<'_>,
     review_fallback: &str,
     commit: &str,
+    review_prefix: &str,
     probe: &mut Probe,
     base: Option<&str>,
 ) -> Result<Prepared, Step> {
@@ -2944,19 +2991,10 @@ fn prepare_merge(
              a merge publishes the approved candidate and the review commit pushed on its task branch"
         ))));
     }
-    // The task branch must hold the approved candidate: the review commit is
-    // pushed on top of it, never instead of it.
-    if !has_review
-        && has_task_branch
-        && git(dir, &["merge-base", "--is-ancestor", &sha, &task_ref]).is_err()
-    {
-        return Err(Step::Failed(Failed::stuck(format!(
-            "{task}: the task branch {task_ref} does not hold the approved candidate {sha}\n\
-             the review commit is pushed on top of the candidate, so the merge would publish work nobody reviewed"
-        ))));
-    }
     // Where the task branch is, when it is there: a restart after the push may
-    // still see the last one locally, at the candidate itself.
+    // still see the last one locally, at the candidate itself. T-564: the ref
+    // is resolved to one sha here and that sha is what merges below, so a push
+    // that lands after this read cannot slip in unreviewed.
     let task_tip = if has_task_branch {
         git(dir, &["rev-parse", &task_ref])
             .ok()
@@ -2964,6 +3002,63 @@ fn prepare_merge(
     } else {
         None
     };
+    // The task branch must hold the approved candidate: the review commit is
+    // pushed on top of it, never instead of it.
+    if !has_review
+        && task_tip
+            .as_deref()
+            .is_some_and(|tip| git(dir, &["merge-base", "--is-ancestor", &sha, tip]).is_err())
+    {
+        return Err(Step::Failed(Failed::stuck(format!(
+            "{task}: the task branch {task_ref} does not hold the approved candidate {sha}\n\
+             the review commit is pushed on top of the candidate, so the merge would publish work nobody reviewed"
+        ))));
+    }
+    // T-564: the task branch holds the approved candidate, the review commit
+    // and nothing else. A lane commit pushed after the hand-in (prometheus
+    // 2026-11-04: hull's fix on T-562) would land unreviewed: each non-merge
+    // commit after the candidate must be the review, whose subject starts with
+    // the project's review message up to `{what}`. A merge commit on top of it
+    // is no way out either — its parents are in the range as well.
+    //
+    // Only the commits the merge newly brings in are judged (T-564 review F1):
+    // a task branch that merged the integration branch into it — the
+    // documented conflict fix (course.md: merge dev into the task branch,
+    // resolve, push, remerge) — carries dev's own commits, and those are
+    // reviewed work already on the branch. `--not <base>` leaves them out.
+    if !has_review && !mechanical && task_tip.is_some() {
+        let tip = task_tip.as_deref().unwrap_or_default();
+        let log = git(
+            dir,
+            &[
+                "log",
+                "--no-merges",
+                "--format=%H%x09%s",
+                &format!("{sha}..{tip}"),
+                "--not",
+                &base_ref,
+            ],
+        )
+        .map_err(|reason| {
+            Step::Failed(Failed::clear(format!(
+                "{task}: the commits of the task branch {task_ref} could not be read: {reason}"
+            )))
+        })?;
+        let foreign: Vec<String> = log
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| {
+                let (commit, subject) = line.split_once('\t')?;
+                (!subject.starts_with(review_prefix)).then(|| format!("{commit} {subject}"))
+            })
+            .collect();
+        if !foreign.is_empty() {
+            return Err(Step::Failed(Failed::stuck(format!(
+                "{task}: the task branch holds commits after the approved candidate that are not the review: {}; a change after hand-in needs a new attempt",
+                foreign.join(", ")
+            ))));
+        }
+    }
     // What merges, and the source the merge commit names for it: as today, the
     // candidate by sha and then the review branch by its name; without a review
     // branch, the task branch alone, which holds both.
@@ -2979,7 +3074,11 @@ fn prepare_merge(
         let only_the_candidate =
             already && task_tip.as_deref().map_or(true, |tip| tip == sha.as_str());
         if !only_the_candidate {
-            merges.push((task_ref.clone(), task_ref.clone()));
+            // The pinned sha merges; the merge commit still names the branch.
+            merges.push((
+                task_tip.clone().unwrap_or_else(|| task_ref.clone()),
+                task_ref.clone(),
+            ));
         }
     } else if !already {
         merges.push((sha.clone(), sha.clone()));
@@ -3272,6 +3371,7 @@ struct TrainOp {
     others: Vec<(String, String, bool)>,
     review_fallback: String,
     commit: String,
+    review_prefix: String,
 }
 
 /// A merge train (`[conventions] merge_parallel` above 1): each merge is
@@ -3334,6 +3434,7 @@ fn run_train(
             remote,
             &train_op.review_fallback,
             &train_op.commit,
+            &train_op.review_prefix,
             &mut probe,
             base.as_deref(),
         ) {
@@ -3544,6 +3645,7 @@ fn run_batch(
             remote,
             &batch_op.review_fallback,
             &batch_op.commit,
+            &batch_op.review_prefix,
             &mut probe,
             base.as_deref(),
         ) {
@@ -9829,6 +9931,7 @@ gate = "{gate}"
             gear_model::commit::MERGE_MESSAGE,
             &[("task", op.task.as_deref().unwrap_or_default())],
         );
+        let prefix = test_review_prefix(op);
         step_result(merge_with_retries(
             worktree,
             repo,
@@ -9843,6 +9946,7 @@ gate = "{gate}"
             None,
             &review,
             &commit,
+            &prefix,
             "",
         ))
     }
@@ -11717,11 +11821,13 @@ gate = "{project_gate}"
         let worktree = scratch.merge_worktree();
         let candidate = scratch.head_of("heat/t5");
         // The reviewer's commit goes onto the task branch, and no review
-        // branch is on the remote.
+        // branch is on the remote. Its subject is the project's review message
+        // (T-564): anything else on the branch is a lane commit made after the
+        // hand-in.
         sh(
             &scratch.work,
             "git switch -q heat/t5 && echo r > r5.txt && git add -A \
-             && git -c user.name=a -c user.email=a@b commit -qm r5",
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass, r5'",
         );
         publish(&scratch.work, "heat/t5");
         sh(
@@ -11746,6 +11852,123 @@ gate = "{project_gate}"
             "{:?}",
             scratch.origin_branches()
         );
+    }
+
+    /// T-564: a lane commit pushed onto the task branch after the hand-in is
+    /// not merged (prometheus, 2026-11-04: hull's fix on T-562 would have
+    /// landed unreviewed). The op fails `stuck` and names the commit.
+    #[test]
+    fn a_lane_commit_after_the_candidate_on_the_task_branch_is_refused() {
+        let scratch = Scratch::new("task-branch-lane-commit");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The review, then the lane's own fix on top of it.
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass' \
+             && echo w > w5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'fix the thing after hand-in'",
+        );
+        publish(&scratch.work, "heat/t5");
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+        let lane_commit = scratch.head_of("heat/t5");
+
+        let failed = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap_err();
+
+        assert_eq!(failed.blocker, Blocker::Stuck, "{}", failed.reason);
+        assert!(
+            failed.reason.contains(&lane_commit),
+            "the lane commit is named: {}",
+            failed.reason
+        );
+        assert!(
+            failed.reason.contains("fix the thing after hand-in"),
+            "{}",
+            failed.reason
+        );
+        assert!(
+            failed
+                .reason
+                .contains("a change after hand-in needs a new attempt"),
+            "{}",
+            failed.reason
+        );
+        // Nothing landed: dev is where it was.
+        assert!(!scratch.dev_log().contains("fix the thing"));
+    }
+
+    /// T-564: the lane commit merged in under a merge commit is caught too: the
+    /// range keeps every commit, and the merge commit's own subject is no pass.
+    #[test]
+    fn a_pulled_in_lane_commit_under_a_merge_commit_is_refused() {
+        let scratch = Scratch::new("task-branch-merge-commit");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass' \
+             && git checkout -q -b lane-side \
+             && echo w > w5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'lane fix' \
+             && git switch -q heat/t5 \
+             && git -c user.name=a -c user.email=a@b merge -q --no-ff lane-side -m 'review(T-5): pass'",
+        );
+        publish(&scratch.work, "heat/t5");
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+
+        let failed = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap_err();
+
+        assert_eq!(failed.blocker, Blocker::Stuck, "{}", failed.reason);
+        assert!(
+            failed.reason.contains("lane fix"),
+            "the pulled-in commit is named: {}",
+            failed.reason
+        );
+    }
+
+    /// T-564 review F1: the documented conflict fix is `merge dev into the
+    /// task branch, resolve, push, remerge` (course.md). That merge brings the
+    /// integration branch's own commits into the range, and they are reviewed
+    /// work already on the branch, not lane commits: the merge goes through.
+    #[test]
+    fn a_task_branch_that_merged_the_integration_branch_still_merges() {
+        let scratch = Scratch::new("task-branch-dev-merge");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The integration branch moves after the hand-in, and the task branch
+        // takes it in: the captain's conflict fix, with nothing to resolve.
+        sh(
+            &scratch.work,
+            "git switch -q dev && echo d > devd.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'dev moved'",
+        );
+        publish(&scratch.work, "dev");
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass' \
+             && git -c user.name=a -c user.email=a@b merge -q --no-edit dev",
+        );
+        publish(&scratch.work, "heat/t5");
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+
+        let line = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap();
+
+        assert!(line.contains("merged T-5"), "{line}");
+        let log = scratch.dev_log();
+        assert!(log.contains("review(T-5)"), "the review landed: {log}");
+        assert!(log.contains("dev moved"), "dev's commit is there: {log}");
     }
 
     /// T-558, the transition: a task reviewed before the change still has its
