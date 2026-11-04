@@ -2500,6 +2500,19 @@ fn stage_worktree(
     // `[conventions].seat_branch` template, `<project>/merge/home` by default
     // (T-559: project / seat / home, like project / lane / task).
     let branch = gear_model::branch::expand_seat(&config.conventions.seat_branch, project, &seat);
+    // T-565: the merge seat has no seat row, so no apply and no lane pass moves
+    // its branch — it is settled here, before the worktree is opened or
+    // created. A ref of the previous default (`p/merge`) is a folder of the new
+    // name, and git cannot hold both: it is renamed, and a ref of another name
+    // in the way fails the merge naming it, never both.
+    let old = gear_app::seat_branch::previous_default(project, &seat);
+    if let Err(reason) =
+        gear_app::seat_branch::settle(&repo.path, &old, &branch, &config.conventions.remote)
+    {
+        // Named as the merge worktree's, so the wait files under its worktree
+        // cause (T-566).
+        return Err(format!("the merge worktree's branch {branch}: {reason}"));
+    }
     let worktree = match herdr.worktree_open(&repo.path, &branch, &label) {
         Outcome::Ok(worktree) => worktree,
         Outcome::Refused { code, .. } if code == "worktree_not_found" => {
@@ -7381,6 +7394,125 @@ mod tests {
         assert_eq!(items.len(), 1, "{items:?}");
         assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
         assert_eq!(items[0].result.as_deref(), Some(MERGE_WAIT_OVER));
+    }
+
+    /// T-565: the merge seat is not a `SeatRow`, so no apply and no lane pass
+    /// moves its branch. A repo still on the previous default (`p/merge`) gets
+    /// its merge worktree on `p/merge/home` anyway: the old ref is settled
+    /// before git is asked for the branch, and no D/F refusal is reported.
+    #[test]
+    fn a_merge_seat_on_the_previous_default_branch_is_moved_before_its_worktree() {
+        let scratch = Scratch::new("merge-seat-old-default");
+        // The ref the previous default gave the merge seat.
+        sh(
+            &scratch.root,
+            &format!("git -C {} branch p/merge dev", scratch.work.display()),
+        );
+        let mut store = world(TaskState::Ready);
+        let candidate = scratch.head_of("heat/t5");
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        lost_task(&mut store, &candidate, OpState::Intended, 5);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+
+        // The ref moved to the current default, and the worktree was asked for
+        // on the new name.
+        assert!(
+            git_ref_exists(&scratch.work, "refs/heads/p/merge/home"),
+            "the new name is a branch"
+        );
+        assert!(
+            !git_ref_exists(&scratch.work, "refs/heads/p/merge"),
+            "the old name is gone"
+        );
+        assert!(
+            herdr.worktree_branches().contains(&"p/merge/home"),
+            "the merge worktree is on the new branch: {:?}",
+            herdr.worktree_branches()
+        );
+        let waits = store
+            .read(|tx| tx.thread_messages("p", "merge-wait:p:worktree"))
+            .unwrap();
+        assert!(waits.is_empty(), "no D/F refusal is reported: {waits:?}");
+    }
+
+    /// T-565: a ref of another name that is a folder of the merge seat's branch
+    /// is named and left alone — the merge waits, and nothing is deleted.
+    #[test]
+    fn a_foreign_ref_in_the_way_of_the_merge_branch_is_named_and_left_alone() {
+        let scratch = Scratch::new("merge-seat-foreign");
+        sh(
+            &scratch.root,
+            &format!("git -C {} branch p dev", scratch.work.display()),
+        );
+        let mut store = world(TaskState::Ready);
+        let candidate = scratch.head_of("heat/t5");
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        lost_task(&mut store, &candidate, OpState::Intended, 5);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+
+        // The wait is one item on the merge-wait thread (T-566) or, before
+        // that lands, on the thread the merge tells the captain on this tick.
+        let said = |store: &mut Store, thread: &str| {
+            store
+                .read(|tx| tx.thread_messages("p", thread))
+                .unwrap_or_default()
+        };
+        let mut waits = said(&mut store, "merge-wait:p:worktree");
+        if waits.is_empty() {
+            waits = said(&mut store, "merge:20");
+        }
+        assert!(
+            waits
+                .iter()
+                .any(|item| item.body.contains("the ref p stands in its way")),
+            "the ref is named: {waits:?}"
+        );
+        // The foreign ref is untouched and nothing was created over it.
+        assert!(
+            git_ref_exists(&scratch.work, "refs/heads/p"),
+            "the foreign ref is untouched"
+        );
+        assert!(
+            !git_ref_exists(&scratch.work, "refs/heads/p/merge/home"),
+            "nothing was created over it"
+        );
+    }
+
+    /// Whether the repo at `dir` has the ref `ref` (T-565).
+    fn git_ref_exists(dir: &Path, name: &str) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", "--verify", "--quiet", name])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
     }
 
     /// The worktree of a merge train's second stage, beside the pair's own.

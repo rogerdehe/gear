@@ -788,30 +788,15 @@ fn move_seat_branches(
 }
 
 /// The output of one git command in `dir`, trimmed; `Err` says why it is no
-/// answer (the exit status and git's own words).
+/// answer (the exit status and git's own words). The runner lives with the seat
+/// branch code (T-565), which the engine calls too.
 fn git_in(dir: &str, args: &[&str]) -> Result<String, String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .map_err(|error| format!("git could not run: {error}"))?;
-    if !output.status.success() {
-        let said = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if said.is_empty() {
-            format!("git {} failed", args.join(" "))
-        } else {
-            said
-        });
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    crate::seat_branch::git(dir, args)
 }
 
 /// Whether `remote` has the branch `branch` of the repository in `dir`.
 fn remote_has_branch(dir: &str, remote: &str, branch: &str) -> bool {
-    git_in(dir, &["ls-remote", "--heads", remote, branch])
-        .map(|found| !found.is_empty())
-        .unwrap_or(false)
+    crate::seat_branch::has_branch(dir, remote, branch)
 }
 
 fn re_register(

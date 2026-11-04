@@ -268,6 +268,92 @@ fn open_worktree_item(
         .map_err(|e| e.detail)
 }
 
+/// T-565: put a seat's own branch on the name the current
+/// `conventions.seat_branch` gives it, before anything is created on it.
+///
+/// A project that never wrote a `seat_branch` line has no apply to run the
+/// rename T-559 makes on a changed template, so the engine does it: a seat
+/// whose branch still carries the name the previous default gave it
+/// (`p/hull`) is moved to the new one (`p/hull/home`), on the remote too when
+/// it is pushed there. A ref of another name that is a folder of the new name
+/// is named and nothing is touched — git cannot create the branch past it.
+///
+/// `dir` is the seat's own worktree when it is there, else the repository it
+/// works in; `new` is the seat's branch under the current template.
+fn settle_seat_branch(
+    store: &mut Store,
+    seat: &SeatRow,
+    config: &gear_app::config::ProjectConfig,
+    repo: &str,
+    recorded: Option<&str>,
+    new: &str,
+    now: Ts,
+) -> Result<(), String> {
+    let old = gear_app::seat_branch::previous_default(&seat.project, &seat.name);
+    if old == new {
+        return Ok(());
+    }
+    let dir = recorded
+        .filter(|path| std::path::Path::new(path).is_dir())
+        .unwrap_or(repo);
+    match gear_app::seat_branch::settle(dir, &old, new, &config.conventions.remote) {
+        Ok(gear_app::seat_branch::Settled::Free) => Ok(()),
+        Ok(gear_app::seat_branch::Settled::Renamed { old, new, remote }) => {
+            let body = format!(
+                "the branch of this seat is now {new} (it was {old}, the name the previous default gave it){remote}"
+            );
+            open_worktree_item(store, &seat.project, &seat.name, &body, now)
+        }
+        Err(reason) => Err(reason),
+    }
+}
+
+/// T-565: settle every lane's seat branch of one project, once per
+/// `conventions.seat_branch` template.
+///
+/// The store keeps the template the branches were last settled at
+/// (`engine.seat_branch_settled.<project>`), so a running engine runs no git
+/// for it after the first tick, and a changed template (a re-applied config,
+/// or a new GEAR default) is settled at the next tick. A failure is named to
+/// the captain in the seat's worktree item and never stops the project.
+fn settle_project_seat_branches(
+    store: &mut Store,
+    project: &str,
+    config: &gear_app::config::ProjectConfig,
+    seats: &[SeatRow],
+    now: Ts,
+) -> GearResult<()> {
+    let key = format!("engine.seat_branch_settled.{project}");
+    let settled_at = store.read(|tx| tx.get_meta(&key))?;
+    if settled_at.as_deref() == Some(config.conventions.seat_branch.as_str()) {
+        return Ok(());
+    }
+    for seat in seats.iter().filter(|seat| seat.role == SeatRole::Lane) {
+        let recorded = store.read(|tx| tx.get_meta(&worktree_path_key(&seat.id)))?;
+        let repo = config.repo_of_lane(&seat.name);
+        let new = gear_model::branch::expand_seat(
+            &config.conventions.seat_branch,
+            &seat.project,
+            &seat.name,
+        );
+        if let Err(reason) = settle_seat_branch(
+            store,
+            seat,
+            config,
+            &repo.path,
+            recorded.as_deref(),
+            &new,
+            now,
+        ) {
+            open_worktree_item(store, &seat.project, &seat.name, &reason, now).map_err(
+                |error| gear_model::GearError::new(gear_model::ErrorCode::BadFormat, error),
+            )?;
+        }
+    }
+    store.write(|tx| tx.set_meta(&key, &config.conventions.seat_branch))?;
+    Ok(())
+}
+
 /// T-503: put a lane's home worktree on the fresh integration branch before
 /// its first delivery: fetch the remote, archive anything the worktree holds
 /// (never discard it), then move the home branch to `<remote>/<integration>`.
@@ -562,6 +648,14 @@ pub fn onboard_queued(
             }
         };
 
+        // T-565: the seat branches of a project that never wrote a
+        // `seat_branch` line are still on the name the previous default gave
+        // them, and no apply will run the rename T-559 makes. The engine moves
+        // them itself, once per template: a seat whose checkout stands on
+        // `p/hull` is moved to `p/hull/home`, locally and on the remote when it
+        // is pushed there.
+        settle_project_seat_branches(store, &project, &config, &seats, now)?;
+
         // A voyage that has not departed yet starts no lane this tick
         // (T-448): at its departure time the engine onboards them by itself.
         if gear_app::config::departs_at(&config, now).is_some() {
@@ -751,6 +845,18 @@ fn onboard_seat(
         })
         .map_err(|e| format!("worktree path: {}", e.detail))?
         .filter(|path| !path.is_empty());
+    // T-565: the seat's branch may still carry the name the previous default
+    // gave it, and a ref that is a folder of the new name blocks git from
+    // creating it (a foreign one is named, never touched).
+    settle_seat_branch(
+        store,
+        seat,
+        config,
+        &worktree.repo,
+        recorded.as_deref(),
+        &worktree.branch,
+        now,
+    )?;
     let by_path = match recorded.as_deref() {
         Some(path) => herdr.worktree_open_path(&worktree.repo, path, &worktree.label),
         None => Outcome::Refused {
