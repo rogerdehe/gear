@@ -71,6 +71,7 @@ eta: 4h
 - station M-7702: keep course | why: T-553 is merging; hull takes F-312 (git switch in rework/resume texts); both go out as v0.6.53 | else: none
 - 2026-11-04 02:33 hand-fix: the engine names a pane that holds several captain seats after the seat bound to it first (names::restore); the Prometheus captain flipped between prometheus-captain and lawrence-captain on every pass after `gear captain take lawrence`, T-552 had fixed only the take path; the lawrence seat was also released from that pane at once | why: user, urgent: prompts by name failed | else: none
 - station M-7727: keep course | why: T-555 merging, then release v0.6.53 (gate variables, Resume text, git switch, captain name fix) | else: none
+- 2026-11-04 03:58 hand-fix: a merge whose fetch cannot read the remote after its retries goes back to the queue like a lost push race (merge.rs unreachable) instead of failing | why: GitHub refused SSH on and off from 03:40, T-675 (critical path for 31 carried tasks), T-678 and T-680 failed and waited for a captain remerge | else: none
 # Queue
 
 ## T-545 [now] lane=mast milestone=M6.2 required
