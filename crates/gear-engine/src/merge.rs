@@ -3016,6 +3016,12 @@ fn prepare_merge(
     // commit after the candidate must be the review, whose subject starts with
     // the project's review message up to `{what}`. A merge commit on top of it
     // is no way out either — its parents are in the range as well.
+    //
+    // Only the commits the merge newly brings in are judged (T-564 review F1):
+    // a task branch that merged the integration branch into it — the
+    // documented conflict fix (course.md: merge dev into the task branch,
+    // resolve, push, remerge) — carries dev's own commits, and those are
+    // reviewed work already on the branch. `--not <base>` leaves them out.
     if !has_review && !mechanical && task_tip.is_some() {
         let tip = task_tip.as_deref().unwrap_or_default();
         let log = git(
@@ -3025,6 +3031,8 @@ fn prepare_merge(
                 "--no-merges",
                 "--format=%H%x09%s",
                 &format!("{sha}..{tip}"),
+                "--not",
+                &base_ref,
             ],
         )
         .map_err(|reason| {
@@ -11654,6 +11662,43 @@ gate = "{project_gate}"
             "the pulled-in commit is named: {}",
             failed.reason
         );
+    }
+
+    /// T-564 review F1: the documented conflict fix is `merge dev into the
+    /// task branch, resolve, push, remerge` (course.md). That merge brings the
+    /// integration branch's own commits into the range, and they are reviewed
+    /// work already on the branch, not lane commits: the merge goes through.
+    #[test]
+    fn a_task_branch_that_merged_the_integration_branch_still_merges() {
+        let scratch = Scratch::new("task-branch-dev-merge");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The integration branch moves after the hand-in, and the task branch
+        // takes it in: the captain's conflict fix, with nothing to resolve.
+        sh(
+            &scratch.work,
+            "git switch -q dev && echo d > devd.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'dev moved'",
+        );
+        publish(&scratch.work, "dev");
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass' \
+             && git -c user.name=a -c user.email=a@b merge -q --no-edit dev",
+        );
+        publish(&scratch.work, "heat/t5");
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+
+        let line = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap();
+
+        assert!(line.contains("merged T-5"), "{line}");
+        let log = scratch.dev_log();
+        assert!(log.contains("review(T-5)"), "the review landed: {log}");
+        assert!(log.contains("dev moved"), "dev's commit is there: {log}");
     }
 
     /// T-558, the transition: a task reviewed before the change still has its
