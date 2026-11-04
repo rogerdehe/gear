@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1143 -->
+<!-- gear-plan project=gear base=1144 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -130,4 +130,16 @@ deps: -
 goal: [v0.6.53] A rework or a resume tells the lane how to get onto the task's branch, as the first attempt does (hull F-312, T-547: the worktree was still on hull/t548 and the rework was committed there first). In crates/gear-engine/src/dispatch.rs, after T-553 (the Resume text): fn assign_text and fn resume_text replace "Branch: <branch> (in your worktree)." with "Branch: <branch>. Before you change anything: git switch <branch> (your worktree may still be on the branch of the task you did last)." Nothing else in either text changes.
 accept: The dispatch tests that pin the Rework and Resume texts are updated to the new sentence and pass, and a test asserts both texts contain "git switch <branch>". Run only `make check CRATE=gear-engine TESTS='test(dispatch::)'`; the merge gate runs `make gate`.
 estimate: 15
+deps: -
+
+## T-555 [now] lane=hull milestone=M6.2
+goal: [v0.6.53] Every gate run is told which project and which merges it judges, so a project's gate can name its CI branch and run after them (user, 2026-11-04: SelyraAI's gate branches were `ci/candidate/<sha>`, owned by no project and unreadable). In crates/gear-engine/src/merge.rs: fn gate_command gains `project: &str, round: &str, tasks: &[String]` and sets three variables next to GEAR_GATE_TEMPFAIL and GEAR_GATE_FAILED: `GEAR_GATE_PROJECT` (the project id), `GEAR_GATE_ROUND` (the id of the first merge op of this gate run, lowercase without the dash, e.g. `o6543`) and `GEAR_GATE_TASKS` (the task ids of the merges this run judges, space-separated, in merge order, e.g. `T-637 T-646 T-662`); each a new `pub const` documented like GATE_TEMPFAIL_ENV. fn run_gate passes them through from its three callers (line ~2635 single merge: its op; ~3256 train stage: that stage's op; ~3471 batch: the batch's first op and every built op's task). Nothing else changes.
+accept: Tests in merge.rs `mod tests`: a single merge's gate `echo "$GEAR_GATE_PROJECT $GEAR_GATE_ROUND $GEAR_GATE_TASKS" > <a file outside the worktree>; true` writes `p o1 T-1`; a batch of two (`batch_of_two`) writes `p o1 T-1 T-2`. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
+estimate: 25
+deps: -
+
+## T-556 [now] lane=mast milestone=M6.2
+goal: [v0.6.53] Document the three new gate variables of the hull task beside it (GEAR_GATE_PROJECT, GEAR_GATE_ROUND, GEAR_GATE_TASKS; values and an example as in that task's goal) in skills/gear/references/conventions.md, in the paragraph that names GEAR_GATE_TEMPFAIL and GEAR_GATE_FAILED, with one sentence of use: a gate that runs CI elsewhere names its CI branch `<project>/gate/<round>` and puts the tasks in the CI run's title, so every gate branch has an owner and every run says what it judged. Then write docs/releases/v0.6.53.md in the form of v0.6.52.md with: Added (the three variables); Fixed (a set-aside task returns as Resume, T-553; a merge waiting for another task is not reported as lost, T-553; rework and resume texts give `git switch <branch>`, T-554; a pane holding several captain seats keeps the name of the seat bound first, captain hand-fix 0d1673ea); Upgrading from 0.6.52 as in v0.6.52.md.
+accept: conventions.md and docs/releases/v0.6.53.md name the variables, values and fixes exactly as the code on dev does (read crates/gear-engine/src/merge.rs after the hull task lands). No command to run.
+estimate: 20
 deps: -
