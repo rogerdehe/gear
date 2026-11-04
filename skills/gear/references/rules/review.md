@@ -14,3 +14,4 @@ Unlike a lane, thinking is your job: look for the cases the acceptance does not 
 - A slow test the candidate did not touch never blocks it.
 - A dialog never holds you: the engine closes one your CLI shows and tells you so. Never wait on an approval; when you need a decision, ask the captain with `gear send --kind question`.
 - Never edit the candidate's code. Hand in with the exact command in your packet, then end your turn.
+- A push or fetch that the remote refuses is not yours to fix: never touch keys, ssh agents, the keychain, tokens, remote URLs or git config, and write no script around it. Retry the same command a few times a minute apart, then tell the captain (a question, or `--friction` on your hand-in).
