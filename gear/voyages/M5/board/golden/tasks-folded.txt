@@ -6,7 +6,7 @@
  ║ Quality bar: DELIVERABLE — errors in normal use block a task; edge cases are logged                                                                       ║  
  ╚═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝  
  Goal check    1 of 3 met     next: small task under 10 min: now 14 min (T-262)           Milestone  ▶ S2 board views to the prototype (1 of 3 reached)         
- Time          ██████████████████░░░░░░░░░░░░░░░░░░░◆░│ expected 7h35m of 8h00m, 0h25m aheTasks      ████████████████▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░ 5/12 merged · 4 g 
+ Time          ██████████████████░░░░░░░░░░░░░░░░░░░◆░│ expected 7h35m of 8h00m, 0h25m aheTasks      ████████████████▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░ 5/12 on dev · 1 p 
  d: unfold the goal check, milestones, time and tasks                                                                                                           
  ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
  │  1 Now  │  2 Tasks  │  3 Cost  │  4 Log  │                                                                                                                 │ 
@@ -21,19 +21,19 @@
    │     │     │     ┆                                                                                                                                          
    │     │     ◉     │     T-264  board: Time & tokens by lane                              working                             22/40m                          
    ├───────────╮     │            starts +2h09m after T-261                                                                                                     
-   ●───────────╯     │     T-261  board: the full width                                     merged                              52/45m  merged 12:57            
+   ●───────────╯     │     T-261  board: the full width                                     on dev                              52/45m  merged 12:57            
    │     ↺     │     │     T-263  small task: the captain settles it                        reworking (round 2)                 49/25m · 2◂ needed by T-267     
    ├─────╮     │     │            starts +1h43m after T-260                                                                                                     
-   ●─────╯     │     │     T-260  small task: no review, accept proof                       merged                              41/30m · 2 rounds  merged 12:31 
-   │     │     │     ◍     T-268  doorbell names the station                                passed, waits to merge              12/15m                          
+   ●─────╯     │     │     T-260  small task: no review, accept proof                       on dev                              41/30m · 2 rounds  merged 12:31 
+   │     │     │     ◍     T-268  doorbell names the station                                passed, not on dev yet              12/15m                          
    ├─────────────────╮            starts +1h10m                                                                                                                 
    ├───────────╮     │            starts +0h59m after T-258                                                                                                     
-   ●───────────╯     │     T-258  board: voyages and the [ ] keys                           merged                              44/40m  merged 11:47            
+   ●───────────╯     │     T-258  board: voyages and the [ ] keys                           on dev                              44/40m  merged 11:47            
    │     │     │     ◎     T-262  goal lock: GOAL_LOCKED at apply                           in review                           35/40m                          
    ├─────────────────╮            starts +0h47m                                                                                                                 
-   ●─────────────────╯     T-259  goal box, check and milestones                            merged                              27/30m  merged 11:35            
+   ●─────────────────╯     T-259  goal box, check and milestones                            on dev                              27/30m  merged 11:35            
    ├─────╮     │     │            starts +0h32m after T-257                                                                                                     
-   ●─────╯     │     │     T-257  small task: the plan marks it                             merged                              18/20m  merged 11:20            
+   ●─────╯     │     │     T-257  small task: the plan marks it                             on dev                              18/20m  merged 11:20            
    ├─────────────────╮            starts +0h08m                                                                                                                 
    ├─────╮     │                  starts +0h05m                                                                                                                 
    ├───────────╮                  starts +0h05m                                                                                                                 

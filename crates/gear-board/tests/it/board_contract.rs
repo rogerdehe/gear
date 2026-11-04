@@ -88,6 +88,29 @@ fn world() -> Store {
                     sent_at: None,
                 })?;
             }
+            // v0.6.54: a done task is merged only when an attempt carries its
+            // merge time; T-1's work is on the integration branch.
+            tx.insert_attempt(&AttemptRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:data".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Accepted,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+            })?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Merged, T0 - 60)?;
             Ok(())
         })
         .unwrap();
@@ -114,7 +137,7 @@ fn the_board_shows_the_totals_and_every_lane_queue() {
     );
     // The lanes come in seat order, their tasks in queue order.
     assert!(
-        text.contains("Lane data · agent unknown · T-3 handed in, waits for a reviewer · 0 queued · rework 0/1 · no task yet\n  T-1 done\n  T-3 waiting"),
+        text.contains("Lane data · agent unknown · T-3 handed in, waits for a reviewer · 0 queued · rework 0/2 · no task yet\n  T-1 done\n  T-3 waiting"),
         "{text}"
     );
     assert!(
@@ -632,7 +655,7 @@ fn a_task_in_review_is_shown_as_in_review() {
     let text = render(&build(&mut store, &options(), T0).unwrap(), View::Lanes);
 
     assert!(
-        text.contains("Lane data · agent unknown · T-3 handed in, waits for a reviewer · 0 queued · rework 0/1 · no task yet\n  T-1 done\n  T-3 waiting\n  T-5 in review"),
+        text.contains("Lane data · agent unknown · T-3 handed in, waits for a reviewer · 0 queued · rework 0/2 · no task yet\n  T-1 done\n  T-3 waiting\n  T-5 in review"),
         "{text}"
     );
     // A task in review is not done and not running: the totals say so.
@@ -3210,6 +3233,31 @@ fn a_landed_voyage_s_lane_reads_retired_at_the_landing_and_has_no_ends() {
                 let mut row = tx.get_task("p", id)?.expect("the task");
                 row.state = TaskState::Done;
                 tx.update_task(&row)?;
+                // v0.6.54: done is merged only with a merge time on an
+                // attempt; T-4 has no attempt yet.
+                if id == "T-4" {
+                    tx.insert_attempt(&AttemptRow {
+                        project: "p".into(),
+                        task: "T-4".into(),
+                        n: 1,
+                        seat: "p:runtime".into(),
+                        generation: 1,
+                        contract_version: 1,
+                        adopted_version: 1,
+                        pending_update: None,
+                        state: AttemptState::Accepted,
+                        candidate: None,
+                        report: None,
+                        safe_point: None,
+                        started: T0,
+                        updated: T0,
+                        session_ref: None,
+                        session_cli: None,
+                        session_action: None,
+                        sent_at: None,
+                    })?;
+                }
+                tx.set_attempt_time("p", id, 1, AttemptStep::Merged, T0)?;
             }
             Ok(())
         })
@@ -3440,26 +3488,8 @@ fn a_merged_task_past_its_estimate_is_not_an_item_to_handle() {
             let mut row = tx.get_task("p", "T-1")?.unwrap();
             row.estimate_min = Some(20);
             tx.update_task(&row)?;
-            tx.insert_attempt(&AttemptRow {
-                session_ref: None,
-                session_cli: None,
-                session_action: None,
-                sent_at: None,
-                project: "p".into(),
-                task: "T-1".into(),
-                n: 1,
-                seat: "p:data".into(),
-                generation: 1,
-                contract_version: 1,
-                adopted_version: 1,
-                pending_update: None,
-                state: AttemptState::Accepted,
-                candidate: None,
-                report: None,
-                safe_point: None,
-                started: T0,
-                updated: T0,
-            })?;
+            // T-1's attempt is the fixture's (v0.6.54): its merge time is set
+            // here to 40 minutes after the start.
             tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T0)?;
             tx.set_attempt_time("p", "T-1", 1, AttemptStep::HandedIn, T0 + 40 * 60)?;
             tx.set_attempt_time("p", "T-1", 1, AttemptStep::Merged, T0 + 40 * 60)?;

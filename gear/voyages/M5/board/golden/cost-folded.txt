@@ -6,7 +6,7 @@
  ║ Quality bar: DELIVERABLE — errors in normal use block a task; edge cases are logged                                                                       ║  
  ╚═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝  
  Goal check    1 of 3 met     next: small task under 10 min: now 14 min (T-262)           Milestone  ▶ S2 board views to the prototype (1 of 3 reached)         
- Time          ██████████████████░░░░░░░░░░░░░░░░░░░◆░│ expected 7h35m of 8h00m, 0h25m aheTasks      ████████████████▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░ 5/12 merged · 4 g 
+ Time          ██████████████████░░░░░░░░░░░░░░░░░░░◆░│ expected 7h35m of 8h00m, 0h25m aheTasks      ████████████████▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░ 5/12 on dev · 1 p 
  d: unfold the goal check, milestones, time and tasks                                                                                                           
  ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
  │  1 Now  │  2 Tasks  │  3 Cost  │  4 Log  │                                                                                                                 │ 

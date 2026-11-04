@@ -9,7 +9,7 @@ use gear_board::frame::{canvas, Tab};
 use gear_board::style::Color;
 use gear_board::{build, Options};
 use gear_model::{SeatRole, TaskState};
-use gear_store::{testing, Store, TaskRow};
+use gear_store::{testing, AttemptRow, AttemptStep, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
 
@@ -56,6 +56,31 @@ fn world(tasks: &[(&str, i64, TaskState, &[&str])]) -> Store {
                     issue: None,
                     updated: T0,
                 })?;
+                // v0.6.54: done is merged only with a merge time on an
+                // attempt; without one, a done task has only passed.
+                if *state == TaskState::Done {
+                    tx.insert_attempt(&AttemptRow {
+                        session_ref: None,
+                        session_cli: None,
+                        session_action: None,
+                        sent_at: None,
+                        project: "p".into(),
+                        task: (*id).into(),
+                        n: 1,
+                        seat: "p:data".into(),
+                        generation: 1,
+                        contract_version: 1,
+                        adopted_version: 1,
+                        pending_update: None,
+                        state: gear_model::AttemptState::Accepted,
+                        candidate: None,
+                        report: None,
+                        safe_point: None,
+                        started: T0,
+                        updated: T0,
+                    })?;
+                    tx.set_attempt_time("p", id, 1, AttemptStep::Merged, T0 - 60)?;
+                }
             }
             Ok(())
         })
