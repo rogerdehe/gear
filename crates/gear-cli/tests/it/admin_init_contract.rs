@@ -1428,10 +1428,11 @@ fn lane_config(dir: &Path, repo: &Path, template: &str) -> PathBuf {
     path
 }
 
-/// T-373: a re-applied config that changes `conventions.seat_branch` prints,
-/// right after the project line, the worktree of every seat that has one: the
-/// branch it was made for, the branch new agents get, and the command that
-/// removes the old tree.
+/// T-373, T-559: a re-applied config that changes `conventions.seat_branch`
+/// prints, right after the project line, one line per seat that has a worktree:
+/// a path that is gone says so and names the branch new agents get (a worktree
+/// standing on the old branch is renamed in place instead — that path is tested
+/// in gear-app).
 #[test]
 fn a_changed_seat_branch_prints_the_worktree_it_leaves_behind() {
     let dir = scratch("seat-branch-moved");
@@ -1457,14 +1458,13 @@ fn a_changed_seat_branch_prints_the_worktree_it_leaves_behind() {
     let o = init(
         &dir,
         &db,
-        &lane_config(&dir, &repo, "{project}/home/{seat}"),
+        &lane_config(&dir, &repo, "{project}/{seat}/home"),
         None,
         true,
     );
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    let expected = "seat heat: its worktree /work/p-heat was made for branch p/seat/heat; \
-                    new agents of this seat get a worktree on p/home/heat; \
-                    remove the old one with `herdr worktree remove` once the seat runs in the new one";
+    let expected = "seat heat: its worktree /work/p-heat is not there any more, so nothing was \
+                    renamed; new agents of this seat get a worktree on p/heat/home";
     let out = String::from_utf8_lossy(&o.stdout).into_owned();
     let lines: Vec<&str> = out.lines().collect();
     let at = lines

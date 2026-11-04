@@ -2486,7 +2486,8 @@ fn stage_worktree(
         )
     };
     // The merge worktree is seat `merge` (T-253): its branch is the project's
-    // `[conventions].seat_branch` template, `<project>/merge` by default.
+    // `[conventions].seat_branch` template, `<project>/merge/home` by default
+    // (T-559: project / seat / home, like project / lane / task).
     let branch = gear_model::branch::expand_seat(&config.conventions.seat_branch, project, &seat);
     let worktree = match herdr.worktree_open(&repo.path, &branch, &label) {
         Outcome::Ok(worktree) => worktree,

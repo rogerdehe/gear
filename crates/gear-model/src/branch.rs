@@ -20,9 +20,11 @@ pub const REVIEW_BRANCH: &str = "review/t{n}";
 /// share it. The old shape was `direction/t<n>`.
 pub const DIRECTION_BRANCH: &str = "{project}/direction/{task}";
 
-/// The default branch of a seat's own worktree (T-252): the name says whose
-/// worktree it is, so Herdr names the worktree `<project>-<seat>`.
-pub const SEAT_BRANCH: &str = "{project}/{seat}";
+/// The default branch of a seat's own worktree (T-252, T-559): the name says
+/// whose worktree it is, so Herdr names the worktree `<project>-<seat>`, and it
+/// reads like a task's (project / seat / home, as project / lane / task), so a
+/// seat branch sits in its own folder beside the task branches below its lane.
+pub const SEAT_BRANCH: &str = "{project}/{seat}/home";
 
 /// `template` with `{project}`, `{lane}`, `{task}` and `{n}` filled in.
 /// `project` is the project id, `lane` the lane name, `{task}` the task id in
@@ -117,7 +119,7 @@ mod tests {
 
     #[test]
     fn a_seat_branch_names_the_project_and_the_seat() {
-        assert_eq!(expand_seat(SEAT_BRANCH, "p", "hull"), "p/hull");
+        assert_eq!(expand_seat(SEAT_BRANCH, "p", "hull"), "p/hull/home");
         assert_eq!(expand_seat("{project}-{seat}", "acme", "pay"), "acme-pay");
     }
 

@@ -2058,7 +2058,7 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                     issues.push(issue(
                         "conventions.seat_branch",
                         format!(
-                            "the seat branch {seat_branch} and the {kind} branch {branch} cannot both exist in git (a ref and a directory of the same name): give the seat branches their own folder, e.g. seat_branch = \"{{project}}/home/{{seat}}\""
+                            "the seat branch {seat_branch} and the {kind} branch {branch} cannot both exist in git (a ref and a directory of the same name): give the seat branches their own folder, e.g. seat_branch = \"{{project}}/{{seat}}/home\""
                         ),
                     ));
                 }
@@ -2719,5 +2719,191 @@ mod tests {
         let again = cache.parse("p", &row("p", 1).config_toml).unwrap();
         assert_eq!(again.quota.lanes, 1);
         assert_eq!(cache.parses(), 2, "no re-parse: both entries were kept");
+    }
+
+    // T-559: a seat's own branch is named project / seat / home, like a task's
+    // project / lane / task, so it sits beside the lane's task branches
+    // instead of above them.
+
+    /// A config of project `harbor` with two lanes on `repo`, its seat branch
+    /// named by `template` (`None`: the project names none, so the default
+    /// stands).
+    fn harbor_config(repo: &std::path::Path, template: Option<&str>) -> String {
+        let repo = serde_json::json!(repo.to_string_lossy()).to_string();
+        let seat = template.map_or(String::new(), |template| {
+            format!("seat_branch = {}\n", serde_json::json!(template))
+        });
+        format!(
+            r#"[project]
+id = "harbor"
+herdr_session = "sess"
+repo = {repo}
+
+[quota]
+lanes = 2
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "keel"
+duty = "docs"
+owns = ["docs/"]
+kind = "codex"
+profile = "codex"
+
+[conventions]
+task_branch = "{{project}}/{{lane}}/t{{n}}"
+gate = "make test"
+{seat}"#
+        )
+    }
+
+    #[test]
+    fn the_default_seat_branch_is_project_seat_home() {
+        assert_eq!(
+            gear_model::branch::expand_seat(&Conventions::default().seat_branch, "p", "captain"),
+            "p/captain/home"
+        );
+        assert_eq!(
+            gear_model::branch::expand_seat(&Conventions::default().seat_branch, "p", "heat"),
+            "p/heat/home"
+        );
+        // Beside the lane's task branches, not above them: git can hold both.
+        let cfg = parse(&harbor_config(std::path::Path::new("/repo"), None)).unwrap();
+        assert_eq!(
+            cfg.conventions.seat_branch,
+            gear_model::branch::SEAT_BRANCH,
+            "the project named none: the default stands"
+        );
+        assert_eq!(validate(&cfg), vec![], "siblings clash with nothing");
+        assert_eq!(
+            gear_model::branch::expand(&cfg.conventions.task_branch, "harbor", "heat", "T-675"),
+            "harbor/heat/t675"
+        );
+    }
+
+    /// Run `git` with `args` in `dir`, trimming its output; it must succeed.
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=GEAR", "-c", "user.email=gear@example.com"])
+            .args(args)
+            .output()
+            .unwrap_or_else(|error| panic!("git -C {}: {error}", dir.display()));
+        assert!(
+            output.status.success(),
+            "git -C {} {}: {}",
+            dir.display(),
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// T-559: an apply that changes `seat_branch` renames the branch of a seat's
+    /// worktree that stands on the old name, and names a seat whose worktree is
+    /// on another branch instead of touching it.
+    #[test]
+    fn an_apply_moves_a_seat_worktree_to_the_new_seat_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "dev"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        // Two checkouts of the repository: the heats stand on its own seat
+        // branch, the keel is mid-task on another one.
+        let heat = dir.path().join("harbor-heat");
+        let keel = dir.path().join("harbor-keel");
+        for (path, branch) in [(&heat, "harbor/seat/heat"), (&keel, "keel/t1")] {
+            git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    &path.to_string_lossy(),
+                    "-b",
+                    branch,
+                ],
+            );
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        for agent in crate::skill::SkillAgent::ALL {
+            crate::skill::install(*agent, home.path()).expect("install the skill");
+        }
+        let env = crate::Env {
+            ctx: None,
+            pane_id: None,
+            admin: true,
+        };
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        let now = 1_800_000_000;
+        crate::admin::init_with_home(
+            &mut store,
+            &env,
+            &harbor_config(&repo, Some("{project}/seat/{seat}")),
+            Some(home.path()),
+            false,
+            now,
+        )
+        .unwrap();
+        store
+            .write(|tx| {
+                tx.set_meta("engine.worktree_path.harbor:heat", &heat.to_string_lossy())?;
+                tx.set_meta("engine.worktree_path.harbor:keel", &keel.to_string_lossy())?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            git(&heat, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "harbor/seat/heat"
+        );
+
+        let r = crate::admin::init_with_home(
+            &mut store,
+            &env,
+            &harbor_config(&repo, Some("{project}/{seat}/home")),
+            Some(home.path()),
+            false,
+            now + 1,
+        )
+        .unwrap();
+        assert_eq!(r.config_version, 2);
+        // The seat standing on the old name is moved, quietly.
+        assert_eq!(
+            git(&heat, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "harbor/heat/home",
+            "the heat's worktree took the new name"
+        );
+        // The seat mid-task on another branch is left alone, and named.
+        assert_eq!(
+            git(&keel, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "keel/t1"
+        );
+        assert_eq!(r.stale_worktrees.len(), 2, "{:?}", r.stale_worktrees);
+        assert!(
+            r.stale_worktrees[0].contains("harbor/heat/home")
+                && r.stale_worktrees[0].contains("harbor/seat/heat"),
+            "{:?}",
+            r.stale_worktrees
+        );
+        assert!(
+            r.stale_worktrees[1].contains("keel/t1") && r.stale_worktrees[1].contains("left alone"),
+            "{:?}",
+            r.stale_worktrees
+        );
     }
 }

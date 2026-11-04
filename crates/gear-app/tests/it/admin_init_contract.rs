@@ -943,10 +943,11 @@ fn with_seat_branch(template: &str) -> String {
     )
 }
 
-/// T-373: a re-applied config whose `conventions.seat_branch` changed names
-/// the worktree of every seat that has one in meta — the branch it was made
-/// for, the branch new agents of the seat get, and the command that takes the
-/// old tree away. Nothing is removed.
+/// T-373, T-559: a re-applied config whose `conventions.seat_branch` changed
+/// names the worktree of every seat that has one in meta. A path that is gone
+/// is named as such, with the branch new agents of the seat get (a worktree
+/// standing on the old branch is renamed in place — that case has real git in
+/// `config.rs`'s tests).
 #[test]
 fn a_changed_seat_branch_names_the_worktree_it_leaves_behind() {
     let mut s = Store::open_in_memory().unwrap();
@@ -967,7 +968,7 @@ fn a_changed_seat_branch_names_the_worktree_it_leaves_behind() {
     let r = init_with_home(
         &mut s,
         &admin(),
-        &with_seat_branch("{project}/home/{seat}"),
+        &with_seat_branch("{project}/{seat}/home"),
         Some(crate::skill_home()),
         false,
         T0 + 1,
@@ -977,14 +978,12 @@ fn a_changed_seat_branch_names_the_worktree_it_leaves_behind() {
     assert_eq!(
         r.stale_worktrees,
         vec![
-            "seat heat: its worktree /work/harbor-heat was made for branch harbor/seat/heat; \
-             new agents of this seat get a worktree on harbor/home/heat; \
-             remove the old one with `herdr worktree remove` once the seat runs in the new one"
+            "seat heat: its worktree /work/harbor-heat is not there any more, so nothing was \
+             renamed; new agents of this seat get a worktree on harbor/heat/home"
                 .to_string()
         ]
     );
-    // Nothing is removed: the seat keeps its worktree until it runs in the new
-    // one.
+    // Nothing is removed: the seat keeps its worktree path in meta.
     let path = s
         .read(|tx| tx.get_meta("engine.worktree_path.harbor:heat"))
         .unwrap();
@@ -994,7 +993,7 @@ fn a_changed_seat_branch_names_the_worktree_it_leaves_behind() {
     let r = init_with_home(
         &mut s,
         &admin(),
-        &with_seat_branch("{project}/home/{seat}"),
+        &with_seat_branch("{project}/{seat}/home"),
         Some(crate::skill_home()),
         false,
         T0 + 2,
