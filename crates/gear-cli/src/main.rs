@@ -323,6 +323,12 @@ enum AdminOp {
         /// theirs.
         #[arg(long)]
         confirmed: bool,
+        /// T-551: move this Herdr session onto the store `GEAR_DB` names. An
+        /// init that names another store than the session's registered one
+        /// is refused without it, since the session's engine would then
+        /// refuse to start on the store it is registered on.
+        #[arg(long)]
+        move_store: bool,
     },
     /// Print what this machine offers, for the captain's kickoff proposal.
     Kickoff,
@@ -560,8 +566,9 @@ fn run(cli: Cli) -> GearResult<()> {
                     check,
                     models,
                     confirmed,
+                    move_store,
                 },
-        }) => cmd_admin_init(&config, check, models, confirmed, cli.json),
+        }) => cmd_admin_init(&config, check, models, confirmed, move_store, cli.json),
         Some(Cmd::Admin {
             op: AdminOp::Kickoff,
         }) => cmd_admin_kickoff(cli.json),
@@ -1024,6 +1031,7 @@ fn cmd_admin_init(
     check_only: bool,
     with_models: bool,
     confirmed: bool,
+    move_store: bool,
     json: bool,
 ) -> GearResult<()> {
     // T-261: the lane list — `(name, kind, model)` — with the model being the
@@ -1178,6 +1186,8 @@ fn cmd_admin_init(
         let text = read_config(config)?;
         let parsed = gear_app::admin::check(&text, None)?;
         refuse_a_foreign_session(&parsed)?;
+        // T-551: nor does an init that would move this session's store.
+        refuse_a_store_move(move_store)?;
         // T-256: another project of this store on the same repository is a
         // branch clash, reported before anything is registered. The store is
         // only read, and only when it exists already: a check creates nothing.
@@ -1288,6 +1298,11 @@ fn cmd_admin_init(
         refuse_a_foreign_session(&parsed)?;
         // T-316: nor does a fixture, unless the caller named its store.
         refuse_a_fixture_into_this_store(&parsed)?;
+        // T-551: nor an init that names another store than the one this
+        // session is registered on, unless the user says `--move-store`: the
+        // session's engine would refuse to start on the store it is
+        // registered on. Refused before the new store file is even created.
+        refuse_a_store_move(move_store)?;
     }
     let mut store = open_store()?;
     // A project that is not registered yet is created by its captain, never by
@@ -3886,6 +3901,42 @@ fn canonical(path: &str) -> String {
     std::fs::canonicalize(path)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.to_string())
+}
+
+/// T-551: an init never moves a Herdr session onto another store without
+/// being told. The session's engine runs only on the store the session is
+/// registered on (`engine_target_ok`), so replacing that line silently leaves
+/// the engine refusing to start and the session's panes on a store nobody
+/// drives.
+///
+/// Refused when the session has a line naming another store and that store
+/// file still exists; `--move-store` is the user saying yes. The same store,
+/// a session with no line, and a registered store that is gone (the session
+/// starts afresh) behave as they always did.
+fn refuse_a_store_move(move_store: bool) -> GearResult<()> {
+    if move_store {
+        return Ok(());
+    }
+    let (Ok(socket), Ok(db), Some(home)) = (
+        std::env::var("HERDR_SOCKET_PATH"),
+        std::env::var(gear_model::ctx::ENV_DB),
+        std::env::var_os("HOME"),
+    ) else {
+        return Ok(());
+    };
+    let registry = targets_path_in(std::path::Path::new(&home));
+    let Some(registered) = registered_store(&registry, &socket) else {
+        return Ok(());
+    };
+    if canonical(&registered) == canonical(&db) || !std::path::Path::new(&registered).exists() {
+        return Ok(());
+    }
+    Err(GearError::new(
+        gear_model::ErrorCode::BadFormat,
+        format!(
+            "session {socket} is registered on the store {registered}, and this init names another one ({db}): init does not move a Herdr session to another store without being told; run `gear admin init --move-store <config>` to move it, or unset GEAR_DB to keep the session's store"
+        ),
+    ))
 }
 
 /// Whether the engine may run on `GEAR_DB` here: a Herdr session is known and
