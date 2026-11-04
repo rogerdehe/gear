@@ -338,7 +338,7 @@ fn start_hand_in_reviews(
                     // room. Otherwise the job waits for a seat instead of
                     // building a cold extra worktree (finding 2 of the T-18
                     // review).
-                    None => match seats_free_for_new(store, project, quota)? {
+                    None => match seats_free_for_new(store, herdr, project, quota)? {
                         true => create_temp_seat(store, project, &task.task, profile_name, now)?,
                         false => {
                             note_waiting(report, &task.task);
@@ -1046,7 +1046,7 @@ fn start_direction_checks(
             Some(seat) => seat,
             None => match free_seat(store, herdr, project, &row.id, &kind)? {
                 Some(seat) => take_seat(store, &seat, &row.id, attempt.n, profile_name, now)?,
-                None if seats_free_for_new(store, project, quota)? => {
+                None if seats_free_for_new(store, herdr, project, quota)? => {
                     create_temp_seat(store, project, &row.id, profile_name, now)?
                 }
                 None => continue,
@@ -1601,6 +1601,9 @@ thread_local! {
     /// Fail only the calls in the worktrees whose path contains this text
     /// (T-425): the incident's one broken worktree, not every seat's.
     static REVIEW_GIT_FAIL_ON: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// What a failing call reports (T-561): a remote's own words make the
+    /// failure an outage, not a broken worktree.
+    static REVIEW_GIT_FAIL_TEXT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -1617,7 +1620,9 @@ impl ReviewGit for FakeReviewGit {
         let only = REVIEW_GIT_FAIL_ON.with(|on| on.borrow().clone());
         if REVIEW_GIT_FAIL.with(|fail| fail.get()) || only.is_some_and(|only| path.contains(&only))
         {
-            Err("injected git failure".into())
+            Err(REVIEW_GIT_FAIL_TEXT
+                .with(|text| text.borrow().clone())
+                .unwrap_or_else(|| "injected git failure".into()))
         } else {
             Ok(String::new())
         }
@@ -1899,6 +1904,13 @@ fn prepare_seat_tree(
         Ok(true) => {}
         Ok(false) => return Ok(false),
         Err(error) => {
+            // T-561: a remote that cannot be reached says nothing about the
+            // worktree. The failure is not counted, the attempt is not stuck,
+            // the seat is not retired: the next tick tries again, and the
+            // captain hears of it only when it has lasted half an hour.
+            if remote_failed(&error.detail) {
+                return note_remote_outage(store, seat, path, &error.detail, now).map(|()| false);
+            }
             // T-425: the failure is counted on the **seat**, not on the task:
             // a worktree that cannot check out fails every job it is given,
             // and the hand-in must go on to another seat.
@@ -1941,7 +1953,7 @@ fn prepare_seat_tree(
             // The third failure on one seat is the worktree's, not the task's:
             // the seat leaves the pool and the captain removes the worktree.
             if used >= 3 {
-                retire_checkout_seat(store, seat, path, &error.detail, now)?;
+                retire_checkout_seat(store, herdr, seat, path, &error.detail, now)?;
             }
             return Ok(false);
         }
@@ -1951,21 +1963,131 @@ fn prepare_seat_tree(
         tx.set_meta(&key, &job)?;
         // A checkout that lands clears the seat's failures: the count is of
         // failures in a row, not of a seat's whole life.
-        tx.set_meta(&checkout_fails_key(&seat.id), "")
+        tx.set_meta(&checkout_fails_key(&seat.id), "")?;
+        // A remote that is back clears its outage (T-561).
+        tx.set_meta(&remote_outage_key(&seat.id), "")
     })?;
     Ok(true)
 }
 
-/// Whether the project may add a seat: fewer seats exist than the quota allows.
-fn seats_free_for_new(store: &mut Store, project: &str, quota: i64) -> GearResult<bool> {
-    store.read(|tx| {
-        let seats = tx
+/// The git errors that mean "the remote could not be reached" (T-561): the
+/// transport words `merge.rs` treats as unreachable, plus the connection and
+/// timeout failures an SSH or HTTPS transport reports.
+const REMOTE_WORDS: &[&str] = &[
+    "fetch remote failed: ",
+    "Permission denied (publickey)",
+    "Could not read from remote repository",
+    "Could not resolve host",
+    "Connection refused",
+    "Connection timed out",
+    "Connection closed by",
+    "Operation timed out",
+    "Network is unreachable",
+    "ssh: connect to host",
+    "kex_exchange_identification",
+];
+
+/// Whether a checkout failed only because the remote could not be reached
+/// (T-561): the worktree is sound, so nothing about it is counted.
+fn remote_failed(detail: &str) -> bool {
+    REMOTE_WORDS.iter().any(|word| detail.contains(word))
+}
+
+fn remote_outage_key(seat: &str) -> String {
+    format!("engine.review_remote_outage.{seat}")
+}
+
+fn remote_outage_told_key(seat: &str) -> String {
+    format!("engine.review_remote_outage_told.{seat}")
+}
+
+/// How long a remote outage may last before the captain hears of it (T-561).
+const REMOTE_OUTAGE_S: i64 = 30 * 60;
+
+/// Record a checkout that failed on the remote, and tell the captain once when
+/// the outage has lasted half an hour (T-561). A short outage is retried on the
+/// next tick in silence: at 04:36 a GitHub SSH refusal retired a sound seat,
+/// and nothing on the screen said the worktree was fine.
+fn note_remote_outage(
+    store: &mut Store,
+    seat: &SeatRow,
+    path: &str,
+    error: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let key = remote_outage_key(&seat.id);
+    store.write(|tx| {
+        if tx.get_meta(&key)?.is_none_or(|seen| seen.trim().is_empty()) {
+            tx.set_meta(&key, &now.to_string())?;
+        }
+        Ok(())
+    })?;
+    let Some(first) = store
+        .read(|tx| tx.get_meta(&key))?
+        .and_then(|seen| seen.parse::<i64>().ok())
+    else {
+        return Ok(());
+    };
+    if now - first < REMOTE_OUTAGE_S {
+        return Ok(());
+    }
+    store.write(|tx| {
+        let told = remote_outage_told_key(&seat.id);
+        if tx.get_meta(&told)?.is_some() {
+            return Ok(());
+        }
+        let Some(captain) = tx.captain_of(&seat.project)? else {
+            return Ok(());
+        };
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: seat.project.clone(),
+            thread: format!("review-remote:{}", seat.id),
+            task: None,
+            attempt: None,
+            sender: "engine".into(),
+            sender_gen: 0,
+            recipient: captain.id,
+            kind: MsgKind::System,
+            urgent: false,
+            body: format!(
+                "reviewer {} could not reach the remote for {} min, so its worktree {path} \
+                 has not been checked out: {error}. The worktree is not broken and the seat \
+                 stays in the pool; the checkout is retried on every tick.",
+                seat.id,
+                (now - first) / 60
+            ),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Info,
+            created: now,
+        })?;
+        tx.set_meta(&told, &now.to_string())
+    })
+}
+
+/// Whether the project may add a seat: fewer seats exist than the quota allows,
+/// and fewer live reviewer agents than the quota allows (T-561). The second
+/// count is Herdr's: a seat the store calls `Released` whose agent still runs
+/// is a reviewer the user sees, so a start waits for it.
+fn seats_free_for_new(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    quota: i64,
+) -> GearResult<bool> {
+    let seats = store.read(|tx| {
+        Ok(tx
             .seats_of_project(project)?
             .into_iter()
             .filter(|seat| seat.role == SeatRole::Temp && seat.state != SeatState::Retired)
-            .count() as i64;
-        Ok(seats < quota)
-    })
+            .count() as i64)
+    })?;
+    if seats >= quota {
+        return Ok(false);
+    }
+    let live = crate::names::live_of_role(store, herdr, project, SeatRole::Temp);
+    Ok((live.len() as i64) < quota)
 }
 
 /// Bind a free seat to the new job. The seat keeps its worktree and its
@@ -2129,7 +2251,10 @@ fn has_free_slot(
             occupying += 1;
         }
     }
-    Ok(occupying < quota)
+    // T-561: the seats are not the whole count. A reviewer whose seat says
+    // `Released` but whose agent is still in a pane holds a slot the user sees.
+    let live = crate::names::live_of_role(store, herdr, project, SeatRole::Temp);
+    Ok(occupying < quota && (live.len() as i64) < quota)
 }
 
 /// Whether Herdr shows an agent in the seat's pane: a parked (`Unknown`)
@@ -2897,24 +3022,48 @@ fn end_stuck_seat_assignment(
 /// worktree is broken, so it leaves the pool (a `Retired` temp seat is never
 /// reused), its pending review is cleared so the hand-in goes to another seat
 /// on the next tick, and the captain is told once to remove the worktree.
+///
+/// T-561: the seat's agent leaves first, through the release every other exit
+/// uses ([`crate::release::release_one`]) — a retired seat with a live agent
+/// was four reviewers on a quota of three. A release that cannot close the
+/// pane does not keep the seat: the tick's sweep closes that pane, and the
+/// seat is retired all the same.
 fn retire_checkout_seat(
     store: &mut Store,
+    herdr: &mut dyn HerdrAct,
     seat: &SeatRow,
     path: &str,
     error: &str,
     now: Ts,
 ) -> GearResult<()> {
-    let reason =
+    let mut reason =
         format!("its worktree {path} failed three checkouts: {error}; remove that worktree");
-    store.write(|tx| {
-        tx.set_meta(&pending_review_key(&seat.id), "")?;
-        // A temp seat reaches Retired from Released (design/10), and it is out
-        // of the pool the moment it is not Released again.
-        if !matches!(seat.state, SeatState::Released | SeatState::Retired) {
-            tx.set_seat_state(&seat.id, SeatState::Released, Some(&reason), now)?;
+    store.write(|tx| tx.set_meta(&pending_review_key(&seat.id), ""))?;
+    // The row the release works on is the store's: the caller's may predate the
+    // failures that led here.
+    let current = store
+        .read(|tx| tx.get_seat(&seat.id))?
+        .unwrap_or_else(|| seat.clone());
+    if !matches!(current.state, SeatState::Released | SeatState::Retired) {
+        match crate::release::release_one(
+            store,
+            herdr,
+            &current.project,
+            &current,
+            None,
+            now,
+            "checkout",
+        ) {
+            // The pane is closed and the seat is `Releasing`: it is retired
+            // now (a reviewer sent on its way out is never reused) and its
+            // pane closed again by the sweep if the agent lingers.
+            Ok(_) => {}
+            Err(failure) => {
+                reason.push_str(&format!("; its pane could not be closed: {failure}"));
+            }
         }
-        tx.set_seat_state(&seat.id, SeatState::Retired, Some(&reason), now)
-    })?;
+    }
+    store.write(|tx| tx.set_seat_state(&seat.id, SeatState::Retired, Some(&reason), now))?;
     tell_captain_of_retired_seat(store, &seat.project, seat, &reason, now)
 }
 
@@ -2959,6 +3108,81 @@ fn tell_captain_of_retired_seat(
         })?;
         tx.set_meta(&told, &now.to_string())
     })
+}
+
+/// The seats that already left, closed and named (T-561).
+///
+/// The quota is a promise to the user — "planned three, four appeared, never
+/// acceptable" — and a seat's state in the store is not the promise: a seat the
+/// store calls `Released` or `Retired` may still have its agent in a pane (a
+/// release whose close was lost, a retire that only wrote the row). Every tick,
+/// every pane whose agent carries such a seat's name (`<project>-<seat>`) is
+/// closed, and the captain hears of it once per seat.
+///
+/// `names` is the tick's snapshot of Herdr's agent names: an unreadable list
+/// closes nothing (it is no evidence of an agent).
+pub fn close_gone_seats(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    names: &std::collections::BTreeMap<String, Option<String>>,
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    let mut closed = Vec::new();
+    for seat in store.read(|tx| tx.seats_of_project(project))? {
+        if !matches!(seat.state, SeatState::Retired | SeatState::Released) {
+            continue;
+        }
+        let wanted = crate::names::desired(&seat);
+        let panes: Vec<String> = names
+            .iter()
+            .filter(|(_, name)| name.as_deref() == Some(wanted.as_str()))
+            .map(|(pane, _)| pane.clone())
+            .collect();
+        for pane in panes {
+            // A pane that is already gone is fine; nothing here may fail the
+            // tick for the other seats.
+            if let Outcome::Ok(()) = herdr.pane_close(&pane) {
+                closed.push(pane.clone());
+                let told = format!("engine.seat_pane_closed.{}", seat.id);
+                let first = store.write(|tx| {
+                    if tx.get_meta(&told)?.is_some() {
+                        return Ok(false);
+                    }
+                    let Some(captain) = tx.captain_of(project)? else {
+                        return Ok(false);
+                    };
+                    tx.insert_message(&NewMessage {
+                        meta: None,
+                        project: project.to_string(),
+                        thread: format!("seat-pane:{}", seat.id),
+                        task: None,
+                        attempt: None,
+                        sender: "engine".into(),
+                        sender_gen: 0,
+                        recipient: captain.id,
+                        kind: MsgKind::System,
+                        urgent: false,
+                        body: format!(
+                            "{} ({}) is {} but its agent was still running in pane {pane}: \
+                             the pane is closed, so the live agents stay within the quota.",
+                            seat.id,
+                            seat.name,
+                            seat.state.as_str()
+                        ),
+                        reply_to: None,
+                        needs_ack: false,
+                        state: MsgState::Info,
+                        created: now,
+                    })?;
+                    tx.set_meta(&told, &now.to_string())?;
+                    Ok(true)
+                })?;
+                let _ = first;
+            }
+        }
+    }
+    Ok(closed)
 }
 
 /// Whether this attempt's checkout is already stuck (two different seats
@@ -4250,6 +4474,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         REVIEW_GIT_CALLS.with(|calls| calls.borrow_mut().clear());
         REVIEW_GIT_FAIL.with(|fail| fail.set(false));
         REVIEW_GIT_FAIL_ON.with(|on| *on.borrow_mut() = None);
+        REVIEW_GIT_FAIL_TEXT.with(|text| *text.borrow_mut() = None);
         let mut store = Store::open_in_memory().unwrap();
         store
             .write(|tx| {
@@ -12161,6 +12386,293 @@ profile = "opencode"
             delivered.iter().any(|op| op.task.as_deref() == Some("T-2")),
             "the hand-in is delivered to the new seat"
         );
+    }
+
+    /// T-561 (1): a retired seat's agent leaves first. The incident's
+    /// retirement kept the pane up, so the user saw four reviewers on a quota
+    /// of three.
+    #[test]
+    fn a_retired_seat_closes_its_pane() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
+                tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
+                tx.clear_seat_task("p:review-1")
+            })
+            .unwrap();
+        queue_review_job(&mut store, 2, "heat");
+        let pane = store
+            .read(|tx| {
+                let seat = tx.get_seat("p:review-1")?.unwrap();
+                Ok(tx
+                    .get_binding(&seat.id, seat.generation)?
+                    .map(|binding| binding.pane_id))
+            })
+            .unwrap()
+            .expect("the reviewer has a pane");
+        REVIEW_GIT_FAIL_ON.with(|on| *on.borrow_mut() = Some("p-review-1".into()));
+        for tick in 0..3 {
+            start_reviews(
+                &mut store,
+                &mut herdr,
+                &cfg(),
+                &cfg().profiles,
+                "p",
+                T0 + 12 + tick,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat("p:review-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            SeatState::Retired
+        );
+        assert!(
+            herdr
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::PaneClose { pane: closed } if *closed == pane)),
+            "the retired seat's pane is closed: {:?}",
+            herdr.calls
+        );
+    }
+
+    /// T-561 (2): at 04:36 GitHub refused the SSH key three times and the seat
+    /// was retired while its worktree was sound. A remote's own words are not
+    /// the worktree's failure: nothing is counted, nothing is retired, and the
+    /// captain hears of it only once the outage has lasted half an hour.
+    #[test]
+    fn a_remote_outage_keeps_the_seat_and_is_told_after_half_an_hour() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
+                tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
+                tx.clear_seat_task("p:review-1")
+            })
+            .unwrap();
+        queue_review_job(&mut store, 2, "heat");
+        let pane = store
+            .read(|tx| {
+                let seat = tx.get_seat("p:review-1")?.unwrap();
+                Ok(tx
+                    .get_binding(&seat.id, seat.generation)?
+                    .map(|binding| binding.pane_id))
+            })
+            .unwrap()
+            .expect("the reviewer has a pane");
+        REVIEW_GIT_FAIL_ON.with(|on| *on.borrow_mut() = Some("p-review-1".into()));
+        REVIEW_GIT_FAIL_TEXT.with(|text| {
+            *text.borrow_mut() = Some("git@github.com: Permission denied (publickey).".into())
+        });
+        for tick in 0..3 {
+            start_reviews(
+                &mut store,
+                &mut herdr,
+                &cfg(),
+                &cfg().profiles,
+                "p",
+                T0 + 12 + tick,
+            )
+            .unwrap();
+        }
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_ne!(
+            seat.state,
+            SeatState::Retired,
+            "a remote outage is not the worktree's failure"
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&checkout_fails_key("p:review-1")))
+                .unwrap()
+                .as_deref(),
+            Some(""),
+            "the outage is not counted"
+        );
+        assert!(
+            !herdr
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::PaneClose { pane: closed } if *closed == pane)),
+            "nothing closes the seat's pane: {:?}",
+            herdr.calls
+        );
+        let told = |store: &mut Store| {
+            store
+                .read(|tx| tx.thread_messages("p", "review-remote:p:review-1"))
+                .unwrap()
+        };
+        assert_eq!(told(&mut store).len(), 0, "a short outage is quiet");
+        // Half an hour after the first failure the captain hears of it, once.
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 12 + 30 * 60,
+        )
+        .unwrap();
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 12 + 60 * 60,
+        )
+        .unwrap();
+        let told = told(&mut store);
+        assert_eq!(told.len(), 1, "told once: {told:?}");
+        assert!(
+            told[0].body.contains("could not reach the remote"),
+            "{}",
+            told[0].body
+        );
+        assert_ne!(
+            store
+                .read(|tx| tx.get_seat("p:review-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            SeatState::Retired
+        );
+    }
+
+    /// T-561 (3), the sweep: whatever left a seat `Retired` or `Released`, an
+    /// agent that still carries its name is closed on the next tick, and the
+    /// captain is told once.
+    #[test]
+    fn a_live_agent_of_a_gone_seat_is_closed_and_named_once() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(
+            "wt1:p1",
+            "codex",
+            gear_herdr::AgentStatus::Idle,
+            "p-review-1",
+        );
+        store
+            .write(|tx| {
+                let seat =
+                    testing::seed_temp_seat(tx, "p", "review-1", "T-9", "wt1:p1", "codex", T0)?;
+                tx.set_seat_state(&seat.id, SeatState::Released, Some("review done"), T0 + 5)?;
+                tx.set_seat_state(&seat.id, SeatState::Retired, Some("gone"), T0 + 6)
+            })
+            .unwrap();
+        let names = crate::names::read(&mut herdr).unwrap();
+        let closed = close_gone_seats(&mut store, &mut herdr, "p", &names, T0 + 20).unwrap();
+        assert_eq!(closed, vec!["wt1:p1".to_string()]);
+        assert!(
+            !crate::names::read(&mut herdr)
+                .unwrap()
+                .contains_key("wt1:p1"),
+            "the pane is gone"
+        );
+        let told = store
+            .read(|tx| tx.thread_messages("p", "seat-pane:p:review-1"))
+            .unwrap();
+        assert_eq!(told.len(), 1, "the captain hears of it once: {told:?}");
+        assert!(told[0].body.contains("wt1:p1"), "{}", told[0].body);
+        // The next tick has nothing left to close.
+        let names = crate::names::read(&mut herdr).unwrap();
+        assert!(
+            close_gone_seats(&mut store, &mut herdr, "p", &names, T0 + 30)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.thread_messages("p", "seat-pane:p:review-1"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// T-561 (3), the gate: live reviewer panes equal the quota while the seats
+    /// say fewer (a retired seat's agent still up) — no new reviewer starts
+    /// beside them.
+    #[test]
+    fn live_reviewer_panes_at_the_quota_start_no_new_reviewer() {
+        let config = CONFIG.replace("temps = 1", "temps = 3");
+        let mut store = world(&config);
+        let mut herdr = FakeHerdr::new();
+        store
+            .write(|tx| {
+                for (n, pane) in [(1, "wt1:p1"), (2, "wt2:p1"), (3, "wt3:p1")] {
+                    let seat = testing::seed_temp_seat(
+                        tx,
+                        "p",
+                        &format!("review-{n}"),
+                        "T-9",
+                        pane,
+                        "codex",
+                        T0,
+                    )?;
+                    tx.set_seat_state(&seat.id, SeatState::Released, Some("review done"), T0 + 5)?;
+                    tx.set_seat_state(&seat.id, SeatState::Retired, Some("gone"), T0 + 6)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        for (pane, name) in [
+            ("wt1:p1", "p-review-1"),
+            ("wt2:p1", "p-review-2"),
+            ("wt3:p1", "p-review-3"),
+        ] {
+            herdr.add_agent_named(pane, "codex", gear_herdr::AgentStatus::Idle, name);
+        }
+        // The seats say none can run (all retired); Herdr shows three agents.
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 20,
+        )
+        .unwrap();
+        assert!(report.started.is_empty(), "{report:?}");
+        assert_eq!(report.waiting, vec!["T-1".to_string()], "{report:?}");
+        let seats = store
+            .read(|tx| tx.seats_of_project("p"))
+            .unwrap()
+            .into_iter()
+            .filter(|seat| seat.role == SeatRole::Temp)
+            .count();
+        assert_eq!(seats, 3, "no fourth reviewer seat is created");
     }
 
     /// T-425: the attempt is marked stuck only when its checkout failed on two

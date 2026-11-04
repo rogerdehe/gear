@@ -210,6 +210,10 @@ pub struct TickReport {
     pub guardrails: Vec<String>,
     /// Seats whose agent was renamed back to its seat name this tick (T-134).
     pub renamed: Vec<String>,
+    /// Panes closed because their agent outlived its seat (T-561), one
+    /// `seat: pane` line each: a `Released` or `Retired` seat whose agent was
+    /// still running in Herdr.
+    pub gone_seats: Vec<String>,
     /// Seats whose name another pane holds (reported, never stolen; T-134).
     pub name_taken: Vec<String>,
     /// `seat: reason` of a name the engine could neither read nor give back
@@ -407,6 +411,16 @@ pub fn tick(
                 report.name_failed.extend(restored.failed);
                 note_slow(report, "names restore", step);
             }
+            // 0e. no agent outlives its seat (T-561): a pane whose agent still
+            //     carries the name of a released or retired seat is closed
+            //     every tick, and the captain hears of it once. The quota names
+            //     live agents, so a dead seat's pane must not stay in the count.
+            let step = std::time::Instant::now();
+            let closed = review::close_gone_seats(store, herdr, &project, &names, now)?;
+            report
+                .gone_seats
+                .extend(closed.into_iter().map(|pane| format!("{project}: {pane}")));
+            note_slow(report, "gone seats", step);
 
             // Seat observations (reads screen tails; no write transaction is held).
             // The profile table of this project: the built-ins with the project's
