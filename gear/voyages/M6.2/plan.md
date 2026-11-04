@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1131 -->
+<!-- gear-plan project=gear base=1134 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -89,6 +89,7 @@ goal: [v0.6.52] A red batch names its culprit when the gate says which paths fai
 accept: Tests in merge.rs `mod tests` with Pair and `batch_of_two`: gate `echo a.txt > "$GEAR_GATE_FAILED"; test ! -f a.txt`: O-1 Failed with "match only T-1" in its result and O-2 Confirmed, and the gate ran twice in all (the red batch, then T-2 alone); a gate that names `nobody.txt` and fails: both requeued and the next run gates one op; a file left from an earlier gate run is not read. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
 estimate: 40
 deps: -
+state: ready
 
 ## T-549 [now] lane=mast milestone=M6.2
 goal: [v0.6.52] The release notes for the batch merge, written now so the release goes out the minute the engine tasks land. Create docs/releases/v0.6.52.md in the form of docs/releases/v0.6.51.md: Added: the batch merge (`[conventions] merge_batch`, default 1: with N above 1 up to N passed merges of a project are merged together onto the integration branch, gated once, and land together; a red batch fails only the task whose changes match the paths the gate wrote to the file `$GEAR_GATE_FAILED` names, the others merge again; with no such match the batch is halved; `merge_batch` above 1 together with `merge_parallel` above 1 is refused) and the gate contract for `GEAR_GATE_FAILED` (repo-relative files or directories whose tests failed, one per line; a gate that writes nothing is fine). Fixed: a project with no unfinished task releases its standby reviewers at once, without `reviewer_release_idle_min`. Upgrading from 0.6.51: the same steps as in v0.6.51.md (binary, skill reinstall, engine restart), then to use it set `merge_batch` in the project's `[conventions]` and re-apply the config. Read crates/gear-app/src/config.rs after T-545 for the exact wording of the setting.
@@ -101,3 +102,10 @@ goal: [v0.6.52] An item addressed to a retired seat closes with it. Lawrence M1 
 accept: Tests in gear-store's tests: a seat with an open and a waiting item retires and both become resolved with that result; an item to another seat and an already resolved item are untouched; a seat set to Released keeps its open item. Run only `make check CRATE=gear-store TESTS='test(seat)'`; the merge gate runs `make gate`.
 estimate: 25
 deps: -
+
+## T-551 [should] lane=mast milestone=M6.2
+goal: [v0.6.52] `gear admin init` never moves a Herdr session to another store without being told (M6.2 backlog, 2026-11-02): today an init run with a different GEAR_DB inside a session replaces that session's line in ~/.config/gear/targets.tsv without a word, and the session's real engine then refuses to start. In crates/gear-app (where targets.tsv is written by init): when the session already has a line naming another store path and that store file exists, init refuses with an error naming the session, the registered store path and the new one, and the flag that allows it; a new flag `--move-store` on `gear admin init` (crates/gear-cli) allows the move. The same path, or a registered store file that no longer exists, behaves as today.
+accept: Tests in gear-app's tests: init with a different store for a session whose registered store exists is refused and the error names both paths and `--move-store`; with `--move-store` the line is replaced; the same store, and a registered store that is gone, change nothing from today. Run only `make check CRATE=gear-app TESTS='test(init)'`; the merge gate runs `make gate`.
+estimate: 30
+deps: -
+
