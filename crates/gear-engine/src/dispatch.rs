@@ -280,14 +280,16 @@ pub fn continue_text(task: &str, version: i64, packet: &str) -> String {
 }
 
 /// design/09 "Delivery content", exactly (T-544):
-/// `Rework <task> attempt <n> (contract v<version>): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: <branch> (in your worktree). Run `gear` first (…). Task packet: <packet>. Read it before starting; report with gear send. After your result, end your turn: …`
+/// `Rework <task> attempt <n> (contract v<version>): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: <branch>. Before you change anything: git switch <branch> (your worktree may still be on the branch of the task you did last). Run `gear` first (…). Task packet: <packet>. Read it before starting; report with gear send. After your result, end your turn: …`
 ///
 /// This is the wording of a **rework** (attempt n ≥ 2): it says so, and that
-/// the fixes are in the packet's Rework section. The branch and the worktree
-/// are already there, so nothing is said about starting them.
+/// the fixes are in the packet's Rework section. The branch exists, but the
+/// lane's worktree may still be on the branch of its previous task, so the
+/// rework says how to get onto it (T-554, hull F-312: a rework was committed on
+/// the branch of the task before).
 pub fn assign_text(task: &str, attempt: i64, version: i64, branch: &str, packet: &str) -> String {
     format!(
-        "Rework {task} attempt {attempt} (contract v{version}): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: {branch} (in your worktree). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+        "Rework {task} attempt {attempt} (contract v{version}): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: {branch}. Before you change anything: git switch {branch} (your worktree may still be on the branch of the task you did last). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
     )
 }
 
@@ -299,9 +301,11 @@ pub fn assign_text(task: &str, attempt: i64, version: i64, branch: &str, packet:
 /// section).
 ///
 /// `Resume <task> attempt <n> (contract v<version>): it was set aside for more
-/// urgent work, not failed: there is no Rework section. Continue from what you
-/// pushed on <branch> (in your worktree); merge <remote>/<integration> into it
-/// first. Run `gear` first (…). …`
+/// urgent work, not failed: there is no Rework section. Branch: <branch>.
+/// Before you change anything: git switch <branch> (your worktree may still be
+/// on the branch of the task you did last). Continue from what you pushed on
+/// <branch> (in your worktree); merge <remote>/<integration> into it first.
+/// Run `gear` first (…). …`
 pub fn resume_text(
     task: &str,
     attempt: i64,
@@ -312,7 +316,7 @@ pub fn resume_text(
     packet: &str,
 ) -> String {
     format!(
-        "Resume {task} attempt {attempt} (contract v{version}): it was set aside for more urgent work, not failed: there is no Rework section. Continue from what you pushed on {branch} (in your worktree); merge {remote}/{integration} into it first. Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+        "Resume {task} attempt {attempt} (contract v{version}): it was set aside for more urgent work, not failed: there is no Rework section. Branch: {branch}. Before you change anything: git switch {branch} (your worktree may still be on the branch of the task you did last). Continue from what you pushed on {branch} (in your worktree); merge {remote}/{integration} into it first. Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
     )
 }
 
@@ -1479,11 +1483,11 @@ mod tests {
             .unwrap();
         let text = assign_delivery_text(&mut store, "T-1", 2);
         assert!(
-            text.contains("Rework T-1 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t1 (in your worktree)."),
+            text.contains("Rework T-1 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last)."),
             "{text}"
         );
         assert!(
-            !text.contains("git switch"),
+            !text.contains("git switch -c"),
             "a rework does not start a branch: {text}"
         );
     }
@@ -1521,7 +1525,7 @@ mod tests {
         );
         assert_eq!(
             assign_text("T-1", 2, 1, "heat/t1", "`gear --show T-1`"),
-            "Rework T-1 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t1 (in your worktree). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+            "Rework T-1 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
         );
     }
 
@@ -1581,7 +1585,7 @@ mod tests {
 
         assert!(
             text.contains(
-                "Resume T-1 attempt 2 (contract v1): it was set aside for more urgent work, not failed: there is no Rework section. Continue from what you pushed on heat/t1 (in your worktree); merge origin/trunk into it first."
+                "Resume T-1 attempt 2 (contract v1): it was set aside for more urgent work, not failed: there is no Rework section. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last). Continue from what you pushed on heat/t1 (in your worktree); merge origin/trunk into it first."
             ),
             "{text}"
         );
@@ -1606,6 +1610,39 @@ mod tests {
         assert!(!text.contains("Resume"), "not a resume: {text}");
     }
 
+    /// T-554 (hull F-312): a rework and a resume say how to get onto the task's
+    /// branch — the lane's worktree may still be on the branch of the task it
+    /// did last, and a rework was once committed there by mistake.
+    #[test]
+    fn a_rework_and_a_resume_say_how_to_get_onto_the_branch() {
+        let rework = assign_text("T-1", 2, 1, "heat/t1", "`gear --show T-1`");
+        let resume = resume_text(
+            "T-1",
+            2,
+            1,
+            "heat/t1",
+            "origin",
+            "trunk",
+            "`gear --show T-1`",
+        );
+        for text in [&rework, &resume] {
+            assert!(
+                text.contains("git switch heat/t1"),
+                "the branch to switch to: {text}"
+            );
+            assert!(
+                text.contains("Branch: heat/t1."),
+                "the branch is named: {text}"
+            );
+            assert!(
+                text.contains(
+                    "Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last)."
+                ),
+                "the switch comes before any change: {text}"
+            );
+        }
+    }
+
     /// The exact wording of the three packets (T-553 adds the resume).
     #[test]
     fn the_three_packet_writings() {
@@ -1619,7 +1656,7 @@ mod tests {
                 "trunk",
                 "`gear --show T-1`"
             ),
-            "Resume T-1 attempt 2 (contract v1): it was set aside for more urgent work, not failed: there is no Rework section. Continue from what you pushed on heat/t1 (in your worktree); merge origin/trunk into it first. Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+            "Resume T-1 attempt 2 (contract v1): it was set aside for more urgent work, not failed: there is no Rework section. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last). Continue from what you pushed on heat/t1 (in your worktree); merge origin/trunk into it first. Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
         );
     }
 
