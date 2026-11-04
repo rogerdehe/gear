@@ -11,6 +11,7 @@
 //! | `Held { reason }` | the seat is held | `held: …` |
 //! | `Waiting { on }` | the lane waits for a task to be merged (§5.3) | `waiting for T-m (lane, stage)` |
 //! | `DepWait { task, on }` | the next task of the lane waits for a dependency | `next T-x waits for T-y (lane, stage)` |
+//! | `Retired { tasks }` | the seat is retired and ready tasks sit on it (T-563) | `retired: T-a, T-b are on it and will not start` |
 //! | `Undelivered { task }` | the next task is ready and was not delivered | `next T-x is ready but not delivered` |
 //! | `NoWork` | nothing is left in the lane's queue | `nothing left planned` |
 //!
@@ -81,6 +82,13 @@ pub enum IdleReason {
         /// The dependency it waits for.
         on: String,
     },
+    /// The seat is retired and ready tasks sit on its lane: nobody will start
+    /// them (T-563, prometheus 2026-11-04: four `now` tasks went to retired
+    /// lanes and sat "ready but not delivered" while the server lane idled).
+    Retired {
+        /// The ready tasks on it, in the plan's order.
+        tasks: Vec<String>,
+    },
     /// The next task of the lane is ready and was never delivered.
     Undelivered {
         /// The task that waits for the lane.
@@ -128,6 +136,18 @@ pub fn idle_reason(
                 return Ok(Some(IdleReason::Held {
                     reason: held_reason(seat),
                 }));
+            }
+            // A retired lane starts nothing; say what sits on it instead of
+            // "ready but not delivered" (T-563).
+            SeatState::Retired => {
+                let ready: Vec<String> = queue_of(tx, project, &seat.name)?
+                    .into_iter()
+                    .filter(|task| task.state == TaskState::Ready)
+                    .map(|task| task.id)
+                    .collect();
+                if !ready.is_empty() {
+                    return Ok(Some(IdleReason::Retired { tasks: ready }));
+                }
             }
             _ => {}
         }
@@ -355,6 +375,9 @@ pub fn describe(reason: &IdleReason, tx: &Tx<'_>, project: &str) -> String {
                 "next {task} waits for {on} ({})",
                 lane_and_stage(tx, project, on)
             )
+        }
+        IdleReason::Retired { tasks } => {
+            format!("retired: {} are on it and will not start", tasks.join(", "))
         }
         IdleReason::Undelivered { task } => format!("next {task} is ready but not delivered"),
         IdleReason::NoWork => "nothing left planned".to_string(),

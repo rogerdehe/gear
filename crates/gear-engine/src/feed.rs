@@ -720,6 +720,10 @@ fn wait_words(
         | gear_board::idle::IdleReason::Held { .. } => {
             format!("waits for lane {lane} ({words})")
         }
+        // The lane is retired: nobody will start the task (T-563).
+        gear_board::idle::IdleReason::Retired { .. } => {
+            format!("is on retired lane {lane}")
+        }
         // The lane has nothing queued: the task is in the review or the verdict
         // steps, not in the lane's queue.
         gear_board::idle::IdleReason::NoWork => {

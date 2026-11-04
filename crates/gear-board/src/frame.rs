@@ -2451,6 +2451,7 @@ pub fn reason_word(reason: &IdleReason) -> &'static str {
         IdleReason::Held { .. } => "held",
         IdleReason::Waiting { .. } => "waiting",
         IdleReason::DepWait { .. } => "dep wait",
+        IdleReason::Retired { .. } => "retired",
         IdleReason::Undelivered { .. } => "undelivered",
         IdleReason::NoWork => "no work",
     }

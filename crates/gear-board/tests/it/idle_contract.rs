@@ -891,3 +891,44 @@ fn an_instruction_sent_after_the_hand_in_is_still_help_after_settle_and_merge() 
     assert_eq!(help.text(), "helping the captain: Check the quota line");
     assert_eq!(help.since, T0 + 180);
 }
+
+// T-563 (prometheus, 2026-11-04): four `now` tasks went to retired lanes and
+// the queue said "ready but not delivered" while the server lane idled. A
+// retired lane names what sits on it and that it will not start.
+#[test]
+fn a_retired_lane_with_ready_tasks_says_they_will_not_start() {
+    let mut store = world();
+    task(&mut store, "T-1", 1, TaskState::Ready, vec![], None);
+    task(&mut store, "T-2", 2, TaskState::Ready, vec![], None);
+    task(&mut store, "T-3", 3, TaskState::Done, vec![], None);
+    store
+        .write(|tx| tx.set_seat_state("p:heat", SeatState::Retiring, None, T0))
+        .unwrap();
+    store
+        .write(|tx| tx.set_seat_state("p:heat", SeatState::Retired, None, T0))
+        .unwrap();
+
+    let (reason, text) = reason_of(&mut store, T0);
+    assert_eq!(
+        reason,
+        Some(IdleReason::Retired {
+            tasks: vec!["T-1".into(), "T-2".into()]
+        }),
+        "{reason:?}"
+    );
+    assert_eq!(text, "retired: T-1, T-2 are on it and will not start");
+
+    // A retired lane with nothing ready is not called retired: it has no work.
+    store
+        .write(|tx| {
+            let mut one = tx.get_task("p", "T-1")?.unwrap();
+            one.state = TaskState::Cancelled;
+            tx.update_task(&one)?;
+            let mut two = tx.get_task("p", "T-2")?.unwrap();
+            two.state = TaskState::Cancelled;
+            tx.update_task(&two)
+        })
+        .unwrap();
+    let (reason, _) = reason_of(&mut store, T0);
+    assert_eq!(reason, Some(IdleReason::NoWork), "{reason:?}");
+}

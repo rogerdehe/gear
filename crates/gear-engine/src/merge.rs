@@ -3108,6 +3108,10 @@ fn run_gate(
         // errors on stderr.
         let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        // T-563: a gate that pushes (or a push that ran beside it) leaves the
+        // remote's chatter in the output; the captain's item and the board
+        // must lead with the gate's own refusal.
+        let combined = without_push_noise(&combined);
         let tail = tail(&combined, 12);
         // T-219: the tail is often slow-test timings, and the captain cannot
         // see what failed in it. The lines that name a failure come first.
@@ -4318,6 +4322,23 @@ fn tail(text: &str, lines: usize) -> String {
     let all: Vec<&str> = text.lines().collect();
     let start = all.len().saturating_sub(lines);
     all[start..].join("\n")
+}
+
+/// T-563: a gate's output without the remote's chatter: the lines git prints
+/// for a push — `remote: …` (the remote's own messages), `To …` (the target),
+/// and the branch lines ` * [new branch] …` / ` - [deleted] …`. A failed gate
+/// keeps its own refusal first instead of leading with lines nobody can act on.
+fn without_push_noise(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !(line.starts_with("remote:")
+                || line.starts_with("To ")
+                || trimmed.starts_with("* [new branch]")
+                || trimmed.starts_with("- [deleted]"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The lines of a gate's output that name a failure (T-219). A line counts
@@ -11132,6 +11153,30 @@ gate = "{project_gate}"
             "{}",
             inbox[0].body
         );
+    }
+
+    /// T-563: a gate that pushed leaves the remote's chatter in its output;
+    /// the refusal the captain reads comes first and no `remote:` line is kept
+    /// (prometheus: the item led with push noise).
+    #[test]
+    fn a_failed_gate_keeps_its_refusal_and_drops_the_push_noise() {
+        let text =
+            "remote: \nremote: Create a pull request for 'p/heat/t1' on GitHub by visiting: \n\
+                    remote:      https://github.com/o/r/pull/new/p/heat/t1\n\
+                    To github.com:o/r.git\n\
+                     * [new branch]      p/heat/t1 -> p/heat/t1\n\
+                     - [deleted]         p/heat/t0\n\
+                    make gate\n  FAIL [t] the_broken_test\n\
+                    the judge refuses at judge: T-1 has no report\n";
+        let kept = without_push_noise(text);
+        assert!(!kept.contains("remote:"), "{kept}");
+        assert!(!kept.contains("To github.com"), "{kept}");
+        assert!(!kept.contains("[new branch]"), "{kept}");
+        assert!(!kept.contains("[deleted]"), "{kept}");
+        // The refusal is still what the captain reads first (T-219's lines).
+        let failures = failure_lines(&kept, 20);
+        assert_eq!(failures, vec!["  FAIL [t] the_broken_test"], "{failures:?}");
+        assert!(tail(&kept, 12).ends_with("the judge refuses at judge: T-1 has no report"));
     }
 
     /// T-219: the failure lines are the ones that name a failure: a line that
