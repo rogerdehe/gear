@@ -46,10 +46,10 @@ models = [
 [profiles.pi]
 unattended_args = ["--approve"]
 
-[temps]                  # reviewers: Claude Code on Claude Sonnet 5.5, no fallback (user, 2026-11-01)
+[temps]                  # reviewers: pi on DeepSeek V4 Pro (user, 2026-11-04; was Claude Sonnet 5.5)
 charter = """You run on a strong model. Judge one candidate against its contract and the voyage's bar (DELIVERABLE): an error in normal use blocks it, an edge case outside normal use is logged, a style preference is neither. Check what the contract asks, in the files it names, and run only the acceptance it names."""
-kind = "claude"
-profile = "claude"
+kind = "pi"
+profile = "pi"
 
 [models]
 lanes = [
@@ -57,7 +57,7 @@ lanes = [
 ]
 # The reviewer never runs the model it reviews.
 review = [
-  { model = "claude-sonnet-5-5", cli = "claude", args = ["--effort", "high"] },
+  { model = "tokenrhythm/deepseek-v4-pro-0813", cli = "pi", args = ["--thinking", "high"], context_window_k = 1000 },
 ]
 on_quota = { lanes = "wait", review = "wait" }   # M5 (user): no fallback; spent means wait for the user
 quota_reset_h = 5
