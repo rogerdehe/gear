@@ -139,10 +139,29 @@ pub fn idle_reason(
     // A declared wait (§5.3): the lane waits for a task to be merged. The
     // attempt of the task stays Started, so this comes before the working
     // check. A held task (Draft) is not waited for: it cannot start.
-    if let Some(task) = queue
+    // A wait belongs only to an unfinished attempt, the engine's rule: a
+    // task that finished with its wait still written (Lawrence T-32, done
+    // with `external`) does not make the lane wait.
+    let mut waiting = None;
+    for task in queue
         .iter()
-        .find(|task| task.state != TaskState::Draft && task.wait_on.is_some())
+        .filter(|task| task.state != TaskState::Draft && task.wait_on.is_some())
     {
+        if tx
+            .attempts_of_task(project, &task.id)?
+            .iter()
+            .any(|attempt| {
+                matches!(
+                    attempt.state,
+                    gear_model::AttemptState::Started | gear_model::AttemptState::Stopped
+                )
+            })
+        {
+            waiting = Some(task);
+            break;
+        }
+    }
+    if let Some(task) = waiting {
         return Ok(Some(IdleReason::Waiting {
             on: task.wait_on.clone().unwrap_or_default(),
         }));

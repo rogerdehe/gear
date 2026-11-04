@@ -203,6 +203,23 @@ fn a_lane_that_waits_for_a_task_says_which_one() {
     assert_eq!(text, "waiting for T-9 (heat, queued)");
 }
 
+/// A task that finished with its wait still written does not make the lane
+/// wait (Lawrence T-32: done with `external`, so the queue showed its lane
+/// "waiting for external" while it worked on T-34).
+#[test]
+fn a_finished_task_with_a_stale_wait_does_not_make_the_lane_wait() {
+    let mut store = world();
+    task(&mut store, "T-2", 1, TaskState::Done, vec![], Some("T-9"));
+    attempt(&mut store, "T-2", 1, AttemptState::Accepted);
+    task(&mut store, "T-9", 2, TaskState::Ready, vec![], None);
+
+    let (reason, _) = reason_of(&mut store, T0);
+    assert!(
+        !matches!(reason, Some(IdleReason::Waiting { .. })),
+        "{reason:?}"
+    );
+}
+
 #[test]
 fn a_lane_whose_next_task_waits_for_a_dependency_says_which_one() {
     let mut store = world();
