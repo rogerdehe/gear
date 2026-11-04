@@ -592,6 +592,9 @@ pub fn merge_passed(
                 match integration_worktree(store, herdr, &repo, project, &config, &cfg.merges, now)
                 {
                     Ok(worktree) => {
+                        // T-566: a merge of this project starts: the wait's
+                        // item has done its work.
+                        close_merge_waits(store, project, now)?;
                         launch_batch(
                             store,
                             cfg,
@@ -610,7 +613,7 @@ pub fn merge_passed(
                         continue;
                     }
                     Err(reason) => {
-                        tell_captain(store, project, None, &format!("merge waits: {reason}"), now)?;
+                        tell_captain_merge_wait(store, project, &reason, now)?;
                         return Ok(merged);
                     }
                 }
@@ -646,15 +649,12 @@ pub fn merge_passed(
                         now,
                         stage,
                     ) {
-                        Ok(worktree) => worktrees.push(worktree),
+                        Ok(worktree) => {
+                            close_merge_waits(store, project, now)?;
+                            worktrees.push(worktree)
+                        }
                         Err(reason) if stage == 0 => {
-                            tell_captain(
-                                store,
-                                project,
-                                None,
-                                &format!("merge waits: {reason}"),
-                                now,
-                            )?;
+                            tell_captain_merge_wait(store, project, &reason, now)?;
                             return Ok(merged);
                         }
                         Err(_) => break,
@@ -683,9 +683,13 @@ pub fn merge_passed(
         }
         let worktree =
             match integration_worktree(store, herdr, &repo, project, &config, &cfg.merges, now) {
-                Ok(worktree) => worktree,
+                Ok(worktree) => {
+                    // T-566: the merge starts, so whatever held it is gone.
+                    close_merge_waits(store, project, now)?;
+                    worktree
+                }
                 Err(reason) => {
-                    tell_captain(store, project, None, &format!("merge waits: {reason}"), now)?;
+                    tell_captain_merge_wait(store, project, &reason, now)?;
                     return Ok(merged);
                 }
             };
@@ -4388,6 +4392,137 @@ fn tell_captain(
     })
 }
 
+/// The cause of a merge wait, as one item per class (T-566).
+///
+/// A merge that cannot start retries every tick, and each retry used to open
+/// its own item: 47 of them for one worktree that git could not create. One
+/// item per project and cause class says the same thing once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeWaitCause {
+    /// The merge worktree: it could not be created, opened, or it belongs to
+    /// another repository.
+    Worktree,
+    /// Anything else the merge step named.
+    Other,
+}
+
+impl MergeWaitCause {
+    /// The class a reason belongs to: the worktree steps name themselves in
+    /// their reason (`worktree_create: refused …`, `the worktree … belongs to
+    /// another repository …`).
+    fn of(reason: &str) -> MergeWaitCause {
+        if reason.to_lowercase().contains("worktree") {
+            MergeWaitCause::Worktree
+        } else {
+            MergeWaitCause::Other
+        }
+    }
+
+    /// The thread's last part.
+    fn as_str(self) -> &'static str {
+        match self {
+            MergeWaitCause::Worktree => "worktree",
+            MergeWaitCause::Other => "other",
+        }
+    }
+
+    /// Every class: closing a wait closes all of them, since a merge that
+    /// starts has left every cause behind.
+    fn all() -> [MergeWaitCause; 2] {
+        [MergeWaitCause::Worktree, MergeWaitCause::Other]
+    }
+}
+
+/// The thread of a project's merge wait for one cause class (T-566):
+/// `merge-wait:<project>:worktree`.
+fn merge_wait_thread(project: &str, cause: MergeWaitCause) -> String {
+    format!("merge-wait:{project}:{}", cause.as_str())
+}
+
+/// The open item of a thread, if there is one.
+fn open_item(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    thread: &str,
+) -> GearResult<Option<gear_store::MessageRow>> {
+    Ok(tx
+        .thread_messages(project, thread)?
+        .into_iter()
+        .find(|message| matches!(message.state, MsgState::Open | MsgState::Waiting)))
+}
+
+/// Tell the captain that the merge waits, once per project and cause class
+/// (T-566): the body follows the latest reason while the cause lasts, and the
+/// item closes when a merge of the project next starts.
+fn tell_captain_merge_wait(
+    store: &mut Store,
+    project: &str,
+    reason: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let cause = MergeWaitCause::of(reason);
+    let body = format!("merge waits: {reason}");
+    store.write(|tx| {
+        let captain = tx.captain_of(project)?.ok_or_else(|| {
+            GearError::new(
+                ErrorCode::NoTarget,
+                format!("project {project} has no captain"),
+            )
+        })?;
+        let thread = merge_wait_thread(project, cause);
+        if let Some(item) = open_item(tx, project, &thread)? {
+            if item.body != body {
+                tx.update_message_body(project, &item.id, &body)?;
+            }
+            return Ok(());
+        }
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: project.to_string(),
+            thread,
+            task: None,
+            attempt: None,
+            sender: captain.id.clone(),
+            sender_gen: 1,
+            recipient: captain.id,
+            kind: MsgKind::Question,
+            urgent: false,
+            body,
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+        Ok(())
+    })
+}
+
+/// Why a merge wait's item closes: a merge of the project started (T-566).
+const MERGE_WAIT_OVER: &str = "a merge of this project started, so the wait is over";
+
+/// Close the project's merge-wait items: a merge op started, so whatever held
+/// it is gone (T-566).
+fn close_merge_waits(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
+    store.write(|tx| {
+        for cause in MergeWaitCause::all() {
+            let thread = merge_wait_thread(project, cause);
+            let Some(item) = open_item(tx, project, &thread)? else {
+                continue;
+            };
+            tx.update_message_state(
+                project,
+                &item.id,
+                MsgState::Resolved,
+                Some(MERGE_WAIT_OVER),
+                None,
+                None,
+                now,
+            )?;
+        }
+        Ok(())
+    })
+}
+
 /// How often the branch sweep asks the remote for its branches: it is a
 /// network call, so not on every tick.
 const BRANCH_SWEEP_EVERY_S: i64 = 600;
@@ -7033,6 +7168,96 @@ mod tests {
         assert_eq!(open.len(), 1, "{items:?}");
         assert!(open[0].body.contains("a test failed"), "{}", open[0].body);
         assert_eq!(items.len(), 2, "the old item closed, a fresh one opened");
+    }
+
+    /// T-566: a merge worktree that cannot be used rings once, not once per
+    /// retry, and the next merge that starts closes the item.
+    #[test]
+    fn a_repeating_worktree_failure_keeps_one_item_and_a_merge_that_starts_closes_it() {
+        let scratch = Scratch::new("merge-wait-item");
+        let foreign_a = Scratch::new("merge-wait-foreign-a");
+        let foreign_b = Scratch::new("merge-wait-foreign-b");
+        let mut store = world(TaskState::Ready);
+        let candidate = scratch.head_of("heat/t5");
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        lost_task(&mut store, &candidate, OpState::Intended, 5);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        // A checkout of another repository stands where the merge worktree goes.
+        herdr.add_worktree(
+            "p/merge/home",
+            &foreign_a.work.display().to_string(),
+            "wt-merge:p1",
+        );
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        // Five retries of the same blocked merge.
+        for tick in 0..3 {
+            merge_passed(&mut store, &mut herdr, &cfg, "p", 20 + tick * 30).unwrap();
+        }
+        // The cause changes (another repository's checkout): the same item
+        // carries the latest reason.
+        herdr.add_worktree(
+            "p/merge/home",
+            &foreign_b.work.display().to_string(),
+            "wt-merge:p1",
+        );
+        for tick in 3..5 {
+            merge_passed(&mut store, &mut herdr, &cfg, "p", 20 + tick * 30).unwrap();
+        }
+
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-wait:p:worktree"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "one item, not one per retry: {items:?}");
+        assert_eq!(items[0].state, MsgState::Open, "still waiting");
+        assert!(
+            items[0].body.starts_with("merge waits: "),
+            "{}",
+            items[0].body
+        );
+        assert!(
+            items[0]
+                .body
+                .contains(&foreign_b.work.display().to_string()),
+            "the latest reason: {}",
+            items[0].body
+        );
+        assert!(
+            !items[0]
+                .body
+                .contains(&foreign_a.work.display().to_string()),
+            "the earlier reason is gone: {}",
+            items[0].body
+        );
+
+        // The merge worktree is right now: the merge starts and the item closes.
+        let path = scratch.root.join("merge");
+        sh(
+            &scratch.root,
+            &format!(
+                "git -C {} worktree add -q -b p/merge/home {} origin/dev",
+                scratch.work.display(),
+                path.display()
+            ),
+        );
+        herdr.add_worktree("p/merge/home", &path.display().to_string(), "wt-merge:p1");
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 400).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-wait:p:worktree"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
+        assert_eq!(items[0].result.as_deref(), Some(MERGE_WAIT_OVER));
     }
 
     /// The worktree of a merge train's second stage, beside the pair's own.
