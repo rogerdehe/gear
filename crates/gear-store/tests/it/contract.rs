@@ -166,6 +166,134 @@ fn seats_bindings_roundtrip() {
     assert_eq!(seat.state_since, NOW + 5);
 }
 
+/// T-550: a seat that is retired closes its items with it — nobody can
+/// resolve an item whose recipient is gone, and none of them rings any more.
+#[test]
+fn a_retired_seat_closes_its_items() {
+    let mut s = store();
+    s.write(|tx| {
+        testing::seed_project(tx, "p", "sess", NOW)?;
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
+        tx.insert_message(&msg(
+            "p:captain",
+            "p:heat",
+            MsgKind::Question,
+            MsgState::Open,
+            NOW,
+        ))?;
+        let waiting = tx.insert_message(&msg(
+            "p:captain",
+            "p:heat",
+            MsgKind::Blocked,
+            MsgState::Open,
+            NOW + 1,
+        ))?;
+        tx.update_message_state(
+            "p",
+            &waiting.id,
+            MsgState::Waiting,
+            None,
+            Some("user"),
+            Some(NOW + 100),
+            NOW + 2,
+        )?;
+        // Another seat's item, and one already resolved, are not its to close.
+        tx.insert_message(&msg(
+            "p:heat",
+            "p:captain",
+            MsgKind::Progress,
+            MsgState::Open,
+            NOW + 3,
+        ))?;
+        let done = tx.insert_message(&msg(
+            "p:captain",
+            "p:heat",
+            MsgKind::Question,
+            MsgState::Open,
+            NOW + 4,
+        ))?;
+        tx.update_message_state(
+            "p",
+            &done.id,
+            MsgState::Resolved,
+            Some("answered earlier"),
+            None,
+            None,
+            NOW + 5,
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    s.write(|tx| {
+        tx.set_seat_state(
+            "p:heat",
+            SeatState::Retired,
+            Some("milestone landed"),
+            NOW + 10,
+        )
+    })
+    .unwrap();
+
+    let open = s.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+    assert_eq!(open.state, MsgState::Resolved);
+    assert_eq!(open.result.as_deref(), Some("closed: its seat retired"));
+    assert_eq!(open.resolved, Some(NOW + 10));
+
+    let waited = s.read(|tx| tx.get_message("p", "M-2")).unwrap().unwrap();
+    assert_eq!(waited.state, MsgState::Resolved);
+    assert_eq!(waited.result.as_deref(), Some("closed: its seat retired"));
+    assert_eq!(waited.resolved, Some(NOW + 10));
+
+    let other = s.read(|tx| tx.get_message("p", "M-3")).unwrap().unwrap();
+    assert_eq!(
+        other.state,
+        MsgState::Open,
+        "another seat's item stays open"
+    );
+    assert_eq!(other.result, None);
+    assert_eq!(other.resolved, None);
+
+    let earlier = s.read(|tx| tx.get_message("p", "M-4")).unwrap().unwrap();
+    assert_eq!(earlier.state, MsgState::Resolved);
+    assert_eq!(earlier.result.as_deref(), Some("answered earlier"));
+    assert_eq!(
+        earlier.resolved,
+        Some(NOW + 5),
+        "an old close keeps its time"
+    );
+}
+
+/// T-550: a released seat is not retired — it may come back — so its items
+/// stay open.
+#[test]
+fn a_released_seat_keeps_its_items() {
+    let mut s = store();
+    s.write(|tx| {
+        testing::seed_project(tx, "p", "sess", NOW)?;
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
+        tx.insert_message(&msg(
+            "p:captain",
+            "p:heat",
+            MsgKind::Question,
+            MsgState::Open,
+            NOW,
+        ))?;
+        Ok(())
+    })
+    .unwrap();
+
+    s.write(|tx| tx.set_seat_state("p:heat", SeatState::Released, Some("tempo"), NOW + 10))
+        .unwrap();
+
+    let seat = s.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+    assert_eq!(seat.state, SeatState::Released);
+    let item = s.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+    assert_eq!(item.state, MsgState::Open, "a released seat keeps its item");
+    assert_eq!(item.result, None);
+    assert_eq!(item.resolved, None);
+}
+
 #[test]
 fn messages_insert_and_actionable_query() {
     let mut s = store();
