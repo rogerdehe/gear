@@ -2174,32 +2174,51 @@ fn idle_reason_text(project: &ProjectBoard, lane: &LaneBoard, landed: bool) -> (
             Style::fg(Color::Bad),
         );
     }
-    // The next task of the lane, and the first dependency it waits for.
-    let Some(next) = lane
+    // The next task of the lane: the first one in the plan's order whose
+    // dependencies are all merged — the rule the engine dispatches by (T-562).
+    let mut waiting: Vec<&TaskBoard> = lane
         .tasks
         .iter()
-        .find(|task| matches!(task.stage, graph::Stage::Deps | graph::Stage::Queued))
-    else {
+        .filter(|task| matches!(task.stage, graph::Stage::Deps | graph::Stage::Queued))
+        .collect();
+    waiting.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    if let Some(next) = waiting
+        .iter()
+        .find(|task| task.deps_open.is_empty())
+        .copied()
+    {
+        return (
+            format!("next {} is ready but not delivered", next.id),
+            Style::fg(Color::Bad),
+        );
+    }
+    // Nothing can start: the first one in the plan says which dependency holds
+    // it (T-562).
+    let Some(next) = waiting.first().copied() else {
         return (
             "nothing left planned for this lane".to_string(),
             Style::fg(Color::Bad),
         );
     };
-    for dep in &next.deps {
-        for owner in &project.lanes {
-            let Some(task) = owner.tasks.iter().find(|task| &task.id == dep) else {
-                continue;
-            };
-            if task.stage != graph::Stage::Merged {
-                return (
-                    format!(
-                        "next {} waits for {} ({}, {})",
-                        next.id, dep, owner.lane, task.stage_words
-                    ),
-                    Style::fg(Color::Bad),
-                );
-            }
-            break;
+    if let Some(dep) = next.deps_open.first() {
+        if let Some((owner, task)) = project.lanes.iter().find_map(|owner| {
+            owner
+                .tasks
+                .iter()
+                .find(|task| &task.id == dep)
+                .map(|task| (owner, task))
+        }) {
+            return (
+                format!(
+                    "next {} waits for {} ({}, {})",
+                    next.id, dep, owner.lane, task.stage_words
+                ),
+                Style::fg(Color::Bad),
+            );
         }
     }
     (
@@ -2359,7 +2378,8 @@ pub fn styled_lane_panel(lane: &LaneBoard, tasks: &[graph::GraphTask], color: Co
                 task.title.chars().take(30).collect::<String>(),
                 graph::Stage::words_of(
                     task.stage,
-                    &task.deps,
+                    &task.deps_open,
+                    task.deps.len(),
                     task.rounds,
                     task.moved_to.as_deref(),
                     &task.integration

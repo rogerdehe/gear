@@ -160,7 +160,8 @@ impl Stage {
     pub fn words(task: &GraphTask) -> String {
         Stage::words_of(
             task.stage,
-            &task.deps,
+            &task.deps_open,
+            task.deps.len(),
             task.rounds,
             task.moved_to.as_deref(),
             &task.integration,
@@ -170,22 +171,24 @@ impl Stage {
     /// The words of a stage from the facts it needs, without a [`GraphTask`]:
     /// the board's lanes and the captain's home page say the same words as the
     /// graph (T-347).
+    ///
+    /// `deps` are the dependencies whose work is not merged yet and `dep_count`
+    /// how many the task has: a task that waits for two of forty-seven says
+    /// which two, one that waits for five says five of forty-seven (T-562).
     pub fn words_of(
         stage: Stage,
         deps: &[String],
+        dep_count: usize,
         rounds: usize,
         moved_to: Option<&str>,
         integration: &str,
     ) -> String {
         match stage {
-            Stage::Deps => format!(
-                "waits for {} to merge",
-                if deps.is_empty() {
-                    "-".to_string()
-                } else {
-                    deps.len().to_string()
-                }
-            ),
+            Stage::Deps => match deps.len() {
+                0 => "waits for - to merge".to_string(),
+                1..=3 => format!("waits for {} to merge", deps.join(", ")),
+                open => format!("waits for {open} of {} to merge", dep_count.max(open)),
+            },
             Stage::Queued => "queued".to_string(),
             Stage::Held => "on hold (the captain holds it)".to_string(),
             Stage::Delivered => "delivered, not started".to_string(),
@@ -232,6 +235,9 @@ pub struct GraphTask {
     pub rounds: usize,
     /// The tasks this one depends on.
     pub deps: Vec<String>,
+    /// The ones of them whose work is not merged yet (T-562): what the task
+    /// really waits for, as the board and the queue say it.
+    pub deps_open: Vec<String>,
     /// When the task was merged into `dev`.
     pub finished: Option<Ts>,
     /// When the lane first started the task: the earliest `started` of its
@@ -268,6 +274,11 @@ fn tasks_of(
     keep: impl Fn(&str) -> bool,
 ) -> GearResult<Vec<GraphTask>> {
     let rows = tx.tasks_of_project(project)?;
+    // The dependencies whose work is merged, in one query for the whole graph
+    // (T-562): the rule the engine dispatches by, so the words of a waiting
+    // task name the ones that really hold it.
+    let merged: std::collections::BTreeSet<String> =
+        tx.merged_done_tasks(project)?.into_iter().collect();
     let mut tasks = Vec::new();
     for row in &rows {
         if !keep(row.id.as_str()) {
@@ -295,6 +306,12 @@ fn tasks_of(
             actual_min: actual,
             rounds: history.attempts.len(),
             deps: row.deps.clone(),
+            deps_open: row
+                .deps
+                .iter()
+                .filter(|dep| !merged.contains(dep.as_str()))
+                .cloned()
+                .collect(),
             finished,
             started: history.span().0,
         });
@@ -1438,5 +1455,40 @@ impl Row {
             line = line.push(character.to_string(), style);
         }
         line
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T-562: a task that waits names the dependencies that really hold it.
+    /// Up to three are named; more are counted, with the number the task has.
+    #[test]
+    fn a_waiting_task_names_the_dependencies_it_really_waits_for() {
+        // Forty-seven dependencies, two of them not merged yet.
+        let all: Vec<String> = (1..=47).map(|n| format!("T-{n}")).collect();
+        let words = |open: Vec<&str>| {
+            Stage::words_of(
+                Stage::Deps,
+                &open.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                all.len(),
+                0,
+                None,
+                "dev",
+            )
+        };
+        assert_eq!(words(vec!["T-3", "T-9"]), "waits for T-3, T-9 to merge");
+        // One and three are named as well.
+        assert_eq!(words(vec!["T-3"]), "waits for T-3 to merge");
+        assert_eq!(
+            words(vec!["T-3", "T-4", "T-5"]),
+            "waits for T-3, T-4, T-5 to merge"
+        );
+        // Five of forty-seven: the words count them instead of naming all.
+        assert_eq!(
+            words(vec!["T-1", "T-2", "T-3", "T-4", "T-5"]),
+            "waits for 5 of 47 to merge"
+        );
     }
 }
