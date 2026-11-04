@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1137 -->
+<!-- gear-plan project=gear base=1138 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -65,6 +65,7 @@ eta: 4h
 - 2026-11-04 01:40 scope: (10) a project with no unfinished task releases its standby reviewers (Lawrence M1 landed with two reviewers left up, `reviewer_release_idle_min` unset) | why: user asked why they were not reclaimed | else: none
 - 2026-11-04 01:40 note: audit of (9) is the captain's own: after the release, Prometheus sets merge_batch and the captain reads the first batches in the SelyraAI store (several tasks confirmed by one gate run; a red batch ejects only its culprit) | why: the proof is the real queue | else: none
 - station M-7644: keep course | why: the batch merge (T-547, T-548) is the critical path on hull; mast finishes T-550 and T-551; release v0.6.52 when T-548 lands | else: none
+- station M-7677: keep course | why: T-547 rework is the last critical step; mast takes the captain-take naming fix for the same release | else: none
 # Queue
 
 ## T-545 [now] lane=mast milestone=M6.2 required
@@ -107,4 +108,10 @@ deps: -
 goal: [v0.6.52] `gear admin init` never moves a Herdr session to another store without being told (M6.2 backlog, 2026-11-02): today an init run with a different GEAR_DB inside a session replaces that session's line in ~/.config/gear/targets.tsv without a word, and the session's real engine then refuses to start. In crates/gear-app (where targets.tsv is written by init): when the session already has a line naming another store path and that store file exists, init refuses with an error naming the session, the registered store path and the new one, and the flag that allows it; a new flag `--move-store` on `gear admin init` (crates/gear-cli) allows the move. The same path, or a registered store file that no longer exists, behaves as today.
 accept: Tests in gear-app's tests: init with a different store for a session whose registered store exists is refused and the error names both paths and `--move-store`; with `--move-store` the line is replaced; the same store, and a registered store that is gone, change nothing from today. Run only `make check CRATE=gear-app TESTS='test(init)'`; the merge gate runs `make gate`.
 estimate: 30
+deps: -
+
+## T-552 [now] lane=mast milestone=M6.2
+goal: [v0.6.52] `gear captain take <project>` on a pane that already holds another project's captain seat keeps the agent's Herdr name. Today the Prometheus captain ran `gear captain take lawrence` to hold the landed Lawrence seat too, its agent was renamed `lawrence-captain`, and every `herdr agent prompt prometheus-captain` failed with agent_not_found. In crates/gear-app/src/captain.rs fn finish_rebind (the `gear_herdr::ensure_agent_name(herdr, pane, &name)` call, line ~648): when the pane already has an Active captain binding of another project in this store (any seat id ending in `:captain` other than this one, bound Active to `pane`), skip the naming and report the name as kept; otherwise name as today. The same check in the early return of fn take_one (line ~445) for a pane that holds this seat already.
+accept: Tests in crates/gear-app/tests/it (the captain take contract tests) with the fake Herdr: a pane holding project A's captain takes project B's seat and the agent keeps A's captain name; a pane with no other captain seat is named B's captain as today; a handover to a fresh pane is named as today. Run only `make check CRATE=gear-app TESTS='test(captain)'`; the merge gate runs `make gate`.
+estimate: 25
 deps: -
