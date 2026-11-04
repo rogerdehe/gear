@@ -603,6 +603,15 @@ pub fn onboard_queued(
             if !config.lanes.iter().any(|lane| lane.name == seat.name) {
                 continue;
             }
+            // T-561: the lane quota counts the lane agents Herdr shows, not
+            // only the seats the store calls live: a lane the store released
+            // whose agent still runs is a lane the user sees, and the next one
+            // waits for it instead of starting beside it.
+            let live =
+                crate::names::live_of_role(store, herdr, &project, SeatRole::Lane, Some(&seat.id));
+            if live.len() as u32 >= config.quota.lanes {
+                continue;
+            }
             match onboard_seat(store, herdr, cfg, &seat, &config, &profiles, now) {
                 // The seat is Active now.
                 Ok(true) => active.push(seat.id.clone()),

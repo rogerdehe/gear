@@ -140,6 +140,45 @@ pub fn read(
     herdr.agent_names()
 }
 
+/// The panes of `project` whose agent carries the name of a seat of `role`
+/// (T-561), as Herdr shows them now.
+///
+/// The quota names **live agents**, not seats: a seat the store calls
+/// `Released` whose agent is still in its pane is a reviewer the user sees, and
+/// a start must wait for it. Counted from the same snapshot `restore` works
+/// from, so one read serves the tick. An unreadable list is no evidence
+/// either way: the caller gets no panes and its own seat-state count stands.
+/// `except` leaves one seat out: a seat that is resumed or reused does not add
+/// a pane, so its own agent must not stop its own start.
+pub fn live_of_role(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    role: SeatRole,
+    except: Option<&str>,
+) -> Vec<String> {
+    let Ok(names) = read(herdr) else {
+        return Vec::new();
+    };
+    let Ok(seats) = store.read(|tx| tx.seats_of_project(project)) else {
+        return Vec::new();
+    };
+    let wanted: Vec<String> = seats
+        .iter()
+        .filter(|seat| seat.role == role)
+        .filter(|seat| except.is_none_or(|except| except != seat.id))
+        .map(desired)
+        .collect();
+    names
+        .into_iter()
+        .filter(|(_, name)| {
+            name.as_deref()
+                .is_some_and(|name| wanted.iter().any(|wanted| wanted == name))
+        })
+        .map(|(pane, _)| pane)
+        .collect()
+}
+
 /// What one [`restore`] did, for the tick report.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Restored {
