@@ -1641,7 +1641,7 @@ repo = "web"
     fn a_retried_lane_whose_agent_still_runs_is_exited_before_the_start() {
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
-        herdr.add_worktree("toy/heat", "/wt/heat", "w5:p1");
+        herdr.add_worktree("toy/heat/home", "/wt/heat", "w5:p1");
         herdr.add_agent("w5:p1", "opencode", gear_herdr::AgentStatus::Idle);
 
         assert!(onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1)
@@ -1674,7 +1674,7 @@ repo = "web"
 
     /// T-125: a lane registered again reuses its home worktree. Its checkout
     /// is on the task branch it last worked, so `worktree open --branch
-    /// toy/heat` finds nothing and a create would collide with the path that
+    /// toy/heat/home` finds nothing and a create would collide with the path that
     /// already exists; the recorded path is opened instead.
     #[test]
     fn a_lane_registered_again_reuses_its_home_worktree() {
@@ -2208,7 +2208,7 @@ repo = "web"
             env.contains(r#"OPENCODE_CONFIG_CONTENT='{"model":"minimax-cn/MiniMax-M3.1-Flash"}'"#),
             "the environment line must carry the lane's model: {env}"
         );
-        assert!(env.starts_with(&format!("mkdir -p '/fake-worktrees/toy-heat/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path)), "{env}");
+        assert!(env.starts_with(&format!("mkdir -p '/fake-worktrees/toy-heat-home/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat-home/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path)), "{env}");
         // The model is only read by a process that inherits the pane's
         // environment, so the agent gets a private server.
         assert!(
@@ -2366,7 +2366,7 @@ repo = "web"
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
         assert_eq!(active, vec!["toy:heat".to_string()]);
-        assert_eq!(env_line(&herdr), format!("mkdir -p '/fake-worktrees/toy-heat/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}; {}", cfg().db_path, EDITOR_ENV));
+        assert_eq!(env_line(&herdr), format!("mkdir -p '/fake-worktrees/toy-heat-home/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat-home/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}; {}", cfg().db_path, EDITOR_ENV));
         assert_eq!(start_args(&herdr), vec!["--auto".to_string()]);
     }
 
@@ -2394,7 +2394,7 @@ repo = "web"
             })
             .expect("the engine created the lane's worktree");
         assert_eq!(repo, "/repo/web", "the worktree is in the lane's repo");
-        assert_eq!(branch, "toy/heat");
+        assert_eq!(branch, "toy/heat/home");
         assert_eq!(base, "web-dev", "the repo's own integration branch");
         assert_eq!(label, "toy-heat");
     }
@@ -2428,7 +2428,7 @@ repo = "web"
             &work,
             "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev",
         );
-        sh(&work, "git worktree add -q -b toy/heat ../heat dev");
+        sh(&work, "git worktree add -q -b toy/heat/home ../heat dev");
         let worktree = root.join("heat");
         // The hook an older engine installed: its own path, worktree-only.
         sh(&worktree, "git config extensions.worktreeConfig true");
@@ -2450,7 +2450,7 @@ repo = "web"
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
 
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
@@ -2491,7 +2491,7 @@ repo = "web"
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
         onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
         assert_eq!(
             sh(&worktree, "git config --worktree core.hooksPath"),
@@ -2533,13 +2533,13 @@ repo = "web"
             &work,
             "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev",
         );
-        sh(&work, "git worktree add -q -b toy/heat ../heat dev");
+        sh(&work, "git worktree add -q -b toy/heat/home ../heat dev");
         let worktree = root.join("heat");
 
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
 
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
@@ -2655,7 +2655,7 @@ repo = "web"
     }
 
     /// T-503: a real repository with a bare `origin` holding `dev` at two
-    /// commits, the lane's home branch `toy/heat` at the first one, and a
+    /// commits, the lane's home branch `toy/heat/home` at the first one, and a
     /// linked worktree of that branch. Returns (the repository, the worktree).
     fn t503_repo(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let root = crate::testtmp::temp(name);
@@ -2675,19 +2675,19 @@ repo = "web"
         );
         sh(&work, "git push -q origin dev");
         // The home branch stays at the first commit while `dev` moves on.
-        sh(&work, "git branch toy/heat dev");
+        sh(&work, "git branch toy/heat/home dev");
         std::fs::write(work.join("a.txt"), "two\n").unwrap();
         sh(
             &work,
             "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev2 && git push -q origin dev",
         );
-        sh(&work, "git worktree add -q ../toy-wt toy/heat");
+        sh(&work, "git worktree add -q ../toy-wt toy/heat/home");
         let worktree = root.join("toy-wt");
         (work, worktree)
     }
 
     /// The project of the T-503 tests: one lane in the real repository, with
-    /// `origin` as its remote and the default home branch `toy/heat`.
+    /// `origin` as its remote and the default home branch `toy/heat/home`.
     fn t503_config(repo: &std::path::Path) -> String {
         format!(
             r#"
@@ -2753,7 +2753,7 @@ profile = "opencode"
         let mut store = t503_world(&repo, &worktree);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
 
         assert_eq!(
             onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
@@ -2761,7 +2761,10 @@ profile = "opencode"
         );
 
         assert_eq!(sh(&worktree, "git status --porcelain"), "");
-        assert_eq!(sh(&worktree, "git rev-parse --abbrev-ref HEAD"), "toy/heat");
+        assert_eq!(
+            sh(&worktree, "git rev-parse --abbrev-ref HEAD"),
+            "toy/heat/home"
+        );
         assert_eq!(
             sh(&worktree, "git rev-parse HEAD"),
             sh(&repo, "git rev-parse origin/dev")
@@ -2800,7 +2803,7 @@ profile = "opencode"
         let mut store = t503_world(&repo, &worktree);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
 
         assert_eq!(
             onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
@@ -2808,7 +2811,10 @@ profile = "opencode"
         );
 
         assert_eq!(sh(&worktree, "git status --porcelain"), "");
-        assert_eq!(sh(&worktree, "git rev-parse --abbrev-ref HEAD"), "toy/heat");
+        assert_eq!(
+            sh(&worktree, "git rev-parse --abbrev-ref HEAD"),
+            "toy/heat/home"
+        );
         assert_eq!(
             sh(&worktree, "git rev-parse HEAD"),
             sh(&repo, "git rev-parse origin/dev")
@@ -2830,11 +2836,14 @@ profile = "opencode"
             &worktree,
             "git fetch -q origin && git reset -q --hard origin/dev",
         );
-        let reflog = sh(&worktree, "git reflog show --format=%H toy/heat | wc -l");
+        let reflog = sh(
+            &worktree,
+            "git reflog show --format=%H toy/heat/home | wc -l",
+        );
         let mut store = t503_world(&repo, &worktree);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
 
         assert_eq!(
             onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
@@ -2842,13 +2851,19 @@ profile = "opencode"
         );
 
         assert_eq!(sh(&worktree, "git status --porcelain"), "");
-        assert_eq!(sh(&worktree, "git rev-parse --abbrev-ref HEAD"), "toy/heat");
+        assert_eq!(
+            sh(&worktree, "git rev-parse --abbrev-ref HEAD"),
+            "toy/heat/home"
+        );
         assert_eq!(
             sh(&worktree, "git rev-parse HEAD"),
             sh(&repo, "git rev-parse origin/dev")
         );
         assert_eq!(
-            sh(&worktree, "git reflog show --format=%H toy/heat | wc -l"),
+            sh(
+                &worktree,
+                "git reflog show --format=%H toy/heat/home | wc -l"
+            ),
             reflog,
             "the home branch was not moved"
         );
@@ -2872,7 +2887,7 @@ profile = "opencode"
         let mut store = t503_world(&repo, &worktree);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
 
         assert_eq!(
             onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
@@ -2886,7 +2901,10 @@ profile = "opencode"
             "the change is still there"
         );
         assert_eq!(sh(&worktree, "git rev-parse HEAD"), head);
-        assert_eq!(sh(&worktree, "git rev-parse --abbrev-ref HEAD"), "toy/heat");
+        assert_eq!(
+            sh(&worktree, "git rev-parse --abbrev-ref HEAD"),
+            "toy/heat/home"
+        );
         let messages = store
             .read(|tx| tx.thread_messages("toy", "worktree:heat"))
             .unwrap();

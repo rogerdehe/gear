@@ -466,10 +466,13 @@ fn a_captain_pass_merges_the_audit_and_starts_what_waits_for_it() {
     // wait for the audit start.
     w.repo
         .review_record("review/t2", "gear/voyages/M6/reviews/T-2.md");
-    let merge_worktree = w.repo.merge_worktree("p/merge");
+    let merge_worktree = w.repo.merge_worktree("p/merge/home");
     w.herdr.add_shell("wt-merge:p1");
-    w.herdr
-        .add_worktree("p/merge", &merge_worktree.to_string_lossy(), "wt-merge:p1");
+    w.herdr.add_worktree(
+        "p/merge/home",
+        &merge_worktree.to_string_lossy(),
+        "wt-merge:p1",
+    );
     wait_merge(&mut w);
     assert!(
         w.store

@@ -82,7 +82,8 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             task_branch: "{lane}/t{n}".into(),
             review_branch: "review/t{n}".into(),
             direction_branch: "{project}/direction/{task}".into(),
-            seat_branch: "{project}/{seat}".into(),
+            // T-559: project / seat / home, like project / lane / task.
+            seat_branch: "{project}/{seat}/home".into(),
             remote: "origin".into(),
             voyage_dir: "gear/voyages/{milestone}".into(),
             // T-299: the commit messages are configuration too; the fixture
@@ -1473,6 +1474,8 @@ fn a_seat_branch_that_holds_a_task_or_review_branch_is_refused() {
     cfg.project.id = "p".into();
     cfg.lanes.truncate(1); // the lane "heat"
     cfg.conventions.task_branch = "{project}/{lane}/t{n}".into();
+    // The seat branch in the lane's own folder (the old default shape).
+    cfg.conventions.seat_branch = "{project}/{seat}".into();
     let issues = validate(&cfg);
     assert_eq!(fields(&issues), vec!["conventions.seat_branch"]);
     assert!(
@@ -1485,17 +1488,22 @@ fn a_seat_branch_that_holds_a_task_or_review_branch_is_refused() {
     assert!(
         issues[0]
             .problem
-            .contains("e.g. seat_branch = \"{project}/home/{seat}\""),
+            .contains("e.g. seat_branch = \"{project}/{seat}/home\""),
         "{}",
         issues[0].problem
     );
 
-    // A seat branch in its own folder collides with nothing.
+    // The default, project / seat / home, sits beside the task branches of its
+    // lane: they are siblings, not a ref and a folder of it (T-559).
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.project.id = "p".into();
     cfg.conventions.task_branch = "{project}/{lane}/t{n}".into();
-    cfg.conventions.seat_branch = "{project}/home/{seat}".into();
-    assert_eq!(validate(&cfg), vec![]);
+    cfg.conventions.seat_branch = "{project}/{seat}/home".into();
+    assert_eq!(
+        validate(&cfg),
+        vec![],
+        "p/heat/home and p/heat/t1 are siblings"
+    );
 
     // The defaults keep the three apart.
     let mut cfg = parse(MINIMAL).unwrap();
@@ -1508,6 +1516,8 @@ fn a_seat_branch_that_holds_a_task_or_review_branch_is_refused() {
     cfg.project.id = "p".into();
     cfg.lanes.truncate(1);
     cfg.conventions.review_branch = "{project}/review-1/t{n}".into();
+    // The reviewer's seat branch in the folder the review branch lives in.
+    cfg.conventions.seat_branch = "{project}/{seat}".into();
     let issues = validate(&cfg);
     assert_eq!(fields(&issues), vec!["conventions.seat_branch"]);
     assert!(

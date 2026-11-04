@@ -327,7 +327,7 @@ fn wait_merge(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg) {
 
 /// T-253: the dispatch packet and the lane's worktree come from
 /// `task_branch` and `seat_branch`; with `seat_branch = "w/{seat}"` the lane's
-/// worktree step names `w/heat`, not the default `p/heat`.
+/// worktree step names `w/heat`, not the default `p/heat/home`.
 #[test]
 fn the_dispatch_packet_and_the_lane_worktree_come_from_the_projects_templates() {
     let repo = Repo::new();
@@ -547,7 +547,7 @@ fn a_worktree_of_another_repository_is_not_used_and_opens_a_captain_item() {
         &format!(
             "git -C {} worktree add -q -b {branch} {path} dev",
             other.work.display(),
-            branch = "p/heat",
+            branch = "p/heat/home",
             path = foreign.display()
         ),
     );
@@ -556,7 +556,7 @@ fn a_worktree_of_another_repository_is_not_used_and_opens_a_captain_item() {
     let mut store = world(&config);
     let mut herdr = FakeHerdr::new();
     // Herdr answers the seat's branch with the other repository's worktree.
-    herdr.add_worktree("p/heat", &foreign.to_string_lossy(), "other:p1");
+    herdr.add_worktree("p/heat/home", &foreign.to_string_lossy(), "other:p1");
     let cfg = cfg();
 
     let active = onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();

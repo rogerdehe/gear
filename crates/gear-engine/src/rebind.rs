@@ -624,7 +624,7 @@ gate="new-gate"
             crate::onboard::onboard_queued(&mut store, &mut h, &cfg, T + 7).unwrap(),
             ["p:heat"]
         );
-        assert!(h.calls.iter().any(|c| matches!(c,Call::WorktreeCreate {repo,branch,base,..} if repo == "/repo/new" && branch == "p/heat" && base == "new-dev")));
+        assert!(h.calls.iter().any(|c| matches!(c,Call::WorktreeCreate {repo,branch,base,..} if repo == "/repo/new" && branch == "p/heat/home" && base == "new-dev")));
         tick(&mut store, &mut h, &cfg, T + 8).unwrap();
         assert_eq!(
             store
