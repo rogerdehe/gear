@@ -100,8 +100,8 @@ Send it with `gear send --kind question`, then continue with other ready work if
 
 ## 7. Review and merge (what the engine does)
 
-- A hand-in starts a temp reviewer on a different model from the writer's, on its own branch `review/t<n>`. What it delivers: `gear --skill review`.
-- A **pass** is settled and merged by the engine: it merges the candidate into the integration branch of the task's repo, runs that repo's gate (`[[repos]].gate`, falling back to `[conventions].gate`), pushes, and deletes the task and review branches. A merge that fails (conflict, red gate) goes to the captain once.
+- A hand-in starts a temp reviewer on a different model from the writer's, on a local branch `review/t<n>`; it pushes its review commit onto the task's branch, so no review branch reaches the remote. What it delivers: `gear --skill review`.
+- A **pass** is settled and merged by the engine: it merges the candidate into the integration branch of the task's repo, runs that repo's gate (`[[repos]].gate`, falling back to `[conventions].gate`), pushes, and deletes the task branch (and an old review branch, if one is left). A merge that fails (conflict, red gate) goes to the captain once.
 - A **fail** goes to the captain, who judges it against the bar and writes the rework (`gear --skill course`).
 - Status comes from facts: an attempt exists → in progress; handed in → in review; merged → done. "The agent said done" is not a fact.
 
@@ -130,7 +130,7 @@ Each seat GEAR starts gets its own scratch directory and `TMPDIR` points at it, 
 
 The engine sweeps the remote every 10 minutes. A cancelled task's branches are deleted (the captain is told each commit, so one can be restored). A task branch older than `branch_max_age_min` (default 120), or more task branches of the open voyages than lanes × `branch_max_per_lane` (default 3: two hand-ins out and one sent back), is named to the captain in one urgent item: a voyage's branch is meant to merge within that time, so its work is stuck and the captain decides — get it reviewed and merged, finish the rework first, or cancel the task.
 
-`[conventions] task_branch` (default `{lane}/t{n}`) and `review_branch` (default `review/t{n}`) name the branches; `{project}`, `{lane}`, `{n}` are filled in, e.g. `task_branch = "{project}/{lane}/t{n}"`. `seat_branch` (default `{project}/{seat}`) names the branch of each seat's own worktree, and of the merge worktree as seat `merge`, so Herdr names the worktree `<project>-<seat>`.
+`[conventions] task_branch` (default `{lane}/t{n}`) and `review_branch` (default `review/t{n}`, local to the reviewer's worktree) name the branches; `{project}`, `{lane}`, `{n}` are filled in, e.g. `task_branch = "{project}/{lane}/t{n}"`. `seat_branch` (default `{project}/{seat}`) names the branch of each seat's own worktree, and of the merge worktree as seat `merge`, so Herdr names the worktree `<project>-<seat>`.
 
 The gate has no default: GEAR cannot know another project's build and test, so a project that names none is refused at `gear admin init` until it does (`make gate`, `go test ./...`, `npm test` — whatever exits non-zero on any failure and runs in seconds).
 

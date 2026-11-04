@@ -53,7 +53,7 @@ The engine rings you for each of these. Answer each the same hour.
 | Two lanes change the same files | a merge will fail | order the two tasks, or merge one first |
 | A quota stop parked a lane | the lane is stopped for hours | switch it to another model, or let it wait |
 | A fail verdict | a reviewer found a problem | §2: rework with the smallest fix, or log and pass |
-| A merge failed | it did not land on the integration branch | `- remerge T-<n>` under `# Staff`, then `gear plan apply`: it retries the accepted candidate (a flaky gate, a push race). A real conflict: merge the integration branch into the task's review branch, resolve it there, push, then `- remerge T-<n>`; the remerge merges that review branch, which contains the candidate. A genuinely red candidate is a code fix first, in a new task |
+| A merge failed | it did not land on the integration branch | `- remerge T-<n>` under `# Staff`, then `gear plan apply`: it retries the accepted candidate (a flaky gate, a push race). A real conflict: merge the integration branch into the task's branch, resolve it there, push, then `- remerge T-<n>`; the remerge merges that branch, which contains the candidate. A genuinely red candidate is a code fix first, in a new task |
 | Ready to land (every task done) | the voyage is finished | land it (§9) |
 
 ## 8. Rework is a contract defect first
