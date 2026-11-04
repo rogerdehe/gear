@@ -2717,8 +2717,24 @@ fn remerge(
             &format!("the candidate {candidate} is already on the integration branch"),
             now,
         )?;
+        // The work is on the integration branch: the attempt is merged, so the
+        // tasks that depend on it may start (Prometheus T-609: the item closed
+        // but merged_at stayed empty, and T-616 never started).
+        if tx
+            .attempt_times(project, task_id, latest.n)?
+            .merged
+            .is_none()
+        {
+            tx.set_attempt_time(
+                project,
+                task_id,
+                latest.n,
+                gear_store::AttemptStep::Merged,
+                now,
+            )?;
+        }
         return Ok(Some(format!(
-            "remerge {task_id}: {candidate} is already on the integration branch: no merge queued, its failed-merge item resolved"
+            "remerge {task_id}: {candidate} is already on the integration branch: no merge queued, the attempt is recorded merged, its failed-merge item resolved"
         )));
     }
     let lane = task.lane.clone().unwrap_or_default();

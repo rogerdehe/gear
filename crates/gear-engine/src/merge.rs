@@ -2166,6 +2166,10 @@ fn pr_claim(store: &mut Store, project: &str, op: &OpRow, repo: &Repo) -> GearRe
 /// reads every done task of the project, so not on every tick (T-516).
 const LOST_SCAN_EVERY_S: i64 = 300;
 
+/// Accepted work lands within this time, carried or not, or it is lost
+/// (user, 2026-11-04).
+const LAND_WITHIN_S: i64 = 2 * 3600;
+
 /// When the lost-merge scan last ran for a project.
 fn lost_scan_key(project: &str) -> String {
     format!("engine.lost_scan.{project}")
@@ -4444,7 +4448,8 @@ fn tell_captain_lost(
 ) -> GearResult<()> {
     // One scan of the ops and one of the tasks per tick, like the merge keys of
     // the queue step: a project with no lost task pays two reads.
-    let lost = store.read(|tx| {
+    let (lost, carried_active) = store.read(|tx| {
+        let mut carried_active: Vec<(String, String)> = Vec::new();
         let mut in_flight = std::collections::HashSet::new();
         for state in [
             OpState::Intended,
@@ -4491,12 +4496,31 @@ fn tell_captain_lost(
             // that has none in flight, lands nothing: the carried work is
             // lost work (user, 2026-11-04: 41 carried tasks sat unlanded for
             // hours, unreported).
+            // A carrier that is still being worked on (ready, running,
+            // verifying, or its merge in flight) is waited for too, but only
+            // for LAND_WITHIN_S after the acceptance: accepted work that has
+            // not landed by then is lost whatever carries it.
             if let Some(by) = tx.task_carried_by(project, &task.id)? {
                 let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, &by);
+                let accepted_at = tx
+                    .attempt_times(project, &task.id, latest.n)?
+                    .verdict
+                    .unwrap_or(now);
+                let carrier_active = in_flight.contains(carrier)
+                    || tx.get_task(carrier_project, carrier)?.is_some_and(|row| {
+                        matches!(
+                            row.state,
+                            TaskState::Ready
+                                | TaskState::Running
+                                | TaskState::Verifying
+                                | TaskState::Waiting
+                        )
+                    });
                 if gear_app::tasks::merged_at(tx, carrier_project, carrier)?.is_none()
-                    && carrier_project == project
-                    && in_flight.contains(carrier)
+                    && carrier_active
+                    && now - accepted_at < LAND_WITHIN_S
                 {
+                    carried_active.push((task.id.clone(), by.clone()));
                     continue;
                 }
             }
@@ -4548,8 +4572,26 @@ fn tell_captain_lost(
                 merged,
             });
         }
-        Ok(lost)
+        Ok((lost, carried_active))
     })?;
+    // A lost item about a task whose carrier is active again is answered.
+    for (task, by) in carried_active {
+        let open = store.read(|tx| {
+            Ok(tx
+                .thread_messages(project, &lost_thread(&task))?
+                .into_iter()
+                .any(|message| message.state == MsgState::Open))
+        })?;
+        if open {
+            resolve_lost_with(
+                store,
+                project,
+                &task,
+                &format!("carried by {by}, which is being worked on"),
+                now,
+            )?;
+        }
+    }
     for Lost {
         task,
         attempt,

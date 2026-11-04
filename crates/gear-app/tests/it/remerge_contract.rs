@@ -575,7 +575,7 @@ fn a_remerge_of_a_candidate_already_on_the_integration_branch_queues_nothing() {
     assert_eq!(
         result.warnings,
         vec![format!(
-            "remerge T-1: {candidate} is already on the integration branch: no merge queued, its failed-merge item resolved"
+            "remerge T-1: {candidate} is already on the integration branch: no merge queued, the attempt is recorded merged, its failed-merge item resolved"
         )],
         "{result:?}"
     );
@@ -586,6 +586,9 @@ fn a_remerge_of_a_candidate_already_on_the_integration_branch_queues_nothing() {
         items[0].result.as_deref(),
         Some(format!("the candidate {candidate} is already on the integration branch").as_str())
     );
+    // The attempt is recorded merged, so its dependants may start (T-609).
+    let merged = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap().merged;
+    assert!(merged.is_some(), "the attempt is merged");
 }
 
 /// The candidate is not on `dev`: the remerge queues the merge op as before,
