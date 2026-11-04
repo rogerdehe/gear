@@ -4489,7 +4489,17 @@ fn sweep_in(
                         return Ok(true);
                     }
                 }
-                for state in [OpState::Intended, OpState::Executing, OpState::Submitted] {
+                // T-553: `Unknown` too — that is where a merge that waits for
+                // another task's merge sits (`Report::Waiting`), and a merge
+                // queued behind a dependency lands as surely as one running
+                // (2026-11-04: the captain was told "nothing will merge them"
+                // for T-548 while its merge waited for T-547).
+                for state in [
+                    OpState::Intended,
+                    OpState::Executing,
+                    OpState::Submitted,
+                    OpState::Unknown,
+                ] {
                     if tx.ops_in_state(project, state)?.iter().any(|op| {
                         op.kind == OpKind::Merge && op.task.as_deref() == Some(branch.task.as_str())
                     }) {
@@ -8304,6 +8314,101 @@ gate = "{gate}"
                 .len(),
             1
         );
+    }
+
+    /// T-553: a done task whose merge waits for another task sits in
+    /// `Unknown` (`Report::Waiting` leaves it there). That merge is landing,
+    /// not lost: the sweep names no unlanded branch for it (2026-11-04: the
+    /// captain was told "nothing will merge them" for T-548 while its merge
+    /// queued behind T-547).
+    #[test]
+    fn a_done_task_whose_merge_waits_for_another_is_not_named_unlanded() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(
+            root.path(),
+            &format!("git init -q --bare {}", origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git init -q -b dev {}", work.display()),
+        );
+        sh(
+            &work,
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base",
+        );
+        sh(
+            &work,
+            &format!("git remote add origin {}", origin.display()),
+        );
+        // A commit of T-5 that dev does not have.
+        sh(
+            &work,
+            "git switch -q -c heat/t5 && echo a > a.txt && git add -A \
+             && git -c user.email=t@t -c user.name=t commit -qm a",
+        );
+        sh(&work, "git push -q origin HEAD:refs/heads/heat/t5");
+        let now = 3600;
+        let config = gear_app::config::parse(&config_text_in("true", &work)).unwrap();
+        let sweep = |store: &mut Store| {
+            let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
+            let repo = config.repo_of_task(&tasks[0]);
+            let remote = Target {
+                name: "origin",
+                runner: &GitRemote,
+            };
+            let heads = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+            let found = task_branches(store, "p", &config, &tasks, &repo, &heads).unwrap();
+            let dev = git(&work, &["rev-parse", "dev"]).unwrap();
+            sweep_in(
+                store,
+                "p",
+                &config,
+                &work,
+                remote,
+                found,
+                now,
+                "dev",
+                Some(dev.trim()),
+            )
+            .unwrap();
+            store
+                .read(|tx| tx.actionable_for("p", "p:captain", now))
+                .unwrap()
+        };
+        let named = |items: &[gear_store::MessageRow]| {
+            items
+                .iter()
+                .any(|item| item.body.contains("nothing will merge them"))
+        };
+
+        // Without a merge op the branch is news: the captain is told.
+        let mut store = world(TaskState::Done);
+        let items = sweep(&mut store);
+        assert!(named(&items), "{items:?}");
+
+        // A merge of T-5 that waits for another task is landing.
+        let mut store = world(TaskState::Done);
+        store
+            .write(|tx| {
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({}),
+                    created: now,
+                })?;
+                tx.set_op_state("p", "O-1", OpState::Unknown, Some("waits for T-4"), now)
+            })
+            .unwrap();
+        let items = sweep(&mut store);
+        assert!(!named(&items), "{items:?}");
     }
 
     /// The project config of a repo in pull-request mode (design §11.1).
