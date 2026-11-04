@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1144 -->
+<!-- gear-plan project=gear base=1145 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -70,6 +70,7 @@ eta: 4h
 - station M-7693: keep course | why: v0.6.52 (batch merge) is live; T-553 (two wrong signals) goes out as v0.6.53; landing is decided after that | else: land now
 - station M-7702: keep course | why: T-553 is merging; hull takes F-312 (git switch in rework/resume texts); both go out as v0.6.53 | else: none
 - 2026-11-04 02:33 hand-fix: the engine names a pane that holds several captain seats after the seat bound to it first (names::restore); the Prometheus captain flipped between prometheus-captain and lawrence-captain on every pass after `gear captain take lawrence`, T-552 had fixed only the take path; the lawrence seat was also released from that pane at once | why: user, urgent: prompts by name failed | else: none
+- station M-7727: keep course | why: T-555 merging, then release v0.6.53 (gate variables, Resume text, git switch, captain name fix) | else: none
 # Queue
 
 ## T-545 [now] lane=mast milestone=M6.2 required
