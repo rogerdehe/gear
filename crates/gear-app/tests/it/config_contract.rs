@@ -73,6 +73,8 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             branch_max_per_lane: 3,
             // One merge after the other unless the project asks for a train.
             merge_parallel: 1,
+            // T-545: each merge is gated alone unless the project asks for a batch.
+            merge_batch: 1,
             push_interval_min: 20,
             push_reply_min: 10,
             // T-255: `gate` has no default; the fixture names one.
@@ -575,6 +577,47 @@ fn scratch_dir_defaults_to_none_and_parses_a_path() {
         Some("~/gear-scratch")
     );
     assert_eq!(validate(&cfg), vec![], "a scratch_dir is valid");
+}
+
+// ---- `[conventions].merge_batch` (T-545): how many passed merges are merged
+// together and gated once. Absent, each merge is gated alone.
+
+#[test]
+fn merge_batch_defaults_to_one_and_a_project_may_raise_it() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert_eq!(cfg.conventions.merge_batch, 1, "the default is one");
+    assert_eq!(validate(&cfg), vec![], "the default is valid");
+
+    let cfg = parse(&MINIMAL.replace(GATE_LINE, "gate = \"make test\"\nmerge_batch = 4")).unwrap();
+    assert_eq!(cfg.conventions.merge_batch, 4);
+    assert_eq!(validate(&cfg), vec![], "a batch merge on its own is valid");
+}
+
+#[test]
+fn a_merge_batch_of_zero_is_refused() {
+    let cfg = parse(&MINIMAL.replace(GATE_LINE, "gate = \"make test\"\nmerge_batch = 0")).unwrap();
+    assert_eq!(fields(&validate(&cfg)), vec!["conventions.merge_batch"]);
+    assert!(!validate(&cfg)[0].problem.is_empty());
+}
+
+#[test]
+fn a_merge_batch_above_one_refuses_a_merge_train() {
+    // A batch is gated once and so cannot also gate side by side as a train.
+    let cfg = parse(&MINIMAL.replace(
+        GATE_LINE,
+        "gate = \"make test\"\nmerge_batch = 3\nmerge_parallel = 2",
+    ))
+    .unwrap();
+    let issues = validate(&cfg);
+    assert_eq!(fields(&issues), vec!["conventions.merge_batch"]);
+    assert!(
+        issues[0].problem.contains("merge_batch")
+            && issues[0].problem.contains("merge_parallel")
+            && issues[0].problem.contains('3')
+            && issues[0].problem.contains('2'),
+        "both fields and their values are named: {}",
+        issues[0].problem
+    );
 }
 
 // ---- `[conventions].max_task_min` (T-279): no task is planned longer than
