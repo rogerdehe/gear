@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1161 -->
+<!-- gear-plan project=gear base=1162 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -75,6 +75,7 @@ eta: 4h
 - 2026-11-04 08:29 hand-fix: renamed GEAR's seat branches gear/<seat> to gear/<seat>/home by hand (git branch -m); v0.6.55's new default never ran the rename for a project with no seat_branch line, and gear/merge blocked gear/merge/home | why: every GEAR merge waited; T-565 makes it automatic
 - station M-7767: keep course T-558 and T-559 shipped as v0.6.55; T-560..T-565 are the v0.6.56 batch, four in review
 - station M-7869: keep course T-561 merged, T-562 merging, T-560 queued, T-563..T-565 in review; v0.6.56 ships when the six are on dev
+- 2026-11-04 08:44 override: T-563 passes over F1 | why: the retired-lane test exists and passes as idle_contract::a_retired_lane_with_ready_tasks_says_they_will_not_start; only the contract's filter test(idle::) named the wrong place, and that wording was mine; every behaviour (1)-(3) the review found ok | changes: none to delivered behaviour
 # Queue
 
 ## T-545 [now] lane=mast milestone=M6.2 required
