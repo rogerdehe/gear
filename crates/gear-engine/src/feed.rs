@@ -21,7 +21,7 @@
 //! stand still is stopped, not finished.
 
 use gear_model::{GearResult, MsgKind, MsgState, SeatRole, SeatState, TaskState, Ts};
-use gear_store::{MessageRow, NewMessage, Store, Tx};
+use gear_store::{MessageRow, NewMessage, SeatRow, Store, TaskRow, Tx};
 
 use crate::dispatch;
 
@@ -570,12 +570,7 @@ fn close(
 /// One urgent item on the thread `stalled`, opened once, updated while the
 /// state lasts and closed when a task can start again or none is left. Each of
 /// the first [`STALLED_SHOWN`] tasks left is named with what it waits for.
-fn stalled(
-    tx: &Tx<'_>,
-    project: &str,
-    captain: &str,
-    now: Ts,
-) -> GearResult<Option<FeedChange>> {
+fn stalled(tx: &Tx<'_>, project: &str, captain: &str, now: Ts) -> GearResult<Option<FeedChange>> {
     let voyage = gear_app::plan::current_voyage(tx, project)?;
     // No open voyage: nothing is stopped, the project stays quiet (T-232).
     let left: Vec<TaskRow> = if voyage.is_empty() {
@@ -658,7 +653,7 @@ fn wait_words(
     tx: &Tx<'_>,
     project: &str,
     task: &TaskRow,
-    seats: &[gear_store::SeatRow],
+    seats: &[SeatRow],
     now: Ts,
 ) -> GearResult<String> {
     let Some(lane) = task.lane.as_deref() else {
@@ -672,6 +667,11 @@ fn wait_words(
             return Ok(format!("is on retired lane {lane}"))
         }
         Some(_) => {}
+    }
+    // A task that is already underway is not waiting for its lane's queue: it
+    // sits in its own step (T-560).
+    if matches!(task.state, TaskState::Running | TaskState::Verifying) {
+        return Ok(format!("is {}", gear_board::state_word(task.state)));
     }
     // The task's own waits come before the lane's: a task that waits for a
     // dependency or for a merge waits for that, whatever its lane's queue says.
