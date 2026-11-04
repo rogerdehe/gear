@@ -845,6 +845,29 @@ pub fn tick(
         }
         note_slow(&mut report, &format!("project {project}"), step);
     }
+    // A paused project starts nothing, but a merge already running for it is
+    // collected when it finishes (Prometheus O-6339): its result is not lost.
+    let paused: Vec<String> = store
+        .read(|tx| tx.project_ids())?
+        .into_iter()
+        .filter(|project| !projects.contains(project))
+        .collect();
+    for project in &paused {
+        let Some(row) = store.read(|tx| tx.get_project(project))? else {
+            continue;
+        };
+        let Ok(config) = gear_app::config::parse_row(&row) else {
+            continue;
+        };
+        match merge::collect_finished(store, cfg, project, &config) {
+            Ok(Some(done)) => report.merged.extend(
+                done.into_iter()
+                    .map(|m| format!("{} @ {}", m.task, m.branch)),
+            ),
+            Ok(None) => {}
+            Err(error) => report.project_failed.push(project_error(project, &error)),
+        }
+    }
     // 10. rings (T-487): the seats of every project bound to one pane are
     //     joined into one doorbell, each line naming its project, urgent
     //     first. A project outside its working hours adds nothing; the other

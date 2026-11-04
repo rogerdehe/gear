@@ -333,6 +333,49 @@ fn write_steps(store: &mut gear_store::Store, key: &str, steps: &[(String, i64, 
         .ok();
 }
 
+/// Collect a finished background merge of `project`, if there is one: its
+/// result is settled. A paused project still has its running merge collected
+/// (Prometheus O-6339: the merge landed on dev while the project was paused,
+/// and the store kept it executing). None when no merge of it has finished.
+pub fn collect_finished(
+    store: &mut Store,
+    cfg: &EngineCfg,
+    project: &str,
+    config: &gear_app::config::ProjectConfig,
+) -> GearResult<Option<Vec<Merged>>> {
+    // A worker survives between ticks. Collect only a completed result;
+    // never join a running thread. One worker per repo (T-53): the workers of
+    // the repos of a project are collected one after the other.
+    let mut workers =
+        cfg.merges.workers.lock().map_err(|_| {
+            GearError::new(ErrorCode::BadTransition, "merge worker registry poisoned")
+        })?;
+    let finished_keys: Vec<String> = workers
+        .iter()
+        .filter(|(_, worker)| {
+            worker.op.project == project && worker.finished.lock().unwrap().is_some()
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    if let Some(key) = finished_keys.first() {
+        let worker = workers.get(key).expect("the worker was just found");
+        let finished = worker.finished.lock().unwrap().clone();
+        let Some(finished) = finished else {
+            return Ok(None);
+        };
+        let op = worker.op.clone();
+        let done = settle_report(store, project, config, &op, finished.result, finished.at)?;
+        // Keep the completion until its database write succeeded: a transient
+        // store error must not lose the result or launch a second worker.
+        workers.remove(key);
+        // The collection is a step of its own: a waiter must not miss it.
+        *cfg.merges.progress.0.lock().unwrap() += 1;
+        cfg.merges.progress.1.notify_all();
+        return Ok(Some(done));
+    }
+    Ok(None)
+}
+
 /// Queue, launch or collect a merge without waiting for git or the gate.
 pub fn merge_passed(
     store: &mut Store,
@@ -427,43 +470,17 @@ pub fn merge_passed(
     //     `branch_max_age_min` is named to the captain.
     sweep_branches(store, cfg, project, &config, now)?;
 
-    // A worker survives between ticks. Collect only a completed result;
-    // never join a running thread. One worker per repo (T-53): the workers of
-    // the repos of a project are collected one after the other.
+    // A worker survives between ticks: a finished one is collected, and the
+    // tick launches nothing else.
+    let collected = collect_finished(store, cfg, project, &config)?;
+    if let Some(done) = collected {
+        merged.extend(done);
+        return Ok(merged);
+    }
     let mut workers =
         cfg.merges.workers.lock().map_err(|_| {
             GearError::new(ErrorCode::BadTransition, "merge worker registry poisoned")
         })?;
-    let finished_keys: Vec<String> = workers
-        .iter()
-        .filter(|(_, worker)| {
-            worker.op.project == project && worker.finished.lock().unwrap().is_some()
-        })
-        .map(|(key, _)| key.clone())
-        .collect();
-    if let Some(key) = finished_keys.first() {
-        let worker = workers.get(key).expect("the worker was just found");
-        let finished = worker.finished.lock().unwrap().clone();
-        let Some(finished) = finished else {
-            return Ok(merged);
-        };
-        let op = worker.op.clone();
-        merged.extend(settle_report(
-            store,
-            project,
-            &config,
-            &op,
-            finished.result,
-            finished.at,
-        )?);
-        // Keep the completion until its database write succeeded: a transient
-        // store error must not lose the result or launch a second worker.
-        workers.remove(key);
-        // The collection is a step of its own: a waiter must not miss it.
-        *cfg.merges.progress.0.lock().unwrap() += 1;
-        cfg.merges.progress.1.notify_all();
-        return Ok(merged);
-    }
 
     // One worker per repo. Unknown ops are restart recovery: merge_one
     // resets to the remote before doing any merges, and adopts a completed push.
@@ -4469,10 +4486,17 @@ fn tell_captain_lost(
             let Some(candidate) = latest.candidate.clone() else {
                 continue;
             };
-            // A carried task waits for its carrier's merge, which lands it.
+            // A carried task waits for its carrier's merge only while that
+            // merge is queued or running. A carrier whose merge failed, or
+            // that has none in flight, lands nothing: the carried work is
+            // lost work (user, 2026-11-04: 41 carried tasks sat unlanded for
+            // hours, unreported).
             if let Some(by) = tx.task_carried_by(project, &task.id)? {
                 let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, &by);
-                if gear_app::tasks::merged_at(tx, carrier_project, carrier)?.is_none() {
+                if gear_app::tasks::merged_at(tx, carrier_project, carrier)?.is_none()
+                    && carrier_project == project
+                    && in_flight.contains(carrier)
+                {
                     continue;
                 }
             }
@@ -4488,11 +4512,6 @@ fn tell_captain_lost(
                 .is_some();
             // A merge op will merge it: queued, running or being recovered.
             let in_flight = in_flight.contains(&task.id);
-            // Its merge failed and the captain has that item still open.
-            let failed_open = tx
-                .thread_messages(project, &failed_thread(&task.id))?
-                .into_iter()
-                .any(|message| message.state == MsgState::Open);
             // Told and settled already: a resolved item does not come back.
             // Such a task is still carried, so the T-408 skips can close an
             // item that is still open.
@@ -4523,7 +4542,9 @@ fn tell_captain_lost(
                 told,
                 voyage: voyage_open(&open_voyages, task),
                 open_item,
-                settled: merged || in_flight || failed_open,
+                // An open merge-failed item is not a merge: the work is
+                // still lost until it lands (user, 2026-11-04).
+                settled: merged || in_flight,
                 merged,
             });
         }
@@ -4607,7 +4628,8 @@ fn tell_captain_lost(
                 sender_gen: 1,
                 recipient: captain.id,
                 kind: MsgKind::Question,
-                urgent: false,
+                // Accepted work that will never land is urgent: it rings at once.
+                urgent: true,
                 body,
                 reply_to: None,
                 needs_ack: false,
@@ -5817,6 +5839,8 @@ mod tests {
                 tx.set_task_carried_by("p", "T-5", "T-9")
             })
             .unwrap();
+        // The carrier T-9 has no merge in flight: the carried work lands
+        // nothing, so it is named lost (user, 2026-11-04).
         merge_passed(&mut store, &mut herdr, &cfg, "p", 20 + LOST_SCAN_EVERY_S).unwrap();
         let merges = store
             .read(|tx| tx.ops_of_kind_in_states("p", OpKind::Merge, &[]))
@@ -5825,7 +5849,12 @@ mod tests {
         let lost = store
             .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
             .unwrap();
-        assert!(lost.is_empty(), "a carried task was named lost: {lost:?}");
+        assert_eq!(
+            lost.len(),
+            1,
+            "a carried task whose carrier merges nothing: {lost:?}"
+        );
+        assert!(lost[0].urgent, "lost accepted work is urgent");
 
         // Without the mark, the same task is queued as usual.
         store
