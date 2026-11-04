@@ -2807,6 +2807,10 @@ fn run_gate(
     };
     let tempfail = gate_tempfail_path(dir);
     let _ = std::fs::remove_file(&tempfail);
+    // T-548: the failed-paths file belongs to this run, too: a line left by an
+    // earlier gate must not name a culprit here. It is not removed after a
+    // failure: the red batch reads it.
+    let _ = std::fs::remove_file(gate_failed_path(dir));
     let output = match gate_command(&gate, dir).stdin(stdin).output() {
         Ok(output) => output,
         // The gate could not run at all: the environment is broken, not the
@@ -3560,7 +3564,8 @@ fn gate_command(gate: &str, dir: &Path) -> Command {
         .current_dir(dir)
         .env_remove(gear_model::ctx::ENV_DB)
         .env_remove(gear_model::ctx::ENV_CTX)
-        .env(GATE_TEMPFAIL_ENV, gate_tempfail_path(dir));
+        .env(GATE_TEMPFAIL_ENV, gate_tempfail_path(dir))
+        .env(GATE_FAILED_ENV, gate_failed_path(dir));
     cmd
 }
 
@@ -3573,6 +3578,18 @@ pub const GATE_TEMPFAIL_ENV: &str = "GEAR_GATE_TEMPFAIL";
 /// The file of [`GATE_TEMPFAIL_ENV`] for a gate run in `dir`.
 fn gate_tempfail_path(dir: &Path) -> std::path::PathBuf {
     dir.join(".git-gear-gate-tempfail")
+}
+
+/// The variable naming the file a gate writes the repo-relative paths of the
+/// files or directories whose tests failed to, one per line (T-548): a red
+/// batch merge reads it to name the task whose changes match them, and `fn
+/// run_gate` removes it before the gate runs, so only this run's lines are
+/// read. A gate that writes nothing leaves no file, which is fine.
+pub const GATE_FAILED_ENV: &str = "GEAR_GATE_FAILED";
+
+/// The file of [`GATE_FAILED_ENV`] for a gate run in `dir`.
+fn gate_failed_path(dir: &Path) -> std::path::PathBuf {
+    dir.join(".git-gear-gate-failed")
 }
 
 /// Run one git command in `dir`; the output tail comes back as the error.
