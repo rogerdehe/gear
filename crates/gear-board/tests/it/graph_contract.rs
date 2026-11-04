@@ -752,7 +752,7 @@ fn stage_and_words(store: &mut Store, task: &str) -> (Stage, String) {
 fn each_stage_comes_from_a_fact_of_the_store() {
     let mut store = stage_world();
     let table: [(&str, Stage, &str); 15] = [
-        ("T-20", Stage::Deps, "waits for 1 to merge"),
+        ("T-20", Stage::Deps, "waits for T-1 to merge"),
         // A held task stays on the board: a hold that drops it from the list hides it from the user.
         ("T-33", Stage::Held, "on hold (the captain holds it)"),
         ("T-1", Stage::Queued, "queued"),
@@ -982,6 +982,7 @@ fn sample() -> GraphTask {
         actual_min: None,
         rounds: 0,
         deps: Vec::new(),
+        deps_open: Vec::new(),
         finished: None,
         started: None,
     }
@@ -1168,6 +1169,9 @@ fn m5() -> Vec<GraphTask> {
             actual_min: Some(task.actual),
             rounds: task.rounds,
             deps: task.deps.iter().map(|dep| dep.to_string()).collect(),
+            // The fixture writes the dependencies of a task that has not merged:
+            // all of them are still open.
+            deps_open: task.deps.iter().map(|dep| dep.to_string()).collect(),
             finished: task.merged.map(|minute| minute * 60),
             started: task.started.map(|minute| minute * 60),
         })
@@ -1240,7 +1244,7 @@ fn the_git_graph_has_the_rows_of_the_prototype_m5_voyage() {
         last_waiting.text
     );
     assert!(
-        last_waiting.text.contains("waits for 1 to merge"),
+        last_waiting.text.contains("waits for T-1 to merge"),
         "{:?}",
         last_waiting.text
     );

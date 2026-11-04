@@ -61,6 +61,45 @@ fn task(
         .unwrap();
 }
 
+/// A task of another lane (T-562): the queue of one lane names the work of
+/// another as what holds it.
+fn task_in(
+    store: &mut Store,
+    id: &str,
+    rank: i64,
+    lane: &str,
+    state: TaskState,
+    deps: Vec<&str>,
+) {
+    store
+        .write(|tx| {
+            tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: id.into(),
+                rank,
+                state,
+                priority: "must".into(),
+                lane: Some(lane.into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: deps.into_iter().map(str::to_string).collect(),
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: None,
+                issue: None,
+                updated: T0,
+            })
+        })
+        .unwrap();
+}
+
 /// An attempt of the lane, in the state the test needs.
 fn attempt(store: &mut Store, id: &str, n: i64, state: AttemptState) {
     store
@@ -220,11 +259,34 @@ fn a_finished_task_with_a_stale_wait_does_not_make_the_lane_wait() {
     );
 }
 
+/// T-562: the queue's next task is the first one, in the order of the plan,
+/// whose dependencies are all merged — the rule the engine dispatches by, so a
+/// later task that can start is the one the lane is told about.
 #[test]
-fn a_lane_whose_next_task_waits_for_a_dependency_says_which_one() {
+fn a_lane_whose_first_task_waits_names_the_later_one_that_can_start() {
     let mut store = world();
     task(&mut store, "T-2", 1, TaskState::Ready, vec!["T-9"], None);
     task(&mut store, "T-9", 2, TaskState::Ready, vec![], None);
+
+    let (reason, text) = reason_of(&mut store, T0);
+    assert_eq!(
+        reason,
+        Some(IdleReason::Undelivered { task: "T-9".into() }),
+        "{reason:?}"
+    );
+    assert_eq!(text, "next T-9 is ready but not delivered");
+}
+
+/// T-562: when nothing in the queue can start, the lane names the first task
+/// of the plan and the first dependency that holds it.
+#[test]
+fn a_lane_whose_tasks_all_wait_names_the_first_one_and_its_first_dependency() {
+    let mut store = world();
+    task(&mut store, "T-2", 1, TaskState::Ready, vec!["T-9", "T-8"], None);
+    task(&mut store, "T-3", 2, TaskState::Ready, vec!["T-9"], None);
+    // The dependencies are another lane's work, in progress and not merged.
+    task_in(&mut store, "T-9", 3, "mast", TaskState::Running, vec![]);
+    task_in(&mut store, "T-8", 4, "mast", TaskState::Running, vec![]);
 
     let (reason, text) = reason_of(&mut store, T0);
     assert_eq!(
@@ -235,16 +297,62 @@ fn a_lane_whose_next_task_waits_for_a_dependency_says_which_one() {
         }),
         "{reason:?}"
     );
-    assert_eq!(text, "next T-2 waits for T-9 (heat, queued)");
+    assert_eq!(text, "next T-2 waits for T-9 (mast, in progress)");
 }
 
+/// T-562: a dependency counts as done only once its work is merged, as the
+/// engine counts it (T-236, F-76): done at the review pass is not merged.
 #[test]
-fn a_dependency_that_is_done_is_not_a_wait() {
+fn a_dependency_that_is_done_but_not_merged_is_still_a_wait() {
     let mut store = world();
     task(&mut store, "T-2", 1, TaskState::Ready, vec!["T-9"], None);
     task(&mut store, "T-9", 2, TaskState::Done, vec![], None);
+    attempt(&mut store, "T-9", 1, AttemptState::Accepted);
 
     let (reason, text) = reason_of(&mut store, T0);
+    assert_eq!(
+        reason,
+        Some(IdleReason::DepWait {
+            task: "T-2".into(),
+            on: "T-9".into()
+        }),
+        "{reason:?}"
+    );
+    assert_eq!(text, "next T-2 waits for T-9 (heat, done)");
+}
+
+#[test]
+fn a_dependency_that_is_merged_is_not_a_wait() {
+    let mut store = world();
+    task(&mut store, "T-2", 1, TaskState::Ready, vec!["T-9"], None);
+    task(&mut store, "T-9", 2, TaskState::Done, vec![], None);
+    store
+        .write(|tx| {
+            tx.insert_attempt(&AttemptRow {
+                project: "p".into(),
+                task: "T-9".into(),
+                n: 1,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Accepted,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+            })?;
+            tx.set_attempt_time("p", "T-9", 1, gear_store::AttemptStep::Merged, T0 + 60)
+        })
+        .unwrap();
+
+    let (reason, text) = reason_of(&mut store, T0 + 120);
     assert_eq!(
         reason,
         Some(IdleReason::Undelivered { task: "T-2".into() }),
@@ -332,7 +440,8 @@ fn the_task_after_the_one_in_review_may_wait_for_a_dependency() {
     task(&mut store, "T-2", 1, TaskState::Verifying, vec![], None);
     attempt(&mut store, "T-2", 1, AttemptState::Submitted);
     task(&mut store, "T-3", 2, TaskState::Ready, vec!["T-9"], None);
-    task(&mut store, "T-9", 3, TaskState::Ready, vec![], None);
+    // The dependency is another lane's work, in progress and not merged.
+    task_in(&mut store, "T-9", 3, "mast", TaskState::Running, vec![]);
 
     let (reason, text) = reason_of(&mut store, T0);
     assert_eq!(
@@ -343,7 +452,44 @@ fn the_task_after_the_one_in_review_may_wait_for_a_dependency() {
         }),
         "{reason:?}"
     );
-    assert_eq!(text, "next T-3 waits for T-9 (heat, queued)");
+    assert_eq!(text, "next T-3 waits for T-9 (mast, in progress)");
+
+    // T-9 merges: the lane's next task can start.
+    store
+        .write(|tx| {
+            tx.insert_attempt(&AttemptRow {
+                project: "p".into(),
+                task: "T-9".into(),
+                n: 1,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Accepted,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+            })?;
+            let mut done = tx.get_task("p", "T-9")?.unwrap();
+            done.state = TaskState::Done;
+            tx.update_task(&done)?;
+            tx.set_attempt_time("p", "T-9", 1, gear_store::AttemptStep::Merged, T0 + 60)
+        })
+        .unwrap();
+    let (reason, text) = reason_of(&mut store, T0 + 120);
+    assert_eq!(
+        reason,
+        Some(IdleReason::Undelivered { task: "T-3".into() }),
+        "{reason:?}"
+    );
+    assert_eq!(text, "next T-3 is ready but not delivered");
 }
 
 // ---------------------------------------------------------------- T-323
