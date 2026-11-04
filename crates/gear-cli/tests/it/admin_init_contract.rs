@@ -33,8 +33,12 @@ fn config(dir: &Path, repo: &Path) -> PathBuf {
 fn init(home: &Path, db: &Path, config: &Path, ctx: Option<&str>, admin: bool) -> Output {
     // T-83: `init` refuses a kind whose GEAR skill is missing; these tests are
     // about the caller checks, so the skill is installed in the test home.
-    for agent in gear_app::skill::SkillAgent::ALL {
-        gear_app::skill::install(*agent, home).expect("install the skill");
+    // Once per home: a second call in the same test reuses the copies.
+    if !home.join(".gear-test-skills").exists() {
+        for agent in gear_app::skill::SkillAgent::ALL {
+            gear_app::skill::install(*agent, home).expect("install the skill");
+        }
+        std::fs::write(home.join(".gear-test-skills"), "").expect("the marker");
     }
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_gear"));
     cmd.args(["admin", "init", config.to_str().expect("a utf-8 path")])
