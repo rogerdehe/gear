@@ -711,6 +711,10 @@ fn release_standby_above(
 /// A reservation whose review is gone is ended by the `under_review` check of
 /// `release_finished_reviews`, not by this sweep.
 ///
+/// T-546: with no work left at all — no task of the project that is not done
+/// or cancelled — a Standby reviewer has nothing to review ever, so every one
+/// of them is released at once, whatever idle time the project sets.
+///
 /// T-424: no Standby reviewer is surplus while a hand-in waits for a reviewer.
 /// A hand-in that waits needs a seat that is up, and a released Standby
 /// reviewer is cold-started again for it — so the sweep releases nothing at
@@ -728,6 +732,25 @@ pub fn release_idle_standby(
     let mut report = ReleaseReport::default();
     let standby = idle_standby(store, project)?;
     if standby.is_empty() {
+        return Ok(report);
+    }
+    // T-546: a project with no work left keeps no reviewer up at all. With no
+    // task of the project that is not done or cancelled, a Standby reviewer
+    // has nothing to review ever: it is released at once, whatever idle time
+    // the project sets (2026-11-03, a landed voyage left two up because
+    // `reviewer_release_idle_min` was unset).
+    let work_left = store
+        .read(|tx| tx.tasks_live_of_project(project))?
+        .into_iter()
+        .any(|task| !matches!(task.state, TaskState::Done | TaskState::Cancelled));
+    if !work_left {
+        for seat in standby {
+            match release_one(store, herdr, project, &seat, None, now, "idle-standby") {
+                Ok(true) => report.released.push(seat.id.clone()),
+                Ok(false) => {}
+                Err(_) => report.failed.push(seat.id.clone()),
+            }
+        }
         return Ok(report);
     }
     // T-424: a hand-in that waits for a reviewer keeps every Standby reviewer:
@@ -3146,6 +3169,131 @@ profile = "codex"
         assert_eq!(exits(&herdr), 2, "both panes are closed");
     }
 
+    /// A config with no `reviewer_release_idle_min` (T-546): the idle-time
+    /// rule keeps every Standby reviewer.
+    const CONFIG_WITHOUT_IDLE_TIME: &str = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 2
+
+[captain]
+pane = "w9:p1"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[temps]
+kind = "codex"
+profile = "codex"
+"#;
+
+    /// T-546: a project with one task per state in `states`, no
+    /// `reviewer_release_idle_min`, and two Standby reviewers whose agents are
+    /// up.
+    fn world_without_idle_time(states: &[TaskState]) -> (Store, FakeHerdr) {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                tx.insert_project(&ProjectRow {
+                    id: "p".into(),
+                    herdr_session: "sess".into(),
+                    config_toml: CONFIG_WITHOUT_IDLE_TIME.into(),
+                    config_version: 1,
+                    quota_lanes: 1,
+                    quota_temps: 2,
+                    quota_includes_captain: false,
+                    plan_version: 0,
+                    created: T0,
+                })?;
+                for (i, state) in states.iter().enumerate() {
+                    tx.insert_task(&TaskRow {
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
+                        project: "p".into(),
+                        id: format!("T-{}", i + 1),
+                        rank: i as i64 + 1,
+                        state: *state,
+                        priority: "must".into(),
+                        lane: Some("heat".into()),
+                        milestone: None,
+                        required: false,
+                        contract_version: 1,
+                        deps: vec![],
+                        followup_of: None,
+                        wait_on: None,
+                        wait_cond: None,
+                        rework_note: None,
+                        estimate_min: None,
+                        issue: None,
+                        updated: T0,
+                    })?;
+                }
+                for (name, pane) in [("r-1", "w2:p2"), ("r-2", "w3:p3")] {
+                    let seat = testing::seed_temp_seat(tx, "p", name, "T-1", pane, "codex", T0)?;
+                    tx.set_seat_state(&seat.id, SeatState::Standby, Some("review done"), T0)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w3:p3", "codex", gear_herdr::AgentStatus::Idle);
+        (store, herdr)
+    }
+
+    /// T-546: a project whose tasks are all done or cancelled has no work left
+    /// for a reviewer: both Standby reviewers go at once, though the project
+    /// sets no idle time (2026-11-03: a landed voyage kept two up for good).
+    #[test]
+    fn no_unfinished_task_releases_every_standby_reviewer_at_once() {
+        let (mut store, mut herdr) =
+            world_without_idle_time(&[TaskState::Done, TaskState::Cancelled]);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+        // Both were put on their way out on the first tick, with no idle time
+        // to wait for.
+        assert_eq!(exits(&herdr), 2, "both panes are closed at once");
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+        for name in ["p:r-1", "p:r-2"] {
+            let seat = store.read(|tx| tx.get_seat(name)).unwrap().unwrap();
+            assert_eq!(seat.state, SeatState::Released, "{name} is free");
+        }
+    }
+
+    /// T-546: one task that is not done or cancelled is work left, so the
+    /// idle-time rule stands: with no idle time set, no reviewer is released.
+    #[test]
+    fn one_ready_task_keeps_the_standby_reviewers() {
+        let (mut store, mut herdr) = world_without_idle_time(&[TaskState::Done, TaskState::Ready]);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+
+        for name in ["p:r-1", "p:r-2"] {
+            let seat = store.read(|tx| tx.get_seat(name)).unwrap().unwrap();
+            assert_eq!(seat.state, SeatState::Standby, "{name} waits for work");
+        }
+        assert_eq!(
+            exits(&herdr),
+            0,
+            "no pane is closed: the task needs a reviewer"
+        );
+    }
+
     /// T-391: a reviewer started for a pending review sits in `Standby` until
     /// its agent is idle and `fn start` (review.rs) hands it the review. It has
     /// a job, so the idle sweep leaves it alone — released, the pending review
@@ -4168,10 +4316,11 @@ profile = "codex"
     }
 
     /// By default an idle reviewer is kept: with no idle time set, a Standby
-    /// reviewer stays up for hours with no lane working.
+    /// reviewer stays up for hours with no lane working while the project still
+    /// has work (T-546: a project with no unfinished task releases it at once).
     #[test]
     fn an_idle_reviewer_is_kept_by_default() {
-        let mut store = world(TaskState::Done, "w2:p2", "codex");
+        let mut store = world(TaskState::Ready, "w2:p2", "codex");
         store
             .write(|tx| {
                 let mut project = tx.get_project("p")?.unwrap();
