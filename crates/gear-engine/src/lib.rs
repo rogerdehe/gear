@@ -438,6 +438,12 @@ pub fn tick(
             // (T-97): the binding follows what the pane reports, so a delivery that
             // was never confirmed can be sent again without a store edit.
             observe::record_sessions(store, &observed)?;
+            let present: Vec<gear_store::SeatRow> = observed
+                .iter()
+                .filter(|obs| obs.presence == observe::Presence::Present)
+                .map(|obs| obs.seat.clone())
+                .collect();
+            session_runner::adopt_opencode_sessions(store, herdr, &present, now)?;
             note_slow(report, "observe seats", step);
             // A park whose time has come ends (T-190): the lane the captain
             // parked until a time that has passed works again.
