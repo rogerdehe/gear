@@ -464,7 +464,13 @@ pub fn merge_passed(
         .is_some_and(|at| at >= last_lost);
     if settled || now - last_lost >= LOST_SCAN_EVERY_S {
         store.write(|tx| tx.set_meta(&lost_scan_key(project), &now.to_string()))?;
-        land_carried(store, project, &config)?;
+        // A chain (T-517 by T-614 by T-675) lands one link per pass: repeat
+        // while a pass marks something, so the whole chain lands at once.
+        for _ in 0..8 {
+            if !land_carried(store, project, &config)? {
+                break;
+            }
+        }
         tell_captain_lost(store, project, &config, now)?;
         close_landed_failures(store, project, now)?;
     }
@@ -4936,7 +4942,8 @@ fn candidate_held(repo: &Repo, candidate: &str) -> Option<bool> {
 /// the attempt takes T-m's merge time, as an `integrated-by` pass would give
 /// it. A carried candidate that is not on the branch stays unmerged, and the
 /// lost scan tells the captain.
-fn land_carried(store: &mut Store, project: &str, config: &ProjectConfig) -> GearResult<()> {
+fn land_carried(store: &mut Store, project: &str, config: &ProjectConfig) -> GearResult<bool> {
+    let mut marked = false;
     let pending = store.read(|tx| {
         let mut pending = Vec::new();
         for task in tx.tasks_of_project(project)? {
@@ -4997,8 +5004,9 @@ fn land_carried(store: &mut Store, project: &str, config: &ProjectConfig) -> Gea
         store.write(|tx| {
             gear_app::tasks::mark_integrated_by(tx, project, &task, attempt, &by, merged_at)
         })?;
+        marked = true;
     }
-    Ok(())
+    Ok(marked)
 }
 
 /// Close the merge-failed items of work that landed after all: the attempt
