@@ -5735,13 +5735,13 @@ mod tests {
             Scratch { root, work }
         }
 
-        /// A worktree of this repo for the merge to run in (on `p/merge`).
+        /// A worktree of this repo for the merge to run in (on `p/merge/home`).
         fn merge_worktree(&self) -> gear_herdr::Worktree {
             let path = self.root.join("merge");
             sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge {} origin/dev",
+                    "git -C {} worktree add -q -b p/merge/home {} origin/dev",
                     self.work.display(),
                     path.display()
                 ),
@@ -5750,7 +5750,7 @@ mod tests {
                 workspace_id: "wt-merge".into(),
                 pane_id: "wt-merge:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge".into(),
+                branch: "p/merge/home".into(),
             }
         }
 
@@ -5762,7 +5762,7 @@ mod tests {
             let heads = sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge {} origin/dev && \
+                    "git -C {} worktree add -q -b p/merge/home {} origin/dev && \
                      git -C origin.git rev-parse heat/t5",
                     self.work.display(),
                     path.display()
@@ -5773,7 +5773,7 @@ mod tests {
                 workspace_id: "wt-merge".into(),
                 pane_id: "wt-merge:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge".into(),
+                branch: "p/merge/home".into(),
             };
             (worktree, head)
         }
@@ -5880,7 +5880,7 @@ mod tests {
             sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge {} origin/dev",
+                    "git -C {} worktree add -q -b p/merge/home {} origin/dev",
                     self.work.display(),
                     path.display()
                 ),
@@ -5889,7 +5889,7 @@ mod tests {
                 workspace_id: "wt-merge".into(),
                 pane_id: "wt-merge:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge".into(),
+                branch: "p/merge/home".into(),
             }
         }
 
@@ -6155,7 +6155,7 @@ mod tests {
         let pair = Pair::new("carried", true);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // T-2 passed; T-1 did not (yet). The engine queues T-2's merge itself.
         pass(&mut store, "T-2", &pair.b, 10);
@@ -6990,12 +6990,16 @@ mod tests {
         sh(
             &pair.root,
             &format!(
-                "git -C {} worktree add -q -b p/merge-2 {} origin/dev",
+                "git -C {} worktree add -q -b p/merge-2/home {} origin/dev",
                 pair.work.display(),
                 path.display()
             ),
         );
-        herdr.add_worktree("p/merge-2", &path.display().to_string(), "wt-merge-2:p1");
+        herdr.add_worktree(
+            "p/merge-2/home",
+            &path.display().to_string(),
+            "wt-merge-2:p1",
+        );
         path
     }
 
@@ -7030,7 +7034,7 @@ mod tests {
         let pair = Pair::new("batch", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // The gate's own tally, in a file neither the worktree nor the remote
         // holds.
@@ -7086,7 +7090,7 @@ mod tests {
         let pair = Pair::new("gate-vars", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // The gate's own record, in a file outside the worktree.
         let got = pair.root.join("gate-run");
@@ -7122,7 +7126,7 @@ mod tests {
         let pair = Pair::new("gate-vars-batch", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         let got = pair.root.join("gate-run");
         batch_of_two(
@@ -7156,7 +7160,7 @@ mod tests {
         let pair = Pair::new("batch-red", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // The gate says no to T-1's work (a.txt) and yes to T-2's alone.
         batch_of_two(&mut store, "test ! -f a.txt");
@@ -7193,7 +7197,7 @@ mod tests {
         let pair = Pair::new("batch-race", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // The gate moves origin/dev under the batch: its push cannot be a
         // fast-forward.
@@ -7249,7 +7253,7 @@ mod tests {
         let pair = Pair::new("batch-culprit", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         let ran = pair.root.join("gate-runs");
         batch_of_two(
@@ -7297,7 +7301,7 @@ mod tests {
         let pair = Pair::new("batch-nobody", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         let ran = pair.root.join("gate-runs");
         batch_of_two(
@@ -7347,7 +7351,7 @@ mod tests {
         )
         .unwrap();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // The gate says no without naming any path.
         batch_of_two(&mut store, "test ! -f a.txt");
@@ -7393,7 +7397,7 @@ mod tests {
         );
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         batch_of_two(&mut store, "true");
         pass(&mut store, "T-1", &pair.a, 10);
@@ -7426,7 +7430,7 @@ mod tests {
         let pair = Pair::new("train", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let second = second_stage(&pair, &mut herdr);
         let mut store = pair_world(&pair.a, &pair.b);
         train_of_two(&mut store, "true");
@@ -7460,7 +7464,7 @@ mod tests {
         let pair = Pair::new("train-fail", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         second_stage(&pair, &mut herdr);
         let mut store = pair_world(&pair.a, &pair.b);
         // The gate says no to T-1's work (a.txt) and yes to T-2's alone.
@@ -7488,7 +7492,7 @@ mod tests {
         let pair = Pair::new("independent", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // T-2 passed; T-1 did not. T-2's commits carry none of T-1's work.
         pass(&mut store, "T-2", &pair.b, 10);
@@ -7548,7 +7552,7 @@ mod tests {
             sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge {} origin/dev",
+                    "git -C {} worktree add -q -b p/merge/home {} origin/dev",
                     self.work.display(),
                     path.display()
                 ),
@@ -7557,7 +7561,7 @@ mod tests {
                 workspace_id: "wt-merge".into(),
                 pane_id: "wt-merge:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge".into(),
+                branch: "p/merge/home".into(),
             }
         }
 
@@ -7679,7 +7683,7 @@ mod tests {
 
         let worktree = chain.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         // T-1: attempt 1 (a1) was rejected, attempt 2 (a2) is in review.
         let mut store = chain_world(&chain.candidates);
         store
@@ -7752,7 +7756,7 @@ mod tests {
         let chain = Chain::new("chain", 3);
         let worktree = chain.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = chain_world(&chain.candidates);
         let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
@@ -7824,14 +7828,14 @@ mod tests {
             }
         }
 
-        /// The merge worktree of this repo: `p/merge`, cut from its
+        /// The merge worktree of this repo: `p/merge/home`, cut from its
         /// integration branch.
         fn merge_worktree(&self, integration: &str) -> gear_herdr::Worktree {
             let path = self.root.join("web-merge");
             sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge {} origin/{integration}",
+                    "git -C {} worktree add -q -b p/merge/home {} origin/{integration}",
                     self.work.display(),
                     path.display()
                 ),
@@ -7840,7 +7844,7 @@ mod tests {
                 workspace_id: "wt-merge-web".into(),
                 pane_id: "wt-merge-web:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge".into(),
+                branch: "p/merge/home".into(),
             }
         }
 
@@ -8929,7 +8933,7 @@ gate = "{gate}"
         let scratch = Scratch::new("pr");
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pr_world(&candidate);
         claim_op(&mut store, "T-5", 7);
         let mut cfg = test_cfg();
@@ -9017,7 +9021,7 @@ gate = "{gate}"
         let scratch = Scratch::new("pr-nopr");
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pr_world(&candidate);
         let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
@@ -9049,7 +9053,7 @@ gate = "{gate}"
         let scratch = Scratch::new("pr-refused");
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pr_world(&candidate);
         claim_op(&mut store, "T-5", 7);
         let mut cfg = test_cfg();
@@ -9259,7 +9263,7 @@ gate = "{gate}"
         let worktree = scratch.merge_worktree();
         let candidate = candidate.to_string();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -9919,7 +9923,7 @@ gate = "{project_gate}"
             &format!("touch '{}'", project_gate.display()),
         );
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = child_world(&config_toml, &candidate);
         let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
@@ -9944,7 +9948,7 @@ gate = "{project_gate}"
             })
             .expect("the engine opened the merge worktree");
         assert_eq!(opened.0, format!("{}/web", scratch.root.display()));
-        assert_eq!(opened.1, "p/merge");
+        assert_eq!(opened.1, "p/merge/home");
         assert_eq!(opened.2, "p-merge-web", "the label names the repo");
         // The merge landed on the child's own integration branch.
         let log = child.log_of("web-dev");
@@ -9995,14 +9999,14 @@ gate = "{project_gate}"
             })
             .unwrap();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
             cfg.profiles
                 .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
         }
         assert_eq!(wait_merge(&mut store, &mut herdr, &cfg).len(), 1);
-        assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::WorktreeOpen {repo,branch,..} if repo == &scratch.root.join("web").to_string_lossy() && branch == "p/merge")));
+        assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::WorktreeOpen {repo,branch,..} if repo == &scratch.root.join("web").to_string_lossy() && branch == "p/merge/home")));
         assert!(child_gate.exists());
         assert!(!new_gate.exists());
         assert!(child.log_of("web-dev").contains("task"));
@@ -10041,7 +10045,7 @@ gate = "{project_gate}"
             })
             .expect("the engine created the merge worktree");
         assert_eq!(created.0, format!("{}/web", scratch.root.display()));
-        assert_eq!(created.1, "p/merge");
+        assert_eq!(created.1, "p/merge/home");
         assert_eq!(created.2, "web-dev", "the repo's own integration branch");
         assert_eq!(created.3, "p-merge-web");
     }
@@ -10062,7 +10066,7 @@ gate = "{project_gate}"
         publish(&scratch.work, "heat/t5-v2");
         let candidate = scratch.head_of("heat/t5-v2");
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -10378,7 +10382,7 @@ gate = "{project_gate}"
             path: PathBuf::from(path).display().to_string(),
             workspace_id: "test".into(),
             pane_id: "test".into(),
-            branch: "p/merge".into(),
+            branch: "p/merge/home".into(),
         };
         merge_one(
             &worktree,
@@ -11440,7 +11444,7 @@ gate = "{project_gate}"
         );
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -11511,7 +11515,7 @@ gate = "{project_gate}"
         );
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -11608,7 +11612,7 @@ gate = "{project_gate}"
         let scratch = Scratch::new("mergetime");
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -11664,7 +11668,7 @@ gate = "{project_gate}"
         let scratch = Scratch::new("captain-quota");
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         herdr.add_agent("w9:p1", "claude", gear_herdr::AgentStatus::Idle);
         herdr.add_agent("w1:p1", "opencode", gear_herdr::AgentStatus::Idle);
         herdr.set_screen("w9:p1", "────────────────\n❯\n────────────────\nOpus 5.5 · medium /repo (dev) · ctx 63% · 5h 100%\n⏵⏵ bypass permissions on");
@@ -11884,7 +11888,7 @@ gate = "{project_gate}"
         let worktree = scratch.merge_worktree();
         let candidate = scratch.head_of("heat/t5");
         let (mut store, mut herdr, cfg) = pr_setup(&candidate);
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
 
         // The merge runs and the pull request's head is pushed.
         pr_tick(&mut store, &mut herdr, &cfg, 20);
@@ -11939,7 +11943,7 @@ gate = "{project_gate}"
         let worktree = scratch.merge_worktree();
         let candidate = scratch.head_of("heat/t5");
         let (mut store, mut herdr, cfg) = pr_setup(&candidate);
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
 
         // The op is Unknown: the engine stopped while its worker ran.
         let id = merge_op_in(&mut store, &candidate, OpState::Unknown);
@@ -11984,7 +11988,7 @@ gate = "{project_gate}"
         let worktree = scratch.merge_worktree();
         let candidate = scratch.head_of("heat/t5");
         let (mut store, mut herdr, cfg) = pr_setup(&candidate);
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
 
         let id = merge_op_in(&mut store, &candidate, OpState::Intended);
         pr_tick(&mut store, &mut herdr, &cfg, 20);

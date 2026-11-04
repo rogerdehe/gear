@@ -5569,8 +5569,9 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(packet.contains("Run `gear --session "), "{packet}");
         assert!(
             packet.contains("Binding: task T-1, attempt 1, candidate ")
-                && packet
-                    .contains(", branch p/direction/t-1, worktree /fake-worktrees/p-review-1."),
+                && packet.contains(
+                    ", branch p/direction/t-1, worktree /fake-worktrees/p-review-1-home."
+                ),
             "the binding names the candidate, the branch and the worktree: {packet}"
         );
         let failed = store
@@ -5684,14 +5685,14 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let calls = REVIEW_GIT_CALLS.with(|calls| calls.borrow().clone());
         assert!(
             calls.iter().any(|(path, args)| {
-                path == "/fake-worktrees/p-review-1"
+                path == "/fake-worktrees/p-review-1-home"
                     && args == &["checkout".to_string(), "--detach".to_string()]
             }),
             "the worktree is detached: {calls:?}"
         );
         assert!(
             calls.iter().any(|(path, args)| {
-                path == "/fake-worktrees/p-review-1"
+                path == "/fake-worktrees/p-review-1-home"
                     && args
                         == &[
                             "branch".to_string(),
@@ -7812,7 +7813,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(
             args.starts_with(&gear_herdr::render_args(
                 &cfg().profiles["codex"].unattended_args,
-                "/fake-worktrees/p-review-1"
+                "/fake-worktrees/p-review-1-home"
             )),
             "{args:?}"
         );
@@ -8463,7 +8464,7 @@ review = [
         // one worktree, on the seat's own branch, cut at the integration branch
         assert_eq!(
             worktrees(&herdr),
-            vec![("p/review-1".to_string(), "dev".to_string())]
+            vec![("p/review-1/home".to_string(), "dev".to_string())]
         );
 
         // The shell reports the checkout: the reviewer starts.
@@ -8488,7 +8489,7 @@ review = [
         // still one worktree, on the review branch, cut at the candidate
         assert_eq!(
             worktrees(&herdr),
-            vec![("p/review-1".to_string(), "dev".to_string())]
+            vec![("p/review-1/home".to_string(), "dev".to_string())]
         );
 
         // one agent, the reviewer's kind, on the review model
@@ -8502,7 +8503,7 @@ review = [
                     "check_for_update_on_startup=false".to_string(),
                     // T-76: the reviewer's worktree is the folder it runs in.
                     "-c".to_string(),
-                    "projects={\"/fake-worktrees/p-review-1\"={trust_level=\"trusted\"}}"
+                    "projects={\"/fake-worktrees/p-review-1-home\"={trust_level=\"trusted\"}}"
                         .to_string(),
                     // T-457: a resume runs in the reviewer's own worktree.
                     "-c".to_string(),
@@ -8754,7 +8755,7 @@ review = [
             .into_iter()
             .find(|command| command.contains("export GEAR_CTX="))
             .expect("the environment line");
-        let scratch = "/fake-worktrees/p-review-1/.gear/tmp";
+        let scratch = "/fake-worktrees/p-review-1-home/.gear/tmp";
         assert!(
             export.starts_with(&format!(
                 "mkdir -p '{scratch}'; export TMPDIR='{scratch}'; "
@@ -9634,7 +9635,7 @@ review = [
                     created: T0,
                 })?;
                 // The first job recorded the seat's worktree path.
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1-home")?;
                 Ok(())
             })
             .unwrap();
@@ -9712,7 +9713,7 @@ review = [
                     handover_id: None,
                     created: T0,
                 })?;
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1-home")?;
                 Ok(())
             })
             .unwrap();
@@ -9795,7 +9796,7 @@ review = [
 
         store
             .write(|tx| {
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1-home")?;
                 tx.insert_round(&gear_store::NewRound {
                     key: gear_store::RoundKey {
                         project: "p".into(),
@@ -9882,7 +9883,7 @@ review = [
                     handover_id: None,
                     created: T0,
                 })?;
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1-home")?;
                 Ok(())
             })
             .unwrap();
@@ -9947,7 +9948,7 @@ review = [
         let worktrees_after_first = worktrees(&herdr);
         assert_eq!(
             worktrees_after_first,
-            vec![("p/review-1".to_string(), "dev".to_string())]
+            vec![("p/review-1/home".to_string(), "dev".to_string())]
         );
         // The job's agent carries its seat's name (T-482).
         let names: Vec<String> = herdr
@@ -10070,7 +10071,7 @@ review = [
             "one worktree in total"
         );
         assert!(
-            herdr.calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { path, .. } if path.ends_with("p-review-1"))),
+            herdr.calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { path, .. } if path.ends_with("p-review-1-home"))),
             "reopened by path: {:?}",
             herdr.calls
         );
@@ -10878,7 +10879,7 @@ review = [
 
         store
             .write(|tx| {
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1-home")?;
                 tx.insert_round(&gear_store::NewRound {
                     key: gear_store::RoundKey {
                         project: "p".into(),
@@ -10974,7 +10975,7 @@ review = [
         assert_eq!(report.started, vec!["p:review-1".to_string()]);
         let (repo, branch, base, label) = created_worktree(&herdr);
         assert_eq!(repo, "/repo/web", "the worktree is in the task's repo");
-        assert_eq!(branch, "p/review-1");
+        assert_eq!(branch, "p/review-1/home");
         assert_eq!(base, "web-dev", "the repo's own integration branch");
         assert_eq!(label, "p-review-1-web", "the label names the repo");
         // The packet asks for the diff against that repo's integration branch.
@@ -11045,7 +11046,7 @@ profile = "opencode"
 "#;
         let mut store = world(&config);
         // Isolated repo doors prevent the fake's branch-only map from letting
-        // root's p/review-1 stand in for web's checkout. Distinct paths and
+        // root's p/review-1/home stand in for web's checkout. Distinct paths and
         // panes also make a checkout in the wrong repo observable.
         let mut web = FakeHerdr::new();
         let mut root = FakeHerdr::new();
@@ -11054,7 +11055,7 @@ profile = "opencode"
             (&mut root, "/root-review-1", "root:p1"),
         ] {
             door.add_shell(pane);
-            door.add_worktree("p/review-1", path, pane);
+            door.add_worktree("p/review-1/home", path, pane);
         }
         for (n, lane, door, path, pane, repo, base) in [
             (
@@ -11098,7 +11099,7 @@ profile = "opencode"
             // The real checkout is now on the job branch. Remove the fake's
             // anchor lookup and register that branch at the unchanged path.
             assert!(matches!(
-                door.worktree_remove("wt-p-review-1"),
+                door.worktree_remove("wt-p-review-1-home"),
                 Outcome::Ok(())
             ));
             door.add_shell(pane);
@@ -11221,7 +11222,7 @@ profile = "opencode"
             SeatState::Released
         );
         herdr.add_shell("child:p1");
-        herdr.add_worktree("p/review-1", "/child-review", "child:p1");
+        herdr.add_worktree("p/review-1/home", "/child-review", "child:p1");
         let report = start_reviews(
             &mut store,
             &mut herdr,

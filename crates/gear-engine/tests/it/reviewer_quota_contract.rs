@@ -140,7 +140,10 @@ fn world(on_quota_review: &str) -> (Store, SeatRow) {
             let seat = testing::seed_temp_seat(tx, "p", "r-1", "T-7", REVIEW_PANE, "codex", T0)?;
             // T-531: the restart onto OpenCode makes the reviewer's service
             // session in its worktree; the path is what it needs for that.
-            tx.set_meta("engine.worktree_path.p:r-1", "/fake-worktrees/p-review-1")?;
+            tx.set_meta(
+                "engine.worktree_path.p:r-1",
+                "/fake-worktrees/p-review-1-home",
+            )?;
             // The packet it was given, delivered.
             let op = tx.insert_op(&gear_store::NewOp {
                 project: "p".into(),
