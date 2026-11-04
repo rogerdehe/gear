@@ -1268,6 +1268,12 @@ impl<'s> Tx<'s> {
     }
 
     /// Raw state write. Caller must have checked `SeatState::can_transition`.
+    /// A seat that is retired takes its items with it (T-550): every message
+    /// addressed to it that may still move to `Resolved` is closed in the same
+    /// transaction, with the line "closed: its seat retired". Nobody can
+    /// resolve an item of a retired seat — only its recipient may — and none
+    /// rings any more, so left open it would stay open for ever. A released
+    /// seat's items stay as they are: it may come back.
     pub fn set_seat_state(
         &self,
         seat_id: &str,
@@ -1282,7 +1288,48 @@ impl<'s> Tx<'s> {
                 params![seat_id, state.as_str(), now, reason],
             )
             .map_err(map_sqlite)?;
-        require_written(changed, "seat", seat_id)
+        require_written(changed, "seat", seat_id)?;
+        if state != SeatState::Retired {
+            return Ok(());
+        }
+        // Read the items first: the rows below are updated in this same
+        // transaction, and the statement must not run while they are read.
+        let mut items = Vec::new();
+        {
+            let mut stmt = self
+                .tx
+                .prepare("SELECT project, id, state FROM messages WHERE recipient=?1")
+                .map_err(map_sqlite)?;
+            let rows = stmt
+                .query_map(params![seat_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(map_sqlite)?;
+            for row in rows {
+                let (project, id, state) = row.map_err(map_sqlite)?;
+                let state = state.parse::<MsgState>()?;
+                items.push((project, id, state));
+            }
+        }
+        for (project, id, item_state) in items {
+            if !item_state.can_transition(MsgState::Resolved) {
+                continue;
+            }
+            self.update_message_state(
+                &project,
+                &id,
+                MsgState::Resolved,
+                Some("closed: its seat retired"),
+                None,
+                None,
+                now,
+            )?;
+        }
+        Ok(())
     }
 
     pub fn set_seat_generation(&self, seat_id: &str, generation: i64) -> GearResult<()> {
