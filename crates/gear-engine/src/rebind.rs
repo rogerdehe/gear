@@ -205,7 +205,7 @@ pub fn tick(
             }
             // The agent is gone. Closing the pane does not remove the old
             // checkout; onboarding will create/open the new repo's home branch.
-            match herdr.pane_close(&binding.pane_id) {
+            match crate::panes::close_seat_pane(store, herdr, &binding.pane_id, &seat.id)? {
                 Outcome::Ok(()) => prepare_onboard(store, &seat, old_generation, now)?,
                 Outcome::Refused { code, .. }
                     if code == "pane_not_found" || code == "not_found" =>

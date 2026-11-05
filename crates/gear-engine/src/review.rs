@@ -3126,6 +3126,11 @@ pub fn close_gone_seats(
         if !matches!(seat.state, SeatState::Retired | SeatState::Released) {
             continue;
         }
+        // A captain's pane is the user's and the captain's: the sweep never
+        // closes it (Prometheus, 2026-11-05).
+        if seat.role == SeatRole::Captain {
+            continue;
+        }
         let wanted = crate::names::desired(&seat);
         let panes: Vec<String> = names
             .iter()
@@ -3135,7 +3140,7 @@ pub fn close_gone_seats(
         for pane in panes {
             // A pane that is already gone is fine; nothing here may fail the
             // tick for the other seats.
-            if let Outcome::Ok(()) = herdr.pane_close(&pane) {
+            if let Outcome::Ok(()) = crate::panes::close_seat_pane(store, herdr, &pane, &seat.id)? {
                 closed.push(pane.clone());
                 let told = format!("engine.seat_pane_closed.{}", seat.id);
                 let first = store.write(|tx| {
@@ -12627,6 +12632,64 @@ profile = "opencode"
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    /// Prometheus, 2026-11-05: a released seat's name on a pane that another
+    /// seat's active binding holds never closes that pane (the Prometheus
+    /// captain's pane carried a released Lawrence captain seat's name and was
+    /// closed), and a gone captain seat's pane is never closed by the sweep.
+    #[test]
+    fn a_gone_seats_name_on_a_pane_another_seat_holds_closes_nothing() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(
+            "wt1:p1",
+            "codex",
+            gear_herdr::AgentStatus::Idle,
+            "p-review-1",
+        );
+        herdr.add_agent_named("w9:p9", "claude", gear_herdr::AgentStatus::Idle, "p-oldcap");
+        store
+            .write(|tx| {
+                let seat =
+                    testing::seed_temp_seat(tx, "p", "review-1", "T-9", "wt1:p1", "codex", T0)?;
+                tx.set_seat_state(&seat.id, SeatState::Released, Some("review done"), T0 + 5)?;
+                tx.set_seat_state(&seat.id, SeatState::Retired, Some("gone"), T0 + 6)?;
+                // Another seat works in the same pane now.
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "keel",
+                    SeatRole::Lane,
+                    "wt1:p1",
+                    "codex",
+                    T0 + 7,
+                )?;
+                // A released captain seat whose name is on a pane nobody else holds.
+                let cap = testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "oldcap",
+                    SeatRole::Captain,
+                    "w9:p9",
+                    "claude",
+                    T0,
+                )?;
+                tx.set_seat_state(&cap.id, SeatState::Released, Some("released"), T0 + 8)
+            })
+            .unwrap();
+        let names = crate::names::read(&mut herdr).unwrap();
+        let closed = close_gone_seats(&mut store, &mut herdr, "p", &names, T0 + 20).unwrap();
+        assert!(closed.is_empty(), "nothing is closed: {closed:?}");
+        let names = crate::names::read(&mut herdr).unwrap();
+        assert!(
+            names.contains_key("wt1:p1"),
+            "the pane another seat holds stays"
+        );
+        assert!(
+            names.contains_key("w9:p9"),
+            "a captain's pane is never swept"
         );
     }
 

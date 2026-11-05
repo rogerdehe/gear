@@ -273,7 +273,7 @@ pub fn release_finished_reviews(
         })?;
         // Its pane holds no agent: closing it ends the shell the seat leaves
         // behind. A refused or uncertain close does not keep the seat (T-264).
-        match herdr.pane_close(&binding.pane_id) {
+        match crate::panes::close_seat_pane(store, herdr, &binding.pane_id, &seat.id)? {
             Outcome::Ok(()) | Outcome::Refused { .. } | Outcome::Uncertain { .. } => {}
         }
     }
@@ -899,7 +899,7 @@ fn cancel_start(
 
     // 2. the pane goes: the agent that was starting has nothing to do.
     if let Some(pane) = bound_pane(store, seat)?.as_deref() {
-        match herdr.pane_close(pane) {
+        match crate::panes::close_seat_pane(store, herdr, pane, &seat.id).map_err(|e| e.detail)? {
             Outcome::Ok(()) => {}
             Outcome::Refused { code, .. } if code == "pane_not_found" => {}
             Outcome::Refused { code, message } => {
@@ -1133,7 +1133,9 @@ fn release_seat(
         if let Some(pane) = bound_pane(store, seat)?.as_deref() {
             // A pane that is already gone is fine; a refused close does not
             // keep the seat (T-264).
-            match herdr.pane_close(pane) {
+            match crate::panes::close_seat_pane(store, herdr, pane, &seat.id)
+                .map_err(|e| e.detail)?
+            {
                 Outcome::Ok(()) | Outcome::Refused { .. } | Outcome::Uncertain { .. } => {}
             }
         }
@@ -1175,7 +1177,9 @@ fn release_seat(
             // A finished reviewer's pane is always closed (herdr `pane_close`),
             // grok included: a reviewer lives for one job, there is no session
             // to resume, and a closed pane cannot leave a stuck slot.
-            match herdr.pane_close(pane) {
+            match crate::panes::close_seat_pane(store, herdr, pane, &seat.id)
+                .map_err(|e| e.detail)?
+            {
                 Outcome::Ok(()) => {}
                 Outcome::Refused { code, .. } if code == "pane_not_found" => {}
                 Outcome::Refused { code, message } => {
@@ -1235,7 +1239,10 @@ fn release_seat(
                 // The old reviewer is still there (its exit was lost, or an
                 // older engine sent exit keys it ignored): close its pane
                 // again; the next tick looks once more.
-                if let Outcome::Refused { code, message } = herdr.pane_close(pane) {
+                if let Outcome::Refused { code, message } =
+                    crate::panes::close_seat_pane(store, herdr, pane, &seat.id)
+                        .map_err(|e| e.detail)?
+                {
                     if code != "pane_not_found" {
                         return Err(format!("pane_close: refused ({code}): {message}"));
                     }
@@ -1405,7 +1412,7 @@ fn release_dead(
         // The pane holds no agent (that is why the seat is dead): closing it
         // ends the shell the seat leaves behind. A pane that is already gone
         // is fine; a refused close does not keep the seat alive.
-        match herdr.pane_close(pane) {
+        match crate::panes::close_seat_pane(store, herdr, pane, &seat.id)? {
             Outcome::Ok(()) => {}
             Outcome::Refused { .. } | Outcome::Uncertain { .. } => {}
         }
@@ -1514,7 +1521,7 @@ fn retire_one(
         }
 
         // 2. the pane goes: a closed pane ends any agent that ignored its exit.
-        match herdr.pane_close(pane) {
+        match crate::panes::close_seat_pane(store, herdr, pane, &seat.id).map_err(|e| e.detail)? {
             Outcome::Ok(()) => {}
             Outcome::Refused { code, .. } if code == "pane_not_found" => {}
             Outcome::Refused { code, message } => {

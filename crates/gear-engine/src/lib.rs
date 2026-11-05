@@ -39,6 +39,7 @@ pub mod onboard;
 mod opencode;
 pub mod ops;
 pub mod overrun;
+pub mod panes;
 pub mod parallel;
 pub mod quiet;
 pub mod quota;

@@ -1419,6 +1419,29 @@ impl<'s> Tx<'s> {
         Ok(row)
     }
 
+    /// The seats whose binding at their current generation is active on
+    /// `pane_id` (any project of this store): a pane that holds one is in use
+    /// and is never closed for another seat (Prometheus, 2026-11-05: the
+    /// captain's pane was closed because a released seat's name was on it).
+    pub fn active_seats_on_pane(&self, pane_id: &str) -> GearResult<Vec<String>> {
+        let mut stmt = self
+            .tx
+            .prepare(
+                "SELECT b.seat FROM bindings b JOIN seats s ON s.id = b.seat
+                 WHERE b.pane_id = ?1 AND b.status = 'active' AND b.generation = s.generation
+                   AND s.state NOT IN ('retired', 'released')",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![pane_id], |row| row.get::<_, String>(0))
+            .map_err(map_sqlite)?;
+        let mut seats = Vec::new();
+        for row in rows {
+            seats.push(row.map_err(map_sqlite)?);
+        }
+        Ok(seats)
+    }
+
     pub fn set_binding_status(
         &self,
         seat_id: &str,
