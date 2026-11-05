@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1196 -->
+<!-- gear-plan project=gear base=1197 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -349,6 +349,13 @@ goal: [feature 2b] A plan written before features moves to them in one apply, cr
 accept: Tests in crates/gear-app/tests/it/feature_plan_contract.rs: a running task given `feature:` is refused and keeps its base; an outside task depending on a member now depends on the carrier and the output names it; a member with an unmerged outside dep is held, and with a merged one it is not. Run only `make check CRATE=gear-app TESTS='test(feature)'`; the merge gate runs `make gate`.
 estimate: 40
 deps: T-578
+
+## T-588 [must] lane=mast milestone=M6.2
+goal: One meaning of "the current voyage", at its root. crates/gear-app/src/plan.rs `current_voyage`: among the departed voyages, the last departed one that still has a task that is not terminal; when none has, the last departed one (today's answer); when no voyage departed but a milestone has open tasks, that milestone (the one with the most open tasks, ties by name). Every caller (home, captain take, charter, admin, feed, doorbell `goal_line`, release, main.rs) then agrees with no change of its own; crates/gear-app/src/home.rs drops its own `open_voyages` and uses `current_voyage` again where T-586 replaced it, keeping T-586's test green. One doc comment says why (GEAR M6.2 ran without a depart line and every surface took the finished M6.1).
+accept: Unit tests next to current_voyage: last departed voyage finished and an older departed one still open gives the open one; nothing open gives the last departed; no departure and open tasks in M2 gives M2. A doorbell test that its goal line names the open voyage. Run only `make check CRATE=gear-app TESTS='test(current_voyage) | test(home)'` and `make check CRATE=gear-engine TESTS='test(doorbell::)'`; the merge gate runs `make gate`.
+estimate: 30
+deps: -
+fresh: current voyage, unrelated to records
 
 ## T-583 [now] lane=mast milestone=M6.2 required
 goal: [feature 7/7] The captain's skill. skills/gear/references/captain.md `# Queue` field list: `feature` (`F-<n>`: the task is part of a feature; members merge into the feature branch with no CI, deps between members release on that merge, and GEAR creates one integration task per feature that reaches the integration branch with one review and the full gate; at most `feature_max_tasks` members; a dep from outside names the integration task; members share the feature's issue). skills/gear/references/decompose.md: a rule that a capability of several small tasks is one feature, cut at decomposition (an issue in issue mode), and that small unrelated tasks stay without a feature.
