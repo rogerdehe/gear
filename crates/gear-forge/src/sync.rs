@@ -200,6 +200,24 @@ fn run_task(
     // 1. The claim: the pull request every later call names. It is opened at the
     //    task's first delivery, not before, and it keeps being tried while the
     //    branch is not there yet (T-91, F3).
+    // `merge = "push"`: the engine merges and pushes, and a task has no pull
+    // request (Carthage, 2026-11-05: a draft claim was tried at delivery,
+    // before the lane had pushed a commit, and refused a hundred times). The
+    // landing comments name no pull request; the issue still closes when its
+    // last task lands.
+    if !fact.github.pr {
+        for call in calls_after_claim(project, fact, &PrRef::none(&fact.github.repo)) {
+            if !matches!(call.what, What::Close { .. }) {
+                continue;
+            }
+            match run_call(store, project, forge, &call, ops, budget, now)? {
+                Outcome::Done(_) => done.push(format!("{project}:{}:{}", fact.task, call.key)),
+                Outcome::Already => {}
+                Outcome::Pending => return Ok(done),
+            }
+        }
+        return Ok(done);
+    }
     let mut pr = claim_of(fact, ops);
     // A claim whose outcome is unknown (T-91 F4): the pull request may be
     // there after all — the branch names it.
@@ -873,6 +891,9 @@ fn first_words(goal: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Github {
     repo: String,
+    /// `merge = "pr"`: a task lands through its pull request. Anything else
+    /// (`push`, the default) opens none.
+    pr: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -900,6 +921,8 @@ struct Conventions {
 struct GithubSection {
     #[serde(default)]
     repo: Option<String>,
+    #[serde(default)]
+    merge: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -937,6 +960,7 @@ impl Config {
         let github = github.and_then(|section| {
             Some(Github {
                 repo: section.repo.clone()?,
+                pr: section.merge.as_deref() == Some("pr"),
             })
         })?;
         let integration = integration
