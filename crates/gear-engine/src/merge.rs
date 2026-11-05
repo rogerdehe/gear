@@ -5582,8 +5582,10 @@ fn note_red_round(
         tx.set_meta(&red_refusal_key(project), &red.normalized)?;
         tx.set_meta(&red_members_key(project), &members)?;
         let spent = ((at - since).max(0) / 60).to_string();
+        // T-572: the captain hears from the first red round on, and the item
+        // says what he can do about it — GEAR splits on its own meanwhile.
         let mut body = format!(
-            "a batch round of {} is red — {rounds} red rounds and {spent} minutes on this line.\nthe gate's refusal, as it printed it:\n{}\nthe members: {members}",
+            "a batch round of {} is red — {rounds} red rounds and {spent} minutes on this line.\nthe gate's refusal, as it printed it:\n{}\nthe members: {members}\nwhat you can do: send the cause back to a lane, take a member out (a `fail` verdict or a cancel), or let GEAR split the batch",
             red.members.len(),
             red.refusal.trim()
         );
@@ -5612,7 +5614,7 @@ fn note_red_round(
         match open {
             Some(item) => {
                 tx.update_message_body(project, &item.id, &body)?;
-                tx.set_message_urgent(project, &item.id, repeat)?;
+                tx.set_message_urgent(project, &item.id, true)?;
             }
             None => {
                 tx.insert_message(&NewMessage {
@@ -5625,7 +5627,7 @@ fn note_red_round(
                     sender_gen: 0,
                     recipient: captain.id.clone(),
                     kind: MsgKind::System,
-                    urgent: repeat,
+                    urgent: true,
                     body,
                     reply_to: None,
                     needs_ack: false,
@@ -8439,6 +8441,11 @@ mod tests {
             "the rounds this line spent: {}",
             items[0].body
         );
+        assert!(
+            items[0].body.contains("send the cause back to a lane, take a member out (a `fail` verdict or a cancel), or let GEAR split the batch"),
+            "what the captain can do: {}",
+            items[0].body
+        );
         // Every member is back in the queue (`Unknown`: it runs again).
         for id in ["O-1", "O-2", "O-3"] {
             assert_eq!(op_state(&mut store, id), Some(OpState::Unknown), "{id}");
@@ -8549,8 +8556,12 @@ mod tests {
             .read(|tx| tx.thread_messages("p", &merge_red_thread("p")))
             .unwrap();
         assert_eq!(items.len(), 1, "{items:?}");
+        // From the first red round on the item is urgent (contract v2).
+        assert!(items[0].urgent, "{}", items[0].body);
         assert!(
-            !items[0].urgent,
+            !items[0]
+                .body
+                .contains("the same refusal with different members"),
             "different refusals are no repeat: {}",
             items[0].body
         );
