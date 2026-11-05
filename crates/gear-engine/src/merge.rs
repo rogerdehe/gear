@@ -8350,9 +8350,11 @@ mod tests {
         merge_passed(&mut store, &mut herdr, &cfg, "p", 31).unwrap();
 
         for id in ["O-1", "O-2"] {
+            // T-576: sent back is queued again (`intended`), not unknown: the
+            // push's outcome is known (nothing landed).
             assert_eq!(
                 op_state(&mut store, id),
-                Some(OpState::Unknown),
+                Some(OpState::Intended),
                 "{id} is queued again"
             );
             let reason = op_result(&mut store, id);
