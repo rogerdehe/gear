@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1187 -->
+<!-- gear-plan project=gear base=1188 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -9,6 +9,7 @@ eta: 4h
 depart: now
 
 # Decisions
+- 2026-11-05 16:25 station M-8020: keep course | why: stage 1 tasks are on pace, the next release carries T-577..T-586
 - 2026-11-05 16:20 confirmed: M6.2 departs now (it ran without a depart line, so GEAR took M6.1 for the current voyage and hid M6.2's items) | why: the user said to depart M6.2 with the old team
 - 2026-11-02 03:00 scope: M6.2 is the captain handover (user): the backlog's eight findings from the Prometheus handover (outgoing Codex captain, incoming Claude captain, the GEAR captain's own look); handover fixes are made by the captain itself, not by lanes, because the handover is too critical to pass through a packet (user); other issues the user reports later become lane tasks
 - 2026-11-02 03:00 scope: taken now: (a) `--pane` sends nothing to the new captain; (b) the captain's agent name stays on the old pane; (c) the handover document's path, branch and commit are named to the new captain; (d) `--facts` prints every lane's full owns list; (e) facts that are wrong: releases from a checkout without tags, an older handover request read as an instruction, a stale plan shown as a draft; logged, not taken yet: the home page after a landing says nothing about the next voyage (the store keeps no landed state; weigh after (a)-(e) ship)
