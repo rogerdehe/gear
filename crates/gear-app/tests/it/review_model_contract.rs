@@ -285,4 +285,44 @@ fn carried_by_is_stored_shown_cleared_and_checked() {
             error.detail
         );
     }
+
+    // A carrier that is done and merged lands nothing more (Prometheus T-779):
+    // a new mark naming it is refused; a mark the task already has stays.
+    run_at(
+        &mut s,
+        "# Queue\n## T-1 [must] lane=heat\ncarried-by: T-2\ndeps: -\n",
+        "r7",
+    )
+    .unwrap();
+    s.write(|tx| {
+        gear_app::tasks::start_attempt(tx, "p", "T-2", "p:heat", 1, NOW)?;
+        tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::Merged, NOW)?;
+        let mut task = tx.get_task("p", "T-2")?.unwrap();
+        task.state = gear_model::TaskState::Done;
+        tx.update_task(&task)
+    })
+    .unwrap();
+    run_at(
+        &mut s,
+        "# Queue\n## T-1 [must] lane=heat\ncarried-by: T-2\ndeps: -\n",
+        "r8",
+    )
+    .expect("a mark the task already has stays");
+    run_at(
+        &mut s,
+        "# Queue\n## T-1 [must] lane=heat\ncarried-by: -\ndeps: -\n",
+        "r9",
+    )
+    .unwrap();
+    let error = run_at(
+        &mut s,
+        "# Queue\n## T-1 [must] lane=heat\ncarried-by: T-2\ndeps: -\n",
+        "r10",
+    )
+    .unwrap_err();
+    assert!(
+        error.detail.contains("has already merged"),
+        "{}",
+        error.detail
+    );
 }

@@ -622,6 +622,23 @@ fn apply_queue(
                     format!("{id}: `carried-by` {by} does not exist"),
                 ));
             }
+            // A carrier that is done and merged lands nothing more: the mark
+            // would keep this task's work off the integration branch for good
+            // (Prometheus T-779). A mark the task already has is left alone.
+            let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, by);
+            let already = tx.task_carried_by(project, &id)?.as_deref() == Some(by);
+            let landed = tx
+                .get_task(carrier_project, carrier)?
+                .is_some_and(|task| task.state == TaskState::Done)
+                && crate::tasks::merged_at(tx, carrier_project, carrier)?.is_some();
+            if landed && !already {
+                return Err(bad(
+                    item.line,
+                    format!(
+                        "{id}: `carried-by` {by} has already merged, so it cannot carry {id}'s work: leave the field out (or `carried-by: -`) and {id} merges on its own"
+                    ),
+                ));
+            }
         }
         // The `review-model:` of a task (T-500): it names an entry of
         // `[models] review` and differs from the task's lane model, so the

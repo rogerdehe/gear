@@ -5798,11 +5798,13 @@ fn tell_captain_lost(
         }
         let tasks = tx.tasks_of_project(project)?;
         // T-408: a voyage is its milestone, and it is open while one of its
-        // tasks is not terminal.
+        // tasks is not terminal, or one settled less than LAND_WITHIN_S ago:
+        // the last task of a voyage is the one most likely to sit unmerged,
+        // and it is the one that holds the final candidate (Prometheus T-779).
         let mut open_voyages = std::collections::HashSet::new();
         for task in &tasks {
             if let Some(milestone) = task.milestone.as_deref() {
-                if !task.state.is_terminal() {
+                if !task.state.is_terminal() || now - task.updated < LAND_WITHIN_S {
                     open_voyages.insert(milestone.to_string());
                 }
             }
@@ -7503,7 +7505,8 @@ mod tests {
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
         let cfg = test_cfg();
 
-        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        // The last task settled more than LAND_WITHIN_S ago: the voyage is over.
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20 + LAND_WITHIN_S).unwrap();
         let items = store
             .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
             .unwrap();
@@ -7511,6 +7514,32 @@ mod tests {
             items.is_empty(),
             "a finished voyage is not checked: {items:?}"
         );
+    }
+
+    /// A voyage whose last task has just settled is still open: that task holds
+    /// the final candidate, and its unmerged work is named (Prometheus T-779
+    /// sat accepted and unmerged for 20 minutes, unnamed, because every task of
+    /// M4 was done).
+    #[test]
+    fn the_last_task_of_a_voyage_is_named_lost() {
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.milestone = Some("M1".into());
+                tx.update_task(&task)
+            })
+            .unwrap();
+        lost_task(&mut store, "abc1234", OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "the voyage's last task: {items:?}");
     }
 
     /// T-408: a candidate the task's repository no longer holds is skipped —
@@ -7586,9 +7615,9 @@ mod tests {
             })
             .unwrap();
 
-        // T-516: the lost scan runs once every `LOST_SCAN_EVERY_S`, so the tick
-        // that resolves the item is one where the scan is due again.
-        merge_passed(&mut store, &mut herdr, &cfg, "p", 21 + LOST_SCAN_EVERY_S).unwrap();
+        // The voyage counts as finished once its last task settled
+        // LAND_WITHIN_S ago, and the scan is due again by then.
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 21 + LAND_WITHIN_S).unwrap();
         let items = store
             .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
             .unwrap();
@@ -7647,8 +7676,8 @@ mod tests {
             })
             .unwrap();
 
-        // T-516: a tick where the lost scan is due again (300 s on).
-        merge_passed(&mut store, &mut herdr, &cfg, "p", 22 + LOST_SCAN_EVERY_S).unwrap();
+        // A tick where the voyage counts as finished and the scan is due.
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 22 + LAND_WITHIN_S).unwrap();
         let items = store
             .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
             .unwrap();
