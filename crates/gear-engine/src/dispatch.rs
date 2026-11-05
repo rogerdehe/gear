@@ -517,11 +517,19 @@ pub(crate) fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<Task
                 .unwrap_or(false)
         })
         // T-581: a feature's integration task is handed in by the engine at the
-        // feature branch's tip, never worked by its lane — its first attempt,
-        // and a rework of it, which the captain re-plans with member work.
+        // feature branch's tip, never worked by its lane — its first attempt is
+        // the engine's. T-592: a rework of it is the owner lane's, so once the
+        // task has an attempt the lane is delivered its next one and fixes the
+        // feature branch.
         .filter(|task| {
-            !crate::feature::branch_override(tx, &seat.project, &task.id)
-                .map(|branch| branch.is_some())
+            if crate::feature::branch_override(tx, &seat.project, &task.id)
+                .map(|branch| branch.is_none())
+                .unwrap_or(true)
+            {
+                return true;
+            }
+            tx.attempts_of_task(&seat.project, &task.id)
+                .map(|attempts| !attempts.is_empty())
                 .unwrap_or(false)
         })
         .filter(|task| task.priority != "wont")
@@ -1125,7 +1133,14 @@ pub fn intend_dispatch(
                 // T-222 (F-75): the first attempt says how to start the branch;
                 // a rework (attempt n ≥ 2) says it is a rework (T-544) — the
                 // branch and the worktree are already there.
-                let branch = task_branch(&conventions.task_branch, project, &seat.name, task);
+                // T-592: a task that names its own branch works on that branch —
+                // a feature's integration task is its owner lane's rework on the
+                // feature branch, so the fix lands there and the task hands in
+                // its tip.
+                let branch = match crate::feature::branch_override(tx, project, task)? {
+                    Some(branch) => branch,
+                    None => task_branch(&conventions.task_branch, project, &seat.name, task),
+                };
                 // T-580: a feature task starts from its own base branch.
                 let integration = start_base(tx, project, seat, task);
                 let mut text = if attempt.n == 1 {
@@ -2103,6 +2118,103 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["T-1"],
             "the feature's integration task is not delivered"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // T-592: a feature integration task's rework is its owner lane's, on the
+    // feature branch.
+    // ----------------------------------------------------------------
+
+    /// T-592: attempt 1 of a feature's integration task is the engine's hand-in
+    /// and is never delivered; once the task has an attempt (a review or a
+    /// merge gate failed it), its rework IS delivered to the owner lane, and the
+    /// packet names the feature branch so the fix lands there.
+    #[test]
+    fn an_integration_tasks_rework_is_delivered_to_the_owner_lane_on_the_feature_branch() {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+                project.config_toml = config_toml("trunk");
+                tx.update_project(&project)?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    NOW,
+                )?;
+                tx.insert_task(&ready_task("T-1"))?;
+                let mut carrier = ready_task("T-9");
+                carrier.rank = 2;
+                tx.insert_task(&carrier)?;
+                tx.set_meta("task_branch_override:p:T-9", "p/feature/f-1")
+            })
+            .unwrap();
+
+        // Attempt 1 has not run: the integration task is not the lane's work.
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let ready = store.read(|tx| ready_tasks_of(tx, &seat)).unwrap();
+        assert_eq!(
+            ready
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["T-1"],
+            "attempt 1 of the integration task is never delivered"
+        );
+
+        // The engine handed attempt 1 in and the review failed it.
+        store
+            .write(|tx| {
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-9".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Rejected,
+                    candidate: Some("abc1234".into()),
+                    report: None,
+                    safe_point: None,
+                    started: NOW,
+                    updated: NOW,
+                })
+            })
+            .unwrap();
+        let ready = store.read(|tx| ready_tasks_of(tx, &seat)).unwrap();
+        assert_eq!(
+            ready
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["T-1", "T-9"],
+            "the integration task's rework is the owner lane's work"
+        );
+
+        let text = assign_delivery_text(&mut store, "T-9", 2);
+        assert!(text.starts_with("Rework T-9 attempt 2"), "{text}");
+        assert!(
+            text.contains("Branch: p/feature/f-1."),
+            "the packet names the feature branch: {text}"
+        );
+        assert!(
+            text.contains("git switch p/feature/f-1"),
+            "the lane switches to the feature branch, not to its own task branch: {text}"
+        );
+        assert!(
+            !text.contains("heat/t9"),
+            "the work does not go to the lane's own branch: {text}"
         );
     }
 
