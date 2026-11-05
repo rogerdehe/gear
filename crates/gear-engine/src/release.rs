@@ -951,14 +951,21 @@ fn under_review(store: &mut Store, project: &str, seat: &SeatRow, task: &str) ->
             let direction = tx
                 .get_meta(&key)?
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-            if matches!(
+            // T-590: a feature member's light stage check runs on the attempt
+            // that was accepted without a blocking review, so its seat keeps
+            // its job while the job runs — not only while the attempt is
+            // Started or Submitted.
+            let stage = tx.stage_check(project, task, attempt.n)?.is_some();
+            if (matches!(
                 attempt.state,
                 AttemptState::Started | AttemptState::Submitted
-            ) && direction.is_some_and(|job| {
-                job["seat"] == seat.id
-                    && (job["state"] == "starting"
-                        || (job["state"] == "running" && job["generation"] == seat.generation))
-            }) {
+            ) || stage)
+                && direction.is_some_and(|job| {
+                    job["seat"] == seat.id
+                        && (job["state"] == "starting"
+                            || (job["state"] == "running" && job["generation"] == seat.generation))
+                })
+            {
                 return Ok(true);
             }
         }

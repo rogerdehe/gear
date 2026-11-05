@@ -3355,6 +3355,60 @@ impl<'s> Tx<'s> {
         self.set_meta(&format!("feature_carrier:{project}:{feature}"), task)
     }
 
+    /// The seat that reviews a feature (T-590, stage 2): the first light stage
+    /// check of the feature takes a seat as a review does and records it here;
+    /// every later light check and the feature's integration task's review go
+    /// to that seat. None while the feature has had no check yet.
+    pub fn feature_reviewer(&self, project: &str, feature: &str) -> GearResult<Option<String>> {
+        Ok(self
+            .get_meta(&format!("feature_reviewer:{project}:{feature}"))?
+            .filter(|seat| !seat.is_empty()))
+    }
+
+    /// Set the seat that reviews a feature; an empty value clears it.
+    pub fn set_feature_reviewer(&self, project: &str, feature: &str, seat: &str) -> GearResult<()> {
+        self.set_meta(&format!("feature_reviewer:{project}:{feature}"), seat)
+    }
+
+    /// The feature a reviewer seat belongs to (T-590), the reverse of
+    /// [`Self::feature_reviewer`]: the seat keeps its conversation from one
+    /// light check to the next. None for every other seat.
+    pub fn feature_seat(&self, project: &str, seat: &str) -> GearResult<Option<String>> {
+        Ok(self
+            .get_meta(&format!("feature_seat:{project}:{seat}"))?
+            .filter(|feature| !feature.is_empty()))
+    }
+
+    /// Set the feature a reviewer seat belongs to; an empty value clears it.
+    pub fn set_feature_seat(&self, project: &str, seat: &str, feature: &str) -> GearResult<()> {
+        self.set_meta(&format!("feature_seat:{project}:{seat}"), feature)
+    }
+
+    /// The light stage check of a member's attempt (T-590): absent while none
+    /// started, `{"feature":F,"state":"running"}` while it runs, and
+    /// `{"feature":F,"state":"done"}` once its result is in. It is what tells
+    /// a direction job that runs on an accepted attempt (never a verdict) from
+    /// one that runs while the lane still works.
+    pub fn stage_check(
+        &self,
+        project: &str,
+        task: &str,
+        attempt: i64,
+    ) -> GearResult<Option<String>> {
+        self.get_meta(&format!("stage_check:{project}:{task}:{attempt}"))
+    }
+
+    /// Set the stage check of a member's attempt; an empty value clears it.
+    pub fn set_stage_check(
+        &self,
+        project: &str,
+        task: &str,
+        attempt: i64,
+        value: &str,
+    ) -> GearResult<()> {
+        self.set_meta(&format!("stage_check:{project}:{task}:{attempt}"), value)
+    }
+
     /// The branch a task's work really goes on, when the project named one
     /// (M6.2): a member of a feature works on the feature's branch, not on its
     /// own `task_branch`. None when the task's branch is the template's.

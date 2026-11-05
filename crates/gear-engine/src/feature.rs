@@ -170,6 +170,17 @@ fn hand_in(
     }) {
         return Ok(None);
     }
+    // T-592: a rework of the integration task is the owner lane's, delivered by
+    // dispatch in this same tick — the lane fixes the feature branch and hands
+    // its tip in. An attempt still in flight holds the hand-in, so the engine
+    // never opens a second attempt beside the lane's.
+    if job
+        .attempts
+        .iter()
+        .any(|attempt| attempt.state.occupies_seat())
+    {
+        return Ok(None);
+    }
     let n = job
         .attempts
         .iter()
@@ -440,5 +451,28 @@ mod tests {
         let attempts = store.read(|tx| tx.attempts_of_task("p", "T-9")).unwrap();
         assert_eq!(attempts.len(), 1, "the failed attempt is not replaced");
         assert_eq!(attempts[0].state, AttemptState::Rejected);
+    }
+
+    /// T-592: the rework of an integration task is the owner lane's — an attempt
+    /// still in flight holds the engine's hand-in, so the two never open an
+    /// attempt each.
+    #[test]
+    fn a_rework_in_the_lanes_hands_holds_the_hand_in() {
+        let (_bare, work) = fixture();
+        let candidate = tip(work.path());
+        let (mut store, cfg) = world(work.path(), &["T-1", "T-2"], Some(&candidate));
+        store
+            .write(|tx| {
+                let mut attempt = attempt("T-9", AttemptState::Delivered, None);
+                attempt.n = 2;
+                tx.insert_attempt(&attempt)
+            })
+            .unwrap();
+        let report = step(&mut store, &cfg);
+        assert!(report.handed_in.is_empty(), "{:?}", report.handed_in);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        let attempts = store.read(|tx| tx.attempts_of_task("p", "T-9")).unwrap();
+        assert_eq!(attempts.len(), 2, "no attempt is opened beside the lane's");
+        assert_eq!(attempts[1].state, AttemptState::Delivered);
     }
 }
