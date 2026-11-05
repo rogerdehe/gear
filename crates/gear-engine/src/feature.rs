@@ -32,17 +32,14 @@ pub struct FeatureReport {
 }
 
 /// The feature branch a task is merged from (T-577: `task_branch_override`),
-/// keyed as the plan's apply writes it. An empty value is none. Read from the
-/// meta key here, so this step builds and runs before T-577's accessor lands;
-/// the accessor answers the same.
+/// keyed as the plan's apply writes it. An empty value is none. T-602: the
+/// store's accessor is the one place that key is read.
 pub(crate) fn branch_override(
     tx: &gear_store::Tx<'_>,
     project: &str,
     task: &str,
 ) -> GearResult<Option<String>> {
-    Ok(tx
-        .get_meta(&format!("task_branch_override:{project}:{task}"))?
-        .filter(|branch| !branch.is_empty()))
+    tx.task_branch_override(project, task)
 }
 
 /// Hand in every feature integration task of `project` whose dependencies are
