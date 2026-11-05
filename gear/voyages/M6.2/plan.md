@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1171 -->
+<!-- gear-plan project=gear base=1172 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -227,4 +227,10 @@ deps: -
 goal: [v0.6.59] An item about a settled task closes itself (user, 2026-11-05: M-10318, a lane's note on T-715 from 11:12, still rang the Prometheus captain hours after T-715 was done; five such items were open, and 7 merge-failed/merge-lost items named tasks whose work had merged). In the engine's periodic scan (the lost-merge scan step 1b in crates/gear-engine/src/merge.rs, next to `close_landed_failures`): resolve every open captain item on a task thread (`T-<n>:<attempt or cap>`) whose task is done or cancelled, with "the task is <state>"; and resolve every open `merge-failed:<task>` and `merge-lost:<task>` item whose task has an attempt with a merge time, with "its work landed". Items of a task still running stay open.
 accept: Tests in merge.rs `mod tests`: an open `T-5:1` item closes once T-5 is done, stays open while T-5 runs; an open merge-failed item of a task whose attempt has merged_at closes. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
 estimate: 40
+deps: -
+
+## T-570 [now] lane=mast milestone=M6.2
+goal: [v0.6.59] A pane that holds two seats keeps one agent name (2026-11-05: pane w2:p10 holds prometheus:captain and lawrence:captain; the user renamed its agent `prometheus-captain` and the engine's name restore set it back to `lawrence-captain`, so prompts to `prometheus-captain` failed with agent_not_found). In crates/gear-engine/src/names.rs `restore` (and the `ensure` used before deliveries): when the agent in the pane already carries the desired name of any seat whose active binding is that same pane, leave it; rename only an agent with no name or a name of no seat bound there. When it has no name, give it the name of the seat whose project has an open (departed, not landed) voyage first.
+accept: Tests in names.rs `mod tests`: two captain seats bound to one pane, the agent named after one of them, keeps its name over several restore passes and deliveries to either seat still find it; an unnamed agent there gets the open voyage's seat name. Run only `make check CRATE=gear-engine TESTS='test(names::)'`; the merge gate runs `make gate`.
+estimate: 30
 deps: -
