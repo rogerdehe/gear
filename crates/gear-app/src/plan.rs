@@ -858,6 +858,26 @@ fn apply_queue(
                     mechanical: item.mechanical.clone(),
                 };
                 tx.insert_contract(&contract)?;
+                // A voyage whose landing order was answered without a landing
+                // (`keep course`) gets a new one when its new work is done:
+                // the mark of the old order is cleared (GEAR's own M6.2 could
+                // never land again).
+                if let Some(milestone) = &item.milestone {
+                    let key = format!("station:{project}:{milestone}:land");
+                    if let Some(order) = tx.get_meta(&key)? {
+                        let landed = tx.get_message(project, &order)?.is_some_and(|message| {
+                            message.result.as_deref().is_some_and(|result| {
+                                result.split_once(':').is_some_and(|(_, action)| {
+                                    let action = action.trim();
+                                    action == "land" || action.starts_with("land ")
+                                })
+                            })
+                        });
+                        if !landed {
+                            tx.delete_meta(&key)?;
+                        }
+                    }
+                }
                 created.push(id);
             }
             Some(id) => {
