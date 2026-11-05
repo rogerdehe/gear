@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1184 -->
+<!-- gear-plan project=gear base=1185 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -316,6 +316,20 @@ goal: [feature 6/7] The merge uses the branch override. crates/gear-engine/src/m
 accept: Tests in merge.rs `mod tests` (Pair fixture): a task with override `p/feature/f-1` merges that branch into dev and leaves it on the remote; a member task with base `p/feature/f-1` and gate `true` merges into the feature branch without running the project gate (a failing project gate proves it); a conflicting member is refused as today. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
 estimate: 50
 deps: -
+
+## T-584 [must] lane=hull milestone=M6.2
+goal: Seat branches name their voyage. (1) crates/gear-model/src/branch.rs `expand_seat(template, project, seat, voyage)`: also fills `{voyage}`; an empty voyage fills `between-voyages` (gear_app::captain::BETWEEN_VOYAGES' text). `SEAT_BRANCH` becomes `{project}/{seat}/{voyage}`, and the old default `{project}/{seat}/home` becomes a previous default the way T-565 settles one (crates/gear-app/src/seat_branch.rs), so a lane's `p/hull/home` is renamed, never left beside the new one. (2) Every caller (config.rs validation and sample, admin.rs rename, onboard.rs both sites, review.rs, merge.rs merge worktree) passes `gear_app::plan::current_voyage(tx, project)`. (3) crates/gear-engine/src/onboard.rs: the meta `engine.seat_branch_settled.{project}` stores the template with `{voyage}` filled, so a new voyage's departure settles the lanes' branches again. (4) skills/gear/references/conventions.md and captain.md: the default and `{voyage}` in one line each.
+accept: Unit tests in branch.rs (`{voyage}` filled, empty voyage gives between-voyages); a config test that the default expands to `p/captain/M2` in voyage M2; an onboard test that a lane on `p/hull/home` is moved to `p/hull/M2`. Run only `make check CRATE=gear-model`, `make check CRATE=gear-app TESTS='test(config) | test(seat_branch)'` and `make check CRATE=gear-engine TESTS='test(onboard::)'`; the merge gate runs `make gate`.
+estimate: 50
+deps: -
+fresh: seat branch naming, unrelated to features
+
+## T-585 [must] lane=hull milestone=M6.2
+goal: A landing merges the captain's records. crates/gear-engine/src/finished.rs `reclaim`, before it lists leftovers: the captain's seat branch of the landed voyage (`expand_seat(seat_branch, project, "captain", <landed milestone>)`) is fetched; when it holds commits not on the integration branch, merge it in the merge worktree (as merge.rs opens it) with a merge commit `records: <project> <milestone>` and no gate (records are the captain's files; a conflict is not resolved), push the integration branch, then delete the branch on the remote and locally. Done once per landing (meta `records_merged:{project}:{milestone}`). A conflict or a push failure opens one captain item, thread `records:<milestone>`, naming the branch and the git error, and nothing is deleted. A branch with nothing new is only deleted. skills/gear/references/course.md §9: one line that the landing merges the captain's branch, so the captain only commits and pushes its records before landing.
+accept: Tests in finished.rs `mod tests` with a fixture remote (as merge tests build one): a captain branch with one records commit is merged into dev and deleted after a landing; a conflicting one opens the `records:M1` item and stays; a branch already on dev is only deleted; a second tick does nothing. Run only `make check CRATE=gear-engine TESTS='test(finished::)'`; the merge gate runs `make gate`.
+estimate: 50
+deps: -
+fresh: landing records, unrelated to features
 
 ## T-583 [now] lane=mast milestone=M6.2 required
 goal: [feature 7/7] The captain's skill. skills/gear/references/captain.md `# Queue` field list: `feature` (`F-<n>`: the task is part of a feature; members merge into the feature branch with no CI, deps between members release on that merge, and GEAR creates one integration task per feature that reaches the integration branch with one review and the full gate; at most `feature_max_tasks` members; a dep from outside names the integration task; members share the feature's issue). skills/gear/references/decompose.md: a rule that a capability of several small tasks is one feature, cut at decomposition (an issue in issue mode), and that small unrelated tasks stay without a feature.
