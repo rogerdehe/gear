@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1170 -->
+<!-- gear-plan project=gear base=1171 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -215,4 +215,16 @@ deps: -
 goal: [v0.6.56] The board's time line never shows an impossible forecast, and names what can never merge (user, 2026-11-04, prometheus M4: "expected 16716h25m of 50h00m, 16666h25m behind"). Cause: crates/gear-board/src/forecast.rs gives a dependency no job speaks for the start `NO_DEP` (1,000,000 min), so a task waiting on a done-but-unmerged task (T-570 on T-665, whose merge keeps failing) puts its lane's end a million minutes out, and frame.rs `header_numbers` takes the max. Fix: a lane end at or beyond `NO_DEP` is left out of `expected`; instead the time line ends with `· blocked: T-570 waits for T-665, which nothing will merge` (the first such task and dep; `+N more` when there are several). The forecast for the other lanes stays as today.
 accept: Tests in forecast.rs / frame.rs `mod tests`: a lane whose task waits on a dep no job speaks for leaves `expected` at the other lanes' max and the time line names the blocked task and its dep. Run only `make check CRATE=gear-board`; the merge gate runs `make gate`.
 estimate: 45
+deps: -
+
+## T-568 [now] lane=hull milestone=M6.2
+goal: [v0.6.59] A newer report replaces the older one instead of piling up (user, 2026-11-05: Prometheus had 59 open items on thread `station:M4` and 123 open branch-sweep items, one thread `branches:<ts>` per sweep, and the doorbell kept ringing old ones). (1) crates/gear-app/src/station.rs (where it inserts on `station:{milestone}`, lines ~117 and ~199): when a new station item is written, resolve every earlier open item of the same project and thread with "superseded by M-<new id>". (2) crates/gear-engine/src/merge.rs, the branch sweep's item (`thread: format!("branches:{now}")`, ~line 5076): when a sweep writes its item, resolve the project's earlier open items whose thread starts with `branches:` with "superseded by M-<new id>" (the new body already lists what is still true). Both close the existing pile at the next write, no migration.
+accept: Tests: three station items on one thread leave one open (the newest); three sweeps leave one open `branches:` item. Run only `make check CRATE=gear-app TESTS='test(station)'` and `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
+estimate: 40
+deps: -
+
+## T-569 [now] lane=mast milestone=M6.2
+goal: [v0.6.59] An item about a settled task closes itself (user, 2026-11-05: M-10318, a lane's note on T-715 from 11:12, still rang the Prometheus captain hours after T-715 was done; five such items were open, and 7 merge-failed/merge-lost items named tasks whose work had merged). In the engine's periodic scan (the lost-merge scan step 1b in crates/gear-engine/src/merge.rs, next to `close_landed_failures`): resolve every open captain item on a task thread (`T-<n>:<attempt or cap>`) whose task is done or cancelled, with "the task is <state>"; and resolve every open `merge-failed:<task>` and `merge-lost:<task>` item whose task has an attempt with a merge time, with "its work landed". Items of a task still running stay open.
+accept: Tests in merge.rs `mod tests`: an open `T-5:1` item closes once T-5 is done, stays open while T-5 runs; an open merge-failed item of a task whose attempt has merged_at closes. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
+estimate: 40
 deps: -
