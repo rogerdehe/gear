@@ -4988,13 +4988,19 @@ fn park(store: &mut Store, seat_id: &str, reason: &str, now: Ts) -> GearResult<(
         } else {
             seat.state
         };
-        gear_model::state::require_transition(
-            SeatState::can_transition(seat.role, from, SeatState::Unknown),
-            "seat",
-            from.as_str(),
-            SeatState::Unknown.as_str(),
-        )?;
-        tx.set_seat_state(seat_id, SeatState::Unknown, Some(reason), now)
+        // A seat already Active (a feature's reviewer kept for its next light
+        // check) may not go to Unknown: it goes to NeedsCheck, and a seat that
+        // can take neither stays as it is. A failed start never fails the tick
+        // (GEAR 2026-11-05: `seat: active -> unknown` stopped every tick of the
+        // project for 40 minutes and held T-602's merge).
+        let to = if SeatState::can_transition(seat.role, from, SeatState::Unknown) {
+            SeatState::Unknown
+        } else if SeatState::can_transition(seat.role, from, SeatState::NeedsCheck) {
+            SeatState::NeedsCheck
+        } else {
+            return Ok(());
+        };
+        tx.set_seat_state(seat_id, to, Some(reason), now)
     })
 }
 
