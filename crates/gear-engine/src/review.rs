@@ -5580,8 +5580,9 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         merges
     }
 
-    /// T-589: a member of a feature is accepted at hand-in — no review seat is
-    /// taken and its merge into the feature's branch queues at once.
+    /// T-589: a member of a feature is accepted at hand-in — no full review is
+    /// started and its merge into the feature's branch queues at once. T-590:
+    /// its accepted attempt gets the feature's light stage check.
     #[test]
     fn a_feature_members_hand_in_is_accepted_without_a_review() {
         let mut store = world_feature("F-1", None);
@@ -5599,18 +5600,25 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 
         assert_eq!(report.settled, vec!["p:T-1/1".to_string()], "{report:?}");
         assert!(report.settle_failed.is_empty(), "{report:?}");
-        assert!(report.started.is_empty(), "{report:?}");
-
-        // No reviewer: no seat, no worktree, no agent.
-        assert!(starts(&herdr).is_empty(), "{:?}", starts(&herdr));
-        assert!(worktrees(&herdr).is_empty());
-        let temps = store
-            .read(|tx| tx.seats_of_project("p"))
-            .unwrap()
-            .into_iter()
-            .filter(|seat| seat.role == SeatRole::Temp)
-            .count();
-        assert_eq!(temps, 0, "no review seat starts");
+        // T-590: the one seat it starts is the feature's light stage check,
+        // never the member's review.
+        assert_eq!(report.started, vec!["p:review-1".to_string()], "{report:?}");
+        assert!(
+            store
+                .read(|tx| tx.rounds_of_task("p", "T-1"))
+                .unwrap()
+                .iter()
+                .all(|round| round.role != "review"),
+            "no full review of the member starts"
+        );
+        let marker: serde_json::Value = serde_json::from_str(
+            &store
+                .read(|tx| tx.stage_check("p", "T-1", 1))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker["state"], "running", "its stage check runs");
 
         // The attempt is accepted and the task done: the review of the next
         // task is where the work is looked at (stage 2).
@@ -5714,7 +5722,16 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         .unwrap();
 
         assert_eq!(report.settled, vec!["p:T-1/2".to_string()], "{report:?}");
-        assert!(starts(&herdr).is_empty(), "{:?}", starts(&herdr));
+        // T-590: the accepted rework gets the feature's light stage check; no
+        // full review of the member starts.
+        assert!(
+            store
+                .read(|tx| tx.rounds_of_task("p", "T-1"))
+                .unwrap()
+                .iter()
+                .all(|round| round.role != "review"),
+            "no full review of the member starts"
+        );
         assert_eq!(
             store
                 .read(|tx| tx.get_attempt("p", "T-1", 2))
