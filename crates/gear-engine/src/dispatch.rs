@@ -517,7 +517,17 @@ pub(crate) fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<Task
                 .unwrap_or(false)
         })
         .filter(|task| task.priority != "wont")
-        .filter(|task| task.deps.iter().all(|dep| done.contains(dep)))
+        // A dependency holds a task's first start only: once the lane has
+        // worked on it, its rework never waits on a merge, and the deps hold
+        // only its merge (merge.rs `deps_landed`; user: work that needs only
+        // code on a branch never waits on a merge).
+        .filter(|task| {
+            task.deps.iter().all(|dep| done.contains(dep))
+                || tx
+                    .attempts_of_task(&seat.project, &task.id)
+                    .map(|attempts| !attempts.is_empty())
+                    .unwrap_or(false)
+        })
         .collect())
 }
 
