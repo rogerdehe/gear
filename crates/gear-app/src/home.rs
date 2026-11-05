@@ -67,7 +67,14 @@ pub fn build_with_agents(
         }
 
         let mut lines: Vec<String> = Vec::new();
-        if seat.role == SeatRole::Captain {
+        // A captain whose voyage finished (a paused one is still open) sees only its seat and what a person or another seat
+        // sent it: no voyage report, goal, snapshot or engine item (the user,
+        // 2026-11-05: Lawrence's finished M1 filled every `gear` call).
+        let sailing = seat.role != SeatRole::Captain || {
+            let milestone = crate::plan::current_voyage(tx, &ctx.project)?;
+            milestone.is_empty() || gear_board::stations::voyage_open(tx, &ctx.project, &milestone)?
+        };
+        if seat.role == SeatRole::Captain && sailing {
             lines.extend(
                 gear_board::voyage::reports(tx, &ctx.project, now)?
                     .iter()
@@ -76,7 +83,9 @@ pub fn build_with_agents(
             // The voyage's goal, bar and course (T-336): the same one text
             // every captain output uses, right under the voyage report lines.
             let milestone = crate::plan::current_voyage(tx, &ctx.project)?;
-            if !milestone.is_empty() {
+            if !milestone.is_empty()
+                && gear_board::stations::voyage_open(tx, &ctx.project, &milestone)?
+            {
                 if let Some(goal) = gear_board::stations::goal_text(tx, &ctx.project, &milestone)? {
                     lines.push(goal);
                 }
@@ -93,7 +102,7 @@ pub fn build_with_agents(
 
         // The captain's snapshot: the plan at a glance, before the inbox
         // (T-9). The model is the board's, so the two views never disagree.
-        if seat.role == SeatRole::Captain {
+        if seat.role == SeatRole::Captain && sailing {
             lines.push(String::new());
             lines.extend(snapshot(tx, &ctx.project, now, agents)?);
         }
@@ -156,6 +165,17 @@ pub fn build_with_agents(
                 now,
                 mail::BatchLimits::default(),
             )?;
+            let batch: Vec<_> = batch
+                .into_iter()
+                .filter_map(|mut thread| {
+                    if !sailing {
+                        thread
+                            .open
+                            .retain(|message| message.kind != gear_model::MsgKind::System);
+                    }
+                    (!thread.open.is_empty()).then_some(thread)
+                })
+                .collect();
             if !batch.is_empty() {
                 lines.push(String::new());
                 lines.push(format!("INBOX ({} threads)", batch.len()));
@@ -344,7 +364,7 @@ fn multi_page(
             lines.extend(report.lines());
         }
         let milestone = crate::plan::current_voyage(tx, project)?;
-        if !milestone.is_empty() {
+        if !milestone.is_empty() && gear_board::stations::voyage_open(tx, project, &milestone)? {
             if let Some(goal) = gear_board::stations::goal_text(tx, project, &milestone)? {
                 lines.push(goal);
             }

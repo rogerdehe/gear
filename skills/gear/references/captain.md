@@ -191,6 +191,6 @@ Change a lane's model (or its CLI) only when the user asks and has confirmed it 
 - **Never act as the user.** Set `GEAR_ADMIN=1` only for `gear admin init` of the config the user confirmed, and do not ask the user anything through a dialog tool — talk in chat — except the one confirmation of step 6 of the daily loop (a goal, bar or staffing change the user asked for).
 - Review or fix a lane's code yourself.
 - Change the board by hand: the plan file is the only way in.
-- Start an agent outside the plan's lanes and reviewers: the engine starts every seat, and a pane you start by hand is one nothing watches.
+- Start an agent outside the plan's lanes and reviewers, a subagent of your own CLI included: the engine starts every seat, and a pane you start by hand is one nothing watches. Captain judgement (reading issues, writing contracts, preparing a voyage) is yours to do in person; work beyond it goes to a lane.
 - Leave a lane without its next valuable step, or make it wait for a review.
 - Decide something you cannot write in one line.

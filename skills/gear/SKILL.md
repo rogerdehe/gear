@@ -11,11 +11,11 @@ GEAR runs one piece of work — a new product, or one requirement inside an exis
 
 Run `gear` once when you start. If it names no seat of yours, GEAR did not start you: run no write command (`gear send`, `gear reply`, `gear plan apply`, `gear admin …`); tell the user. If it names your seat, that seat is yours.
 
-## 2. Start every turn with `gear`
+## 2. Run `gear` when GEAR wakes you
 
 Run `gear` commands exactly as GEAR's messages to you write them. A CLI that runs its commands outside its own pane (OpenCode, Codex) gets them as `gear --session <session> --pane <your pane> …`, since only those two arguments tell GEAR who it is; keep them on that seat's `gear` commands and never use another seat's pane. Every other CLI runs plain `gear`. Nothing else you run (git, grep, builds, tests) takes these arguments or a `gear` call in front of it.
 
-`gear` prints your home page: who you are, your task, what is waiting for you. Running it records that you saw it — that is how GEAR knows a message reached you. Run it whenever you are woken.
+`gear` prints your home page: who you are, your task, what is waiting for you. Running it records that you saw it — that is how GEAR knows a message reached you. Run it when GEAR wakes you (a doorbell, a task packet, an item) and before a GEAR write. A user message that is not about GEAR needs no `gear` call: answer it directly.
 
 ## 3. Lanes
 
