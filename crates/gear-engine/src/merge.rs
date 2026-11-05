@@ -146,7 +146,29 @@ struct Worker {
 #[derive(Debug, Clone)]
 struct Finished {
     result: Report,
+    /// The red batch round this result is, when it is one (T-572).
+    red: Option<RedRound>,
     at: Ts,
+}
+
+/// A red batch round (T-572): what the gate refused, whom it gated, and the cap
+/// the round asked for.
+///
+/// The user's Prometheus, 2026-11-05: batches went red six times in an hour —
+/// 8, 3, 2, 1 members — every time for the same two browser cases missing cost
+/// declarations, a cause on the integration branch that no split could fix, and
+/// the captain heard nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RedRound {
+    /// The tasks the round gated, in the batch's order.
+    members: Vec<String>,
+    /// The gate's refusal as the gate printed it (for the captain's item).
+    refusal: String,
+    /// The same text with shas, run ids and timings taken out: two rounds of
+    /// the same cause read the same.
+    normalized: String,
+    /// The cap the round asks for next (half the members).
+    cap: usize,
 }
 
 /// What the merge worker reports back.
@@ -373,6 +395,15 @@ pub fn collect_finished(
         // path never runs at 1, and only a batch that landed could double it,
         // so every merge ran alone for the rest of the day).
         let landed_alone = matches!(finished.result, Report::Merged(_));
+        // T-572: a red batch round names why the captain's line is red, and a
+        // refusal that repeats with different members stops the splitting.
+        // A round that named its culprit or whose gate could not run is not one.
+        if let Some(red) = &finished.red {
+            let integration = repo_of_op(store, project, &op, config)
+                .map(|repo| repo.integration)
+                .unwrap_or_else(|_| config.conventions.integration.clone());
+            note_red_round(store, project, &integration, red, finished.at)?;
+        }
         let done = settle_report(store, project, config, &op, finished.result, finished.at)?;
         if landed_alone {
             let batch = config.conventions.merge_batch.max(1) as usize;
@@ -571,6 +602,12 @@ pub fn merge_passed(
         // branch, each gated on the commit the one ahead of it lands.
         let parallel = config.conventions.merge_parallel.max(1) as usize;
         let single = cfg.merges.single.lock().unwrap().remove(&key);
+        // T-572: a line whose batch rounds kept failing for the same cause
+        // outside the batch waits, and runs again only when a merge op is
+        // queued anew (a remerge or a new pass). Nothing is gated meanwhile.
+        if red_line_waits(store, project)? {
+            continue;
+        }
         // A batch merge (T-547): up to `cap` passed merges of this project are
         // merged into one worktree and gated once. `merge_parallel` is not
         // consulted then; a batch of one op takes the normal single path.
@@ -779,6 +816,7 @@ pub fn merge_passed(
                 .unwrap_or_else(|_| Report::Failed(Failed::stuck("merge worker panicked")));
                 *output.lock().unwrap() = Some(Finished {
                     result,
+                    red: None,
                     at: wall_time(),
                 });
                 // A waiter sleeps on this, not on the clock (T-127).
@@ -813,6 +851,8 @@ fn settle_report(
     let mut merged = Vec::new();
     match result {
         Report::Merged(lines) => {
+            // T-572: a merge landed, so the red item has done its work.
+            close_red_line(store, project, at)?;
             store.write(|tx| {
                 let current = tx.get_op(project, &op.id)?.unwrap();
                 if current.state == OpState::Executing {
@@ -1031,6 +1071,7 @@ fn launch_train(
             }
             *output.lock().unwrap() = Some(Finished {
                 result: Report::Train(result),
+                red: None,
                 at: wall_time(),
             });
             *progress.0.lock().unwrap() += 1;
@@ -1115,7 +1156,7 @@ fn launch_batch(
         .name(format!("merge-batch-{project}-{}", repo.name))
         .spawn(move || {
             let single = std::sync::atomic::AtomicBool::new(false);
-            let (result, cap) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (result, cap, red) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let target = Target {
                     name: &remote_name,
                     runner: remote.as_ref(),
@@ -1129,7 +1170,7 @@ fn launch_batch(
                     .iter()
                     .map(|m| (m.op.clone(), Report::Requeue("merge batch panicked".into())))
                     .collect();
-                (results, cap)
+                (results, cap, None)
             });
             if single.load(std::sync::atomic::Ordering::SeqCst) {
                 single_set.lock().unwrap().insert(single_key.clone());
@@ -1137,6 +1178,7 @@ fn launch_batch(
             cap_set.lock().unwrap().insert(single_key, cap);
             *output.lock().unwrap() = Some(Finished {
                 result: Report::Train(result),
+                red,
                 at: wall_time(),
             });
             *progress.0.lock().unwrap() += 1;
@@ -3605,7 +3647,7 @@ fn run_batch(
     single: &std::sync::atomic::AtomicBool,
     batch: usize,
     cap: usize,
-) -> (Vec<(OpRow, Report)>, usize) {
+) -> (Vec<(OpRow, Report)>, usize, Option<RedRound>) {
     use std::sync::atomic::Ordering;
     let dir = Path::new(&worktree.path);
     let collect = |reports: Vec<Option<Report>>| -> Vec<(OpRow, Report)> {
@@ -3625,6 +3667,7 @@ fn run_batch(
             return (
                 ops.iter().map(|t| (t.op.clone(), Report::Busy)).collect(),
                 cap,
+                None,
             )
         }
         Err(reason) => {
@@ -3638,6 +3681,7 @@ fn run_batch(
                     })
                     .collect(),
                 cap,
+                None,
             )
         }
     };
@@ -3724,7 +3768,7 @@ fn run_batch(
         }
     }
     if built.is_empty() {
-        return (collect(reports), cap);
+        return (collect(reports), cap, None);
     }
     let built_count = built.len();
     // One gate for the whole batch, named by its first merge and judging every
@@ -3799,13 +3843,28 @@ fn run_batch(
                 });
             }
             // The culprit is known: the batch is not halved.
-            return (collect(reports), cap);
+            return (collect(reports), cap, None);
         }
+        // T-572: what the round refused, as the gate printed it, and the cap
+        // it asks for. A gate that could not run (a reason that clears) is no
+        // refusal: nothing is recorded and the line is not stopped.
+        let refusal = match &step {
+            Step::Failed(failed) => failed.reason.clone(),
+            _ => "the batch could not be gated".to_string(),
+        };
+        let new_cap = if clear || built_count == 1 {
+            cap
+        } else {
+            built_count.div_ceil(2)
+        };
+        let red_round = (!clear && built_count > 1).then(|| RedRound {
+            members: tasks.clone(),
+            normalized: normalize_refusal(&refusal),
+            refusal: refusal.clone(),
+            cap: new_cap,
+        });
         let red = if clear {
-            match &step {
-                Step::Failed(failed) => failed.reason.clone(),
-                _ => "the batch could not be gated".to_string(),
-            }
+            refusal
         } else {
             "its batch failed the gate: it is gated again in a smaller batch".to_string()
         };
@@ -3820,12 +3879,7 @@ fn run_batch(
                 alone.clone()
             });
         }
-        let cap = if clear || built_count == 1 {
-            cap
-        } else {
-            built_count.div_ceil(2)
-        };
-        return (collect(reports), cap);
+        return (collect(reports), new_cap, red_round);
     }
     // Green: one push lands the whole batch, as step 9b of a single merge.
     for (_, _, _, probe) in built.iter_mut() {
@@ -3852,7 +3906,7 @@ fn run_batch(
             probe.done();
             reports[index] = Some(Report::Requeue(reason.clone()));
         }
-        return (collect(reports), cap);
+        return (collect(reports), cap, None);
     }
     // Green: each merge of the batch closes its branches and says so.
     for ((index, prepared, _changed, mut probe), head) in built.into_iter().zip(heads) {
@@ -3872,7 +3926,7 @@ fn run_batch(
         probe.done();
         reports[index] = Some(step_report(step));
     }
-    (collect(reports), batch.min(cap.saturating_mul(2)))
+    (collect(reports), batch.min(cap.saturating_mul(2)), None)
 }
 
 /// A merge's end, as the worker reports it.
@@ -5411,6 +5465,241 @@ fn close_landed_failures(store: &mut Store, project: &str, now: Ts) -> GearResul
     })
 }
 
+/// The thread of the item that says a batch round is red (T-572): one item per
+/// project, opened once, updated with every round, closed when a merge lands.
+fn merge_red_thread(project: &str) -> String {
+    format!("merge-red:{project}")
+}
+
+/// The key of the number of red rounds this line has spent (T-572).
+fn red_rounds_key(project: &str) -> String {
+    format!("engine.merge_red.rounds.{project}")
+}
+
+/// The key of the moment the line's first red round was (T-572).
+fn red_since_key(project: &str) -> String {
+    format!("engine.merge_red.since.{project}")
+}
+
+/// The key of the last round's normalized refusal (T-572).
+fn red_refusal_key(project: &str) -> String {
+    format!("engine.merge_red.refusal.{project}")
+}
+
+/// The key of the last round's members, comma joined (T-572).
+fn red_members_key(project: &str) -> String {
+    format!("engine.merge_red.members.{project}")
+}
+
+/// The key of the moment a line was set waiting for a new merge op (T-572).
+fn red_wait_key(project: &str) -> String {
+    format!("engine.merge_red.wait.{project}")
+}
+
+/// A gate's refusal with shas, run ids and timings taken out (T-572): two
+/// rounds that failed for the same cause read the same, whatever commits or
+/// numbers the gate happened to print.
+pub(crate) fn normalize_refusal(text: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if trimmed.is_empty() {
+            continue;
+        }
+        let words: Vec<String> = trimmed
+            .split(' ')
+            .map(|word| {
+                let bare = word.trim_matches(|character: char| {
+                    !character.is_ascii_alphanumeric() && character != '.' && character != '-'
+                });
+                let hex = bare.len() >= 7
+                    && bare.chars().all(|character| character.is_ascii_hexdigit())
+                    && bare
+                        .chars()
+                        .any(|character| character.is_ascii_alphabetic())
+                    && bare.chars().any(|character| character.is_ascii_digit());
+                let number = bare.len() >= 4 && bare.chars().all(|c| c.is_ascii_digit());
+                if hex {
+                    "<sha>".to_string()
+                } else if number {
+                    "<n>".to_string()
+                } else if is_timing(bare) {
+                    "<time>".to_string()
+                } else {
+                    word.to_string()
+                }
+            })
+            .collect();
+        lines.push(words.join(" "));
+    }
+    lines.join("\n")
+}
+
+/// Whether a token is a duration a test runner prints (`4.2s`, `123ms`,
+/// `1.5µs`): the tail of a gate is mostly these, and they say nothing about
+/// the cause.
+fn is_timing(word: &str) -> bool {
+    for unit in ["ms", "µs", "us", "ns", "s"] {
+        if let Some(number) = word.strip_suffix(unit) {
+            if !number.is_empty() && number.parse::<f64>().is_ok() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Record a red batch round (T-572): one item per project names why, and a
+/// refusal that repeats with different members stops the splitting.
+fn note_red_round(
+    store: &mut Store,
+    project: &str,
+    integration: &str,
+    red: &RedRound,
+    at: Ts,
+) -> GearResult<()> {
+    store.write(|tx| {
+        let rounds = tx
+            .get_meta(&red_rounds_key(project))?
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0)
+            + 1;
+        let since = tx
+            .get_meta(&red_since_key(project))?
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(at);
+        let previous = tx
+            .get_meta(&red_refusal_key(project))?
+            .unwrap_or_default();
+        let before = tx.get_meta(&red_members_key(project))?.unwrap_or_default();
+        let members = red.members.join(", ");
+        // T-572: the same refusal from two rounds of different members is a
+        // cause on the integration branch, not in the batch: no split can fix
+        // it, so the line stops and the captain is told at once.
+        let repeat = !previous.is_empty() && previous == red.normalized && before != members;
+        tx.set_meta(&red_rounds_key(project), &rounds.to_string())?;
+        tx.set_meta(&red_since_key(project), &since.to_string())?;
+        tx.set_meta(&red_refusal_key(project), &red.normalized)?;
+        tx.set_meta(&red_members_key(project), &members)?;
+        let spent = ((at - since).max(0) / 60).to_string();
+        let mut body = format!(
+            "a batch round of {} is red — {rounds} red rounds and {spent} minutes on this line.\nthe gate's refusal, as it printed it:\n{}\nthe members: {members}",
+            red.members.len(),
+            red.refusal.trim()
+        );
+        if repeat {
+            body.push_str(&format!(
+                "\nthe same refusal with different members: the cause is on {integration}, not in the batch. The line waits for a merge op to be queued anew."
+            ));
+            let mut merge_ops = 0;
+            for state in OpState::ALL {
+                merge_ops += tx
+                    .ops_in_state(project, *state)?
+                    .into_iter()
+                    .filter(|op| op.kind == OpKind::Merge)
+                    .count();
+            }
+            tx.set_meta(&red_wait_key(project), &merge_ops.to_string())?;
+        }
+        let Some(captain) = tx.captain_of(project)? else {
+            return Ok(());
+        };
+        let thread = merge_red_thread(project);
+        let open = tx
+            .thread_messages(project, &thread)?
+            .into_iter()
+            .find(|item| matches!(item.state, MsgState::Open | MsgState::Waiting));
+        match open {
+            Some(item) => {
+                tx.update_message_body(project, &item.id, &body)?;
+                tx.set_message_urgent(project, &item.id, repeat)?;
+            }
+            None => {
+                tx.insert_message(&NewMessage {
+                    meta: None,
+                    project: project.to_string(),
+                    thread,
+                    task: None,
+                    attempt: None,
+                    sender: "engine".to_string(),
+                    sender_gen: 0,
+                    recipient: captain.id.clone(),
+                    kind: MsgKind::System,
+                    urgent: repeat,
+                    body,
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: at,
+                })?;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// A merge landed: the red item of the project has done its work, and the line
+/// starts over with no rounds and no wait (T-572).
+fn close_red_line(store: &mut Store, project: &str, at: Ts) -> GearResult<()> {
+    store.write(|tx| {
+        let thread = merge_red_thread(project);
+        for item in tx.thread_messages(project, &thread)? {
+            if matches!(item.state, MsgState::Open | MsgState::Waiting) {
+                tx.update_message_state(
+                    project,
+                    &item.id,
+                    MsgState::Resolved,
+                    Some("a merge landed"),
+                    None,
+                    None,
+                    at,
+                )?;
+            }
+        }
+        for key in [
+            red_rounds_key(project),
+            red_since_key(project),
+            red_refusal_key(project),
+            red_members_key(project),
+            red_wait_key(project),
+        ] {
+            tx.set_meta(&key, "")?;
+        }
+        Ok(())
+    })
+}
+
+/// Whether the batch line of `project` waits (T-572): it does while a refusal
+/// that repeats for different members has been named, and starts again only
+/// when a merge op is queued anew — a remerge or a new pass.
+///
+/// What the key remembers is how many merge ops the project had when the line
+/// stopped: one more is a merge op queued anew. The count is clock-free on
+/// purpose — an op's `created` is the tick's clock and a worker's report the
+/// wall clock, and the two do not compare.
+fn red_line_waits(store: &mut Store, project: &str) -> GearResult<bool> {
+    let Some(stopped_at) = store
+        .read(|tx| tx.get_meta(&red_wait_key(project)))?
+        .and_then(|value| value.parse::<usize>().ok())
+    else {
+        return Ok(false);
+    };
+    let mut merge_ops = 0;
+    for state in OpState::ALL {
+        merge_ops += store
+            .read(|tx| tx.ops_in_state(project, *state))?
+            .into_iter()
+            .filter(|op| op.kind == OpKind::Merge)
+            .count();
+    }
+    if merge_ops > stopped_at {
+        // A merge op is queued anew: the line runs again.
+        store.write(|tx| tx.set_meta(&red_wait_key(project), ""))?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 /// Close the captain's items about a task that is over (T-569): a note on a
 /// settled task rings for hours otherwise (M-10318, a lane's note on T-715,
 /// still ringing after T-715 was done; five such items open, and seven
@@ -5846,6 +6135,8 @@ mod tests {
         PairOn,
         /// Two tasks both cut from `dev`: neither carries the other.
         PairFlat,
+        /// Three tasks both cut from `dev`: the batch rounds of T-572.
+        TrioFlat,
         /// Two tasks in a chain: T-2 carries T-1.
         Chain2,
         /// Three tasks in a chain.
@@ -5917,6 +6208,29 @@ mod tests {
                         review: "r2",
                     },
                 ],
+                Shape::TrioFlat => vec![
+                    Branch {
+                        task: "t1",
+                        base: "dev",
+                        file: "a.txt",
+                        subject: "a",
+                        review: "r1",
+                    },
+                    Branch {
+                        task: "t2",
+                        base: "dev",
+                        file: "b.txt",
+                        subject: "b",
+                        review: "r2",
+                    },
+                    Branch {
+                        task: "t3",
+                        base: "dev",
+                        file: "c.txt",
+                        subject: "c",
+                        review: "r3",
+                    },
+                ],
                 Shape::Chain2 => vec![chain("t1", "dev"), chain("t2", "heat/t1")],
                 Shape::Chain3 => vec![
                     chain("t1", "dev"),
@@ -5948,6 +6262,7 @@ mod tests {
         static TASK: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         static PAIR_ON: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         static PAIR_FLAT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        static TRIO_FLAT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         static CHAIN2: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         static CHAIN3: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         static CHILD: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
@@ -5955,6 +6270,7 @@ mod tests {
             Shape::Task => &TASK,
             Shape::PairOn => &PAIR_ON,
             Shape::PairFlat => &PAIR_FLAT,
+            Shape::TrioFlat => &TRIO_FLAT,
             Shape::Chain2 => &CHAIN2,
             Shape::Chain3 => &CHAIN3,
             Shape::ChildWeb => &CHILD,
@@ -7787,16 +8103,104 @@ mod tests {
             .unwrap();
     }
 
-    /// The project merges in batches of two, with `gate` as its gate (T-547).
-    fn batch_of_two(store: &mut Store, gate: &str) {
+    /// Three tasks of one project, each cut from `dev` (T-572): their batch
+    /// rounds hold different members.
+    struct Trio {
+        root: PathBuf,
+        work: PathBuf,
+    }
+
+    impl Trio {
+        fn new(name: &str) -> Trio {
+            let root = scratch_root(name, Shape::TrioFlat);
+            let work = root.join("work");
+            Trio { root, work }
+        }
+
+        fn merge_worktree(&self) -> gear_herdr::Worktree {
+            let path = self.root.join("merge");
+            sh(
+                &self.root,
+                &format!(
+                    "git -C {} worktree add -q -b p/merge/home {} origin/dev",
+                    self.work.display(),
+                    path.display()
+                ),
+            );
+            gear_herdr::Worktree {
+                workspace_id: "wt-merge".into(),
+                pane_id: "wt-merge:p1".into(),
+                path: path.display().to_string(),
+                branch: "p/merge/home".into(),
+            }
+        }
+
+        fn heads(&self) -> std::collections::BTreeMap<String, String> {
+            branch_heads(&self.root)
+        }
+    }
+
+    impl Drop for Trio {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// A project with the three tasks of a [`Trio`], all handed in.
+    fn trio_world(candidate_a: &str, candidate_b: &str, candidate_c: &str) -> Store {
+        let mut store = pair_world(candidate_a, candidate_b);
+        store
+            .write(|tx| {
+                tx.insert_task(&gear_store::TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-3".into(),
+                    rank: 3,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: 0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-3", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-3", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-3", 1, 1, candidate_c, "report", 0)?;
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// The project merges in batches of `size`, with `gate` as its gate
+    /// (T-547, T-572).
+    fn batch_of(store: &mut Store, gate: &str, size: usize) {
         store
             .write(|tx| {
                 let mut project = tx.get_project("p")?.unwrap();
-                project.config_toml = config_text(gate)
-                    .replace("[conventions]\n", "[conventions]\nmerge_batch = 2\n");
+                project.config_toml = config_text(gate).replace(
+                    "[conventions]\n",
+                    &format!("[conventions]\nmerge_batch = {size}\n"),
+                );
                 tx.update_project(&project)
             })
             .unwrap();
+    }
+
+    /// The project merges in batches of two, with `gate` as its gate (T-547).
+    fn batch_of_two(store: &mut Store, gate: &str) {
+        batch_of(store, gate, 2);
     }
 
     /// A batch merge (T-547): the two passed merges are merged into one
@@ -7965,6 +8369,205 @@ mod tests {
         assert!(
             !caps.is_empty() && caps.values().all(|cap| *cap == 2),
             "a merge that landed alone doubles the cap back to merge_batch: {caps:?}"
+        );
+    }
+
+    /// T-572: the same refusal from two rounds of different members is a cause
+    /// on the integration branch, not in the batch (the user's Prometheus,
+    /// 2026-11-05: 8, 3, 2, 1 members, every time the same two browser cases).
+    /// The splitting stops, every member goes back to the queue, one urgent
+    /// item names why — and no further gate runs.
+    #[test]
+    fn the_same_refusal_with_different_members_stops_the_splitting() {
+        let trio = Trio::new("batch-repeat");
+        let worktree = trio.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let heads = trio.heads();
+        let mut store = trio_world(&heads["heat/t1"], &heads["heat/t2"], &heads["heat/t3"]);
+        // The gate's own tally, and a refusal that names no member: whatever
+        // the batch holds, it says the same thing.
+        let ran = trio.root.join("gate-runs");
+        batch_of(
+            &mut store,
+            &format!(
+                "echo x >> {}; echo 'FAIL [browser] the two cases miss their cost declarations'; exit 1",
+                ran.display()
+            ),
+            3,
+        );
+        for (task, branch) in [("T-1", "heat/t1"), ("T-2", "heat/t2"), ("T-3", "heat/t3")] {
+            pass(&mut store, task, &heads[branch], 10);
+        }
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        // Round 1 gates three members, round 2 two: the same refusal, other
+        // members, so the line stops.
+        quiet_ticks(&mut store, &mut herdr, &cfg, 8);
+
+        let items = store
+            .read(|tx| tx.thread_messages("p", &merge_red_thread("p")))
+            .unwrap();
+        assert_eq!(items.len(), 1, "one item for the project: {items:?}");
+        assert_eq!(items[0].state, MsgState::Open, "{items:?}");
+        assert!(items[0].urgent, "the repeat is urgent: {}", items[0].body);
+        assert!(
+            items[0]
+                .body
+                .contains("the two cases miss their cost declarations"),
+            "the gate's own refusal: {}",
+            items[0].body
+        );
+        assert!(
+            items[0].body.contains(
+                "the same refusal with different members: the cause is on dev, not in the batch"
+            ),
+            "{}",
+            items[0].body
+        );
+        assert!(
+            items[0].body.contains("T-1, T-2"),
+            "the last round's members: {}",
+            items[0].body
+        );
+        assert!(
+            items[0].body.contains("2 red rounds"),
+            "the rounds this line spent: {}",
+            items[0].body
+        );
+        // Every member is back in the queue (`Unknown`: it runs again).
+        for id in ["O-1", "O-2", "O-3"] {
+            assert_eq!(op_state(&mut store, id), Some(OpState::Unknown), "{id}");
+        }
+        // The line waits: two rounds ran, and no gate runs after them.
+        let runs = fs::read_to_string(&ran).unwrap_or_default();
+        assert_eq!(runs.lines().count(), 2, "two gates, then the wait: {runs}");
+        let more = runs.lines().count();
+        quiet_ticks(&mut store, &mut herdr, &cfg, 4);
+        let runs = fs::read_to_string(&ran).unwrap_or_default();
+        assert_eq!(
+            runs.lines().count(),
+            more,
+            "no gate runs while the line waits: {runs}"
+        );
+
+        // A merge op queued anew starts the line again (a remerge, here: a new
+        // op of the same task).
+        store
+            .write(|tx| {
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({
+                        "branch": "heat/t1",
+                        "candidate": heads["heat/t1"].clone(),
+                        "remerge": true,
+                    }),
+                    created: 9_000,
+                })
+            })
+            .unwrap();
+        quiet_ticks(&mut store, &mut herdr, &cfg, 4);
+        let runs = fs::read_to_string(&ran).unwrap_or_default();
+        assert!(
+            runs.lines().count() > more,
+            "a merge op queued anew lets the line run again: {runs}"
+        );
+    }
+
+    /// T-572: a red round followed by one that lands closes the item.
+    #[test]
+    fn a_merge_that_lands_closes_the_red_item() {
+        let pair = Pair::new("batch-red-green", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        // Red with both members (a.txt is T-1's work), green for T-2 alone.
+        batch_of_two(&mut store, "test ! -f a.txt");
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let items = store
+            .read(|tx| tx.thread_messages("p", &merge_red_thread("p")))
+            .unwrap();
+        assert!(!items.is_empty(), "the red round was named");
+        assert!(
+            items.iter().all(|item| item.state == MsgState::Resolved),
+            "a merge landed, so the item closed: {items:?}"
+        );
+    }
+
+    /// T-572: two rounds that refused for different reasons keep today's
+    /// halving: the cause is in the batch, and a smaller batch may find it.
+    #[test]
+    fn different_refusals_keep_the_halving() {
+        let trio = Trio::new("batch-different");
+        let worktree = trio.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let heads = trio.heads();
+        let mut store = trio_world(&heads["heat/t1"], &heads["heat/t2"], &heads["heat/t3"]);
+        // Three members refuse for T-3's file, two for no file: different
+        // refusals, so the batch is halved as before.
+        batch_of(
+            &mut store,
+            "if test -f c.txt; then echo 'FAIL [browser] the cost case of c'; else echo 'FAIL [browser] the cost case of a'; fi; exit 1",
+            3,
+        );
+        for (task, branch) in [("T-1", "heat/t1"), ("T-2", "heat/t2"), ("T-3", "heat/t3")] {
+            pass(&mut store, task, &heads[branch], 10);
+        }
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        quiet_ticks(&mut store, &mut herdr, &cfg, 8);
+
+        let items = store
+            .read(|tx| tx.thread_messages("p", &merge_red_thread("p")))
+            .unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(
+            !items[0].urgent,
+            "different refusals are no repeat: {}",
+            items[0].body
+        );
+        assert!(items[0].body.contains("2 red rounds"), "{}", items[0].body);
+        // The cap halved and the line did not stop.
+        let caps = cfg.merges.batch_cap.lock().unwrap().clone();
+        assert!(
+            !caps.is_empty() && caps.values().all(|cap| *cap == 1),
+            "the batch halved: {caps:?}"
+        );
+        assert!(
+            store
+                .read(|tx| tx.get_meta(&red_wait_key("p")))
+                .unwrap()
+                .unwrap_or_default()
+                .is_empty(),
+            "the line is not waiting"
         );
     }
 
@@ -10219,6 +10822,26 @@ gate = "{gate}"
         }
     }
 
+    /// Like [`ticks`], but a step that runs nothing is fine (T-572: a batch
+    /// line that waits gates nothing until a merge op is queued anew).
+    fn quiet_ticks(
+        store: &mut Store,
+        herdr: &mut gear_herdr::fake::FakeHerdr,
+        cfg: &EngineCfg,
+        times: usize,
+    ) {
+        for _ in 0..times {
+            let seen = cfg.merges.progress();
+            let _ = merge_passed(store, herdr, cfg, "p", 30).unwrap();
+            if cfg.merges.running("p") {
+                assert!(
+                    cfg.merges.wait_progress(seen, WAIT),
+                    "the merge worker did not report within {WAIT:?}"
+                );
+            }
+        }
+    }
+
     /// Run the engine's merge step a few times, letting the worker run and be
     /// collected between the calls.
     fn ticks(
@@ -11187,6 +11810,7 @@ gate = "{project_gate}"
         other.seat = "q:heat".into();
         let finished = Arc::new(Mutex::new(Some(Finished {
             result: Report::Merged("q merged".into()),
+            red: None,
             at: 20,
         })));
         cfg.merges.workers.lock().unwrap().insert(
