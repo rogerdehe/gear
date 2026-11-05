@@ -70,23 +70,31 @@ pub fn build_with_agents(
         // A captain whose voyage finished (a paused one is still open) sees only its seat and what a person or another seat
         // sent it: no voyage report, goal, snapshot or engine item (the user,
         // 2026-11-05: Lawrence's finished M1 filled every `gear` call).
-        let sailing = seat.role != SeatRole::Captain || {
-            let milestone = crate::plan::current_voyage(tx, &ctx.project)?;
-            milestone.is_empty() || gear_board::stations::voyage_open(tx, &ctx.project, &milestone)?
+        //
+        // T-586: a voyage is open when any of its milestone's tasks is not
+        // terminal, not only the voyage that departed last. GEAR M6.2 ran
+        // without a depart line, so the page took the finished M6.1 and hid
+        // M-8020 while the doorbell rang it: the page follows open work, as
+        // the doorbell does.
+        let open_voyages = if seat.role == SeatRole::Captain {
+            open_voyages(tx, &ctx.project)?
+        } else {
+            Vec::new()
         };
+        let sailing = seat.role != SeatRole::Captain
+            || !open_voyages.is_empty()
+            || crate::plan::current_voyage(tx, &ctx.project)?.is_empty();
         if seat.role == SeatRole::Captain && sailing {
             lines.extend(
                 gear_board::voyage::reports(tx, &ctx.project, now)?
                     .iter()
                     .flat_map(|v| v.lines()),
             );
-            // The voyage's goal, bar and course (T-336): the same one text
-            // every captain output uses, right under the voyage report lines.
-            let milestone = crate::plan::current_voyage(tx, &ctx.project)?;
-            if !milestone.is_empty()
-                && gear_board::stations::voyage_open(tx, &ctx.project, &milestone)?
-            {
-                if let Some(goal) = gear_board::stations::goal_text(tx, &ctx.project, &milestone)? {
+            // The goal, bar and course of every voyage with open work (T-336,
+            // T-586): the same one text every captain output uses, right under
+            // the voyage report lines.
+            for milestone in &open_voyages {
+                if let Some(goal) = gear_board::stations::goal_text(tx, &ctx.project, milestone)? {
                     lines.push(goal);
                 }
             }
@@ -373,8 +381,9 @@ fn multi_page(
         for report in gear_board::voyage::reports(tx, project, now)? {
             lines.extend(report.lines());
         }
-        let milestone = crate::plan::current_voyage(tx, project)?;
-        if !milestone.is_empty() && gear_board::stations::voyage_open(tx, project, &milestone)? {
+        // The goal of every voyage with open work (T-586), not only of the one
+        // that departed last.
+        for milestone in open_voyages(tx, project)? {
             if let Some(goal) = gear_board::stations::goal_text(tx, project, &milestone)? {
                 lines.push(goal);
             }
@@ -459,6 +468,25 @@ fn multi_page(
         None => "next: gear".to_string(),
     });
     Ok((lines.join("\n"), views))
+}
+
+/// The milestones of the project's tasks whose voyage still has open work
+/// (T-586): `gear_board::stations::voyage_open` over every milestone of the
+/// project's tasks, in milestone order — the voyages the report lines carry.
+fn open_voyages(tx: &Tx<'_>, project: &str) -> GearResult<Vec<String>> {
+    let mut milestones: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for task in tx.tasks_of_project(project)? {
+        if let Some(milestone) = task.milestone {
+            milestones.insert(milestone);
+        }
+    }
+    let mut open = Vec::new();
+    for milestone in milestones {
+        if gear_board::stations::voyage_open(tx, project, &milestone)? {
+            open.push(milestone);
+        }
+    }
+    Ok(open)
 }
 
 /// The command that helps the seat move on (design/13). `first` is the first

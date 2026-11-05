@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1193 -->
+<!-- gear-plan project=gear base=1198 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -9,6 +9,8 @@ eta: 4h
 depart: now
 
 # Decisions
+- station M-8072: keep course | why: T-587, the last stage 1 task, moves to hull, which frees up after T-584 sooner than mast after T-585; stage 1 then ships without waiting for T-585 | else: time-box
+- station M-8048: keep course | why: the release does not wait for the whole voyage: feature stage 1 (T-578, T-579, T-582, T-583, T-587) ships to Carthage as soon as it merges, ahead of T-584..T-586 which sit behind it in each lane's queue; the projected 422m counts those too | else: time-box
 - 2026-11-05 16:40 hand-fix: T-581 conflicted with T-580 in dispatch.rs (both added tests at one place); dev merged into hull/t581 keeping both, dispatch tests 23/23, pushed 1f0736bf | why: merge conflict, a few lines
 - station M-8020: keep course | why: stage 1 tasks are on pace, the next release carries T-577..T-586
 - 2026-11-05 16:20 confirmed: M6.2 departs now (it ran without a depart line, so GEAR took M6.1 for the current voyage and hid M6.2's items) | why: the user said to depart M6.2 with the old team
@@ -328,7 +330,7 @@ estimate: 50
 deps: -
 fresh: seat branch naming, unrelated to features
 
-## T-585 [must] lane=hull milestone=M6.2
+## T-585 [must] lane=mast milestone=M6.2
 goal: A landing merges the captain's records. crates/gear-engine/src/finished.rs `reclaim`, before it lists leftovers: the captain's seat branch of the landed voyage (`expand_seat(seat_branch, project, "captain", <landed milestone>)`) is fetched; when it holds commits not on the integration branch, merge it in the merge worktree (as merge.rs opens it) with a merge commit `records: <project> <milestone>` and no gate (records are the captain's files; a conflict is not resolved), push the integration branch, then delete the branch on the remote and locally. Done once per landing (meta `records_merged:{project}:{milestone}`). A conflict or a push failure opens one captain item, thread `records:<milestone>`, naming the branch and the git error, and nothing is deleted. A branch with nothing new is only deleted. skills/gear/references/course.md §9: one line that the landing merges the captain's branch, so the captain only commits and pushes its records before landing.
 accept: Tests in finished.rs `mod tests` with a fixture remote (as merge tests build one): a captain branch with one records commit is merged into dev and deleted after a landing; a conflicting one opens the `records:M1` item and stays; a branch already on dev is only deleted; a second tick does nothing. Run only `make check CRATE=gear-engine TESTS='test(finished::)'`; the merge gate runs `make gate`.
 estimate: 50
@@ -347,6 +349,13 @@ goal: [feature 2b] A plan written before features moves to them in one apply, cr
 accept: Tests in crates/gear-app/tests/it/feature_plan_contract.rs: a running task given `feature:` is refused and keeps its base; an outside task depending on a member now depends on the carrier and the output names it; a member with an unmerged outside dep is held, and with a merged one it is not. Run only `make check CRATE=gear-app TESTS='test(feature)'`; the merge gate runs `make gate`.
 estimate: 40
 deps: T-578
+
+## T-588 [must] lane=mast milestone=M6.2
+goal: One meaning of "the current voyage", at its root. crates/gear-app/src/plan.rs `current_voyage`: among the departed voyages, the last departed one that still has a task that is not terminal; when none has, the last departed one (today's answer); when no voyage departed but a milestone has open tasks, that milestone (the one with the most open tasks, ties by name). Every caller (home, captain take, charter, admin, feed, doorbell `goal_line`, release, main.rs) then agrees with no change of its own; crates/gear-app/src/home.rs drops its own `open_voyages` and uses `current_voyage` again where T-586 replaced it, keeping T-586's test green. One doc comment says why (GEAR M6.2 ran without a depart line and every surface took the finished M6.1).
+accept: Unit tests next to current_voyage: last departed voyage finished and an older departed one still open gives the open one; nothing open gives the last departed; no departure and open tasks in M2 gives M2. A doorbell test that its goal line names the open voyage. Run only `make check CRATE=gear-app TESTS='test(current_voyage) | test(home)'` and `make check CRATE=gear-engine TESTS='test(doorbell::)'`; the merge gate runs `make gate`.
+estimate: 30
+deps: -
+fresh: current voyage, unrelated to records
 
 ## T-583 [now] lane=mast milestone=M6.2 required
 goal: [feature 7/7] The captain's skill. skills/gear/references/captain.md `# Queue` field list: `feature` (`F-<n>`: the task is part of a feature; members merge into the feature branch with no CI, deps between members release on that merge, and GEAR creates one integration task per feature that reaches the integration branch with one review and the full gate; at most `feature_max_tasks` members; a dep from outside names the integration task; members share the feature's issue). skills/gear/references/decompose.md: a rule that a capability of several small tasks is one feature, cut at decomposition (an issue in issue mode), and that small unrelated tasks stay without a feature.

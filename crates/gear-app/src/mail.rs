@@ -221,8 +221,16 @@ fn send_inner(
                         .flatten()
                         .and_then(|row| row.lane)
                     {
-                        let branch =
-                            crate::base::task_branch(&conventions, &ctx.project, &lane, task);
+                        // A task that names its own branch (a member of a
+                        // feature works on the feature's branch, M6.2) is
+                        // pushed there, not to the lane's task branch (T-579).
+                        let branch = crate::base::pushed_branch(
+                            store,
+                            &conventions,
+                            &ctx.project,
+                            &lane,
+                            task,
+                        )?;
                         crate::base::require_pushed(
                             &gate.worktree,
                             &conventions.remote,
@@ -255,7 +263,10 @@ fn send_inner(
                 .and_then(|row| row.lane);
             if let (true, Some(lane)) = (is_temp, lane) {
                 let conventions = crate::config::conventions_or_default(store, &ctx.project)?;
-                let branch = crate::base::task_branch(&conventions, &ctx.project, &lane, task);
+                // The reviewer's commit goes onto the task's branch, which for
+                // a member of a feature is the feature's branch (T-579).
+                let branch =
+                    crate::base::pushed_branch(store, &conventions, &ctx.project, &lane, task)?;
                 let worktree = std::env::current_dir().map_err(|error| {
                     GearError::new(
                         ErrorCode::BadFormat,
