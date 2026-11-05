@@ -1715,6 +1715,28 @@ impl<'s> Tx<'s> {
         Ok(messages)
     }
 
+    /// The messages of a project whose thread starts with `prefix` (T-568).
+    ///
+    /// A report written on a thread named after the tick (`branches:<ts>`)
+    /// replaces the one the last tick wrote, and the prefix is all the two
+    /// threads have in common.
+    pub fn messages_in_threads_starting(
+        &self,
+        project: &str,
+        prefix: &str,
+    ) -> GearResult<Vec<MessageRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(&message_select(
+                " WHERE project=?1 AND substr(thread, 1, length(?2))=?2 ORDER BY created, id",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, prefix], message_from_row)
+            .map_err(map_sqlite)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
+    }
+
     /// Direction results for one task attempt.
     pub fn direction_results_of_attempt(
         &self,
