@@ -571,11 +571,20 @@ pub fn merge_passed(
         // branch, each gated on the commit the one ahead of it lands.
         let parallel = config.conventions.merge_parallel.max(1) as usize;
         let single = cfg.merges.single.lock().unwrap().remove(&key);
+        // T-574: the merge the captain put first runs alone — never batched,
+        // never in a train — so nothing waits behind it and nothing changes
+        // under its gate. The mark is one-shot: it is cleared here, when the
+        // merge starts.
+        let alone = store.read(|tx| {
+            Ok(tx
+                .get_meta(&gear_app::plan::merge_first_key(project))?
+                .is_some_and(|marked| !marked.is_empty() && marked == task))
+        })?;
         // A batch merge (T-547): up to `cap` passed merges of this project are
         // merged into one worktree and gated once. `merge_parallel` is not
         // consulted then; a batch of one op takes the normal single path.
         let batch = config.conventions.merge_batch.max(1) as usize;
-        if pr.is_none() && batch > 1 && !single {
+        if pr.is_none() && batch > 1 && !single && !alone {
             let cap = cfg
                 .merges
                 .batch_cap
@@ -632,7 +641,7 @@ pub fn merge_passed(
                 }
             }
         }
-        if pr.is_none() && parallel > 1 && !single {
+        if pr.is_none() && parallel > 1 && !single && !alone {
             let mut train = vec![op.clone()];
             for later in ready.iter().skip(position + 1) {
                 if train.len() >= parallel {
@@ -711,6 +720,10 @@ pub fn merge_passed(
         // Submitted result (design §11.2 step 3).
         if matches!(op.state, OpState::Intended | OpState::Unknown) {
             store.write(|tx| tx.set_op_state(project, &op.id, OpState::Executing, None, now))?;
+        }
+        if alone {
+            // T-574: the captain's line is one-shot; it is used here.
+            store.write(|tx| tx.set_meta(&gear_app::plan::merge_first_key(project), ""))?;
         }
         // The other tasks of the project with a candidate: the merge waits for
         // the ones whose work its candidate carries (T-62).
@@ -1285,11 +1298,23 @@ fn waits_cleared(store: &mut Store, project: &str, ready: Vec<OpRow>) -> GearRes
 /// The merges of tasks the plan marks `now` run before the others, each group
 /// in its queue order (Prometheus, 2026-11-03: the user's top-priority test
 /// gate waited behind older ordinary merges on the shared merge line).
+/// The ready merges in the order they run (T-128, T-574): the captain's
+/// `- merge-first` task first, then the `now` tasks, then the rest.
 fn now_first(store: &mut Store, project: &str, ready: Vec<OpRow>) -> GearResult<Vec<OpRow>> {
     store.read(|tx| {
+        // T-574: the one merge the captain put first runs before every other,
+        // `now` ones included.
+        let first = tx
+            .get_meta(&gear_app::plan::merge_first_key(project))?
+            .unwrap_or_default();
+        let mut marked = Vec::new();
         let mut now = Vec::new();
         let mut rest = Vec::new();
         for op in ready {
+            if !first.is_empty() && op.task.as_deref() == Some(first.as_str()) {
+                marked.push(op);
+                continue;
+            }
             let urgent = match op.task.as_deref() {
                 Some(task) => tx
                     .get_task(project, task)?
@@ -1302,8 +1327,9 @@ fn now_first(store: &mut Store, project: &str, ready: Vec<OpRow>) -> GearResult<
                 rest.push(op);
             }
         }
-        now.extend(rest);
-        Ok(now)
+        marked.extend(now);
+        marked.extend(rest);
+        Ok(marked)
     })
 }
 
@@ -5967,6 +5993,8 @@ mod tests {
         PairOn,
         /// Two tasks both cut from `dev`: neither carries the other.
         PairFlat,
+        /// Three tasks both cut from `dev`: the merge order of T-574.
+        TrioFlat,
         /// Two tasks in a chain: T-2 carries T-1.
         Chain2,
         /// Three tasks in a chain.
@@ -6038,6 +6066,19 @@ mod tests {
                         review: "r2",
                     },
                 ],
+                Shape::TrioFlat => ["t1", "t2", "t3"]
+                    .into_iter()
+                    .zip(["a.txt", "b.txt", "c.txt"])
+                    .zip(["a", "b", "c"])
+                    .zip(["r1", "r2", "r3"])
+                    .map(|(((task, file), subject), review)| Branch {
+                        task,
+                        base: "dev",
+                        file,
+                        subject,
+                        review,
+                    })
+                    .collect(),
                 Shape::Chain2 => vec![chain("t1", "dev"), chain("t2", "heat/t1")],
                 Shape::Chain3 => vec![
                     chain("t1", "dev"),
@@ -6069,6 +6110,7 @@ mod tests {
         static TASK: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         static PAIR_ON: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         static PAIR_FLAT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        static TRIO_FLAT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         static CHAIN2: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         static CHAIN3: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         static CHILD: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
@@ -6076,6 +6118,7 @@ mod tests {
             Shape::Task => &TASK,
             Shape::PairOn => &PAIR_ON,
             Shape::PairFlat => &PAIR_FLAT,
+            Shape::TrioFlat => &TRIO_FLAT,
             Shape::Chain2 => &CHAIN2,
             Shape::Chain3 => &CHAIN3,
             Shape::ChildWeb => &CHILD,
@@ -7968,16 +8011,103 @@ mod tests {
             .unwrap();
     }
 
-    /// The project merges in batches of two, with `gate` as its gate (T-547).
-    fn batch_of_two(store: &mut Store, gate: &str) {
+    /// Three tasks of one project, each cut from `dev` (T-574's merge order).
+    struct Trio {
+        root: PathBuf,
+        work: PathBuf,
+    }
+
+    impl Trio {
+        fn new(name: &str) -> Trio {
+            let root = scratch_root(name, Shape::TrioFlat);
+            let work = root.join("work");
+            Trio { root, work }
+        }
+
+        fn merge_worktree(&self) -> gear_herdr::Worktree {
+            let path = self.root.join("merge");
+            sh(
+                &self.root,
+                &format!(
+                    "git -C {} worktree add -q -b p/merge/home {} origin/dev",
+                    self.work.display(),
+                    path.display()
+                ),
+            );
+            gear_herdr::Worktree {
+                workspace_id: "wt-merge".into(),
+                pane_id: "wt-merge:p1".into(),
+                path: path.display().to_string(),
+                branch: "p/merge/home".into(),
+            }
+        }
+
+        fn heads(&self) -> std::collections::BTreeMap<String, String> {
+            branch_heads(&self.root)
+        }
+    }
+
+    impl Drop for Trio {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// A project with the three tasks of a [`Trio`], all handed in.
+    fn trio_world(candidate_a: &str, candidate_b: &str, candidate_c: &str) -> Store {
+        let mut store = pair_world(candidate_a, candidate_b);
+        store
+            .write(|tx| {
+                tx.insert_task(&gear_store::TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-3".into(),
+                    rank: 3,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: 0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-3", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-3", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-3", 1, 1, candidate_c, "report", 0)?;
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// The project merges in batches of `size`, with `gate` as its gate
+    /// (T-547).
+    fn batch_of(store: &mut Store, gate: &str, size: usize) {
         store
             .write(|tx| {
                 let mut project = tx.get_project("p")?.unwrap();
-                project.config_toml = config_text(gate)
-                    .replace("[conventions]\n", "[conventions]\nmerge_batch = 2\n");
+                project.config_toml = config_text(gate).replace(
+                    "[conventions]\n",
+                    &format!("[conventions]\nmerge_batch = {size}\n"),
+                );
                 tx.update_project(&project)
             })
             .unwrap();
+    }
+
+    /// The project merges in batches of two, with `gate` as its gate (T-547).
+    fn batch_of_two(store: &mut Store, gate: &str) {
+        batch_of(store, gate, 2);
     }
 
     /// A batch merge (T-547): the two passed merges are merged into one
@@ -8104,6 +8234,70 @@ mod tests {
 
         let line = fs::read_to_string(&got).unwrap_or_default();
         assert_eq!(line.trim(), "p o1 T-1 T-2");
+    }
+
+    /// T-574: the captain's `- merge-first T-<n>` runs before every other ready
+    /// merge — the batch they would form — and alone (Prometheus, 2026-11-05:
+    /// T-738 held the fix every red round waited for, and its merge was last
+    /// of fifteen).
+    #[test]
+    fn a_merge_first_task_merges_before_the_batch() {
+        let trio = Trio::new("merge-first");
+        let worktree = trio.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let heads = trio.heads();
+        let mut store = trio_world(&heads["heat/t1"], &heads["heat/t2"], &heads["heat/t3"]);
+        // The gate writes whom it judged: one task when the merge runs alone.
+        let ran = trio.root.join("gate-runs");
+        batch_of(
+            &mut store,
+            &format!("printenv GEAR_GATE_TASKS >> {}; true", ran.display()),
+            3,
+        );
+        for (task, branch) in [("T-1", "heat/t1"), ("T-2", "heat/t2"), ("T-3", "heat/t3")] {
+            pass(&mut store, task, &heads[branch], 10);
+        }
+        // The captain puts the last of the three first.
+        store
+            .write(|tx| tx.set_meta(&gear_app::plan::merge_first_key("p"), "T-3"))
+            .unwrap();
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        // The merge runs alone, then its report is collected on the next step.
+        tick_step(&mut store, &mut herdr, &cfg, 30);
+        tick_step(&mut store, &mut herdr, &cfg, 31);
+
+        assert_eq!(op_state(&mut store, "O-3"), Some(OpState::Confirmed));
+        assert_ne!(op_state(&mut store, "O-1"), Some(OpState::Confirmed));
+        assert_ne!(op_state(&mut store, "O-2"), Some(OpState::Confirmed));
+        let runs = fs::read_to_string(&ran).unwrap_or_default();
+        assert_eq!(runs.lines().next(), Some("T-3"), "{runs}");
+        // The line is one-shot: the mark is used.
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&gear_app::plan::merge_first_key("p")))
+                .unwrap()
+                .unwrap_or_default(),
+            "",
+            "the mark is cleared when its merge starts"
+        );
+
+        // The other two land together afterwards.
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Confirmed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+        let runs = fs::read_to_string(&ran).unwrap_or_default();
+        assert!(
+            runs.lines()
+                .any(|line| line.contains("T-1") && line.contains("T-2")),
+            "the rest batch together: {runs}"
+        );
     }
 
     /// T-547: a red batch is halved — its first merge runs alone and fails as
