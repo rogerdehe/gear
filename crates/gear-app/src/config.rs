@@ -416,6 +416,14 @@ pub struct TempsSection {
 /// hand-in is reviewed.
 pub const MAX_TASK_MIN: u32 = 60;
 
+/// The default branch of a feature (M6.2): its members merge into it, and the
+/// feature reaches the integration branch through one integration task.
+pub const FEATURE_BRANCH: &str = "{project}/feature/{feature}";
+
+/// The default cap on a feature's tasks (M6.2): a feature holds at most this
+/// many tasks, so a set of work bigger than this is a voyage of its own.
+pub const FEATURE_MAX_TASKS: u32 = 10;
+
 /// The default age, in minutes, past which a task's branch on the remote is
 /// named to the captain: a branch of a voyage is meant to be merged (or its
 /// task cancelled) within this time; one that lives longer means its work is
@@ -465,6 +473,18 @@ pub struct Conventions {
     /// is split: the task whose changes match the paths the gate names fails,
     /// else the batch is halved. Default 1: each merge is gated alone.
     pub merge_batch: u32,
+    /// The branch a feature's members merge into (M6.2): a template with
+    /// `{project}` and `{feature}` filled in, and one that must name
+    /// `{feature}`. Default `{project}/feature/{feature}`.
+    pub feature_branch: String,
+    /// A shell command run on the feature branch after a member merges
+    /// (M6.2), for a feature whose own checks are cheaper than the full gate.
+    /// Absent = none.
+    #[serde(default)]
+    pub feature_check: Option<String>,
+    /// How many tasks one feature may hold (M6.2): more than this is a voyage
+    /// of its own. Default 10.
+    pub feature_max_tasks: u32,
     /// A lane working this many minutes without a push is asked to tell the
     /// captain why. Default 20.
     pub push_interval_min: u32,
@@ -533,6 +553,9 @@ impl Default for Conventions {
             branch_max_per_lane: BRANCH_MAX_PER_LANE,
             merge_parallel: 1,
             merge_batch: 1,
+            feature_branch: FEATURE_BRANCH.to_string(),
+            feature_check: None,
+            feature_max_tasks: FEATURE_MAX_TASKS,
             push_interval_min: PUSH_INTERVAL_MIN,
             push_reply_min: PUSH_REPLY_MIN,
             gate: String::new(),
@@ -1483,6 +1506,25 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         issues.push(issue(
             "conventions.merge_batch",
             "must be at least one (the default is 1: each merge is gated alone)".to_string(),
+        ));
+    }
+    // A feature branch template without `{feature}` names one branch for every
+    // feature (M6.2): the members of two features would merge into one branch.
+    if !cfg.conventions.feature_branch.contains("{feature}") {
+        issues.push(issue(
+            "conventions.feature_branch",
+            format!(
+                "must name `{{feature}}`, so each feature has a branch of its own (the default is `{FEATURE_BRANCH}`)"
+            ),
+        ));
+    }
+    // A feature that may hold no task at all holds nothing (M6.2).
+    if cfg.conventions.feature_max_tasks == 0 {
+        issues.push(issue(
+            "conventions.feature_max_tasks",
+            format!(
+                "must be at least one task (the default is {FEATURE_MAX_TASKS}: bigger work is a voyage of its own)"
+            ),
         ));
     }
     // A batch merge and a merge train are two answers to the same queue: a

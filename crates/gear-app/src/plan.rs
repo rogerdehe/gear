@@ -840,6 +840,11 @@ fn apply_queue(
                 if let Some(by) = &item.carried_by {
                     tx.set_task_carried_by(project, &id, by)?;
                 }
+                // The `feature:` of a task (M6.2): its work merges into the
+                // feature's branch, not the integration branch.
+                if let Some(feature) = &item.feature {
+                    tx.set_task_feature(project, &id, feature)?;
+                }
                 // The `audit:` mark of a task (T-505): a voyage audit is run
                 // by reviewers and never assigned to its lane.
                 if let Some(audit) = item.audit {
@@ -929,6 +934,11 @@ fn apply_queue(
                 }
                 if let Some(by) = &item.carried_by {
                     tx.set_task_carried_by(project, id, by)?;
+                }
+                // The `feature:` of a task (M6.2): a block that names one sets
+                // it; a block without it keeps the feature the task has.
+                if let Some(feature) = &item.feature {
+                    tx.set_task_feature(project, id, feature)?;
                 }
                 // The `audit:` mark of a task (T-505): a block that names the
                 // field sets it; a block without it keeps the mark.
@@ -3162,6 +3172,11 @@ pub fn show(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<String> {
     }
     if let Some(by) = tx.task_carried_by(project, task)? {
         text.push_str(&format!("carried-by: {by}\n"));
+    }
+    // The `feature:` of a task (M6.2): the feature whose branch its work
+    // merges into.
+    if let Some(feature) = tx.task_feature(project, task)? {
+        text.push_str(&format!("feature: {feature}\n"));
     }
     // The `audit:` mark of a task (T-505): a voyage audit, run by reviewers.
     if tx.task_audit(project, task)?.is_some() {

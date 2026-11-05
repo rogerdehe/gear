@@ -3289,6 +3289,54 @@ impl<'s> Tx<'s> {
         self.set_meta(&format!("task_carried_by:{project}:{task}"), by)
     }
 
+    /// The feature a task belongs to (`feature: F-<n>`, M6.2): its work merges
+    /// into the feature's branch instead of the integration branch. None when
+    /// the task belongs to no feature.
+    pub fn task_feature(&self, project: &str, task: &str) -> GearResult<Option<String>> {
+        Ok(self
+            .get_meta(&format!("task_feature:{project}:{task}"))?
+            .filter(|feature| !feature.is_empty()))
+    }
+
+    /// Set the feature of a task; an empty value clears it.
+    pub fn set_task_feature(&self, project: &str, task: &str, feature: &str) -> GearResult<()> {
+        self.set_meta(&format!("task_feature:{project}:{task}"), feature)
+    }
+
+    /// The task that carries a feature (M6.2): the generated integration task
+    /// whose candidate is the feature's branch and whose merge brings the
+    /// whole feature to the integration branch. None while no such task is
+    /// open.
+    pub fn feature_carrier(&self, project: &str, feature: &str) -> GearResult<Option<String>> {
+        Ok(self
+            .get_meta(&format!("feature_carrier:{project}:{feature}"))?
+            .filter(|task| !task.is_empty()))
+    }
+
+    /// Set the task that carries a feature; an empty value clears it.
+    pub fn set_feature_carrier(&self, project: &str, feature: &str, task: &str) -> GearResult<()> {
+        self.set_meta(&format!("feature_carrier:{project}:{feature}"), task)
+    }
+
+    /// The branch a task's work really goes on, when the project named one
+    /// (M6.2): a member of a feature works on the feature's branch, not on its
+    /// own `task_branch`. None when the task's branch is the template's.
+    pub fn task_branch_override(&self, project: &str, task: &str) -> GearResult<Option<String>> {
+        Ok(self
+            .get_meta(&format!("task_branch_override:{project}:{task}"))?
+            .filter(|branch| !branch.is_empty()))
+    }
+
+    /// Set the branch a task's work goes on; an empty value clears it.
+    pub fn set_task_branch_override(
+        &self,
+        project: &str,
+        task: &str,
+        branch: &str,
+    ) -> GearResult<()> {
+        self.set_meta(&format!("task_branch_override:{project}:{task}"), branch)
+    }
+
     /// The `audit:` mark of a task (T-505): the task is a voyage audit, run by
     /// reviewers and never assigned to its lane. None when the block does not
     /// mark it.

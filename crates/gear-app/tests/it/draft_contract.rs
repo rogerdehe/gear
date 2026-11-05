@@ -343,3 +343,23 @@ fn a_queue_header_carries_the_station() {
             .contains("`station=` needs a station id")
     );
 }
+
+/// M6.2: `feature: F-<n>` names the feature a task belongs to; `-` clears it,
+/// and anything but `F-<n>` is refused with the line named.
+#[test]
+fn a_feature_line_is_parsed_and_a_bad_one_is_refused() {
+    let d = parse("<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [must] lane=heat\nfeature: F-3\ngoal: A\naccept: a\ndeps: -\n").unwrap();
+    assert_eq!(d.queue[0].feature.as_deref(), Some("F-3"));
+
+    let d = parse("<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [must] lane=heat\nfeature: -\ngoal: A\naccept: a\ndeps: -\n").unwrap();
+    assert_eq!(d.queue[0].feature.as_deref(), Some(""));
+
+    for value in ["x", "F-", "F-3x", "f-3", "3"] {
+        let text = format!(
+            "<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [must] lane=heat\nfeature: {value}\ngoal: A\naccept: a\ndeps: -\n"
+        );
+        let detail = bad_line(&text);
+        assert!(detail.starts_with("line 4: "), "{value}: {detail}");
+        assert!(detail.contains("`feature` is `F-<n>`"), "{value}: {detail}");
+    }
+}
