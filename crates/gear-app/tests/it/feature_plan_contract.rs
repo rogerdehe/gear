@@ -342,16 +342,17 @@ fn a_re_apply_adds_a_member_to_the_carriers_deps() {
         .unwrap()
         .unwrap();
 
-    run_at(
+    let added = run_at(
         &mut s,
         "# Queue\n## NEW [could] lane=wire\nfeature: F-1\nissue: #12\ngoal: C\naccept: c\nestimate: 30\ndeps: -\n",
         "r2",
     )
     .unwrap();
+    let third = added.created[0].clone();
     let row = task(&mut s, &carrier);
     assert_eq!(
         row.deps,
-        vec!["T-1".to_string(), "T-2".to_string(), "T-3".to_string()],
+        vec!["T-1".to_string(), "T-2".to_string(), third.clone()],
         "the carrier waits for every member"
     );
     assert_eq!(row.issue, Some(12), "the carrier keeps the issue");
