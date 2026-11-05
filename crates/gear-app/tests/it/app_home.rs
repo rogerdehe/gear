@@ -940,3 +940,82 @@ fn a_removed_config_file_cannot_be_read() {
         format!("! config file {canonical} cannot be read (config v1 still runs)")
     );
 }
+
+/// A captain whose voyage finished: the page leaves out the finished voyage's
+/// engine items (its station here) and still shows a seat take, the items the
+/// doorbell also rings for (Lawrence M-875: the doorbell rang for the take
+/// while the page hid it).
+#[test]
+fn a_finished_voyage_hides_its_own_items_and_shows_a_seat_take() {
+    let mut s = world();
+    s.write(|tx| {
+        tx.upsert_voyage(&gear_store::VoyageRow {
+            project: "p".into(),
+            milestone: "M1".into(),
+            title: "the goal".into(),
+            done: Some("the goal is met".into()),
+            bar: None,
+            eta: Some("4h".into()),
+            departure: Some(NOW - 3600),
+            departure_tasks: Some(1),
+            departure_estimate_min: Some(30),
+            updated: NOW - 3600,
+        })?;
+        tx.insert_task(&gear_store::TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: "p".into(),
+            id: "T-1".into(),
+            rank: 1,
+            state: gear_model::TaskState::Done,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: Some("M1".into()),
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: Some(30),
+            issue: None,
+            updated: NOW,
+        })
+    })
+    .unwrap();
+    insert(
+        &mut s,
+        "station:M1",
+        "engine",
+        "p:captain",
+        MsgKind::System,
+        MsgState::Open,
+        "Station M1 [3 done]",
+        NOW,
+    );
+    insert(
+        &mut s,
+        "captain:take",
+        "engine",
+        "p:captain",
+        MsgKind::System,
+        MsgState::Open,
+        "pane w1:p1 took the captain",
+        NOW,
+    );
+
+    let home = home::build(
+        &mut s,
+        &seat_env("captain", CAP_PANE),
+        Some(&fp(CAP_PANE, "codex")),
+        NOW + 1,
+    )
+    .unwrap();
+
+    assert!(home.text.contains("took the captain"), "{}", home.text);
+    assert!(!home.text.contains("Station M1"), "{}", home.text);
+    assert!(!home.text.contains("Your goal"), "{}", home.text);
+}
