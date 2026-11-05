@@ -193,3 +193,33 @@ fn waiting_task_blocks_continue_and_assign() {
     let v = s.read(|tx| lane_view(tx, &seat, None, T0)).unwrap();
     assert!(v.attempt.is_none() && v.ready_tasks.is_empty());
 }
+
+/// A dependency holds a task's first start only: a rework (the lane already
+/// worked on the task) never waits on a merge; the deps then hold only its
+/// merge.
+#[test]
+fn a_rework_does_not_wait_for_its_deps() {
+    let (mut s, seat) = world(
+        &[
+            task("T-1", 1, "heat", TaskState::Running, "must", &[]),
+            task("T-2", 2, "heat", TaskState::Ready, "must", &["T-1"]),
+        ],
+        &[{
+            let mut rejected = attempt("T-2", AttemptState::Rejected);
+            rejected.n = 1;
+            rejected
+        }],
+    );
+    let ready = s
+        .read(|tx| lane_view(tx, &seat, None, T0))
+        .unwrap()
+        .ready_tasks
+        .iter()
+        .map(|t| t.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ready,
+        vec!["T-2".to_string()],
+        "the rework starts while T-1 is unmerged"
+    );
+}
