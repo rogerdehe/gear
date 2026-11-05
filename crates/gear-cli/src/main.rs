@@ -3517,10 +3517,13 @@ fn hand_in_reply(
         .and_then(|row| row.lane)
         .or_else(|| env.ctx.as_ref().map(|ctx| ctx.seat.clone()))
         .unwrap_or_default();
-    // The branch is the project's own template (T-252); a project whose config
-    // cannot be read keeps the name GEAR uses.
+    // The branch is the task's own (T-252, T-602): the branch the task names
+    // when it names one (a member of a feature pushes onto the feature's
+    // branch), else the project's own template. A project whose config cannot be
+    // read keeps the name GEAR uses.
     let conventions = gear_app::config::conventions_or_default(store, &project).unwrap_or_default();
-    let branch = gear_app::base::task_branch(&conventions, &project, &lane, task);
+    let branch =
+        store.read(|tx| gear_app::base::task_branch_of(tx, &conventions, &project, &lane, task))?;
     Ok(Some(format!(
         "Handed in. End your turn: the next task comes by itself; do not push to {branch} again."
     )))

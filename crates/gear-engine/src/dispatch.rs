@@ -555,6 +555,12 @@ pub fn packet_ref(task: &str) -> String {
 /// The task branch a lane works on (T-253): the project's
 /// `[conventions].task_branch` template with `{project}`, `{lane}` and `{n}`
 /// filled in — `<lane>/t<n>` by default (17 §3).
+///
+/// This is the template only: a caller that knows the task and has no store in
+/// hand (`config.rs` validation, a name built from a config alone) keeps it,
+/// and a caller with a store names a task's branch with
+/// `gear_app::base::task_branch_of` (T-602), which reads the task's own branch
+/// first.
 pub fn task_branch(template: &str, project: &str, lane: &str, task: &str) -> String {
     gear_model::branch::expand(template, project, lane, task)
 }
@@ -1137,10 +1143,9 @@ pub fn intend_dispatch(
                 // a feature's integration task is its owner lane's rework on the
                 // feature branch, so the fix lands there and the task hands in
                 // its tip.
-                let branch = match crate::feature::branch_override(tx, project, task)? {
-                    Some(branch) => branch,
-                    None => task_branch(&conventions.task_branch, project, &seat.name, task),
-                };
+                // T-602: one place names the branch of a known task.
+                let branch =
+                    gear_app::base::task_branch_of(tx, &conventions, project, &seat.name, task)?;
                 // T-580: a feature task starts from its own base branch.
                 let integration = start_base(tx, project, seat, task);
                 let mut text = if attempt.n == 1 {
