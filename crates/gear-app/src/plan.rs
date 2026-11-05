@@ -2776,12 +2776,14 @@ fn remerge(
             // that carries the rework (Prometheus 2026-11-05: `- remerge T-722`
             // was refused as "already unknown, not failed" while the op sat
             // unknown and nothing would ever take it).
+            // The unknown op is closed, so only the new op below is queued
+            // (Prometheus T-716, 2026-11-05: both were left intended).
             gear_model::OpState::Unknown => {
                 tx.set_op_state(
                     project,
                     &last_id,
-                    gear_model::OpState::Intended,
-                    Some("remerge: queued again by the captain"),
+                    gear_model::OpState::Failed,
+                    Some("remerge: superseded by the captain's remerge"),
                     now,
                 )?;
             }

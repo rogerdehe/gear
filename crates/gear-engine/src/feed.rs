@@ -43,6 +43,8 @@ const STARTABLE_AGAIN: &str = "a task can start again";
 const NO_TASK_LEFT: &str = "no task is left in the voyage";
 /// Why the item closes when every task left is being worked on (T-575).
 const IN_PROGRESS: &str = "a task is in progress";
+/// The word a stalled item closes with while a merge is queued or running.
+const MERGE_IN_FLIGHT: &str = "a merge is queued or running";
 
 /// How many of the tasks left the stalled item names (T-560).
 const STALLED_SHOWN: usize = 5;
@@ -613,6 +615,24 @@ fn stalled(tx: &Tx<'_>, project: &str, captain: &str, now: Ts) -> GearResult<Opt
             NO_TASK_LEFT
         };
         return close_stalled(tx, project, captain, now, reason);
+    }
+    // A merge queued or running moves the voyage: the tasks left wait for it,
+    // and they start when it lands (Prometheus 2026-11-05: eight items while
+    // T-748's merge ran).
+    let merging = [
+        gear_model::OpState::Intended,
+        gear_model::OpState::Executing,
+        gear_model::OpState::Submitted,
+        gear_model::OpState::Unknown,
+    ]
+    .into_iter()
+    .map(|state| tx.ops_in_state(project, state))
+    .collect::<GearResult<Vec<_>>>()?
+    .into_iter()
+    .flatten()
+    .any(|op| op.kind == gear_model::OpKind::Merge);
+    if merging {
+        return close_stalled(tx, project, captain, now, MERGE_IN_FLIGHT);
     }
     let left = stuck;
     let seats = tx.seats_of_project(project)?;
