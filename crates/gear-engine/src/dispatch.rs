@@ -2126,12 +2126,11 @@ mod tests {
     // feature branch.
     // ----------------------------------------------------------------
 
-    /// T-592: attempt 1 of a feature's integration task is the engine's hand-in
-    /// and is never delivered; once the task has an attempt (a review or a
-    /// merge gate failed it), its rework IS delivered to the owner lane, and the
-    /// packet names the feature branch so the fix lands there.
-    #[test]
-    fn an_integration_tasks_rework_is_delivered_to_the_owner_lane_on_the_feature_branch() {
+    /// T-592: a project with lane `heat`, one ready task of its own (`T-1`) and
+    /// the feature `F-1`'s integration task `T-9`, which names the branch
+    /// `p/feature/f-1`. `attempt` is the state of `T-9`'s first attempt; `None`
+    /// means the engine has not handed it in yet.
+    fn integration_task_world(attempt: Option<AttemptState>) -> gear_store::Store {
         let mut store = gear_store::Store::open_in_memory().unwrap();
         store
             .write(|tx| {
@@ -2151,58 +2150,50 @@ mod tests {
                 let mut carrier = ready_task("T-9");
                 carrier.rank = 2;
                 tx.insert_task(&carrier)?;
-                tx.set_meta("task_branch_override:p:T-9", "p/feature/f-1")
+                tx.set_meta("task_branch_override:p:T-9", "p/feature/f-1")?;
+                if let Some(state) = attempt {
+                    tx.insert_attempt(&AttemptRow {
+                        session_ref: None,
+                        session_cli: None,
+                        session_action: None,
+                        sent_at: None,
+                        project: "p".into(),
+                        task: "T-9".into(),
+                        n: 1,
+                        seat: "p:heat".into(),
+                        generation: 1,
+                        contract_version: 1,
+                        adopted_version: 1,
+                        pending_update: None,
+                        state,
+                        candidate: Some("abc1234".into()),
+                        report: None,
+                        safe_point: None,
+                        started: NOW,
+                        updated: NOW,
+                    })?;
+                }
+                Ok(())
             })
             .unwrap();
-
-        // Attempt 1 has not run: the integration task is not the lane's work.
-        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
-        let ready = store.read(|tx| ready_tasks_of(tx, &seat)).unwrap();
-        assert_eq!(
-            ready
-                .iter()
-                .map(|task| task.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["T-1"],
-            "attempt 1 of the integration task is never delivered"
-        );
-
-        // The engine handed attempt 1 in and the review failed it.
         store
-            .write(|tx| {
-                tx.insert_attempt(&AttemptRow {
-                    session_ref: None,
-                    session_cli: None,
-                    session_action: None,
-                    sent_at: None,
-                    project: "p".into(),
-                    task: "T-9".into(),
-                    n: 1,
-                    seat: "p:heat".into(),
-                    generation: 1,
-                    contract_version: 1,
-                    adopted_version: 1,
-                    pending_update: None,
-                    state: AttemptState::Rejected,
-                    candidate: Some("abc1234".into()),
-                    report: None,
-                    safe_point: None,
-                    started: NOW,
-                    updated: NOW,
-                })
-            })
-            .unwrap();
-        let ready = store.read(|tx| ready_tasks_of(tx, &seat)).unwrap();
-        assert_eq!(
-            ready
-                .iter()
-                .map(|task| task.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["T-1", "T-9"],
-            "the integration task's rework is the owner lane's work"
-        );
+    }
 
-        let text = assign_delivery_text(&mut store, "T-9", 2);
+    /// The ids of the lane's ready work, in order.
+    fn ready_ids(store: &mut gear_store::Store) -> Vec<String> {
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        store
+            .read(|tx| ready_tasks_of(tx, &seat))
+            .unwrap()
+            .into_iter()
+            .map(|task| task.id)
+            .collect()
+    }
+
+    /// The rework of an integration task goes to the owner lane, and its packet
+    /// names the feature branch.
+    fn assert_the_rework_lands_on_the_feature_branch(store: &mut gear_store::Store) {
+        let text = assign_delivery_text(store, "T-9", 2);
         assert!(text.starts_with("Rework T-9 attempt 2"), "{text}");
         assert!(
             text.contains("Branch: p/feature/f-1."),
@@ -2216,6 +2207,42 @@ mod tests {
             !text.contains("heat/t9"),
             "the work does not go to the lane's own branch: {text}"
         );
+    }
+
+    /// T-592: attempt 1 of a feature's integration task is the engine's hand-in
+    /// and is never delivered; once the review failed that attempt, its rework
+    /// IS delivered to the owner lane, on the feature branch.
+    #[test]
+    fn an_integration_tasks_rework_is_delivered_to_the_owner_lane_on_the_feature_branch() {
+        let mut store = integration_task_world(None);
+        assert_eq!(
+            ready_ids(&mut store),
+            vec!["T-1".to_string()],
+            "attempt 1 of the integration task is never delivered"
+        );
+
+        // The engine handed attempt 1 in and the review failed it.
+        let mut store = integration_task_world(Some(AttemptState::Rejected));
+        assert_eq!(
+            ready_ids(&mut store),
+            vec!["T-1".to_string(), "T-9".to_string()],
+            "the integration task's rework is the owner lane's work"
+        );
+        assert_the_rework_lands_on_the_feature_branch(&mut store);
+    }
+
+    /// T-592: the same holds when the integration task's merge failed its full
+    /// gate and the captain settled a fail: the task is Ready with its accepted
+    /// attempt kept, and its rework is the owner lane's on the feature branch.
+    #[test]
+    fn an_integration_tasks_merge_gate_rework_is_the_owner_lanes_on_the_feature_branch() {
+        let mut store = integration_task_world(Some(AttemptState::Accepted));
+        assert_eq!(
+            ready_ids(&mut store),
+            vec!["T-1".to_string(), "T-9".to_string()],
+            "the reopened integration task is the owner lane's work"
+        );
+        assert_the_rework_lands_on_the_feature_branch(&mut store);
     }
 
     // ----------------------------------------------------------------
