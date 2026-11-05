@@ -2735,17 +2735,31 @@ fn merge_one_locked(
     };
     let tasks = vec![op.task.clone().unwrap_or_default()];
     let round = gate_round(op);
-    if let Err(step) = run_gate(
-        worktree,
-        repo,
-        lock,
-        remote,
+    // T-573: a merge that carries only reports skips the gate (the user,
+    // 2026-11-05: a merge holding one review record still paid a four-to-five
+    // minute CI round). The conflict check ran above and the push below is the
+    // same; only the gate step is skipped, and the merge result says so.
+    let dir = Path::new(&worktree.path);
+    let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(lock));
+    let mut prepared = prepared;
+    prepared.no_gate = reports_only(
+        &changed_paths(&git, dir, &prepared.base, "HEAD"),
+        &repo.voyage_dir,
         &op.project,
-        &round,
-        &tasks,
-        probe,
-    ) {
-        return step;
+    );
+    if !prepared.no_gate {
+        if let Err(step) = run_gate(
+            worktree,
+            repo,
+            lock,
+            remote,
+            &op.project,
+            &round,
+            &tasks,
+            probe,
+        ) {
+            return step;
+        }
     }
     land_merge(worktree, repo, lock, remote, pr, commit, probe, &prepared)
 }
@@ -2761,6 +2775,12 @@ struct Prepared {
     review_ref: String,
     has_review: bool,
     pushed: Pushed,
+    /// What the merge was built on: the remote integration branch, or the
+    /// commit of the train's stage ahead (T-573 reads the changed files from
+    /// it).
+    base: String,
+    /// T-573: the merge carries only reports, so no gate ran for it.
+    no_gate: bool,
 }
 
 /// The attempt the merge op names, as the review message's `{attempt}`.
@@ -3183,6 +3203,8 @@ fn prepare_merge(
         review_ref,
         has_review,
         pushed,
+        base: base_ref,
+        no_gate: false,
     })
 }
 
@@ -3372,6 +3394,10 @@ fn closed_and_line(
         None => git(dir, &["log", "-1", "--oneline"]).unwrap_or_default(),
     };
     let mut line = format!("merged {task} into {integration}: {head}");
+    // T-573: the merge says why no gate ran.
+    if prepared.no_gate {
+        line.push_str("\nno gate: reports only");
+    }
     if !closed.is_empty() {
         line.push_str(&format!("\nclosed on {remote_name}: {}", closed.join(", ")));
     }
@@ -3654,7 +3680,33 @@ fn run_batch(
     // line names it (F2 of the review).
     let mut heads: Vec<String> = Vec::new();
     let mut base: Option<String> = None;
-    for (index, batch_op) in ops.iter().enumerate() {
+    // T-573: the members that carry only reports merge first. They need no
+    // gate, so a gated member's red gate never holds them back; `changed_paths`
+    // before a build reads the candidate against the remote integration branch,
+    // and a candidate that is not here yet counts as gated, never as a report.
+    let order: Vec<usize> = {
+        let mut only = Vec::new();
+        let mut gated = Vec::new();
+        for (index, batch_op) in ops.iter().enumerate() {
+            let candidate = batch_op.op.payload["candidate"]
+                .as_str()
+                .unwrap_or_default();
+            let paths = if candidate.is_empty() {
+                Vec::new()
+            } else {
+                changed_paths(&git, dir, &first_base, candidate)
+            };
+            if reports_only(&paths, &repo.voyage_dir, &batch_op.op.project) {
+                only.push(index);
+            } else {
+                gated.push(index);
+            }
+        }
+        only.extend(gated);
+        only
+    };
+    for index in order {
+        let batch_op = &ops[index];
         let mut probe = Probe::new(
             batch_op.op.task.as_deref().unwrap_or("-"),
             batch_op.op.created,
@@ -3699,6 +3751,10 @@ fn run_batch(
                     .unwrap_or_default();
                 heads.push(head.clone());
                 base = Some(head);
+                let mut prepared = prepared;
+                // T-573: the merge's own changed files, its review commit
+                // included, decide whether a gate is needed at all.
+                prepared.no_gate = reports_only(&changed, &repo.voyage_dir, &batch_op.op.project);
                 built.push((index, prepared, changed, probe));
             }
             // A merge that cannot be built steps aside (as in a train): the
@@ -3735,97 +3791,102 @@ fn run_batch(
         .iter()
         .map(|(index, ..)| ops[*index].op.task.clone().unwrap_or_default())
         .collect();
-    if let Err(step) = run_gate(
-        worktree,
-        repo,
-        &lock,
-        remote,
-        &project,
-        &round,
-        &tasks,
-        &mut built[0].3,
-    ) {
-        let clear = matches!(&step, Step::Failed(failed) if failed.blocker == Blocker::Clear);
-        if clear {
-            single.store(true, Ordering::SeqCst);
-        }
-        // T-548: a red batch names its culprit when the gate says which paths
-        // failed. The gate may write the repo-relative files or directories
-        // whose tests failed to `$GEAR_GATE_FAILED`, one per line; a built merge
-        // whose changed paths hold one of them is a suspect. Exactly one
-        // suspect fails with the gate's reason and the others merge again
-        // without it; with no suspect, several, or no file the batch is halved
-        // as before. The file is read once and removed, so a line an earlier
-        // gate left is never read here.
-        let failed_paths = if clear {
-            Vec::new()
-        } else {
-            gate_failed_paths(dir)
-        };
-        let suspects: Vec<(usize, Vec<String>)> = if failed_paths.is_empty() {
-            Vec::new()
-        } else {
-            built
-                .iter()
-                .filter_map(|(index, _, changed, _)| {
-                    let matching = matching_paths(&failed_paths, changed);
-                    (!matching.is_empty()).then_some((*index, matching))
-                })
-                .collect()
-        };
-        if built_count > 1 && suspects.len() == 1 {
-            let (culprit, matching) = &suspects[0];
-            let culprit = *culprit;
-            let task = ops[culprit].op.task.clone().unwrap_or_default();
-            let (gate_reason, blocker) = match &step {
-                Step::Failed(failed) => (failed.reason.clone(), failed.blocker),
-                _ => (String::new(), Blocker::Stuck),
+    // T-573: no gated member, no gate: the batch pushes the way a report-only
+    // single merge does.
+    let gated = built.iter().any(|(_, prepared, ..)| !prepared.no_gate);
+    if gated {
+        if let Err(step) = run_gate(
+            worktree,
+            repo,
+            &lock,
+            remote,
+            &project,
+            &round,
+            &tasks,
+            &mut built[0].3,
+        ) {
+            let clear = matches!(&step, Step::Failed(failed) if failed.blocker == Blocker::Clear);
+            if clear {
+                single.store(true, Ordering::SeqCst);
+            }
+            // T-548: a red batch names its culprit when the gate says which paths
+            // failed. The gate may write the repo-relative files or directories
+            // whose tests failed to `$GEAR_GATE_FAILED`, one per line; a built merge
+            // whose changed paths hold one of them is a suspect. Exactly one
+            // suspect fails with the gate's reason and the others merge again
+            // without it; with no suspect, several, or no file the batch is halved
+            // as before. The file is read once and removed, so a line an earlier
+            // gate left is never read here.
+            let failed_paths = if clear {
+                Vec::new()
+            } else {
+                gate_failed_paths(dir)
             };
-            let reason = format!(
-                "{gate_reason}\nthe batch's failed paths match only {task}'s changes: {}",
-                matching.join(", ")
-            );
+            let suspects: Vec<(usize, Vec<String>)> = if failed_paths.is_empty() {
+                Vec::new()
+            } else {
+                built
+                    .iter()
+                    .filter_map(|(index, _, changed, _)| {
+                        let matching = matching_paths(&failed_paths, changed);
+                        (!matching.is_empty()).then_some((*index, matching))
+                    })
+                    .collect()
+            };
+            if built_count > 1 && suspects.len() == 1 {
+                let (culprit, matching) = &suspects[0];
+                let culprit = *culprit;
+                let task = ops[culprit].op.task.clone().unwrap_or_default();
+                let (gate_reason, blocker) = match &step {
+                    Step::Failed(failed) => (failed.reason.clone(), failed.blocker),
+                    _ => (String::new(), Blocker::Stuck),
+                };
+                let reason = format!(
+                    "{gate_reason}\nthe batch's failed paths match only {task}'s changes: {}",
+                    matching.join(", ")
+                );
+                for (index, _, _, mut probe) in built {
+                    probe.done();
+                    reports[index] = Some(if index == culprit {
+                        Report::Failed(Failed {
+                            reason: reason.clone(),
+                            blocker,
+                        })
+                    } else {
+                        Report::Requeue(format!(
+                            "its batch failed on {task}'s changes: it merges again without it"
+                        ))
+                    });
+                }
+                // The culprit is known: the batch is not halved.
+                return (collect(reports), cap);
+            }
+            let red = if clear {
+                match &step {
+                    Step::Failed(failed) => failed.reason.clone(),
+                    _ => "the batch could not be gated".to_string(),
+                }
+            } else {
+                "its batch failed the gate: it is gated again in a smaller batch".to_string()
+            };
+            // A single built merge fails as it would alone (the gate's own end).
+            let alone = step_report(step);
             for (index, _, _, mut probe) in built {
                 probe.done();
-                reports[index] = Some(if index == culprit {
-                    Report::Failed(Failed {
-                        reason: reason.clone(),
-                        blocker,
-                    })
+                reports[index] = Some(if clear || built_count > 1 {
+                    Report::Requeue(red.clone())
                 } else {
-                    Report::Requeue(format!(
-                        "its batch failed on {task}'s changes: it merges again without it"
-                    ))
+                    // A single built merge fails as it would alone.
+                    alone.clone()
                 });
             }
-            // The culprit is known: the batch is not halved.
+            let cap = if clear || built_count == 1 {
+                cap
+            } else {
+                built_count.div_ceil(2)
+            };
             return (collect(reports), cap);
         }
-        let red = if clear {
-            match &step {
-                Step::Failed(failed) => failed.reason.clone(),
-                _ => "the batch could not be gated".to_string(),
-            }
-        } else {
-            "its batch failed the gate: it is gated again in a smaller batch".to_string()
-        };
-        // A single built merge fails as it would alone (the gate's own end).
-        let alone = step_report(step);
-        for (index, _, _, mut probe) in built {
-            probe.done();
-            reports[index] = Some(if clear || built_count > 1 {
-                Report::Requeue(red.clone())
-            } else {
-                // A single built merge fails as it would alone.
-                alone.clone()
-            });
-        }
-        let cap = if clear || built_count == 1 {
-            cap
-        } else {
-            built_count.div_ceil(2)
-        };
-        return (collect(reports), cap);
     }
     // Green: one push lands the whole batch, as step 9b of a single merge.
     for (_, _, _, probe) in built.iter_mut() {
@@ -4270,6 +4331,63 @@ fn close_branches(
         }
     }
     (closed, left, moved)
+}
+
+/// The files a merge changes between `base` and `head` (T-573).
+fn changed_paths(
+    git: &impl Fn(&Path, &[&str]) -> Result<String, String>,
+    dir: &Path,
+    base: &str,
+    head: &str,
+) -> Vec<String> {
+    git(dir, &["diff", "--name-only", base, head])
+        .map(|paths| {
+            paths
+                .lines()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// T-573: does this merge change nothing but reports? Every changed file must
+/// lie under the project's voyage folder (`[conventions].voyage_dir` with
+/// `{project}` filled and `{milestone}` any folder), and a merge that changes
+/// nothing at all is not a report-only merge.
+fn reports_only(paths: &[String], voyage_dir: &str, project: &str) -> bool {
+    !paths.is_empty()
+        && paths
+            .iter()
+            .all(|path| is_under_voyage(path, voyage_dir, project))
+}
+
+/// Is `path` under the project's voyage folder, with `{milestone}` matching any
+/// one folder? The templates GEAR validates name `{milestone}`, so a template
+/// without it is no voyage folder at all.
+fn is_under_voyage(path: &str, voyage_dir: &str, project: &str) -> bool {
+    let template = voyage_dir.replace("{project}", project);
+    let Some(at) = template.find("{milestone}") else {
+        return false;
+    };
+    let prefix = &template[..at];
+    let suffix = &template[at + "{milestone}".len()..];
+    let Some(rest) = path.strip_prefix(prefix) else {
+        return false;
+    };
+    let Some((milestone, _)) = rest.split_once('/') else {
+        return false;
+    };
+    if milestone.is_empty() {
+        return false;
+    }
+    // `{milestone}` is one folder, never a prefix of another: what follows it
+    // is the template's own suffix, then the file.
+    let Some(tail) = rest[milestone.len()..].strip_prefix(suffix) else {
+        return false;
+    };
+    tail.starts_with('/') && tail.len() > 1
 }
 
 /// A file a lane writes its report to: it lies in a `reports/` directory, a
@@ -11461,6 +11579,153 @@ gate = "{project_gate}"
         let branches = &state.branches;
         assert!(!branches.contains("heat/t5"), "{branches}");
         assert!(!branches.contains("review/t5"), "{branches}");
+    }
+
+    /// T-573: only a file under the voyage folder counts, with `{project}`
+    /// filled and `{milestone}` any one folder.
+    #[test]
+    fn only_a_file_under_the_voyage_folder_is_a_report() {
+        let template = "gear/{project}/voyages/{milestone}";
+        assert!(is_under_voyage(
+            "gear/p/voyages/M1/reviews/T-5.md",
+            template,
+            "p"
+        ));
+        assert!(is_under_voyage("gear/p/voyages/M1/plan.md", template, "p"));
+        // Any milestone, one folder: not another project's, not the folder
+        // itself, not a file that only looks like one.
+        assert!(!is_under_voyage(
+            "gear/other/voyages/M1/reviews/T-5.md",
+            template,
+            "p"
+        ));
+        assert!(!is_under_voyage("gear/p/voyages/M1", template, "p"));
+        assert!(!is_under_voyage("gear/p/voyages", template, "p"));
+        assert!(!is_under_voyage("src/lib.rs", template, "p"));
+        // The default template names no project, and matches the same way.
+        let default = gear_model::layout::VOYAGE_DIR;
+        assert!(is_under_voyage(
+            "gear/voyages/M3/reports/T-7.md",
+            default,
+            "p"
+        ));
+        assert!(!is_under_voyage("gear/voyages/M3", default, "p"));
+        // A merge that changes nothing is no report-only merge.
+        assert!(!reports_only(&[], template, "p"));
+        assert!(reports_only(
+            &[
+                "gear/p/voyages/M1/reports/T-5.md".to_string(),
+                "gear/p/voyages/M1/reviews/T-5.md".to_string(),
+            ],
+            template,
+            "p"
+        ));
+        assert!(!reports_only(
+            &[
+                "gear/p/voyages/M1/reports/T-5.md".to_string(),
+                "src/lib.rs".to_string(),
+            ],
+            template,
+            "p"
+        ));
+    }
+
+    /// The config of a test project whose voyage folder names the project
+    /// (T-573): `gear/<project>/voyages/<milestone>`.
+    fn repo_with_voyage_dir(gate: &str) -> Repo {
+        gear_app::config::parse(&format!(
+            "{}\nvoyage_dir = \"gear/{{project}}/voyages/{{milestone}}\"\n",
+            config_text(gate)
+        ))
+        .unwrap()
+        .repo_of_lane("heat")
+    }
+
+    /// A scratch repo carrying one report-only task: `heat/t6` holds a commit
+    /// that adds only `gear/p/voyages/M1/reviews/T-6.md`, and the review commit
+    /// on top of it adds only a record.
+    fn reports_only_task(scratch: &Scratch) -> String {
+        sh(
+            &scratch.work,
+            "git switch -qc report/t6 dev && mkdir -p gear/p/voyages/M1/reviews \
+             && echo record > gear/p/voyages/M1/reviews/T-6.md && git add -A \
+             && git -c user.email=a@b -c user.name=a commit -qm report \
+             && git -C ../origin.git fetch -q \"$(pwd)\" +HEAD:refs/heads/heat/t6 \
+             && git fetch -q origin",
+        );
+        let candidate = sh(&scratch.work, "git rev-parse HEAD");
+        sh(
+            &scratch.work,
+            "echo reviewed >> gear/p/voyages/M1/reviews/T-6.md && git add -A \
+             && git -c user.email=a@b -c user.name=a commit -qm 'review(T-6): the record is right' \
+             && git -C ../origin.git fetch -q \"$(pwd)\" +HEAD:refs/heads/heat/t6 \
+             && git fetch -q origin",
+        );
+        candidate.trim().to_string()
+    }
+
+    /// The merge op of `reports_only_task`.
+    fn reports_only_op(candidate: &str) -> OpRow {
+        let mut report = op(candidate);
+        report.task = Some("T-6".into());
+        report.payload = serde_json::json!({
+            "branch": "heat/t6",
+            "candidate": candidate,
+            "review": "review/t6",
+        });
+        report
+    }
+
+    /// T-573: a merge that carries only reports skips the gate (the user,
+    /// 2026-11-05: a merge holding one review record still paid a four-to-five
+    /// minute CI round). The gate here always fails, so the merge landing
+    /// proves it did not run.
+    #[test]
+    fn a_merge_that_carries_only_reports_skips_the_gate() {
+        let scratch = Scratch::new("reports-only");
+        let worktree = scratch.merge_worktree();
+        let candidate = reports_only_task(&scratch);
+
+        let line = merge_one(
+            &worktree,
+            &repo_with_voyage_dir("false"),
+            &reports_only_op(&candidate),
+        )
+        .expect("a report-only merge runs no gate");
+
+        assert!(line.contains("merged T-6 into dev"), "{line}");
+        assert!(line.contains("no gate: reports only"), "{line}");
+        // The conflict check and the push ran as usual: dev holds the record.
+        let dev = scratch.dev_log();
+        assert!(dev.contains("report"), "{dev}");
+        assert!(dev.contains("review(T-6)"), "{dev}");
+        assert!(!line.contains("gate failed"), "{line}");
+    }
+
+    /// The same merge with one ordinary file in it: the gate runs and its
+    /// failure ends the merge.
+    #[test]
+    fn a_merge_that_touches_another_file_still_gates() {
+        let scratch = Scratch::new("reports-plus");
+        let worktree = scratch.merge_worktree();
+        let candidate = reports_only_task(&scratch);
+        // One file outside the voyage folder, on the same candidate.
+        sh(
+            &scratch.work,
+            "git switch -q report/t6 && echo note > notes.txt && git add -A \
+             && git -c user.email=a@b -c user.name=a commit -qm notes \
+             && git -C ../origin.git fetch -q \"$(pwd)\" +HEAD:refs/heads/heat/t6 \
+             && git fetch -q origin",
+        );
+
+        let failed = merge_one(
+            &worktree,
+            &repo_with_voyage_dir("false"),
+            &reports_only_op(&candidate),
+        )
+        .expect_err("a merge with another file runs the gate, and it fails");
+        assert!(!failed.reason.contains("no gate"), "{}", failed.reason);
+        assert!(!scratch.dev_log().contains("report"), "nothing landed");
     }
 
     /// T-483: a confirmed merge closes the review branch it merged, whatever
