@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1210 -->
+<!-- gear-plan project=gear base=1211 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -9,6 +9,7 @@ eta: 4h
 depart: now
 
 # Decisions
+- station M-8196: keep course | why: the rest is reviews and the two integration tasks GEAR hands in itself; mast's 168m is those integration tasks' estimates, not lane work
 - station M-8171: keep course | why: the 389m projection is stage 2 and 3 (F-1, F-2), added after departure as agreed design; stage 1, the eta's goal, shipped in v0.6.80; T-599 moves to hull to even the lanes | else: move F-2 to its own voyage
 - 2026-11-05 17:40 scope: feature stage 3 (refresh the feature branch before its full review, bisect a red full gate) joins M6.2 as feature F-2, the design agreed with the user | why: both lanes wait on reviews; it is the last stage of the agreed design
 - station M-8165: keep course | why: projected finish 233m inside the 4h eta; three tasks left, lanes balanced
