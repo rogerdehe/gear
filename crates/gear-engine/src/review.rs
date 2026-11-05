@@ -2339,6 +2339,7 @@ fn start_reviewer(
         &config.conventions.seat_branch,
         &config.project.id,
         &seat.name,
+        &store.read(|tx| gear_app::plan::current_voyage(tx, &config.project.id))?,
     );
     let seat_label = worktree_label(config, &seat.name, &repo);
     let label = agent_name(config, &seat.name);
@@ -8705,7 +8706,7 @@ review = [
         // one worktree, on the seat's own branch, cut at the integration branch
         assert_eq!(
             worktrees(&herdr),
-            vec![("p/review-1/home".to_string(), "dev".to_string())]
+            vec![("p/review-1/between-voyages".to_string(), "dev".to_string())]
         );
 
         // The shell reports the checkout: the reviewer starts.
@@ -8730,7 +8731,7 @@ review = [
         // still one worktree, on the review branch, cut at the candidate
         assert_eq!(
             worktrees(&herdr),
-            vec![("p/review-1/home".to_string(), "dev".to_string())]
+            vec![("p/review-1/between-voyages".to_string(), "dev".to_string())]
         );
 
         // one agent, the reviewer's kind, on the review model
@@ -10189,7 +10190,7 @@ review = [
         let worktrees_after_first = worktrees(&herdr);
         assert_eq!(
             worktrees_after_first,
-            vec![("p/review-1/home".to_string(), "dev".to_string())]
+            vec![("p/review-1/between-voyages".to_string(), "dev".to_string())]
         );
         // The job's agent carries its seat's name (T-482).
         let names: Vec<String> = herdr
@@ -11216,7 +11217,7 @@ review = [
         assert_eq!(report.started, vec!["p:review-1".to_string()]);
         let (repo, branch, base, label) = created_worktree(&herdr);
         assert_eq!(repo, "/repo/web", "the worktree is in the task's repo");
-        assert_eq!(branch, "p/review-1/home");
+        assert_eq!(branch, "p/review-1/between-voyages");
         assert_eq!(base, "web-dev", "the repo's own integration branch");
         assert_eq!(label, "p-review-1-web", "the label names the repo");
         // The packet asks for the diff against that repo's integration branch.
@@ -11287,7 +11288,7 @@ profile = "opencode"
 "#;
         let mut store = world(&config);
         // Isolated repo doors prevent the fake's branch-only map from letting
-        // root's p/review-1/home stand in for web's checkout. Distinct paths and
+        // root's p/review-1/between-voyages stand in for web's checkout. Distinct paths and
         // panes also make a checkout in the wrong repo observable.
         let mut web = FakeHerdr::new();
         let mut root = FakeHerdr::new();
@@ -11296,7 +11297,7 @@ profile = "opencode"
             (&mut root, "/root-review-1", "root:p1"),
         ] {
             door.add_shell(pane);
-            door.add_worktree("p/review-1/home", path, pane);
+            door.add_worktree("p/review-1/between-voyages", path, pane);
         }
         for (n, lane, door, path, pane, repo, base) in [
             (
@@ -11463,7 +11464,7 @@ profile = "opencode"
             SeatState::Released
         );
         herdr.add_shell("child:p1");
-        herdr.add_worktree("p/review-1/home", "/child-review", "child:p1");
+        herdr.add_worktree("p/review-1/between-voyages", "/child-review", "child:p1");
         let report = start_reviews(
             &mut store,
             &mut herdr,

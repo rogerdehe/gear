@@ -87,8 +87,8 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             task_branch: "{lane}/t{n}".into(),
             review_branch: "review/t{n}".into(),
             direction_branch: "{project}/direction/{task}".into(),
-            // T-559: project / seat / home, like project / lane / task.
-            seat_branch: "{project}/{seat}/home".into(),
+            // T-584: project / seat / voyage, like project / lane / task.
+            seat_branch: "{project}/{seat}/{voyage}".into(),
             remote: "origin".into(),
             voyage_dir: "gear/voyages/{milestone}".into(),
             // T-299: the commit messages are configuration too; the fixture
@@ -1543,13 +1543,13 @@ fn a_seat_branch_that_holds_a_task_or_review_branch_is_refused() {
     assert!(
         issues[0]
             .problem
-            .contains("e.g. seat_branch = \"{project}/{seat}/home\""),
+            .contains("e.g. seat_branch = \"{project}/{seat}/{voyage}\""),
         "{}",
         issues[0].problem
     );
 
-    // The default, project / seat / home, sits beside the task branches of its
-    // lane: they are siblings, not a ref and a folder of it (T-559).
+    // The default, project / seat / voyage, sits beside the task branches of
+    // its lane: they are siblings, not a ref and a folder of it (T-559, T-584).
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.project.id = "p".into();
     cfg.conventions.task_branch = "{project}/{lane}/t{n}".into();

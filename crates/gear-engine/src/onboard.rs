@@ -289,12 +289,13 @@ fn open_worktree_item(
 /// A project that never wrote a `seat_branch` line has no apply to run the
 /// rename T-559 makes on a changed template, so the engine does it: a seat
 /// whose branch still carries the name the previous default gave it
-/// (`p/hull`) is moved to the new one (`p/hull/home`), on the remote too when
-/// it is pushed there. A ref of another name that is a folder of the new name
-/// is named and nothing is touched — git cannot create the branch past it.
+/// (`p/hull/home`) is moved to the new one (`p/hull/M2`, T-584), on the remote
+/// too when it is pushed there. A ref of another name that is a folder of the
+/// new name is named and nothing is touched — git cannot create the branch
+/// past it.
 ///
 /// `dir` is the seat's own worktree when it is there, else the repository it
-/// works in; `new` is the seat's branch under the current template.
+/// works in; `new` is the seat's branch under the current template and voyage.
 fn settle_seat_branch(
     store: &mut Store,
     seat: &SeatRow,
@@ -324,13 +325,15 @@ fn settle_seat_branch(
 }
 
 /// T-565: settle every lane's seat branch of one project, once per
-/// `conventions.seat_branch` template.
+/// `conventions.seat_branch` template and voyage.
 ///
-/// The store keeps the template the branches were last settled at
-/// (`engine.seat_branch_settled.<project>`), so a running engine runs no git
-/// for it after the first tick, and a changed template (a re-applied config,
-/// or a new GEAR default) is settled at the next tick. A failure is named to
-/// the captain in the seat's worktree item and never stops the project.
+/// The store keeps what the branches were last settled at
+/// (`engine.seat_branch_settled.<project>`): the template with `{voyage}`
+/// filled in (T-584), so a running engine runs no git for it after the first
+/// tick, a changed template (a re-applied config, or a new GEAR default) is
+/// settled at the next tick, and a new voyage's departure settles the lanes'
+/// branches again. A failure is named to the captain in the seat's worktree
+/// item and never stops the project.
 fn settle_project_seat_branches(
     store: &mut Store,
     project: &str,
@@ -340,7 +343,16 @@ fn settle_project_seat_branches(
 ) -> GearResult<()> {
     let key = format!("engine.seat_branch_settled.{project}");
     let settled_at = store.read(|tx| tx.get_meta(&key))?;
-    if settled_at.as_deref() == Some(config.conventions.seat_branch.as_str()) {
+    let voyage = store.read(|tx| gear_app::plan::current_voyage(tx, project))?;
+    // The template with `{voyage}` filled, `{project}` and `{seat}` left for
+    // each lane's own expansion: `{project}/{seat}/M2`.
+    let settled = gear_model::branch::expand_seat(
+        &config.conventions.seat_branch,
+        "{project}",
+        "{seat}",
+        &voyage,
+    );
+    if settled_at.as_deref() == Some(settled.as_str()) {
         return Ok(());
     }
     for seat in seats.iter().filter(|seat| seat.role == SeatRole::Lane) {
@@ -350,6 +362,7 @@ fn settle_project_seat_branches(
             &config.conventions.seat_branch,
             &seat.project,
             &seat.name,
+            &voyage,
         );
         if let Err(reason) = settle_seat_branch(
             store,
@@ -365,7 +378,7 @@ fn settle_project_seat_branches(
             )?;
         }
     }
-    store.write(|tx| tx.set_meta(&key, &config.conventions.seat_branch))?;
+    store.write(|tx| tx.set_meta(&key, &settled))?;
     Ok(())
 }
 
@@ -485,8 +498,9 @@ fn git_config(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeStep {
     pub repo: String,
-    /// The project's `[conventions].seat_branch` with `{project}` and `{seat}`
-    /// filled in (T-253): `<project>/<lane>` by default.
+    /// The project's `[conventions].seat_branch` with `{project}`, `{seat}` and
+    /// `{voyage}` filled in (T-253, T-584): `<project>/<lane>/<voyage>` by
+    /// default.
     pub branch: String,
     /// the project's integration branch
     pub base: String,
@@ -518,9 +532,9 @@ pub const EDITOR_ENV: &str =
 
 /// Plan onboarding of `seat` as generation `generation` (the next one):
 /// - Lane seats get a `WorktreeStep` (branch
-///   `seat_branch` = the project's `[conventions].seat_branch` template,
-///   `<project>/<name>` by default, base `integration`, label
-///   `<project>-<name>`); other roles `None`;
+///   `seat_branch` = the project's `[conventions].seat_branch` template with
+///   the project's `voyage` filled in, `<project>/<name>/<voyage>` by default,
+///   base `integration`, label `<project>-<name>`); other roles `None`;
 /// - `env_command` exactly `export GEAR_CTX=<project>:<name>:<generation>; export GEAR_DB=<db_path>; <EDITOR_ENV>`;
 /// - `args` = `profile.unattended_args` (+ resume args when `resume` is Some and
 ///   the profile has them; a resume request for a profile without resume
@@ -534,6 +548,7 @@ pub fn plan_onboard(
     repo: &str,
     integration: &str,
     seat_branch: &str,
+    voyage: &str,
     db_path: &str,
     resume: Option<&str>,
 ) -> Result<OnboardPlan, String> {
@@ -567,7 +582,7 @@ pub fn plan_onboard(
     let worktree = match seat.role {
         SeatRole::Lane => Some(WorktreeStep {
             repo: repo.to_string(),
-            branch: gear_model::branch::expand_seat(seat_branch, &seat.project, &seat.name),
+            branch: gear_model::branch::expand_seat(seat_branch, &seat.project, &seat.name, voyage),
             base: integration.to_string(),
             label: agent_name.clone(),
         }),
@@ -602,7 +617,8 @@ pub fn plan_onboard(
 ///    profile is `cfg.profiles[seat.profile]` (missing → seat NeedsCheck,
 ///    reason says so);
 /// 2. `plan_onboard(seat, kind, profile, generation = seat.generation + 1, repo,
-///    integration, cfg.db_path, None)` (Err → NeedsCheck with the reason);
+///    integration, seat_branch, voyage, cfg.db_path, None)` (Err → NeedsCheck
+///    with the reason);
 /// 3. Herdr `worktree_create` → the root pane;
 /// 4. `gear_app::seats::begin_onboard(seat, pane, kind)` in a write transaction;
 /// 5. Herdr `pane_run(pane, env_command)`, then `agent_start(agent_name, kind, pane, args)`;
@@ -801,6 +817,9 @@ fn onboard_seat(
     //    The lane's worktree is in the lane's own repo, cut from that repo's
     //    integration branch (T-53): a lane bound to a child repo works there.
     let repo = config.repo_of_lane(&seat.name);
+    // T-584: the lane's seat branch names the voyage the project is in, so the
+    // plan expands the template with it.
+    let voyage = store.read(|tx| gear_app::plan::current_voyage(tx, &seat.project))?;
     let mut plan = plan_onboard(
         seat,
         &kind,
@@ -809,6 +828,7 @@ fn onboard_seat(
         &repo.path,
         &repo.integration,
         &config.conventions.seat_branch,
+        &voyage,
         &cfg.db_path,
         None,
     )?;
@@ -1775,7 +1795,7 @@ repo = "web"
     fn a_retried_lane_whose_agent_still_runs_is_exited_before_the_start() {
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
-        herdr.add_worktree("toy/heat/home", "/wt/heat", "w5:p1");
+        herdr.add_worktree("toy/heat/between-voyages", "/wt/heat", "w5:p1");
         herdr.add_agent("w5:p1", "opencode", gear_herdr::AgentStatus::Idle);
 
         assert!(onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1)
@@ -1808,8 +1828,8 @@ repo = "web"
 
     /// T-125: a lane registered again reuses its home worktree. Its checkout
     /// is on the task branch it last worked, so `worktree open --branch
-    /// toy/heat/home` finds nothing and a create would collide with the path that
-    /// already exists; the recorded path is opened instead.
+    /// toy/heat/between-voyages` finds nothing and a create would collide with
+    /// the path that already exists; the recorded path is opened instead.
     #[test]
     fn a_lane_registered_again_reuses_its_home_worktree() {
         let mut store = world(CONFIG);
@@ -2528,7 +2548,7 @@ repo = "web"
             })
             .expect("the engine created the lane's worktree");
         assert_eq!(repo, "/repo/web", "the worktree is in the lane's repo");
-        assert_eq!(branch, "toy/heat/home");
+        assert_eq!(branch, "toy/heat/between-voyages");
         assert_eq!(base, "web-dev", "the repo's own integration branch");
         assert_eq!(label, "toy-heat");
     }
@@ -2562,7 +2582,10 @@ repo = "web"
             &work,
             "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev",
         );
-        sh(&work, "git worktree add -q -b toy/heat/home ../heat dev");
+        sh(
+            &work,
+            "git worktree add -q -b toy/heat/between-voyages ../heat dev",
+        );
         let worktree = root.join("heat");
         // The hook an older engine installed: its own path, worktree-only.
         sh(&worktree, "git config extensions.worktreeConfig true");
@@ -2584,7 +2607,11 @@ repo = "web"
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree(
+            "toy/heat/between-voyages",
+            &worktree.to_string_lossy(),
+            "w1:p2",
+        );
 
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
@@ -2625,7 +2652,11 @@ repo = "web"
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree(
+            "toy/heat/between-voyages",
+            &worktree.to_string_lossy(),
+            "w1:p2",
+        );
         onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
         assert_eq!(
             sh(&worktree, "git config --worktree core.hooksPath"),
@@ -2667,13 +2698,20 @@ repo = "web"
             &work,
             "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev",
         );
-        sh(&work, "git worktree add -q -b toy/heat/home ../heat dev");
+        sh(
+            &work,
+            "git worktree add -q -b toy/heat/between-voyages ../heat dev",
+        );
         let worktree = root.join("heat");
 
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree(
+            "toy/heat/between-voyages",
+            &worktree.to_string_lossy(),
+            "w1:p2",
+        );
 
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
@@ -2809,8 +2847,9 @@ repo = "web"
     }
 
     /// T-503: a real repository with a bare `origin` holding `dev` at two
-    /// commits, the lane's home branch `toy/heat/home` at the first one, and a
-    /// linked worktree of that branch. Returns (the repository, the worktree).
+    /// commits, the lane's home branch `toy/heat/between-voyages` at the first
+    /// one, and a linked worktree of that branch. Returns (the repository, the
+    /// worktree).
     fn t503_repo(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let root = crate::testtmp::temp(name);
         let origin = root.join("origin.git");
@@ -2829,19 +2868,23 @@ repo = "web"
         );
         sh(&work, "git push -q origin dev");
         // The home branch stays at the first commit while `dev` moves on.
-        sh(&work, "git branch toy/heat/home dev");
+        sh(&work, "git branch toy/heat/between-voyages dev");
         std::fs::write(work.join("a.txt"), "two\n").unwrap();
         sh(
             &work,
             "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev2 && git push -q origin dev",
         );
-        sh(&work, "git worktree add -q ../toy-wt toy/heat/home");
+        sh(
+            &work,
+            "git worktree add -q ../toy-wt toy/heat/between-voyages",
+        );
         let worktree = root.join("toy-wt");
         (work, worktree)
     }
 
     /// The project of the T-503 tests: one lane in the real repository, with
-    /// `origin` as its remote and the default home branch `toy/heat/home`.
+    /// `origin` as its remote and the default home branch
+    /// `toy/heat/between-voyages`.
     fn t503_config(repo: &std::path::Path) -> String {
         format!(
             r#"
@@ -2907,7 +2950,11 @@ profile = "opencode"
         let mut store = t503_world(&repo, &worktree);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree(
+            "toy/heat/between-voyages",
+            &worktree.to_string_lossy(),
+            "w1:p2",
+        );
 
         assert_eq!(
             onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
@@ -2917,7 +2964,7 @@ profile = "opencode"
         assert_eq!(sh(&worktree, "git status --porcelain"), "");
         assert_eq!(
             sh(&worktree, "git rev-parse --abbrev-ref HEAD"),
-            "toy/heat/home"
+            "toy/heat/between-voyages"
         );
         assert_eq!(
             sh(&worktree, "git rev-parse HEAD"),
@@ -2957,7 +3004,11 @@ profile = "opencode"
         let mut store = t503_world(&repo, &worktree);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree(
+            "toy/heat/between-voyages",
+            &worktree.to_string_lossy(),
+            "w1:p2",
+        );
 
         assert_eq!(
             onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
@@ -2967,7 +3018,7 @@ profile = "opencode"
         assert_eq!(sh(&worktree, "git status --porcelain"), "");
         assert_eq!(
             sh(&worktree, "git rev-parse --abbrev-ref HEAD"),
-            "toy/heat/home"
+            "toy/heat/between-voyages"
         );
         assert_eq!(
             sh(&worktree, "git rev-parse HEAD"),
@@ -2992,12 +3043,16 @@ profile = "opencode"
         );
         let reflog = sh(
             &worktree,
-            "git reflog show --format=%H toy/heat/home | wc -l",
+            "git reflog show --format=%H toy/heat/between-voyages | wc -l",
         );
         let mut store = t503_world(&repo, &worktree);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree(
+            "toy/heat/between-voyages",
+            &worktree.to_string_lossy(),
+            "w1:p2",
+        );
 
         assert_eq!(
             onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
@@ -3007,7 +3062,7 @@ profile = "opencode"
         assert_eq!(sh(&worktree, "git status --porcelain"), "");
         assert_eq!(
             sh(&worktree, "git rev-parse --abbrev-ref HEAD"),
-            "toy/heat/home"
+            "toy/heat/between-voyages"
         );
         assert_eq!(
             sh(&worktree, "git rev-parse HEAD"),
@@ -3016,7 +3071,7 @@ profile = "opencode"
         assert_eq!(
             sh(
                 &worktree,
-                "git reflog show --format=%H toy/heat/home | wc -l"
+                "git reflog show --format=%H toy/heat/between-voyages | wc -l"
             ),
             reflog,
             "the home branch was not moved"
@@ -3041,7 +3096,11 @@ profile = "opencode"
         let mut store = t503_world(&repo, &worktree);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree(
+            "toy/heat/between-voyages",
+            &worktree.to_string_lossy(),
+            "w1:p2",
+        );
 
         assert_eq!(
             onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
@@ -3057,7 +3116,7 @@ profile = "opencode"
         assert_eq!(sh(&worktree, "git rev-parse HEAD"), head);
         assert_eq!(
             sh(&worktree, "git rev-parse --abbrev-ref HEAD"),
-            "toy/heat/home"
+            "toy/heat/between-voyages"
         );
         let messages = store
             .read(|tx| tx.thread_messages("toy", "worktree:heat"))
@@ -3075,6 +3134,90 @@ profile = "opencode"
                 .unwrap()
                 .state,
             SeatState::Active
+        );
+    }
+
+    /// T-584: a seat branch names the voyage, so a lane whose checkout stands
+    /// on the previous default (`p/hull/home`) is moved to the voyage's name
+    /// (`p/hull/M2`) at onboarding — beside it, never both.
+    #[test]
+    fn a_lane_on_the_previous_default_seat_branch_is_moved_to_the_voyage_branch() {
+        let root = crate::testtmp::temp("gear-onboard-t584");
+        sh(&root, "git init -q -b dev work");
+        let work = root.join("work");
+        std::fs::write(work.join("a.txt"), "one\n").unwrap();
+        sh(
+            &work,
+            "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev",
+        );
+        // The lane's worktree, on the branch the previous default named.
+        sh(&work, "git worktree add -q -b p/hull/home ../p-hull dev");
+        let worktree = root.join("p-hull");
+
+        let config = format!(
+            "\n[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"{}\"\n\n[quota]\nlanes = 1\ntemps = 0\n\n[captain]\npane = \"w1:p1\"\nkind = \"claude\"\nprofile = \"claude\"\n\n[[lanes]]\nname = \"hull\"\nduty = \"everything\"\nowns = [\"src/\"]\nkind = \"opencode\"\nprofile = \"opencode\"\n",
+            work.display()
+        );
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                tx.insert_project(&ProjectRow {
+                    id: "p".into(),
+                    herdr_session: "sess".into(),
+                    config_toml: config,
+                    config_version: 1,
+                    quota_lanes: 1,
+                    quota_temps: 0,
+                    quota_includes_captain: false,
+                    plan_version: 0,
+                    created: T0,
+                })?;
+                tx.insert_seat(&SeatRow {
+                    id: "p:hull".into(),
+                    project: "p".into(),
+                    role: SeatRole::Lane,
+                    name: "hull".into(),
+                    profile: "opencode".into(),
+                    generation: 0,
+                    state: SeatState::Queued,
+                    state_since: T0,
+                    state_reason: Some("registered".into()),
+                    task_id: None,
+                })?;
+                // The voyage the project is in: M2 departed.
+                tx.upsert_voyage(&gear_store::VoyageRow {
+                    project: "p".into(),
+                    milestone: "M2".into(),
+                    title: "a voyage".into(),
+                    done: None,
+                    bar: None,
+                    eta: None,
+                    departure: Some(T0),
+                    departure_tasks: Some(1),
+                    departure_estimate_min: Some(30),
+                    updated: T0,
+                })?;
+                tx.set_meta(&worktree_path_key("p:hull"), &worktree.to_string_lossy())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w1:p2");
+        herdr.add_worktree("p/hull/home", &worktree.to_string_lossy(), "w1:p2");
+
+        onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        assert!(
+            git(&work, &["rev-parse", "--verify", "refs/heads/p/hull/M2"]).is_ok(),
+            "the voyage's name is a branch"
+        );
+        assert!(
+            git(&work, &["rev-parse", "--verify", "refs/heads/p/hull/home"]).is_err(),
+            "the old name is gone, never beside the new one"
+        );
+        assert_eq!(
+            sh(&worktree, "git rev-parse --abbrev-ref HEAD"),
+            "p/hull/M2",
+            "the lane's checkout moved with it"
         );
     }
 }

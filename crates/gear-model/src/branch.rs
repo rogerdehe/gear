@@ -2,9 +2,10 @@
 //!
 //! A project names the branch a task's work goes on, the branch it is reviewed
 //! on and the branch of each seat's own worktree in its `[conventions]`, as
-//! templates: `{project}`, `{lane}`, `{seat}` and `{n}` are filled in. The
-//! constants here are the names GEAR itself uses, and the defaults of a project
-//! that says nothing — never the only way (naming is a team's own habit).
+//! templates: `{project}`, `{lane}`, `{seat}`, `{voyage}` and `{n}` are filled
+//! in. The constants here are the names GEAR itself uses, and the defaults of a
+//! project that says nothing — never the only way (naming is a team's own
+//! habit).
 //!
 //! Pure: no I/O, no store, so the engine, the app and the forge all expand the
 //! same templates the same way.
@@ -20,11 +21,17 @@ pub const REVIEW_BRANCH: &str = "review/t{n}";
 /// share it. The old shape was `direction/t<n>`.
 pub const DIRECTION_BRANCH: &str = "{project}/direction/{task}";
 
-/// The default branch of a seat's own worktree (T-252, T-559): the name says
-/// whose worktree it is, so Herdr names the worktree `<project>-<seat>`, and it
-/// reads like a task's (project / seat / home, as project / lane / task), so a
-/// seat branch sits in its own folder beside the task branches below its lane.
-pub const SEAT_BRANCH: &str = "{project}/{seat}/home";
+/// The default branch of a seat's own worktree (T-252, T-559, T-584): the name
+/// says whose worktree it is, so Herdr names the worktree `<project>-<seat>`,
+/// and it reads like a task's (project / seat / voyage, as project / lane /
+/// task), so a seat branch sits in its own folder beside the task branches
+/// below its lane, one per voyage.
+pub const SEAT_BRANCH: &str = "{project}/{seat}/{voyage}";
+
+/// What `{voyage}` is filled in with when the project is between voyages
+/// (no voyage has departed, or the last one has finished): the folder a
+/// captain's handovers use for that time (`gear_app::captain`).
+pub const BETWEEN_VOYAGES: &str = "between-voyages";
 
 /// `template` with `{project}`, `{lane}`, `{task}` and `{n}` filled in.
 /// `project` is the project id, `lane` the lane name, `{task}` the task id in
@@ -52,12 +59,20 @@ pub fn direction_branch(template: &str, project: &str, lane: &str, task: &str) -
     expand(template, project, lane, task)
 }
 
-/// `template` with `{project}`, `{seat}` filled in: the branch of a seat's own
-/// worktree (T-252). The merge worktree is seat `merge`.
-pub fn expand_seat(template: &str, project: &str, seat: &str) -> String {
+/// `template` with `{project}`, `{seat}` and `{voyage}` filled in: the branch
+/// of a seat's own worktree (T-252, T-584). The merge worktree is seat `merge`.
+/// An empty `voyage` — a project before its first departure, or between two —
+/// fills [`BETWEEN_VOYAGES`], so the name is never `p/hull/`.
+pub fn expand_seat(template: &str, project: &str, seat: &str, voyage: &str) -> String {
+    let voyage = if voyage.is_empty() {
+        BETWEEN_VOYAGES
+    } else {
+        voyage
+    };
     template
         .replace("{project}", project)
         .replace("{seat}", seat)
+        .replace("{voyage}", voyage)
 }
 
 /// The number in a task id: the id's trailing run of digits (`T-40` → `40`).
@@ -118,9 +133,25 @@ mod tests {
     }
 
     #[test]
-    fn a_seat_branch_names_the_project_and_the_seat() {
-        assert_eq!(expand_seat(SEAT_BRANCH, "p", "hull"), "p/hull/home");
-        assert_eq!(expand_seat("{project}-{seat}", "acme", "pay"), "acme-pay");
+    fn a_seat_branch_names_the_project_the_seat_and_the_voyage() {
+        assert_eq!(expand_seat(SEAT_BRANCH, "p", "hull", "M2"), "p/hull/M2");
+        assert_eq!(
+            expand_seat("{project}-{seat}-{voyage}", "acme", "pay", "M6.2"),
+            "acme-pay-M6.2"
+        );
+        assert_eq!(
+            expand_seat("{project}-{seat}", "acme", "pay", "M2"),
+            "acme-pay"
+        );
+    }
+
+    #[test]
+    fn an_empty_voyage_is_a_between_voyages_seat_branch() {
+        assert_eq!(
+            expand_seat(SEAT_BRANCH, "p", "captain", ""),
+            "p/captain/between-voyages"
+        );
+        assert_eq!(BETWEEN_VOYAGES, "between-voyages");
     }
 
     #[test]

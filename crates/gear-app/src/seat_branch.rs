@@ -1,26 +1,31 @@
-//! The branch of a seat's own worktree (T-252, T-559, T-565).
+//! The branch of a seat's own worktree (T-252, T-559, T-565, T-584).
 //!
 //! One place that moves it, for both callers: a config apply that changes
 //! `conventions.seat_branch` (T-559), and the engine when it starts or onboards
 //! a seat whose branch still carries the name the **previous default** gave it
-//! (T-565: `{project}/{seat}`, before v0.6.55's `{project}/{seat}/home`). The
-//! second case needed the first: a project that never wrote a `seat_branch`
-//! line has no config change to apply, so no apply ran the rename, and git
-//! refused `p/hull/home` while the ref `p/hull` stood in its way.
+//! (T-565: `{project}/{seat}`, before v0.6.55's `{project}/{seat}/home`; T-584:
+//! `{project}/{seat}/home`, before `{project}/{seat}/{voyage}`). The second case
+//! needed the first: a project that never wrote a `seat_branch` line has no
+//! config change to apply, so no apply ran the rename, and git refused the new
+//! name while the old ref stood in its way.
 //!
-//! [`settle`] is also what a seat branch is created through: a ref that is a
-//! folder of the new name is renamed when it is the seat's own old branch, and
-//! named — never touched — when it is somebody else's.
+//! [`settle`] is also what a seat branch is created through: a seat's own old
+//! branch is renamed to the new name — git cannot hold `p/hull` and
+//! `p/hull/home` at once, and a name beside the new one (`p/hull/home` beside
+//! `p/hull/M2`) is never left behind — and a ref of another name that is a
+//! folder of the new one is named, never touched.
 
-/// The name the default seat branch had before v0.6.55 (T-565).
+/// The name the default seat branch had before `{project}/{seat}/{voyage}`
+/// (T-584): v0.6.55's `{project}/{seat}/home`, so a lane's `p/hull/home` is
+/// renamed instead of being left beside `p/hull/M2`.
 ///
 /// A seat branch named by this template is the seat's own: it is moved to the
 /// current template's name when the seat is next onboarded.
-pub const PREVIOUS_DEFAULT: &str = "{project}/{seat}";
+pub const PREVIOUS_DEFAULT: &str = "{project}/{seat}/home";
 
-/// The old default's expansion for one seat: `p/hull`.
+/// The old default's expansion for one seat: `p/hull/home`.
 pub fn previous_default(project: &str, seat: &str) -> String {
-    gear_model::branch::expand_seat(PREVIOUS_DEFAULT, project, seat)
+    gear_model::branch::expand_seat(PREVIOUS_DEFAULT, project, seat, "")
 }
 
 /// What [`settle`] did or found.
@@ -40,25 +45,30 @@ pub enum Settled {
 }
 
 /// Move the seat's own branch to `new` before anything is created on it, and
-/// fail naming a ref that stands in the way (T-565).
+/// fail naming a ref that stands in the way (T-565, T-584).
 ///
 /// `dir` is a worktree or a repository of the seat's repo; `old` is the name the
 /// previous default gave the seat's branch; `new` is the branch the current
-/// `conventions.seat_branch` names. Git cannot hold `p/hull` and `p/hull/home`
-/// at once (a ref and a folder of the same name), so a ref that is a folder of
-/// `new` is settled first: the seat's own old branch is renamed, anything else
-/// is refused with its name.
+/// `conventions.seat_branch` names. The seat's own old branch is renamed to
+/// `new` — whether it stands in the way (git cannot hold `p/hull/home` and
+/// `p/hull/home/x` at once) or merely beside it (`p/hull/home` beside
+/// `p/hull/M2`, which would otherwise be left behind). A ref of another name
+/// that is a folder of `new` is refused with its name, and nothing is touched.
 pub fn settle(dir: &str, old: &str, new: &str, remote: &str) -> Result<Settled, String> {
     if old == new {
         return Ok(Settled::Free);
     }
-    let Some(blocking) = blocking_ref(dir, new) else {
-        return Ok(Settled::Free);
-    };
-    if blocking != old {
-        return Err(format!(
-            "the branch {new} cannot be created: the ref {blocking} stands in its way (git cannot hold a ref and a folder of the same name); rename or delete {blocking}, or give the seat branches another name"
-        ));
+    match blocking_ref(dir, new).as_deref() {
+        Some(blocking) if blocking != old => {
+            return Err(format!(
+                "the branch {new} cannot be created: the ref {blocking} stands in its way (git cannot hold a ref and a folder of the same name); rename or delete {blocking}, or give the seat branches another name"
+            ));
+        }
+        // The seat's own old branch is in the way, and is renamed below.
+        Some(_) => {}
+        // Nothing is in the way: only an old branch of the seat's own to move.
+        None if !local_branch(dir, old) => return Ok(Settled::Free),
+        None => {}
     }
     rename(dir, old, new)?;
     Ok(Settled::Renamed {
@@ -66,6 +76,20 @@ pub fn settle(dir: &str, old: &str, new: &str, remote: &str) -> Result<Settled, 
         new: new.to_string(),
         remote: move_remote(dir, remote, old, new),
     })
+}
+
+/// Whether `dir` has the local branch `branch`.
+fn local_branch(dir: &str, branch: &str) -> bool {
+    git(
+        dir,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_ok()
 }
 
 /// The ref (short name) that is a folder of `branch`, if there is one.
@@ -208,28 +232,32 @@ mod tests {
     }
 
     #[test]
-    fn the_previous_default_is_project_seat() {
-        assert_eq!(previous_default("p", "hull"), "p/hull");
+    fn the_previous_default_is_project_seat_home() {
+        assert_eq!(previous_default("p", "hull"), "p/hull/home");
         assert_ne!(
             previous_default("p", "hull"),
-            gear_model::branch::expand_seat(gear_model::branch::SEAT_BRANCH, "p", "hull")
+            gear_model::branch::expand_seat(gear_model::branch::SEAT_BRANCH, "p", "hull", "M2")
         );
     }
 
     #[test]
     fn a_seat_on_the_old_default_is_renamed_to_the_new_one() {
         let (_dir, path) = repo("rename");
-        git(&path, &["branch", "p/hull"]).unwrap();
+        git(&path, &["branch", "p/hull/home"]).unwrap();
 
-        let settled = settle(&path, "p/hull", "p/hull/home", "origin").unwrap();
+        let settled = settle(&path, "p/hull/home", "p/hull/M2", "origin").unwrap();
         assert!(
-            matches!(&settled, Settled::Renamed { old, new, .. } if old == "p/hull" && new == "p/hull/home"),
+            matches!(&settled, Settled::Renamed { old, new, .. } if old == "p/hull/home" && new == "p/hull/M2"),
             "{settled:?}"
         );
-        assert_eq!(blocking_ref(&path, "p/hull/home"), None);
+        assert_eq!(
+            git(&path, &["rev-parse", "--verify", "refs/heads/p/hull/M2"]).is_ok(),
+            true
+        );
         assert_eq!(
             git(&path, &["rev-parse", "--verify", "refs/heads/p/hull/home"]).is_ok(),
-            true
+            false,
+            "the old name is gone: it is never left beside the new one"
         );
     }
 
@@ -238,7 +266,7 @@ mod tests {
         let (_dir, path) = repo("foreign");
         git(&path, &["branch", "p/hull"]).unwrap();
         // The seat's branch is another one: `p/hull` is not its old name.
-        let error = settle(&path, "p/other", "p/hull/home", "origin").unwrap_err();
+        let error = settle(&path, "p/hull/home", "p/hull/M2", "origin").unwrap_err();
         assert!(error.contains("p/hull"), "{error}");
         assert_eq!(
             git(&path, &["rev-parse", "--verify", "refs/heads/p/hull"]).is_ok(),
@@ -265,13 +293,7 @@ mod tests {
         )
         .unwrap();
 
-        let settled = settle(
-            worktree.to_str().unwrap(),
-            "p/hull",
-            "p/hull/home",
-            "origin",
-        )
-        .unwrap();
+        let settled = settle(worktree.to_str().unwrap(), "p/hull", "p/hull/M2", "origin").unwrap();
         assert!(matches!(settled, Settled::Renamed { .. }), "{settled:?}");
         assert_eq!(
             git(&path, &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -282,7 +304,7 @@ mod tests {
                 worktree.to_str().unwrap(),
                 &["rev-parse", "--abbrev-ref", "HEAD"]
             ),
-            Ok("p/hull/home".to_string())
+            Ok("p/hull/M2".to_string())
         );
     }
 
@@ -290,11 +312,11 @@ mod tests {
     fn a_free_name_settles_nothing() {
         let (_dir, path) = repo("free");
         assert_eq!(
-            settle(&path, "p/hull", "p/hull/home", "origin").unwrap(),
+            settle(&path, "p/hull/home", "p/hull/M2", "origin").unwrap(),
             Settled::Free
         );
         assert_eq!(
-            settle(&path, "p/hull", "p/hull", "origin").unwrap(),
+            settle(&path, "p/hull/home", "p/hull/home", "origin").unwrap(),
             Settled::Free
         );
     }

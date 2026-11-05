@@ -31,6 +31,7 @@ fn lane_gets_worktree_env_and_unattended_args() {
         "/repo",
         "dev",
         gear_model::branch::SEAT_BRANCH,
+        "M2",
         "/state/gear.db",
         None,
     )
@@ -39,7 +40,7 @@ fn lane_gets_worktree_env_and_unattended_args() {
         plan.worktree,
         Some(WorktreeStep {
             repo: "/repo".into(),
-            branch: "harbor/heat/home".into(),
+            branch: "harbor/heat/M2".into(),
             base: "dev".into(),
             label: "harbor-heat".into()
         })
@@ -69,6 +70,7 @@ fn captain_has_no_worktree_and_resume_appends_args() {
         "/repo",
         "dev",
         gear_model::branch::SEAT_BRANCH,
+        "M2",
         "/db",
         Some("ses_1"),
     )
@@ -100,6 +102,7 @@ fn refusals() {
             "/r",
             "dev",
             gear_model::branch::SEAT_BRANCH,
+            "M2",
             "/db",
             None
         )
@@ -116,6 +119,7 @@ fn refusals() {
             "/r",
             "dev",
             gear_model::branch::SEAT_BRANCH,
+            "M2",
             "/db",
             Some("s")
         )
@@ -132,6 +136,7 @@ fn refusals() {
             "/r",
             "dev",
             gear_model::branch::SEAT_BRANCH,
+            "M2",
             "/db",
             None
         )

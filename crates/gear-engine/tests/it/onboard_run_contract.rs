@@ -73,7 +73,9 @@ fn queued_lane_gets_worktree_env_and_agent() {
     assert_eq!((seat.state, seat.generation), (SeatState::Active, 1));
     let b = s.read(|tx| tx.get_binding("toy:heat", 1)).unwrap().unwrap();
     assert_eq!(b.status, BindingStatus::Active);
-    assert!(herdr.worktree_branches().contains(&"toy/heat/home"));
+    assert!(herdr
+        .worktree_branches()
+        .contains(&"toy/heat/between-voyages"));
     let scratch = "/fake-worktrees/toy-heat-home/.gear/tmp";
     assert!(herdr.calls.iter().any(|c| matches!(c, Call::PaneRun { command, .. }
         if command == &format!("mkdir -p '{scratch}'; export TMPDIR='{scratch}'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}; {}", cfg().db_path, gear_engine::onboard::EDITOR_ENV))), "{:?}", herdr.calls);
@@ -307,7 +309,7 @@ fn a_lane_added_by_a_config_change_is_onboarded_with_the_latest_config() {
             .calls
             .iter()
             .any(|c| matches!(c, Call::WorktreeCreate { repo, branch, .. }
-        if repo == "/repo2" && branch == "toy/pricing/home")),
+        if repo == "/repo2" && branch == "toy/pricing/between-voyages")),
         "{:?}",
         herdr.calls
     );

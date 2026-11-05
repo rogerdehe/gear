@@ -161,14 +161,15 @@ impl World {
         publish(&self.child, branch);
     }
 
-    /// The engine's integration worktree of the child repo: `p/merge/home`,
+    /// The engine's integration worktree of the child repo:
+    /// `p/merge/between-voyages`,
     /// cut from the child's `feat`.
     fn merge_worktree(&self) -> std::path::PathBuf {
         let path = self.root.path().join("child-merge");
         sh(
             self.root.path(),
             &format!(
-                "git -C {} worktree add -q -b p/merge/home {} origin/feat",
+                "git -C {} worktree add -q -b p/merge/between-voyages {} origin/feat",
                 self.child.display(),
                 path.display()
             ),
@@ -356,13 +357,13 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
     //    child's own branch.
     let active = onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
     assert_eq!(active, vec!["p:heat".to_string()]);
-    let (repo, branch, base, label) = created(&herdr, "p/heat/home");
+    let (repo, branch, base, label) = created(&herdr, "p/heat/between-voyages");
     assert_eq!(
         repo,
         world.child.to_string_lossy().to_string(),
         "the child repo"
     );
-    assert_eq!(branch, "p/heat/home");
+    assert_eq!(branch, "p/heat/between-voyages");
     assert_eq!(base, "feat", "the child's own integration branch");
     assert_eq!(label, "p-heat");
 
@@ -416,13 +417,13 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
     // 3. the review: the reviewer works in the task's repo.
     let report = start_reviews(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T0 + 10).unwrap();
     assert_eq!(report.started, vec!["p:review-1"]);
-    let (repo, branch, base, label) = created(&herdr, "p/review-1/home");
+    let (repo, branch, base, label) = created(&herdr, "p/review-1/between-voyages");
     assert_eq!(
         repo,
         world.child.to_string_lossy().to_string(),
         "the child repo"
     );
-    assert_eq!(branch, "p/review-1/home");
+    assert_eq!(branch, "p/review-1/between-voyages");
     assert_eq!(base, "feat", "the child's own integration branch");
     assert_eq!(label, "p-review-1-child", "the label names the repo");
     let checkout = crate::REVIEW_GIT_CALLS.with(|calls| calls.borrow().clone());
@@ -468,18 +469,18 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
     //    child's gate.
     let merge_worktree = world.merge_worktree();
     herdr.add_worktree(
-        "p/merge/home",
+        "p/merge/between-voyages",
         &merge_worktree.to_string_lossy(),
         "wt-merge:p1",
     );
     wait_merge(&mut store, &mut herdr, &cfg);
-    let (repo, branch, label) = opened(&herdr, "p/merge/home");
+    let (repo, branch, label) = opened(&herdr, "p/merge/between-voyages");
     assert_eq!(
         repo,
         world.child.to_string_lossy().to_string(),
         "the child repo"
     );
-    assert_eq!(branch, "p/merge/home");
+    assert_eq!(branch, "p/merge/between-voyages");
     assert_eq!(label, "p-merge-child", "the label names the repo");
 
     // The child's branch holds the lane's work and the review.
