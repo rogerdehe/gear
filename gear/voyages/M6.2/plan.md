@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1207 -->
+<!-- gear-plan project=gear base=1208 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -9,6 +9,7 @@ eta: 4h
 depart: now
 
 # Decisions
+- 2026-11-05 17:40 scope: feature stage 3 (refresh the feature branch before its full review, bisect a red full gate) joins M6.2 as feature F-2, the design agreed with the user | why: both lanes wait on reviews; it is the last stage of the agreed design
 - station M-8165: keep course | why: projected finish 233m inside the 4h eta; three tasks left, lanes balanced
 - station M-8132: keep course | why: the eta's goal (stage 1, clause 5) is released as v0.6.80; the 379m projection counts stage 2 (F-1), added after departure, and the T-584 rework; lanes are balanced (hull holds T-590 and its own T-584 rework, mast the rest) | else: move stage 2 to its own voyage
 - station M-8109: keep course | why: the ready-to-land order came before stage 2 (F-1, T-589..T-594) was planned; the voyage goes on
@@ -415,6 +416,30 @@ estimate: 15
 deps: -
 feature: F-1
 fresh: feature stage 2
+
+## T-597 [must] lane=hull milestone=M6.2 required
+goal: [feature stage 3, 1/3] The feature branch catches up with the integration branch before its full review. crates/gear-engine/src/feature.rs `hand_in`: before handing the integration task in, merge the integration branch into the feature branch when it is not already contained (`git merge-base --is-ancestor`): in the merge worktree (as merge.rs opens it), `git merge --no-ff <remote>/<integration> -m "refresh(<feature>): <integration>"`, push the feature branch, and hand in its new tip, so the review and the full gate judge what will land. A conflict aborts the merge, pushes nothing, does not hand in, and opens one captain item (thread `feature-refresh:<feature>`) naming the conflicting files and saying: settle a fail of the integration task with a rework; its owner lane resolves it on the feature branch. The step tries again on a later tick only when the integration branch or the feature branch has moved since the conflict (meta of the two tips).
+accept: Tests in feature.rs `mod tests` with a fixture remote: a feature branch behind dev is refreshed and the hand-in names the refresh commit; a conflicting one opens the item once, hands nothing in and does not retry until a branch moves; a feature branch already containing dev is handed in as today. Run only the new tests by name; the merge gate runs `make gate`.
+estimate: 45
+deps: -
+feature: F-2
+fresh: feature stage 3
+
+## T-598 [must] lane=mast milestone=M6.2 required
+goal: [feature stage 3, 2/3] A red full gate on a feature names the member that turned it red. crates/gear-engine/src/merge.rs: when the merge of a feature's integration task (`task_branch_override` set) fails its gate (not a conflict), start a bisect beside the merge train, never in it: a worktree `<project>-bisect` (herdr worktree, as the merge worktree is made), the member merge commits on the feature branch's first-parent line after its fork from the integration branch, binary search with the project's merge gate on each probe (at most ceil(log2(n))+1 runs), each probe merged onto the integration branch tip the failed merge used. The result is appended to the merge-failed item as one line: `bisect: the gate turns red at merge(<T-n>) <sha>` or `bisect: every member is green alone; the red comes from the refresh or the mix`. A second failure of the same candidate starts no second bisect (meta per candidate). The merge train is never held by it.
+accept: Tests in merge.rs `mod tests` (Pair fixture with a gate script that fails when a file one member adds is present): a failed feature merge appends the line naming that member; a normal task's failed merge starts no bisect; the train merges another task while the bisect runs. Run only the new tests by name; the merge gate runs `make gate`.
+estimate: 60
+deps: -
+feature: F-2
+fresh: feature stage 3
+
+## T-599 [must] lane=mast milestone=M6.2 required
+goal: [feature stage 3, 3/3] The skill: skills/gear/references/captain.md (the `feature` field): the feature branch is merged with the integration branch before the full review, a conflict there is one rework of the owner lane; a red full gate is bisected beside the train and the merge-failed item names the member. skills/gear/references/decompose.md: members that change one behaviour get deps between them (lesson F-331). At most five lines in all.
+accept: The two files say so in at most five lines; `make check CRATE=gear-app TESTS='test(skill)'` passes; the merge gate runs `make gate`.
+estimate: 15
+deps: -
+feature: F-2
+fresh: feature stage 3
 
 ## T-583 [now] lane=mast milestone=M6.2 required
 goal: [feature 7/7] The captain's skill. skills/gear/references/captain.md `# Queue` field list: `feature` (`F-<n>`: the task is part of a feature; members merge into the feature branch with no CI, deps between members release on that merge, and GEAR creates one integration task per feature that reaches the integration branch with one review and the full gate; at most `feature_max_tasks` members; a dep from outside names the integration task; members share the feature's issue). skills/gear/references/decompose.md: a rule that a capability of several small tasks is one feature, cut at decomposition (an issue in issue mode), and that small unrelated tasks stay without a feature.
