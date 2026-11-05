@@ -811,3 +811,48 @@ fn a_landing_needs_every_accepted_task_merged_and_retires_the_lanes() {
     let lane = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
     assert_eq!(lane.state, gear_model::SeatState::Retiring, "{lane:?}");
 }
+
+/// A landing order answered with `keep course` comes back when the voyage's
+/// new work is done (GEAR's own M6.2 could never land again).
+#[test]
+fn a_kept_course_voyage_gets_a_new_landing_order_after_new_work() {
+    let mut store = world("8h", 6);
+    assert!(check(&mut store, 0).is_empty(), "watch the voyage first");
+    for n in 1..=6 {
+        finish(&mut store, n);
+    }
+    let land = check(&mut store, 7200)
+        .into_iter()
+        .find(|id| item(&mut store, id).body.contains("ready to land"))
+        .unwrap();
+    apply(
+        &mut store,
+        &format!("- station {land}: keep course | why: more work"),
+        "keep",
+        T0 + 7201,
+    )
+    .unwrap();
+    let base = store.read(|tx| tx.plan_version("p")).unwrap();
+    let text = format!(
+        "<!-- gear-plan project=p base={base} -->\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: more\naccept: more\nestimate: 10\ndeps: -\n"
+    );
+    let parsed = draft::parse(&text).unwrap();
+    let (env, fp) = captain();
+    plan::apply(
+        &mut store,
+        &env,
+        Some(&fp),
+        None,
+        &parsed,
+        &text,
+        "more",
+        T0 + 7202,
+    )
+    .unwrap();
+    finish(&mut store, 7);
+
+    let again = check(&mut store, 9000)
+        .into_iter()
+        .find(|id| item(&mut store, id).body.contains("ready to land"));
+    assert!(again.is_some_and(|id| id != land), "a new landing order");
+}
