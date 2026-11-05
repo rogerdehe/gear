@@ -148,12 +148,16 @@ pub fn init_with_home(
     // stored (git runs outside the store's transaction).
     if let Some(previous) = previous_seat_branch.as_deref() {
         if previous != config.conventions.seat_branch {
+            // T-584: a seat branch names the voyage, so the rename expands both
+            // templates with the project's voyage as it is now.
+            let voyage = store.read(|tx| crate::plan::current_voyage(tx, &project_id))?;
             result.stale_worktrees = move_seat_branches(
                 store,
                 &project_id,
                 previous,
                 &config.conventions.seat_branch,
                 &config.conventions.remote,
+                &voyage,
             )?;
         }
     }
@@ -780,6 +784,7 @@ fn move_seat_branches(
     old_template: &str,
     new_template: &str,
     remote: &str,
+    voyage: &str,
 ) -> GearResult<Vec<String>> {
     let seats = store.read(|tx| Ok(tx.seats_of_project(project)?))?;
     let mut lines = Vec::new();
@@ -792,8 +797,8 @@ fn move_seat_branches(
         if path.is_empty() {
             continue;
         }
-        let old_branch = gear_model::branch::expand_seat(old_template, project, &seat.name);
-        let new_branch = gear_model::branch::expand_seat(new_template, project, &seat.name);
+        let old_branch = gear_model::branch::expand_seat(old_template, project, &seat.name, voyage);
+        let new_branch = gear_model::branch::expand_seat(new_template, project, &seat.name, voyage);
         if old_branch == new_branch {
             continue;
         }

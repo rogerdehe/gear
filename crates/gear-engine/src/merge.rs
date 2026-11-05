@@ -2175,6 +2175,15 @@ fn other_candidates(
             if carried_into(tx, project, &row.id, task)? {
                 continue;
             }
+            // A member of the feature this task integrates merged into the
+            // feature branch, which is this candidate: it lands with this
+            // merge. Waiting for it to reach the integration branch on its own
+            // deadlocked GEAR's own F-1 (T-594 waited for T-589..T-593).
+            if let Some(feature) = tx.task_feature(project, &row.id)? {
+                if tx.feature_carrier(project, &feature)?.as_deref() == Some(task) {
+                    continue;
+                }
+            }
             let attempts = tx.attempts_of_task(project, &row.id)?;
             let Some(latest) = attempts.last() else {
                 continue;
@@ -2636,14 +2645,19 @@ fn stage_worktree(
         )
     };
     // The merge worktree is seat `merge` (T-253): its branch is the project's
-    // `[conventions].seat_branch` template, `<project>/merge/home` by default
-    // (T-559: project / seat / home, like project / lane / task).
-    let branch = gear_model::branch::expand_seat(&config.conventions.seat_branch, project, &seat);
+    // `[conventions].seat_branch` template with the project's voyage,
+    // `<project>/merge/<voyage>` by default (T-584: project / seat / voyage,
+    // like project / lane / task).
+    let voyage = store
+        .read(|tx| gear_app::plan::current_voyage(tx, project))
+        .map_err(|e| e.detail)?;
+    let branch =
+        gear_model::branch::expand_seat(&config.conventions.seat_branch, project, &seat, &voyage);
     // T-565: the merge seat has no seat row, so no apply and no lane pass moves
     // its branch — it is settled here, before the worktree is opened or
-    // created. A ref of the previous default (`p/merge`) is a folder of the new
-    // name, and git cannot hold both: it is renamed, and a ref of another name
-    // in the way fails the merge naming it, never both.
+    // created. A ref of the previous default (`p/merge/between-voyages`, T-584) is
+    // renamed, whether it stands in the way or merely beside the new name, and
+    // a ref of another name in the way fails the merge naming it, never both.
     let old = gear_app::seat_branch::previous_default(project, &seat);
     if let Err(reason) =
         gear_app::seat_branch::settle(&repo.path, &old, &branch, &config.conventions.remote)
@@ -6513,13 +6527,13 @@ mod tests {
             Scratch { root, work }
         }
 
-        /// A worktree of this repo for the merge to run in (on `p/merge/home`).
+        /// A worktree of this repo for the merge to run in (on `p/merge/between-voyages`).
         fn merge_worktree(&self) -> gear_herdr::Worktree {
             let path = self.root.join("merge");
             sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge/home {} origin/dev",
+                    "git -C {} worktree add -q -b p/merge/between-voyages {} origin/dev",
                     self.work.display(),
                     path.display()
                 ),
@@ -6528,7 +6542,7 @@ mod tests {
                 workspace_id: "wt-merge".into(),
                 pane_id: "wt-merge:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge/home".into(),
+                branch: "p/merge/between-voyages".into(),
             }
         }
 
@@ -6540,7 +6554,7 @@ mod tests {
             let heads = sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge/home {} origin/dev && \
+                    "git -C {} worktree add -q -b p/merge/between-voyages {} origin/dev && \
                      git -C origin.git rev-parse heat/t5",
                     self.work.display(),
                     path.display()
@@ -6551,7 +6565,7 @@ mod tests {
                 workspace_id: "wt-merge".into(),
                 pane_id: "wt-merge:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge/home".into(),
+                branch: "p/merge/between-voyages".into(),
             };
             (worktree, head)
         }
@@ -6658,7 +6672,7 @@ mod tests {
             sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge/home {} origin/dev",
+                    "git -C {} worktree add -q -b p/merge/between-voyages {} origin/dev",
                     self.work.display(),
                     path.display()
                 ),
@@ -6667,7 +6681,7 @@ mod tests {
                 workspace_id: "wt-merge".into(),
                 pane_id: "wt-merge:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge/home".into(),
+                branch: "p/merge/between-voyages".into(),
             }
         }
 
@@ -6792,6 +6806,43 @@ mod tests {
         let passed = passed_tasks(&mut store, "p").unwrap();
         assert_eq!(passed.len(), 1);
         assert_eq!(passed[0].0, "T-1");
+    }
+
+    /// A feature's integration task does not wait for its own members: they
+    /// merged into the feature branch, which is its candidate (GEAR F-1:
+    /// T-594 waited for T-589..T-593 forever). A task outside the feature
+    /// still waits for them.
+    #[test]
+    fn an_integration_task_does_not_wait_for_its_own_members() {
+        let mut store = pair_world("aaa1111", "bbb2222");
+        pass(&mut store, "T-1", "aaa1111", 1);
+        store
+            .write(|tx| {
+                tx.set_task_feature("p", "T-1", "F-1")?;
+                tx.set_feature_carrier("p", "F-1", "T-2")?;
+                Ok(())
+            })
+            .unwrap();
+        let waits_for_member = |store: &mut Store, task: &str| {
+            other_candidates(store, "p", task)
+                .unwrap()
+                .into_iter()
+                .any(|(other, _, _)| other == "T-1")
+        };
+        assert!(
+            !waits_for_member(&mut store, "T-2"),
+            "the integration task carries its member"
+        );
+        store
+            .write(|tx| {
+                tx.set_feature_carrier("p", "F-1", "T-9")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            waits_for_member(&mut store, "T-2"),
+            "a task that integrates another feature still waits"
+        );
     }
 
     /// A reviewed task whose own merge failed is not waited for: a candidate
@@ -6961,7 +7012,7 @@ mod tests {
         let pair = Pair::new("carried", true);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // T-2 passed; T-1 did not (yet). The engine queues T-2's merge itself.
         pass(&mut store, "T-2", &pair.b, 10);
@@ -8078,7 +8129,7 @@ mod tests {
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
         // A checkout of another repository stands where the merge worktree goes.
         herdr.add_worktree(
-            "p/merge/home",
+            "p/merge/between-voyages",
             &foreign_a.work.display().to_string(),
             "wt-merge:p1",
         );
@@ -8095,7 +8146,7 @@ mod tests {
         // The cause changes (another repository's checkout): the same item
         // carries the latest reason.
         herdr.add_worktree(
-            "p/merge/home",
+            "p/merge/between-voyages",
             &foreign_b.work.display().to_string(),
             "wt-merge:p1",
         );
@@ -8133,12 +8184,16 @@ mod tests {
         sh(
             &scratch.root,
             &format!(
-                "git -C {} worktree add -q -b p/merge/home {} origin/dev",
+                "git -C {} worktree add -q -b p/merge/between-voyages {} origin/dev",
                 scratch.work.display(),
                 path.display()
             ),
         );
-        herdr.add_worktree("p/merge/home", &path.display().to_string(), "wt-merge:p1");
+        herdr.add_worktree(
+            "p/merge/between-voyages",
+            &path.display().to_string(),
+            "wt-merge:p1",
+        );
         merge_passed(&mut store, &mut herdr, &cfg, "p", 400).unwrap();
         let items = store
             .read(|tx| tx.thread_messages("p", "merge-wait:p:worktree"))
@@ -8148,17 +8203,19 @@ mod tests {
         assert_eq!(items[0].result.as_deref(), Some(MERGE_WAIT_OVER));
     }
 
-    /// T-565: the merge seat is not a `SeatRow`, so no apply and no lane pass
-    /// moves its branch. A repo still on the previous default (`p/merge`) gets
-    /// its merge worktree on `p/merge/home` anyway: the old ref is settled
-    /// before git is asked for the branch, and no D/F refusal is reported.
+    /// T-565, T-584: the merge seat is not a `SeatRow`, so no apply and no lane
+    /// pass moves its branch. A repo still on the previous default
+    /// (`p/merge/home`) gets its merge worktree on the voyage's name anyway
+    /// (`p/merge/between-voyages`: no voyage has departed): the old ref is
+    /// settled before git is asked for the branch, and no D/F refusal is
+    /// reported.
     #[test]
     fn a_merge_seat_on_the_previous_default_branch_is_moved_before_its_worktree() {
         let scratch = Scratch::new("merge-seat-old-default");
         // The ref the previous default gave the merge seat.
         sh(
             &scratch.root,
-            &format!("git -C {} branch p/merge dev", scratch.work.display()),
+            &format!("git -C {} branch p/merge/home dev", scratch.work.display()),
         );
         let mut store = world(TaskState::Ready);
         let candidate = scratch.head_of("heat/t5");
@@ -8182,15 +8239,17 @@ mod tests {
         // The ref moved to the current default, and the worktree was asked for
         // on the new name.
         assert!(
-            git_ref_exists(&scratch.work, "refs/heads/p/merge/home"),
+            git_ref_exists(&scratch.work, "refs/heads/p/merge/between-voyages"),
             "the new name is a branch"
         );
         assert!(
-            !git_ref_exists(&scratch.work, "refs/heads/p/merge"),
+            !git_ref_exists(&scratch.work, "refs/heads/p/merge/home"),
             "the old name is gone"
         );
         assert!(
-            herdr.worktree_branches().contains(&"p/merge/home"),
+            herdr
+                .worktree_branches()
+                .contains(&"p/merge/between-voyages"),
             "the merge worktree is on the new branch: {:?}",
             herdr.worktree_branches()
         );
@@ -8251,7 +8310,7 @@ mod tests {
             "the foreign ref is untouched"
         );
         assert!(
-            !git_ref_exists(&scratch.work, "refs/heads/p/merge/home"),
+            !git_ref_exists(&scratch.work, "refs/heads/p/merge/between-voyages"),
             "nothing was created over it"
         );
     }
@@ -8273,13 +8332,13 @@ mod tests {
         sh(
             &pair.root,
             &format!(
-                "git -C {} worktree add -q -b p/merge-2/home {} origin/dev",
+                "git -C {} worktree add -q -b p/merge-2/between-voyages {} origin/dev",
                 pair.work.display(),
                 path.display()
             ),
         );
         herdr.add_worktree(
-            "p/merge-2/home",
+            "p/merge-2/between-voyages",
             &path.display().to_string(),
             "wt-merge-2:p1",
         );
@@ -8316,7 +8375,7 @@ mod tests {
             sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge/home {} origin/dev",
+                    "git -C {} worktree add -q -b p/merge/between-voyages {} origin/dev",
                     self.work.display(),
                     path.display()
                 ),
@@ -8325,7 +8384,7 @@ mod tests {
                 workspace_id: "wt-merge".into(),
                 pane_id: "wt-merge:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge/home".into(),
+                branch: "p/merge/between-voyages".into(),
             }
         }
 
@@ -8433,7 +8492,7 @@ mod tests {
         let pair = Pair::new("batch-queued", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         let third = add_third_task(&mut store, &pair);
         // The gate says no to the whole batch.
@@ -8525,7 +8584,7 @@ mod tests {
         let pair = Pair::new("batch", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // The gate's own tally, in a file neither the worktree nor the remote
         // holds.
@@ -8581,7 +8640,7 @@ mod tests {
         let pair = Pair::new("gate-vars", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // The gate's own record, in a file outside the worktree.
         let got = pair.root.join("gate-run");
@@ -8617,7 +8676,7 @@ mod tests {
         let pair = Pair::new("gate-vars-batch", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         let got = pair.root.join("gate-run");
         batch_of_two(
@@ -8653,7 +8712,7 @@ mod tests {
         let trio = Trio::new("merge-first");
         let worktree = trio.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let heads = trio.heads();
         let mut store = trio_world(&heads["heat/t1"], &heads["heat/t2"], &heads["heat/t3"]);
         // The gate writes whom it judged: one task when the merge runs alone.
@@ -8715,7 +8774,7 @@ mod tests {
         let pair = Pair::new("batch-red", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // The gate says no to T-1's work (a.txt) and yes to T-2's alone.
         batch_of_two(&mut store, "test ! -f a.txt");
@@ -8760,7 +8819,7 @@ mod tests {
         let pair = Pair::new("batch-race", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // The gate moves origin/dev under the batch: its push cannot be a
         // fast-forward.
@@ -8818,7 +8877,7 @@ mod tests {
         let pair = Pair::new("batch-culprit", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         let ran = pair.root.join("gate-runs");
         batch_of_two(
@@ -8866,7 +8925,7 @@ mod tests {
         let pair = Pair::new("batch-nobody", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         let ran = pair.root.join("gate-runs");
         batch_of_two(
@@ -8916,7 +8975,7 @@ mod tests {
         )
         .unwrap();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // The gate says no without naming any path.
         batch_of_two(&mut store, "test ! -f a.txt");
@@ -8962,7 +9021,7 @@ mod tests {
         );
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         batch_of_two(&mut store, "true");
         pass(&mut store, "T-1", &pair.a, 10);
@@ -8995,7 +9054,7 @@ mod tests {
         let pair = Pair::new("train", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let second = second_stage(&pair, &mut herdr);
         let mut store = pair_world(&pair.a, &pair.b);
         train_of_two(&mut store, "true");
@@ -9029,7 +9088,7 @@ mod tests {
         let pair = Pair::new("train-fail", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         second_stage(&pair, &mut herdr);
         let mut store = pair_world(&pair.a, &pair.b);
         // The gate says no to T-1's work (a.txt) and yes to T-2's alone.
@@ -9057,7 +9116,7 @@ mod tests {
         let pair = Pair::new("independent", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // T-2 passed; T-1 did not. T-2's commits carry none of T-1's work.
         pass(&mut store, "T-2", &pair.b, 10);
@@ -9117,7 +9176,7 @@ mod tests {
             sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge/home {} origin/dev",
+                    "git -C {} worktree add -q -b p/merge/between-voyages {} origin/dev",
                     self.work.display(),
                     path.display()
                 ),
@@ -9126,7 +9185,7 @@ mod tests {
                 workspace_id: "wt-merge".into(),
                 pane_id: "wt-merge:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge/home".into(),
+                branch: "p/merge/between-voyages".into(),
             }
         }
 
@@ -9248,7 +9307,7 @@ mod tests {
 
         let worktree = chain.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         // T-1: attempt 1 (a1) was rejected, attempt 2 (a2) is in review.
         let mut store = chain_world(&chain.candidates);
         store
@@ -9321,7 +9380,7 @@ mod tests {
         let chain = Chain::new("chain", 3);
         let worktree = chain.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = chain_world(&chain.candidates);
         let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
@@ -9393,14 +9452,14 @@ mod tests {
             }
         }
 
-        /// The merge worktree of this repo: `p/merge/home`, cut from its
+        /// The merge worktree of this repo: `p/merge/between-voyages`, cut from its
         /// integration branch.
         fn merge_worktree(&self, integration: &str) -> gear_herdr::Worktree {
             let path = self.root.join("web-merge");
             sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge/home {} origin/{integration}",
+                    "git -C {} worktree add -q -b p/merge/between-voyages {} origin/{integration}",
                     self.work.display(),
                     path.display()
                 ),
@@ -9409,7 +9468,7 @@ mod tests {
                 workspace_id: "wt-merge-web".into(),
                 pane_id: "wt-merge-web:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge/home".into(),
+                branch: "p/merge/between-voyages".into(),
             }
         }
 
@@ -10585,7 +10644,7 @@ gate = "{gate}"
         let scratch = Scratch::new("pr");
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pr_world(&candidate);
         claim_op(&mut store, "T-5", 7);
         let mut cfg = test_cfg();
@@ -10673,7 +10732,7 @@ gate = "{gate}"
         let scratch = Scratch::new("pr-nopr");
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pr_world(&candidate);
         let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
@@ -10705,7 +10764,7 @@ gate = "{gate}"
         let scratch = Scratch::new("pr-refused");
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pr_world(&candidate);
         claim_op(&mut store, "T-5", 7);
         let mut cfg = test_cfg();
@@ -10915,7 +10974,7 @@ gate = "{gate}"
         let worktree = scratch.merge_worktree();
         let candidate = candidate.to_string();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -11577,7 +11636,7 @@ gate = "{project_gate}"
             &format!("touch '{}'", project_gate.display()),
         );
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = child_world(&config_toml, &candidate);
         let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
@@ -11602,7 +11661,7 @@ gate = "{project_gate}"
             })
             .expect("the engine opened the merge worktree");
         assert_eq!(opened.0, format!("{}/web", scratch.root.display()));
-        assert_eq!(opened.1, "p/merge/home");
+        assert_eq!(opened.1, "p/merge/between-voyages");
         assert_eq!(opened.2, "p-merge-web", "the label names the repo");
         // The merge landed on the child's own integration branch.
         let log = child.log_of("web-dev");
@@ -11653,14 +11712,14 @@ gate = "{project_gate}"
             })
             .unwrap();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
             cfg.profiles
                 .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
         }
         assert_eq!(wait_merge(&mut store, &mut herdr, &cfg).len(), 1);
-        assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::WorktreeOpen {repo,branch,..} if repo == &scratch.root.join("web").to_string_lossy() && branch == "p/merge/home")));
+        assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::WorktreeOpen {repo,branch,..} if repo == &scratch.root.join("web").to_string_lossy() && branch == "p/merge/between-voyages")));
         assert!(child_gate.exists());
         assert!(!new_gate.exists());
         assert!(child.log_of("web-dev").contains("task"));
@@ -11699,7 +11758,7 @@ gate = "{project_gate}"
             })
             .expect("the engine created the merge worktree");
         assert_eq!(created.0, format!("{}/web", scratch.root.display()));
-        assert_eq!(created.1, "p/merge/home");
+        assert_eq!(created.1, "p/merge/between-voyages");
         assert_eq!(created.2, "web-dev", "the repo's own integration branch");
         assert_eq!(created.3, "p-merge-web");
     }
@@ -11720,7 +11779,7 @@ gate = "{project_gate}"
         publish(&scratch.work, "heat/t5-v2");
         let candidate = scratch.head_of("heat/t5-v2");
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -12037,7 +12096,7 @@ gate = "{project_gate}"
             path: PathBuf::from(path).display().to_string(),
             workspace_id: "test".into(),
             pane_id: "test".into(),
-            branch: "p/merge/home".into(),
+            branch: "p/merge/between-voyages".into(),
         };
         merge_one(
             &worktree,
@@ -13491,7 +13550,7 @@ gate = "{project_gate}"
             ),
         );
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -13562,7 +13621,7 @@ gate = "{project_gate}"
         );
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -13659,7 +13718,7 @@ gate = "{project_gate}"
         let scratch = Scratch::new("mergetime");
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -13715,7 +13774,7 @@ gate = "{project_gate}"
         let scratch = Scratch::new("captain-quota");
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         herdr.add_agent("w9:p1", "claude", gear_herdr::AgentStatus::Idle);
         herdr.add_agent("w1:p1", "opencode", gear_herdr::AgentStatus::Idle);
         herdr.set_screen("w9:p1", "────────────────\n❯\n────────────────\nOpus 5.5 · medium /repo (dev) · ctx 63% · 5h 100%\n⏵⏵ bypass permissions on");
@@ -13935,7 +13994,7 @@ gate = "{project_gate}"
         let worktree = scratch.merge_worktree();
         let candidate = scratch.head_of("heat/t5");
         let (mut store, mut herdr, cfg) = pr_setup(&candidate);
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
 
         // The merge runs and the pull request's head is pushed.
         pr_tick(&mut store, &mut herdr, &cfg, 20);
@@ -13990,7 +14049,7 @@ gate = "{project_gate}"
         let worktree = scratch.merge_worktree();
         let candidate = scratch.head_of("heat/t5");
         let (mut store, mut herdr, cfg) = pr_setup(&candidate);
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
 
         // The op is Unknown: the engine stopped while its worker ran.
         let id = merge_op_in(&mut store, &candidate, OpState::Unknown);
@@ -14035,7 +14094,7 @@ gate = "{project_gate}"
         let worktree = scratch.merge_worktree();
         let candidate = scratch.head_of("heat/t5");
         let (mut store, mut herdr, cfg) = pr_setup(&candidate);
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
 
         let id = merge_op_in(&mut store, &candidate, OpState::Intended);
         pr_tick(&mut store, &mut herdr, &cfg, 20);

@@ -2396,6 +2396,43 @@ impl<'s> Tx<'s> {
         Ok(tasks)
     }
 
+    /// The project's Done tasks whose latest accepted attempt has no merge
+    /// time, with the voyage each belongs to (T-595): work accepted and not on
+    /// the integration branch. Such a task keeps its voyage open — its
+    /// merge-failed and merge-lost items are still work — so the sweep, the
+    /// board's `voyage_open` and the landing's refusal read one rule here. A
+    /// voyage audit is judged against the integration branch and has nothing
+    /// to merge, so it is never named. One query: every tick reads it.
+    pub fn unmerged_done_tasks(&self, project: &str) -> GearResult<Vec<(String, Option<String>)>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(
+                "SELECT t.id, t.milestone FROM tasks t
+                   JOIN attempts a ON a.project=t.project AND a.task=t.id
+                  WHERE t.project=?1 AND t.state='done' AND a.state='accepted'
+                    AND a.merged_at IS NULL
+                    AND a.n=(SELECT MAX(b.n) FROM attempts b
+                               WHERE b.project=t.project AND b.task=t.id
+                                 AND b.state='accepted')
+                  ORDER BY t.id",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(map_sqlite)?;
+        let mut unmerged = Vec::new();
+        for row in rows {
+            let (task, milestone) = row.map_err(map_sqlite)?;
+            if self.task_audit(project, &task)? == Some(true) {
+                continue;
+            }
+            unmerged.push((task, milestone));
+        }
+        Ok(unmerged)
+    }
+
     /// Replace every column of an existing task (raw write, no transition
     /// check — callers use `require_transition`). Missing → NoTarget.
     pub fn update_task(&self, row: &TaskRow) -> GearResult<()> {

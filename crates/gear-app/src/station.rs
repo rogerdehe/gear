@@ -446,35 +446,17 @@ fn require_land_ready(
 }
 
 /// The done tasks of the voyage whose latest accepted attempt has no merge
-/// time: their work is not on the integration branch.
-fn unmerged_tasks(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<Vec<String>> {
-    let mut unmerged = Vec::new();
-    for task in tx.tasks_of_project(project)? {
-        if task.milestone.as_deref() != Some(milestone) || task.state != TaskState::Done {
-            continue;
-        }
-        // A voyage audit is judged against the integration branch: it has
-        // nothing to merge.
-        if tx.task_audit(project, &task.id)? == Some(true) {
-            continue;
-        }
-        let Some(latest) = tx
-            .attempts_of_task(project, &task.id)?
-            .into_iter()
-            .rev()
-            .find(|attempt| attempt.state == gear_model::AttemptState::Accepted)
-        else {
-            continue;
-        };
-        if tx
-            .attempt_times(project, &task.id, latest.n)?
-            .merged
-            .is_none()
-        {
-            unmerged.push(task.id.clone());
-        }
-    }
-    Ok(unmerged)
+/// time: their work is not on the integration branch (T-595). A voyage that has
+/// one is not finished — its merge failures are still work — so the sweep, the
+/// board's `voyage_open` and the landing's refusal read the same rule (the
+/// store's `unmerged_done_tasks`; a voyage audit has nothing to merge).
+pub fn unmerged_tasks(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<Vec<String>> {
+    Ok(tx
+        .unmerged_done_tasks(project)?
+        .into_iter()
+        .filter(|(_, of)| of.as_deref() == Some(milestone))
+        .map(|(task, _)| task)
+        .collect())
 }
 
 /// The tasks of the voyage cancelled, or moved out of it, since departure

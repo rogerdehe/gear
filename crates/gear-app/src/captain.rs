@@ -31,8 +31,9 @@ use gear_model::{
 use gear_store::{BindingRow, BindingStatus, NewMessage, Store, Tx};
 
 /// The folder name, in place of a voyage's, for a project whose last voyage
-/// has finished: its handovers and the like until the next kickoff.
-pub const BETWEEN_VOYAGES: &str = "between-voyages";
+/// has finished: its handovers and the like until the next kickoff (one text
+/// with the `{voyage}` of a seat branch, `gear_model::branch`).
+pub const BETWEEN_VOYAGES: &str = gear_model::branch::BETWEEN_VOYAGES;
 
 /// How long the outgoing captain has to answer the request for its handover
 /// before the new captain is pointed at its session (handover.md part B).
