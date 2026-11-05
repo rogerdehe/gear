@@ -503,13 +503,53 @@ pub fn branch_clash(config: &config::ProjectConfig, others: &[(String, String)])
                 .as_ref()
                 .is_some_and(|old| shared_integration(old, &other).is_some());
             if !had {
+                let id = &config.project.id;
                 return Some(format!(
-                    "project {other_id} also integrates into {branch} in {shared}: two voyages on one branch cannot be released apart, so give this project its own integration branch (`[conventions] integration`, or `integration` on its `[[repos]]` entry), any name your team uses"
+                    "project {other_id} also integrates into {branch} in {shared}: two voyages on one branch cannot be released apart, so give this project its own integration branch: leave `integration` out and registration sets `{id}/dev`, or name one in `[conventions] integration` (or on its `[[repos]]` entry)"
                 ));
             }
         }
     }
     None
+}
+
+/// The default for a project that shares a repository (user, 2026-11-05):
+/// when the config names no integration branch and another project already
+/// integrates into the default one there, the config with
+/// `integration = "<project>/dev"` in `[conventions]`. `None` when the config
+/// names its own branch, shares nothing, or already shared before (a
+/// re-registration keeps its branch).
+pub fn with_own_integration(text: &str, others: &[(String, String)]) -> Option<String> {
+    let names_one = text.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("integration") && line["integration".len()..].trim_start().starts_with('=')
+    });
+    if names_one {
+        return None;
+    }
+    let config = config::parse(text).ok()?;
+    let id = &config.project.id;
+    if others.iter().any(|(other, _)| other == id) {
+        return None;
+    }
+    let shares = others.iter().any(|(_, other)| {
+        config::parse(other)
+            .ok()
+            .is_some_and(|other| shared_integration(&config, &other).is_some())
+    });
+    if !shares {
+        return None;
+    }
+    let line = format!("integration = \"{id}/dev\"   # its own: another project integrates into the default branch here");
+    let updated = match text.find("[conventions]\n") {
+        Some(at) => {
+            let after = at + "[conventions]\n".len();
+            format!("{}{line}\n{}", &text[..after], &text[after..])
+        }
+        None => format!("{}\n[conventions]\n{line}\n", text.trim_end()),
+    };
+    config::parse(&updated).ok()?;
+    Some(updated)
 }
 
 /// The repo path and integration branch `config` shares with `other`: the same

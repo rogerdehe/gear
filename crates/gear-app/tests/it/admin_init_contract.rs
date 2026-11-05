@@ -859,7 +859,7 @@ fn a_second_project_on_one_repo_needs_its_own_voyage_folder() {
     assert_eq!(
         e.detail,
         format!(
-            "project alpha also integrates into dev in {shown}: two voyages on one branch cannot be released apart, so give this project its own integration branch (`[conventions] integration`, or `integration` on its `[[repos]]` entry), any name your team uses"
+            "project alpha also integrates into dev in {shown}: two voyages on one branch cannot be released apart, so give this project its own integration branch: leave `integration` out and registration sets `beta/dev`, or name one in `[conventions] integration` (or on its `[[repos]]` entry)"
         )
     );
 
@@ -1026,4 +1026,38 @@ fn a_changed_seat_branch_names_the_worktree_it_leaves_behind() {
     .unwrap();
     assert_eq!(r.config_version, 3);
     assert!(r.stale_worktrees.is_empty());
+}
+
+/// A project that shares a repository and names no integration branch gets
+/// `<project>/dev` (user, 2026-11-05); one that names its own, one alone on
+/// its repository and a re-registration keep their config.
+#[test]
+fn a_second_project_on_one_repo_gets_its_own_integration_branch_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let apart = format!("{TEMPLATED}voyage_dir = \"gear/{{project}}/voyages/{{milestone}}\"\n");
+    let alpha = project_on("alpha", &repo, &apart);
+    let others = [("alpha".to_string(), alpha.clone())];
+
+    let beta = project_on("beta", &repo, &apart);
+    let filled = gear_app::admin::with_own_integration(&beta, &others).expect("a default");
+    let parsed = gear_app::config::parse(&filled).unwrap();
+    assert_eq!(parsed.conventions.integration, "beta/dev");
+    assert_eq!(gear_app::admin::branch_clash(&parsed, &others), None);
+
+    let named = project_on(
+        "beta",
+        &repo,
+        &format!("{apart}integration = \"testing\"\n"),
+    );
+    assert_eq!(gear_app::admin::with_own_integration(&named, &others), None);
+
+    let alone = project_on("beta", &elsewhere, &apart);
+    assert_eq!(gear_app::admin::with_own_integration(&alone, &others), None);
+
+    let again = [others[0].clone(), ("beta".to_string(), beta.clone())];
+    assert_eq!(gear_app::admin::with_own_integration(&beta, &again), None);
 }

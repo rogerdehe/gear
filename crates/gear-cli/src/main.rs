@@ -1183,7 +1183,7 @@ fn cmd_admin_init(
     // T-228: `--check` validates the config and changes nothing — no
     // GEAR_ADMIN, no store, no Herdr, no engine.
     if check_only {
-        let text = read_config(config)?;
+        let text = own_integration(read_config(config)?)?;
         let parsed = gear_app::admin::check(&text, None)?;
         refuse_a_foreign_session(&parsed)?;
         // T-551: nor does an init that would move this session's store.
@@ -1228,6 +1228,12 @@ fn cmd_admin_init(
             if let Some(problem) = staffing_refusal_of(&parsed)? {
                 return Err(problem);
             }
+        }
+        if read_config(config)? != text {
+            eprintln!(
+                "integration branch: {} (another project integrates into the default branch of this repository; registration writes it to the config)",
+                parsed.conventions.integration
+            );
         }
         let lanes = parsed.lanes.len();
         let reviewers = parsed.quota.temps;
@@ -1292,7 +1298,7 @@ fn cmd_admin_init(
             "`gear admin init` needs GEAR_ADMIN=1: the user's own shell, or the captain's pane",
         ));
     }
-    let text = read_config(config)?;
+    let text = own_integration(read_config(config)?)?;
     // T-269: a config for another session never lands in this one's store.
     if let Ok(parsed) = gear_app::config::parse(&text) {
         refuse_a_foreign_session(&parsed)?;
@@ -1346,6 +1352,24 @@ fn cmd_admin_init(
     // runs on. Canonical, so the meta names the same file every run.
     let path = canonical(&config.to_string_lossy());
     store.write(|tx| tx.set_meta(&gear_app::admin::config_path_key(&r.project), &path))?;
+    // The default integration branch (if one was filled in) goes back to the
+    // file only once the store holds it.
+    if read_config(config)? != text {
+        std::fs::write(config, &text).map_err(|e| {
+            GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!("cannot write {}: {e}", config.display()),
+            )
+        })?;
+        if let Ok(parsed) = gear_app::config::parse(&text) {
+            eprintln!(
+                "integration branch: {} (another project integrates into the default branch of this repository; written to {})",
+                parsed.conventions.integration,
+                config.display()
+            );
+            ensure_integration_branch(&parsed);
+        }
+    }
     // This store becomes the Herdr session's GEAR target (design/14, L-54).
     if let (Ok(socket), Ok(db), Some(home)) = (
         std::env::var("HERDR_SOCKET_PATH"),
@@ -1444,6 +1468,64 @@ fn config_changes(registered: &str, file: &str) -> Vec<String> {
 }
 
 /// Read the config a command was given, as `BadFormat` when it cannot be read.
+/// The config text with its own integration branch filled in (user,
+/// 2026-11-05: a project that shares a repository gets `<project>/dev` by
+/// default). Registration writes it back to the config file once the store
+/// holds it, so the file and the store agree.
+fn own_integration(text: String) -> GearResult<String> {
+    let Some(others) = other_projects()? else {
+        return Ok(text);
+    };
+    let pairs: Vec<(String, String)> = others.into_iter().map(|(id, text, _)| (id, text)).collect();
+    let Some(updated) = gear_app::admin::with_own_integration(&text, &pairs) else {
+        return Ok(text);
+    };
+    Ok(updated)
+}
+
+/// Create the project's integration branch on the remote when it is not
+/// there yet, from the release branch: a project of its own is released on
+/// its own. A branch the captain already pushed (from a commit the user
+/// chose) is left as it is.
+fn ensure_integration_branch(parsed: &gear_app::config::ProjectConfig) {
+    let repo = parsed.root_repo();
+    let remote = parsed.conventions.remote.clone();
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo.path)
+            .args(args)
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    };
+    // A repository without that remote (a local fixture) has nothing to create.
+    if !run(&["remote", "get-url", &remote])
+        || run(&[
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            &remote,
+            &repo.integration,
+        ])
+    {
+        return;
+    }
+    let source = format!("refs/remotes/{remote}/{}", repo.release);
+    let target = format!("{source}:refs/heads/{}", repo.integration);
+    if run(&["fetch", "-q", &remote, &repo.release]) && run(&["push", "-q", &remote, &target]) {
+        eprintln!(
+            "integration branch: created {remote}/{} from {remote}/{}",
+            repo.integration, repo.release
+        );
+    } else {
+        eprintln!(
+            "warning: {remote}/{} does not exist and could not be created from {remote}/{}; push it before the first merge",
+            repo.integration, repo.release
+        );
+    }
+}
+
 fn read_config(config: &std::path::Path) -> GearResult<String> {
     std::fs::read_to_string(config).map_err(|e| {
         GearError::new(
