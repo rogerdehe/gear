@@ -660,6 +660,62 @@ fn a_remerge_retries_a_voided_merge() {
     assert_eq!(queued_merge(&mut s).payload["candidate"], "c1");
 }
 
+/// T-576: an op left `unknown` has no worker running it, so a remerge queues
+/// it again — and the unknown op itself goes back to intended (Prometheus
+/// 2026-11-05: `- remerge T-722` was refused as "already unknown, not failed"
+/// while nothing would ever take that op).
+#[test]
+fn a_remerge_requeues_an_unknown_merge() {
+    let mut s = world(None);
+    accepted_task(&mut s);
+    let id = s
+        .write(|tx| {
+            let op = tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: OpKind::Merge,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({}),
+                created: T0 + 10,
+            })?;
+            tx.set_op_state("p", &op.id, OpState::Executing, None, T0 + 11)?;
+            tx.set_op_state(
+                "p",
+                &op.id,
+                OpState::Unknown,
+                Some("its batch failed the gate: it is gated again in a smaller batch"),
+                T0 + 12,
+            )?;
+            Ok(op.id)
+        })
+        .unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_op("p", &id)).unwrap().unwrap().state,
+        OpState::Unknown
+    );
+
+    run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap();
+
+    // The merge is queued: the new op carries the candidate, and the unknown
+    // one is queued again too.
+    let fresh = s
+        .read(|tx| Ok(tx.ops_in_state("p", OpState::Intended)?))
+        .unwrap()
+        .into_iter()
+        .find(|op| op.kind == OpKind::Merge && op.id != id)
+        .expect("the remerge queued a new merge op");
+    assert_eq!(fresh.payload["candidate"], "c1");
+    assert_eq!(
+        s.read(|tx| tx.get_op("p", &id)).unwrap().unwrap().state,
+        OpState::Intended,
+        "the unknown op is queued again, not left for nobody"
+    );
+}
+
 /// A captain's pass that names the stored short candidate by its full sha
 /// keeps the attempt's own spelling.
 #[test]
