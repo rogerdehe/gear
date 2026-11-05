@@ -927,3 +927,28 @@ fn holding_a_delivered_task_closes_its_attempt() {
     assert_eq!(state(&mut s, "T-1"), TaskState::Draft);
     assert_eq!(attempt(&mut s, "T-1", 1), AttemptState::Abandoned);
 }
+
+/// A dep added to an accepted task is applied: the engine holds its merge
+/// until the dep lands (Prometheus 2026-11-05: T-748 waits for T-762).
+#[test]
+fn a_dep_added_to_an_accepted_task_is_applied() {
+    let mut s = world();
+    s.write(|tx| {
+        let mut task = tx.get_task("p", "T-1")?.unwrap();
+        task.state = TaskState::Done;
+        tx.update_task(&task)
+    })
+    .unwrap();
+    run(
+        &mut s,
+        "## T-1 [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: T-2\n\n## T-2 [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n",
+        1,
+        "v2",
+    )
+    .unwrap();
+    let deps = s
+        .read(|tx| Ok(tx.get_task("p", "T-1")?.unwrap().deps))
+        .unwrap();
+    assert_eq!(deps, vec!["T-2".to_string()]);
+    assert_eq!(state(&mut s, "T-1"), TaskState::Done);
+}

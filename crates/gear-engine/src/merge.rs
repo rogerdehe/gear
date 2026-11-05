@@ -509,6 +509,7 @@ pub fn merge_passed(
     // resets to the remote before doing any merges, and adopts a completed push.
     let ready = ready_merges(store, project)?;
     let ready = void_carried(store, project, ready, now)?;
+    let ready = deps_landed(store, project, ready)?;
     let ready = waits_cleared(store, project, ready)?;
     let ready = merge_order(now_first(store, project, ready)?);
     // The merges a train took (or voided) in this tick.
@@ -1935,6 +1936,44 @@ fn void_carried(
         }
     }
     Ok(keep)
+}
+
+/// A merge waits while one of its task's `deps:` has not landed: the captain
+/// keeps an accepted task out of the merge line until the fix it needs is on
+/// the integration branch (Prometheus 2026-11-05: T-748 refused three rounds,
+/// and their batchmates with it, for a cause T-762 fixes). A cancelled dep, or
+/// one of another project, does not hold it.
+fn deps_landed(store: &mut Store, project: &str, ready: Vec<OpRow>) -> GearResult<Vec<OpRow>> {
+    store.read(|tx| {
+        let mut keep = Vec::with_capacity(ready.len());
+        for op in ready {
+            let Some(task) = op.task.as_deref() else {
+                keep.push(op);
+                continue;
+            };
+            let Some(row) = tx.get_task(project, task)? else {
+                keep.push(op);
+                continue;
+            };
+            let mut waits = false;
+            for dep in &row.deps {
+                if dep.contains(':') {
+                    continue;
+                }
+                let cancelled = tx
+                    .get_task(project, dep)?
+                    .is_none_or(|dep| dep.state == TaskState::Cancelled);
+                if !cancelled && !gear_app::tasks::work_landed(tx, project, dep)? {
+                    waits = true;
+                    break;
+                }
+            }
+            if !waits {
+                keep.push(op);
+            }
+        }
+        Ok(keep)
+    })
 }
 
 /// Close a queued merge op that will not run: Intended becomes Void, Unknown
@@ -6729,6 +6768,34 @@ mod tests {
 
         assert_eq!(order[0].id, running.id, "the merge that can run goes first");
         assert_eq!(order[1].id, waiting.id, "the waiting merge goes last");
+    }
+
+    /// A merge waits while a dep of its task has not landed, and runs once it
+    /// has (Prometheus 2026-11-05: T-748 held until T-762 lands).
+    #[test]
+    fn a_merge_waits_for_its_deps_to_land() {
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.id = "T-6".into();
+                task.rank = 6;
+                task.deps = vec!["T-5".into()];
+                tx.insert_task(&task)
+            })
+            .unwrap();
+        let mut held = op("abc1234");
+        held.task = Some("T-6".into());
+
+        let ready = deps_landed(&mut store, "p", vec![held.clone()]).unwrap();
+        assert!(ready.is_empty(), "T-5 has not landed: T-6's merge waits");
+
+        lost_task(&mut store, "abc1234", OpState::Confirmed, 5);
+        store
+            .write(|tx| tx.set_attempt_time("p", "T-5", 1, AttemptStep::Merged, 30))
+            .unwrap();
+        let ready = deps_landed(&mut store, "p", vec![held]).unwrap();
+        assert_eq!(ready.len(), 1, "T-5 landed: T-6 merges");
     }
 
     /// A merge of a task the plan marks `now` runs before older ordinary ones
