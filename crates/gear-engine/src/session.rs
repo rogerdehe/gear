@@ -728,6 +728,25 @@ fn review_facts(
     })?;
 
     let (current_session, current_cli, agent_live) = seat_session(store, herdr, seat)?;
+    // T-590: a feature's reviewer seat keeps its conversation from one light
+    // stage check to the next, and into the feature's one full review. Its
+    // own session is the earlier work, so V1 keeps it (or resumes it) instead
+    // of starting a fresh conversation for each member's check.
+    let mut earlier_seat = earlier_seat;
+    let mut earlier_cli = earlier_cli;
+    let mut earlier_session = earlier_session;
+    if matches!(seat.state, SeatState::Standby | SeatState::Released) && agent_live {
+        if store
+            .read(|tx| tx.feature_seat(&seat.project, &seat.id))?
+            .is_some()
+        {
+            if let Some(session) = current_session.clone() {
+                earlier_seat = Some(seat.id.clone());
+                earlier_cli = current_cli.clone();
+                earlier_session = Some(session);
+            }
+        }
+    }
     Ok(Facts {
         seat: seat.id.clone(),
         seat_state: seat.state,
