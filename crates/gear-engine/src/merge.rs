@@ -5435,8 +5435,13 @@ fn close_settled_task_items(store: &mut Store, project: &str, now: Ts) -> GearRe
                     .into_iter()
                     .map(|attempt| format!("{}:{}", task.id, attempt.n))
                     .collect();
-                // The captain's own decision item hangs on `T-<n>:cap`.
+                // The captain's own decision item hangs on `T-<n>:cap`, and an
+                // overrun of a finished task says nothing any more
+                // (Prometheus M-8886, overrun:T-609:rework).
                 threads.push(format!("{}:cap", task.id));
+                for step in ["dev", "review", "rework", "direction"] {
+                    threads.push(format!("overrun:{}:{step}", task.id));
+                }
                 for thread in threads {
                     for item in tx.thread_messages(project, &thread)? {
                         if !unrest(item.state) {
@@ -5456,10 +5461,8 @@ fn close_settled_task_items(store: &mut Store, project: &str, now: Ts) -> GearRe
             }
             // The work landed: an item that says the merge failed or was lost
             // asks for a remerge of work that is already on the branch.
-            let landed = tx
-                .attempt_times_of_task(project, &task.id)?
-                .into_iter()
-                .any(|(_, times)| times.merged.is_some());
+            // Its own merge or its carrier's (Prometheus T-588, T-563).
+            let landed = gear_app::tasks::work_landed(tx, project, &task.id)?;
             if !landed {
                 continue;
             }
@@ -7475,6 +7478,66 @@ mod tests {
         assert_eq!(items.len(), 1, "{items:?}");
         assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
         assert_eq!(items[0].result.as_deref(), Some(LOST_LANDED));
+    }
+
+    /// Prometheus M-8629 / M-9797 (2026-11-05): a task carried by another
+    /// (`carried-by`) has no merge time of its own; once its carrier merged,
+    /// its merge-failed item closes, and a reply may close it too.
+    #[test]
+    fn a_failed_merge_item_of_a_carried_task_closes_once_its_carrier_merged() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 5);
+        store
+            .write(|tx| {
+                let mut carrier = tx.get_task("p", "T-5")?.unwrap();
+                carrier.id = "T-6".into();
+                carrier.rank = 2;
+                carrier.state = TaskState::Ready;
+                tx.insert_task(&carrier)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-6", "p:heat", 1, 0)?;
+                tx.set_task_carried_by("p", "T-5", "T-6")?;
+                tx.insert_message(&gear_store::NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: failed_thread("T-5"),
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: gear_model::MsgKind::System,
+                    urgent: false,
+                    body: "the merge of T-5 failed".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: 5,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 10).unwrap();
+        let state = |store: &mut Store| {
+            store
+                .read(|tx| tx.thread_messages("p", &failed_thread("T-5")))
+                .unwrap()[0]
+                .state
+        };
+        assert_eq!(
+            state(&mut store),
+            MsgState::Open,
+            "the carrier has not merged"
+        );
+        store
+            .write(|tx| tx.set_attempt_time("p", "T-6", 1, AttemptStep::Merged, 30))
+            .unwrap();
+        assert!(store
+            .read(|tx| gear_app::tasks::work_landed(tx, "p", "T-5"))
+            .unwrap());
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 31 + LOST_SCAN_EVERY_S).unwrap();
+        assert_eq!(state(&mut store), MsgState::Resolved, "its carrier merged");
     }
 
     /// A merge-failed item closes once the attempt it names has landed after
