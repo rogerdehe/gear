@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1194 -->
+<!-- gear-plan project=gear base=1195 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -329,7 +329,7 @@ estimate: 50
 deps: -
 fresh: seat branch naming, unrelated to features
 
-## T-585 [must] lane=hull milestone=M6.2
+## T-585 [must] lane=mast milestone=M6.2
 goal: A landing merges the captain's records. crates/gear-engine/src/finished.rs `reclaim`, before it lists leftovers: the captain's seat branch of the landed voyage (`expand_seat(seat_branch, project, "captain", <landed milestone>)`) is fetched; when it holds commits not on the integration branch, merge it in the merge worktree (as merge.rs opens it) with a merge commit `records: <project> <milestone>` and no gate (records are the captain's files; a conflict is not resolved), push the integration branch, then delete the branch on the remote and locally. Done once per landing (meta `records_merged:{project}:{milestone}`). A conflict or a push failure opens one captain item, thread `records:<milestone>`, naming the branch and the git error, and nothing is deleted. A branch with nothing new is only deleted. skills/gear/references/course.md §9: one line that the landing merges the captain's branch, so the captain only commits and pushes its records before landing.
 accept: Tests in finished.rs `mod tests` with a fixture remote (as merge tests build one): a captain branch with one records commit is merged into dev and deleted after a landing; a conflicting one opens the `records:M1` item and stays; a branch already on dev is only deleted; a second tick does nothing. Run only `make check CRATE=gear-engine TESTS='test(finished::)'`; the merge gate runs `make gate`.
 estimate: 50
