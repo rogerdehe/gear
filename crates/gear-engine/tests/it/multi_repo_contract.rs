@@ -328,6 +328,7 @@ fn wait_merge(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg) {
 /// merged into that repo's own branch with that repo's gate. The project
 /// root is not touched.
 #[test]
+#[ignore = "T-601: onboard to merge over real git repos, no wait or sleep to cut, `make full` runs it"]
 fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
     let world = World::new();
     let marker = world.root.path().join("gate-marker");

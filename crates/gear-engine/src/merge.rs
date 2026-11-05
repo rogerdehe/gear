@@ -6962,6 +6962,7 @@ mod tests {
     /// told which task it waits for, and both land in order once the other
     /// task passes.
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn a_merge_waits_for_the_task_its_commits_carry() {
         let pair = Pair::new("carried", true);
         let worktree = pair.merge_worktree();
@@ -8442,6 +8443,7 @@ mod tests {
     /// batch took them, the lost scan called them lost and `- remerge`
     /// refused them).
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn a_red_batch_leaves_its_members_queued_and_the_next_batch_takes_them() {
         let pair = Pair::new("batch-queued", false);
         let worktree = pair.merge_worktree();
@@ -8662,6 +8664,7 @@ mod tests {
     /// T-738 held the fix every red round waited for, and its merge was last
     /// of fifteen).
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn a_merge_first_task_merges_before_the_batch() {
         let trio = Trio::new("merge-first");
         let worktree = trio.merge_worktree();
@@ -8724,6 +8727,7 @@ mod tests {
     /// T-547: a red batch is halved — its first merge runs alone and fails as
     /// it would, the other lands alone. Two gates after the red one.
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn a_red_batch_is_halved_and_its_merges_run_alone() {
         let pair = Pair::new("batch-red", false);
         let worktree = pair.merge_worktree();
@@ -8769,6 +8773,7 @@ mod tests {
     /// merges go back to the queue with the race reason and the next merge of
     /// this branch still batches (no `single`).
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn dev_moving_during_a_batch_gate_is_a_race() {
         let pair = Pair::new("batch-race", false);
         let worktree = pair.merge_worktree();
@@ -8827,6 +8832,7 @@ mod tests {
     /// changes hold it: T-1 fails with that line, T-2 merges again and lands
     /// alone. The gate runs twice in all.
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn a_red_batch_names_the_culprit_the_gate_points_at() {
         let pair = Pair::new("batch-culprit", false);
         let worktree = pair.merge_worktree();
@@ -8875,6 +8881,7 @@ mod tests {
     /// T-548: the gate names a path no merge touched: nothing is a culprit, so
     /// the batch is halved as before and its merges are gated one by one.
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn a_red_batch_naming_no_change_is_halved() {
         let pair = Pair::new("batch-nobody", false);
         let worktree = pair.merge_worktree();
@@ -8919,6 +8926,7 @@ mod tests {
     /// earlier gate left in the worktree is removed before the gate runs, so
     /// its lines never name a culprit here.
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn a_failed_paths_file_left_from_an_earlier_gate_is_not_read() {
         let pair = Pair::new("batch-leftover", false);
         let worktree = pair.merge_worktree();
@@ -9004,6 +9012,7 @@ mod tests {
     /// A merge train: two passed tasks gate side by side, the second on the
     /// commit the first lands, and both land in order.
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn two_merges_gate_side_by_side_and_land_in_order() {
         let pair = Pair::new("train", false);
         let worktree = pair.merge_worktree();
@@ -9038,6 +9047,7 @@ mod tests {
     /// A merge whose gate says no fails as it would alone; the merge behind it
     /// was gated on top of it, so it goes back to the queue and lands alone.
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn a_failed_stage_sends_the_merges_behind_it_back_to_the_queue() {
         let pair = Pair::new("train-fail", false);
         let worktree = pair.merge_worktree();
@@ -9229,6 +9239,7 @@ mod tests {
     /// and the task built on the older branch still carries the older,
     /// rejected work. The wait must look at every attempt, not only the last.
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn a_merge_waits_for_an_earlier_attempt_of_the_task_it_carries() {
         let chain = Chain::new("rework", 2);
         // A's rework: one more commit on the same branch, outside B's history.
@@ -9329,6 +9340,7 @@ mod tests {
     /// its own order even when the verdicts arrive last-task first, and even
     /// after a restart (every waiting op is Unknown then).
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn waiting_merges_take_turns_and_a_chain_lands_in_order() {
         // T-1 (the base) is carried by T-2, which is carried by T-3.
         let chain = Chain::new("chain", 3);
@@ -11353,6 +11365,7 @@ gate = "{gate}"
     /// lands from the new tip on the next tick: no Failed state on the way,
     /// no captain item.
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn a_merge_that_races_every_try_goes_back_to_the_queue_and_lands() {
         let scratch = Scratch::new("raced-queue");
         let (mut store, mut herdr, mut cfg) = queued_merge(&scratch, "true");
@@ -11383,6 +11396,7 @@ gate = "{gate}"
     /// T-280: every other clear failure keeps today's three retries and its
     /// Failed end — a push a hook declines is not the remote moving.
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn a_push_a_hook_declines_every_try_still_fails_and_rings_the_captain() {
         let scratch = Scratch::new("declined");
         let (mut store, mut herdr, mut cfg) = queued_merge(&scratch, "true");
@@ -11577,6 +11591,7 @@ gate = "{project_gate}"
     /// T-53: the merge of a task of a lane bound to a child repo runs in that
     /// repo: its own worktree, its own integration branch and its own gate.
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn a_task_merges_in_the_repo_of_its_lane() {
         let scratch = Scratch::new("child");
         let child = Child::new(&scratch.root, "web", "web-dev");
@@ -11640,6 +11655,7 @@ gate = "{project_gate}"
     }
 
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn a_task_from_before_a_lane_rebind_merges_on_its_original_repo_and_gate() {
         let scratch = Scratch::new("rebound-child");
         let child = Child::new(&scratch.root, "web", "web-dev");
@@ -13383,6 +13399,7 @@ gate = "{project_gate}"
     /// integration branch's own commits into the range, and they are reviewed
     /// work already on the branch, not lane commits: the merge goes through.
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn a_task_branch_that_merged_the_integration_branch_still_merges() {
         let scratch = Scratch::new("task-branch-dev-merge");
         let worktree = scratch.merge_worktree();
@@ -14043,6 +14060,7 @@ gate = "{project_gate}"
     /// retry does not build a sibling merge commit and does not fail with a
     /// non-fast-forward.
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn a_pushed_head_is_reused_after_a_restart() {
         let scratch = Scratch::new("pr-reuse");
         let worktree = scratch.merge_worktree();
@@ -14335,6 +14353,7 @@ gate = "{project_gate}"
     /// T-582: an integration task's merge merges the feature's branch into the
     /// integration branch, and the close keeps that branch on the remote.
     #[test]
+    #[ignore = "T-601: a whole merge pass over real git, ~120 processes; no wait or sleep to cut, `make full` runs it"]
     fn an_integration_task_merges_the_feature_branch_and_keeps_it() {
         let scratch = Scratch::new("feature-integration");
         let candidate = feature_branch_on(&scratch.work, "review/t5");

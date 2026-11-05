@@ -6,6 +6,11 @@
 #   scripts/test.sh            all tests
 #   scripts/test.sh -p gear-app  extra arguments go to `cargo nextest run`
 #
+# A test marked `#[ignore = "..."]` is skipped here and run by `make full`
+# (`scripts/test.sh --run-ignored all`): the merge gate must keep its 80 s
+# headroom on a busy machine (T-601), and a test that is seconds of real git
+# work in one process cannot be made faster without weakening what it checks.
+#
 # Why `cargo nextest` and not `cargo test` (T-132). Measured here, warm cache,
 # six interleaved runs of each on the same build: nextest 61-99 s (median 72 s)
 # against `cargo test --workspace` 72-125 s (median 101 s) — a process per test
