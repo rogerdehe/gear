@@ -662,3 +662,60 @@ fn an_open_voyage_keeps_its_items_and_its_goal() {
         "an open voyage still rings its captain: {ops:?}"
     );
 }
+
+/// A station answered with `keep course` is not a landing: no reclaim item
+/// (GEAR's own M6.2 was taken for landed, and its lanes were retired).
+#[test]
+fn a_kept_course_is_not_a_landing_for_the_reclaim() {
+    use gear_store::NewMessage;
+
+    let mut store = voyage_store(None, 2);
+    store
+        .write(|tx| {
+            let land = tx.insert_message(&NewMessage {
+                project: "p".into(),
+                thread: "station:M1".into(),
+                task: None,
+                attempt: None,
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: "p:captain".into(),
+                kind: MsgKind::System,
+                urgent: true,
+                body: "Voyage M1 is ready to land".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: NOW,
+                meta: None,
+            })?;
+            tx.set_meta("station:p:M1:land", &land.id)?;
+            tx.update_message_state(
+                "p",
+                &land.id,
+                MsgState::Resolved,
+                Some(&format!(
+                    "station {}: keep course | why: more work",
+                    land.id
+                )),
+                None,
+                None,
+                NOW + 1,
+            )?;
+            for n in 1..=2 {
+                let mut task = tx.get_task("p", &format!("T-{n}"))?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let changed = gear_engine::finished::reclaim(&mut store, "p", NOW + 600).unwrap();
+
+    assert_eq!(changed, None);
+    let items = store
+        .read(|tx| tx.thread_messages("p", gear_engine::finished::RECLAIM_THREAD))
+        .unwrap();
+    assert!(items.is_empty(), "{items:?}");
+}
