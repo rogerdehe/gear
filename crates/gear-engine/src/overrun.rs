@@ -23,6 +23,51 @@ fn text(task: &str, attempt: i64, contract: i64, budget: i64, active: i64) -> St
     format!("GEAR: {task} has reached its estimate ({budget} min; {} min so far).\nAnswer with one command, then keep working:\ngear send --kind progress --task {task} --attempt {attempt} --contract {contract} --left <minutes> --blocker \"<what stops you, or none>\" \"<done so far; what is left>\"", active / 60)
 }
 
+/// The budget of a stage check (T-591): a direction round of a feature member
+/// is a light look at the candidate, not the task's work, so it gets five
+/// minutes and not the task's estimate.
+const STAGE_CHECK_BUDGET_MIN: i64 = 5;
+
+/// The one reminder a stage check gets (T-591). It says what the check is — a
+/// stage check of a feature, whose full review comes once, on the feature's
+/// integration task — so the reviewer reports what it has and keeps going.
+fn stage_check_text(task: &str, feature: &str) -> String {
+    format!(
+        "GEAR: {task} is a stage check of feature {feature}, and {STAGE_CHECK_BUDGET_MIN} minutes have passed. Report what you found now. If you have a lead that needs more time, reply with one line saying why and keep going; the full review comes on the feature's integration task."
+    )
+}
+
+/// The feature whose stage check this round runs (T-591): a direction round of
+/// a task marked `feature: F-<n>` that is not the feature's own integration
+/// task (the carrier is never marked). None for every other round.
+fn stage_check(tx: &Tx<'_>, round: &RoundRow) -> GearResult<Option<String>> {
+    if round.role != "direction" {
+        return Ok(None);
+    }
+    tx.task_feature(&round.project, &round.task)
+}
+
+/// The stage check's reply (T-591): a progress line its seat sent after the
+/// reminder — "one line saying why and keep going". It is not an answer with
+/// `--left`, so it neither asks for a captain item nor moves the clock: it
+/// only silences the reminder for this round.
+fn stage_check_reply(
+    tx: &Tx<'_>,
+    round: &RoundRow,
+    after: Ts,
+    until: Ts,
+) -> GearResult<Option<gear_store::MessageRow>> {
+    let mut messages = tx.progress_of_attempt(&round.project, &round.task, round.attempt)?;
+    messages.retain(|m| m.sender == round.seat && m.created >= after && m.created <= until);
+    messages.sort_by_key(|m| {
+        (
+            m.created,
+            m.id.trim_start_matches("M-").parse::<u64>().unwrap_or(0),
+        )
+    });
+    Ok(messages.pop())
+}
+
 /// Union of the seat's pauses in a time window: overlapping quota and wait
 /// pauses count only once.
 fn paused(tx: &Tx<'_>, round: &RoundRow, start: Ts, end: Ts) -> GearResult<i64> {
@@ -139,10 +184,16 @@ pub(crate) fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool
     };
     let times = tx.attempt_times(&round.project, &round.task, round.attempt)?;
     let review = round.role == "review";
+    // T-591: a direction round of a feature member is a stage check. It is a
+    // light look under the feature's reviewer and not the task's work, so it
+    // is measured in its own five minutes, from the check's own start: the
+    // attempt's start (and its hand-in) belong to the work, not to the check
+    // that reads its candidate.
+    let stage_check = stage_check(tx, round)?;
     // T-458: a round reopened for a parked attempt that goes on counts from
     // the window's own start, never from the attempt's first start (the time
     // the lane worked on another task is not this round's).
-    let start = if review {
+    let start = if review || stage_check.is_some() {
         Some(round.start_at)
     } else {
         times.started.map(|started| started.max(round.start_at))
@@ -162,7 +213,12 @@ pub(crate) fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool
     // the reviewer; once it is not, the round stops when it was settled.
     let settled =
         review && (attempt.state != AttemptState::Submitted || task.state != TaskState::Verifying);
-    let stop = if review {
+    let stop = if stage_check.is_some() {
+        // A stage check reads a candidate that is already handed in: the
+        // hand-in is not its end. Its round ends when the check's job ends
+        // (`rounds`), never here.
+        None
+    } else if review {
         match verdict {
             Some(at) => Some(at),
             None if settled => Some(times.settled.unwrap_or(now)),
@@ -183,7 +239,12 @@ pub(crate) fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool
     }
     let active = (end - start - total_pause).max(0);
     tx.set_round_active(&round_key(round), active)?;
-    let live = if review {
+    let live = if let Some(_feature) = &stage_check {
+        // T-591: a stage check is never ended by this step, and this step
+        // never sets a result for it or judges it on course. Its round is open
+        // until its check's job ends (`rounds`), and it is reminded once.
+        round.end_at.is_none()
+    } else if review {
         verdict.is_none() && round.end_at.is_none() && !settled
     } else {
         matches!(attempt.state, AttemptState::Started | AttemptState::Stopped) && stop.is_none()
@@ -191,13 +252,16 @@ pub(crate) fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool
     let Some(seat) = tx.get_seat(&round.seat)? else {
         return Ok(false);
     };
-    let budget = tx.round_budget_min(
-        &round.project,
-        &round.task,
-        round.attempt,
-        &round.role,
-        round.model.as_deref(),
-    )?;
+    let budget = match &stage_check {
+        Some(_) => STAGE_CHECK_BUDGET_MIN,
+        None => tx.round_budget_min(
+            &round.project,
+            &round.task,
+            round.attempt,
+            &round.role,
+            round.model.as_deref(),
+        )?,
+    };
     let state_key = key(round);
     let mut state = tx.get_meta(&state_key)?.and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or_else(|| json!({"next_active":budget*60,"asked_at":null,"asked_active":0,"answer_id":null,"waiting":false,"no_answer":false}));
     let previous_budget = state
@@ -214,7 +278,10 @@ pub(crate) fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool
         .and_then(Value::as_i64)
         .filter(|_| !settled);
     let mut changed = false;
-    if let Some(asked) = asked_at {
+    // T-591: a stage check's reply is not an answer. The block below writes
+    // the captain an overrun item and moves the clock; a stage check does
+    // neither — its reply only silences its reminder, below.
+    if let (None, Some(asked)) = (&stage_check, asked_at) {
         let last_id = state["answer_id"]
             .as_str()
             .and_then(|id| id.trim_start_matches("M-").parse::<u64>().ok())
@@ -324,6 +391,74 @@ pub(crate) fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool
     }
     let waiting = state["waiting"].as_bool().unwrap_or(false);
     let asked_active = state["asked_active"].as_i64().unwrap_or(0);
+    let paused_now = tx
+        .pauses_of_project(&round.project)?
+        .iter()
+        .any(|p| p.seat == round.seat && p.start_at <= now && p.end_at.is_none());
+    let askable = !paused_now
+        && task.wait_on.is_none()
+        && !matches!(seat.state, SeatState::Parked | SeatState::Held);
+    // T-591: a stage check gets one interrupting prompt when its five minutes
+    // pass, and nothing else from this step: the round is never ended here, no
+    // result is set for it, it is never judged on course, and no answer is
+    // asked for. A progress reply with a reason — "why and keep going" —
+    // silences the reminder for this round, and there is no second reminder.
+    if let Some(feature) = &stage_check {
+        let next = state["next_active"].as_i64().unwrap_or(budget * 60);
+        let reminded = state["stage_reminded"].as_bool().unwrap_or(false);
+        if reminded {
+            let asked = state["asked_at"].as_i64().unwrap_or(0);
+            if stage_check_reply(tx, round, asked, end)?.is_some() {
+                for prompt in tx.thread_messages(
+                    &round.project,
+                    &format!(
+                        "overrun-question:{}:{}:{}",
+                        round.task, round.attempt, round.role
+                    ),
+                )? {
+                    if matches!(prompt.state, MsgState::Open | MsgState::Waiting) {
+                        tx.update_message_state(
+                            &round.project,
+                            &prompt.id,
+                            MsgState::Resolved,
+                            Some("progress received"),
+                            None,
+                            None,
+                            now,
+                        )?;
+                        changed = true;
+                    }
+                }
+            }
+        } else if active >= next && askable {
+            tx.insert_message(&NewMessage {
+                project: round.project.clone(),
+                thread: format!(
+                    "overrun-question:{}:{}:{}",
+                    round.task, round.attempt, round.role
+                ),
+                task: Some(round.task.clone()),
+                attempt: Some(round.attempt),
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: round.seat.clone(),
+                kind: MsgKind::Instruction,
+                urgent: true,
+                body: stage_check_text(&round.task, feature),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: now,
+                meta: None,
+            })?;
+            state["stage_reminded"] = json!(true);
+            state["asked_at"] = json!(now);
+            state["waiting"] = json!(false);
+            changed = true;
+        }
+        tx.set_meta(&state_key, &state.to_string())?;
+        return Ok(changed);
+    }
     if waiting
         && task.wait_on.is_none()
         && !state["no_answer"].as_bool().unwrap_or(false)
@@ -346,17 +481,10 @@ pub(crate) fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool
         state["next_active"] = json!(active + 900);
         changed = true;
     }
+    // Read after the no answer item moved it: the next question waits for the
+    // new time, never for the one this tick found.
     let next = state["next_active"].as_i64().unwrap_or(budget * 60);
-    let paused_now = tx
-        .pauses_of_project(&round.project)?
-        .iter()
-        .any(|p| p.seat == round.seat && p.start_at <= now && p.end_at.is_none());
-    if !state["waiting"].as_bool().unwrap_or(false)
-        && active >= next
-        && !paused_now
-        && task.wait_on.is_none()
-        && !matches!(seat.state, SeatState::Parked | SeatState::Held)
-    {
+    if !state["waiting"].as_bool().unwrap_or(false) && active >= next && askable {
         let question = text(
             &round.task,
             round.attempt,
@@ -554,6 +682,181 @@ mod tests {
     }
     fn processed() -> usize {
         PROCESSED.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn round_of(s: &mut Store, role: &str) -> gear_store::RoundRow {
+        s.read(|tx| tx.rounds_of_task("p", "T-1"))
+            .unwrap()
+            .into_iter()
+            .find(|round| round.attempt == 1 && round.role == role)
+            .unwrap_or_else(|| panic!("no {role} round"))
+    }
+
+    /// A feature member under its stage check (T-591): T-1 is marked
+    /// `feature: F-1` and a direction round reads its candidate from a temp
+    /// review seat. The dev round of `world` is still there and is not a
+    /// stage check.
+    fn stage_check_world() -> Store {
+        let mut s = world();
+        s.write(|tx| {
+            testing::seed_temp_seat(tx, "p", "review-1", "T-1", "w1:p3", "codex", T)?;
+            tx.set_task_feature("p", "T-1", "F-1")?;
+            tx.insert_round(&NewRound {
+                key: RoundKey {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    role: "direction".into(),
+                },
+                seat: "p:review-1".into(),
+                generation: 1,
+                cli: "codex".into(),
+                model: None,
+                start_at: T,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    /// The one line a stage check's reviewer sends instead of a result: why it
+    /// needs more time, with no `--left` fields (`meta` None).
+    fn reviewer_line(s: &mut Store, at: i64, body: &str) {
+        s.write(|tx| {
+            tx.insert_message(&NewMessage {
+                project: "p".into(),
+                thread: "T-1:1".into(),
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                sender: "p:review-1".into(),
+                sender_gen: 1,
+                recipient: "p:captain".into(),
+                kind: MsgKind::Progress,
+                urgent: false,
+                body: body.into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Info,
+                created: T + at,
+                meta: None,
+            })
+            .map(|_| ())
+        })
+        .unwrap();
+    }
+
+    /// T-591: a member's direction round is a stage check, and five minutes of
+    /// it earns one interrupting prompt — the same message the overrun question
+    /// uses today — and never a second one. The engine ends nothing, sets no
+    /// result and judges nothing.
+    #[test]
+    fn a_stage_check_is_reminded_once_at_five_minutes() {
+        let mut s = stage_check_world();
+        tick_at(&mut s, 299);
+        assert!(messages(&mut s, "overrun-question:T-1:1:direction").is_empty());
+        tick_at(&mut s, 300);
+        let prompts = messages(&mut s, "overrun-question:T-1:1:direction");
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].urgent);
+        assert_eq!(prompts[0].kind, MsgKind::Instruction);
+        assert_eq!(prompts[0].recipient, "p:review-1");
+        assert_eq!(
+            prompts[0].body,
+            "GEAR: T-1 is a stage check of feature F-1, and 5 minutes have passed. \
+             Report what you found now. If you have a lead that needs more time, reply \
+             with one line saying why and keep going; the full review comes on the \
+             feature's integration task."
+        );
+        // No second reminder, however long the check goes on, and no captain
+        // item: the check blocks nothing.
+        for at in [301, 600, 1200, 3600] {
+            tick_at(&mut s, at);
+        }
+        let prompts = messages(&mut s, "overrun-question:T-1:1:direction");
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].state, MsgState::Open);
+        assert!(messages(&mut s, "overrun:T-1:direction").is_empty());
+        // The round stays open, with no result and no verdict written for it.
+        let round = round_of(&mut s, "direction");
+        assert_eq!(round.end_at, None);
+        assert_eq!(round.active_s, 3600);
+        assert!(s
+            .read(|tx| tx.direction_results_of_attempt("p", "T-1", 1))
+            .unwrap()
+            .is_empty());
+    }
+
+    /// T-591: the reviewer's one line, sent after the reminder, silences it for
+    /// that round — no second reminder and no captain item for it.
+    #[test]
+    fn a_stage_check_reply_silences_the_reminder() {
+        let mut s = stage_check_world();
+        tick_at(&mut s, 300);
+        assert_eq!(
+            messages(&mut s, "overrun-question:T-1:1:direction").len(),
+            1
+        );
+        reviewer_line(
+            &mut s,
+            320,
+            "the goal names two behaviours the contract does not; reading the plan",
+        );
+        tick_at(&mut s, 321);
+        let prompts = messages(&mut s, "overrun-question:T-1:1:direction");
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].state, MsgState::Resolved);
+        assert_eq!(prompts[0].result.as_deref(), Some("progress received"));
+        // Silenced: no second reminder at 10, 30 or 90 minutes, and the reply
+        // is no answer of the overrun question's kind (no captain item).
+        for at in [600, 660, 1800, 5400, 7200] {
+            tick_at(&mut s, at);
+        }
+        assert_eq!(
+            messages(&mut s, "overrun-question:T-1:1:direction").len(),
+            1
+        );
+        assert!(messages(&mut s, "overrun:T-1:direction").is_empty());
+        assert_eq!(round_of(&mut s, "direction").end_at, None);
+    }
+
+    /// T-591: the five minutes are the stage check's own. A normal round of the
+    /// same feature member keeps its budget: the dev round its estimate, the
+    /// review round the measured review budget.
+    #[test]
+    fn a_normal_round_keeps_its_estimate_budget() {
+        let mut s = stage_check_world();
+        tick_at(&mut s, 599);
+        assert!(messages(&mut s, "overrun-question:T-1:1:dev").is_empty());
+        tick_at(&mut s, 600);
+        let dev = messages(&mut s, "overrun-question:T-1:1:dev");
+        assert_eq!(dev.len(), 1);
+        assert_eq!(dev[0].body, text("T-1", 1, 1, 10, 600));
+
+        let mut s = submitted();
+        s.write(|tx| {
+            testing::seed_temp_seat(tx, "p", "review-1", "T-1", "w1:p3", "codex", T)?;
+            tx.set_task_feature("p", "T-1", "F-1")?;
+            tx.insert_round(&NewRound {
+                key: RoundKey {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    role: "review".into(),
+                },
+                seat: "p:review-1".into(),
+                generation: 1,
+                cli: "codex".into(),
+                model: None,
+                start_at: T,
+            })
+        })
+        .unwrap();
+        tick_at(&mut s, 1799);
+        assert!(messages(&mut s, "overrun-question:T-1:1:review").is_empty());
+        tick_at(&mut s, 1800);
+        let review = messages(&mut s, "overrun-question:T-1:1:review");
+        assert_eq!(review.len(), 1);
+        assert_eq!(review[0].body, text("T-1", 1, 1, 30, 1800));
     }
 
     fn answer(s: &mut Store, at: i64, left: i64, blocker: &str) {
@@ -1081,6 +1384,7 @@ mod tests {
     /// here failed under the gate's parallel load (F-293); the plan is the fact
     /// that does not move with the machine's load.
     #[test]
+    #[ignore = "T-601: 10 000 messages size the long history it reads, `make full` runs it"]
     fn a_long_history_is_selected_by_index() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gear.db");
