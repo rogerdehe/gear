@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1219 -->
+<!-- gear-plan project=gear base=1220 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -9,6 +9,7 @@ eta: 4h
 depart: now
 
 # Decisions
+- station M-8246: keep course | why: T-602 is merging after the engine fix; v0.6.83 ships it, then the landing goes to the user
 - done (1): met | evidence: `captain handover --pane` names the new pane, moves the captain's agent name and sends one urgent item with the handover document's path, branch and commit (v0.6.19..v0.6.50, decisions 2026-11-02..04); used live 2026-11-05 when Lawrence's Claude captain (w1ZJ:pG) took over from opencode
 - done (2): met | evidence: `captain handover --facts` names the caller's project, finds the document on any branch, summarizes lanes and reads releases (v0.6.49, v0.6.50 and the M6.2 fixes); the Lawrence takeover read it in one tool read
 - done (3): met | evidence: v0.6.69..v0.6.82 released this voyage; each one installed, skill copies reinstalled for claude, codex, pi, opencode and grok, both engines restarted, captains of Carthage and Lawrence told (Prometheus' captain is not running; nothing changes for it without `feature:`)
