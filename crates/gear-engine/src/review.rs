@@ -1391,8 +1391,21 @@ fn start_stage_checks(
                 continue;
             };
             // The feature's integration task is reviewed, not stage-checked.
-            if tx.feature_carrier(project, &feature)?.as_deref() == Some(row.id.as_str()) {
+            let carrier = tx.feature_carrier(project, &feature)?;
+            if carrier.as_deref() == Some(row.id.as_str()) {
                 continue;
+            }
+            // A feature whose integration task is finished has had its full
+            // review: a light check of its members is history (GEAR M6.2 had
+            // landed when review-9 was still started, failed and started
+            // again for F-1's and F-2's members every few minutes).
+            if let Some(carrier) = carrier.as_deref() {
+                if tx
+                    .get_task(project, carrier)?
+                    .is_some_and(|task| task.state.is_terminal())
+                {
+                    continue;
+                }
             }
             let Some(attempt) = tx.attempts_of_task(project, &row.id)?.into_iter().last() else {
                 continue;
