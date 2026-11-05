@@ -661,7 +661,7 @@ fn a_remerge_retries_a_voided_merge() {
 }
 
 /// T-576: an op left `unknown` has no worker running it, so a remerge queues
-/// it again — and the unknown op itself goes back to intended (Prometheus
+/// it again — and the unknown op is closed, so one merge is queued (Prometheus
 /// 2026-11-05: `- remerge T-722` was refused as "already unknown, not failed"
 /// while nothing would ever take that op).
 #[test]
@@ -700,8 +700,8 @@ fn a_remerge_requeues_an_unknown_merge() {
 
     run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap();
 
-    // The merge is queued: the new op carries the candidate, and the unknown
-    // one is queued again too.
+    // The merge is queued once: the new op carries the candidate, and the
+    // unknown one is closed, so no second merge of the task is queued.
     let fresh = s
         .read(|tx| Ok(tx.ops_in_state("p", OpState::Intended)?))
         .unwrap()
@@ -711,9 +711,16 @@ fn a_remerge_requeues_an_unknown_merge() {
     assert_eq!(fresh.payload["candidate"], "c1");
     assert_eq!(
         s.read(|tx| tx.get_op("p", &id)).unwrap().unwrap().state,
-        OpState::Intended,
-        "the unknown op is queued again, not left for nobody"
+        OpState::Failed,
+        "the unknown op is closed, not queued beside the new one"
     );
+    let queued = s
+        .read(|tx| Ok(tx.ops_in_state("p", OpState::Intended)?))
+        .unwrap()
+        .into_iter()
+        .filter(|op| op.kind == OpKind::Merge && op.task.as_deref() == Some("T-1"))
+        .count();
+    assert_eq!(queued, 1, "one merge of the task is queued");
 }
 
 /// A captain's pass that names the stored short candidate by its full sha
