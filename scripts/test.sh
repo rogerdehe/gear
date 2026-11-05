@@ -75,7 +75,7 @@ elif [ "$elapsed" -gt 60 ];  then verdict="below the pass mark (60 s)"
 elif [ "$elapsed" -gt 30 ];  then verdict="pass (60 s)"
 elif [ "$elapsed" -gt 10 ];  then verdict="good (30 s)"
 else verdict="excellent (10 s)"; fi
-echo "build: ${build_s} s (compiling the test binaries; not in the red line, but every lane waits for it)"
+echo "prepare: ${build_s} s (building and listing the test binaries)"
 if [ "$elapsed" -gt 60 ]; then
   echo "warning: the whole suite took ${elapsed} s to run under cargo nextest: ${verdict}" >&2
 else

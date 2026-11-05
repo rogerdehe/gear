@@ -268,6 +268,92 @@ fn open_worktree_item(
         .map_err(|e| e.detail)
 }
 
+/// T-565: put a seat's own branch on the name the current
+/// `conventions.seat_branch` gives it, before anything is created on it.
+///
+/// A project that never wrote a `seat_branch` line has no apply to run the
+/// rename T-559 makes on a changed template, so the engine does it: a seat
+/// whose branch still carries the name the previous default gave it
+/// (`p/hull`) is moved to the new one (`p/hull/home`), on the remote too when
+/// it is pushed there. A ref of another name that is a folder of the new name
+/// is named and nothing is touched — git cannot create the branch past it.
+///
+/// `dir` is the seat's own worktree when it is there, else the repository it
+/// works in; `new` is the seat's branch under the current template.
+fn settle_seat_branch(
+    store: &mut Store,
+    seat: &SeatRow,
+    config: &gear_app::config::ProjectConfig,
+    repo: &str,
+    recorded: Option<&str>,
+    new: &str,
+    now: Ts,
+) -> Result<(), String> {
+    let old = gear_app::seat_branch::previous_default(&seat.project, &seat.name);
+    if old == new {
+        return Ok(());
+    }
+    let dir = recorded
+        .filter(|path| std::path::Path::new(path).is_dir())
+        .unwrap_or(repo);
+    match gear_app::seat_branch::settle(dir, &old, new, &config.conventions.remote) {
+        Ok(gear_app::seat_branch::Settled::Free) => Ok(()),
+        Ok(gear_app::seat_branch::Settled::Renamed { old, new, remote }) => {
+            let body = format!(
+                "the branch of this seat is now {new} (it was {old}, the name the previous default gave it){remote}"
+            );
+            open_worktree_item(store, &seat.project, &seat.name, &body, now)
+        }
+        Err(reason) => Err(reason),
+    }
+}
+
+/// T-565: settle every lane's seat branch of one project, once per
+/// `conventions.seat_branch` template.
+///
+/// The store keeps the template the branches were last settled at
+/// (`engine.seat_branch_settled.<project>`), so a running engine runs no git
+/// for it after the first tick, and a changed template (a re-applied config,
+/// or a new GEAR default) is settled at the next tick. A failure is named to
+/// the captain in the seat's worktree item and never stops the project.
+fn settle_project_seat_branches(
+    store: &mut Store,
+    project: &str,
+    config: &gear_app::config::ProjectConfig,
+    seats: &[SeatRow],
+    now: Ts,
+) -> GearResult<()> {
+    let key = format!("engine.seat_branch_settled.{project}");
+    let settled_at = store.read(|tx| tx.get_meta(&key))?;
+    if settled_at.as_deref() == Some(config.conventions.seat_branch.as_str()) {
+        return Ok(());
+    }
+    for seat in seats.iter().filter(|seat| seat.role == SeatRole::Lane) {
+        let recorded = store.read(|tx| tx.get_meta(&worktree_path_key(&seat.id)))?;
+        let repo = config.repo_of_lane(&seat.name);
+        let new = gear_model::branch::expand_seat(
+            &config.conventions.seat_branch,
+            &seat.project,
+            &seat.name,
+        );
+        if let Err(reason) = settle_seat_branch(
+            store,
+            seat,
+            config,
+            &repo.path,
+            recorded.as_deref(),
+            &new,
+            now,
+        ) {
+            open_worktree_item(store, &seat.project, &seat.name, &reason, now).map_err(
+                |error| gear_model::GearError::new(gear_model::ErrorCode::BadFormat, error),
+            )?;
+        }
+    }
+    store.write(|tx| tx.set_meta(&key, &config.conventions.seat_branch))?;
+    Ok(())
+}
+
 /// T-503: put a lane's home worktree on the fresh integration branch before
 /// its first delivery: fetch the remote, archive anything the worktree holds
 /// (never discard it), then move the home branch to `<remote>/<integration>`.
@@ -562,6 +648,14 @@ pub fn onboard_queued(
             }
         };
 
+        // T-565: the seat branches of a project that never wrote a
+        // `seat_branch` line are still on the name the previous default gave
+        // them, and no apply will run the rename T-559 makes. The engine moves
+        // them itself, once per template: a seat whose checkout stands on
+        // `p/hull` is moved to `p/hull/home`, locally and on the remote when it
+        // is pushed there.
+        settle_project_seat_branches(store, &project, &config, &seats, now)?;
+
         // A voyage that has not departed yet starts no lane this tick
         // (T-448): at its departure time the engine onboards them by itself.
         if gear_app::config::departs_at(&config, now).is_some() {
@@ -601,6 +695,15 @@ pub fn onboard_queued(
             // A lane the snapshot's config does not name is not parked: the
             // next tick reads a newer config (T-6, R-63).
             if !config.lanes.iter().any(|lane| lane.name == seat.name) {
+                continue;
+            }
+            // T-561: the lane quota counts the lane agents Herdr shows, not
+            // only the seats the store calls live: a lane the store released
+            // whose agent still runs is a lane the user sees, and the next one
+            // waits for it instead of starting beside it.
+            let live =
+                crate::names::live_of_role(store, herdr, &project, SeatRole::Lane, Some(&seat.id));
+            if live.len() as u32 >= config.quota.lanes {
                 continue;
             }
             match onboard_seat(store, herdr, cfg, &seat, &config, &profiles, now) {
@@ -742,6 +845,18 @@ fn onboard_seat(
         })
         .map_err(|e| format!("worktree path: {}", e.detail))?
         .filter(|path| !path.is_empty());
+    // T-565: the seat's branch may still carry the name the previous default
+    // gave it, and a ref that is a folder of the new name blocks git from
+    // creating it (a foreign one is named, never touched).
+    settle_seat_branch(
+        store,
+        seat,
+        config,
+        &worktree.repo,
+        recorded.as_deref(),
+        &worktree.branch,
+        now,
+    )?;
     let by_path = match recorded.as_deref() {
         Some(path) => herdr.worktree_open_path(&worktree.repo, path, &worktree.label),
         None => Outcome::Refused {
@@ -852,10 +967,14 @@ fn onboard_seat(
             let name = crate::names::agent_name(&seat.project, &seat.name);
             let target = match crate::names::live_name(herdr, &pane) {
                 Some(live) => Some(live),
-                None => match crate::names::ensure(herdr, &pane, &name) {
+                None => match crate::names::ensure_for(store, herdr, &pane, &name) {
                     crate::names::Ensure::Renamed | crate::names::Ensure::Named => Some(name),
+                    // `Kept` is a `captain take` outcome (T-552): the engine's
+                    // naming keeps a pane's other seat's name as `Named`
+                    // (T-570).
                     crate::names::Ensure::Taken { .. }
                     | crate::names::Ensure::NoAgent
+                    | crate::names::Ensure::Kept
                     | crate::names::Ensure::Failed(_) => None,
                 },
             };
@@ -1638,7 +1757,7 @@ repo = "web"
     fn a_retried_lane_whose_agent_still_runs_is_exited_before_the_start() {
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
-        herdr.add_worktree("toy/heat", "/wt/heat", "w5:p1");
+        herdr.add_worktree("toy/heat/home", "/wt/heat", "w5:p1");
         herdr.add_agent("w5:p1", "opencode", gear_herdr::AgentStatus::Idle);
 
         assert!(onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1)
@@ -1671,7 +1790,7 @@ repo = "web"
 
     /// T-125: a lane registered again reuses its home worktree. Its checkout
     /// is on the task branch it last worked, so `worktree open --branch
-    /// toy/heat` finds nothing and a create would collide with the path that
+    /// toy/heat/home` finds nothing and a create would collide with the path that
     /// already exists; the recorded path is opened instead.
     #[test]
     fn a_lane_registered_again_reuses_its_home_worktree() {
@@ -2205,7 +2324,7 @@ repo = "web"
             env.contains(r#"OPENCODE_CONFIG_CONTENT='{"model":"minimax-cn/MiniMax-M3.1-Flash"}'"#),
             "the environment line must carry the lane's model: {env}"
         );
-        assert!(env.starts_with(&format!("mkdir -p '/fake-worktrees/toy-heat/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path)), "{env}");
+        assert!(env.starts_with(&format!("mkdir -p '/fake-worktrees/toy-heat-home/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat-home/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path)), "{env}");
         // The model is only read by a process that inherits the pane's
         // environment, so the agent gets a private server.
         assert!(
@@ -2363,7 +2482,7 @@ repo = "web"
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
         assert_eq!(active, vec!["toy:heat".to_string()]);
-        assert_eq!(env_line(&herdr), format!("mkdir -p '/fake-worktrees/toy-heat/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}; {}", cfg().db_path, EDITOR_ENV));
+        assert_eq!(env_line(&herdr), format!("mkdir -p '/fake-worktrees/toy-heat-home/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat-home/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}; {}", cfg().db_path, EDITOR_ENV));
         assert_eq!(start_args(&herdr), vec!["--auto".to_string()]);
     }
 
@@ -2391,7 +2510,7 @@ repo = "web"
             })
             .expect("the engine created the lane's worktree");
         assert_eq!(repo, "/repo/web", "the worktree is in the lane's repo");
-        assert_eq!(branch, "toy/heat");
+        assert_eq!(branch, "toy/heat/home");
         assert_eq!(base, "web-dev", "the repo's own integration branch");
         assert_eq!(label, "toy-heat");
     }
@@ -2425,7 +2544,7 @@ repo = "web"
             &work,
             "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev",
         );
-        sh(&work, "git worktree add -q -b toy/heat ../heat dev");
+        sh(&work, "git worktree add -q -b toy/heat/home ../heat dev");
         let worktree = root.join("heat");
         // The hook an older engine installed: its own path, worktree-only.
         sh(&worktree, "git config extensions.worktreeConfig true");
@@ -2447,7 +2566,7 @@ repo = "web"
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
 
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
@@ -2488,7 +2607,7 @@ repo = "web"
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
         onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
         assert_eq!(
             sh(&worktree, "git config --worktree core.hooksPath"),
@@ -2530,13 +2649,13 @@ repo = "web"
             &work,
             "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev",
         );
-        sh(&work, "git worktree add -q -b toy/heat ../heat dev");
+        sh(&work, "git worktree add -q -b toy/heat/home ../heat dev");
         let worktree = root.join("heat");
 
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
 
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
@@ -2652,7 +2771,7 @@ repo = "web"
     }
 
     /// T-503: a real repository with a bare `origin` holding `dev` at two
-    /// commits, the lane's home branch `toy/heat` at the first one, and a
+    /// commits, the lane's home branch `toy/heat/home` at the first one, and a
     /// linked worktree of that branch. Returns (the repository, the worktree).
     fn t503_repo(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let root = crate::testtmp::temp(name);
@@ -2672,19 +2791,19 @@ repo = "web"
         );
         sh(&work, "git push -q origin dev");
         // The home branch stays at the first commit while `dev` moves on.
-        sh(&work, "git branch toy/heat dev");
+        sh(&work, "git branch toy/heat/home dev");
         std::fs::write(work.join("a.txt"), "two\n").unwrap();
         sh(
             &work,
             "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev2 && git push -q origin dev",
         );
-        sh(&work, "git worktree add -q ../toy-wt toy/heat");
+        sh(&work, "git worktree add -q ../toy-wt toy/heat/home");
         let worktree = root.join("toy-wt");
         (work, worktree)
     }
 
     /// The project of the T-503 tests: one lane in the real repository, with
-    /// `origin` as its remote and the default home branch `toy/heat`.
+    /// `origin` as its remote and the default home branch `toy/heat/home`.
     fn t503_config(repo: &std::path::Path) -> String {
         format!(
             r#"
@@ -2750,7 +2869,7 @@ profile = "opencode"
         let mut store = t503_world(&repo, &worktree);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
 
         assert_eq!(
             onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
@@ -2758,7 +2877,10 @@ profile = "opencode"
         );
 
         assert_eq!(sh(&worktree, "git status --porcelain"), "");
-        assert_eq!(sh(&worktree, "git rev-parse --abbrev-ref HEAD"), "toy/heat");
+        assert_eq!(
+            sh(&worktree, "git rev-parse --abbrev-ref HEAD"),
+            "toy/heat/home"
+        );
         assert_eq!(
             sh(&worktree, "git rev-parse HEAD"),
             sh(&repo, "git rev-parse origin/dev")
@@ -2797,7 +2919,7 @@ profile = "opencode"
         let mut store = t503_world(&repo, &worktree);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
 
         assert_eq!(
             onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
@@ -2805,7 +2927,10 @@ profile = "opencode"
         );
 
         assert_eq!(sh(&worktree, "git status --porcelain"), "");
-        assert_eq!(sh(&worktree, "git rev-parse --abbrev-ref HEAD"), "toy/heat");
+        assert_eq!(
+            sh(&worktree, "git rev-parse --abbrev-ref HEAD"),
+            "toy/heat/home"
+        );
         assert_eq!(
             sh(&worktree, "git rev-parse HEAD"),
             sh(&repo, "git rev-parse origin/dev")
@@ -2827,11 +2952,14 @@ profile = "opencode"
             &worktree,
             "git fetch -q origin && git reset -q --hard origin/dev",
         );
-        let reflog = sh(&worktree, "git reflog show --format=%H toy/heat | wc -l");
+        let reflog = sh(
+            &worktree,
+            "git reflog show --format=%H toy/heat/home | wc -l",
+        );
         let mut store = t503_world(&repo, &worktree);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
 
         assert_eq!(
             onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
@@ -2839,13 +2967,19 @@ profile = "opencode"
         );
 
         assert_eq!(sh(&worktree, "git status --porcelain"), "");
-        assert_eq!(sh(&worktree, "git rev-parse --abbrev-ref HEAD"), "toy/heat");
+        assert_eq!(
+            sh(&worktree, "git rev-parse --abbrev-ref HEAD"),
+            "toy/heat/home"
+        );
         assert_eq!(
             sh(&worktree, "git rev-parse HEAD"),
             sh(&repo, "git rev-parse origin/dev")
         );
         assert_eq!(
-            sh(&worktree, "git reflog show --format=%H toy/heat | wc -l"),
+            sh(
+                &worktree,
+                "git reflog show --format=%H toy/heat/home | wc -l"
+            ),
             reflog,
             "the home branch was not moved"
         );
@@ -2869,7 +3003,7 @@ profile = "opencode"
         let mut store = t503_world(&repo, &worktree);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat/home", &worktree.to_string_lossy(), "w1:p2");
 
         assert_eq!(
             onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
@@ -2883,7 +3017,10 @@ profile = "opencode"
             "the change is still there"
         );
         assert_eq!(sh(&worktree, "git rev-parse HEAD"), head);
-        assert_eq!(sh(&worktree, "git rev-parse --abbrev-ref HEAD"), "toy/heat");
+        assert_eq!(
+            sh(&worktree, "git rev-parse --abbrev-ref HEAD"),
+            "toy/heat/home"
+        );
         let messages = store
             .read(|tx| tx.thread_messages("toy", "worktree:heat"))
             .unwrap();

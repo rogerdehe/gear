@@ -40,7 +40,7 @@ The branch names, the remote and the voyage folder are configuration: a project 
 | `integration` / `release` / `staging` | `dev` / `main` / none | — |
 | `task_branch` | `{lane}/t{n}` | `{project}`, `{lane}`, `{n}` |
 | `review_branch` | `review/t{n}` | `{project}`, `{lane}`, `{n}` |
-| `seat_branch` | `{project}/{seat}` | `{project}`, `{seat}` |
+| `seat_branch` | `{project}/{seat}/home` | `{project}`, `{seat}` |
 | `remote` | `origin` | — (the git remote a hand-in is checked against) |
 | `voyage_dir` | `gear/voyages/{milestone}` | `{project}`, `{milestone}`; its `plan.md`, `reports/` and `reviews/` |
 | `merge_message` | `merge({task}): {source}` | `{project}`, `{task}`, `{source}` |
@@ -82,7 +82,7 @@ A lane's worktree holds only its repo (§9).
    Out of scope: <noticed, not touched> | none
    ```
 
-   Add `--friction "<what cost time the captain could fix>"` to a result or review when applicable; it is required when the round exceeds its budget. Include a missing permission, slow build or test, unclear contract, missing tool or fixture, or costly step. **Then end your turn.** The next task is delivered as soon as you are idle.
+   Add `--friction "<what cost time the captain could fix>"` to a result or review when applicable; it is required when the round exceeds its budget. Include a missing permission, slow build or test, unclear contract, missing tool or fixture, or costly step, and the checks the captain asked for when they took a fifth of the round or more (name them and their minutes). **Then end your turn.** The next task is delivered as soon as you are idle.
 7. **Rework comes first.** A sent-back task is delivered before new work; do exactly the rework note.
 
 When GEAR asks at the estimate, answer with `gear send --kind progress --task T-<n> --attempt <a> --contract <c> --left <minutes> --blocker "<what stops you, or none>" "<done; left>"`, then continue. To wait for another task's merge, send `gear send --kind blocked --task T-<n> --attempt <a> --contract <c> --on T-<m> "<done; what waits>"`; GEAR pauses the clock and resumes this session when it lands.
@@ -100,8 +100,8 @@ Send it with `gear send --kind question`, then continue with other ready work if
 
 ## 7. Review and merge (what the engine does)
 
-- A hand-in starts a temp reviewer on a different model from the writer's, on its own branch `review/t<n>`. What it delivers: `gear --skill review`.
-- A **pass** is settled and merged by the engine: it merges the candidate into the integration branch of the task's repo, runs that repo's gate (`[[repos]].gate`, falling back to `[conventions].gate`), pushes, and deletes the task and review branches. A merge that fails (conflict, red gate) goes to the captain once.
+- A hand-in starts a temp reviewer on a different model from the writer's, on a local branch `review/t<n>`; it pushes its review commit onto the task's branch, so no review branch reaches the remote. What it delivers: `gear --skill review`.
+- A **pass** is settled and merged by the engine: it merges the candidate into the integration branch of the task's repo, runs that repo's gate (`[[repos]].gate`, falling back to `[conventions].gate`), pushes, and deletes the task branch (and an old review branch, if one is left). A merge that fails (conflict, red gate) goes to the captain once.
 - A **fail** goes to the captain, who judges it against the bar and writes the rework (`gear --skill course`).
 - Status comes from facts: an attempt exists → in progress; handed in → in review; merged → done. "The agent said done" is not a fact.
 
@@ -111,7 +111,9 @@ Send it with `gear send --kind question`, then continue with other ready work if
 [conventions]
 integration = "dev"     # the integration branch
 release = "main"        # the release branch
-gate = "make test"      # the project's own build + test, run before every merge; no default
+gate = "make test"      # the project's own build + test, run before every merge; no default; when it could not judge (a CI service refused a request) it exits 75 or, behind a wrapper such as make that hides that code, creates the file $GEAR_GATE_TEMPFAIL names: the merge is retried, not failed
+merge_parallel = 1      # how many merges gate at once (a merge train); default 1: one after the other
+merge_batch = 1         # how many passed merges are merged together and gated once (a batch merge); default 1
 max_task_min = 60       # no task is planned longer than this; a plan that asks for more is refused
 branch_max_age_min = 120  # a task branch older than this is named to the captain
 branch_max_per_lane = 3   # more than lanes × this open-voyage task branches is named to the captain
@@ -122,11 +124,13 @@ scratch_dir = "~/gear-scratch"  # where a seat's temp files go; default none: <w
 
 Each seat GEAR starts gets its own scratch directory and `TMPDIR` points at it, so temp files — the agent's own, a build's, a test's — land there and never in the system temp directory: `scratch_dir` names the parent (`<scratch_dir>/<project>/<seat>`, `~` is the home folder), and without it the seat's worktree holds them in `.gear/tmp`, which GEAR adds once to the repository's `info/exclude`. The directory is removed when the seat is released or retired; the worktree and its build cache stay.
 
+**Merges land one after the other on the integration branch;** with `merge_parallel` above 1 they gate side by side as a train: each merge is built on the commit the merge ahead of it will land, so every gate checks the branch exactly as it will be, and they land in that order, each a fast-forward of the one before. A gate that says no fails its merge as it would alone, and the merges behind it go back to the queue and gate again from the new tip; a merge that cannot be built (a conflict) steps aside and the next one is built in its place. Raise it only as far as the gate can run side by side: a gate that runs on this machine takes its cores each time, a gate that runs in a remote CI takes that CI's concurrent runs. Pull-request mode always lands one merge at a time. With `merge_batch` above 1 the passed merges are merged together and gated once and land together. A gate may write the repo-relative paths whose tests failed, one per line, to the file `$GEAR_GATE_FAILED` names, and the task whose changes match them is the one that fails, the others merge again. Beside it, every gate run is told what it judges: `$GEAR_GATE_PROJECT` (the project id), `$GEAR_GATE_ROUND` (the id of the run's first merge op, lowercase without the dash, e.g. `o6543`) and `$GEAR_GATE_TASKS` (the task ids of the merges the run judges, space-separated, in merge order, e.g. `T-637 T-646 T-662`). A gate that runs CI elsewhere names its CI branch `<project>/gate/<round>` and puts the tasks in the CI run's title, so every gate branch has an owner and every run says what it judged.
+
 `max_task_min` (default 60) caps a task's `estimate:`: a lane works unattended and is reviewed only at its hand-in, so a task of hours is a stretch nobody checks and one wrong turn costs all of it — bigger work is cut into tasks of at most `max_task_min`, each with its own test cycle (`gear --skill decompose` §1 rule 5). A rework estimate (`estimate=` on a fail verdict) is not capped.
 
 The engine sweeps the remote every 10 minutes. A cancelled task's branches are deleted (the captain is told each commit, so one can be restored). A task branch older than `branch_max_age_min` (default 120), or more task branches of the open voyages than lanes × `branch_max_per_lane` (default 3: two hand-ins out and one sent back), is named to the captain in one urgent item: a voyage's branch is meant to merge within that time, so its work is stuck and the captain decides — get it reviewed and merged, finish the rework first, or cancel the task.
 
-`[conventions] task_branch` (default `{lane}/t{n}`) and `review_branch` (default `review/t{n}`) name the branches; `{project}`, `{lane}`, `{n}` are filled in, e.g. `task_branch = "{project}/{lane}/t{n}"`. `seat_branch` (default `{project}/{seat}`) names the branch of each seat's own worktree, and of the merge worktree as seat `merge`, so Herdr names the worktree `<project>-<seat>`.
+`[conventions] task_branch` (default `{lane}/t{n}`) and `review_branch` (default `review/t{n}`, local to the reviewer's worktree) name the branches; `{project}`, `{lane}`, `{n}` are filled in, e.g. `task_branch = "{project}/{lane}/t{n}"`. `seat_branch` (default `{project}/{seat}/home`, project / seat / home, as a task is project / lane / task) names the branch of each seat's own worktree, and of the merge worktree as seat `merge`, so Herdr names the worktree `<project>-<seat>` and `prometheus/web/home` sits beside the lane's task branches `prometheus/web/t675` instead of above them. Re-apply the config after changing it: GEAR renames the branch of each seat's worktree that still stands on the old name (`git branch -m`, and on the remote when it was pushed), and names a seat whose worktree is on another branch instead of touching it.
 
 The gate has no default: GEAR cannot know another project's build and test, so a project that names none is refused at `gear admin init` until it does (`make gate`, `go test ./...`, `npm test` — whatever exits non-zero on any failure and runs in seconds).
 

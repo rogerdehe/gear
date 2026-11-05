@@ -333,8 +333,8 @@ fn the_engine_fetches_merges_and_pushes_through_the_projects_remote() {
 
     let active = onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
     assert_eq!(active, vec!["p:heat".to_string()]);
-    let (_, branch, base, _) = created(&herdr, "p/heat");
-    assert_eq!(branch, "p/heat");
+    let (_, branch, base, _) = created(&herdr, "p/heat/home");
+    assert_eq!(branch, "p/heat/home");
     assert_eq!(base, "dev");
 
     // The dispatch names the project's remote: the lane fetches and starts
@@ -401,8 +401,12 @@ fn the_engine_fetches_merges_and_pushes_through_the_projects_remote() {
         .unwrap();
 
     // The merge runs on the fixture whose remote is `upstream`.
-    let merge_worktree = repo.merge_worktree("p/merge");
-    herdr.add_worktree("p/merge", &merge_worktree.to_string_lossy(), "wt-merge:p1");
+    let merge_worktree = repo.merge_worktree("p/merge/home");
+    herdr.add_worktree(
+        "p/merge/home",
+        &merge_worktree.to_string_lossy(),
+        "wt-merge:p1",
+    );
     wait_merge(&mut store, &mut herdr, &cfg);
 
     // What landed is on `upstream`'s integration branch.

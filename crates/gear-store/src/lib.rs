@@ -17,6 +17,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 mod migrate;
+mod remap;
+pub use remap::CommitMap;
 
 pub const SCHEMA_SQL: &str = include_str!("schema.sql");
 pub use migrate::{OLDEST_VERSION, SCHEMA_VERSION, STEPS};
@@ -1059,6 +1061,14 @@ impl<'s> Tx<'s> {
         Ok(keys)
     }
 
+    /// Remove one meta key (absent is fine).
+    pub fn delete_meta(&self, key: &str) -> GearResult<()> {
+        self.tx
+            .execute("DELETE FROM meta WHERE key=?1", params![key])
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
     pub fn set_meta(&self, key: &str, value: &str) -> GearResult<()> {
         self.tx
             .execute(
@@ -1258,6 +1268,12 @@ impl<'s> Tx<'s> {
     }
 
     /// Raw state write. Caller must have checked `SeatState::can_transition`.
+    /// A seat that is retired takes its items with it (T-550): every message
+    /// addressed to it that may still move to `Resolved` is closed in the same
+    /// transaction, with the line "closed: its seat retired". Nobody can
+    /// resolve an item of a retired seat — only its recipient may — and none
+    /// rings any more, so left open it would stay open for ever. A released
+    /// seat's items stay as they are: it may come back.
     pub fn set_seat_state(
         &self,
         seat_id: &str,
@@ -1272,7 +1288,48 @@ impl<'s> Tx<'s> {
                 params![seat_id, state.as_str(), now, reason],
             )
             .map_err(map_sqlite)?;
-        require_written(changed, "seat", seat_id)
+        require_written(changed, "seat", seat_id)?;
+        if state != SeatState::Retired {
+            return Ok(());
+        }
+        // Read the items first: the rows below are updated in this same
+        // transaction, and the statement must not run while they are read.
+        let mut items = Vec::new();
+        {
+            let mut stmt = self
+                .tx
+                .prepare("SELECT project, id, state FROM messages WHERE recipient=?1")
+                .map_err(map_sqlite)?;
+            let rows = stmt
+                .query_map(params![seat_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(map_sqlite)?;
+            for row in rows {
+                let (project, id, state) = row.map_err(map_sqlite)?;
+                let state = state.parse::<MsgState>()?;
+                items.push((project, id, state));
+            }
+        }
+        for (project, id, item_state) in items {
+            if !item_state.can_transition(MsgState::Resolved) {
+                continue;
+            }
+            self.update_message_state(
+                &project,
+                &id,
+                MsgState::Resolved,
+                Some("closed: its seat retired"),
+                None,
+                None,
+                now,
+            )?;
+        }
+        Ok(())
     }
 
     pub fn set_seat_generation(&self, seat_id: &str, generation: i64) -> GearResult<()> {
@@ -1360,6 +1417,29 @@ impl<'s> Tx<'s> {
             .optional()
             .map_err(map_sqlite)?;
         Ok(row)
+    }
+
+    /// The seats whose binding at their current generation is active on
+    /// `pane_id` (any project of this store): a pane that holds one is in use
+    /// and is never closed for another seat (Prometheus, 2026-11-05: the
+    /// captain's pane was closed because a released seat's name was on it).
+    pub fn active_seats_on_pane(&self, pane_id: &str) -> GearResult<Vec<String>> {
+        let mut stmt = self
+            .tx
+            .prepare(
+                "SELECT b.seat FROM bindings b JOIN seats s ON s.id = b.seat
+                 WHERE b.pane_id = ?1 AND b.status = 'active' AND b.generation = s.generation
+                   AND s.state NOT IN ('retired', 'released')",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![pane_id], |row| row.get::<_, String>(0))
+            .map_err(map_sqlite)?;
+        let mut seats = Vec::new();
+        for row in rows {
+            seats.push(row.map_err(map_sqlite)?);
+        }
+        Ok(seats)
     }
 
     pub fn set_binding_status(
@@ -1656,6 +1736,43 @@ impl<'s> Tx<'s> {
             messages.push(row.map_err(map_sqlite)?);
         }
         Ok(messages)
+    }
+
+    /// The messages of a project whose thread starts with `prefix` (T-568).
+    ///
+    /// A report written on a thread named after the tick (`branches:<ts>`)
+    /// replaces the one the last tick wrote, and the prefix is all the two
+    /// threads have in common.
+    pub fn messages_in_threads_starting(
+        &self,
+        project: &str,
+        prefix: &str,
+    ) -> GearResult<Vec<MessageRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(&message_select(
+                " WHERE project=?1 AND substr(thread, 1, length(?2))=?2 ORDER BY created, id",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, prefix], message_from_row)
+            .map_err(map_sqlite)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
+    }
+
+    /// The project's open and waiting items (T-571): what the sweep that ends
+    /// a voyage reads to close what it left behind.
+    pub fn open_messages_of_project(&self, project: &str) -> GearResult<Vec<MessageRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(&message_select(
+                " WHERE project=?1 AND state IN ('open','waiting') ORDER BY created, id",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], message_from_row)
+            .map_err(map_sqlite)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
     }
 
     /// Direction results for one task attempt.
@@ -2210,6 +2327,26 @@ impl<'s> Tx<'s> {
         Ok(tasks)
     }
 
+    /// The tasks of one voyage, in rank then id order (T-571). A finished
+    /// voyage closes the engine items its tasks left open, and reading them
+    /// must not cost every other voyage's history.
+    pub fn tasks_of_voyage(&self, project: &str, milestone: &str) -> GearResult<Vec<TaskRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(&task_select(
+                " WHERE project=?1 AND milestone=?2 ORDER BY rank, id",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, milestone], task_from_row)
+            .map_err(map_sqlite)?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row.map_err(map_sqlite)?);
+        }
+        Ok(tasks)
+    }
+
     /// The project's live tasks, in rank then id order (T-529): the ones that
     /// are not terminal, and the ones of a voyage that still has a task that is
     /// not — a finished voyage's tasks are history, not work.
@@ -2734,6 +2871,43 @@ impl<'s> Tx<'s> {
         Ok(())
     }
 
+    /// Move a voyage's departure (the user's resume, `voyage_clock`): the
+    /// scope at departure stays.
+    pub fn move_voyage_departure(
+        &self,
+        project: &str,
+        milestone: &str,
+        departure: Ts,
+    ) -> GearResult<()> {
+        self.tx
+            .execute(
+                "UPDATE voyages SET departure=?3 WHERE project=?1 AND milestone=?2",
+                params![project, milestone, departure],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// Depart a voyage again (the user's redepart, `voyage_clock`): the
+    /// departure and the scope at departure are replaced.
+    pub fn redepart_voyage(
+        &self,
+        project: &str,
+        milestone: &str,
+        departure: Ts,
+        tasks: i64,
+        estimate_min: i64,
+    ) -> GearResult<()> {
+        self.tx
+            .execute(
+                "UPDATE voyages SET departure=?3, departure_tasks=?4, departure_estimate_min=?5, updated=?3
+                 WHERE project=?1 AND milestone=?2",
+                params![project, milestone, departure, tasks, estimate_min],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
     /// Remove a voyage row (T-473): a milestone with no task and no history
     /// can be dropped. Callers check the history; this only deletes the row.
     pub fn delete_voyage(&self, project: &str, milestone: &str) -> GearResult<()> {
@@ -3090,6 +3264,26 @@ impl<'s> Tx<'s> {
     /// it, a block that names none keeps the model the task has.
     pub fn set_task_review_model(&self, project: &str, task: &str, model: &str) -> GearResult<()> {
         self.set_meta(&format!("task_review_model:{project}:{task}"), model)
+    }
+
+    /// The task whose merge lands this task's work (`carried-by:`): a pass of
+    /// this task queues no merge of its own, and the task counts as merged
+    /// when the carrier's merge has landed its candidate. None when unset.
+    pub fn task_carried_by(&self, project: &str, task: &str) -> GearResult<Option<String>> {
+        Ok(self
+            .get_meta(&format!("task_carried_by:{project}:{task}"))?
+            .filter(|by| !by.is_empty()))
+    }
+
+    /// The project and task a `carried-by:` value names: `T-m` is a task of
+    /// `project`, `<other>:T-m` a task of another project on the same repo.
+    pub fn carrier_of<'a>(project: &'a str, by: &'a str) -> (&'a str, &'a str) {
+        by.split_once(':').unwrap_or((project, by))
+    }
+
+    /// Set `carried-by:` of a task; an empty value clears it.
+    pub fn set_task_carried_by(&self, project: &str, task: &str, by: &str) -> GearResult<()> {
+        self.set_meta(&format!("task_carried_by:{project}:{task}"), by)
     }
 
     /// The `audit:` mark of a task (T-505): the task is a voyage audit, run by

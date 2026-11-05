@@ -162,6 +162,9 @@ pub fn apply(
             // before the queue writes so the guard can tell a new milestone
             // from one that already carried tasks.
             let guard = planned_guard(tx, &ctx.project, draft)?;
+            // A voyage never stands still on the captain's word alone: read
+            // whether the fleet had work before this apply.
+            let stopped_before = fleet_withheld(tx, &ctx.project, now)?.is_some();
             let mut result = apply_queue(
                 tx,
                 &ctx.project,
@@ -212,6 +215,21 @@ pub fn apply(
             // milestone's departure and a move between milestones need the
             // user's word: --confirmed and its `confirmed:` line.
             require_confirmed_changes(draft, &guard.0, &guard.1)?;
+            // An apply that leaves no lane any work while the departed voyage
+            // still has work held back is a stop of the voyage: the user's,
+            // like a change of its goal.
+            if !stopped_before {
+                if let Some(withheld) = fleet_withheld(tx, &ctx.project, now)? {
+                    if !draft.confirmed || confirmed_decisions(draft).is_empty() {
+                        return Err(GearError::new(
+                            ErrorCode::BadFormat,
+                            format!(
+                                "this apply leaves no lane any work while voyage {withheld}: a voyage never stands still on the captain's word. Stopping it is the user's: ask them in your dialog; if they confirm, apply again with --confirmed and a `confirmed:` line in # Decisions. A merge backlog is the merge queue's, never a reason to stop the lanes"
+                            ),
+                        ));
+                    }
+                }
+            }
             // T-461: the captain's goal check of the voyage's done clauses,
             // written before a landing of this same apply reads it.
             let checked = voyage_of(tx, &ctx.project, draft)?;
@@ -442,14 +460,21 @@ fn apply_queue(
                         }
                     }
                     Some("hold") => {
-                        // T-473: a task can be kept out of delivery only
-                        // before it is delivered; a running or waiting task
-                        // already has an attempt on it.
-                        if !matches!(task.state, TaskState::Draft | TaskState::Ready) {
+                        // T-473: a draft or ready task is kept out of
+                        // delivery. A running or waiting one is set aside for
+                        // more urgent work: its attempt closes, its branch
+                        // stays. A handed-in task waits for its review.
+                        if !matches!(
+                            task.state,
+                            TaskState::Draft
+                                | TaskState::Ready
+                                | TaskState::Running
+                                | TaskState::Waiting
+                        ) {
                             return Err(bad(
                                 item.line,
                                 format!(
-                                    "task {id} is {}, only a draft or ready task is held here",
+                                    "task {id} is {}, only a draft, ready, running or waiting task is held here",
                                     task.state.as_str()
                                 ),
                             ));
@@ -575,6 +600,26 @@ fn apply_queue(
                 return Err(bad(
                     item.line,
                     "an audit task keeps its `lane=`: the review model choice and the writer seat need it",
+                ));
+            }
+        }
+        // `carried-by:` names another task of the project, whose merge lands
+        // this task's work.
+        if let Some(by) = item.carried_by.as_deref().filter(|by| !by.is_empty()) {
+            if by == id {
+                return Err(bad(
+                    item.line,
+                    format!("{id}: `carried-by` names the task itself"),
+                ));
+            }
+            let named = match by.split_once(':') {
+                Some((other, task)) => tx.get_task(other, task)?.is_some(),
+                None => known.contains(by),
+            };
+            if !named {
+                return Err(bad(
+                    item.line,
+                    format!("{id}: `carried-by` {by} does not exist"),
                 ));
             }
         }
@@ -770,6 +815,9 @@ fn apply_queue(
                 if let Some(model) = &item.review_model {
                     tx.set_task_review_model(project, &id, model)?;
                 }
+                if let Some(by) = &item.carried_by {
+                    tx.set_task_carried_by(project, &id, by)?;
+                }
                 // The `audit:` mark of a task (T-505): a voyage audit is run
                 // by reviewers and never assigned to its lane.
                 if let Some(audit) = item.audit {
@@ -837,6 +885,9 @@ fn apply_queue(
                 if let Some(model) = &item.review_model {
                     tx.set_task_review_model(project, id, model)?;
                 }
+                if let Some(by) = &item.carried_by {
+                    tx.set_task_carried_by(project, id, by)?;
+                }
                 // The `audit:` mark of a task (T-505): a block that names the
                 // field sets it; a block without it keeps the mark.
                 if let Some(audit) = item.audit {
@@ -896,7 +947,12 @@ fn apply_queue(
                         )?);
                     }
                     Some("ready") => task.state = TaskState::Ready,
-                    Some("hold") => task.state = TaskState::Draft,
+                    Some("hold") => {
+                        if matches!(task.state, TaskState::Running | TaskState::Waiting) {
+                            set_aside_task(tx, project, &task, by_seat, by_gen, now)?;
+                        }
+                        task.state = TaskState::Draft;
+                    }
                     _ => {}
                 }
                 // A task moved to another lane takes its work with it (T-311):
@@ -1107,6 +1163,22 @@ fn apply_queue(
             )?;
             continue;
         }
+        if let StaffItem::MergeFirst { task, .. } = item {
+            mark_merge_first(tx, project, task, staff_line(item))?;
+            staffed.push(format!("merge-first {task}"));
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
+            continue;
+        }
         if let StaffItem::Retry { lane, .. } = item {
             retry_lane(tx, project, lane, staff_line(item), now)?;
             staffed.push(format!("retry {lane}"));
@@ -1223,6 +1295,7 @@ fn apply_queue(
                 ))
             }
             StaffItem::Remerge { .. } => unreachable!("remerge is applied above"),
+            StaffItem::MergeFirst { .. } => unreachable!("merge-first is applied above"),
             StaffItem::Retry { .. } => unreachable!("retry is applied above"),
             StaffItem::Release { .. } => unreachable!("release is applied above"),
             StaffItem::Rebind { .. } => unreachable!("rebind is applied above"),
@@ -1399,6 +1472,9 @@ fn apply_queue(
         Some(config) => config.lanes.into_iter().map(|lane| lane.name).collect(),
         None => Vec::new(),
     };
+    // The lanes this apply brings back (T-563): the warning about a task on a
+    // lane nobody works must not fire for a lane it has just staffed.
+    let mut revived: Vec<String> = Vec::new();
     if !lanes.is_empty() {
         let tasks = tx.tasks_of_project(project)?;
         let quota = tx
@@ -1446,7 +1522,15 @@ fn apply_queue(
             )?;
             running += 1;
             staffed.push(format!("start {}", seat.name));
+            revived.push(seat.name.clone());
         }
+    }
+
+    // T-563: a task on a lane nobody works will never start (prometheus,
+    // 2026-11-04: four `now` tasks went to retired lanes). A warning, never a
+    // refusal: the apply stands, the captain is told.
+    for warning in retired_lane_warnings(tx, project, &revived)? {
+        warnings.push(warning);
     }
 
     // T-473: two Ready tasks on different lanes that name one file are a
@@ -1758,8 +1842,8 @@ fn on_integration(
 }
 
 /// Close the open merge items of a task (T-112: a cancelled task; T-92 F1: a
-/// remerge of an already-merged candidate): its failed merge and its push
-/// refusal are history. `result` is the line the captain reads — "cancelled by
+/// remerge of an already-merged candidate): its failed merge, its push refusal
+/// and its lost-merge word are history (T-563 left M-7875 open). `result` is the line the captain reads — "cancelled by
 /// the captain" or "the candidate <sha> is already on the integration branch".
 /// Returns the message ids that were closed.
 fn resolve_merge_items(
@@ -1770,7 +1854,11 @@ fn resolve_merge_items(
     now: Ts,
 ) -> GearResult<Vec<String>> {
     let mut resolved = Vec::new();
-    for thread in [format!("merge-failed:{task}"), format!("push:{task}")] {
+    for thread in [
+        format!("merge-failed:{task}"),
+        format!("push:{task}"),
+        format!("merge-lost:{task}"),
+    ] {
         for message in tx.thread_messages(project, &thread)? {
             if !matches!(
                 message.state,
@@ -1834,6 +1922,7 @@ pub fn staff_line(item: &StaffItem) -> usize {
         | StaffItem::Retry { line, .. }
         | StaffItem::Release { line, .. }
         | StaffItem::Remerge { line, .. }
+        | StaffItem::MergeFirst { line, .. }
         | StaffItem::Rebind { line, .. }
         | StaffItem::RebindCancel { line, .. }
         | StaffItem::Drop { line, .. }
@@ -2539,6 +2628,49 @@ fn project_config(tx: &Tx<'_>, project: &str) -> GearResult<Option<crate::config
     Ok(Some(crate::config::parse(&row.config_toml)?))
 }
 
+/// The key the captain's `- merge-first T-<n>` writes (T-574): the task whose
+/// queued merge goes next, on its own. The engine reads it when it orders its
+/// ready merges and clears it when that merge starts.
+pub fn merge_first_key(project: &str) -> String {
+    format!("engine.merge_first.{project}")
+}
+
+/// `- merge-first T-<n>` (T-574): the task's queued merge runs next on its
+/// branch, alone (never batched), before every other ready merge — `now`
+/// ones included. The user's Prometheus, 2026-11-05: T-738 held the fix every
+/// red round waited for, and its merge was last of fifteen.
+///
+/// Only a task with a merge already in the queue can be moved: a task with
+/// none is refused with a line saying so, like every plan line. The line is
+/// one-shot — the apply removes it from the file, and the engine clears the
+/// mark when the merge starts.
+fn mark_merge_first(tx: &Tx<'_>, project: &str, task: &str, line: usize) -> GearResult<()> {
+    if tx.get_task(project, task)?.is_none() {
+        return Err(bad(line, format!("no task {task} in this project")));
+    }
+    let mut queued = false;
+    for state in [
+        gear_model::OpState::Intended,
+        gear_model::OpState::Executing,
+        gear_model::OpState::Unknown,
+    ] {
+        queued = queued
+            || tx
+                .ops_in_state(project, state)?
+                .iter()
+                .any(|op| op.kind == gear_model::OpKind::Merge && op.task.as_deref() == Some(task));
+    }
+    if !queued {
+        return Err(bad(
+            line,
+            format!(
+                "{task} has no queued merge: `merge-first` moves a merge that is already waiting in the queue"
+            ),
+        ));
+    }
+    tx.set_meta(&merge_first_key(project), task)
+}
+
 /// `- remerge T-<n>` (T-92): the captain retries a merge that failed on
 /// something that can clear (a flaky test, a broken gate run). A new merge op
 /// is queued for the task's accepted attempt and candidate.
@@ -2609,31 +2741,58 @@ fn remerge(
             .unwrap_or(0)
     };
     merges.sort_by(|a, b| (a.created, op_number(&a.id)).cmp(&(b.created, op_number(&b.id))));
-    let Some(last) = merges.into_iter().last() else {
-        return Err(bad(
-            line,
-            format!(
-                "{task_id} has no merge to retry: the engine queues one when its review passes"
-            ),
-        ));
-    };
-    match last.state {
-        gear_model::OpState::Failed => {}
-        gear_model::OpState::Confirmed => {
-            return Err(bad(
-                line,
-                format!("{task_id} is already merged ({})", last.id),
-            ))
+    // A task accepted while it was carried by another never had a merge of
+    // its own (Lawrence T-34): once its carried-by is cleared, remerge queues
+    // its first one. While it is still carried, it lands with its carrier.
+    let last_state = match merges.into_iter().last() {
+        Some(last) => Some((last.state, last.id)),
+        None => {
+            if let Some(by) = tx.task_carried_by(project, task_id)? {
+                return Err(bad(
+                    line,
+                    format!(
+                        "{task_id} is carried by {by}: it lands with that merge; clear `carried-by` to merge it alone"
+                    ),
+                ));
+            }
+            None
         }
-        state => {
-            return Err(bad(
-                line,
-                format!(
-                    "a merge of {task_id} is already {} ({}), not failed: nothing to retry",
+    };
+    if let Some((state, last_id)) = last_state {
+        match state {
+            // A voided merge merged nothing: the accepted attempt above may be
+            // queued again.
+            gear_model::OpState::Failed | gear_model::OpState::Void => {}
+            // T-576: an op left `unknown` has no worker running it — a worker's
+            // op is executing or submitted — so the captain may queue the merge
+            // again. It goes back to intended, and the new op below is the one
+            // that carries the rework (Prometheus 2026-11-05: `- remerge T-722`
+            // was refused as "already unknown, not failed" while the op sat
+            // unknown and nothing would ever take it).
+            gear_model::OpState::Unknown => {
+                tx.set_op_state(
+                    project,
+                    &last_id,
+                    gear_model::OpState::Intended,
+                    Some("remerge: queued again by the captain"),
+                    now,
+                )?;
+            }
+            gear_model::OpState::Confirmed => {
+                return Err(bad(
+                    line,
+                    format!("{task_id} is already merged ({last_id})"),
+                ))
+            }
+            state => {
+                return Err(bad(
+                    line,
+                    format!(
+                    "a merge of {task_id} is already {} ({last_id}), not failed: nothing to retry",
                     state.as_str(),
-                    last.id
                 ),
-            ))
+                ))
+            }
         }
     }
     // The same payload the engine writes when a review passes: the lane's
@@ -2649,8 +2808,24 @@ fn remerge(
             &format!("the candidate {candidate} is already on the integration branch"),
             now,
         )?;
+        // The work is on the integration branch: the attempt is merged, so the
+        // tasks that depend on it may start (Prometheus T-609: the item closed
+        // but merged_at stayed empty, and T-616 never started).
+        if tx
+            .attempt_times(project, task_id, latest.n)?
+            .merged
+            .is_none()
+        {
+            tx.set_attempt_time(
+                project,
+                task_id,
+                latest.n,
+                gear_store::AttemptStep::Merged,
+                now,
+            )?;
+        }
         return Ok(Some(format!(
-            "remerge {task_id}: {candidate} is already on the integration branch: no merge queued, its failed-merge item resolved"
+            "remerge {task_id}: {candidate} is already on the integration branch: no merge queued, the attempt is recorded merged, its failed-merge item resolved"
         )));
     }
     let lane = task.lane.clone().unwrap_or_default();
@@ -2835,6 +3010,9 @@ pub fn show(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<String> {
     if let Some(model) = tx.task_review_model(project, task)? {
         text.push_str(&format!("review-model: {model}\n"));
     }
+    if let Some(by) = tx.task_carried_by(project, task)? {
+        text.push_str(&format!("carried-by: {by}\n"));
+    }
     // The `audit:` mark of a task (T-505): a voyage audit, run by reviewers.
     if tx.task_audit(project, task)?.is_some() {
         text.push_str("audit: true\n");
@@ -2937,6 +3115,100 @@ mod tests {
         let draft = parse(text).unwrap();
         let (env, fp) = cap();
         apply(s, &env, Some(&fp), None, &draft, text, rid, NOW)
+    }
+
+    /// T-563: a task on a lane nobody works is named after the apply, one line
+    /// per task, and the apply still stands (prometheus, 2026-11-04: four
+    /// `now` tasks went to retired lanes and sat ready).
+    #[test]
+    fn a_task_on_a_retired_lane_is_named_and_the_apply_stands() {
+        let mut s = world();
+        s.write(|tx| {
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "codex", NOW)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p3", "codex", NOW)?;
+            tx.set_seat_state("p:heat", SeatState::Retiring, None, NOW)?;
+            tx.set_seat_state("p:heat", SeatState::Retired, None, NOW)
+        })
+        .unwrap();
+        let r = run(
+            &mut s,
+            &draft_text(
+                0,
+                "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\
+                 ## NEW [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n\
+                 ## NEW [must] lane=hull\ngoal: C\naccept: c\nestimate: 30\ndeps: -\n",
+            ),
+            "r1",
+        )
+        .unwrap();
+        assert_eq!(
+            r.warnings,
+            vec![
+                "warning: T-1 is on lane heat, which is retired: move it to a working lane or bring the lane back",
+                "warning: T-2 is on lane heat, which is retired: move it to a working lane or bring the lane back",
+            ],
+            "{:?}",
+            r.warnings
+        );
+        // The apply stands: the tasks are in the store.
+        assert_eq!(
+            s.read(|tx| tx.get_task("p", "T-2")).unwrap().unwrap().state,
+            TaskState::Ready
+        );
+    }
+
+    /// T-574: `- merge-first T-<n>` moves a merge that is already queued, and
+    /// refuses a task that has none.
+    #[test]
+    fn merge_first_moves_a_queued_merge_and_refuses_a_task_without_one() {
+        let mut s = world();
+        run(
+            &mut s,
+            &draft_text(
+                0,
+                "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
+            ),
+            "r1",
+        )
+        .unwrap();
+        let staff = |line: &str| format!("<!-- gear-plan project=p base=1 -->\n# Staff\n{line}\n");
+
+        // No merge is queued for T-1 yet: the line is refused and says so.
+        let refused = run(&mut s, &staff("- merge-first T-1"), "r2").unwrap_err();
+        assert!(
+            refused.detail.contains("has no queued merge"),
+            "{}",
+            refused.detail
+        );
+        assert!(
+            refused.detail.contains("T-1"),
+            "the task is named: {}",
+            refused.detail
+        );
+
+        // Once the merge waits in the queue, the line marks it.
+        s.write(|tx| {
+            tx.insert_op(&gear_store::NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: gear_model::OpKind::Merge,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({"branch": "heat/t1", "candidate": "abc1234"}),
+                created: NOW,
+            })
+        })
+        .unwrap();
+        run(&mut s, &staff("- merge-first T-1"), "r3").unwrap();
+        assert_eq!(
+            s.read(|tx| tx.get_meta(&merge_first_key("p")))
+                .unwrap()
+                .as_deref(),
+            Some("T-1")
+        );
     }
 
     #[test]
@@ -3870,6 +4142,60 @@ fn planned_guard(
     Ok((departing, moved))
 }
 
+/// Whether the fleet stands still while the departed voyage holds work back:
+/// no lane that is up has a task it can start (after its current one), and
+/// the voyage has tasks on hold or ready for a held or parked lane. `Some`
+/// names the voyage and the work held back.
+fn fleet_withheld(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<String>> {
+    let voyage = current_voyage(tx, project)?;
+    if voyage.is_empty()
+        || !tx
+            .get_voyage(project, &voyage)?
+            .is_some_and(|v| v.departure.is_some())
+    {
+        return Ok(None);
+    }
+    let seats = tx.seats_of_project(project)?;
+    let lane_down = |lane: &str| {
+        seats.iter().any(|seat| {
+            seat.role == SeatRole::Lane
+                && seat.name == lane
+                && matches!(seat.state, SeatState::Held | SeatState::Parked)
+        })
+    };
+    let (mut held, mut ready_for_down) = (0, 0);
+    for task in tx.tasks_of_project(project)? {
+        if task.milestone.as_deref() != Some(voyage.as_str()) {
+            continue;
+        }
+        match task.state {
+            TaskState::Draft => held += 1,
+            TaskState::Ready if task.lane.as_deref().is_some_and(lane_down) => ready_for_down += 1,
+            _ => {}
+        }
+    }
+    if held + ready_for_down == 0 {
+        return Ok(None);
+    }
+    let idle: BTreeSet<String> = idle_lanes(tx, project, now)?
+        .into_iter()
+        .map(|lane| lane.lane)
+        .collect();
+    let working = seats.iter().any(|seat| {
+        seat.role == SeatRole::Lane
+            && matches!(seat.state, SeatState::Active | SeatState::Standby)
+            && !idle.contains(&seat.name)
+            && !lane_in_tail_at(tx, project, &seat.name, now).unwrap_or(false)
+    });
+    if working {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{voyage} holds {} tasks back ({held} on hold, {ready_for_down} ready for held or parked lanes)",
+        held + ready_for_down
+    )))
+}
+
 /// T-461: a new milestone's departure and a move between milestones are
 /// applied only with `--confirmed` and a `confirmed:` line in this same
 /// `# Decisions`; without both the apply is refused and nothing is written.
@@ -4148,6 +4474,48 @@ fn cancel_task(
     Ok(())
 }
 
+/// Set a running task aside for more urgent work (`state: hold` on a
+/// running or waiting task): its open attempt closes, so the lane's seat is
+/// free for the next task, and the lane is told to save its work on the
+/// task's branch. The task keeps its branch and comes back with `state: ready`.
+fn set_aside_task(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &TaskRow,
+    by_seat: &str,
+    by_gen: i64,
+    now: Ts,
+) -> GearResult<()> {
+    let closed = abandon_open_attempts(tx, project, &task.id, now)?;
+    let Some(lane) = task.lane.as_deref() else {
+        return Ok(());
+    };
+    let lane_seat = format!("{project}:{lane}");
+    if closed && tx.get_seat(&lane_seat)?.is_some() {
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: project.to_string(),
+            thread: format!("{}:hold", task.id),
+            task: Some(task.id.clone()),
+            attempt: None,
+            sender: by_seat.to_string(),
+            sender_gen: by_gen,
+            recipient: lane_seat,
+            kind: MsgKind::Instruction,
+            urgent: true,
+            body: format!(
+                "{} is set aside for more urgent work: commit and push what you have to its branch now, then end your turn; nothing to hand in. It comes back later on the same branch.",
+                task.id
+            ),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+    }
+    Ok(())
+}
+
 /// Close every open attempt of a task (T-93, T-311): a cancelled task and a
 /// task that moves to another lane both finish with their attempts abandoned,
 /// so the seat is free for the next task. Returns whether one was closed.
@@ -4334,6 +4702,7 @@ fn staff_text(item: &StaffItem) -> String {
         StaffItem::Retry { lane, .. } => format!("retry {lane}"),
         StaffItem::Release { name, .. } => format!("release {name}"),
         StaffItem::Remerge { task, .. } => format!("remerge {task}"),
+        StaffItem::MergeFirst { task, .. } => format!("merge-first {task}"),
         StaffItem::Rebind {
             lane, repo, owns, ..
         } => format!("rebind {lane} repo={repo} owns=[{}]", owns.join(", ")),
@@ -4625,6 +4994,43 @@ fn drop_milestone(
     }
     tx.delete_voyage(project, milestone)?;
     Ok(())
+}
+
+/// T-563: one warning per open task on a lane no seat works (no seat of the
+/// lane is Active or Standby), in plan order:
+/// `warning: T-3 is on lane heat, which is retired: move it to a working lane or
+/// bring the lane back`. Read-only: the apply writes what it wrote.
+fn retired_lane_warnings(
+    tx: &Tx<'_>,
+    project: &str,
+    revived: &[String],
+) -> GearResult<Vec<String>> {
+    let seats = tx.seats_of_project(project)?;
+    let mut warnings = Vec::new();
+    for task in tx.tasks_of_project(project)? {
+        if matches!(task.state, TaskState::Done | TaskState::Cancelled) {
+            continue;
+        }
+        let Some(lane) = task.lane.as_deref() else {
+            continue;
+        };
+        if revived.iter().any(|name| name == lane) {
+            continue;
+        }
+        let worked = seats.iter().any(|seat| {
+            seat.role == SeatRole::Lane
+                && seat.name == lane
+                && matches!(seat.state, SeatState::Active | SeatState::Standby)
+        });
+        if worked {
+            continue;
+        }
+        warnings.push(format!(
+            "warning: {} is on lane {lane}, which is retired: move it to a working lane or bring the lane back",
+            task.id
+        ));
+    }
+    Ok(warnings)
 }
 
 /// T-473: one warning per file two Ready tasks on different lanes name. The
@@ -4975,8 +5381,68 @@ pub fn render_task_packet(
             row.contract_version, row.contract_version, pending.goal, row.contract_version, pending.accept, row.contract_version
         ));
     }
-    text.push_str("\nYou implement; you never design. If anything here is unclear or contradicts the design or a message, stop and send gear send --kind question (Question / Options / Context / Default) at once, then go on with your default. Commit and push this branch at least every 15 minutes.\n");
+    // T-195: a CLI that takes no rules at its start (OpenCode, Grok) gets its
+    // role's rules — the lane's charter and the working rules — in the packet.
+    if let Some(rules) = packet_rules(tx, project, row.lane.as_deref())? {
+        text.push_str(&format!("\n## Your role\n{rules}"));
+    }
+    // The stance is the lane's charter when the project wrote one (T-469):
+    // the footer repeats only the default stance, never over a charter.
+    let chartered = match row.lane.as_deref() {
+        Some(lane) => project_config(tx, project)?.is_some_and(|config| {
+            config
+                .lanes
+                .iter()
+                .any(|l| l.name == lane && l.charter.is_some())
+        }),
+        None => false,
+    };
+    if chartered {
+        text.push_str("\nYour charter says how you work on this task. If anything here contradicts the design or a message, send gear send --kind question (Question / Options / Context / Default) and go on with your default. Commit and push this branch at least every 15 minutes.\n");
+    } else {
+        text.push_str("\nYou implement; you never design. If anything here is unclear or contradicts the design or a message, stop and send gear send --kind question (Question / Options / Context / Default) at once, then go on with your default. Commit and push this branch at least every 15 minutes.\n");
+    }
     Ok(text)
+}
+
+/// The rules a lane's agent gets in its packet (T-195): only when its CLI
+/// takes none when it starts, so an agent is never told them twice.
+fn packet_rules(tx: &Tx<'_>, project: &str, lane: Option<&str>) -> GearResult<Option<String>> {
+    let Some(lane) = lane else {
+        return Ok(None);
+    };
+    let seat_id = format!("{project}:{lane}");
+    let Some(seat) = tx.get_seat(&seat_id)? else {
+        return Ok(None);
+    };
+    let Some(binding) = tx.get_binding(&seat_id, seat.generation)? else {
+        return Ok(None);
+    };
+    let takes_rules_at_start = gear_herdr::profile::builtin(&binding.kind)
+        .is_none_or(|profile| !profile.instructions_args.is_empty());
+    if takes_rules_at_start {
+        return Ok(None);
+    }
+    let config = project_config(tx, project)?;
+    let voyage = match current_voyage(tx, project)? {
+        id if id.is_empty() => None,
+        id => tx.get_voyage(project, &id)?,
+    };
+    let done = voyage
+        .as_ref()
+        .and_then(|v| v.done.as_deref())
+        .unwrap_or("-");
+    let bar = voyage
+        .as_ref()
+        .and_then(|v| v.bar.as_deref())
+        .unwrap_or("-");
+    Ok(crate::charter::text(
+        config.as_ref(),
+        gear_model::SeatRole::Lane,
+        lane,
+        done,
+        bar,
+    ))
 }
 
 /// The attempt whose round failed, if the task has one (T-118): the highest

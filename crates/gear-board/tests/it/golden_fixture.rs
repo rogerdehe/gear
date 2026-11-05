@@ -333,7 +333,9 @@ pub fn load() -> (Store, i64) {
                     };
                     tx.insert_task(&TaskRow {
                         repo: None,
-                        base: None,
+                        // v0.6.54: the stage words name the branch by its
+                        // name; the prototype's graph is dev's line.
+                        base: Some("dev".into()),
                         gate: None,
                         rework_estimate_min: None,
                         project: "gear".into(),

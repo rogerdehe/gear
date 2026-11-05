@@ -71,22 +71,38 @@ JSON
 }
 
 /// Put a fake curl on the PATH, run `f`, and put the PATH back.
+///
+/// The `curl` on the PATH is one wrapper per test process that runs this
+/// test's script with `sh`: macOS scans every newly written executable on its
+/// first run (0.2-0.4 s each here), so a fresh executable per call made these
+/// tests slow; a script read by `sh` is data and is not scanned.
 fn with_fake_curl(dir: &Path, script: &str, f: impl FnOnce(&Path)) {
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let curl = bin.join("curl");
-    std::fs::write(&curl, script).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    static WRAPPER: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let bin = WRAPPER.get_or_init(|| {
+        let bin = tempfile::tempdir().unwrap();
+        let curl = bin.path().join("curl");
+        std::fs::write(
+            &curl,
+            "#!/bin/sh\nexec /bin/sh \"$FAKE_CURL_SCRIPT\" \"$@\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        bin
+    });
+    let body = dir.join("curl.sh");
+    std::fs::write(&body, script).unwrap();
     let _guard = PATH_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let old = std::env::var("PATH").unwrap_or_default();
-    std::env::set_var("PATH", format!("{}:{}", bin.display(), old));
+    std::env::set_var("PATH", format!("{}:{}", bin.path().display(), old));
+    std::env::set_var("FAKE_CURL_SCRIPT", &body);
     f(dir);
+    std::env::remove_var("FAKE_CURL_SCRIPT");
     std::env::set_var("PATH", old);
 }
 

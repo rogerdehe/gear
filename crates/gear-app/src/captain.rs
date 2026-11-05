@@ -81,17 +81,69 @@ pub fn handover(
     pane: &str,
     now: Ts,
 ) -> GearResult<Handover> {
+    handover_of(store, env, herdr, ancestors, cwd, None, pane, now)
+}
+
+/// [`handover`] with the project named by the caller (`--project`): two
+/// projects may share one checkout, so the user's terminal names the one whose
+/// captain moves. The caller is proven exactly as without it.
+#[allow(clippy::too_many_arguments)]
+pub fn handover_of(
+    store: &mut Store,
+    env: &Env,
+    herdr: &mut dyn gear_herdr::HerdrAct,
+    ancestors: &[u32],
+    cwd: &Path,
+    named: Option<&str>,
+    pane: &str,
+    now: Ts,
+) -> GearResult<Handover> {
     // 1. Where does this process really run? Without a pane nothing can be
     //    proven about the caller.
     let Some(real) = identity::real_pane(herdr, ancestors) else {
         return Err(GearError::new(
             ErrorCode::Forbidden,
-            "the handover runs in no pane of this session: run it in the captain's pane or in your own terminal",
+            "the handover runs in no pane of this session (a CLI that runs its commands outside its pane cannot prove it is the captain): run it in the captain's pane, or in a shell pane of this session with no agent, as `gear --session <session> captain handover --project <project> --pane <new pane>`",
         ));
     };
     // 2. The project: the caller's own, else the one whose checkout holds the
     //    working directory (the user's terminal in the project).
-    let project = project_of(store, env, cwd)?;
+    //    A pane may hold the captain seats of several projects while its
+    //    GEAR_CTX names one of them (Prometheus, 2026-11-05: w2:p1X held
+    //    Prometheus and Lawrence, the handover without --project moved
+    //    Lawrence's seat, and --project prometheus was refused). A named
+    //    project is proven in step 3 like any other: the caller's pane must be
+    //    that captain's binding. Without a name, a pane that holds several
+    //    seats is asked to name one.
+    let project = match named {
+        Some(named) => {
+            if let Some(ctx) = &env.ctx {
+                if ctx.project != named && !captains_on(store, &real)?.iter().any(|p| p == named) {
+                    return Err(GearError::new(
+                        ErrorCode::Forbidden,
+                        format!(
+                            "--project {named} names another project than this seat's ({}), and this pane holds no captain seat of {named}",
+                            ctx.project
+                        ),
+                    ));
+                }
+            }
+            named.to_string()
+        }
+        None => {
+            let held = captains_on(store, &real)?;
+            if held.len() > 1 {
+                return Err(GearError::new(
+                    ErrorCode::BadFormat,
+                    format!(
+                        "pane {real} holds the captain seats of {}: name the one that moves, `gear --session <session> captain handover --project <project> --pane <new pane>`",
+                        held.join(" and ")
+                    ),
+                ));
+            }
+            project_of(store, env, cwd)?
+        }
+    };
     let captain = format!("{project}:captain");
     let seat = store
         .read(|tx| tx.get_seat(&captain))?
@@ -413,11 +465,18 @@ fn take_one(
     let previous = store.read(|tx| tx.get_binding(&captain, seat.generation))?;
     if let Some(binding) = &previous {
         if binding.status == BindingStatus::Active && binding.pane_id == pane {
-            let named = gear_herdr::ensure_agent_name(
-                herdr,
-                pane,
-                &crate::config::agent_name(project, "captain"),
-            );
+            // T-552: a pane may hold another project's captain seat too, and
+            // the agent then carries that captain's name; naming it after this
+            // project would take that name away from every prompt to it.
+            let named = if other_captain_in_pane(store, pane, &captain)?.is_some() {
+                gear_herdr::Ensured::Kept
+            } else {
+                gear_herdr::ensure_agent_name(
+                    herdr,
+                    pane,
+                    &crate::config::agent_name(project, "captain"),
+                )
+            };
             return Ok(Taken {
                 project: project.to_string(),
                 captain,
@@ -478,6 +537,32 @@ fn take_one(
 enum Rebound {
     Taken,
     HandedOver,
+}
+
+/// The other project's captain seat this pane already holds (T-552), if any.
+///
+/// A captain pane may hold the captain seats of more than one project (T-485),
+/// and the agent in it carries one name: naming it after the second project
+/// takes the first captain's name away, so every prompt to that name fails with
+/// `agent_not_found`. The name is therefore kept as it is.
+fn other_captain_in_pane(store: &mut Store, pane: &str, seat: &str) -> GearResult<Option<String>> {
+    store.read(|tx| {
+        for project in tx.project_ids()? {
+            let Some(other) = tx.captain_of(&project)? else {
+                continue;
+            };
+            if other.id == seat {
+                continue;
+            }
+            let Some(binding) = tx.get_binding(&other.id, other.generation)? else {
+                continue;
+            };
+            if binding.status == BindingStatus::Active && binding.pane_id == pane {
+                return Ok(Some(other.id));
+            }
+        }
+        Ok(None)
+    })
 }
 
 /// What the steps after a rebind did.
@@ -605,6 +690,8 @@ fn finish_rebind(
     // 7. The new captain's agent carries the captain's name (T-134): Herdr
     //    clears a name when it re-detects the occupant, and a prompt to an
     //    unnamed agent is refused, so the seat must not start out nameless.
+    //    Unless the pane already holds another project's captain seat (T-552):
+    //    that captain's name stays, or every prompt to it would fail.
     let name = crate::config::agent_name(project, "captain");
     if let Some(from) = from.as_deref().filter(|from| *from != pane) {
         let held_by_old = herdr
@@ -616,7 +703,11 @@ fn finish_rebind(
             let _ = herdr.agent_clear_name(from);
         }
     }
-    let named = gear_herdr::ensure_agent_name(herdr, pane, &name);
+    let named = if other_captain_in_pane(store, pane, &captain)?.is_some() {
+        gear_herdr::Ensured::Kept
+    } else {
+        gear_herdr::ensure_agent_name(herdr, pane, &name)
+    };
 
     Ok(Finished {
         named,
@@ -643,6 +734,27 @@ fn document_place(cwd: &Path, document: &str) -> String {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
         (!text.is_empty()).then_some(text)
     };
+    if !cwd.join(document).exists() {
+        // Committed on another branch only: name where to read it.
+        let Some(commit) = git(&["log", "--all", "-1", "--format=%h", "--", document]) else {
+            return " (not committed)".to_string();
+        };
+        let branch = git(&[
+            "for-each-ref",
+            "--contains",
+            &commit,
+            "--format=%(refname:short)",
+            "refs/heads",
+            "refs/remotes",
+        ])
+        .and_then(|refs| refs.lines().next().map(str::to_string));
+        return match branch {
+            Some(branch) => format!(
+                " (branch {branch}, commit {commit}, not in this checkout: `git show {commit}:{document}`)"
+            ),
+            None => format!(" (commit {commit}, not in this checkout: `git show {commit}:{document}`)"),
+        };
+    }
     let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"]);
     let commit = git(&["log", "-1", "--format=%h", "--", document]);
     match (branch, commit) {
@@ -760,12 +872,32 @@ fn request_key(project: &str) -> String {
 /// there is one. The names carry the date and time, so the last one in name
 /// order is the newest.
 fn newest_handover(root: &Path, directory: &str) -> Option<String> {
+    // The checkout's own files, and every document committed on any branch:
+    // the outgoing captain commits it on its home branch, which is rarely the
+    // branch this checkout is on. The names carry the date, so the last one
+    // sorted is the newest.
     let mut names: Vec<String> = std::fs::read_dir(root.join(directory))
-        .ok()?
-        .flatten()
-        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
-        .filter(|name| name.starts_with("captain-") && name.ends_with(".md"))
-        .collect();
+        .map(|dir| {
+            dir.flatten()
+                .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Ok(output) = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["log", "--all", "--format=", "--name-only", "--", directory])
+        .output()
+    {
+        if output.status.success() {
+            names.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter_map(|line| line.rsplit('/').next().map(str::to_string)),
+            );
+        }
+    }
+    names.retain(|name| name.starts_with("captain-") && name.ends_with(".md"));
     names.sort();
     names.pop().map(|name| format!("{directory}/{name}"))
 }
@@ -1393,6 +1525,25 @@ fn needs_of(
 
 /// The project a handover is for: the caller's context, else the project whose
 /// checkout holds the working directory (the user's own terminal).
+/// The projects whose captain is bound to `pane` at its current generation.
+fn captains_on(store: &mut Store, pane: &str) -> GearResult<Vec<String>> {
+    store.read(|tx| {
+        let mut held = Vec::new();
+        for project in tx.project_ids()? {
+            let Some(seat) = tx.get_seat(&format!("{project}:captain"))? else {
+                continue;
+            };
+            let bound = tx
+                .get_binding(&seat.id, seat.generation)?
+                .is_some_and(|binding| binding.pane_id == pane);
+            if bound {
+                held.push(project);
+            }
+        }
+        Ok(held)
+    })
+}
+
 fn project_of(store: &mut Store, env: &Env, cwd: &Path) -> GearResult<String> {
     if let Some(ctx) = &env.ctx {
         return Ok(ctx.project.clone());

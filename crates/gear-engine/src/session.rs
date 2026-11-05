@@ -1685,6 +1685,108 @@ mod tests {
         }
     }
 
+    /// OpenCode opens the session of a `/new` only with the first prompt
+    /// (Lawrence T-34): the `/new` is done without a new id and no alarm, and
+    /// the session is adopted once it appears; one that never appears tells
+    /// the captain.
+    #[test]
+    fn an_opencode_new_is_done_at_once_and_adopts_its_session_when_it_appears() {
+        for appears in [true, false] {
+            let mut store = world();
+            store
+                .write(|tx| {
+                    testing::seed_active_seat(
+                        tx,
+                        "p",
+                        "oc",
+                        gear_model::SeatRole::Lane,
+                        "oc:p1",
+                        "opencode",
+                        T0,
+                    )?;
+                    testing::seed_active_seat(
+                        tx,
+                        "p",
+                        "captain",
+                        gear_model::SeatRole::Captain,
+                        "cap:p1",
+                        "codex",
+                        T0,
+                    )?;
+                    tx.set_binding_session_ref("p:oc", 1, "ses_old")?;
+                    tx.set_meta(&crate::onboard::worktree_path_key("p:oc"), "/w/oc")
+                })
+                .unwrap();
+            let seat = store.read(|tx| tx.get_seat("p:oc")).unwrap().unwrap();
+            let mut herdr = FakeHerdr::new();
+            herdr.add_agent("oc:p1", "opencode", gear_herdr::AgentStatus::Idle);
+            let mut config = cfg();
+            config
+                .profiles
+                .insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
+            let action = Action::New;
+            let mut ready = false;
+            for now in [T0, T0 + 1, T0 + 4, T0 + 5] {
+                let prep = crate::session_runner::run(
+                    &mut store,
+                    &mut herdr,
+                    &config,
+                    &seat,
+                    "T-1",
+                    1,
+                    Role::Dev,
+                    &action,
+                    false,
+                    now,
+                )
+                .unwrap();
+                ready = prep == Prep::Ready;
+            }
+            assert!(ready, "the /new is done once the composer is back");
+            let attempt = store
+                .read(|tx| tx.get_attempt("p", "T-1", 1))
+                .unwrap()
+                .unwrap();
+            assert_eq!(attempt.session_action.as_deref(), Some("new"));
+            let alarms = |store: &mut Store| {
+                store
+                    .read(|tx| tx.thread_messages("p", "session:p:oc"))
+                    .unwrap()
+                    .len()
+            };
+            assert_eq!(alarms(&mut store), 0);
+
+            let at = if appears { T0 + 6 } else { T0 + 700 };
+            herdr.api_replies.push_back(Ok(serde_json::json!({"data": if appears {
+                serde_json::json!([
+                    {"id": "ses_old", "location": {"directory": "/w/oc"}, "time": {"created": (T0 - 100) * 1000}},
+                    {"id": "ses_new", "location": {"directory": "/w/oc"}, "time": {"created": (T0 + 6) * 1000}},
+                ])
+            } else {
+                serde_json::json!([])
+            }})));
+            crate::session_runner::adopt_opencode_sessions(
+                &mut store,
+                &mut herdr,
+                &[seat.clone()],
+                at,
+            )
+            .unwrap();
+            let session = store
+                .read(|tx| tx.get_binding("p:oc", 1))
+                .unwrap()
+                .unwrap()
+                .session_ref;
+            if appears {
+                assert_eq!(session.as_deref(), Some("ses_new"));
+                assert_eq!(alarms(&mut store), 0);
+            } else {
+                assert_eq!(session.as_deref(), Some("ses_old"));
+                assert_eq!(alarms(&mut store), 1, "the captain checks the profile");
+            }
+        }
+    }
+
     #[test]
     fn pi_session_resume_starts_without_role_rules() {
         // T-469: a resumed conversation already holds the charter it started

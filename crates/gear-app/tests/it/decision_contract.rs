@@ -532,8 +532,9 @@ fn a_plan_without_a_milestone_logs_to_the_current_voyage() {
     assert_eq!(logged.len(), 1, "{logged:?}");
     assert_eq!(logged[0].kind, "scope");
 
-    // A staff-only apply: the entry belongs to M1 too.
-    run(&mut s, "# Staff\n- hold heat reason=waiting\n", "r3").unwrap();
+    // A staff-only apply: the entry belongs to M1 too. Holding the only
+    // lane stops the voyage, which is the user's: the apply is confirmed.
+    run_confirmed(&mut s, "# Staff\n- hold heat reason=waiting\n", "r3").unwrap();
     let logged = s.read(|tx| tx.decisions_of("p", "M1")).unwrap();
     assert_eq!(
         logged.iter().filter(|d| d.kind == "staff").count(),

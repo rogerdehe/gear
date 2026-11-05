@@ -9,7 +9,7 @@ use gear_board::frame::{canvas, Tab};
 use gear_board::style::Color;
 use gear_board::{build, Options};
 use gear_model::{SeatRole, TaskState};
-use gear_store::{testing, Store, TaskRow};
+use gear_store::{testing, AttemptRow, AttemptStep, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
 
@@ -56,6 +56,31 @@ fn world(tasks: &[(&str, i64, TaskState, &[&str])]) -> Store {
                     issue: None,
                     updated: T0,
                 })?;
+                // v0.6.54: done is merged only with a merge time on an
+                // attempt; without one, a done task has only passed.
+                if *state == TaskState::Done {
+                    tx.insert_attempt(&AttemptRow {
+                        session_ref: None,
+                        session_cli: None,
+                        session_action: None,
+                        sent_at: None,
+                        project: "p".into(),
+                        task: (*id).into(),
+                        n: 1,
+                        seat: "p:data".into(),
+                        generation: 1,
+                        contract_version: 1,
+                        adopted_version: 1,
+                        pending_update: None,
+                        state: gear_model::AttemptState::Accepted,
+                        candidate: None,
+                        report: None,
+                        safe_point: None,
+                        started: T0,
+                        updated: T0,
+                    })?;
+                    tx.set_attempt_time("p", id, 1, AttemptStep::Merged, T0 - 60)?;
+                }
             }
             Ok(())
         })
@@ -78,11 +103,32 @@ fn tasks_frame(store: &mut Store, selected: usize, size: (usize, usize)) -> Vec<
     text.lines().map(str::to_string).collect()
 }
 
+/// Is the task the one this line is about? Its id is the first `T-` of the
+/// line: the words of the row may name its dependencies after it (T-562).
+fn names(line: &str, task: &str) -> bool {
+    line.match_indices("T-").next().is_some_and(|(at, _)| {
+        let rest = &line[at..];
+        rest.starts_with(task)
+            && !rest[task.len()..]
+                .chars()
+                .next()
+                .is_some_and(|next| next.is_ascii_digit())
+    })
+}
+
 /// The row of a task's own text.
 fn row_of<'a>(lines: &'a [String], task: &str) -> &'a str {
     lines
         .iter()
-        .find(|line| line.contains(task) && !line.contains("time"))
+        .find(|line| names(line, task) && !line.contains("time"))
+        .unwrap_or_else(|| panic!("no row of {task}: {lines:?}"))
+}
+
+/// The index of the row of a task's own text.
+fn row_at(lines: &[String], task: &str) -> usize {
+    lines
+        .iter()
+        .position(|line| names(line, task) && !line.contains("time"))
         .unwrap_or_else(|| panic!("no row of {task}: {lines:?}"))
 }
 
@@ -193,20 +239,14 @@ fn the_selected_rows_lines_are_lit_and_the_others_are_not() {
     .unwrap();
     let canvas = canvas(&board, &crate::screen(Tab::Tasks, 0, (160, 40)), None);
     let lines: Vec<String> = canvas.text().lines().map(str::to_string).collect();
-    let t3_row = lines
-        .iter()
-        .position(|line| line.contains("T-3") && !line.contains("time"))
-        .expect("T-3's row");
+    let t3_row = row_at(&lines, "T-3");
     // T-3 is the first pick: the line from its row to T-2 is lit along the
     // rows it crosses (the selected row itself is the board's reverse bar).
     let lit = canvas.style_at(DEPS_X, t3_row + 1);
     assert_eq!(lit.fg, Some(Color::Warn), "{lit:?}");
     assert!(lit.bold, "the selected row's line is bold: {lit:?}");
     // The line of T-2 to T-1 is not the selected task's: it stays dim.
-    let t2_row = lines
-        .iter()
-        .position(|line| line.contains("T-2") && !line.contains("time"))
-        .expect("T-2's row");
+    let t2_row = row_at(&lines, "T-2");
     let dim = canvas.style_at(DEPS_X + 1, t2_row + 1);
     assert_eq!(dim.fg, Some(Color::Dim), "{dim:?}");
     assert!(!dim.bold, "an unselected line is not bold: {dim:?}");

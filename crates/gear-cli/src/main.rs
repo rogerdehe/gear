@@ -103,6 +103,10 @@ enum CaptainOp {
         /// rebind nothing.
         #[arg(long)]
         facts: bool,
+        /// The project whose captain moves, when the working directory is a
+        /// checkout two projects share (the user's own terminal).
+        #[arg(long, value_name = "PROJECT")]
+        project: Option<String>,
     },
     /// Become the captain of one or more projects from the agent in this
     /// pane: no GEAR_CTX, no pane id. Every named project's captain seat is
@@ -319,6 +323,12 @@ enum AdminOp {
         /// theirs.
         #[arg(long)]
         confirmed: bool,
+        /// T-551: move this Herdr session onto the store `GEAR_DB` names. An
+        /// init that names another store than the session's registered one
+        /// is refused without it, since the session's engine would then
+        /// refuse to start on the store it is registered on.
+        #[arg(long)]
+        move_store: bool,
     },
     /// Print what this machine offers, for the captain's kickoff proposal.
     Kickoff,
@@ -349,10 +359,28 @@ enum AdminOp {
         #[arg(long, default_value = "paused by the user")]
         reason: String,
     },
-    /// Lift `gear admin pause`: the engine works on the project again.
+    /// After the repository's history was rewritten: every commit id the
+    /// session's store names (candidates, merge payloads, items) becomes the
+    /// new one, from `git filter-repo`'s commit-map. Needs GEAR_ADMIN=1 and a
+    /// stopped engine (`gear admin stop --hold`); start it again after.
+    RemapCommits {
+        /// The commit-map file (`<old> <new>` per line).
+        map: std::path::PathBuf,
+    },
+    /// Lift `gear admin pause`: the engine works on the project again, and
+    /// the paused hours do not count in its voyages' elapsed time.
     Resume {
         /// The project id.
         project: String,
+    },
+    /// Depart a voyage again now: its elapsed time and time stations start
+    /// from zero, its scope at departure is what it has today. The user's
+    /// call only.
+    Redepart {
+        /// The project id.
+        project: String,
+        /// The voyage's milestone.
+        milestone: String,
     },
 }
 
@@ -538,8 +566,9 @@ fn run(cli: Cli) -> GearResult<()> {
                     check,
                     models,
                     confirmed,
+                    move_store,
                 },
-        }) => cmd_admin_init(&config, check, models, confirmed, cli.json),
+        }) => cmd_admin_init(&config, check, models, confirmed, move_store, cli.json),
         Some(Cmd::Admin {
             op: AdminOp::Kickoff,
         }) => cmd_admin_kickoff(cli.json),
@@ -555,15 +584,26 @@ fn run(cli: Cli) -> GearResult<()> {
         }) => cmd_admin_projects(cli.json),
         Some(Cmd::Admin {
             op: AdminOp::Pause { project, reason },
-        }) => cmd_admin_pause(&project, Some(&reason)),
+        }) => cmd_admin_pause(&project, ProjectClock::Pause(&reason)),
         Some(Cmd::Admin {
             op: AdminOp::Resume { project },
-        }) => cmd_admin_pause(&project, None),
+        }) => cmd_admin_pause(&project, ProjectClock::Resume),
+        Some(Cmd::Admin {
+            op: AdminOp::RemapCommits { map },
+        }) => cmd_admin_remap_commits(&map),
+        Some(Cmd::Admin {
+            op: AdminOp::Redepart { project, milestone },
+        }) => cmd_admin_pause(&project, ProjectClock::Redepart(&milestone)),
         Some(Cmd::Captain {
-            op: CaptainOp::Handover { pane, facts },
+            op:
+                CaptainOp::Handover {
+                    pane,
+                    facts,
+                    project,
+                },
         }) => match (facts, pane) {
             (true, _) => cmd_captain_handover_facts(cli.json),
-            (false, Some(pane)) => cmd_captain_handover(&pane, cli.json),
+            (false, Some(pane)) => cmd_captain_handover(&pane, project.as_deref(), cli.json),
             (false, None) => Err(GearError::new(
                 gear_model::ErrorCode::BadFormat,
                 "`gear captain handover` needs --pane <id>, or --facts for the template",
@@ -620,6 +660,12 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
         })
         | Some(Cmd::Admin {
             op: AdminOp::Resume { .. },
+        })
+        | Some(Cmd::Admin {
+            op: AdminOp::RemapCommits { .. },
+        })
+        | Some(Cmd::Admin {
+            op: AdminOp::Redepart { .. },
         })
         | Some(Cmd::Admin {
             op: AdminOp::InstallSkill { .. },
@@ -683,7 +729,20 @@ fn cmd_admin_kickoff(json: bool) -> GearResult<()> {
 /// no engine starts.
 /// Pause (`reason` given) or resume (`None`) one project in whichever store
 /// on this machine registers it: no Herdr session or pane is needed.
-fn cmd_admin_pause(project: &str, reason: Option<&str>) -> GearResult<()> {
+/// What `gear admin` does to one project's run and clock.
+enum ProjectClock<'a> {
+    Pause(&'a str),
+    Resume,
+    Redepart(&'a str),
+}
+
+fn cmd_admin_pause(project: &str, action: ProjectClock<'_>) -> GearResult<()> {
+    if matches!(action, ProjectClock::Redepart(_)) && !env_from_process()?.admin {
+        return Err(GearError::new(
+            gear_model::ErrorCode::Forbidden,
+            "`gear admin redepart` is the user's call: it needs GEAR_ADMIN=1",
+        ));
+    }
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let mut found = Vec::new();
     for path in stores_in(home.as_deref()) {
@@ -719,18 +778,34 @@ fn cmd_admin_pause(project: &str, reason: Option<&str>) -> GearResult<()> {
         }
     };
     let key = gear_store::Tx::project_paused_key(project);
-    match reason {
-        Some(reason) => {
-            let value = format!("{} {reason}", now_ts());
+    let now = now_ts();
+    match action {
+        ProjectClock::Pause(reason) => {
+            let value = format!("{now} {reason}");
             store.write(|tx| tx.set_meta(&key, &value))?;
             println!(
                 "{project} paused in {}: its engine no longer dispatches, rings or merges for it; `gear admin resume {project}` lifts it",
                 path.display()
             );
         }
-        None => {
-            store.write(|tx| tx.set_meta(&key, ""))?;
+        ProjectClock::Resume => {
+            let moved = store.write(|tx| gear_app::voyage_clock::resume(tx, project, now))?;
             println!("{project} resumed in {}", path.display());
+            for (milestone, minutes) in moved {
+                println!(
+                    "  {milestone}: the {minutes} paused min do not count in its elapsed time"
+                );
+            }
+        }
+        ProjectClock::Redepart(milestone) => {
+            let (tasks, estimate) =
+                store.write(|tx| gear_app::voyage_clock::redepart(tx, project, milestone, now))?;
+            println!(
+                "{project} {milestone} departs again now: elapsed 0, {tasks} tasks, {estimate} min estimated"
+            );
+            if store.read(|tx| tx.project_paused(project))?.is_some() {
+                println!("  {project} is still paused: its clock starts counting at `gear admin resume {project}`");
+            }
         }
     }
     Ok(())
@@ -956,6 +1031,7 @@ fn cmd_admin_init(
     check_only: bool,
     with_models: bool,
     confirmed: bool,
+    move_store: bool,
     json: bool,
 ) -> GearResult<()> {
     // T-261: the lane list — `(name, kind, model)` — with the model being the
@@ -1110,6 +1186,8 @@ fn cmd_admin_init(
         let text = read_config(config)?;
         let parsed = gear_app::admin::check(&text, None)?;
         refuse_a_foreign_session(&parsed)?;
+        // T-551: nor does an init that would move this session's store.
+        refuse_a_store_move(move_store)?;
         // T-256: another project of this store on the same repository is a
         // branch clash, reported before anything is registered. The store is
         // only read, and only when it exists already: a check creates nothing.
@@ -1220,6 +1298,11 @@ fn cmd_admin_init(
         refuse_a_foreign_session(&parsed)?;
         // T-316: nor does a fixture, unless the caller named its store.
         refuse_a_fixture_into_this_store(&parsed)?;
+        // T-551: nor an init that names another store than the one this
+        // session is registered on, unless the user says `--move-store`: the
+        // session's engine would refuse to start on the store it is
+        // registered on. Refused before the new store file is even created.
+        refuse_a_store_move(move_store)?;
     }
     let mut store = open_store()?;
     // A project that is not registered yet is created by its captain, never by
@@ -2415,6 +2498,12 @@ fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
 fn cmd_captain_handover_facts(json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
+    // The caller's seat first, as the handover itself does: two projects may
+    // share one checkout, so the working directory alone can name the wrong one.
+    let env = match open_herdr() {
+        Ok(mut herdr) => resolve_caller(&mut store, &mut herdr, env.clone()).unwrap_or(env),
+        Err(_) => env,
+    };
     let cwd = std::env::current_dir().map_err(|e| {
         GearError::new(
             gear_model::ErrorCode::BadFormat,
@@ -2482,7 +2571,7 @@ fn engine_line() -> String {
 /// (T-104). Allowed from the captain's own real pane or the user's own terminal
 /// (a shell with no agent); a lane or reviewer asking is refused and the
 /// captain is told which pane asked.
-fn cmd_captain_handover(pane: &str, json: bool) -> GearResult<()> {
+fn cmd_captain_handover(pane: &str, project: Option<&str>, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
     let mut herdr = open_herdr()?;
@@ -2494,12 +2583,13 @@ fn cmd_captain_handover(pane: &str, json: bool) -> GearResult<()> {
             format!("cannot read the working directory: {e}"),
         )
     })?;
-    let result = gear_app::captain::handover(
+    let result = gear_app::captain::handover_of(
         &mut store,
         &env,
         &mut herdr,
         &ancestors,
         &cwd,
+        project,
         pane,
         now_ts(),
     )?;
@@ -2678,6 +2768,7 @@ fn named_line(named: &gear_herdr::Ensured) -> &'static str {
         gear_herdr::Ensured::Taken { .. } => {
             "held by another pane: GEAR reports it and never steals it"
         }
+        gear_herdr::Ensured::Kept => "kept: the pane already holds another project's captain name",
         gear_herdr::Ensured::Failed(_) => "could not be given: the engine tries again next tick",
     }
 }
@@ -2698,8 +2789,9 @@ fn cmd_admin_install_skill(agent: &str, json: bool) -> GearResult<()> {
         )
     })?;
     let home = std::path::PathBuf::from(home);
-    let files = gear_app::skill::install(agent, &home)?;
-    let dir = agent.skills_root(&home).join(gear_app::skill::SKILL_NAME);
+    let root = agent.skills_dir(&home);
+    let files = gear_app::skill::install_into(&root)?;
+    let dir = root.join(gear_app::skill::SKILL_NAME);
     if json {
         let out = serde_json::json!({
             "agent": agent.as_str(),
@@ -3812,6 +3904,42 @@ fn canonical(path: &str) -> String {
         .unwrap_or_else(|_| path.to_string())
 }
 
+/// T-551: an init never moves a Herdr session onto another store without
+/// being told. The session's engine runs only on the store the session is
+/// registered on (`engine_target_ok`), so replacing that line silently leaves
+/// the engine refusing to start and the session's panes on a store nobody
+/// drives.
+///
+/// Refused when the session has a line naming another store and that store
+/// file still exists; `--move-store` is the user saying yes. The same store,
+/// a session with no line, and a registered store that is gone (the session
+/// starts afresh) behave as they always did.
+fn refuse_a_store_move(move_store: bool) -> GearResult<()> {
+    if move_store {
+        return Ok(());
+    }
+    let (Ok(socket), Ok(db), Some(home)) = (
+        std::env::var("HERDR_SOCKET_PATH"),
+        std::env::var(gear_model::ctx::ENV_DB),
+        std::env::var_os("HOME"),
+    ) else {
+        return Ok(());
+    };
+    let registry = targets_path_in(std::path::Path::new(&home));
+    let Some(registered) = registered_store(&registry, &socket) else {
+        return Ok(());
+    };
+    if canonical(&registered) == canonical(&db) || !std::path::Path::new(&registered).exists() {
+        return Ok(());
+    }
+    Err(GearError::new(
+        gear_model::ErrorCode::BadFormat,
+        format!(
+            "session {socket} is registered on the store {registered}, and this init names another one ({db}): init does not move a Herdr session to another store without being told; run `gear admin init --move-store <config>` to move it, or unset GEAR_DB to keep the session's store"
+        ),
+    ))
+}
+
 /// Whether the engine may run on `GEAR_DB` here: a Herdr session is known and
 /// `GEAR_DB` is the store registered for it. `Err` says why not.
 fn engine_target_ok() -> Result<(), String> {
@@ -3918,6 +4046,48 @@ fn hold_engine(dir: &std::path::Path) -> GearResult<()> {
 
 /// `gear admin stop`: signal the engine named in its lock file. With `hold`
 /// it writes `engine.hold` as well, so the stop stays (T-394).
+/// `gear admin remap-commits <map>`: rewrite the commit ids of this
+/// session's store after a history rewrite, with the engine held off.
+fn cmd_admin_remap_commits(map_path: &std::path::Path) -> GearResult<()> {
+    let env = env_from_process()?;
+    if env.ctx.is_some() || !env.admin {
+        return Err(GearError::new(
+            gear_model::ErrorCode::Forbidden,
+            "`gear admin remap-commits` is the user's call: it needs GEAR_ADMIN=1 outside every seat",
+        ));
+    }
+    let dir = engine_dir()
+        .ok_or_else(|| GearError::new(gear_model::ErrorCode::NoTarget, "GEAR_DB is not set"))?;
+    // Holding the engine's lock keeps the engine off while the ids change.
+    let _lock = take_engine_lock(&dir).map_err(|_| {
+        GearError::new(
+            gear_model::ErrorCode::Forbidden,
+            "the engine of this session is running: `gear admin stop --hold` first",
+        )
+    })?;
+    let text = std::fs::read_to_string(map_path).map_err(|e| {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot read {}: {e}", map_path.display()),
+        )
+    })?;
+    let map = gear_store::CommitMap::parse(&text);
+    if map.is_empty() {
+        return Err(GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("{} maps no commit", map_path.display()),
+        ));
+    }
+    let mut store = open_store()?;
+    let counts = store.write(|tx| tx.remap_commits(&map))?;
+    let total: usize = counts.iter().map(|(_, n)| n).sum();
+    println!("{} commits mapped; {total} values rewritten", map.len());
+    for (table, n) in counts {
+        println!("  {table}: {n}");
+    }
+    Ok(())
+}
+
 fn cmd_admin_stop(hold: bool) -> GearResult<()> {
     let env = env_from_process()?;
     if env.ctx.is_some() {

@@ -63,18 +63,3 @@ sh tools/build-slot/test.sh
 
 `BUILD_SLOT_CORES`, `BUILD_SLOT_LOAD`, `BUILD_SLOT_RUNNING` and
 `BUILD_SLOT_FREE` replace the four readings.
-
-## Under Herdr on macOS: the machine wrapper
-
-macOS scans each new executable on its first launch (every relinked test
-binary, every build script) unless the process responsible for it is a
-Developer Tool. Herdr panes have no responsible process (herdr issue #808),
-so the exemption never applies there: 40-80 s per test binary, one at a time.
-
-When `HERDR_ENV=1` and the machine has an executable
-`~/.config/build-slot/herdr-wrap`, build-slot runs the command through it. The
-wrapper lives outside every repository: on this kind of machine it runs the
-command over `ssh localhost`, whose `sshd-session` is a Developer Tool. On a
-machine without the wrapper, or outside Herdr, nothing changes. Copy the hook
-(the `wrap=` lines in build-slot.sh) into any project's copy to share the
-machine's wrapper; do not write another one.

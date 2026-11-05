@@ -188,6 +188,11 @@ impl SeatState {
                     // the seat free (B03-05).
                     | (Starting, Released)
                     | (Releasing, Released | Unknown)
+                    // T-561: a reviewer sent on its way out whose worktree
+                    // failed its checkouts is retired instead of released —
+                    // the pane is already closed by the release that put it
+                    // in `Releasing`, and the seat must never be reused.
+                    | (Releasing, Retired)
                     | (Released, Starting | Retired)
                     | (Missing, Starting | NeedsCheck | Retired)
                     // Retried by the captain (T-82): the engine onboards it again.
@@ -235,6 +240,11 @@ impl OpState {
                 | (Executing, Intended)
                 | (Submitted, Confirmed | Failed)
                 | (Unknown, Confirmed | Failed)
+                // T-576: an op whose worker let go without a verdict (a batch
+                // or a train that sent it back) is queued again, not unknown.
+                // Unknown means the outcome is not known; a merge queued again
+                // re-runs from the remote, so nothing is retried blindly.
+                | (Unknown, Intended)
         )
     }
 

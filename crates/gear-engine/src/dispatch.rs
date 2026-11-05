@@ -280,14 +280,51 @@ pub fn continue_text(task: &str, version: i64, packet: &str) -> String {
 }
 
 /// design/09 "Delivery content", exactly (T-544):
-/// `Rework <task> attempt <n> (contract v<version>): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: <branch> (in your worktree). Run `gear` first (…). Task packet: <packet>. Read it before starting; report with gear send. After your result, end your turn: …`
+/// `Rework <task> attempt <n> (contract v<version>): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: <branch>. Before you change anything: git switch <branch> (your worktree may still be on the branch of the task you did last), then git pull --no-rebase <remote> <branch>: the review is committed on it. Run `gear` first (…). Task packet: <packet>. Read it before starting; report with gear send. After your result, end your turn: …`
 ///
 /// This is the wording of a **rework** (attempt n ≥ 2): it says so, and that
-/// the fixes are in the packet's Rework section. The branch and the worktree
-/// are already there, so nothing is said about starting them.
-pub fn assign_text(task: &str, attempt: i64, version: i64, branch: &str, packet: &str) -> String {
+/// the fixes are in the packet's Rework section. The branch exists, but the
+/// lane's worktree may still be on the branch of its previous task, so the
+/// rework says how to get onto it (T-554, hull F-312: a rework was committed on
+/// the branch of the task before).
+pub fn assign_text(
+    task: &str,
+    attempt: i64,
+    version: i64,
+    branch: &str,
+    remote: &str,
+    packet: &str,
+) -> String {
     format!(
-        "Rework {task} attempt {attempt} (contract v{version}): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: {branch} (in your worktree). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+        "Rework {task} attempt {attempt} (contract v{version}): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: {branch}. Before you change anything: git switch {branch} (your worktree may still be on the branch of the task you did last), then git pull --no-rebase {remote} {branch}: the review is committed on it. Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+    )
+}
+
+/// The delivery of a task whose last attempt was set aside, not failed
+/// (T-553): `state: hold` closes the attempt as `abandoned`, and the task comes
+/// back to the lane with the work it pushed still on its branch. The rework
+/// wording would send the lane looking for a Rework section the packet does
+/// not have (Hull F-311: T-548 came back as a rework with an empty Rework
+/// section).
+///
+/// `Resume <task> attempt <n> (contract v<version>): it was set aside for more
+/// urgent work, not failed: there is no Rework section. Branch: <branch>.
+/// Before you change anything: git switch <branch> (your worktree may still be
+/// on the branch of the task you did last), then git pull --no-rebase <remote>
+/// <branch>: the review is committed on it. Continue from what you pushed on
+/// <branch> (in your worktree); merge <remote>/<integration> into it first.
+/// Run `gear` first (…). …`
+pub fn resume_text(
+    task: &str,
+    attempt: i64,
+    version: i64,
+    branch: &str,
+    remote: &str,
+    integration: &str,
+    packet: &str,
+) -> String {
+    format!(
+        "Resume {task} attempt {attempt} (contract v{version}): it was set aside for more urgent work, not failed: there is no Rework section. Branch: {branch}. Before you change anything: git switch {branch} (your worktree may still be on the branch of the task you did last), then git pull --no-rebase {remote} {branch}: the review is committed on it. Continue from what you pushed on {branch} (in your worktree); merge {remote}/{integration} into it first. Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
     )
 }
 
@@ -857,9 +894,21 @@ pub fn recover_open_rounds(
     Ok(())
 }
 
+/// Whether the attempt before `n` was set aside rather than failed (T-553):
+/// `state: hold` closes an attempt as `abandoned`, so the delivery to the next
+/// one resumes the work instead of announcing a rework. An attempt a review
+/// rejected is not set aside and keeps the rework wording.
+fn attempt_set_aside(tx: &Tx<'_>, project: &str, task: &str, n: i64) -> GearResult<bool> {
+    Ok(tx
+        .attempts_of_task(project, task)?
+        .into_iter()
+        .find(|attempt| attempt.n == n - 1)
+        .is_some_and(|attempt| attempt.state == AttemptState::Abandoned))
+}
+
 /// Turn decisions into Deliver ops in the caller's transaction:
 /// - Assign → `gear_app::tasks::start_attempt(tx, project, task, seat.id, seat.generation, now)`
-///   then a delivery with `assign_text(task, attempt.n, contract_version, task_branch(template, project, seat.name, task), packet_ref(task))`;
+///   then a delivery with `assign_text(task, attempt.n, contract_version, task_branch(template, project, seat.name, task), conventions.remote, packet_ref(task))`;
 /// - Continue → a delivery for the seat's open attempt with `continue_text(task, adopted_version, packet_ref(task))`;
 /// - None / Escalate → nothing.
 /// Returns the Intended ops (via `ops::intend_deliveries`).
@@ -899,13 +948,26 @@ pub fn intend_dispatch(
                 // a rework (attempt n ≥ 2) says it is a rework (T-544) — the
                 // branch and the worktree are already there.
                 let branch = task_branch(&conventions.task_branch, project, &seat.name, task);
+                let integration = integration_branch(tx, project, &seat.name);
                 let mut text = if attempt.n == 1 {
                     first_attempt_text(
                         task,
                         attempt.contract_version,
                         &branch,
                         &conventions.remote,
-                        &integration_branch(tx, project, &seat.name),
+                        &integration,
+                        &packet_ref(task),
+                    )
+                } else if attempt_set_aside(tx, project, task, attempt.n)? {
+                    // T-553: the attempt before this one was set aside, not
+                    // rejected: the lane resumes its own work.
+                    resume_text(
+                        task,
+                        attempt.n,
+                        attempt.contract_version,
+                        &branch,
+                        &conventions.remote,
+                        &integration,
                         &packet_ref(task),
                     )
                 } else {
@@ -914,6 +976,7 @@ pub fn intend_dispatch(
                         attempt.n,
                         attempt.contract_version,
                         &branch,
+                        &conventions.remote,
                         &packet_ref(task),
                     )
                 };
@@ -1429,11 +1492,11 @@ mod tests {
             .unwrap();
         let text = assign_delivery_text(&mut store, "T-1", 2);
         assert!(
-            text.contains("Rework T-1 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t1 (in your worktree)."),
+            text.contains("Rework T-1 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last), then git pull --no-rebase origin heat/t1: the review is committed on it."),
             "{text}"
         );
         assert!(
-            !text.contains("git switch"),
+            !text.contains("git switch -c"),
             "a rework does not start a branch: {text}"
         );
     }
@@ -1470,8 +1533,139 @@ mod tests {
             "New task T-1 (contract v1). Branch: heat/t1. Before you read any repository file, start it from the integration branch: git fetch origin && git switch -c heat/t1 origin/dev (if it exists already: git switch heat/t1). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
         );
         assert_eq!(
-            assign_text("T-1", 2, 1, "heat/t1", "`gear --show T-1`"),
-            "Rework T-1 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t1 (in your worktree). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+            assign_text("T-1", 2, 1, "heat/t1", "origin", "`gear --show T-1`"),
+            "Rework T-1 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last), then git pull --no-rebase origin heat/t1: the review is committed on it. Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+        );
+    }
+
+    /// A store with the lane `heat` and `T-1` ready, and attempt 1 of `T-1` in
+    /// `state` (T-553).
+    fn world_with_a_first_attempt(state: AttemptState) -> gear_store::Store {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+                project.config_toml = config_toml("trunk");
+                tx.update_project(&project)?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    NOW,
+                )?;
+                tx.insert_task(&ready_task("T-1"))?;
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: NOW,
+                    updated: NOW,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// T-553: a task whose attempt 1 was set aside (`state: hold` abandons the
+    /// attempt) comes back to the lane as a Resume: there is no Rework section
+    /// to look for (Hull F-311: T-548 came back as a rework with an empty one).
+    #[test]
+    fn a_set_aside_attempt_comes_back_as_a_resume() {
+        let mut store = world_with_a_first_attempt(AttemptState::Abandoned);
+
+        let text = assign_delivery_text(&mut store, "T-1", 2);
+
+        assert!(
+            text.contains(
+                "Resume T-1 attempt 2 (contract v1): it was set aside for more urgent work, not failed: there is no Rework section. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last), then git pull --no-rebase origin heat/t1: the review is committed on it. Continue from what you pushed on heat/t1 (in your worktree); merge origin/trunk into it first."
+            ),
+            "{text}"
+        );
+        assert!(text.starts_with("Resume T-1 attempt 2"), "{text}");
+        assert!(!text.contains("review failed"), "not a rework: {text}");
+        assert!(!text.starts_with("Rework"), "not a rework: {text}");
+    }
+
+    /// T-553: an attempt the review rejected keeps the rework wording.
+    #[test]
+    fn a_rejected_attempt_still_comes_back_as_a_rework() {
+        let mut store = world_with_a_first_attempt(AttemptState::Rejected);
+
+        let text = assign_delivery_text(&mut store, "T-1", 2);
+
+        assert!(
+            text.contains(
+                "Rework T-1 attempt 2 (contract v1): the review failed your last attempt;"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("Resume"), "not a resume: {text}");
+    }
+
+    /// T-554 (hull F-312): a rework and a resume say how to get onto the task's
+    /// branch — the lane's worktree may still be on the branch of the task it
+    /// did last, and a rework was once committed there by mistake.
+    #[test]
+    fn a_rework_and_a_resume_say_how_to_get_onto_the_branch() {
+        let rework = assign_text("T-1", 2, 1, "heat/t1", "origin", "`gear --show T-1`");
+        let resume = resume_text(
+            "T-1",
+            2,
+            1,
+            "heat/t1",
+            "origin",
+            "trunk",
+            "`gear --show T-1`",
+        );
+        for text in [&rework, &resume] {
+            assert!(
+                text.contains("git switch heat/t1"),
+                "the branch to switch to: {text}"
+            );
+            assert!(
+                text.contains("Branch: heat/t1."),
+                "the branch is named: {text}"
+            );
+            assert!(
+                text.contains(
+                    "Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last), then git pull --no-rebase origin heat/t1: the review is committed on it."
+                ),
+                "the switch and the pull come before any change: {text}"
+            );
+        }
+    }
+
+    /// The exact wording of the three packets (T-553 adds the resume).
+    #[test]
+    fn the_three_packet_writings() {
+        assert_eq!(
+            resume_text(
+                "T-1",
+                2,
+                1,
+                "heat/t1",
+                "origin",
+                "trunk",
+                "`gear --show T-1`"
+            ),
+            "Resume T-1 attempt 2 (contract v1): it was set aside for more urgent work, not failed: there is no Rework section. Branch: heat/t1. Before you change anything: git switch heat/t1 (your worktree may still be on the branch of the task you did last), then git pull --no-rebase origin heat/t1: the review is committed on it. Continue from what you pushed on heat/t1 (in your worktree); merge origin/trunk into it first. Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
         );
     }
 

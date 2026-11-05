@@ -35,14 +35,14 @@ Read the task packet (`gear --show T-<n>`): the contract (goal, acceptance, the 
 
 ## 2. Delivering
 
-- **Work on branch `review/t<n>`** — the project gives you a worktree on it, cut at the candidate. The review you write is a repository artifact like any other: put it at the path your project uses for reviews (the packet's command and the project's own conventions name it), set `Status: running` first, commit it with the message the packet names, push; at the end set `Status: done`, commit and push again. Leave the candidate code untouched: your commits carry only the review. Never run `git stash`: every worktree of the repository shares one stash, so a stash can carry your work to another lane or theirs to you.
+- **Work on your local branch `review/t<n>`** — the project gives you a worktree on it, cut at the candidate. The review you write is a repository artifact like any other: put it at the path your project uses for reviews (the packet's command and the project's own conventions name it), set `Status: running` first, commit it with the message the packet names, and push it onto the task's branch, as the packet's command names (`git push <remote> HEAD:refs/heads/<task branch>`); there is no review branch on the remote. If the push is refused because the lane pushed meanwhile, `git pull --no-rebase <remote> <task branch>` and push again — a merge, never a rebase. At the end set `Status: done`, commit and push the same way. Leave the candidate code untouched: your commits carry only the review. Never run `git stash`: every worktree of the repository shares one stash, so a stash can carry your work to another lane or theirs to you.
 - Hand the verdict in with exactly:
 
   ```bash
   gear send --kind review --task T-<n> --attempt <a> --verdict pass|fail [--blocking F1,F3] [--friction "<what cost time>"] "<the path to your review file, or the text>"
   ```
 
-  `--blocking` names findings that must be fixed; the others are logged. `--friction` reports a missing permission, slow build or test, unclear contract, missing tool or fixture, or costly step; it is required when the review round exceeds its budget.
+  `--blocking` names findings that must be fixed; the others are logged. `--friction` reports a missing permission, slow build or test, unclear contract, missing tool or fixture, or costly step, and the checks the captain asked for when they took a fifth of the round or more (name them and their minutes); it is required when the review round exceeds its budget.
 
   GEAR reads the file and keeps the **text** of your findings: the writer reads them from GEAR — the rework note and the task packet — so your worktree, your branch and your file may be gone afterwards. A path that names no file is refused (`BAD_FORMAT`) and nothing is stored; a file longer than 64 KiB is cut with a note.
 - A `fail` becomes the writer's rework: write every finding so the writer can act on it without asking. A `pass` lets the captain merge.

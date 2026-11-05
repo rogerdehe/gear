@@ -864,3 +864,46 @@ fn moving_a_task_with_no_attempt_changes_only_its_lane() {
         "the other task keeps its lane"
     );
 }
+
+/// A running task set aside for urgent work (`state: hold`, Prometheus
+/// 2026-11-03): its attempt closes so the seat is free, the lane is told to
+/// save its work on the branch, and the task is back with `state: ready`.
+#[test]
+fn holding_a_running_task_sets_it_aside_and_frees_the_lane() {
+    let mut s = world();
+    s.write(|tx| {
+        start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+        on_delivery_confirmed(tx, "p", "T-1", 1, T0)
+    })
+    .unwrap();
+    run(
+        &mut s,
+        "## T-1 [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nstate: hold\n\n## T-2 [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n",
+        1,
+        "v2",
+    )
+    .unwrap();
+    assert_eq!(state(&mut s, "T-1"), TaskState::Draft);
+    assert_eq!(attempt(&mut s, "T-1", 1), AttemptState::Abandoned);
+    assert!(s
+        .read(|tx| tx.in_progress_attempts_of_seat("p:heat"))
+        .unwrap()
+        .is_empty());
+    let told = s.read(|tx| tx.thread_messages("p", "T-1:hold")).unwrap();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(
+        told[0].body.contains("commit and push what you have"),
+        "{}",
+        told[0].body
+    );
+
+    let base = s.read(|tx| tx.plan_version("p")).unwrap();
+    run(
+        &mut s,
+        "## T-1 [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nstate: ready\n",
+        base,
+        "v3",
+    )
+    .unwrap();
+    assert_eq!(state(&mut s, "T-1"), TaskState::Ready);
+}

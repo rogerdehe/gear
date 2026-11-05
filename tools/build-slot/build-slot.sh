@@ -116,21 +116,20 @@ echo "build-slot: $jobs (cores $cores, load $load, running $running, free memory
 BUILD_SLOT=1 BUILD_JOBS=$jobs CARGO_BUILD_JOBS=$jobs NEXTEST_TEST_THREADS=$jobs GOMAXPROCS=$gomax
 export BUILD_SLOT BUILD_JOBS CARGO_BUILD_JOBS NEXTEST_TEST_THREADS GOMAXPROCS
 
-# Under Herdr, a machine may run the command through its own wrapper
-# (~/.config/build-slot/herdr-wrap, outside any repository). Without that
-# file, or outside Herdr, the command runs here.
-wrap=
-if [ "${HERDR_ENV:-}" = 1 ] && [ -x "$HOME/.config/build-slot/herdr-wrap" ]; then
-    wrap=$HOME/.config/build-slot/herdr-wrap
+# On a machine that has `devrun` (a local helper on macOS's Developer Tools
+# list), the command runs through it, so macOS does not scan every freshly
+# built binary on its first run. Without it, nothing changes.
+if [ -z "${DEVRUN_CLAIMED:-}" ] && command -v devrun >/dev/null 2>&1; then
+    set -- devrun "$@"
 fi
 
 # A child, not exec: this process stays counted until the command ends.
 # BUILD_SLOT_PRIORITY=normal skips the lower priority, for the one run
 # everybody waits on (a merge gate); the memory clamps above still hold.
 if [ "${BUILD_SLOT_PRIORITY:-}" = normal ]; then
-    $wrap "$@"
+    "$@"
 elif command -v taskpolicy >/dev/null 2>&1; then
-    $wrap taskpolicy -c utility "$@"
+    taskpolicy -c utility "$@"
 else
-    $wrap nice -n 10 "$@"
+    nice -n 10 "$@"
 fi

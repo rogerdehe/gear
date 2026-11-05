@@ -221,9 +221,13 @@ pub fn deliver_doorbell_now(
     // live agent **name**, never to the pane id — a pane that lost its agent
     // refuses the text instead of typing it into a shell.
     let names = crate::names::read(herdr).unwrap_or_default();
+    // T-570: the pane may hold another project's seat too; its name is the
+    // agent's to keep.
+    let keep = crate::names::kept_on_pane(store, &pane_id);
     let outcome = aim(
         herdr,
         &names,
+        &keep,
         &pane_id,
         &agent_name,
         &kind,
@@ -553,7 +557,16 @@ pub fn execute_intended(
                 // agent of the pane is read first: only an agent of the
                 // seat's kind is the seat's agent, and a pane without one
                 // never receives the text.
-                Some(aim(herdr, &names, pane_id, agent_name, kind, text, *policy))
+                Some(aim(
+                    herdr,
+                    &names,
+                    &crate::names::kept_on_pane(store, pane_id),
+                    pane_id,
+                    agent_name,
+                    kind,
+                    text,
+                    *policy,
+                ))
             }
             // Waiting ops never reach here (they are not prepared).
             Prepared::Wait { .. } => None,
@@ -921,9 +934,11 @@ enum PromptPolicy {
     },
 }
 
+#[allow(clippy::too_many_arguments)]
 fn aim(
     herdr: &mut dyn HerdrAct,
     names: &BTreeMap<String, Option<String>>,
+    keep: &[String],
     pane_id: &str,
     agent_name: &str,
     kind: &str,
@@ -986,7 +1001,13 @@ fn aim(
                         // decides (design §10.1). It is named again and the
                         // text goes next tick, and nothing is restarted.
                         // The naming gives the agent its name back (naming.rs).
-                        let note = match crate::names::ensure(herdr, pane_id, agent_name) {
+                        let note = match crate::names::ensure_keeping(
+                            herdr,
+                            names,
+                            pane_id,
+                            agent_name,
+                            keep,
+                        ) {
                             crate::names::Ensure::Renamed => "it was renamed".to_string(),
                             crate::names::Ensure::Named => {
                                 "it already carried the name".to_string()
@@ -995,6 +1016,8 @@ fn aim(
                                 format!("the name is held by {holder:?}")
                             }
                             crate::names::Ensure::NoAgent => "the agent is gone".to_string(),
+                            // Only a `captain take` keeps a name (T-552).
+                            crate::names::Ensure::Kept => "its name was kept".to_string(),
                             crate::names::Ensure::Failed(reason) => {
                                 format!("the rename failed ({reason})")
                             }

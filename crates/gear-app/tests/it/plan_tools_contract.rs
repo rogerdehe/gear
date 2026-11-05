@@ -97,7 +97,7 @@ fn a_new_task_can_be_held_out_of_delivery_and_sent_ready_later() {
 }
 
 #[test]
-fn a_ready_task_is_held_and_a_delivered_one_is_refused() {
+fn a_ready_task_is_held_and_a_handed_in_one_is_refused() {
     let mut s = world();
     let ready = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, ready, "r1", NOW).unwrap();
@@ -109,11 +109,10 @@ fn a_ready_task_is_held_and_a_delivered_one_is_refused() {
         TaskState::Draft
     );
 
-    // A task the engine has already delivered is not held: its attempt is on
-    // it.
+    // A handed-in task waits for its review: it is not held.
     s.write(|tx| {
         let mut task = tx.get_task("p", "T-1")?.unwrap();
-        task.state = TaskState::Running;
+        task.state = TaskState::Verifying;
         tx.update_task(&task)
     })
     .unwrap();
@@ -123,7 +122,7 @@ fn a_ready_task_is_held_and_a_delivered_one_is_refused() {
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
         err.detail
-            .contains("only a draft or ready task is held here"),
+            .contains("only a draft, ready, running or waiting task is held here"),
         "{}",
         err.detail
     );

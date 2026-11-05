@@ -404,11 +404,16 @@ use std::path::{Path, PathBuf};
 
 /// An open `merge-failed:T-1` item, as the engine leaves it when a merge fails.
 fn open_failed_item(s: &mut Store) -> String {
+    open_item(s, "merge-failed:T-1")
+}
+
+/// An open engine item of T-1 in `thread`.
+fn open_item(s: &mut Store, thread: &str) -> String {
     s.write(|tx| {
         tx.insert_message(&NewMessage {
             meta: None,
             project: "p".into(),
-            thread: "merge-failed:T-1".into(),
+            thread: thread.into(),
             task: Some("T-1".into()),
             attempt: Some(1),
             sender: "engine".into(),
@@ -563,6 +568,8 @@ fn a_remerge_of_a_candidate_already_on_the_integration_branch_queues_nothing() {
     accepted_task_on(&mut s, &candidate);
     failed_merge(&mut s, T0 + 10);
     open_failed_item(&mut s);
+    // The lost-merge scan may have spoken too (T-563, M-7875).
+    open_item(&mut s, "merge-lost:T-1");
     assert_eq!(merge_op_count(&mut s), 1, "the failed op is history");
 
     let result = run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap();
@@ -575,7 +582,7 @@ fn a_remerge_of_a_candidate_already_on_the_integration_branch_queues_nothing() {
     assert_eq!(
         result.warnings,
         vec![format!(
-            "remerge T-1: {candidate} is already on the integration branch: no merge queued, its failed-merge item resolved"
+            "remerge T-1: {candidate} is already on the integration branch: no merge queued, the attempt is recorded merged, its failed-merge item resolved"
         )],
         "{result:?}"
     );
@@ -586,6 +593,18 @@ fn a_remerge_of_a_candidate_already_on_the_integration_branch_queues_nothing() {
         items[0].result.as_deref(),
         Some(format!("the candidate {candidate} is already on the integration branch").as_str())
     );
+    let lost = s
+        .read(|tx| tx.thread_messages("p", "merge-lost:T-1"))
+        .unwrap();
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert_eq!(
+        lost[0].state,
+        MsgState::Resolved,
+        "the lost-merge item closes too: {lost:?}"
+    );
+    // The attempt is recorded merged, so its dependants may start (T-609).
+    let merged = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap().merged;
+    assert!(merged.is_some(), "the attempt is merged");
 }
 
 /// The candidate is not on `dev`: the remerge queues the merge op as before,
@@ -610,4 +629,140 @@ fn a_remerge_of_a_candidate_not_on_the_integration_branch_queues_the_op() {
         MsgState::Open,
         "the engine's retry answers it"
     );
+}
+
+/// A voided merge merged nothing: the accepted attempt is queued again.
+#[test]
+fn a_remerge_retries_a_voided_merge() {
+    let mut s = world(None);
+    accepted_task(&mut s);
+    let id = s
+        .write(|tx| {
+            let op = tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: OpKind::Merge,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({}),
+                created: T0 + 10,
+            })?;
+            tx.set_op_state("p", &op.id, OpState::Void, Some("voided"), T0 + 11)?;
+            Ok(op.id)
+        })
+        .unwrap();
+    let state = s.read(|tx| tx.get_op("p", &id)).unwrap().unwrap().state;
+    assert_eq!(state, OpState::Void);
+    run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap();
+    assert_eq!(queued_merge(&mut s).payload["candidate"], "c1");
+}
+
+/// T-576: an op left `unknown` has no worker running it, so a remerge queues
+/// it again — and the unknown op itself goes back to intended (Prometheus
+/// 2026-11-05: `- remerge T-722` was refused as "already unknown, not failed"
+/// while nothing would ever take that op).
+#[test]
+fn a_remerge_requeues_an_unknown_merge() {
+    let mut s = world(None);
+    accepted_task(&mut s);
+    let id = s
+        .write(|tx| {
+            let op = tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: OpKind::Merge,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({}),
+                created: T0 + 10,
+            })?;
+            tx.set_op_state("p", &op.id, OpState::Executing, None, T0 + 11)?;
+            tx.set_op_state(
+                "p",
+                &op.id,
+                OpState::Unknown,
+                Some("its batch failed the gate: it is gated again in a smaller batch"),
+                T0 + 12,
+            )?;
+            Ok(op.id)
+        })
+        .unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_op("p", &id)).unwrap().unwrap().state,
+        OpState::Unknown
+    );
+
+    run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap();
+
+    // The merge is queued: the new op carries the candidate, and the unknown
+    // one is queued again too.
+    let fresh = s
+        .read(|tx| Ok(tx.ops_in_state("p", OpState::Intended)?))
+        .unwrap()
+        .into_iter()
+        .find(|op| op.kind == OpKind::Merge && op.id != id)
+        .expect("the remerge queued a new merge op");
+    assert_eq!(fresh.payload["candidate"], "c1");
+    assert_eq!(
+        s.read(|tx| tx.get_op("p", &id)).unwrap().unwrap().state,
+        OpState::Intended,
+        "the unknown op is queued again, not left for nobody"
+    );
+}
+
+/// A captain's pass that names the stored short candidate by its full sha
+/// keeps the attempt's own spelling.
+#[test]
+fn a_pass_by_full_sha_stores_the_attempts_candidate() {
+    let mut s = world(None);
+    run(
+        &mut s,
+        "# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
+        "v1",
+        T0,
+    )
+    .unwrap();
+    s.write(|tx| {
+        gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 1)?;
+        gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0 + 1)?;
+        gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, "ea91cbf12", "report", T0 + 2)
+    })
+    .unwrap();
+    run(
+        &mut s,
+        "# Verdicts\n- T-1 attempt=1 contract=1 candidate=ea91cbf12d23ef97e04c06cf9f60bdedcf759b2f pass evidence=logs/t1.md\n",
+        "v2",
+        T0 + 3,
+    )
+    .unwrap();
+    let verdicts = s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap();
+    assert_eq!(verdicts.last().unwrap().candidate, "ea91cbf12");
+}
+
+/// A task accepted while it was carried never had a merge of its own
+/// (Lawrence T-34): while it is still carried, remerge refuses and names the
+/// carrier; once `carried-by` is cleared, remerge queues its first merge.
+#[test]
+fn a_remerge_queues_the_first_merge_of_a_task_that_is_no_longer_carried() {
+    let mut s = world(None);
+    accepted_task(&mut s);
+    s.write(|tx| tx.set_task_carried_by("p", "T-1", "q:T-9"))
+        .unwrap();
+    let error = run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap_err();
+    assert!(
+        error.detail.contains("carried by q:T-9"),
+        "{}",
+        error.detail
+    );
+
+    s.write(|tx| tx.set_task_carried_by("p", "T-1", ""))
+        .unwrap();
+    run(&mut s, "# Staff\n- remerge T-1\n", "v4", T0 + 30).unwrap();
+    assert_eq!(queued_merge(&mut s).payload["candidate"], "c1");
 }

@@ -75,6 +75,8 @@ pub enum Stage {
     Deps,
     /// It is queued: the lane has not started it.
     Queued,
+    /// The captain holds it (`state: hold` in the plan): in the voyage, not delivered.
+    Held,
     /// It was delivered to its lane and nothing has started yet.
     Delivered,
     /// The lane works on it.
@@ -110,6 +112,7 @@ impl Stage {
     pub fn symbol(self) -> &'static str {
         match self {
             Stage::Deps | Stage::Queued => "○",
+            Stage::Held => "‖",
             Stage::Delivered => "◌",
             Stage::Working | Stage::Asking => "◉",
             Stage::Handed | Stage::Review | Stage::Verdict => "◎",
@@ -125,7 +128,9 @@ impl Stage {
     pub fn color(self) -> Color {
         match self {
             Stage::Deps | Stage::Queued | Stage::Delivered | Stage::Moved => Color::Dim,
-            Stage::Working | Stage::Asking | Stage::Verdict | Stage::Rework => Color::Warn,
+            Stage::Working | Stage::Asking | Stage::Verdict | Stage::Rework | Stage::Held => {
+                Color::Warn
+            }
             Stage::Handed | Stage::Review | Stage::Passed | Stage::Merging => Color::Acc,
             Stage::SentBack | Stage::MergeFailed | Stage::Failed => Color::Bad,
             Stage::Merged => Color::Ok,
@@ -155,31 +160,37 @@ impl Stage {
     pub fn words(task: &GraphTask) -> String {
         Stage::words_of(
             task.stage,
-            &task.deps,
+            &task.deps_open,
+            task.deps.len(),
             task.rounds,
             task.moved_to.as_deref(),
+            &task.integration,
         )
     }
 
     /// The words of a stage from the facts it needs, without a [`GraphTask`]:
     /// the board's lanes and the captain's home page say the same words as the
     /// graph (T-347).
+    ///
+    /// `deps` are the dependencies whose work is not merged yet and `dep_count`
+    /// how many the task has: a task that waits for two of forty-seven says
+    /// which two, one that waits for five says five of forty-seven (T-562).
     pub fn words_of(
         stage: Stage,
         deps: &[String],
+        dep_count: usize,
         rounds: usize,
         moved_to: Option<&str>,
+        integration: &str,
     ) -> String {
         match stage {
-            Stage::Deps => format!(
-                "waits for {} to merge",
-                if deps.is_empty() {
-                    "-".to_string()
-                } else {
-                    deps.len().to_string()
-                }
-            ),
+            Stage::Deps => match deps.len() {
+                0 => "waits for - to merge".to_string(),
+                1..=3 => format!("waits for {} to merge", deps.join(", ")),
+                open => format!("waits for {open} of {} to merge", dep_count.max(open)),
+            },
             Stage::Queued => "queued".to_string(),
+            Stage::Held => "on hold (the captain holds it)".to_string(),
             Stage::Delivered => "delivered, not started".to_string(),
             Stage::Working => "working".to_string(),
             Stage::Asking => "waits for the captain's answer".to_string(),
@@ -188,10 +199,10 @@ impl Stage {
             Stage::Verdict => "waits for the captain's verdict".to_string(),
             Stage::SentBack => "sent back, rework queued".to_string(),
             Stage::Rework => format!("reworking (round {rounds})"),
-            Stage::Passed => "passed, waits to merge".to_string(),
+            Stage::Passed => format!("passed, not on {integration} yet"),
             Stage::Merging => "merging (gate running)".to_string(),
-            Stage::MergeFailed => "merge failed, waits for the captain".to_string(),
-            Stage::Merged => "merged".to_string(),
+            Stage::MergeFailed => format!("merge into {integration} failed, waits for the captain"),
+            Stage::Merged => format!("on {integration}"),
             Stage::Failed => "failed (rounds used up)".to_string(),
             Stage::Moved => format!("moved to {}", moved_to.unwrap_or("-")),
         }
@@ -202,6 +213,10 @@ impl Stage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphTask {
     pub id: String,
+    /// The branch the task merges into (its `base`, from the project's
+    /// `[conventions] integration` when it was created): `dev` in one project,
+    /// `main` or `testing` in another.
+    pub integration: String,
     /// The queue position of the task in the plan, ascending (the store's
     /// rank).
     pub rank: i64,
@@ -220,6 +235,9 @@ pub struct GraphTask {
     pub rounds: usize,
     /// The tasks this one depends on.
     pub deps: Vec<String>,
+    /// The ones of them whose work is not merged yet (T-562): what the task
+    /// really waits for, as the board and the queue say it.
+    pub deps_open: Vec<String>,
     /// When the task was merged into `dev`.
     pub finished: Option<Ts>,
     /// When the lane first started the task: the earliest `started` of its
@@ -256,13 +274,14 @@ fn tasks_of(
     keep: impl Fn(&str) -> bool,
 ) -> GearResult<Vec<GraphTask>> {
     let rows = tx.tasks_of_project(project)?;
+    // The dependencies whose work is merged, in one query for the whole graph
+    // (T-562): the rule the engine dispatches by, so the words of a waiting
+    // task name the ones that really hold it.
+    let merged: std::collections::BTreeSet<String> =
+        tx.merged_done_tasks(project)?.into_iter().collect();
     let mut tasks = Vec::new();
     for row in &rows {
         if !keep(row.id.as_str()) {
-            continue;
-        }
-        if row.state == TaskState::Draft {
-            // A task that is not in the plan yet is not in the flow.
             continue;
         }
         if row.state == TaskState::Failed || row.state == TaskState::Cancelled {
@@ -277,6 +296,7 @@ fn tasks_of(
         let (actual, finished) = actual_of(&history, now);
         tasks.push(GraphTask {
             id: row.id.clone(),
+            integration: integration_of(row),
             rank: row.rank,
             lane: row.lane.clone().unwrap_or_default(),
             stage: stage_of(tx, project, row)?,
@@ -286,11 +306,26 @@ fn tasks_of(
             actual_min: actual,
             rounds: history.attempts.len(),
             deps: row.deps.clone(),
+            deps_open: row
+                .deps
+                .iter()
+                .filter(|dep| !merged.contains(dep.as_str()))
+                .cloned()
+                .collect(),
             finished,
             started: history.span().0,
         });
     }
     Ok(order(tasks))
+}
+
+/// The branch a task merges into, by name: its `base`, else words that name
+/// no branch (a task from before bases were recorded).
+pub(crate) fn integration_of(task: &gear_store::TaskRow) -> String {
+    task.base
+        .clone()
+        .filter(|base| !base.is_empty())
+        .unwrap_or_else(|| "the integration branch".to_string())
 }
 
 /// The order of the prototype (its `order_of`): the tasks that wait for a
@@ -311,7 +346,7 @@ fn order(mut tasks: Vec<GraphTask>) -> Vec<GraphTask> {
     let mut ordered: Vec<GraphTask> = Vec::new();
     ordered.extend(
         rest.iter()
-            .filter(|task| matches!(task.stage, Stage::Deps | Stage::Queued))
+            .filter(|task| matches!(task.stage, Stage::Deps | Stage::Queued | Stage::Held))
             .cloned(),
     );
     ordered.extend(rest.iter().filter(|task| task.stage.is_open()).cloned());
@@ -685,7 +720,7 @@ fn git_info(task: &GraphTask, tw: usize) -> Vec<Span> {
     let live = is_live(task.stage);
     let (head, time_style) = if task.stage == Stage::Merged {
         (Style::fg(Color::Dim), Style::fg(Color::Dim))
-    } else if matches!(task.stage, Stage::Deps | Stage::Queued) {
+    } else if matches!(task.stage, Stage::Deps | Stage::Queued | Stage::Held) {
         (Style::fg(Color::Dim), Style::fg(Color::Dim))
     } else if live {
         (Style::bold(), Style::PLAIN)
@@ -748,8 +783,30 @@ pub(crate) fn stage_of(
 ) -> GearResult<Stage> {
     // Done and failed are endings of the task itself.
     match task.state {
-        TaskState::Done => return Ok(Stage::Merged),
+        // Done is accepted; it is merged only when its work is recorded on the
+        // integration branch (user, 2026-11-04: 58 accepted Prometheus tasks
+        // showed "merged" while their work was not on dev). An accepted task
+        // whose merge has not landed shows where that merge is.
+        TaskState::Done => {
+            if tx
+                .attempt_times_of_task(project, &task.id)?
+                .iter()
+                .any(|(_, times)| times.merged.is_some())
+            {
+                return Ok(Stage::Merged);
+            }
+            return Ok(
+                match newest_merge_op(tx, project, &task.id)?.map(|op| op.state) {
+                    Some(OpState::Failed) => Stage::MergeFailed,
+                    Some(OpState::Executing | OpState::Submitted | OpState::Unknown) => {
+                        Stage::Merging
+                    }
+                    _ => Stage::Passed,
+                },
+            );
+        }
         TaskState::Failed => return Ok(Stage::Failed),
+        TaskState::Draft => return Ok(Stage::Held),
         _ => {}
     }
     // The attempt the task is on: the one with the highest n; an abandoned
@@ -1130,6 +1187,7 @@ fn info(task: &GraphTask) -> String {
         }
         Stage::Deps
         | Stage::Queued
+        | Stage::Held
         | Stage::Delivered
         | Stage::Working
         | Stage::Asking
@@ -1397,5 +1455,40 @@ impl Row {
             line = line.push(character.to_string(), style);
         }
         line
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T-562: a task that waits names the dependencies that really hold it.
+    /// Up to three are named; more are counted, with the number the task has.
+    #[test]
+    fn a_waiting_task_names_the_dependencies_it_really_waits_for() {
+        // Forty-seven dependencies, two of them not merged yet.
+        let all: Vec<String> = (1..=47).map(|n| format!("T-{n}")).collect();
+        let words = |open: Vec<&str>| {
+            Stage::words_of(
+                Stage::Deps,
+                &open.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                all.len(),
+                0,
+                None,
+                "dev",
+            )
+        };
+        assert_eq!(words(vec!["T-3", "T-9"]), "waits for T-3, T-9 to merge");
+        // One and three are named as well.
+        assert_eq!(words(vec!["T-3"]), "waits for T-3 to merge");
+        assert_eq!(
+            words(vec!["T-3", "T-4", "T-5"]),
+            "waits for T-3, T-4, T-5 to merge"
+        );
+        // Five of forty-seven: the words count them instead of naming all.
+        assert_eq!(
+            words(vec!["T-1", "T-2", "T-3", "T-4", "T-5"]),
+            "waits for 5 of 47 to merge"
+        );
     }
 }

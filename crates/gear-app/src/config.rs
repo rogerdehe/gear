@@ -69,6 +69,7 @@ impl ProjectConfig {
             integration: self.conventions.integration.clone(),
             release: self.conventions.release.clone(),
             gate: self.conventions.gate.clone(),
+            voyage_dir: self.conventions.voyage_dir.clone(),
             github: self.github.as_ref().and_then(GithubSection::resolved),
         }
     }
@@ -151,6 +152,7 @@ impl ProjectConfig {
                 .gate
                 .clone()
                 .unwrap_or_else(|| self.conventions.gate.clone()),
+            voyage_dir: self.conventions.voyage_dir.clone(),
             // A repo's own `[github]`, and only that (T-79): a child repo
             // without one is local-only. It never inherits the project's
             // section, which names another repository — a GitHub mode that
@@ -177,10 +179,13 @@ pub struct Quota {
     #[serde(default)]
     pub includes_captain: bool,
     /// How long a reviewer seat must be idle before the engine releases it
-    /// (T-467): a seat stays warm for a re-review, then goes. Default 30
-    /// minutes.
-    #[serde(default = "default_release_idle_min")]
-    pub reviewer_release_idle_min: u32,
+    /// (T-467). Unset (the default), a reviewer is never released for being
+    /// idle: the user's `temps` are the reviewers it keeps, and a kept agent
+    /// takes its next job with `/new` or resumes the task's own conversation,
+    /// so closing it saves nothing but its start. Set it to give idle slots
+    /// back after that many minutes.
+    #[serde(default)]
+    pub reviewer_release_idle_min: Option<u32>,
     /// The same for a lane (T-467). A lane keeps its pane, worktree and build
     /// cache; the value is the role's own idle time. Default 30 minutes.
     #[serde(default = "default_release_idle_min")]
@@ -387,6 +392,10 @@ pub struct Repo {
     pub release: String,
     /// The gate that runs in this repo before a merge.
     pub gate: String,
+    /// The project's voyage folder template (`[conventions].voyage_dir`, T-257
+    /// with `{project}` and `{milestone}`): a merge that changes only reports
+    /// in it needs no gate (T-573).
+    pub voyage_dir: String,
     /// The GitHub mode of this repo (T-79); `None` = local-only.
     pub github: Option<Github>,
 }
@@ -446,6 +455,16 @@ pub struct Conventions {
     /// The open voyages' task branches on the remote may number at most
     /// lanes × this; more are named to the captain. Default 3.
     pub branch_max_per_lane: u32,
+    /// How many merges of the project gate at once (the merge train): each
+    /// one on the commit the merge ahead of it will land, so every gate checks
+    /// what the integration branch will be. They land in order. Default 1:
+    /// one merge after the other.
+    pub merge_parallel: u32,
+    /// How many passed merges of the project are merged together onto the
+    /// integration branch and gated once (a batch merge). A batch that fails
+    /// is split: the task whose changes match the paths the gate names fails,
+    /// else the batch is halved. Default 1: each merge is gated alone.
+    pub merge_batch: u32,
     /// A lane working this many minutes without a push is asked to tell the
     /// captain why. Default 20.
     pub push_interval_min: u32,
@@ -507,6 +526,8 @@ impl Default for Conventions {
             max_task_min: MAX_TASK_MIN,
             branch_max_age_min: BRANCH_MAX_AGE_MIN,
             branch_max_per_lane: BRANCH_MAX_PER_LANE,
+            merge_parallel: 1,
+            merge_batch: 1,
             push_interval_min: PUSH_INTERVAL_MIN,
             push_reply_min: PUSH_REPLY_MIN,
             gate: String::new(),
@@ -1446,6 +1467,30 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
             format!("must be at least one minute (the default is {BRANCH_MAX_AGE_MIN})"),
         ));
     }
+    if cfg.conventions.merge_parallel == 0 {
+        issues.push(issue(
+            "conventions.merge_parallel",
+            "must be at least one (the default is 1: one merge after the other)".to_string(),
+        ));
+    }
+    if cfg.conventions.merge_batch == 0 {
+        issues.push(issue(
+            "conventions.merge_batch",
+            "must be at least one (the default is 1: each merge is gated alone)".to_string(),
+        ));
+    }
+    // A batch merge and a merge train are two answers to the same queue: a
+    // batch already lands several merges at once, so it is gated once and
+    // never side by side (T-545).
+    if cfg.conventions.merge_batch > 1 && cfg.conventions.merge_parallel > 1 {
+        issues.push(issue(
+            "conventions.merge_batch",
+            format!(
+                "conventions.merge_batch and conventions.merge_parallel cannot both be above 1: a batch merge is gated once, so it cannot also be a train (merge_batch is {} and merge_parallel is {})",
+                cfg.conventions.merge_batch, cfg.conventions.merge_parallel
+            ),
+        ));
+    }
     if cfg.conventions.branch_max_per_lane == 0 {
         issues.push(issue(
             "conventions.branch_max_per_lane",
@@ -2019,7 +2064,7 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                     issues.push(issue(
                         "conventions.seat_branch",
                         format!(
-                            "the seat branch {seat_branch} and the {kind} branch {branch} cannot both exist in git (a ref and a directory of the same name): give the seat branches their own folder, e.g. seat_branch = \"{{project}}/home/{{seat}}\""
+                            "the seat branch {seat_branch} and the {kind} branch {branch} cannot both exist in git (a ref and a directory of the same name): give the seat branches their own folder, e.g. seat_branch = \"{{project}}/{{seat}}/home\""
                         ),
                     ));
                 }
@@ -2680,5 +2725,191 @@ mod tests {
         let again = cache.parse("p", &row("p", 1).config_toml).unwrap();
         assert_eq!(again.quota.lanes, 1);
         assert_eq!(cache.parses(), 2, "no re-parse: both entries were kept");
+    }
+
+    // T-559: a seat's own branch is named project / seat / home, like a task's
+    // project / lane / task, so it sits beside the lane's task branches
+    // instead of above them.
+
+    /// A config of project `harbor` with two lanes on `repo`, its seat branch
+    /// named by `template` (`None`: the project names none, so the default
+    /// stands).
+    fn harbor_config(repo: &std::path::Path, template: Option<&str>) -> String {
+        let repo = serde_json::json!(repo.to_string_lossy()).to_string();
+        let seat = template.map_or(String::new(), |template| {
+            format!("seat_branch = {}\n", serde_json::json!(template))
+        });
+        format!(
+            r#"[project]
+id = "harbor"
+herdr_session = "sess"
+repo = {repo}
+
+[quota]
+lanes = 2
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "keel"
+duty = "docs"
+owns = ["docs/"]
+kind = "codex"
+profile = "codex"
+
+[conventions]
+task_branch = "{{project}}/{{lane}}/t{{n}}"
+gate = "make test"
+{seat}"#
+        )
+    }
+
+    #[test]
+    fn the_default_seat_branch_is_project_seat_home() {
+        assert_eq!(
+            gear_model::branch::expand_seat(&Conventions::default().seat_branch, "p", "captain"),
+            "p/captain/home"
+        );
+        assert_eq!(
+            gear_model::branch::expand_seat(&Conventions::default().seat_branch, "p", "heat"),
+            "p/heat/home"
+        );
+        // Beside the lane's task branches, not above them: git can hold both.
+        let cfg = parse(&harbor_config(std::path::Path::new("/repo"), None)).unwrap();
+        assert_eq!(
+            cfg.conventions.seat_branch,
+            gear_model::branch::SEAT_BRANCH,
+            "the project named none: the default stands"
+        );
+        assert_eq!(validate(&cfg), vec![], "siblings clash with nothing");
+        assert_eq!(
+            gear_model::branch::expand(&cfg.conventions.task_branch, "harbor", "heat", "T-675"),
+            "harbor/heat/t675"
+        );
+    }
+
+    /// Run `git` with `args` in `dir`, trimming its output; it must succeed.
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=GEAR", "-c", "user.email=gear@example.com"])
+            .args(args)
+            .output()
+            .unwrap_or_else(|error| panic!("git -C {}: {error}", dir.display()));
+        assert!(
+            output.status.success(),
+            "git -C {} {}: {}",
+            dir.display(),
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// T-559: an apply that changes `seat_branch` renames the branch of a seat's
+    /// worktree that stands on the old name, and names a seat whose worktree is
+    /// on another branch instead of touching it.
+    #[test]
+    fn an_apply_moves_a_seat_worktree_to_the_new_seat_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "dev"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        // Two checkouts of the repository: the heats stand on its own seat
+        // branch, the keel is mid-task on another one.
+        let heat = dir.path().join("harbor-heat");
+        let keel = dir.path().join("harbor-keel");
+        for (path, branch) in [(&heat, "harbor/seat/heat"), (&keel, "keel/t1")] {
+            git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    &path.to_string_lossy(),
+                    "-b",
+                    branch,
+                ],
+            );
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        for agent in crate::skill::SkillAgent::ALL {
+            crate::skill::install(*agent, home.path()).expect("install the skill");
+        }
+        let env = crate::Env {
+            ctx: None,
+            pane_id: None,
+            admin: true,
+        };
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        let now = 1_800_000_000;
+        crate::admin::init_with_home(
+            &mut store,
+            &env,
+            &harbor_config(&repo, Some("{project}/seat/{seat}")),
+            Some(home.path()),
+            false,
+            now,
+        )
+        .unwrap();
+        store
+            .write(|tx| {
+                tx.set_meta("engine.worktree_path.harbor:heat", &heat.to_string_lossy())?;
+                tx.set_meta("engine.worktree_path.harbor:keel", &keel.to_string_lossy())?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            git(&heat, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "harbor/seat/heat"
+        );
+
+        let r = crate::admin::init_with_home(
+            &mut store,
+            &env,
+            &harbor_config(&repo, Some("{project}/{seat}/home")),
+            Some(home.path()),
+            false,
+            now + 1,
+        )
+        .unwrap();
+        assert_eq!(r.config_version, 2);
+        // The seat standing on the old name is moved, quietly.
+        assert_eq!(
+            git(&heat, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "harbor/heat/home",
+            "the heat's worktree took the new name"
+        );
+        // The seat mid-task on another branch is left alone, and named.
+        assert_eq!(
+            git(&keel, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "keel/t1"
+        );
+        assert_eq!(r.stale_worktrees.len(), 2, "{:?}", r.stale_worktrees);
+        assert!(
+            r.stale_worktrees[0].contains("harbor/heat/home")
+                && r.stale_worktrees[0].contains("harbor/seat/heat"),
+            "{:?}",
+            r.stale_worktrees
+        );
+        assert!(
+            r.stale_worktrees[1].contains("keel/t1") && r.stale_worktrees[1].contains("left alone"),
+            "{:?}",
+            r.stale_worktrees
+        );
     }
 }

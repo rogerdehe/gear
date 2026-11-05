@@ -88,6 +88,14 @@ pub struct MergeWorkers {
     /// attempt, each of which is a git process the tick pays otherwise
     /// (T-127).
     cleaned: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    /// The merge workers whose last train stopped on a reason that can clear:
+    /// their next merge runs alone, with its bounded retries, so such a
+    /// reason ends as it would without a train.
+    single: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    /// The batch size a repo's next batch merge starts with (T-547): the
+    /// project's `merge_batch`, doubled by every batch that landed whole and
+    /// halved by a batch a gate turned red, up to `merge_batch` again.
+    batch_cap: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 impl MergeWorkers {
@@ -162,6 +170,12 @@ enum Report {
     Raced(String),
     /// The merge failed: the reason, and whether it can clear.
     Failed(Failed),
+    /// The merge goes back to the queue and runs again from the new tip: the
+    /// merge ahead of it in its train did not land, or a reason that can
+    /// clear stopped the train.
+    Requeue(String),
+    /// A merge train: each of its merges with what became of it.
+    Train(Vec<(OpRow, Report)>),
 }
 
 fn wall_time() -> Ts {
@@ -323,6 +337,61 @@ fn write_steps(store: &mut gear_store::Store, key: &str, steps: &[(String, i64, 
         .ok();
 }
 
+/// Collect a finished background merge of `project`, if there is one: its
+/// result is settled. A paused project still has its running merge collected
+/// (Prometheus O-6339: the merge landed on dev while the project was paused,
+/// and the store kept it executing). None when no merge of it has finished.
+pub fn collect_finished(
+    store: &mut Store,
+    cfg: &EngineCfg,
+    project: &str,
+    config: &gear_app::config::ProjectConfig,
+) -> GearResult<Option<Vec<Merged>>> {
+    // A worker survives between ticks. Collect only a completed result;
+    // never join a running thread. One worker per repo (T-53): the workers of
+    // the repos of a project are collected one after the other.
+    let mut workers =
+        cfg.merges.workers.lock().map_err(|_| {
+            GearError::new(ErrorCode::BadTransition, "merge worker registry poisoned")
+        })?;
+    let finished_keys: Vec<String> = workers
+        .iter()
+        .filter(|(_, worker)| {
+            worker.op.project == project && worker.finished.lock().unwrap().is_some()
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    if let Some(key) = finished_keys.first() {
+        let worker = workers.get(key).expect("the worker was just found");
+        let finished = worker.finished.lock().unwrap().clone();
+        let Some(finished) = finished else {
+            return Ok(None);
+        };
+        let op = worker.op.clone();
+        // A merge that ran alone and landed lets the batch grow again
+        // (Prometheus, 2026-11-04: red batches halved the cap to 1, the batch
+        // path never runs at 1, and only a batch that landed could double it,
+        // so every merge ran alone for the rest of the day).
+        let landed_alone = matches!(finished.result, Report::Merged(_));
+        let done = settle_report(store, project, config, &op, finished.result, finished.at)?;
+        if landed_alone {
+            let batch = config.conventions.merge_batch.max(1) as usize;
+            let mut caps = cfg.merges.batch_cap.lock().unwrap();
+            if let Some(cap) = caps.get_mut(key) {
+                *cap = (*cap * 2).min(batch);
+            }
+        }
+        // Keep the completion until its database write succeeded: a transient
+        // store error must not lose the result or launch a second worker.
+        workers.remove(key);
+        // The collection is a step of its own: a waiter must not miss it.
+        *cfg.merges.progress.0.lock().unwrap() += 1;
+        cfg.merges.progress.1.notify_all();
+        return Ok(Some(done));
+    }
+    Ok(None)
+}
+
 /// Queue, launch or collect a merge without waiting for git or the gate.
 pub fn merge_passed(
     store: &mut Store,
@@ -407,7 +476,16 @@ pub fn merge_passed(
         .is_some_and(|at| at >= last_lost);
     if settled || now - last_lost >= LOST_SCAN_EVERY_S {
         store.write(|tx| tx.set_meta(&lost_scan_key(project), &now.to_string()))?;
+        // A chain (T-517 by T-614 by T-675) lands one link per pass: repeat
+        // while a pass marks something, so the whole chain lands at once.
+        for _ in 0..8 {
+            if !land_carried(store, project, &config)? {
+                break;
+            }
+        }
         tell_captain_lost(store, project, &config, now)?;
+        close_landed_failures(store, project, now)?;
+        close_settled_task_items(store, project, now)?;
     }
 
     // 1c. the task branches on the remote (the branch sweep): a cancelled
@@ -415,161 +493,31 @@ pub fn merge_passed(
     //     `branch_max_age_min` is named to the captain.
     sweep_branches(store, cfg, project, &config, now)?;
 
-    // A worker survives between ticks. Collect only a completed result;
-    // never join a running thread. One worker per repo (T-53): the workers of
-    // the repos of a project are collected one after the other.
+    // A worker survives between ticks: a finished one is collected, and the
+    // tick launches nothing else.
+    let collected = collect_finished(store, cfg, project, &config)?;
+    if let Some(done) = collected {
+        merged.extend(done);
+        return Ok(merged);
+    }
     let mut workers =
         cfg.merges.workers.lock().map_err(|_| {
             GearError::new(ErrorCode::BadTransition, "merge worker registry poisoned")
         })?;
-    let finished_keys: Vec<String> = workers
-        .iter()
-        .filter(|(_, worker)| {
-            worker.op.project == project && worker.finished.lock().unwrap().is_some()
-        })
-        .map(|(key, _)| key.clone())
-        .collect();
-    if let Some(key) = finished_keys.first() {
-        let worker = workers.get(key).expect("the worker was just found");
-        let finished = worker.finished.lock().unwrap().clone();
-        let Some(finished) = finished else {
-            return Ok(merged);
-        };
-        let op = &worker.op;
-        match finished.result {
-            Report::Merged(lines) => {
-                store.write(|tx| {
-                    let current = tx.get_op(project, &op.id)?.unwrap();
-                    if current.state == OpState::Executing {
-                        tx.set_op_state(project, &op.id, OpState::Submitted, None, finished.at)?;
-                    }
-                    tx.set_op_state(
-                        project,
-                        &op.id,
-                        OpState::Confirmed,
-                        Some(&lines),
-                        finished.at,
-                    )?;
-                    tx.set_meta(&settled_key(project), &finished.at.to_string())?;
-                    // T-38's merge time belongs to gate/push completion,
-                    // independent of both the launching and collecting tick.
-                    if let (Some(attempt), Some(task)) = (op.attempt, op.task.as_deref()) {
-                        tx.set_attempt_time(
-                            project,
-                            task,
-                            attempt,
-                            AttemptStep::Merged,
-                            finished.at,
-                        )?;
-                    }
-                    Ok(())
-                })?;
-                merged.push(Merged {
-                    task: op.task.clone().unwrap_or_default(),
-                    branch: op.payload["branch"].as_str().unwrap_or("").to_string(),
-                });
-                // The wait is over and the failure (if any) is settled: the
-                // captain's items about them close (T-62, T-92).
-                resolve_wait(
-                    store,
-                    project,
-                    &op.task.clone().unwrap_or_default(),
-                    finished.at,
-                )?;
-                resolve_failed(
-                    store,
-                    project,
-                    &op.task.clone().unwrap_or_default(),
-                    finished.at,
-                )?;
-                // A branch the merge had to leave behind holds work that is not
-                // on the integration branch: the captain decides, once.
-                if let Some(left) = lines.lines().find(|line| line.starts_with("left on ")) {
-                    let task = op.task.clone().unwrap_or_default();
-                    let _ = tell_captain(
-                        store,
-                        project,
-                        op.attempt.map(|attempt| (task.as_str(), attempt)),
-                        &format!("{task} merged, but a branch stays: {left}. Land what it holds in a task, or delete it."),
-                        finished.at,
-                    );
-                }
-            }
-            Report::Pr { pr, head } => {
-                // §11.2 step 3: the merge op waits for the land op, which is
-                // the forge's call. Nothing is deleted: the pull request's
-                // head is the task's branch until the pull request is merged.
-                let result = serde_json::json!({"mode":"pr","pr":pr,"head":head}).to_string();
-                let method = merge_method_of(&repo_of_op(store, project, &op, &config)?);
-                store.write(|tx| {
-                    let current = tx.get_op(project, &op.id)?.unwrap();
-                    if current.state == OpState::Executing {
-                        tx.set_op_state(
-                            project,
-                            &op.id,
-                            OpState::Submitted,
-                            Some(&result),
-                            finished.at,
-                        )?;
-                    }
-                    insert_land_op(tx, project, &op, pr, &head, method, finished.at)
-                })?;
-            }
-            Report::Busy => retry_merge(
-                store,
-                project,
-                op,
-                "merge will retry from the remote",
-                finished.at,
-            )?,
-            // The merge waits for another task: it is not a failure. The op
-            // goes back to Unknown and the captain is told once which task it
-            // waits for (T-62).
-            Report::Waiting(blocked) => {
-                let names: Vec<String> = blocked.iter().map(|(task, _)| task.clone()).collect();
-                retry_merge(
-                    store,
-                    project,
-                    op,
-                    &format!("waits for {}", names.join(", ")),
-                    finished.at,
-                )?;
-                tell_captain_waiting(store, project, op, &blocked, finished.at)?;
-            }
-            // The integration branch moved under every try (T-280): another
-            // merge landed each time, so this is not a failure and no
-            // captain item. The op goes back to Unknown and runs again from
-            // the new tip on the next tick.
-            Report::Raced(reason) => {
-                let first = reason.lines().next().unwrap_or_default();
-                retry_merge(
-                    store,
-                    project,
-                    op,
-                    &format!(
-                        "{first} — the integration branch moved during each of {} tries; \
-                         it merges again from the new tip on the next tick",
-                        MERGE_RETRIES + 1
-                    ),
-                    finished.at,
-                )?
-            }
-            // The worker already retried a reason that can clear (T-61): what
-            // comes back is the failure that stands.
-            Report::Failed(failed) => fail_merge(store, project, op, &failed.reason, finished.at)?,
-        }
-        // Keep the completion until its database write succeeded: a transient
-        // store error must not lose the result or launch a second worker.
-        workers.remove(key);
-        // The collection is a step of its own: a waiter must not miss it.
-        *cfg.merges.progress.0.lock().unwrap() += 1;
-        cfg.merges.progress.1.notify_all();
-        return Ok(merged);
-    }
 
     // One worker per repo. Unknown ops are restart recovery: merge_one
     // resets to the remote before doing any merges, and adopts a completed push.
-    for op in merge_order(ready_merges(store, project)?) {
+    let ready = ready_merges(store, project)?;
+    let ready = void_carried(store, project, ready, now)?;
+    let ready = waits_cleared(store, project, ready)?;
+    let ready = merge_order(now_first(store, project, ready)?);
+    // The merges a train took (or voided) in this tick.
+    let mut taken: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (position, op) in ready.iter().enumerate() {
+        if taken.contains(&op.id) {
+            continue;
+        }
+        let op = op.clone();
         let task = op.task.clone().unwrap_or_default();
         // The work of this attempt is already on the integration branch: it
         // landed with another task's merge (design §10.7, row B03-01). The
@@ -619,11 +567,151 @@ pub fn merge_passed(
         if workers.contains_key(&key) {
             continue;
         }
+        // A merge train: the merges behind this one that land on the same
+        // branch, each gated on the commit the one ahead of it lands.
+        let parallel = config.conventions.merge_parallel.max(1) as usize;
+        let single = cfg.merges.single.lock().unwrap().remove(&key);
+        // T-574: the merge the captain put first runs alone — never batched,
+        // never in a train — so nothing waits behind it and nothing changes
+        // under its gate. The mark is one-shot: it is cleared here, when the
+        // merge starts.
+        let alone = store.read(|tx| {
+            Ok(tx
+                .get_meta(&gear_app::plan::merge_first_key(project))?
+                .is_some_and(|marked| !marked.is_empty() && marked == task))
+        })?;
+        // A batch merge (T-547): up to `cap` passed merges of this project are
+        // merged into one worktree and gated once. `merge_parallel` is not
+        // consulted then; a batch of one op takes the normal single path.
+        let batch = config.conventions.merge_batch.max(1) as usize;
+        if pr.is_none() && batch > 1 && !single && !alone {
+            let cap = cfg
+                .merges
+                .batch_cap
+                .lock()
+                .unwrap()
+                .get(&key)
+                .copied()
+                .unwrap_or(batch)
+                .clamp(1, batch);
+            let mut members = vec![op.clone()];
+            for later in ready.iter().skip(position + 1) {
+                if members.len() >= cap {
+                    break;
+                }
+                if taken.contains(&later.id) {
+                    continue;
+                }
+                match train_member(store, project, later, &config, &key, now)? {
+                    Member::Joins => members.push(later.clone()),
+                    Member::Voided => {
+                        taken.insert(later.id.clone());
+                    }
+                    Member::Not => {}
+                }
+            }
+            if members.len() > 1 {
+                match integration_worktree(store, herdr, &repo, project, &config, &cfg.merges, now)
+                {
+                    Ok(worktree) => {
+                        // T-566: a merge of this project starts: the wait's
+                        // item has done its work.
+                        close_merge_waits(store, project, now)?;
+                        launch_batch(
+                            store,
+                            cfg,
+                            project,
+                            &config,
+                            &repo,
+                            &key,
+                            members.clone(),
+                            worktree,
+                            &mut workers,
+                            now,
+                        )?;
+                        for member in &members {
+                            taken.insert(member.id.clone());
+                        }
+                        continue;
+                    }
+                    Err(reason) => {
+                        tell_captain_merge_wait(store, project, &reason, now)?;
+                        return Ok(merged);
+                    }
+                }
+            }
+        }
+        if pr.is_none() && parallel > 1 && !single && !alone {
+            let mut train = vec![op.clone()];
+            for later in ready.iter().skip(position + 1) {
+                if train.len() >= parallel {
+                    break;
+                }
+                if taken.contains(&later.id) {
+                    continue;
+                }
+                match train_member(store, project, later, &config, &key, now)? {
+                    Member::Joins => train.push(later.clone()),
+                    Member::Voided => {
+                        taken.insert(later.id.clone());
+                    }
+                    Member::Not => {}
+                }
+            }
+            if train.len() > 1 {
+                let mut worktrees = Vec::new();
+                for stage in 0..train.len() {
+                    match stage_worktree(
+                        store,
+                        herdr,
+                        &repo,
+                        project,
+                        &config,
+                        &cfg.merges,
+                        now,
+                        stage,
+                    ) {
+                        Ok(worktree) => {
+                            close_merge_waits(store, project, now)?;
+                            worktrees.push(worktree)
+                        }
+                        Err(reason) if stage == 0 => {
+                            tell_captain_merge_wait(store, project, &reason, now)?;
+                            return Ok(merged);
+                        }
+                        Err(_) => break,
+                    }
+                }
+                train.truncate(worktrees.len());
+                if train.len() > 1 {
+                    launch_train(
+                        store,
+                        cfg,
+                        project,
+                        &config,
+                        &repo,
+                        &key,
+                        train.clone(),
+                        worktrees,
+                        &mut workers,
+                        now,
+                    )?;
+                    for member in &train {
+                        taken.insert(member.id.clone());
+                    }
+                    continue;
+                }
+            }
+        }
         let worktree =
             match integration_worktree(store, herdr, &repo, project, &config, &cfg.merges, now) {
-                Ok(worktree) => worktree,
+                Ok(worktree) => {
+                    // T-566: the merge starts, so whatever held it is gone.
+                    close_merge_waits(store, project, now)?;
+                    worktree
+                }
                 Err(reason) => {
-                    tell_captain(store, project, None, &format!("merge waits: {reason}"), now)?;
+                    tell_captain_merge_wait(store, project, &reason, now)?;
                     return Ok(merged);
                 }
             };
@@ -632,6 +720,10 @@ pub fn merge_passed(
         // Submitted result (design §11.2 step 3).
         if matches!(op.state, OpState::Intended | OpState::Unknown) {
             store.write(|tx| tx.set_op_state(project, &op.id, OpState::Executing, None, now))?;
+        }
+        if alone {
+            // T-574: the captain's line is one-shot; it is used here.
+            store.write(|tx| tx.set_meta(&gear_app::plan::merge_first_key(project), ""))?;
         }
         // The other tasks of the project with a candidate: the merge waits for
         // the ones whose work its candidate carries (T-62).
@@ -648,6 +740,8 @@ pub fn merge_passed(
             &config.conventions.merge_message,
             &[("project", project), ("task", &task)],
         );
+        // T-564: what a review commit's subject starts with for this task.
+        let prefix = review_prefix(&config, project, &task, &op_attempt(&op));
         let finished = Arc::new(Mutex::new(None));
         let output = finished.clone();
         let job = op.clone();
@@ -685,6 +779,7 @@ pub fn merge_passed(
                         pr.as_ref(),
                         &fallback,
                         &commit,
+                        &prefix,
                         &db_path,
                     ) {
                         Step::Merged(lines) => Report::Merged(lines),
@@ -717,6 +812,373 @@ pub fn merge_passed(
         }
     }
     Ok(merged)
+}
+
+/// What a merge's result does to its op, its task and the captain's items.
+fn settle_report(
+    store: &mut Store,
+    project: &str,
+    config: &ProjectConfig,
+    op: &OpRow,
+    result: Report,
+    at: Ts,
+) -> GearResult<Vec<Merged>> {
+    let mut merged = Vec::new();
+    match result {
+        Report::Merged(lines) => {
+            store.write(|tx| {
+                let current = tx.get_op(project, &op.id)?.unwrap();
+                if current.state == OpState::Executing {
+                    tx.set_op_state(project, &op.id, OpState::Submitted, None, at)?;
+                }
+                tx.set_op_state(project, &op.id, OpState::Confirmed, Some(&lines), at)?;
+                tx.set_meta(&settled_key(project), &at.to_string())?;
+                // T-38's merge time belongs to gate/push completion,
+                // independent of both the launching and collecting tick.
+                if let (Some(attempt), Some(task)) = (op.attempt, op.task.as_deref()) {
+                    tx.set_attempt_time(project, task, attempt, AttemptStep::Merged, at)?;
+                }
+                Ok(())
+            })?;
+            merged.push(Merged {
+                task: op.task.clone().unwrap_or_default(),
+                branch: op.payload["branch"].as_str().unwrap_or("").to_string(),
+            });
+            // The wait is over and the failure (if any) is settled: the
+            // captain's items about them close (T-62, T-92).
+            resolve_wait(store, project, &op.task.clone().unwrap_or_default(), at)?;
+            resolve_failed(store, project, &op.task.clone().unwrap_or_default(), at)?;
+            // A branch the merge had to leave behind holds work that is not
+            // on the integration branch: the captain decides, once.
+            if let Some(left) = lines.lines().find(|line| line.starts_with("left on ")) {
+                let task = op.task.clone().unwrap_or_default();
+                let _ = tell_captain(
+                    store,
+                    project,
+                    op.attempt.map(|attempt| (task.as_str(), attempt)),
+                    &format!("{task} merged, but a branch stays: {left}. Land what it holds in a task, or delete it."),
+                    at,
+                );
+            }
+        }
+        Report::Pr { pr, head } => {
+            // §11.2 step 3: the merge op waits for the land op, which is
+            // the forge's call. Nothing is deleted: the pull request's
+            // head is the task's branch until the pull request is merged.
+            let result = serde_json::json!({"mode":"pr","pr":pr,"head":head}).to_string();
+            let method = merge_method_of(&repo_of_op(store, project, &op, &config)?);
+            store.write(|tx| {
+                let current = tx.get_op(project, &op.id)?.unwrap();
+                if current.state == OpState::Executing {
+                    tx.set_op_state(project, &op.id, OpState::Submitted, Some(&result), at)?;
+                }
+                insert_land_op(tx, project, &op, pr, &head, method, at)
+            })?;
+        }
+        Report::Busy => retry_merge(store, project, op, "merge will retry from the remote", at)?,
+        // The merge waits for another task: it is not a failure. The op
+        // goes back to Unknown and the captain is told once which task it
+        // waits for (T-62).
+        Report::Waiting(blocked) => {
+            let names: Vec<String> = blocked.iter().map(|(task, _)| task.clone()).collect();
+            retry_merge(
+                store,
+                project,
+                op,
+                &format!("waits for {}", names.join(", ")),
+                at,
+            )?;
+            tell_captain_waiting(store, project, op, &blocked, at)?;
+        }
+        // The integration branch moved under every try (T-280): another
+        // merge landed each time, so this is not a failure and no
+        // captain item. The op goes back to Unknown and runs again from
+        // the new tip on the next tick.
+        Report::Raced(reason) => {
+            let first = reason.lines().next().unwrap_or_default();
+            let why = if unreachable(&reason) {
+                "the remote could not be read"
+            } else {
+                "the integration branch moved"
+            };
+            retry_merge(
+                store,
+                project,
+                op,
+                &format!(
+                    "{first} — {why} during each of {} tries; \
+                     it merges again from the new tip on the next tick",
+                    MERGE_RETRIES + 1
+                ),
+                at,
+            )?
+        }
+        // The worker already retried a reason that can clear (T-61): what
+        // comes back is the failure that stands.
+        Report::Failed(failed) => fail_merge(store, project, op, &failed.reason, at)?,
+        // T-576: a merge a batch or a train sends back is **queued again**, not
+        // unknown (Prometheus 2026-11-05: O-7384..O-7390 sat `unknown` with
+        // "its batch failed the gate: it is gated again in a smaller batch",
+        // no later batch took them, the lost scan called them lost and
+        // `- remerge` refused them). Unknown is kept for a push whose outcome
+        // is not known; a requeue knows its outcome (nothing was pushed).
+        Report::Requeue(reason) => requeue_merge(store, project, op, &reason, at)?,
+        Report::Train(results) => {
+            for (one, report) in results {
+                merged.extend(settle_report(store, project, config, &one, report, at)?);
+            }
+        }
+    }
+    Ok(merged)
+}
+
+/// Whether a queued merge joins the train of `key`.
+enum Member {
+    Joins,
+    /// The merge will not run: its work is already landed, or its task may
+    /// not be merged any more. It was voided as the queue voids it.
+    Voided,
+    /// It runs on its own turn: another branch, or a pull request.
+    Not,
+}
+
+/// The checks the queue makes before a merge runs, for a merge behind the
+/// head of a train (the same voids, in the same order).
+fn train_member(
+    store: &mut Store,
+    project: &str,
+    op: &OpRow,
+    config: &ProjectConfig,
+    key: &str,
+    now: Ts,
+) -> GearResult<Member> {
+    let task = op.task.clone().unwrap_or_default();
+    if store.read(|tx| attempt_already_merged(tx, project, op))? {
+        store.write(|tx| void_merged_op(tx, project, &op.id, now))?;
+        return Ok(Member::Voided);
+    }
+    let valid_task = store.read(|tx| {
+        Ok(tx
+            .get_task(project, &task)?
+            .is_some_and(|row| matches!(row.state, TaskState::Verifying | TaskState::Done)))
+    })?;
+    if !valid_task || still_current(store, project, op)?.is_err() {
+        store.write(|tx| neutrino_void(tx, project, &op.id, now))?;
+        resolve_wait(store, project, &task, now)?;
+        return Ok(Member::Voided);
+    }
+    let repo = repo_of_op(store, project, op, config)?;
+    if worker_key(&repo) != key || pr_claim_is_pr(store, project, op, &repo)? {
+        return Ok(Member::Not);
+    }
+    Ok(Member::Joins)
+}
+
+/// Whether the repo of `op` lands through pull requests (a train never does).
+fn pr_claim_is_pr(store: &mut Store, project: &str, op: &OpRow, repo: &Repo) -> GearResult<bool> {
+    Ok(!matches!(
+        pr_claim(store, project, op, repo)?,
+        PrClaim::Local
+    ))
+}
+
+/// Start a merge train's worker: its merges are Executing until it reports.
+#[allow(clippy::too_many_arguments)]
+fn launch_train(
+    store: &mut Store,
+    cfg: &EngineCfg,
+    project: &str,
+    config: &ProjectConfig,
+    repo: &Repo,
+    key: &str,
+    train: Vec<OpRow>,
+    worktrees: Vec<gear_herdr::Worktree>,
+    workers: &mut BTreeMap<String, Worker>,
+    now: Ts,
+) -> GearResult<()> {
+    let mut members = Vec::new();
+    for op in &train {
+        let task = op.task.clone().unwrap_or_default();
+        if matches!(op.state, OpState::Intended | OpState::Unknown) {
+            store.write(|tx| tx.set_op_state(project, &op.id, OpState::Executing, None, now))?;
+        }
+        let lane = lane_of(store, project, op.task.as_deref())?;
+        members.push(TrainOp {
+            op: op.clone(),
+            others: other_candidates(store, project, &task)?,
+            review_fallback: review_branch(
+                &config.conventions.review_branch,
+                project,
+                &lane,
+                &task,
+            ),
+            commit: gear_model::commit::fill(
+                &config.conventions.merge_message,
+                &[("project", project), ("task", &task)],
+            ),
+            review_prefix: review_prefix(config, project, &task, &op_attempt(&op)),
+        });
+    }
+    let finished = Arc::new(Mutex::new(None));
+    let output = finished.clone();
+    let repo = repo.clone();
+    let remote_name = config.conventions.remote.clone();
+    let remote = cfg.remote.clone();
+    let progress = cfg.merges.progress.clone();
+    let db_path = cfg.db_path.clone();
+    let single_set = cfg.merges.single.clone();
+    let single_key = key.to_string();
+    let spawned = std::thread::Builder::new()
+        .name(format!("merge-train-{project}-{}", repo.name))
+        .spawn(move || {
+            let single = std::sync::atomic::AtomicBool::new(false);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let target = Target {
+                    name: &remote_name,
+                    runner: remote.as_ref(),
+                };
+                run_train(&worktrees, &repo, &members, target, &db_path, &single)
+            }))
+            .unwrap_or_else(|_| {
+                members
+                    .iter()
+                    .map(|m| (m.op.clone(), Report::Requeue("merge train panicked".into())))
+                    .collect()
+            });
+            if single.load(std::sync::atomic::Ordering::SeqCst) {
+                single_set.lock().unwrap().insert(single_key);
+            }
+            *output.lock().unwrap() = Some(Finished {
+                result: Report::Train(result),
+                at: wall_time(),
+            });
+            *progress.0.lock().unwrap() += 1;
+            progress.1.notify_all();
+        });
+    let head = train[0].clone();
+    match spawned {
+        Ok(_) => {
+            workers.insert(key.to_string(), Worker { op: head, finished });
+        }
+        Err(error) => {
+            for op in &train {
+                retry_merge(
+                    store,
+                    project,
+                    op,
+                    &format!("start merge train: {error}"),
+                    wall_time(),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Start a batch merge's worker (T-547): its merges are Executing until it
+/// reports. One worktree and one gate for the whole batch; the cap the batch
+/// ends with is kept for this repo's next one.
+#[allow(clippy::too_many_arguments)]
+fn launch_batch(
+    store: &mut Store,
+    cfg: &EngineCfg,
+    project: &str,
+    config: &ProjectConfig,
+    repo: &Repo,
+    key: &str,
+    batch: Vec<OpRow>,
+    worktree: gear_herdr::Worktree,
+    workers: &mut BTreeMap<String, Worker>,
+    now: Ts,
+) -> GearResult<()> {
+    let mut members = Vec::new();
+    for op in &batch {
+        let task = op.task.clone().unwrap_or_default();
+        if matches!(op.state, OpState::Intended | OpState::Unknown) {
+            store.write(|tx| tx.set_op_state(project, &op.id, OpState::Executing, None, now))?;
+        }
+        let lane = lane_of(store, project, op.task.as_deref())?;
+        let commit = gear_model::commit::fill(
+            &config.conventions.merge_message,
+            &[("project", project), ("task", &task)],
+        );
+        members.push(TrainOp {
+            op: op.clone(),
+            others: other_candidates(store, project, &task)?,
+            review_fallback: review_branch(
+                &config.conventions.review_branch,
+                project,
+                &lane,
+                &task,
+            ),
+            review_prefix: review_prefix(config, project, &task, &op_attempt(op)),
+            commit,
+        });
+    }
+    let finished = Arc::new(Mutex::new(None));
+    let output = finished.clone();
+    let repo = repo.clone();
+    let remote_name = config.conventions.remote.clone();
+    let remote = cfg.remote.clone();
+    let progress = cfg.merges.progress.clone();
+    let db_path = cfg.db_path.clone();
+    let single_set = cfg.merges.single.clone();
+    let single_key = key.to_string();
+    let cap_set = cfg.merges.batch_cap.clone();
+    let batch_size = config.conventions.merge_batch.max(1) as usize;
+    let cap = {
+        let caps = cfg.merges.batch_cap.lock().unwrap();
+        caps.get(key).copied().unwrap_or(batch_size)
+    };
+    let spawned = std::thread::Builder::new()
+        .name(format!("merge-batch-{project}-{}", repo.name))
+        .spawn(move || {
+            let single = std::sync::atomic::AtomicBool::new(false);
+            let (result, cap) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let target = Target {
+                    name: &remote_name,
+                    runner: remote.as_ref(),
+                };
+                run_batch(
+                    &worktree, &repo, &members, target, &db_path, &single, batch_size, cap,
+                )
+            }))
+            .unwrap_or_else(|_| {
+                let results: Vec<(OpRow, Report)> = members
+                    .iter()
+                    .map(|m| (m.op.clone(), Report::Requeue("merge batch panicked".into())))
+                    .collect();
+                (results, cap)
+            });
+            if single.load(std::sync::atomic::Ordering::SeqCst) {
+                single_set.lock().unwrap().insert(single_key.clone());
+            }
+            cap_set.lock().unwrap().insert(single_key, cap);
+            *output.lock().unwrap() = Some(Finished {
+                result: Report::Train(result),
+                at: wall_time(),
+            });
+            *progress.0.lock().unwrap() += 1;
+            progress.1.notify_all();
+        });
+    let head = batch[0].clone();
+    match spawned {
+        Ok(_) => {
+            workers.insert(key.to_string(), Worker { op: head, finished });
+        }
+        Err(error) => {
+            for op in &batch {
+                retry_merge(
+                    store,
+                    project,
+                    op,
+                    &format!("start merge batch: {error}"),
+                    wall_time(),
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A lock in the worktree's git directory also excludes another runtime or a
@@ -798,6 +1260,28 @@ fn retry_merge(
     })
 }
 
+/// Queue a merge again that a batch or a train sent back (T-576): the op goes
+/// back to `intended` with the reason, so the queue takes it in the next round.
+fn requeue_merge(
+    store: &mut Store,
+    project: &str,
+    op: &OpRow,
+    reason: &str,
+    now: Ts,
+) -> GearResult<()> {
+    store.write(|tx| {
+        if tx.get_op(project, &op.id)?.is_some_and(|row| {
+            matches!(
+                row.state,
+                OpState::Intended | OpState::Executing | OpState::Unknown
+            )
+        }) {
+            tx.set_op_state(project, &op.id, OpState::Intended, Some(reason), now)?;
+        }
+        Ok(())
+    })
+}
+
 /// The reason an op that waits for another task carries (T-62). It is the
 /// op's explanation, so the engine can tell a waiting merge from one that
 /// waits for the next tick.
@@ -806,6 +1290,75 @@ const WAITS: &str = "waits for ";
 /// The tasks a merge op waits for, if it waits (T-62).
 fn waits_for(op: &OpRow) -> Option<&str> {
     op.result.as_deref()?.strip_prefix(WAITS)
+}
+
+/// A waiting merge whose tasks have all merged since is waiting no longer: it
+/// goes back into the ordinary queue (Prometheus T-482, 2026-11-03: it waited
+/// for T-481 nine hours after T-481 landed, because the busy merge line never
+/// reached the waiting group to look again). Only the order changes here; the
+/// merge itself checks what its candidate carries before it gates.
+fn waits_cleared(store: &mut Store, project: &str, ready: Vec<OpRow>) -> GearResult<Vec<OpRow>> {
+    store.read(|tx| {
+        let mut out = Vec::with_capacity(ready.len());
+        for mut op in ready {
+            if let Some(list) = waits_for(&op) {
+                let mut all_landed = true;
+                for task in list.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+                    let landed = gear_app::tasks::merged_at(tx, project, task)?.is_some()
+                        || tx
+                            .get_task(project, task)?
+                            .is_some_and(|row| row.state == TaskState::Cancelled);
+                    if !landed {
+                        all_landed = false;
+                        break;
+                    }
+                }
+                if all_landed {
+                    op.result = None;
+                }
+            }
+            out.push(op);
+        }
+        Ok(out)
+    })
+}
+
+/// The merges of tasks the plan marks `now` run before the others, each group
+/// in its queue order (Prometheus, 2026-11-03: the user's top-priority test
+/// gate waited behind older ordinary merges on the shared merge line).
+/// The ready merges in the order they run (T-128, T-574): the captain's
+/// `- merge-first` task first, then the `now` tasks, then the rest.
+fn now_first(store: &mut Store, project: &str, ready: Vec<OpRow>) -> GearResult<Vec<OpRow>> {
+    store.read(|tx| {
+        // T-574: the one merge the captain put first runs before every other,
+        // `now` ones included.
+        let first = tx
+            .get_meta(&gear_app::plan::merge_first_key(project))?
+            .unwrap_or_default();
+        let mut marked = Vec::new();
+        let mut now = Vec::new();
+        let mut rest = Vec::new();
+        for op in ready {
+            if !first.is_empty() && op.task.as_deref() == Some(first.as_str()) {
+                marked.push(op);
+                continue;
+            }
+            let urgent = match op.task.as_deref() {
+                Some(task) => tx
+                    .get_task(project, task)?
+                    .is_some_and(|row| row.priority == "now"),
+                None => false,
+            };
+            if urgent {
+                now.push(op);
+            } else {
+                rest.push(op);
+            }
+        }
+        marked.extend(now);
+        marked.extend(rest);
+        Ok(marked)
+    })
 }
 
 /// The ready merges in the order they run: a merge that waits for another task
@@ -824,6 +1377,8 @@ fn merge_order(ready: Vec<OpRow>) -> Vec<OpRow> {
 
 /// A push rejected because the integration branch moved meanwhile.
 const RACE: &str = "push race: ";
+/// A fetch of the remote that failed.
+const FETCH: &str = "fetch remote failed: ";
 /// How many times a merge that failed for a reason that can clear is retried
 /// before it fails (T-61).
 const MERGE_RETRIES: u32 = 3;
@@ -902,6 +1457,7 @@ fn merge_with_retries(
     pr: Option<&PrTarget>,
     review_fallback: &str,
     commit: &str,
+    review_prefix: &str,
     db_path: &str,
 ) -> Step {
     let mut attempt = 0;
@@ -924,6 +1480,7 @@ fn merge_with_retries(
             pr,
             review_fallback,
             commit,
+            review_prefix,
             &mut probe,
         ) {
             Step::Merged(lines) => {
@@ -952,7 +1509,13 @@ fn merge_with_retries(
                     // merge goes back to the queue. A "cannot lock ref"
                     // failure is not that — it can be a stale local lock —
                     // and PR mode keeps its Failed end (T-280 §3).
-                    if pr.is_none() && lost_the_race(&failed.reason) {
+                    // A remote that could not be read through every retry
+                    // (the network or the host refused) says nothing about
+                    // the work: it goes back to the queue too (2026-11-04,
+                    // GitHub refused SSH for minutes and T-675 failed).
+                    if pr.is_none()
+                        && (lost_the_race(&failed.reason) || unreachable(&failed.reason))
+                    {
                         probe.done();
                         return Step::Raced(failed.reason);
                     }
@@ -1180,7 +1743,8 @@ fn failed_thread(task: &str) -> String {
 }
 
 /// Tell the captain that a merge failed, naming the plan line that retries it
-/// (T-92). An item that is still open is refreshed rather than duplicated. The
+/// (T-92). One open item per task: the same failure again changes nothing, a
+/// new failure replaces the open item with a fresh one that rings. The
 /// item names the task and attempt it is about, so the captain's home page can
 /// suggest the verdict that settles it (T-90).
 fn tell_captain_failed(
@@ -1218,10 +1782,21 @@ fn tell_captain_failed(
             .into_iter()
             .find(|message| message.state == MsgState::Open);
         if let Some(item) = open {
-            if item.body != body {
-                tx.update_message_body(project, &item.id, &body)?;
+            if item.body == body {
+                return Ok(());
             }
-            return Ok(());
+            // A new failure is new news: the captain may have seen the old
+            // item already, and a seen item does not ring again. Close it and
+            // open a fresh one so the doorbell names it.
+            tx.update_message_state(
+                project,
+                &item.id,
+                MsgState::Resolved,
+                Some("a newer failure of this merge replaced it"),
+                None,
+                None,
+                now,
+            )?;
         }
         tx.insert_message(&NewMessage {
             meta: None,
@@ -1283,7 +1858,11 @@ fn still_current(store: &mut Store, project: &str, op: &OpRow) -> GearResult<Res
             return Ok(Err(format!("a newer attempt {} was handed in", latest.n)));
         }
         let candidate = op.payload["candidate"].as_str().unwrap_or("");
-        if latest.candidate.as_deref() != Some(candidate) {
+        if !latest
+            .candidate
+            .as_deref()
+            .is_some_and(|stored| gear_app::tasks::same_candidate(stored, candidate))
+        {
             return Ok(Err("the attempt's candidate changed".to_string()));
         }
         Ok(Ok(()))
@@ -1326,26 +1905,55 @@ fn neutrino_void(tx: &gear_store::Tx<'_>, project: &str, id: &str, now: Ts) -> G
 /// A merge that is already running (Executing) is left alone: its worker
 /// finishes on its own and the completion is kept.
 fn void_merged_op(tx: &gear_store::Tx<'_>, project: &str, id: &str, now: Ts) -> GearResult<()> {
+    void_op(tx, project, id, "the work is already merged", now)
+}
+
+/// A queued merge of a task that is carried by another (`carried-by:` set
+/// after the merge was queued) never runs on its own: its work lands with the
+/// carrier's merge. The op is closed, and the task's waits with it
+/// (Prometheus T-574/T-577, 2026-11-03).
+fn void_carried(
+    store: &mut Store,
+    project: &str,
+    ready: Vec<OpRow>,
+    now: Ts,
+) -> GearResult<Vec<OpRow>> {
+    let mut keep = Vec::with_capacity(ready.len());
+    for op in ready {
+        let carried = match op.task.as_deref() {
+            Some(task) => store.read(|tx| tx.task_carried_by(project, task))?,
+            None => None,
+        };
+        let Some(by) = carried else {
+            keep.push(op);
+            continue;
+        };
+        let reason = format!("the work lands with {by}'s merge (carried-by)");
+        store.write(|tx| void_op(tx, project, &op.id, &reason, now))?;
+        if let Some(task) = op.task.as_deref() {
+            resolve_wait(store, project, task, now)?;
+        }
+    }
+    Ok(keep)
+}
+
+/// Close a queued merge op that will not run: Intended becomes Void, Unknown
+/// (a restart's leftover) becomes Failed with the reason.
+fn void_op(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    id: &str,
+    reason: &str,
+    now: Ts,
+) -> GearResult<()> {
     let from = tx
         .get_op(project, id)?
         .map(|op| op.state)
         .unwrap_or(OpState::Intended);
     match from {
-        OpState::Intended => tx.set_op_state(
-            project,
-            id,
-            OpState::Void,
-            Some("the work is already merged"),
-            now,
-        )?,
+        OpState::Intended => tx.set_op_state(project, id, OpState::Void, Some(reason), now)?,
         OpState::Unknown => {
-            tx.set_op_state(
-                project,
-                id,
-                OpState::Failed,
-                Some("the work is already merged"),
-                now,
-            )?;
+            tx.set_op_state(project, id, OpState::Failed, Some(reason), now)?;
             tx.set_meta(&settled_key(project), &now.to_string())?;
         }
         _ => {}
@@ -1398,6 +2006,10 @@ fn passed_tasks(
             {
                 continue;
             }
+            // `carried-by: T-m`: the work lands with T-m's merge, never alone.
+            if tx.task_carried_by(project, &task.id)?.is_some() {
+                continue;
+            }
             let Some(verdict) = tx
                 .verdicts_of_task(project, &task.id)?
                 .into_iter()
@@ -1406,7 +2018,9 @@ fn passed_tasks(
                     verdict.passed
                         && verdict.attempt == latest.n
                         && verdict.contract_version == task.contract_version
-                        && Some(&verdict.candidate) == latest.candidate.as_ref()
+                        && latest.candidate.as_deref().is_some_and(|stored| {
+                            gear_app::tasks::same_candidate(&verdict.candidate, stored)
+                        })
                 })
             else {
                 continue;
@@ -1449,12 +2063,52 @@ fn settled_mechanically(verdict: &gear_store::VerdictRow) -> bool {
 /// that reworked hands in a new candidate, and the task built on the older
 /// branch carries that older, rejected work. Its verdict was rejected, but its
 /// commits are still in the branch.
+/// Whether `row`'s `carried-by:` chain, within `project`, reaches `task`.
+fn carried_into(tx: &gear_store::Tx<'_>, project: &str, row: &str, task: &str) -> GearResult<bool> {
+    let mut at = row.to_string();
+    // A chain longer than the project's tasks is a loop.
+    for _ in 0..64 {
+        let Some(by) = tx.task_carried_by(project, &at)? else {
+            return Ok(false);
+        };
+        let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, &by);
+        if carrier_project != project {
+            return Ok(false);
+        }
+        if carrier == task {
+            return Ok(true);
+        }
+        at = carrier.to_string();
+    }
+    Ok(false)
+}
+
 fn other_candidates(
     store: &mut Store,
     project: &str,
     task: &str,
 ) -> GearResult<Vec<(String, String, bool)>> {
     store.read(|tx| {
+        // The state of each task's latest merge op (by creation, then number).
+        let mut last_merge: std::collections::BTreeMap<String, (Ts, u64, OpState)> =
+            std::collections::BTreeMap::new();
+        for op in tx.ops_of_kind_in_states(project, OpKind::Merge, &[])? {
+            let Some(of) = op.task.clone() else {
+                continue;
+            };
+            let number = op
+                .id
+                .strip_prefix("O-")
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap_or(0);
+            let entry = (op.created, number, op.state);
+            if last_merge
+                .get(&of)
+                .is_none_or(|seen| (seen.0, seen.1) < (entry.0, entry.1))
+            {
+                last_merge.insert(of, entry);
+            }
+        }
         let mut others = Vec::new();
         for row in tx.tasks_of_project(project)? {
             if row.id == task {
@@ -1463,6 +2117,12 @@ fn other_candidates(
             // A cancelled task never lands: work of it that this candidate
             // carries is this candidate's own, never a task to wait for.
             if row.state == gear_model::TaskState::Cancelled {
+                continue;
+            }
+            // A task carried by this one lands with this merge, and so does a
+            // task carried by a task this one carries (T-517 by T-614 by
+            // T-675: the merge of T-675 waited for T-517, which waited for it).
+            if carried_into(tx, project, &row.id, task)? {
                 continue;
             }
             let attempts = tx.attempts_of_task(project, &row.id)?;
@@ -1477,8 +2137,21 @@ fn other_candidates(
                     verdict.passed
                         && verdict.attempt == latest.n
                         && verdict.contract_version == row.contract_version
-                        && Some(&verdict.candidate) == latest.candidate.as_ref()
+                        && latest.candidate.as_deref().is_some_and(|stored| {
+                            gear_app::tasks::same_candidate(&verdict.candidate, stored)
+                        })
                 });
+            // A reviewed task whose own merge failed cannot land alone: a
+            // candidate that carries it (with the fix) is the way it lands,
+            // and that candidate's gate runs on both. Waiting for it would
+            // deadlock the two merges.
+            if passed
+                && last_merge
+                    .get(&row.id)
+                    .is_some_and(|(_, _, state)| *state == OpState::Failed)
+            {
+                continue;
+            }
             for attempt in attempts {
                 if let Some(candidate) = attempt.candidate {
                     others.push((row.id.clone(), candidate, passed));
@@ -1779,6 +2452,10 @@ fn pr_claim(store: &mut Store, project: &str, op: &OpRow, repo: &Repo) -> GearRe
 /// reads every done task of the project, so not on every tick (T-516).
 const LOST_SCAN_EVERY_S: i64 = 300;
 
+/// Accepted work lands within this time, carried or not, or it is lost
+/// (user, 2026-11-04).
+const LAND_WITHIN_S: i64 = 2 * 3600;
+
 /// When the lost-merge scan last ran for a project.
 fn lost_scan_key(project: &str) -> String {
     format!("engine.lost_scan.{project}")
@@ -1862,10 +2539,47 @@ fn integration_worktree(
     merges: &MergeWorkers,
     now: Ts,
 ) -> Result<gear_herdr::Worktree, String> {
-    let label = merge_label(project, repo);
+    stage_worktree(store, herdr, repo, project, config, merges, now, 0)
+}
+
+/// The worktree of one stage of a merge train: stage 0 is the integration
+/// worktree, stage `n` its sibling `<label>-<n+1>` on seat `merge-<n+1>`.
+#[allow(clippy::too_many_arguments)]
+fn stage_worktree(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    repo: &Repo,
+    project: &str,
+    config: &ProjectConfig,
+    merges: &MergeWorkers,
+    now: Ts,
+    stage: usize,
+) -> Result<gear_herdr::Worktree, String> {
+    let (label, seat) = if stage == 0 {
+        (merge_label(project, repo), "merge".to_string())
+    } else {
+        (
+            format!("{}-{}", merge_label(project, repo), stage + 1),
+            format!("merge-{}", stage + 1),
+        )
+    };
     // The merge worktree is seat `merge` (T-253): its branch is the project's
-    // `[conventions].seat_branch` template, `<project>/merge` by default.
-    let branch = gear_model::branch::expand_seat(&config.conventions.seat_branch, project, "merge");
+    // `[conventions].seat_branch` template, `<project>/merge/home` by default
+    // (T-559: project / seat / home, like project / lane / task).
+    let branch = gear_model::branch::expand_seat(&config.conventions.seat_branch, project, &seat);
+    // T-565: the merge seat has no seat row, so no apply and no lane pass moves
+    // its branch — it is settled here, before the worktree is opened or
+    // created. A ref of the previous default (`p/merge`) is a folder of the new
+    // name, and git cannot hold both: it is renamed, and a ref of another name
+    // in the way fails the merge naming it, never both.
+    let old = gear_app::seat_branch::previous_default(project, &seat);
+    if let Err(reason) =
+        gear_app::seat_branch::settle(&repo.path, &old, &branch, &config.conventions.remote)
+    {
+        // Named as the merge worktree's, so the wait files under its worktree
+        // cause (T-566).
+        return Err(format!("the merge worktree's branch {branch}: {reason}"));
+    }
     let worktree = match herdr.worktree_open(&repo.path, &branch, &label) {
         Outcome::Ok(worktree) => worktree,
         Outcome::Refused { code, .. } if code == "worktree_not_found" => {
@@ -1960,6 +2674,8 @@ fn merge_one_with_db(
         gear_model::commit::MERGE_MESSAGE,
         &[("task", op.task.as_deref().unwrap_or_default())],
     );
+    // The tests' default review message, as the engine fills it (T-564).
+    let prefix = test_review_prefix(op);
     let mut probe = Probe::new(
         op.task.as_deref().unwrap_or("-"),
         op.created,
@@ -1980,6 +2696,7 @@ fn merge_one_with_db(
         None,
         &review,
         &commit,
+        &prefix,
         &mut probe,
     );
     // T-407: the operation's own completion line, as the retry loop writes it.
@@ -1987,6 +2704,18 @@ fn merge_one_with_db(
         probe.done();
     }
     step_result(step)
+}
+
+/// A review commit's subject prefix for the fixtures (T-564): the default
+/// `review(<task>): ` message, cut at `{what}`.
+#[cfg(test)]
+fn test_review_prefix(op: &OpRow) -> String {
+    let task = op.task.as_deref().unwrap_or_default();
+    gear_model::commit::fill(gear_model::commit::REVIEW_MESSAGE, &[("task", task)])
+        .split("{what}")
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -2019,6 +2748,11 @@ fn step_result(step: Step) -> Result<String, Failed> {
 /// another merge landed on the integration branch between the fetch and the
 /// push. A "cannot lock ref" failure is not that: it can be a stale local
 /// lock, so it keeps the failed end.
+/// Whether a merge failed only because its fetch could not read the remote.
+fn unreachable(reason: &str) -> bool {
+    reason.starts_with(FETCH)
+}
+
 fn lost_the_race(reason: &str) -> bool {
     reason.starts_with(RACE)
         && (reason.contains("non-fast-forward") || reason.contains("fetch first"))
@@ -2034,14 +2768,126 @@ fn merge_one_locked(
     pr: Option<&PrTarget>,
     review_fallback: &str,
     commit: &str,
+    review_prefix: &str,
     probe: &mut Probe,
 ) -> Step {
+    let prepared = match prepare_merge(
+        worktree,
+        repo,
+        op,
+        lock,
+        others,
+        remote,
+        review_fallback,
+        commit,
+        review_prefix,
+        probe,
+        None,
+    ) {
+        Ok(prepared) => prepared,
+        Err(step) => return step,
+    };
+    let tasks = vec![op.task.clone().unwrap_or_default()];
+    let round = gate_round(op);
+    // T-573: a merge that carries only reports skips the gate (the user,
+    // 2026-11-05: a merge holding one review record still paid a four-to-five
+    // minute CI round). The conflict check ran above and the push below is the
+    // same; only the gate step is skipped, and the merge result says so.
+    let dir = Path::new(&worktree.path);
+    let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(lock));
+    let mut prepared = prepared;
+    prepared.no_gate = reports_only(
+        &changed_paths(&git, dir, &prepared.base, "HEAD"),
+        &repo.voyage_dir,
+        &op.project,
+    );
+    if !prepared.no_gate {
+        if let Err(step) = run_gate(
+            worktree,
+            repo,
+            lock,
+            remote,
+            &op.project,
+            &round,
+            &tasks,
+            probe,
+        ) {
+            return step;
+        }
+    }
+    land_merge(worktree, repo, lock, remote, pr, commit, probe, &prepared)
+}
+
+/// A merge built and checked for conflicts, not yet gated or landed: what
+/// the land step needs.
+#[derive(Debug)]
+struct Prepared {
+    task: String,
+    sha: String,
+    branch: String,
+    review: String,
+    review_ref: String,
+    has_review: bool,
+    pushed: Pushed,
+    /// What the merge was built on: the remote integration branch, or the
+    /// commit of the train's stage ahead (T-573 reads the changed files from
+    /// it).
+    base: String,
+    /// T-573: the merge carries only reports, so no gate ran for it.
+    no_gate: bool,
+}
+
+/// The attempt the merge op names, as the review message's `{attempt}`.
+fn op_attempt(op: &OpRow) -> String {
+    op.attempt
+        .map(|attempt| attempt.to_string())
+        .unwrap_or_default()
+}
+
+/// The prefix a review commit's subject starts with (T-564): the project's
+/// `[conventions].review_message` filled with the task and the attempt, cut at
+/// `{what}` — what the commit carries is the reviewer's to write. The default
+/// gives `review(T-7): `.
+fn review_prefix(config: &ProjectConfig, project: &str, task: &str, attempt: &str) -> String {
+    let filled = gear_model::commit::fill(
+        &config.conventions.review_message,
+        &[("project", project), ("task", task), ("attempt", attempt)],
+    );
+    match filled.find("{what}") {
+        Some(at) => filled[..at].to_string(),
+        None => filled,
+    }
+}
+
+/// Steps 1 to 7 of a merge: a clean base (the remote integration branch, or
+/// `base`: the commit of the train's stage ahead), the approved candidate and
+/// its review branch merged onto it, no conflict. `Err` is the merge's end.
+#[allow(clippy::too_many_arguments)]
+fn prepare_merge(
+    worktree: &gear_herdr::Worktree,
+    repo: &Repo,
+    op: &OpRow,
+    lock: &File,
+    others: &[(String, String, bool)],
+    remote: Target<'_>,
+    review_fallback: &str,
+    commit: &str,
+    review_prefix: &str,
+    probe: &mut Probe,
+    base: Option<&str>,
+) -> Result<Prepared, Step> {
     let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(lock));
     let dir = Path::new(&worktree.path);
     let integration = repo.integration.clone();
     // The project's own remote (T-262): every fetch, ref and message of this
     // merge names it.
     let remote_name = remote.name;
+    // What the candidate is merged onto: the remote integration branch, or
+    // the commit of the train's stage ahead.
+    let base_ref = match base {
+        Some(base) => base.to_string(),
+        None => format!("{remote_name}/{integration}"),
+    };
     let branch = op.payload["branch"]
         .as_str()
         .unwrap_or_default()
@@ -2064,26 +2910,42 @@ fn merge_one_locked(
     //    would not bring it in. A fetch that fails may clear (the network,
     //    the remote): it is retried.
     probe.begin("fetch");
-    if let Err(reason) = git(
-        dir,
-        &[
-            "fetch",
-            "--prune",
-            remote_name,
-            &format!("+refs/heads/*:refs/remotes/{remote_name}/*"),
-        ],
-    ) {
-        probe.step("fetch");
-        return Step::Failed(Failed::clear(format!("fetch {remote_name}: {reason}")));
-    }
-    if let Err(reason) = git(
-        dir,
-        &["reset", "--hard", &format!("{remote_name}/{integration}")],
-    ) {
-        probe.step("fetch");
-        return Step::Failed(Failed::stuck(format!(
-            "reset to {remote_name}/{integration}: {reason}"
-        )));
+    match base {
+        None => {
+            if let Err(reason) = git(
+                dir,
+                &[
+                    "fetch",
+                    "--prune",
+                    remote_name,
+                    &format!("+refs/heads/*:refs/remotes/{remote_name}/*"),
+                ],
+            ) {
+                probe.step("fetch");
+                return Err(Step::Failed(Failed::clear(format!(
+                    "{FETCH}{remote_name}: {reason}"
+                ))));
+            }
+            if let Err(reason) = git(
+                dir,
+                &["reset", "--hard", &format!("{remote_name}/{integration}")],
+            ) {
+                probe.step("fetch");
+                return Err(Step::Failed(Failed::stuck(format!(
+                    "reset to {remote_name}/{integration}: {reason}"
+                ))));
+            }
+        }
+        // A stage of a merge train: the base is the commit the stage ahead of
+        // it lands; the refs were fetched once for the whole train.
+        Some(base) => {
+            if let Err(reason) = git(dir, &["reset", "--hard", base]) {
+                probe.step("fetch");
+                return Err(Step::Failed(Failed::stuck(format!(
+                    "reset to the train's base {base}: {reason}"
+                ))));
+            }
+        }
     }
     probe.step("fetch");
 
@@ -2097,9 +2959,9 @@ fn merge_one_locked(
         .trim()
         .to_string();
     if candidate.is_empty() {
-        return Step::Failed(Failed::stuck(format!(
+        return Err(Step::Failed(Failed::stuck(format!(
             "{task}: the merge op names no candidate"
-        )));
+        ))));
     }
     // 2. the commit must be known here. An op names its candidate by full sha
     //    (it is pinned to it), so this costs no git process (T-127); a payload
@@ -2109,10 +2971,10 @@ fn merge_one_locked(
         None => match git(dir, &["rev-parse", "--verify", &format!("{candidate}^{{commit}}")]) {
             Ok(out) => out.trim().to_string(),
             Err(reason) => {
-                return Step::Failed(Failed::clear(format!(
+                return Err(Step::Failed(Failed::clear(format!(
                     "{task}: the approved candidate {candidate} is not fetchable from {remote_name} yet\n{reason}\n\
                      it may not be pushed yet: the merge retries and asks the captain if it stays"
-                )))
+                ))))
             }
         },
     };
@@ -2136,10 +2998,10 @@ fn merge_one_locked(
     ) {
         Ok(pushed) => pushed,
         Err(reason) => {
-            return Step::Failed(Failed::clear(format!(
+            return Err(Step::Failed(Failed::clear(format!(
             "{task}: the approved candidate {candidate} is not fetchable from {remote_name} yet\n{reason}\n\
                  it may not be pushed yet: the merge retries and asks the captain if it stays"
-            )))
+            ))))
         }
     };
     let pushed = Pushed::read(&pushed, &sha);
@@ -2147,10 +3009,10 @@ fn merge_one_locked(
         // The candidate may not be pushed yet: the lane pushes it and the
         // merge retries. Only the bounded retry decides whether it was never
         // pushed (F2 of the T-61 review).
-        return Step::Failed(Failed::clear(format!(
+        return Err(Step::Failed(Failed::clear(format!(
             "{task}: the approved candidate {sha} is on no pushed ref of {remote_name}\n\
              it was never pushed, or the branch that held it is gone"
-        )));
+        ))));
     }
 
     // 4. the work the candidate carries (T-62): the commits of other tasks
@@ -2163,17 +3025,13 @@ fn merge_one_locked(
     //    on every tick while it waits. The range's members are exactly the
     //    commits the candidate adds to the integration branch, which is
     //    "carried and not landed" — and an empty list is step 5's answer too.
-    let ahead = git(
-        dir,
-        &["rev-list", &format!("{remote_name}/{integration}..{sha}")],
-    )
-    .ok();
+    let ahead = git(dir, &["rev-list", &format!("{base_ref}..{sha}")]).ok();
     let carried = match &ahead {
         Some(ahead) => carried_tasks(dir, &git, ahead, &sha, others),
         None => Vec::new(),
     };
     if !carried.is_empty() {
-        return Step::Waiting(carried);
+        return Err(Step::Waiting(carried));
     }
 
     // 5. the candidate may already be on the integration branch: a restart
@@ -2207,21 +3065,123 @@ fn merge_one_locked(
     let review_ref = format!("{remote_name}/{review}");
     let review_found = git(dir, &["rev-parse", "--verify", &review_ref]);
     let has_review = review_found.is_ok() && !mechanical;
-    if !has_review && !mechanical && !already {
-        let reason = review_found.unwrap_err();
-        return Step::Failed(Failed::stuck(format!(
-            "{task}: the review branch {review_ref} is missing on {remote_name}\n{reason}\n\
-             a merge publishes the approved candidate and its review branch together"
-        )));
+    // T-558: a review leaves no branch of its own on the remote — the reviewer
+    // pushes its review commit onto the TASK branch, and that branch is what
+    // merges. A task already in review before this change still has the old
+    // review branch on the remote: that one merges exactly as before
+    // (`has_review`), and the sweep and `close_branches` still delete it.
+    let task_ref = format!("{remote_name}/{branch}");
+    let has_task_branch =
+        !branch.is_empty() && git(dir, &["rev-parse", "--verify", &task_ref]).is_ok();
+    // A restart after the push finds none of them and the candidate on the
+    // integration branch: that merge already happened (`already`).
+    if !has_review && !mechanical && !has_task_branch && !already {
+        let reason = if branch.is_empty() {
+            "the merge op names no task branch".to_string()
+        } else {
+            format!(
+                "{}: the task branch {task_ref} is missing on {remote_name}",
+                git(dir, &["rev-parse", "--verify", &task_ref])
+                    .err()
+                    .unwrap_or_default()
+            )
+        };
+        return Err(Step::Failed(Failed::stuck(format!(
+            "{task}: no branch to merge from on {remote_name}\n{reason}\n\
+             a merge publishes the approved candidate and the review commit pushed on its task branch"
+        ))));
+    }
+    // Where the task branch is, when it is there: a restart after the push may
+    // still see the last one locally, at the candidate itself. T-564: the ref
+    // is resolved to one sha here and that sha is what merges below, so a push
+    // that lands after this read cannot slip in unreviewed.
+    let task_tip = if has_task_branch {
+        git(dir, &["rev-parse", &task_ref])
+            .ok()
+            .map(|tip| tip.trim().to_string())
+    } else {
+        None
+    };
+    // The task branch must hold the approved candidate: the review commit is
+    // pushed on top of it, never instead of it.
+    if !has_review
+        && task_tip
+            .as_deref()
+            .is_some_and(|tip| git(dir, &["merge-base", "--is-ancestor", &sha, tip]).is_err())
+    {
+        return Err(Step::Failed(Failed::stuck(format!(
+            "{task}: the task branch {task_ref} does not hold the approved candidate {sha}\n\
+             the review commit is pushed on top of the candidate, so the merge would publish work nobody reviewed"
+        ))));
+    }
+    // T-564: the task branch holds the approved candidate, the review commit
+    // and nothing else. A lane commit pushed after the hand-in (prometheus
+    // 2026-11-04: hull's fix on T-562) would land unreviewed: each non-merge
+    // commit after the candidate must be the review, whose subject starts with
+    // the project's review message up to `{what}`. A merge commit on top of it
+    // is no way out either — its parents are in the range as well.
+    //
+    // Only the commits the merge newly brings in are judged (T-564 review F1):
+    // a task branch that merged the integration branch into it — the
+    // documented conflict fix (course.md: merge dev into the task branch,
+    // resolve, push, remerge) — carries dev's own commits, and those are
+    // reviewed work already on the branch. `--not <base>` leaves them out.
+    if !has_review && !mechanical && task_tip.is_some() {
+        let tip = task_tip.as_deref().unwrap_or_default();
+        let log = git(
+            dir,
+            &[
+                "log",
+                "--no-merges",
+                "--format=%H%x09%s",
+                &format!("{sha}..{tip}"),
+                "--not",
+                &base_ref,
+            ],
+        )
+        .map_err(|reason| {
+            Step::Failed(Failed::clear(format!(
+                "{task}: the commits of the task branch {task_ref} could not be read: {reason}"
+            )))
+        })?;
+        let foreign: Vec<String> = log
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| {
+                let (commit, subject) = line.split_once('\t')?;
+                (!subject.starts_with(review_prefix)).then(|| format!("{commit} {subject}"))
+            })
+            .collect();
+        if !foreign.is_empty() {
+            return Err(Step::Failed(Failed::stuck(format!(
+                "{task}: the task branch holds commits after the approved candidate that are not the review: {}; a change after hand-in needs a new attempt",
+                foreign.join(", ")
+            ))));
+        }
     }
     // What merges, and the source the merge commit names for it: as today, the
-    // candidate by sha and then the review branch by its name.
+    // candidate by sha and then the review branch by its name; without a review
+    // branch, the task branch alone, which holds both.
     let mut merges: Vec<(String, String)> = Vec::new();
-    if !already {
-        merges.push((sha.clone(), sha.clone()));
-    }
     if has_review {
+        if !already {
+            merges.push((sha.clone(), sha.clone()));
+        }
         merges.push((review_ref.clone(), review_ref.clone()));
+    } else if !mechanical {
+        // Nothing to merge when the candidate is already on the integration
+        // branch and the task branch is exactly it, or is gone with it.
+        let only_the_candidate =
+            already && task_tip.as_deref().map_or(true, |tip| tip == sha.as_str());
+        if !only_the_candidate {
+            // The pinned sha merges; the merge commit still names the branch.
+            merges.push((
+                task_tip.clone().unwrap_or_else(|| task_ref.clone()),
+                task_ref.clone(),
+            ));
+        }
+    } else if !already {
+        merges.push((sha.clone(), sha.clone()));
     }
     // T-532: a remerge whose review branch contains the candidate — the captain
     // merged the integration branch into it and resolved the conflict there —
@@ -2244,12 +3204,14 @@ fn merge_one_locked(
         }
     }
     if merges.is_empty() {
-        // The candidate is on the integration branch and its review branch is
-        // gone: a restart after the push. Nothing to merge, nothing to push.
-        return Step::Merged(format!(
+        // The candidate is on the integration branch and its review commit is
+        // gone with the branch: a restart after the push. Nothing to merge,
+        // nothing to push.
+        return Err(Step::Merged(format!(
             "{task} was already merged: {sha} is on {remote_name}/{integration}"
-        ));
+        )));
     }
+    let head_before = git(dir, &["rev-parse", "HEAD"]).ok();
     for (target, source) in &merges {
         if let Err(reason) = git(
             dir,
@@ -2268,10 +3230,19 @@ fn merge_one_locked(
                 &["reset", "--hard", &format!("{remote_name}/{integration}")],
             );
             probe.step("merge");
-            return Step::Failed(Failed::stuck(format!(
+            return Err(Step::Failed(Failed::stuck(format!(
                 "conflict merging {target}: {reason}"
-            )));
+            ))));
         }
+    }
+    // Every target was already on the branch ("Already up to date"): the work
+    // landed with another merge, and a gate would refuse a candidate that
+    // carries nothing new (Prometheus T-745/T-746, 2026-11-04).
+    if head_before.is_some() && git(dir, &["rev-parse", "HEAD"]).ok() == head_before {
+        probe.step("merge");
+        return Err(Step::Merged(format!(
+            "{task} was already merged: its work is on {remote_name}/{integration}"
+        )));
     }
 
     // 7. conflict markers that a merge left behind without reporting a
@@ -2282,10 +3253,41 @@ fn merge_one_locked(
             &["reset", "--hard", &format!("{remote_name}/{integration}")],
         );
         probe.step("merge");
-        return Step::Failed(Failed::stuck("conflict markers in the merged tree"));
+        return Err(Step::Failed(Failed::stuck(
+            "conflict markers in the merged tree",
+        )));
     }
     probe.step("merge");
 
+    Ok(Prepared {
+        task,
+        sha,
+        branch,
+        review,
+        review_ref,
+        has_review,
+        pushed,
+        base: base_ref,
+        no_gate: false,
+    })
+}
+
+/// Step 8 of a merge: the gate of the repo, in the worktree, before anything
+/// is pushed. `Err` is the merge's end; the worktree is clean again.
+fn run_gate(
+    worktree: &gear_herdr::Worktree,
+    repo: &Repo,
+    lock: &File,
+    remote: Target<'_>,
+    project: &str,
+    round: &str,
+    tasks: &[String],
+    probe: &mut Probe,
+) -> Result<(), Step> {
+    let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(lock));
+    let dir = Path::new(&worktree.path);
+    let integration = repo.integration.clone();
+    let remote_name = remote.name;
     // 8. the gate, before anything is pushed: the gate of the repo the work
     //    is in (T-53).
     probe.begin("gate");
@@ -2295,16 +3297,25 @@ fn merge_one_locked(
     // it still excludes recovery if the engine is killed before wait returns.
     let stdin = match lock.try_clone() {
         Ok(stdin) => stdin,
-        Err(error) => return Step::Failed(Failed::clear(format!("gate lock: {error}"))),
+        Err(error) => return Err(Step::Failed(Failed::clear(format!("gate lock: {error}")))),
     };
-    let output = match gate_command(&gate, dir).stdin(stdin).output() {
+    let tempfail = gate_tempfail_path(dir);
+    let _ = std::fs::remove_file(&tempfail);
+    // T-548: the failed-paths file belongs to this run, too: a line left by an
+    // earlier gate must not name a culprit here. It is not removed after a
+    // failure: the red batch reads it.
+    let _ = std::fs::remove_file(gate_failed_path(dir));
+    let output = match gate_command(&gate, dir, project, round, tasks)
+        .stdin(stdin)
+        .output()
+    {
         Ok(output) => output,
         // The gate could not run at all: the environment is broken, not the
         // work. That can clear (a toolchain coming back), so it is retried.
         Err(error) => {
-            return Step::Failed(Failed::clear(format!(
+            return Err(Step::Failed(Failed::clear(format!(
                 "gate could not run ({gate}): {error}"
-            )))
+            ))))
         }
     };
     if !output.status.success() {
@@ -2312,6 +3323,10 @@ fn merge_one_locked(
         // errors on stderr.
         let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        // T-563: a gate that pushes (or a push that ran beside it) leaves the
+        // remote's chatter in the output; the captain's item and the board
+        // must lead with the gate's own refusal.
+        let combined = without_push_noise(&combined);
         let tail = tail(&combined, 12);
         // T-219: the tail is often slow-test timings, and the captain cannot
         // see what failed in it. The lines that name a failure come first.
@@ -2322,9 +3337,13 @@ fn merge_one_locked(
         );
         // 126 and 127 are the shell's own "cannot run that" (126: not
         // executable, 127: not found): the toolchain is missing or broken,
-        // not the work. That can clear, so it is retried; every other exit
-        // status is the project's own gate saying no.
+        // not the work. 75 (EX_TEMPFAIL) is the gate's own "I could not judge
+        // this time" (a CI service refusing a request, say). All three can
+        // clear, so they are retried; every other exit status is the
+        // project's own gate saying no.
         let status = output.status.code().unwrap_or(0);
+        let asked_retry = tempfail.exists();
+        let _ = std::fs::remove_file(&tempfail);
         let mut reason = format!("gate failed ({gate}):\n");
         if !failures.is_empty() {
             reason.push_str(&failures.join("\n"));
@@ -2332,14 +3351,42 @@ fn merge_one_locked(
         }
         reason.push_str(&tail);
         probe.step("gate");
-        return Step::Failed(if status == 126 || status == 127 {
-            Failed::clear(reason)
-        } else {
-            Failed::stuck(reason)
-        });
+        return Err(Step::Failed(
+            if asked_retry || matches!(status, 75 | 126 | 127) {
+                Failed::clear(reason)
+            } else {
+                Failed::stuck(reason)
+            },
+        ));
     }
     probe.step("gate");
+    Ok(())
+}
 
+/// Steps 9 and 10 of a merge: the push of the gated commit (or the pull
+/// request's head), then the close of the branches the merge consumed.
+#[allow(clippy::too_many_arguments)]
+fn land_merge(
+    worktree: &gear_herdr::Worktree,
+    repo: &Repo,
+    lock: &File,
+    remote: Target<'_>,
+    pr: Option<&PrTarget>,
+    commit: &str,
+    probe: &mut Probe,
+    prepared: &Prepared,
+) -> Step {
+    let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(lock));
+    let dir = Path::new(&worktree.path);
+    let integration = repo.integration.clone();
+    let remote_name = remote.name;
+    let Prepared {
+        sha,
+        review_ref,
+        has_review,
+        ..
+    } = prepared;
+    let has_review = *has_review;
     // 9. PR mode (design §11.2 step 2): the integration branch is not pushed.
     //    The review's commits go onto the pull request's head, and the pull
     //    request is what lands the task.
@@ -2368,11 +3415,53 @@ fn merge_one_locked(
     }
     probe.step("push");
     probe.begin("close");
-    let (closed, left, moved) = close_branches(dir, repo, &branch, &review, remote, &pushed);
+    let step = closed_and_line(
+        dir,
+        repo,
+        remote,
+        &integration,
+        remote_name,
+        prepared,
+        None,
+        |dir, args| git(dir, args),
+    );
     probe.step("close");
+    step
+}
 
-    let head = git(dir, &["log", "-1", "--oneline"]).unwrap_or_default();
+/// Step 10 of a merge: close the branches the merge consumed and write the
+/// `merged <task> into <integration>: ...` line (T-547: a single merge and a
+/// batch, which pushes once for all of its merges, say it the same way).
+fn closed_and_line(
+    dir: &Path,
+    repo: &Repo,
+    remote: Target<'_>,
+    integration: &str,
+    remote_name: &str,
+    prepared: &Prepared,
+    commit: Option<&str>,
+    git: impl Fn(&Path, &[&str]) -> Result<String, String>,
+) -> Step {
+    let Prepared {
+        task,
+        branch,
+        review,
+        pushed,
+        ..
+    } = prepared;
+    let (closed, left, moved) = close_branches(dir, repo, branch, review, remote, pushed);
+
+    // The merge commit this line is about: a batch's op names the one it built
+    // (T-547, F2 of the review), a single merge its own HEAD.
+    let head = match commit {
+        Some(commit) => git(dir, &["log", "-1", "--oneline", commit]).unwrap_or_default(),
+        None => git(dir, &["log", "-1", "--oneline"]).unwrap_or_default(),
+    };
     let mut line = format!("merged {task} into {integration}: {head}");
+    // T-573: the merge says why no gate ran.
+    if prepared.no_gate {
+        line.push_str("\nno gate: reports only");
+    }
     if !closed.is_empty() {
         line.push_str(&format!("\nclosed on {remote_name}: {}", closed.join(", ")));
     }
@@ -2389,6 +3478,537 @@ fn merge_one_locked(
         ));
     }
     Step::Merged(line)
+}
+
+/// One merge of a train, with what its tick resolved for it.
+#[derive(Debug, Clone)]
+struct TrainOp {
+    op: OpRow,
+    others: Vec<(String, String, bool)>,
+    review_fallback: String,
+    commit: String,
+    review_prefix: String,
+}
+
+/// A merge train (`[conventions] merge_parallel` above 1): each merge is
+/// built on the commit the merge ahead of it lands, so every gate checks the
+/// integration branch as it will be; the gates run side by side; the merges
+/// land in order, each a fast-forward of the one before. A merge whose gate
+/// says no fails as it would alone; the ones behind it were gated on top of
+/// it, so they go back to the queue and run again from the new tip. A reason
+/// that can clear stops the train the same way, and `single` asks for the
+/// next merge of this branch to run alone (with its bounded retries).
+#[allow(clippy::too_many_arguments)]
+fn run_train(
+    worktrees: &[gear_herdr::Worktree],
+    repo: &Repo,
+    ops: &[TrainOp],
+    remote: Target<'_>,
+    db_path: &str,
+    single: &std::sync::atomic::AtomicBool,
+) -> Vec<(OpRow, Report)> {
+    use std::sync::atomic::Ordering;
+    let mut locks = Vec::new();
+    for worktree in worktrees {
+        match merge_lock(Path::new(&worktree.path)) {
+            Ok(Some(lock)) => locks.push(lock),
+            Ok(None) => return ops.iter().map(|t| (t.op.clone(), Report::Busy)).collect(),
+            Err(reason) => {
+                return ops
+                    .iter()
+                    .map(|t| {
+                        (
+                            t.op.clone(),
+                            Report::Requeue(format!("merge lock: {reason}")),
+                        )
+                    })
+                    .collect()
+            }
+        }
+    }
+    let mut reports: Vec<Option<Report>> = vec![None; ops.len()];
+    // The stages built: (op index, worktree index, the merge, its probe).
+    let mut stages: Vec<(usize, usize, Prepared, Probe)> = Vec::new();
+    let mut base: Option<String> = None;
+    for (index, train_op) in ops.iter().enumerate() {
+        let slot = stages.len();
+        if slot >= worktrees.len() {
+            break;
+        }
+        let mut probe = Probe::new(
+            train_op.op.task.as_deref().unwrap_or("-"),
+            train_op.op.created,
+            db_path,
+            &train_op.op.id,
+        );
+        match prepare_merge(
+            &worktrees[slot],
+            repo,
+            &train_op.op,
+            &locks[slot],
+            &train_op.others,
+            remote,
+            &train_op.review_fallback,
+            &train_op.commit,
+            &train_op.review_prefix,
+            &mut probe,
+            base.as_deref(),
+        ) {
+            Ok(prepared) => {
+                let dir = Path::new(&worktrees[slot].path);
+                match git_with_lock(dir, &["rev-parse", "HEAD"], Some(&locks[slot])) {
+                    Ok(head) => {
+                        base = Some(head.trim().to_string());
+                        stages.push((index, slot, prepared, probe));
+                    }
+                    Err(reason) => {
+                        reports[index] = Some(Report::Requeue(format!(
+                            "the train could not read its stage: {reason}"
+                        )));
+                    }
+                }
+            }
+            // A merge that cannot be built steps aside: the next one is built
+            // on the same base, so it does not wait behind a conflict.
+            Err(step) => {
+                probe.done();
+                reports[index] = Some(match step {
+                    Step::Failed(failed) if failed.blocker == Blocker::Clear => {
+                        single.store(true, Ordering::SeqCst);
+                        Report::Requeue(failed.reason)
+                    }
+                    Step::Merged(line) if base.is_none() => Report::Merged(line),
+                    Step::Merged(_) => {
+                        Report::Requeue("its work is in a merge ahead of it in the train".into())
+                    }
+                    other => step_report(other),
+                });
+            }
+        }
+    }
+    // The gates, side by side.
+    let gates: Vec<Result<(), Step>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = stages
+            .iter_mut()
+            .map(|(index, slot, _, probe)| {
+                let worktree = &worktrees[*slot];
+                let lock = &locks[*slot];
+                // This stage's own merge names the gate run (T-555).
+                let train_op = &ops[*index];
+                let project = train_op.op.project.clone();
+                let round = gate_round(&train_op.op);
+                let tasks = vec![train_op.op.task.clone().unwrap_or_default()];
+                scope.spawn(move || {
+                    run_gate(
+                        worktree, repo, lock, remote, &project, &round, &tasks, probe,
+                    )
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err(Step::Failed(Failed::stuck("gate thread panicked"))))
+            })
+            .collect()
+    });
+    // The landings, in order: each one is a fast-forward of the one before.
+    let mut broken = false;
+    for ((index, slot, prepared, mut probe), gate) in stages.into_iter().zip(gates) {
+        if broken {
+            reports[index] = Some(Report::Requeue(
+                "the merge ahead of it in the train did not land: it merges again from the new tip"
+                    .into(),
+            ));
+            continue;
+        }
+        if let Err(step) = gate {
+            broken = true;
+            probe.done();
+            reports[index] = Some(match step {
+                Step::Failed(failed) if failed.blocker == Blocker::Clear => {
+                    single.store(true, Ordering::SeqCst);
+                    Report::Requeue(failed.reason)
+                }
+                other => step_report(other),
+            });
+            continue;
+        }
+        let step = land_merge(
+            &worktrees[slot],
+            repo,
+            &locks[slot],
+            remote,
+            None,
+            &ops[index].commit,
+            &mut probe,
+            &prepared,
+        );
+        probe.done();
+        reports[index] = Some(match step {
+            Step::Merged(line) => Report::Merged(line),
+            Step::Failed(failed) => {
+                broken = true;
+                if !lost_the_race(&failed.reason) {
+                    single.store(true, Ordering::SeqCst);
+                }
+                Report::Requeue(failed.reason)
+            }
+            other => {
+                broken = true;
+                step_report(other)
+            }
+        });
+    }
+    ops.iter()
+        .zip(reports)
+        .map(|(train_op, report)| {
+            (
+                train_op.op.clone(),
+                report.unwrap_or_else(|| Report::Requeue("it waits for the next train".into())),
+            )
+        })
+        .collect()
+}
+
+/// A batch merge (T-547, `[conventions] merge_batch` above 1): the passed
+/// merges of one project are merged one after the other into the integration
+/// worktree, each onto the commit the one ahead of it built, and the gate runs
+/// once for all of them. Green: one push lands all of them, then each closes
+/// its own branches. Red: when the gate's reason can clear, every built op
+/// goes back to the queue and the next merge of this branch runs alone; a
+/// single built op fails as it would alone; a batch of several is retried in a
+/// smaller one — the cap comes back halved, and `min(merge_batch, cap * 2)`
+/// after a batch that landed. A merge that cannot be built steps aside on the
+/// base the merges before it left behind, as it does in a train.
+///
+/// The returned cap is what this repo's next batch starts with.
+#[allow(clippy::too_many_arguments)]
+fn run_batch(
+    worktree: &gear_herdr::Worktree,
+    repo: &Repo,
+    ops: &[TrainOp],
+    remote: Target<'_>,
+    db_path: &str,
+    single: &std::sync::atomic::AtomicBool,
+    batch: usize,
+    cap: usize,
+) -> (Vec<(OpRow, Report)>, usize) {
+    use std::sync::atomic::Ordering;
+    let dir = Path::new(&worktree.path);
+    let collect = |reports: Vec<Option<Report>>| -> Vec<(OpRow, Report)> {
+        ops.iter()
+            .zip(reports)
+            .map(|(batch_op, report)| {
+                (
+                    batch_op.op.clone(),
+                    report.unwrap_or_else(|| Report::Requeue("it waits for the next batch".into())),
+                )
+            })
+            .collect()
+    };
+    let lock = match merge_lock(dir) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            return (
+                ops.iter().map(|t| (t.op.clone(), Report::Busy)).collect(),
+                cap,
+            )
+        }
+        Err(reason) => {
+            return (
+                ops.iter()
+                    .map(|t| {
+                        (
+                            t.op.clone(),
+                            Report::Requeue(format!("merge lock: {reason}")),
+                        )
+                    })
+                    .collect(),
+                cap,
+            )
+        }
+    };
+    let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(&lock));
+    let integration = repo.integration.clone();
+    let remote_name = remote.name;
+    let first_base = format!("{remote_name}/{integration}");
+    let mut reports: Vec<Option<Report>> = vec![None; ops.len()];
+    // The merges that built, in order: the op's index, its prepared merge, the
+    // paths its commits added, and its probe. The next task names the culprit
+    // of a red batch from these paths (T-548).
+    let mut built: Vec<(usize, Prepared, Vec<String>, Probe)> = Vec::new();
+    // The commit each built merge left at the head, in the same order: its own
+    // line names it (F2 of the review).
+    let mut heads: Vec<String> = Vec::new();
+    let mut base: Option<String> = None;
+    // T-573: the members that carry only reports merge first. They need no
+    // gate, so a gated member's red gate never holds them back; `changed_paths`
+    // before a build reads the candidate against the remote integration branch,
+    // and a candidate that is not here yet counts as gated, never as a report.
+    let order: Vec<usize> = {
+        let mut only = Vec::new();
+        let mut gated = Vec::new();
+        for (index, batch_op) in ops.iter().enumerate() {
+            let candidate = batch_op.op.payload["candidate"]
+                .as_str()
+                .unwrap_or_default();
+            let paths = if candidate.is_empty() {
+                Vec::new()
+            } else {
+                changed_paths(&git, dir, &first_base, candidate)
+            };
+            if reports_only(&paths, &repo.voyage_dir, &batch_op.op.project) {
+                only.push(index);
+            } else {
+                gated.push(index);
+            }
+        }
+        only.extend(gated);
+        only
+    };
+    for index in order {
+        let batch_op = &ops[index];
+        let mut probe = Probe::new(
+            batch_op.op.task.as_deref().unwrap_or("-"),
+            batch_op.op.created,
+            db_path,
+            &batch_op.op.id,
+        );
+        let before = base.clone().unwrap_or_else(|| first_base.clone());
+        match prepare_merge(
+            worktree,
+            repo,
+            &batch_op.op,
+            &lock,
+            &batch_op.others,
+            remote,
+            &batch_op.review_fallback,
+            &batch_op.commit,
+            &batch_op.review_prefix,
+            &mut probe,
+            base.as_deref(),
+        ) {
+            Ok(prepared) => {
+                let head = match git(dir, &["rev-parse", "HEAD"]) {
+                    Ok(head) => head.trim().to_string(),
+                    Err(reason) => {
+                        probe.done();
+                        reports[index] = Some(Report::Requeue(format!(
+                            "the batch could not read its merge: {reason}"
+                        )));
+                        let _ = git(dir, &["reset", "--hard", &before]);
+                        continue;
+                    }
+                };
+                let changed: Vec<String> = git(dir, &["diff", "--name-only", &before, &head])
+                    .map(|paths| {
+                        paths
+                            .lines()
+                            .map(str::trim)
+                            .filter(|path| !path.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                heads.push(head.clone());
+                base = Some(head);
+                let mut prepared = prepared;
+                // T-573: the merge's own changed files, its review commit
+                // included, decide whether a gate is needed at all.
+                prepared.no_gate = reports_only(&changed, &repo.voyage_dir, &batch_op.op.project);
+                built.push((index, prepared, changed, probe));
+            }
+            // A merge that cannot be built steps aside (as in a train): the
+            // next one is built on the same base, so it does not wait behind a
+            // conflict.
+            Err(step) => {
+                probe.done();
+                reports[index] = Some(match step {
+                    Step::Failed(failed) if failed.blocker == Blocker::Clear => {
+                        single.store(true, Ordering::SeqCst);
+                        Report::Requeue(failed.reason)
+                    }
+                    Step::Merged(line) if base.is_none() => Report::Merged(line),
+                    Step::Merged(_) => {
+                        Report::Requeue("its work is in a merge ahead of it in the batch".into())
+                    }
+                    other => step_report(other),
+                });
+                // Back to where the last good merge left the worktree: a
+                // failed prepare may have reset it to the remote.
+                let _ = git(dir, &["reset", "--hard", &before]);
+            }
+        }
+    }
+    if built.is_empty() {
+        return (collect(reports), cap);
+    }
+    let built_count = built.len();
+    // One gate for the whole batch, named by its first merge and judging every
+    // merge it built (T-555).
+    let project = ops[0].op.project.clone();
+    let round = gate_round(&ops[0].op);
+    let tasks: Vec<String> = built
+        .iter()
+        .map(|(index, ..)| ops[*index].op.task.clone().unwrap_or_default())
+        .collect();
+    // T-573: no gated member, no gate: the batch pushes the way a report-only
+    // single merge does.
+    let gated = built.iter().any(|(_, prepared, ..)| !prepared.no_gate);
+    if gated {
+        if let Err(step) = run_gate(
+            worktree,
+            repo,
+            &lock,
+            remote,
+            &project,
+            &round,
+            &tasks,
+            &mut built[0].3,
+        ) {
+            let clear = matches!(&step, Step::Failed(failed) if failed.blocker == Blocker::Clear);
+            if clear {
+                single.store(true, Ordering::SeqCst);
+            }
+            // T-548: a red batch names its culprit when the gate says which paths
+            // failed. The gate may write the repo-relative files or directories
+            // whose tests failed to `$GEAR_GATE_FAILED`, one per line; a built merge
+            // whose changed paths hold one of them is a suspect. Exactly one
+            // suspect fails with the gate's reason and the others merge again
+            // without it; with no suspect, several, or no file the batch is halved
+            // as before. The file is read once and removed, so a line an earlier
+            // gate left is never read here.
+            let failed_paths = if clear {
+                Vec::new()
+            } else {
+                gate_failed_paths(dir)
+            };
+            let suspects: Vec<(usize, Vec<String>)> = if failed_paths.is_empty() {
+                Vec::new()
+            } else {
+                built
+                    .iter()
+                    .filter_map(|(index, _, changed, _)| {
+                        let matching = matching_paths(&failed_paths, changed);
+                        (!matching.is_empty()).then_some((*index, matching))
+                    })
+                    .collect()
+            };
+            if built_count > 1 && suspects.len() == 1 {
+                let (culprit, matching) = &suspects[0];
+                let culprit = *culprit;
+                let task = ops[culprit].op.task.clone().unwrap_or_default();
+                let (gate_reason, blocker) = match &step {
+                    Step::Failed(failed) => (failed.reason.clone(), failed.blocker),
+                    _ => (String::new(), Blocker::Stuck),
+                };
+                let reason = format!(
+                    "{gate_reason}\nthe batch's failed paths match only {task}'s changes: {}",
+                    matching.join(", ")
+                );
+                for (index, _, _, mut probe) in built {
+                    probe.done();
+                    reports[index] = Some(if index == culprit {
+                        Report::Failed(Failed {
+                            reason: reason.clone(),
+                            blocker,
+                        })
+                    } else {
+                        Report::Requeue(format!(
+                            "its batch failed on {task}'s changes: it merges again without it"
+                        ))
+                    });
+                }
+                // The culprit is known: the batch is not halved.
+                return (collect(reports), cap);
+            }
+            let red = if clear {
+                match &step {
+                    Step::Failed(failed) => failed.reason.clone(),
+                    _ => "the batch could not be gated".to_string(),
+                }
+            } else {
+                "its batch failed the gate: it is gated again in a smaller batch".to_string()
+            };
+            // A single built merge fails as it would alone (the gate's own end).
+            let alone = step_report(step);
+            for (index, _, _, mut probe) in built {
+                probe.done();
+                reports[index] = Some(if clear || built_count > 1 {
+                    Report::Requeue(red.clone())
+                } else {
+                    // A single built merge fails as it would alone.
+                    alone.clone()
+                });
+            }
+            let cap = if clear || built_count == 1 {
+                cap
+            } else {
+                built_count.div_ceil(2)
+            };
+            return (collect(reports), cap);
+        }
+    }
+    // Green: one push lands the whole batch, as step 9b of a single merge.
+    for (_, _, _, probe) in built.iter_mut() {
+        probe.begin("push");
+    }
+    if let Err(reason) = remote.push(dir, &integration) {
+        // A push the remote rejects because the integration branch moved is a
+        // race, read exactly as step 9b of `land_merge` reads it (F1 of the
+        // review): the batch goes back to the queue with the race reason and
+        // the next merge of this branch still batches.
+        let reason = if reason.contains("non-fast-forward")
+            || reason.contains("fetch first")
+            || reason.contains("cannot lock ref")
+        {
+            format!("{RACE}{reason}")
+        } else {
+            format!("push failed: {reason}")
+        };
+        if !lost_the_race(&reason) {
+            single.store(true, Ordering::SeqCst);
+        }
+        for (index, _, _, mut probe) in built {
+            probe.step("push");
+            probe.done();
+            reports[index] = Some(Report::Requeue(reason.clone()));
+        }
+        return (collect(reports), cap);
+    }
+    // Green: each merge of the batch closes its branches and says so.
+    for ((index, prepared, _changed, mut probe), head) in built.into_iter().zip(heads) {
+        probe.step("push");
+        probe.begin("close");
+        let step = closed_and_line(
+            dir,
+            repo,
+            remote,
+            &integration,
+            remote_name,
+            &prepared,
+            Some(&head),
+            |dir, args| git(dir, args),
+        );
+        probe.step("close");
+        probe.done();
+        reports[index] = Some(step_report(step));
+    }
+    (collect(reports), batch.min(cap.saturating_mul(2)))
+}
+
+/// A merge's end, as the worker reports it.
+fn step_report(step: Step) -> Report {
+    match step {
+        Step::Merged(line) => Report::Merged(line),
+        Step::Pr { pr, head } => Report::Pr { pr, head },
+        Step::Waiting(tasks) => Report::Waiting(tasks),
+        Step::Raced(reason) => Report::Raced(reason),
+        Step::Failed(failed) => Report::Failed(failed),
+    }
 }
 
 /// The tasks whose work the candidate carries (T-62): their candidates are
@@ -2777,6 +4397,63 @@ fn close_branches(
     (closed, left, moved)
 }
 
+/// The files a merge changes between `base` and `head` (T-573).
+fn changed_paths(
+    git: &impl Fn(&Path, &[&str]) -> Result<String, String>,
+    dir: &Path,
+    base: &str,
+    head: &str,
+) -> Vec<String> {
+    git(dir, &["diff", "--name-only", base, head])
+        .map(|paths| {
+            paths
+                .lines()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// T-573: does this merge change nothing but reports? Every changed file must
+/// lie under the project's voyage folder (`[conventions].voyage_dir` with
+/// `{project}` filled and `{milestone}` any folder), and a merge that changes
+/// nothing at all is not a report-only merge.
+fn reports_only(paths: &[String], voyage_dir: &str, project: &str) -> bool {
+    !paths.is_empty()
+        && paths
+            .iter()
+            .all(|path| is_under_voyage(path, voyage_dir, project))
+}
+
+/// Is `path` under the project's voyage folder, with `{milestone}` matching any
+/// one folder? The templates GEAR validates name `{milestone}`, so a template
+/// without it is no voyage folder at all.
+fn is_under_voyage(path: &str, voyage_dir: &str, project: &str) -> bool {
+    let template = voyage_dir.replace("{project}", project);
+    let Some(at) = template.find("{milestone}") else {
+        return false;
+    };
+    let prefix = &template[..at];
+    let suffix = &template[at + "{milestone}".len()..];
+    let Some(rest) = path.strip_prefix(prefix) else {
+        return false;
+    };
+    let Some((milestone, _)) = rest.split_once('/') else {
+        return false;
+    };
+    if milestone.is_empty() {
+        return false;
+    }
+    // `{milestone}` is one folder, never a prefix of another: what follows it
+    // is the template's own suffix, then the file.
+    let Some(tail) = rest[milestone.len()..].strip_prefix(suffix) else {
+        return false;
+    };
+    tail.starts_with('/') && tail.len() > 1
+}
+
 /// A file a lane writes its report to: it lies in a `reports/` directory, a
 /// path segment `/reports/` (T-402). Commits past the approved candidate that
 /// change nothing but such files hold no work the review did not see.
@@ -2815,14 +4492,95 @@ fn branch_on_remote(dir: &Path, remote: Target<'_>, branch: &str) -> bool {
 /// project's own build and test command, and it must never see the store of
 /// this machine (L-59). A test that inherited `GEAR_DB` would write to the
 /// production store; the tests give themselves a scratch home instead.
-fn gate_command(gate: &str, dir: &Path) -> Command {
+fn gate_command(gate: &str, dir: &Path, project: &str, round: &str, tasks: &[String]) -> Command {
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg(gate)
         .current_dir(dir)
         .env_remove(gear_model::ctx::ENV_DB)
-        .env_remove(gear_model::ctx::ENV_CTX);
+        .env_remove(gear_model::ctx::ENV_CTX)
+        .env(GATE_TEMPFAIL_ENV, gate_tempfail_path(dir))
+        .env(GATE_FAILED_ENV, gate_failed_path(dir))
+        .env(GATE_PROJECT_ENV, project)
+        .env(GATE_ROUND_ENV, round)
+        .env(GATE_TASKS_ENV, tasks.join(" "));
     cmd
+}
+
+/// The variable naming the file a gate creates when it could not judge this
+/// time (a CI service refused a request): the merge is retried, not failed.
+/// It reaches the engine through any wrapper (`make` turns a recipe's exit 75
+/// into its own exit 2), so it is the bridge for gates run through one.
+pub const GATE_TEMPFAIL_ENV: &str = "GEAR_GATE_TEMPFAIL";
+
+/// The file of [`GATE_TEMPFAIL_ENV`] for a gate run in `dir`.
+fn gate_tempfail_path(dir: &Path) -> std::path::PathBuf {
+    dir.join(".git-gear-gate-tempfail")
+}
+
+/// The variable naming the file a gate writes the repo-relative paths of the
+/// files or directories whose tests failed to, one per line (T-548): a red
+/// batch merge reads it to name the task whose changes match them, and `fn
+/// run_gate` removes it before the gate runs, so only this run's lines are
+/// read. A gate that writes nothing leaves no file, which is fine.
+pub const GATE_FAILED_ENV: &str = "GEAR_GATE_FAILED";
+
+/// The file of [`GATE_FAILED_ENV`] for a gate run in `dir`.
+fn gate_failed_path(dir: &Path) -> std::path::PathBuf {
+    dir.join(".git-gear-gate-failed")
+}
+
+/// The variable naming the project whose merge this gate run judges (T-555):
+/// a project's gate can name the CI branch it uses, and read the run it is.
+pub const GATE_PROJECT_ENV: &str = "GEAR_GATE_PROJECT";
+
+/// The variable naming this gate run (T-555): the id of its first merge op,
+/// lowercase without the dash — `O-6543` is `o6543` — so every gate run of a
+/// project has a name of its own to give its CI work.
+pub const GATE_ROUND_ENV: &str = "GEAR_GATE_ROUND";
+
+/// The variable naming the tasks whose merges this gate run judges (T-555),
+/// space-separated in merge order (`T-637 T-646 T-662`): a single merge names
+/// one task, a batch every merge it built.
+pub const GATE_TASKS_ENV: &str = "GEAR_GATE_TASKS";
+
+/// The round of the gate run that starts at `op` (T-555): its id, lowercase
+/// without the dash.
+fn gate_round(op: &OpRow) -> String {
+    op.id.to_lowercase().replace('-', "")
+}
+
+/// The paths a failed gate named (T-548): the repo-relative files or
+/// directories whose tests failed, one per line, as the gate wrote them to the
+/// file [`GATE_FAILED_ENV`] names — trimmed, empty lines skipped, a trailing
+/// `/` dropped. The file belongs to the run that wrote it: it is read once and
+/// removed here, so a line an earlier gate left behind is never read.
+fn gate_failed_paths(dir: &Path) -> Vec<String> {
+    let path = gate_failed_path(dir);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let _ = std::fs::remove_file(&path);
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.strip_suffix('/').unwrap_or(line).to_string())
+        .filter(|path| !path.is_empty())
+        .collect()
+}
+
+/// The listed paths that name one of `changed` (T-548): a listed path is a
+/// changed path itself, or the directory one of them is in.
+fn matching_paths(listed: &[String], changed: &[String]) -> Vec<String> {
+    listed
+        .iter()
+        .filter(|listed| {
+            changed
+                .iter()
+                .any(|changed| *changed == **listed || changed.starts_with(&format!("{listed}/")))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Run one git command in `dir`; the output tail comes back as the error.
@@ -2842,6 +4600,15 @@ fn git_with_lock(dir: &Path, args: &[&str], lock: Option<&File>) -> Result<Strin
         .env_remove("GEAR_CTX")
         .env_remove("GEAR_DB")
         .env_remove("GEAR_ADMIN");
+    // A connection the host stops answering ends within about a minute
+    // instead of holding the merge for ever (2026-11-04: a fetch hung on
+    // GitHub SSH for 7 minutes). A user's own ssh command is kept.
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() && std::env::var_os("GIT_SSH").is_none() {
+        command.env(
+            "GIT_SSH_COMMAND",
+            "ssh -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4",
+        );
+    }
     if let Some(lock) = lock {
         command.stdin(
             lock.try_clone()
@@ -2869,6 +4636,23 @@ fn tail(text: &str, lines: usize) -> String {
     let all: Vec<&str> = text.lines().collect();
     let start = all.len().saturating_sub(lines);
     all[start..].join("\n")
+}
+
+/// T-563: a gate's output without the remote's chatter: the lines git prints
+/// for a push — `remote: …` (the remote's own messages), `To …` (the target),
+/// and the branch lines ` * [new branch] …` / ` - [deleted] …`. A failed gate
+/// keeps its own refusal first instead of leading with lines nobody can act on.
+fn without_push_noise(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !(line.starts_with("remote:")
+                || line.starts_with("To ")
+                || trimmed.starts_with("* [new branch]")
+                || trimmed.starts_with("- [deleted]"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The lines of a gate's output that name a failure (T-219). A line counts
@@ -2935,6 +4719,137 @@ fn tell_captain(
             state: MsgState::Open,
             created: now,
         })?;
+        Ok(())
+    })
+}
+
+/// The cause of a merge wait, as one item per class (T-566).
+///
+/// A merge that cannot start retries every tick, and each retry used to open
+/// its own item: 47 of them for one worktree that git could not create. One
+/// item per project and cause class says the same thing once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeWaitCause {
+    /// The merge worktree: it could not be created, opened, or it belongs to
+    /// another repository.
+    Worktree,
+    /// Anything else the merge step named.
+    Other,
+}
+
+impl MergeWaitCause {
+    /// The class a reason belongs to: the worktree steps name themselves in
+    /// their reason (`worktree_create: refused …`, `the worktree … belongs to
+    /// another repository …`).
+    fn of(reason: &str) -> MergeWaitCause {
+        if reason.to_lowercase().contains("worktree") {
+            MergeWaitCause::Worktree
+        } else {
+            MergeWaitCause::Other
+        }
+    }
+
+    /// The thread's last part.
+    fn as_str(self) -> &'static str {
+        match self {
+            MergeWaitCause::Worktree => "worktree",
+            MergeWaitCause::Other => "other",
+        }
+    }
+
+    /// Every class: closing a wait closes all of them, since a merge that
+    /// starts has left every cause behind.
+    fn all() -> [MergeWaitCause; 2] {
+        [MergeWaitCause::Worktree, MergeWaitCause::Other]
+    }
+}
+
+/// The thread of a project's merge wait for one cause class (T-566):
+/// `merge-wait:<project>:worktree`.
+fn merge_wait_thread(project: &str, cause: MergeWaitCause) -> String {
+    format!("merge-wait:{project}:{}", cause.as_str())
+}
+
+/// The open item of a thread, if there is one.
+fn open_item(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    thread: &str,
+) -> GearResult<Option<gear_store::MessageRow>> {
+    Ok(tx
+        .thread_messages(project, thread)?
+        .into_iter()
+        .find(|message| matches!(message.state, MsgState::Open | MsgState::Waiting)))
+}
+
+/// Tell the captain that the merge waits, once per project and cause class
+/// (T-566): the body follows the latest reason while the cause lasts, and the
+/// item closes when a merge of the project next starts.
+fn tell_captain_merge_wait(
+    store: &mut Store,
+    project: &str,
+    reason: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let cause = MergeWaitCause::of(reason);
+    let body = format!("merge waits: {reason}");
+    store.write(|tx| {
+        let captain = tx.captain_of(project)?.ok_or_else(|| {
+            GearError::new(
+                ErrorCode::NoTarget,
+                format!("project {project} has no captain"),
+            )
+        })?;
+        let thread = merge_wait_thread(project, cause);
+        if let Some(item) = open_item(tx, project, &thread)? {
+            if item.body != body {
+                tx.update_message_body(project, &item.id, &body)?;
+            }
+            return Ok(());
+        }
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: project.to_string(),
+            thread,
+            task: None,
+            attempt: None,
+            sender: captain.id.clone(),
+            sender_gen: 1,
+            recipient: captain.id,
+            kind: MsgKind::Question,
+            urgent: false,
+            body,
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+        Ok(())
+    })
+}
+
+/// Why a merge wait's item closes: a merge of the project started (T-566).
+const MERGE_WAIT_OVER: &str = "a merge of this project started, so the wait is over";
+
+/// Close the project's merge-wait items: a merge op started, so whatever held
+/// it is gone (T-566).
+fn close_merge_waits(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
+    store.write(|tx| {
+        for cause in MergeWaitCause::all() {
+            let thread = merge_wait_thread(project, cause);
+            let Some(item) = open_item(tx, project, &thread)? else {
+                continue;
+            };
+            tx.update_message_state(
+                project,
+                &item.id,
+                MsgState::Resolved,
+                Some(MERGE_WAIT_OVER),
+                None,
+                None,
+                now,
+            )?;
+        }
         Ok(())
     })
 }
@@ -3204,7 +5119,25 @@ fn sweep_in(
             // A done task whose merge is queued or running is landing, not
             // lost: its branch is not news to the captain.
             let landing = store.read(|tx| {
-                for state in [OpState::Intended, OpState::Executing, OpState::Submitted] {
+                // A carried task lands with its carrier's merge: until the
+                // carrier has merged, its branches are the work in flight.
+                if let Some(by) = tx.task_carried_by(project, &branch.task)? {
+                    let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, &by);
+                    if gear_app::tasks::merged_at(tx, carrier_project, carrier)?.is_none() {
+                        return Ok(true);
+                    }
+                }
+                // T-553: `Unknown` too — that is where a merge that waits for
+                // another task's merge sits (`Report::Waiting`), and a merge
+                // queued behind a dependency lands as surely as one running
+                // (2026-11-04: the captain was told "nothing will merge them"
+                // for T-548 while its merge waited for T-547).
+                for state in [
+                    OpState::Intended,
+                    OpState::Executing,
+                    OpState::Submitted,
+                    OpState::Unknown,
+                ] {
                     if tx.ops_in_state(project, state)?.iter().any(|op| {
                         op.kind == OpKind::Merge && op.task.as_deref() == Some(branch.task.as_str())
                     }) {
@@ -3276,7 +5209,7 @@ fn sweep_in(
     let mut body = String::new();
     if !crowded.is_empty() {
         body.push_str(&format!(
-            "{} task branches of the open voyage(s) are on the remote, over the limit of {cap} ({} lanes × `[conventions] branch_max_per_lane` {}): work is piling up unmerged and branches rot. Clean up: get the oldest reviewed and merged, finish the reworks before new work, cancel what will not land. Oldest first:\n",
+            "{} task branches of the open voyage(s) are on the remote, over the limit of {cap} ({} lanes × `[conventions] branch_max_per_lane` {}): work is piling up unmerged and branches rot. Clean up: get the oldest reviewed and merged, finish the reworks, cancel what will not land. Oldest first:\n",
             crowded.len(),
             config.lanes.len().max(1),
             config.conventions.branch_max_per_lane.max(1)
@@ -3320,7 +5253,7 @@ fn sweep_in(
         let Some(captain) = tx.captain_of(project)? else {
             return Ok(());
         };
-        tx.insert_message(&NewMessage {
+        let message = tx.insert_message(&NewMessage {
             meta: None,
             project: project.to_string(),
             thread: format!("branches:{now}"),
@@ -3337,6 +5270,27 @@ fn sweep_in(
             state: MsgState::Open,
             created: now,
         })?;
+        // T-568: this sweep's report replaces the ones before it (its thread is
+        // named after the tick, so they are found by their prefix): the
+        // captain's inbox holds one branch-sweep item, the newest, whose body
+        // already lists what is still true.
+        for item in tx.messages_in_threads_starting(project, "branches:")? {
+            if item.id == message.id {
+                continue;
+            }
+            if !matches!(item.state, MsgState::Open | MsgState::Waiting) {
+                continue;
+            }
+            tx.update_message_state(
+                project,
+                &item.id,
+                MsgState::Resolved,
+                Some(&format!("superseded by {}", message.id)),
+                None,
+                None,
+                now,
+            )?;
+        }
         Ok(())
     })
 }
@@ -3471,6 +5425,10 @@ fn merge_lost_landed_key(project: &str, task: &str, attempt: i64) -> String {
 /// The word that closes a lost-merge item whose task the scan no longer
 /// checks (T-408).
 const LOST_SKIPPED: &str = "no longer checked: its voyage is finished or its candidate is gone";
+/// The word an open merge-lost item closes with once the work landed.
+const LOST_LANDED: &str = "its work landed";
+/// The word an open merge-lost item closes with once a merge of it is queued.
+const LOST_QUEUED: &str = "a merge of it is queued again";
 
 /// The accepted attempt the lost-merge scan looks at (T-397, T-408): what it
 /// needs to name the work, and why it may leave it alone.
@@ -3491,6 +5449,11 @@ struct Lost {
     /// merge landed, a merge op is queued or running, or its merge-failed item
     /// is open.
     settled: bool,
+    /// The attempt carries a merge time: its work landed, by its own merge or
+    /// with another task's (`integrated-by`).
+    merged: bool,
+    /// A merge op of the task is queued, running or being recovered.
+    in_flight: bool,
 }
 
 /// Is the task's voyage open (T-408)? A voyage is its milestone, and it is open
@@ -3517,9 +5480,213 @@ fn candidate_held(repo: &Repo, candidate: &str) -> Option<bool> {
     Some(git(dir, &["cat-file", "-e", &format!("{candidate}^{{commit}}")]).is_ok())
 }
 
+/// Mark merged the tasks carried by another (`carried-by: T-m`) once T-m's
+/// merge has landed and the carried candidate is on the integration branch:
+/// the attempt takes T-m's merge time, as an `integrated-by` pass would give
+/// it. A carried candidate that is not on the branch stays unmerged, and the
+/// lost scan tells the captain.
+fn land_carried(store: &mut Store, project: &str, config: &ProjectConfig) -> GearResult<bool> {
+    let mut marked = false;
+    let pending = store.read(|tx| {
+        let mut pending = Vec::new();
+        for task in tx.tasks_of_project(project)? {
+            if task.state != TaskState::Done {
+                continue;
+            }
+            let Some(by) = tx.task_carried_by(project, &task.id)? else {
+                continue;
+            };
+            let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, &by);
+            let Some(merged_at) = gear_app::tasks::merged_at(tx, carrier_project, carrier)? else {
+                continue;
+            };
+            let Some(latest) = tx.attempts_of_task(project, &task.id)?.into_iter().last() else {
+                continue;
+            };
+            if latest.state != gear_model::AttemptState::Accepted
+                || tx
+                    .attempt_times(project, &task.id, latest.n)?
+                    .merged
+                    .is_some()
+            {
+                continue;
+            }
+            let Some(candidate) = latest.candidate.clone() else {
+                continue;
+            };
+            pending.push((
+                task.id.clone(),
+                task.lane.clone(),
+                latest.n,
+                candidate,
+                by,
+                merged_at,
+            ));
+        }
+        Ok(pending)
+    })?;
+    for (task, lane, attempt, candidate, by, merged_at) in pending {
+        let repo = match lane.as_deref() {
+            Some(lane) => config.repo_of_lane(lane),
+            None => config.root_repo(),
+        };
+        let dir = Path::new(&repo.path);
+        let reference = format!("{}/{}", config.conventions.remote, repo.integration);
+        let _ = git(
+            dir,
+            &[
+                "fetch",
+                "--quiet",
+                &config.conventions.remote,
+                &repo.integration,
+            ],
+        );
+        if !is_ancestor(dir, &candidate, &reference) {
+            continue;
+        }
+        store.write(|tx| {
+            gear_app::tasks::mark_integrated_by(tx, project, &task, attempt, &by, merged_at)
+        })?;
+        marked = true;
+    }
+    Ok(marked)
+}
+
+/// Close the merge-failed items of work that landed after all: the attempt
+/// the item names has a merge time (its own later merge, or another task's
+/// merge that carried it, `integrated-by`). Such an item asks for a remerge of
+/// work that is already on the integration branch, and a reply cannot close it
+/// (Lawrence M-182, 2026-11-03: T-14 landed with T-26).
+fn close_landed_failures(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
+    store.write(|tx| {
+        for task in tx.merged_done_tasks(project)? {
+            let thread = failed_thread(&task);
+            let open: Vec<_> = tx
+                .thread_messages(project, &thread)?
+                .into_iter()
+                .filter(|item| matches!(item.state, MsgState::Open | MsgState::Waiting))
+                .collect();
+            if open.is_empty() {
+                continue;
+            }
+            let merged: Vec<i64> = tx
+                .attempt_times_of_task(project, &task)?
+                .into_iter()
+                .filter(|(_, times)| times.merged.is_some())
+                .map(|(n, _)| n)
+                .collect();
+            for item in open {
+                let landed = match item.attempt {
+                    Some(attempt) => merged.contains(&attempt),
+                    None => !merged.is_empty(),
+                };
+                if landed {
+                    tx.update_message_state(
+                        project,
+                        &item.id,
+                        MsgState::Resolved,
+                        Some(LOST_LANDED),
+                        None,
+                        None,
+                        now,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Close the captain's items about a task that is over (T-569): a note on a
+/// settled task rings for hours otherwise (M-10318, a lane's note on T-715,
+/// still ringing after T-715 was done; five such items open, and seven
+/// merge-failed/merge-lost items naming tasks whose work had merged).
+///
+/// Two kinds close here, in the same periodic scan as [`close_landed_failures`]:
+/// - every open item on a task thread — `T-<n>:<attempt>` and the captain's
+///   own `T-<n>:cap` — while the task is done or cancelled, with `the task is
+///   <state>`;
+/// - every open `merge-failed:<task>` and `merge-lost:<task>` item of a task
+///   whose attempt has a merge time, with `its work landed`.
+///
+/// An item of a task still running stays open: it is the captain's to act on.
+fn close_settled_task_items(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
+    let unrest = |state: MsgState| matches!(state, MsgState::Open | MsgState::Waiting);
+    store.write(|tx| {
+        for task in tx.tasks_of_project(project)? {
+            if matches!(task.state, TaskState::Done | TaskState::Cancelled) {
+                let why = format!("the task is {}", task.state.as_str());
+                let mut threads: Vec<String> = tx
+                    .attempts_of_task(project, &task.id)?
+                    .into_iter()
+                    .map(|attempt| format!("{}:{}", task.id, attempt.n))
+                    .collect();
+                // The captain's own decision item hangs on `T-<n>:cap`, and an
+                // overrun of a finished task says nothing any more
+                // (Prometheus M-8886, overrun:T-609:rework).
+                threads.push(format!("{}:cap", task.id));
+                for step in ["dev", "review", "rework", "direction"] {
+                    threads.push(format!("overrun:{}:{step}", task.id));
+                }
+                for thread in threads {
+                    for item in tx.thread_messages(project, &thread)? {
+                        if !unrest(item.state) {
+                            continue;
+                        }
+                        tx.update_message_state(
+                            project,
+                            &item.id,
+                            MsgState::Resolved,
+                            Some(&why),
+                            None,
+                            None,
+                            now,
+                        )?;
+                    }
+                }
+            }
+            // The work landed: an item that says the merge failed or was lost
+            // asks for a remerge of work that is already on the branch.
+            // Its own merge or its carrier's (Prometheus T-588, T-563).
+            let landed = gear_app::tasks::work_landed(tx, project, &task.id)?;
+            if !landed {
+                continue;
+            }
+            for thread in [failed_thread(&task.id), lost_thread(&task.id)] {
+                for item in tx.thread_messages(project, &thread)? {
+                    if !unrest(item.state) {
+                        continue;
+                    }
+                    tx.update_message_state(
+                        project,
+                        &item.id,
+                        MsgState::Resolved,
+                        Some(LOST_LANDED),
+                        None,
+                        None,
+                        now,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 /// Close the lost-merge item of a task the scan no longer checks (T-408): the
 /// captain can no longer act on it.
 fn resolve_lost(store: &mut Store, project: &str, task: &str, now: Ts) -> GearResult<()> {
+    resolve_lost_with(store, project, task, LOST_SKIPPED, now)
+}
+
+/// Close the open merge-lost items of a task with `why`.
+fn resolve_lost_with(
+    store: &mut Store,
+    project: &str,
+    task: &str,
+    why: &str,
+    now: Ts,
+) -> GearResult<()> {
     store.write(|tx| {
         let thread = lost_thread(task);
         for item in tx.thread_messages(project, &thread)? {
@@ -3528,7 +5695,7 @@ fn resolve_lost(store: &mut Store, project: &str, task: &str, now: Ts) -> GearRe
                     project,
                     &item.id,
                     MsgState::Resolved,
-                    Some(LOST_SKIPPED),
+                    Some(why),
                     None,
                     None,
                     now,
@@ -3559,7 +5726,8 @@ fn tell_captain_lost(
 ) -> GearResult<()> {
     // One scan of the ops and one of the tasks per tick, like the merge keys of
     // the queue step: a project with no lost task pays two reads.
-    let lost = store.read(|tx| {
+    let (lost, carried_active) = store.read(|tx| {
+        let mut carried_active: Vec<(String, String)> = Vec::new();
         let mut in_flight = std::collections::HashSet::new();
         for state in [
             OpState::Intended,
@@ -3601,6 +5769,39 @@ fn tell_captain_lost(
             let Some(candidate) = latest.candidate.clone() else {
                 continue;
             };
+            // A carried task waits for its carrier's merge only while that
+            // merge is queued or running. A carrier whose merge failed, or
+            // that has none in flight, lands nothing: the carried work is
+            // lost work (user, 2026-11-04: 41 carried tasks sat unlanded for
+            // hours, unreported).
+            // A carrier that is still being worked on (ready, running,
+            // verifying, or its merge in flight) is waited for too, but only
+            // for LAND_WITHIN_S after the acceptance: accepted work that has
+            // not landed by then is lost whatever carries it.
+            if let Some(by) = tx.task_carried_by(project, &task.id)? {
+                let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, &by);
+                let accepted_at = tx
+                    .attempt_times(project, &task.id, latest.n)?
+                    .verdict
+                    .unwrap_or(now);
+                let carrier_active = in_flight.contains(carrier)
+                    || tx.get_task(carrier_project, carrier)?.is_some_and(|row| {
+                        matches!(
+                            row.state,
+                            TaskState::Ready
+                                | TaskState::Running
+                                | TaskState::Verifying
+                                | TaskState::Waiting
+                        )
+                    });
+                if gear_app::tasks::merged_at(tx, carrier_project, carrier)?.is_none()
+                    && carrier_active
+                    && now - accepted_at < LAND_WITHIN_S
+                {
+                    carried_active.push((task.id.clone(), by.clone()));
+                    continue;
+                }
+            }
             // The old filters of T-397 say only whether a **new** item is
             // opened. They are kept here rather than skipping the task
             // (T-458): a task they drop may still hold an open merge-lost item
@@ -3613,11 +5814,6 @@ fn tell_captain_lost(
                 .is_some();
             // A merge op will merge it: queued, running or being recovered.
             let in_flight = in_flight.contains(&task.id);
-            // Its merge failed and the captain has that item still open.
-            let failed_open = tx
-                .thread_messages(project, &failed_thread(&task.id))?
-                .into_iter()
-                .any(|message| message.state == MsgState::Open);
             // Told and settled already: a resolved item does not come back.
             // Such a task is still carried, so the T-408 skips can close an
             // item that is still open.
@@ -3648,11 +5844,33 @@ fn tell_captain_lost(
                 told,
                 voyage: voyage_open(&open_voyages, task),
                 open_item,
-                settled: merged || in_flight || failed_open,
+                // An open merge-failed item is not a merge: the work is
+                // still lost until it lands (user, 2026-11-04).
+                settled: merged || in_flight,
+                merged,
+                in_flight,
             });
         }
-        Ok(lost)
+        Ok((lost, carried_active))
     })?;
+    // A lost item about a task whose carrier is active again is answered.
+    for (task, by) in carried_active {
+        let open = store.read(|tx| {
+            Ok(tx
+                .thread_messages(project, &lost_thread(&task))?
+                .into_iter()
+                .any(|message| message.state == MsgState::Open))
+        })?;
+        if open {
+            resolve_lost_with(
+                store,
+                project,
+                &task,
+                &format!("carried by {by}, which is being worked on"),
+                now,
+            )?;
+        }
+    }
     for Lost {
         task,
         attempt,
@@ -3662,8 +5880,16 @@ fn tell_captain_lost(
         voyage,
         open_item,
         settled,
+        merged,
+        in_flight,
     } in lost
     {
+        // The work landed (its own merge, or another task's that carried it):
+        // an item still open about it is answered.
+        if open_item && merged {
+            resolve_lost_with(store, project, &task, LOST_LANDED, now)?;
+            continue;
+        }
         // T-408: a lost merge of a finished voyage was settled with the voyage,
         // and a candidate the repository no longer holds is work that cannot be
         // remerged. Either way the task is not checked, and an item still open
@@ -3679,6 +5905,13 @@ fn tell_captain_lost(
                 }
                 continue;
             }
+        }
+        // A merge of it is queued again (a red batch sent it back, or the
+        // captain's remerge): the item is answered, the merge will land it
+        // (Prometheus T-721/T-723, 2026-11-05).
+        if open_item && in_flight {
+            resolve_lost_with(store, project, &task, LOST_QUEUED, now)?;
+            continue;
         }
         if told {
             continue;
@@ -3724,7 +5957,8 @@ fn tell_captain_lost(
                 sender_gen: 1,
                 recipient: captain.id,
                 kind: MsgKind::Question,
-                urgent: false,
+                // Accepted work that will never land is urgent: it rings at once.
+                urgent: true,
                 body,
                 reply_to: None,
                 needs_ack: false,
@@ -3810,6 +6044,8 @@ mod tests {
         PairOn,
         /// Two tasks both cut from `dev`: neither carries the other.
         PairFlat,
+        /// Three tasks both cut from `dev`: the merge order of T-574.
+        TrioFlat,
         /// Two tasks in a chain: T-2 carries T-1.
         Chain2,
         /// Three tasks in a chain.
@@ -3881,6 +6117,19 @@ mod tests {
                         review: "r2",
                     },
                 ],
+                Shape::TrioFlat => ["t1", "t2", "t3"]
+                    .into_iter()
+                    .zip(["a.txt", "b.txt", "c.txt"])
+                    .zip(["a", "b", "c"])
+                    .zip(["r1", "r2", "r3"])
+                    .map(|(((task, file), subject), review)| Branch {
+                        task,
+                        base: "dev",
+                        file,
+                        subject,
+                        review,
+                    })
+                    .collect(),
                 Shape::Chain2 => vec![chain("t1", "dev"), chain("t2", "heat/t1")],
                 Shape::Chain3 => vec![
                     chain("t1", "dev"),
@@ -3912,6 +6161,7 @@ mod tests {
         static TASK: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         static PAIR_ON: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         static PAIR_FLAT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        static TRIO_FLAT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         static CHAIN2: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         static CHAIN3: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         static CHILD: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
@@ -3919,6 +6169,7 @@ mod tests {
             Shape::Task => &TASK,
             Shape::PairOn => &PAIR_ON,
             Shape::PairFlat => &PAIR_FLAT,
+            Shape::TrioFlat => &TRIO_FLAT,
             Shape::Chain2 => &CHAIN2,
             Shape::Chain3 => &CHAIN3,
             Shape::ChildWeb => &CHILD,
@@ -4128,13 +6379,13 @@ mod tests {
             Scratch { root, work }
         }
 
-        /// A worktree of this repo for the merge to run in (on `p/merge`).
+        /// A worktree of this repo for the merge to run in (on `p/merge/home`).
         fn merge_worktree(&self) -> gear_herdr::Worktree {
             let path = self.root.join("merge");
             sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge {} origin/dev",
+                    "git -C {} worktree add -q -b p/merge/home {} origin/dev",
                     self.work.display(),
                     path.display()
                 ),
@@ -4143,7 +6394,7 @@ mod tests {
                 workspace_id: "wt-merge".into(),
                 pane_id: "wt-merge:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge".into(),
+                branch: "p/merge/home".into(),
             }
         }
 
@@ -4155,7 +6406,7 @@ mod tests {
             let heads = sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge {} origin/dev && \
+                    "git -C {} worktree add -q -b p/merge/home {} origin/dev && \
                      git -C origin.git rev-parse heat/t5",
                     self.work.display(),
                     path.display()
@@ -4166,7 +6417,7 @@ mod tests {
                 workspace_id: "wt-merge".into(),
                 pane_id: "wt-merge:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge".into(),
+                branch: "p/merge/home".into(),
             };
             (worktree, head)
         }
@@ -4273,7 +6524,7 @@ mod tests {
             sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge {} origin/dev",
+                    "git -C {} worktree add -q -b p/merge/home {} origin/dev",
                     self.work.display(),
                     path.display()
                 ),
@@ -4282,7 +6533,7 @@ mod tests {
                 workspace_id: "wt-merge".into(),
                 pane_id: "wt-merge:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge".into(),
+                branch: "p/merge/home".into(),
             }
         }
 
@@ -4393,6 +6644,74 @@ mod tests {
             .unwrap();
     }
 
+    /// A pass that names the candidate by its full sha while the attempt
+    /// stored a short one is the same commit: its merge is queued.
+    #[test]
+    fn a_pass_naming_the_full_sha_of_a_short_candidate_is_merged() {
+        let mut store = pair_world("ea91cbf12", "486aeaa77");
+        pass(
+            &mut store,
+            "T-1",
+            "ea91cbf12d23ef97e04c06cf9f60bdedcf759b2f",
+            1,
+        );
+        let passed = passed_tasks(&mut store, "p").unwrap();
+        assert_eq!(passed.len(), 1);
+        assert_eq!(passed[0].0, "T-1");
+    }
+
+    /// A reviewed task whose own merge failed is not waited for: a candidate
+    /// that carries it with the fix is how it lands (Lawrence T-17 carried
+    /// T-2, and each waited for the other).
+    #[test]
+    fn a_reviewed_task_whose_merge_failed_is_not_waited_for() {
+        let mut store = pair_world("aaa1111", "bbb2222");
+        pass(&mut store, "T-1", "aaa1111", 1);
+        let carried = |store: &mut Store| {
+            other_candidates(store, "p", "T-2")
+                .unwrap()
+                .into_iter()
+                .any(|(task, _, _)| task == "T-1")
+        };
+        assert!(
+            carried(&mut store),
+            "a passed task not yet merged is waited for"
+        );
+        store
+            .write(|tx| {
+                let op = tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({}),
+                    created: 2,
+                })?;
+                tx.set_op_state("p", &op.id, OpState::Executing, None, 2)?;
+                tx.set_op_state("p", &op.id, OpState::Failed, Some("gate failed"), 3)
+            })
+            .unwrap();
+        assert!(
+            !carried(&mut store),
+            "its merge failed: the carrier lands it"
+        );
+    }
+
+    /// A queued merge naming the full sha of the attempt's short candidate
+    /// still merges what was passed.
+    #[test]
+    fn a_merge_naming_the_full_sha_of_a_short_candidate_is_still_current() {
+        let mut store = pair_world("ea91cbf12", "486aeaa77");
+        let mut merge = op("ea91cbf12d23ef97e04c06cf9f60bdedcf759b2f");
+        merge.task = Some("T-1".into());
+        merge.attempt = Some(1);
+        assert!(still_current(&mut store, "p", &merge).unwrap().is_ok());
+    }
+
     /// T-62: a merge that waits for another task goes last in the queue: the
     /// task it waits for must be able to land first.
     #[test]
@@ -4412,6 +6731,65 @@ mod tests {
         assert_eq!(order[1].id, waiting.id, "the waiting merge goes last");
     }
 
+    /// A merge of a task the plan marks `now` runs before older ordinary ones
+    /// (Prometheus T-579, 2026-11-03).
+    #[test]
+    fn a_now_task_merges_before_older_ordinary_ones() {
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.priority = "must".into();
+                tx.update_task(&task)?;
+                task.id = "T-6".into();
+                task.rank = 6;
+                task.priority = "now".into();
+                tx.insert_task(&task)
+            })
+            .unwrap();
+        let mut older = op("abc1234");
+        older.id = "O-1".into();
+        older.task = Some("T-5".into());
+        let mut urgent = op("abc1234");
+        urgent.id = "O-2".into();
+        urgent.task = Some("T-6".into());
+        urgent.created = older.created + 10;
+
+        let order = merge_order(now_first(&mut store, "p", vec![older, urgent]).unwrap());
+
+        assert_eq!(order[0].id, "O-2", "the now task goes first");
+        assert_eq!(order[1].id, "O-1");
+    }
+
+    /// A merge that waited for a task which has merged since is back in the
+    /// ordinary queue, ahead of newer merges (Prometheus T-482, 2026-11-03).
+    #[test]
+    fn a_merge_whose_awaited_task_landed_waits_no_longer() {
+        let mut store = world(TaskState::Ready);
+        lost_task(&mut store, "abc1234", OpState::Confirmed, 5);
+        let mut waiting = op("abc1234");
+        waiting.id = "O-1".into();
+        waiting.state = OpState::Unknown;
+        waiting.result = Some("waits for T-5".into());
+        let mut newer = op("abc1234");
+        newer.id = "O-2".into();
+        newer.created = waiting.created + 10;
+
+        let still = merge_order(
+            waits_cleared(&mut store, "p", vec![waiting.clone(), newer.clone()]).unwrap(),
+        );
+        assert_eq!(
+            still[0].id, "O-2",
+            "T-5 has not merged yet: O-1 still waits"
+        );
+
+        store
+            .write(|tx| tx.set_attempt_time("p", "T-5", 1, AttemptStep::Merged, 30))
+            .unwrap();
+        let order = merge_order(waits_cleared(&mut store, "p", vec![waiting, newer]).unwrap());
+        assert_eq!(order[0].id, "O-1", "T-5 landed: O-1 runs first again");
+    }
+
     /// T-62: a task built on another task's branch does not merge before that
     /// task passes. The merge waits (it is not a failure), the captain is
     /// told which task it waits for, and both land in order once the other
@@ -4421,7 +6799,7 @@ mod tests {
         let pair = Pair::new("carried", true);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // T-2 passed; T-1 did not (yet). The engine queues T-2's merge itself.
         pass(&mut store, "T-2", &pair.b, 10);
@@ -4678,10 +7056,12 @@ mod tests {
             })
             .unwrap();
         accept(&mut store, "T-5", 0);
-        let error = plan_remerge(&mut store, "T-5", 40).unwrap_err();
-        assert!(error.detail.contains("no merge to retry"), "{error:?}");
-        let error = plan_remerge(&mut store, "T-99", 41).unwrap_err();
+        // An accepted task with no merge of its own (it was carried, Lawrence
+        // T-34) gets its first one from a remerge.
+        let error = plan_remerge(&mut store, "T-99", 40).unwrap_err();
         assert!(error.detail.contains("no task T-99"), "{error:?}");
+        plan_remerge(&mut store, "T-5", 41).unwrap();
+        assert_eq!(merge_op(&mut store).state, OpState::Intended);
     }
 
     /// A done task whose attempt was accepted with `candidate`, whose merge op
@@ -4752,6 +7132,53 @@ mod tests {
             .unwrap();
     }
 
+    /// A lost item closes once a merge of the task is queued again: the merge
+    /// will land it (Prometheus T-721/T-723, 2026-11-05: a red batch's members
+    /// were named lost, then queued again, and the items stayed open).
+    #[test]
+    fn a_lost_item_closes_once_a_merge_of_it_is_queued_again() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let open = |store: &mut Store| {
+            store
+                .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+                .unwrap()
+                .into_iter()
+                .filter(|item| item.state == MsgState::Open)
+                .count()
+        };
+        assert_eq!(open(&mut store), 1, "the lost work is named");
+
+        store
+            .write(|tx| {
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "branch": "heat/t5", "candidate": "abc1234" }),
+                    created: 25,
+                })?;
+                tx.set_meta(&settled_key("p"), "25")
+            })
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
+
+        assert_eq!(open(&mut store), 0, "a queued merge answers the item");
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items[0].result.as_deref(), Some(LOST_QUEUED));
+    }
+
     /// T-397: a merge failed, its item was resolved without a remerge, and the
     /// accepted work sat unmerged with no word about it. The engine names it
     /// once, with the plan line that retries it, and the next tick is quiet.
@@ -4781,6 +7208,78 @@ mod tests {
             .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
             .unwrap();
         assert_eq!(items.len(), 1, "a second tick added an item: {items:?}");
+    }
+
+    /// `carried-by: T-m` (Lawrence T-31, 2026-11-03): a passed task whose work
+    /// lands with another task's merge gets no merge of its own, and it is not
+    /// named lost while its carrier has not merged.
+    #[test]
+    fn a_carried_task_queues_no_merge_and_is_not_named_lost() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        store
+            .write(|tx| {
+                gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-5", 1, 1, "abc1234", "report", 0)?;
+                let mut attempt = tx.get_attempt("p", "T-5", 1)?.unwrap();
+                attempt.state = gear_model::AttemptState::Accepted;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+                tx.set_task_carried_by("p", "T-5", "T-9")
+            })
+            .unwrap();
+        // The carrier T-9 has no merge in flight: the carried work lands
+        // nothing, so it is named lost (user, 2026-11-04).
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20 + LOST_SCAN_EVERY_S).unwrap();
+        let merges = store
+            .read(|tx| tx.ops_of_kind_in_states("p", OpKind::Merge, &[]))
+            .unwrap();
+        assert!(merges.is_empty(), "a carried task got a merge: {merges:?}");
+        let lost = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(
+            lost.len(),
+            1,
+            "a carried task whose carrier merges nothing: {lost:?}"
+        );
+        assert!(lost[0].urgent, "lost accepted work is urgent");
+
+        // Without the mark, the same task is queued as usual.
+        store
+            .write(|tx| tx.set_task_carried_by("p", "T-5", ""))
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 30 + LOST_SCAN_EVERY_S).unwrap();
+        let merges = store
+            .read(|tx| tx.ops_of_kind_in_states("p", OpKind::Merge, &[]))
+            .unwrap();
+        assert_eq!(merges.len(), 1, "{merges:?}");
+    }
+
+    /// A merge queued before the task was marked `carried-by` is closed, not
+    /// run: the work lands with its carrier (Prometheus T-574/T-577).
+    #[test]
+    fn a_queued_merge_of_a_task_that_became_carried_is_voided() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Intended, 10);
+        store
+            .write(|tx| tx.set_task_carried_by("p", "T-5", "T-9"))
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Void, "{op:?}");
+        assert!(
+            op.result
+                .as_deref()
+                .is_some_and(|r| r.contains("carried-by")),
+            "{op:?}"
+        );
     }
 
     /// T-397: a merge that is still queued will merge the attempt itself: it is
@@ -5077,12 +7576,1299 @@ mod tests {
         assert_eq!(items[0].result.as_deref(), Some(LOST_SKIPPED));
     }
 
+    /// T-569: a captain item on a task thread closes once the task is done,
+    /// and stays open while it runs (M-10318: a note on T-715 rang for hours
+    /// after the task was done).
+    #[test]
+    fn an_item_on_a_task_thread_closes_when_the_task_is_done() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 5);
+        // A note of a lane to the captain, on the task's own thread, and the
+        // captain's decision item on `T-5:cap`.
+        store
+            .write(|tx| {
+                for thread in ["T-5:1", "T-5:cap"] {
+                    tx.insert_message(&gear_store::NewMessage {
+                        meta: None,
+                        project: "p".into(),
+                        thread: thread.into(),
+                        task: Some("T-5".into()),
+                        attempt: Some(1),
+                        sender: "p:heat".into(),
+                        sender_gen: 1,
+                        recipient: "p:captain".into(),
+                        kind: gear_model::MsgKind::Instruction,
+                        urgent: true,
+                        body: "a note about T-5".into(),
+                        reply_to: None,
+                        needs_ack: false,
+                        state: MsgState::Open,
+                        created: 5,
+                    })?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let states = |store: &mut Store| {
+            store
+                .read(|tx| {
+                    Ok((
+                        tx.thread_messages("p", "T-5:1")?,
+                        tx.thread_messages("p", "T-5:cap")?,
+                    ))
+                })
+                .unwrap()
+        };
+
+        // The task still runs: its items stay open.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.state = TaskState::Running;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 10 + LOST_SCAN_EVERY_S).unwrap();
+        let (item, decision) = states(&mut store);
+        assert_eq!(item[0].state, MsgState::Open, "{item:?}");
+        assert_eq!(decision[0].state, MsgState::Open, "{decision:?}");
+
+        // The task is done: both close, and say why.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        merge_passed(
+            &mut store,
+            &mut herdr,
+            &cfg,
+            "p",
+            11 + 2 * LOST_SCAN_EVERY_S,
+        )
+        .unwrap();
+        let (item, decision) = states(&mut store);
+        assert_eq!(item[0].state, MsgState::Resolved, "{item:?}");
+        assert_eq!(item[0].result.as_deref(), Some("the task is done"));
+        assert_eq!(decision[0].state, MsgState::Resolved, "{decision:?}");
+        assert_eq!(decision[0].result.as_deref(), Some("the task is done"));
+    }
+
+    /// T-569: an open merge-failed item of a task whose attempt has a merge
+    /// time closes, even when the task is not done.
+    #[test]
+    fn a_failed_item_closes_once_its_attempt_has_a_merge_time() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 5);
+        store
+            .write(|tx| {
+                tx.insert_message(&gear_store::NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: failed_thread("T-5"),
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: gear_model::MsgKind::System,
+                    urgent: false,
+                    body: "the merge of T-5 failed".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: 5,
+                })
+            })
+            .unwrap();
+        let state = |store: &mut Store| {
+            store
+                .read(|tx| tx.thread_messages("p", &failed_thread("T-5")))
+                .unwrap()[0]
+                .state
+        };
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 10 + LOST_SCAN_EVERY_S).unwrap();
+        assert_eq!(state(&mut store), MsgState::Open, "nothing landed yet");
+
+        store
+            .write(|tx| tx.set_attempt_time("p", "T-5", 1, AttemptStep::Merged, 30))
+            .unwrap();
+        merge_passed(
+            &mut store,
+            &mut herdr,
+            &cfg,
+            "p",
+            31 + 2 * LOST_SCAN_EVERY_S,
+        )
+        .unwrap();
+        assert_eq!(state(&mut store), MsgState::Resolved, "its work landed");
+    }
+
+    /// A merge-lost item closes once the work landed with another task's
+    /// merge (`integrated-by`): the item asked for a remerge of work that is
+    /// already on the integration branch (Lawrence M-81).
+    #[test]
+    fn a_lost_item_closes_once_the_work_landed_with_another_task() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items[0].state, MsgState::Open, "{items:?}");
+
+        // The work lands with another task's merge.
+        store
+            .write(|tx| tx.set_attempt_time("p", "T-5", 1, AttemptStep::Merged, 30))
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 31 + LOST_SCAN_EVERY_S).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
+        assert_eq!(items[0].result.as_deref(), Some(LOST_LANDED));
+    }
+
+    /// Prometheus M-8629 / M-9797 (2026-11-05): a task carried by another
+    /// (`carried-by`) has no merge time of its own; once its carrier merged,
+    /// its merge-failed item closes, and a reply may close it too.
+    #[test]
+    fn a_failed_merge_item_of_a_carried_task_closes_once_its_carrier_merged() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 5);
+        store
+            .write(|tx| {
+                let mut carrier = tx.get_task("p", "T-5")?.unwrap();
+                carrier.id = "T-6".into();
+                carrier.rank = 2;
+                carrier.state = TaskState::Ready;
+                tx.insert_task(&carrier)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-6", "p:heat", 1, 0)?;
+                tx.set_task_carried_by("p", "T-5", "T-6")?;
+                tx.insert_message(&gear_store::NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: failed_thread("T-5"),
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: gear_model::MsgKind::System,
+                    urgent: false,
+                    body: "the merge of T-5 failed".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: 5,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 10).unwrap();
+        let state = |store: &mut Store| {
+            store
+                .read(|tx| tx.thread_messages("p", &failed_thread("T-5")))
+                .unwrap()[0]
+                .state
+        };
+        assert_eq!(
+            state(&mut store),
+            MsgState::Open,
+            "the carrier has not merged"
+        );
+        store
+            .write(|tx| tx.set_attempt_time("p", "T-6", 1, AttemptStep::Merged, 30))
+            .unwrap();
+        assert!(store
+            .read(|tx| gear_app::tasks::work_landed(tx, "p", "T-5"))
+            .unwrap());
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 31 + LOST_SCAN_EVERY_S).unwrap();
+        assert_eq!(state(&mut store), MsgState::Resolved, "its carrier merged");
+    }
+
+    /// A merge-failed item closes once the attempt it names has landed after
+    /// all (Lawrence M-182: T-14 landed with T-26, `integrated-by`).
+    #[test]
+    fn a_failed_merge_item_closes_once_its_work_landed() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 5);
+        store
+            .write(|tx| {
+                tx.insert_message(&gear_store::NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: failed_thread("T-5"),
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: gear_model::MsgKind::System,
+                    urgent: false,
+                    body: "the merge of T-5 failed".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: 5,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 10).unwrap();
+        let open = |store: &mut Store| {
+            store
+                .read(|tx| tx.thread_messages("p", &failed_thread("T-5")))
+                .unwrap()[0]
+                .state
+        };
+        assert_eq!(open(&mut store), MsgState::Open, "nothing landed yet");
+
+        store
+            .write(|tx| tx.set_attempt_time("p", "T-5", 1, AttemptStep::Merged, 30))
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 31 + LOST_SCAN_EVERY_S).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", &failed_thread("T-5")))
+            .unwrap();
+        assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
+        assert_eq!(items[0].result.as_deref(), Some(LOST_LANDED));
+    }
+
+    /// A new failure of a merge whose failed item is still open rings again
+    /// (Prometheus T-597: the third failure only rewrote an item the captain
+    /// had seen, so no doorbell named it). The same failure again stays quiet.
+    #[test]
+    fn a_new_failure_of_the_same_merge_opens_a_fresh_item() {
+        let mut store = world(TaskState::Ready);
+        lost_task(&mut store, "abc1234", OpState::Failed, 5);
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        tell_captain_failed(&mut store, "p", &op, "the gate said no", 10).unwrap();
+        tell_captain_failed(&mut store, "p", &op, "the gate said no", 11).unwrap();
+        assert_eq!(failed_items(&mut store, "T-5").len(), 1, "the same failure");
+
+        tell_captain_failed(&mut store, "p", &op, "a test failed", 20).unwrap();
+        let items = failed_items(&mut store, "T-5");
+        let open: Vec<_> = items.iter().filter(|m| m.state == MsgState::Open).collect();
+        assert_eq!(open.len(), 1, "{items:?}");
+        assert!(open[0].body.contains("a test failed"), "{}", open[0].body);
+        assert_eq!(items.len(), 2, "the old item closed, a fresh one opened");
+    }
+
+    /// T-566: a merge worktree that cannot be used rings once, not once per
+    /// retry, and the next merge that starts closes the item.
+    #[test]
+    fn a_repeating_worktree_failure_keeps_one_item_and_a_merge_that_starts_closes_it() {
+        let scratch = Scratch::new("merge-wait-item");
+        let foreign_a = Scratch::new("merge-wait-foreign-a");
+        let foreign_b = Scratch::new("merge-wait-foreign-b");
+        let mut store = world(TaskState::Ready);
+        let candidate = scratch.head_of("heat/t5");
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        lost_task(&mut store, &candidate, OpState::Intended, 5);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        // A checkout of another repository stands where the merge worktree goes.
+        herdr.add_worktree(
+            "p/merge/home",
+            &foreign_a.work.display().to_string(),
+            "wt-merge:p1",
+        );
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        // Five retries of the same blocked merge.
+        for tick in 0..3 {
+            merge_passed(&mut store, &mut herdr, &cfg, "p", 20 + tick * 30).unwrap();
+        }
+        // The cause changes (another repository's checkout): the same item
+        // carries the latest reason.
+        herdr.add_worktree(
+            "p/merge/home",
+            &foreign_b.work.display().to_string(),
+            "wt-merge:p1",
+        );
+        for tick in 3..5 {
+            merge_passed(&mut store, &mut herdr, &cfg, "p", 20 + tick * 30).unwrap();
+        }
+
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-wait:p:worktree"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "one item, not one per retry: {items:?}");
+        assert_eq!(items[0].state, MsgState::Open, "still waiting");
+        assert!(
+            items[0].body.starts_with("merge waits: "),
+            "{}",
+            items[0].body
+        );
+        assert!(
+            items[0]
+                .body
+                .contains(&foreign_b.work.display().to_string()),
+            "the latest reason: {}",
+            items[0].body
+        );
+        assert!(
+            !items[0]
+                .body
+                .contains(&foreign_a.work.display().to_string()),
+            "the earlier reason is gone: {}",
+            items[0].body
+        );
+
+        // The merge worktree is right now: the merge starts and the item closes.
+        let path = scratch.root.join("merge");
+        sh(
+            &scratch.root,
+            &format!(
+                "git -C {} worktree add -q -b p/merge/home {} origin/dev",
+                scratch.work.display(),
+                path.display()
+            ),
+        );
+        herdr.add_worktree("p/merge/home", &path.display().to_string(), "wt-merge:p1");
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 400).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-wait:p:worktree"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
+        assert_eq!(items[0].result.as_deref(), Some(MERGE_WAIT_OVER));
+    }
+
+    /// T-565: the merge seat is not a `SeatRow`, so no apply and no lane pass
+    /// moves its branch. A repo still on the previous default (`p/merge`) gets
+    /// its merge worktree on `p/merge/home` anyway: the old ref is settled
+    /// before git is asked for the branch, and no D/F refusal is reported.
+    #[test]
+    fn a_merge_seat_on_the_previous_default_branch_is_moved_before_its_worktree() {
+        let scratch = Scratch::new("merge-seat-old-default");
+        // The ref the previous default gave the merge seat.
+        sh(
+            &scratch.root,
+            &format!("git -C {} branch p/merge dev", scratch.work.display()),
+        );
+        let mut store = world(TaskState::Ready);
+        let candidate = scratch.head_of("heat/t5");
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        lost_task(&mut store, &candidate, OpState::Intended, 5);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+
+        // The ref moved to the current default, and the worktree was asked for
+        // on the new name.
+        assert!(
+            git_ref_exists(&scratch.work, "refs/heads/p/merge/home"),
+            "the new name is a branch"
+        );
+        assert!(
+            !git_ref_exists(&scratch.work, "refs/heads/p/merge"),
+            "the old name is gone"
+        );
+        assert!(
+            herdr.worktree_branches().contains(&"p/merge/home"),
+            "the merge worktree is on the new branch: {:?}",
+            herdr.worktree_branches()
+        );
+        let waits = store
+            .read(|tx| tx.thread_messages("p", "merge-wait:p:worktree"))
+            .unwrap();
+        assert!(waits.is_empty(), "no D/F refusal is reported: {waits:?}");
+    }
+
+    /// T-565: a ref of another name that is a folder of the merge seat's branch
+    /// is named and left alone — the merge waits, and nothing is deleted.
+    #[test]
+    fn a_foreign_ref_in_the_way_of_the_merge_branch_is_named_and_left_alone() {
+        let scratch = Scratch::new("merge-seat-foreign");
+        sh(
+            &scratch.root,
+            &format!("git -C {} branch p dev", scratch.work.display()),
+        );
+        let mut store = world(TaskState::Ready);
+        let candidate = scratch.head_of("heat/t5");
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        lost_task(&mut store, &candidate, OpState::Intended, 5);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+
+        // The wait is one item on the merge-wait thread (T-566) or, before
+        // that lands, on the thread the merge tells the captain on this tick.
+        let said = |store: &mut Store, thread: &str| {
+            store
+                .read(|tx| tx.thread_messages("p", thread))
+                .unwrap_or_default()
+        };
+        let mut waits = said(&mut store, "merge-wait:p:worktree");
+        if waits.is_empty() {
+            waits = said(&mut store, "merge:20");
+        }
+        assert!(
+            waits
+                .iter()
+                .any(|item| item.body.contains("the ref p stands in its way")),
+            "the ref is named: {waits:?}"
+        );
+        // The foreign ref is untouched and nothing was created over it.
+        assert!(
+            git_ref_exists(&scratch.work, "refs/heads/p"),
+            "the foreign ref is untouched"
+        );
+        assert!(
+            !git_ref_exists(&scratch.work, "refs/heads/p/merge/home"),
+            "nothing was created over it"
+        );
+    }
+
+    /// Whether the repo at `dir` has the ref `ref` (T-565).
+    fn git_ref_exists(dir: &Path, name: &str) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", "--verify", "--quiet", name])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    /// The worktree of a merge train's second stage, beside the pair's own.
+    fn second_stage(pair: &Pair, herdr: &mut gear_herdr::fake::FakeHerdr) -> PathBuf {
+        let path = pair.root.join("merge-2");
+        sh(
+            &pair.root,
+            &format!(
+                "git -C {} worktree add -q -b p/merge-2/home {} origin/dev",
+                pair.work.display(),
+                path.display()
+            ),
+        );
+        herdr.add_worktree(
+            "p/merge-2/home",
+            &path.display().to_string(),
+            "wt-merge-2:p1",
+        );
+        path
+    }
+
+    /// The project's merges gate two at a time, with `gate` as its gate.
+    fn train_of_two(store: &mut Store, gate: &str) {
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text(gate)
+                    .replace("[conventions]\n", "[conventions]\nmerge_parallel = 2\n");
+                tx.update_project(&project)
+            })
+            .unwrap();
+    }
+
+    /// Three tasks of one project, each cut from `dev` (T-574's merge order).
+    struct Trio {
+        root: PathBuf,
+        work: PathBuf,
+    }
+
+    impl Trio {
+        fn new(name: &str) -> Trio {
+            let root = scratch_root(name, Shape::TrioFlat);
+            let work = root.join("work");
+            Trio { root, work }
+        }
+
+        fn merge_worktree(&self) -> gear_herdr::Worktree {
+            let path = self.root.join("merge");
+            sh(
+                &self.root,
+                &format!(
+                    "git -C {} worktree add -q -b p/merge/home {} origin/dev",
+                    self.work.display(),
+                    path.display()
+                ),
+            );
+            gear_herdr::Worktree {
+                workspace_id: "wt-merge".into(),
+                pane_id: "wt-merge:p1".into(),
+                path: path.display().to_string(),
+                branch: "p/merge/home".into(),
+            }
+        }
+
+        fn heads(&self) -> std::collections::BTreeMap<String, String> {
+            branch_heads(&self.root)
+        }
+    }
+
+    impl Drop for Trio {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// A project with the three tasks of a [`Trio`], all handed in.
+    fn trio_world(candidate_a: &str, candidate_b: &str, candidate_c: &str) -> Store {
+        let mut store = pair_world(candidate_a, candidate_b);
+        store
+            .write(|tx| {
+                tx.insert_task(&gear_store::TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-3".into(),
+                    rank: 3,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: 0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-3", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-3", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-3", 1, 1, candidate_c, "report", 0)?;
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// A third handed-in task, T-3, on its own branch of the scratch repo: its
+    /// candidate is returned.
+    fn add_third_task(store: &mut Store, pair: &Pair) -> String {
+        let candidate = sh(
+            &pair.work,
+            "git switch -qc t3 dev && echo c > c.txt && git add c.txt \
+             && git -c user.email=a@b -c user.name=a commit -qm c \
+             && git -C ../origin.git fetch -q \"$(pwd)\" +HEAD:refs/heads/heat/t3 \
+             && git rev-parse HEAD",
+        )
+        .trim()
+        .to_string();
+        store
+            .write(|tx| {
+                tx.insert_task(&gear_store::TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-3".into(),
+                    rank: 3,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: 0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-3", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-3", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-3", 1, 1, &candidate, "report", 0)?;
+                Ok(())
+            })
+            .unwrap();
+        candidate
+    }
+
+    /// T-576: a red batch of three sends its members back **queued**, not
+    /// unknown (Prometheus 2026-11-05: O-7384..O-7390 sat `unknown` with "its
+    /// batch failed the gate: it is gated again in a smaller batch", no later
+    /// batch took them, the lost scan called them lost and `- remerge`
+    /// refused them).
+    #[test]
+    fn a_red_batch_leaves_its_members_queued_and_the_next_batch_takes_them() {
+        let pair = Pair::new("batch-queued", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        let third = add_third_task(&mut store, &pair);
+        // The gate says no to the whole batch.
+        batch_of(&mut store, "false", 3);
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        pass(&mut store, "T-3", &third, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        // One red batch, then collected: every member is queued again.
+        let seen = cfg.merges.progress();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
+        assert!(cfg.merges.running("p"), "the batch runs");
+        assert!(cfg.merges.wait_progress(seen, WAIT), "the batch reports");
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 31).unwrap();
+
+        let ids: Vec<String> = ["T-1", "T-2", "T-3"]
+            .iter()
+            .map(|task| {
+                store
+                    .read(|tx| Ok(tx.ops_in_state("p", OpState::Intended)?))
+                    .unwrap()
+                    .into_iter()
+                    .find(|op| op.kind == OpKind::Merge && op.task.as_deref() == Some(task))
+                    .unwrap_or_else(|| panic!("{task} is queued again"))
+                    .id
+            })
+            .collect();
+        for id in &ids {
+            let op = store.read(|tx| tx.get_op("p", id)).unwrap().unwrap();
+            assert_eq!(op.state, OpState::Intended, "{id} is queued, not unknown");
+            assert!(
+                op.result
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("gated again in a smaller batch")),
+                "{id}: {:?}",
+                op.result
+            );
+        }
+
+        // The next round takes them: a passing gate lands all three.
+        batch_of(&mut store, "true", 3);
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            ["T-1", "T-2", "T-3"].iter().all(|task| {
+                store
+                    .read(|tx| {
+                        Ok(tx
+                            .ops_in_state("p", OpState::Confirmed)?
+                            .into_iter()
+                            .any(|op| op.kind == OpKind::Merge && op.task.as_deref() == Some(task)))
+                    })
+                    .unwrap()
+            })
+        });
+        let log = pair.dev_log();
+        for subject in ["a", "c"] {
+            assert!(log_has(&log, subject), "{subject} landed: {log}");
+        }
+    }
+
+    /// The project merges in batches of `size`, with `gate` as its gate
+    /// (T-547).
+    fn batch_of(store: &mut Store, gate: &str, size: usize) {
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text(gate).replace(
+                    "[conventions]\n",
+                    &format!("[conventions]\nmerge_batch = {size}\n"),
+                );
+                tx.update_project(&project)
+            })
+            .unwrap();
+    }
+
+    /// The project merges in batches of two, with `gate` as its gate (T-547).
+    fn batch_of_two(store: &mut Store, gate: &str) {
+        batch_of(store, gate, 2);
+    }
+
+    /// A batch merge (T-547): the two passed merges are merged into one
+    /// worktree and gated once; both land together.
+    #[test]
+    fn two_merges_are_merged_together_and_gated_once() {
+        let pair = Pair::new("batch", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        // The gate's own tally, in a file neither the worktree nor the remote
+        // holds.
+        let ran = pair.root.join("gate-runs");
+        batch_of_two(&mut store, &format!("echo x >> {}; true", ran.display()));
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Confirmed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let log = pair.dev_log();
+        for subject in ["a", "b", "r1", "r2"] {
+            assert!(log_has(&log, subject), "{subject} landed: {log}");
+        }
+        let runs = fs::read_to_string(&ran).unwrap_or_default();
+        assert_eq!(runs.lines().count(), 1, "one gate for both: {runs}");
+        // Each merge's line names its own commit, not the last one's (F2 of the
+        // review): both are commits of dev and they differ.
+        let line_of = |store: &mut Store, id: &str| {
+            op_result(store, id)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
+        let first = line_of(&mut store, "O-1");
+        let second = line_of(&mut store, "O-2");
+        assert_ne!(first, second, "each merge names its own commit");
+        let heads = sh(&pair.root, "git -C origin.git log --format=%h dev");
+        for line in [&first, &second] {
+            // `merged <task> into <integration>: <sha> <subject>`
+            let commit = line.split(": ").nth(1).unwrap_or_default();
+            let sha = commit.split_whitespace().next().unwrap_or_default();
+            assert!(
+                heads.lines().any(|head| head == sha),
+                "{line:?} names a commit of dev: {heads}"
+            );
+        }
+    }
+
+    /// T-555: a gate run is told which project it judges, which run it is (the
+    /// id of its first merge op, `o1`) and which task it judges.
+    #[test]
+    fn a_single_merges_gate_names_its_project_round_and_task() {
+        let pair = Pair::new("gate-vars", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        // The gate's own record, in a file outside the worktree.
+        let got = pair.root.join("gate-run");
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text(&format!(
+                    "echo $GEAR_GATE_PROJECT $GEAR_GATE_ROUND $GEAR_GATE_TASKS > {}; true",
+                    got.display()
+                ));
+                tx.update_project(&project)
+            })
+            .unwrap();
+        pass(&mut store, "T-1", &pair.a, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Confirmed)
+        });
+
+        let line = fs::read_to_string(&got).unwrap_or_default();
+        assert_eq!(line.trim(), "p o1 T-1");
+    }
+
+    /// T-555: a batch's one gate names its first merge as the round and every
+    /// merge it judges, in merge order.
+    #[test]
+    fn a_batchs_gate_names_the_round_and_every_task_it_judges() {
+        let pair = Pair::new("gate-vars-batch", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        let got = pair.root.join("gate-run");
+        batch_of_two(
+            &mut store,
+            &format!(
+                "echo $GEAR_GATE_PROJECT $GEAR_GATE_ROUND $GEAR_GATE_TASKS > {}; true",
+                got.display()
+            ),
+        );
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Confirmed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let line = fs::read_to_string(&got).unwrap_or_default();
+        assert_eq!(line.trim(), "p o1 T-1 T-2");
+    }
+
+    /// T-574: the captain's `- merge-first T-<n>` runs before every other ready
+    /// merge — the batch they would form — and alone (Prometheus, 2026-11-05:
+    /// T-738 held the fix every red round waited for, and its merge was last
+    /// of fifteen).
+    #[test]
+    fn a_merge_first_task_merges_before_the_batch() {
+        let trio = Trio::new("merge-first");
+        let worktree = trio.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let heads = trio.heads();
+        let mut store = trio_world(&heads["heat/t1"], &heads["heat/t2"], &heads["heat/t3"]);
+        // The gate writes whom it judged: one task when the merge runs alone.
+        let ran = trio.root.join("gate-runs");
+        batch_of(
+            &mut store,
+            &format!("printenv GEAR_GATE_TASKS >> {}; true", ran.display()),
+            3,
+        );
+        for (task, branch) in [("T-1", "heat/t1"), ("T-2", "heat/t2"), ("T-3", "heat/t3")] {
+            pass(&mut store, task, &heads[branch], 10);
+        }
+        // The captain puts the last of the three first.
+        store
+            .write(|tx| tx.set_meta(&gear_app::plan::merge_first_key("p"), "T-3"))
+            .unwrap();
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        // The merge runs alone, then its report is collected on the next step.
+        tick_step(&mut store, &mut herdr, &cfg, 30);
+        tick_step(&mut store, &mut herdr, &cfg, 31);
+
+        assert_eq!(op_state(&mut store, "O-3"), Some(OpState::Confirmed));
+        assert_ne!(op_state(&mut store, "O-1"), Some(OpState::Confirmed));
+        assert_ne!(op_state(&mut store, "O-2"), Some(OpState::Confirmed));
+        let runs = fs::read_to_string(&ran).unwrap_or_default();
+        assert_eq!(runs.lines().next(), Some("T-3"), "{runs}");
+        // The line is one-shot: the mark is used.
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&gear_app::plan::merge_first_key("p")))
+                .unwrap()
+                .unwrap_or_default(),
+            "",
+            "the mark is cleared when its merge starts"
+        );
+
+        // The other two land together afterwards.
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Confirmed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+        let runs = fs::read_to_string(&ran).unwrap_or_default();
+        assert!(
+            runs.lines()
+                .any(|line| line.contains("T-1") && line.contains("T-2")),
+            "the rest batch together: {runs}"
+        );
+    }
+
+    /// T-547: a red batch is halved — its first merge runs alone and fails as
+    /// it would, the other lands alone. Two gates after the red one.
+    #[test]
+    fn a_red_batch_is_halved_and_its_merges_run_alone() {
+        let pair = Pair::new("batch-red", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        // The gate says no to T-1's work (a.txt) and yes to T-2's alone.
+        batch_of_two(&mut store, "test ! -f a.txt");
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Failed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let log = pair.dev_log();
+        assert!(!log_has(&log, "a"), "T-1 did not land: {log}");
+        assert!(log_has(&log, "b"), "T-2 landed: {log}");
+        assert!(
+            op_result(&mut store, "O-1").contains("gate failed"),
+            "{}: {}",
+            "the gate's own reason is kept",
+            op_result(&mut store, "O-1")
+        );
+        // The red batch halved the cap to 1, where the batch path never runs;
+        // T-2 landing alone lets it grow back, so the next merges batch again
+        // (Prometheus, 2026-11-04: every merge ran alone after a red streak).
+        let caps = cfg.merges.batch_cap.lock().unwrap().clone();
+        assert!(
+            !caps.is_empty() && caps.values().all(|cap| *cap == 2),
+            "a merge that landed alone doubles the cap back to merge_batch: {caps:?}"
+        );
+    }
+
+    /// F1 of the review of T-547: a batch whose push is rejected because the
+    /// integration branch moved during its gate is a race, not a failure: both
+    /// merges go back to the queue with the race reason and the next merge of
+    /// this branch still batches (no `single`).
+    #[test]
+    fn dev_moving_during_a_batch_gate_is_a_race() {
+        let pair = Pair::new("batch-race", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        // The gate moves origin/dev under the batch: its push cannot be a
+        // fast-forward.
+        let racer = format!(
+            "cd {} && git fetch -q origin && git switch -q dev && git reset -q --hard origin/dev \
+             && echo x >> other.txt && git add other.txt \
+             && git -c user.email=a@b -c user.name=a commit -qm racer \
+             && git -C ../origin.git fetch -q $(pwd) +HEAD:refs/heads/dev",
+            pair.work.display()
+        );
+        batch_of_two(&mut store, &racer);
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        // One batch: it is launched, it runs, and its push is rejected.
+        let seen = cfg.merges.progress();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
+        assert!(cfg.merges.running("p"), "the batch runs");
+        assert!(cfg.merges.wait_progress(seen, WAIT), "the batch reports");
+        // The next step collects it.
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 31).unwrap();
+
+        for id in ["O-1", "O-2"] {
+            // T-576: sent back is queued again (`intended`), not unknown: the
+            // push's outcome is known (nothing landed).
+            assert_eq!(
+                op_state(&mut store, id),
+                Some(OpState::Intended),
+                "{id} is queued again"
+            );
+            let reason = op_result(&mut store, id);
+            assert!(reason.starts_with(RACE), "{id}: {reason}");
+        }
+        assert!(
+            cfg.merges.single.lock().unwrap().is_empty(),
+            "a race does not leave the batch path"
+        );
+        let log = pair.dev_log();
+        assert!(
+            !log_has(&log, "a") && !log_has(&log, "b"),
+            "nothing landed: {log}"
+        );
+    }
+
+    /// T-548: the gate names a.txt in `$GEAR_GATE_FAILED`, and only T-1's
+    /// changes hold it: T-1 fails with that line, T-2 merges again and lands
+    /// alone. The gate runs twice in all.
+    #[test]
+    fn a_red_batch_names_the_culprit_the_gate_points_at() {
+        let pair = Pair::new("batch-culprit", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        let ran = pair.root.join("gate-runs");
+        batch_of_two(
+            &mut store,
+            &format!(
+                "echo x >> {}; echo a.txt > $GEAR_GATE_FAILED; test ! -f a.txt",
+                ran.display()
+            ),
+        );
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Failed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let result = op_result(&mut store, "O-1");
+        assert!(
+            result.contains("match only T-1"),
+            "the culprit is named: {result}"
+        );
+        // T-2 was requeued from a batch whose culprit is known: it is gated
+        // again alone, not in a smaller batch of its own.
+        let log = pair.dev_log();
+        assert!(!log_has(&log, "a"), "T-1 did not land: {log}");
+        assert!(log_has(&log, "b"), "T-2 landed: {log}");
+        let runs = fs::read_to_string(&ran).unwrap_or_default();
+        assert_eq!(
+            runs.lines().count(),
+            2,
+            "the red batch, then T-2 alone: {runs}"
+        );
+    }
+
+    /// T-548: the gate names a path no merge touched: nothing is a culprit, so
+    /// the batch is halved as before and its merges are gated one by one.
+    #[test]
+    fn a_red_batch_naming_no_change_is_halved() {
+        let pair = Pair::new("batch-nobody", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        let ran = pair.root.join("gate-runs");
+        batch_of_two(
+            &mut store,
+            &format!(
+                "echo x >> {}; echo nobody.txt > $GEAR_GATE_FAILED; test ! -f a.txt",
+                ran.display()
+            ),
+        );
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Failed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        assert!(
+            !op_result(&mut store, "O-1").contains("match only"),
+            "no culprit is named: {}",
+            op_result(&mut store, "O-1")
+        );
+        let log = pair.dev_log();
+        assert!(!log_has(&log, "a"), "T-1 did not land: {log}");
+        assert!(log_has(&log, "b"), "T-2 landed: {log}");
+        // The red batch of two, then T-1 and T-2 one by one: the cap halved.
+        let runs = fs::read_to_string(&ran).unwrap_or_default();
+        assert_eq!(runs.lines().count(), 3, "the halving: {runs}");
+    }
+
+    /// T-548: the failed-paths file belongs to the run that wrote it. A file an
+    /// earlier gate left in the worktree is removed before the gate runs, so
+    /// its lines never name a culprit here.
+    #[test]
+    fn a_failed_paths_file_left_from_an_earlier_gate_is_not_read() {
+        let pair = Pair::new("batch-leftover", false);
+        let worktree = pair.merge_worktree();
+        // An earlier run's leftovers, naming T-1's own file.
+        fs::write(
+            Path::new(&worktree.path).join(".git-gear-gate-failed"),
+            "a.txt\n",
+        )
+        .unwrap();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        // The gate says no without naming any path.
+        batch_of_two(&mut store, "test ! -f a.txt");
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Failed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        assert!(
+            !op_result(&mut store, "O-1").contains("match only"),
+            "the leftover is not read: {}",
+            op_result(&mut store, "O-1")
+        );
+        let log = pair.dev_log();
+        assert!(!log_has(&log, "a"), "T-1 did not land: {log}");
+        assert!(log_has(&log, "b"), "T-2 landed: {log}");
+    }
+    /// T-547: a batch member whose merge conflicts with the integration branch
+    /// steps aside on the base the merges before it left; the other lands.
+    #[test]
+    fn a_conflicting_batch_member_steps_aside_and_the_other_lands() {
+        let pair = Pair::new("batch-conflict", false);
+        // dev moves on the file T-1 adds: merging T-1 into it conflicts.
+        sh(
+            &pair.root,
+            &format!(
+                "set -e\n\\
+                 git -C {work} checkout -q dev\n\\
+                 printf 'dev\\n' > {work}/a.txt\n\\
+                 git -C {work} add a.txt\n\\
+                 git -C {work} commit -q -m dev-a\n\\
+                 git -C {work} push -q origin dev\n",
+                work = pair.work.display()
+            ),
+        );
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        batch_of_two(&mut store, "true");
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Failed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let log = pair.dev_log();
+        assert!(log_has(&log, "b"), "T-2 landed: {log}");
+        assert!(!log_has(&log, "a"), "T-1 kept out by its conflict: {log}");
+        assert!(
+            op_result(&mut store, "O-1").contains("conflict"),
+            "the conflict is named: {}",
+            op_result(&mut store, "O-1")
+        );
+    }
+
+    /// A merge train: two passed tasks gate side by side, the second on the
+    /// commit the first lands, and both land in order.
+    #[test]
+    fn two_merges_gate_side_by_side_and_land_in_order() {
+        let pair = Pair::new("train", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let second = second_stage(&pair, &mut herdr);
+        let mut store = pair_world(&pair.a, &pair.b);
+        train_of_two(&mut store, "true");
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Confirmed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let log = pair.dev_log();
+        for subject in ["a", "b", "r1", "r2"] {
+            assert!(log_has(&log, subject), "{subject} landed: {log}");
+        }
+        // The second stage was gated on the first: what it gated is the tip.
+        let tip = sh(&pair.root, "git -C origin.git rev-parse dev");
+        let stage = sh(&second, "git rev-parse HEAD");
+        assert_eq!(stage.trim(), tip.trim(), "the second stage landed as gated");
+    }
+
+    /// A merge whose gate says no fails as it would alone; the merge behind it
+    /// was gated on top of it, so it goes back to the queue and lands alone.
+    #[test]
+    fn a_failed_stage_sends_the_merges_behind_it_back_to_the_queue() {
+        let pair = Pair::new("train-fail", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        second_stage(&pair, &mut herdr);
+        let mut store = pair_world(&pair.a, &pair.b);
+        // The gate says no to T-1's work (a.txt) and yes to T-2's alone.
+        train_of_two(&mut store, "test ! -f a.txt");
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Failed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let log = pair.dev_log();
+        assert!(!log_has(&log, "a"), "T-1 did not land: {log}");
+        assert!(log_has(&log, "b"), "T-2 landed: {log}");
+    }
+
     #[test]
     fn a_merge_that_carries_no_other_task_is_not_held() {
         let pair = Pair::new("independent", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // T-2 passed; T-1 did not. T-2's commits carry none of T-1's work.
         pass(&mut store, "T-2", &pair.b, 10);
@@ -5142,7 +8928,7 @@ mod tests {
             sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge {} origin/dev",
+                    "git -C {} worktree add -q -b p/merge/home {} origin/dev",
                     self.work.display(),
                     path.display()
                 ),
@@ -5151,7 +8937,7 @@ mod tests {
                 workspace_id: "wt-merge".into(),
                 pane_id: "wt-merge:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge".into(),
+                branch: "p/merge/home".into(),
             }
         }
 
@@ -5273,7 +9059,7 @@ mod tests {
 
         let worktree = chain.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         // T-1: attempt 1 (a1) was rejected, attempt 2 (a2) is in review.
         let mut store = chain_world(&chain.candidates);
         store
@@ -5346,7 +9132,7 @@ mod tests {
         let chain = Chain::new("chain", 3);
         let worktree = chain.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = chain_world(&chain.candidates);
         let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
@@ -5418,14 +9204,14 @@ mod tests {
             }
         }
 
-        /// The merge worktree of this repo: `p/merge`, cut from its
+        /// The merge worktree of this repo: `p/merge/home`, cut from its
         /// integration branch.
         fn merge_worktree(&self, integration: &str) -> gear_herdr::Worktree {
             let path = self.root.join("web-merge");
             sh(
                 &self.root,
                 &format!(
-                    "git -C {} worktree add -q -b p/merge {} origin/{integration}",
+                    "git -C {} worktree add -q -b p/merge/home {} origin/{integration}",
                     self.work.display(),
                     path.display()
                 ),
@@ -5434,7 +9220,7 @@ mod tests {
                 workspace_id: "wt-merge-web".into(),
                 pane_id: "wt-merge-web:p1".into(),
                 path: path.display().to_string(),
-                branch: "p/merge".into(),
+                branch: "p/merge/home".into(),
             }
         }
 
@@ -5877,6 +9663,126 @@ gate = "{gate}"
         );
     }
 
+    /// A done task carried by another task that has not merged yet (Lawrence
+    /// T-31 / M-603, 2026-11-03): its branch holds the work in flight, so it is
+    /// kept and not named to the captain.
+    #[test]
+    fn the_branch_sweep_leaves_a_carried_task_waiting_for_its_carrier() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(
+            root.path(),
+            &format!("git init -q --bare {}", origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git init -q -b dev {}", work.display()),
+        );
+        sh(
+            &work,
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base",
+        );
+        sh(
+            &work,
+            &format!("git remote add origin {}", origin.display()),
+        );
+        for branch in ["dev", "api/t8"] {
+            sh(
+                &work,
+                &format!("git push -q origin HEAD:refs/heads/{branch}"),
+            );
+        }
+        // The lane it moved to left work the integration branch does not have.
+        sh(
+            &work,
+            "git checkout -q -b heat/t8 && git -c user.email=t@t -c user.name=t \
+             commit -q --allow-empty -m extra && git push -q origin HEAD:refs/heads/heat/t8",
+        );
+        sh(&work, "git checkout -q dev");
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.id = "T-8".into();
+                task.rank = 8;
+                task.state = TaskState::Done;
+                task.lane = Some("heat".into());
+                task.milestone = Some("M5".into());
+                tx.insert_task(&task)?;
+                // First held by `api`, then moved to `heat`.
+                for (n, seat) in [(1, "p:api"), (2, "p:heat")] {
+                    tx.insert_attempt(&gear_store::AttemptRow {
+                        project: "p".into(),
+                        task: "T-8".into(),
+                        n,
+                        seat: seat.into(),
+                        generation: 1,
+                        contract_version: 1,
+                        adopted_version: 1,
+                        pending_update: None,
+                        state: gear_model::AttemptState::Accepted,
+                        candidate: None,
+                        report: None,
+                        safe_point: None,
+                        started: 0,
+                        updated: 0,
+                        session_ref: None,
+                        session_cli: None,
+                        session_action: None,
+                        sent_at: None,
+                    })?;
+                }
+                tx.set_task_carried_by("p", "T-8", "other:T-9")
+            })
+            .unwrap();
+        let config = gear_app::config::parse(&config_text_in("true", &work)).unwrap();
+        let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
+        let repo = config.repo_of_task(&tasks[1]);
+        let now = 3 * 3600;
+        let heads = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        let found = task_branches(&mut store, "p", &config, &tasks, &repo, &heads).unwrap();
+        let dev = git(&work, &["rev-parse", "dev"]).unwrap();
+        let remote = Target {
+            name: "origin",
+            runner: &GitRemote,
+        };
+        sweep_in(
+            &mut store,
+            "p",
+            &config,
+            &work,
+            remote,
+            found,
+            now,
+            "dev",
+            Some(dev.trim()),
+        )
+        .unwrap();
+
+        let branches = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        assert!(
+            !branches.contains("api/t8"),
+            "the old lane's merged branch is deleted: {branches}"
+        );
+        assert!(
+            branches.contains("heat/t8"),
+            "the branch holding work is kept: {branches}"
+        );
+        let items = store
+            .read(|tx| tx.actionable_for("p", "p:captain", now))
+            .unwrap();
+        let branches = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        assert!(
+            branches.contains("heat/t8"),
+            "the carried work is kept: {branches}"
+        );
+        assert!(
+            !items.iter().any(|m| m.body.contains("heat/t8")),
+            "{items:?}"
+        );
+    }
+
     /// The branch sweep counts the open voyage's task branches: more than
     /// lanes × `branch_max_per_lane` (1 × 3 here) is named to the captain,
     /// review branches and other voyages' branches are not counted.
@@ -5981,6 +9887,188 @@ gate = "{gate}"
                 .len(),
             1
         );
+    }
+
+    /// T-568: a sweep's report replaces the one the last sweep wrote — its
+    /// thread is named after the tick, so the captain ended up with 123 open
+    /// `branches:` items and doorbells for the old ones.
+    #[test]
+    fn three_branch_sweeps_leave_one_open_item() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(
+            root.path(),
+            &format!("git init -q --bare {}", origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git init -q -b dev {}", work.display()),
+        );
+        sh(
+            &work,
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base",
+        );
+        sh(
+            &work,
+            &format!("git remote add origin {}", origin.display()),
+        );
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        let config = gear_app::config::parse(&config_text_in("true", &work)).unwrap();
+        let remote = Target {
+            name: "origin",
+            runner: &GitRemote,
+        };
+        let dev = git(&work, &["rev-parse", "dev"]).unwrap();
+        let sweep = |store: &mut Store, name: &str, at: Ts| {
+            let found = vec![TaskBranch {
+                name: name.into(),
+                sha: dev.trim().into(),
+                task: "T-5".into(),
+                state: TaskState::Ready,
+                since: Some(0),
+                review: false,
+                open_voyage: true,
+            }];
+            sweep_in(
+                store,
+                "p",
+                &config,
+                &work,
+                remote,
+                found,
+                at,
+                "dev",
+                Some(dev.trim()),
+            )
+            .unwrap();
+        };
+        sweep(&mut store, "heat/t6", 1_000_000);
+        sweep(&mut store, "heat/t7", 2_000_000);
+        sweep(&mut store, "heat/t8", 3_000_000);
+
+        let items = store
+            .read(|tx| tx.messages_in_threads_starting("p", "branches:"))
+            .unwrap();
+        assert_eq!(items.len(), 3, "{items:?}");
+        let open: Vec<&gear_store::MessageRow> = items
+            .iter()
+            .filter(|item| item.state == MsgState::Open)
+            .collect();
+        assert_eq!(open.len(), 1, "one open sweep item: {items:?}");
+        assert_eq!(open[0].thread, "branches:3000000");
+        // Each one says which replaced it; the last one is the open item.
+        for pair in items.windows(2) {
+            assert_eq!(pair[0].state, MsgState::Resolved, "{:?}", pair[0]);
+            assert_eq!(
+                pair[0].result.as_deref(),
+                Some(format!("superseded by {}", pair[1].id).as_str()),
+                "the item says which one replaced it"
+            );
+        }
+        assert_eq!(items[items.len() - 1].id, open[0].id);
+    }
+
+    /// T-553: a done task whose merge waits for another task sits in
+    /// `Unknown` (`Report::Waiting` leaves it there). That merge is landing,
+    /// not lost: the sweep names no unlanded branch for it (2026-11-04: the
+    /// captain was told "nothing will merge them" for T-548 while its merge
+    /// queued behind T-547).
+    #[test]
+    fn a_done_task_whose_merge_waits_for_another_is_not_named_unlanded() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(
+            root.path(),
+            &format!("git init -q --bare {}", origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git init -q -b dev {}", work.display()),
+        );
+        sh(
+            &work,
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base",
+        );
+        sh(
+            &work,
+            &format!("git remote add origin {}", origin.display()),
+        );
+        // A commit of T-5 that dev does not have.
+        sh(
+            &work,
+            "git switch -q -c heat/t5 && echo a > a.txt && git add -A \
+             && git -c user.email=t@t -c user.name=t commit -qm a",
+        );
+        sh(&work, "git push -q origin HEAD:refs/heads/heat/t5");
+        let now = 3600;
+        let config = gear_app::config::parse(&config_text_in("true", &work)).unwrap();
+        let sweep = |store: &mut Store| {
+            let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
+            let repo = config.repo_of_task(&tasks[0]);
+            let remote = Target {
+                name: "origin",
+                runner: &GitRemote,
+            };
+            let heads = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+            let found = task_branches(store, "p", &config, &tasks, &repo, &heads).unwrap();
+            let dev = git(&work, &["rev-parse", "dev"]).unwrap();
+            sweep_in(
+                store,
+                "p",
+                &config,
+                &work,
+                remote,
+                found,
+                now,
+                "dev",
+                Some(dev.trim()),
+            )
+            .unwrap();
+            store
+                .read(|tx| tx.actionable_for("p", "p:captain", now))
+                .unwrap()
+        };
+        let named = |items: &[gear_store::MessageRow]| {
+            items
+                .iter()
+                .any(|item| item.body.contains("nothing will merge them"))
+        };
+
+        // Without a merge op the branch is news: the captain is told.
+        let mut store = world(TaskState::Done);
+        let items = sweep(&mut store);
+        assert!(named(&items), "{items:?}");
+
+        // A merge of T-5 that waits for another task is landing.
+        let mut store = world(TaskState::Done);
+        store
+            .write(|tx| {
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({}),
+                    created: now,
+                })?;
+                tx.set_op_state("p", "O-1", OpState::Unknown, Some("waits for T-4"), now)
+            })
+            .unwrap();
+        let items = sweep(&mut store);
+        assert!(!named(&items), "{items:?}");
     }
 
     /// The project config of a repo in pull-request mode (design §11.1).
@@ -6308,7 +10396,7 @@ gate = "{gate}"
         let scratch = Scratch::new("pr");
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pr_world(&candidate);
         claim_op(&mut store, "T-5", 7);
         let mut cfg = test_cfg();
@@ -6396,7 +10484,7 @@ gate = "{gate}"
         let scratch = Scratch::new("pr-nopr");
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pr_world(&candidate);
         let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
@@ -6428,7 +10516,7 @@ gate = "{gate}"
         let scratch = Scratch::new("pr-refused");
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = pr_world(&candidate);
         claim_op(&mut store, "T-5", 7);
         let mut cfg = test_cfg();
@@ -6638,7 +10726,7 @@ gate = "{gate}"
         let worktree = scratch.merge_worktree();
         let candidate = candidate.to_string();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -6907,6 +10995,7 @@ gate = "{gate}"
             gear_model::commit::MERGE_MESSAGE,
             &[("task", op.task.as_deref().unwrap_or_default())],
         );
+        let prefix = test_review_prefix(op);
         step_result(merge_with_retries(
             worktree,
             repo,
@@ -6921,6 +11010,7 @@ gate = "{gate}"
             None,
             &review,
             &commit,
+            &prefix,
             "",
         ))
     }
@@ -7133,6 +11223,47 @@ gate = "{gate}"
         assert!(scratch.dev_has_task_commit());
     }
 
+    /// A gate that exits 75 (EX_TEMPFAIL) could not judge this time (a CI
+    /// service refused a request): the merge is retried and lands, as for a
+    /// missing toolchain (Prometheus, 2026-11-03: GitHub HTTP 403 failed three
+    /// merges outright).
+    #[test]
+    fn a_gate_that_could_not_judge_is_retried_and_the_merge_lands() {
+        let scratch = Scratch::new("gate-tempfail");
+        let worktree = scratch.merge_worktree();
+        let ran = scratch.root.join("gate-ran");
+        let gate = format!(
+            "if [ ! -e '{ran}' ]; then touch '{ran}'; exit 75; fi",
+            ran = ran.display()
+        );
+
+        let line =
+            merge_retried(&worktree, &repo(&gate), &op(&scratch.head_of("heat/t5"))).unwrap();
+
+        assert!(line.contains("merged T-5 into dev"), "{line}");
+        assert!(scratch.dev_has_task_commit());
+    }
+
+    /// A gate behind a wrapper that hides exit 75 (`make` turns it into its
+    /// own exit 2) asks for a retry by creating the file `GEAR_GATE_TEMPFAIL`
+    /// names; the merge is retried and lands (Prometheus, 2026-11-03).
+    #[test]
+    fn a_gate_that_marks_the_tempfail_file_is_retried_and_the_merge_lands() {
+        let scratch = Scratch::new("gate-tempfail-file");
+        let worktree = scratch.merge_worktree();
+        let ran = scratch.root.join("gate-ran");
+        let gate = format!(
+            "if [ ! -e '{ran}' ]; then touch '{ran}'; touch $GEAR_GATE_TEMPFAIL; exit 2; fi",
+            ran = ran.display()
+        );
+
+        let line =
+            merge_retried(&worktree, &repo(&gate), &op(&scratch.head_of("heat/t5"))).unwrap();
+
+        assert!(line.contains("merged T-5 into dev"), "{line}");
+        assert!(scratch.dev_has_task_commit());
+    }
+
     /// T-61, F2 of the review: a candidate on no pushed ref is retried (it may
     /// not be pushed yet) and rings the captain once when the retries are
     /// used up. Nothing in the store is edited by hand.
@@ -7257,7 +11388,7 @@ gate = "{project_gate}"
             &format!("touch '{}'", project_gate.display()),
         );
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = child_world(&config_toml, &candidate);
         let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
@@ -7282,7 +11413,7 @@ gate = "{project_gate}"
             })
             .expect("the engine opened the merge worktree");
         assert_eq!(opened.0, format!("{}/web", scratch.root.display()));
-        assert_eq!(opened.1, "p/merge");
+        assert_eq!(opened.1, "p/merge/home");
         assert_eq!(opened.2, "p-merge-web", "the label names the repo");
         // The merge landed on the child's own integration branch.
         let log = child.log_of("web-dev");
@@ -7333,14 +11464,14 @@ gate = "{project_gate}"
             })
             .unwrap();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
             cfg.profiles
                 .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
         }
         assert_eq!(wait_merge(&mut store, &mut herdr, &cfg).len(), 1);
-        assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::WorktreeOpen {repo,branch,..} if repo == &scratch.root.join("web").to_string_lossy() && branch == "p/merge")));
+        assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::WorktreeOpen {repo,branch,..} if repo == &scratch.root.join("web").to_string_lossy() && branch == "p/merge/home")));
         assert!(child_gate.exists());
         assert!(!new_gate.exists());
         assert!(child.log_of("web-dev").contains("task"));
@@ -7379,7 +11510,7 @@ gate = "{project_gate}"
             })
             .expect("the engine created the merge worktree");
         assert_eq!(created.0, format!("{}/web", scratch.root.display()));
-        assert_eq!(created.1, "p/merge");
+        assert_eq!(created.1, "p/merge/home");
         assert_eq!(created.2, "web-dev", "the repo's own integration branch");
         assert_eq!(created.3, "p-merge-web");
     }
@@ -7400,7 +11531,7 @@ gate = "{project_gate}"
         publish(&scratch.work, "heat/t5-v2");
         let candidate = scratch.head_of("heat/t5-v2");
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -7600,11 +11731,12 @@ gate = "{project_gate}"
         assert_eq!(fs::read_to_string(&started).unwrap().lines().count(), 1);
         release_fifo(&release);
         assert_eq!(wait_merge(&mut store, &mut herdr, &cfg).len(), 1);
-        // The second merge runs next, and reports its own result.
+        // The second merge runs next, and reports its own result. Its branches
+        // are T-5's, already on dev, so it lands without a gate of its own.
         drive(&mut store, &mut herdr, &cfg, |store| {
             op_state(store, "O-2") == Some(OpState::Confirmed)
         });
-        assert_eq!(fs::read_to_string(&started).unwrap().lines().count(), 2);
+        assert_eq!(fs::read_to_string(&started).unwrap().lines().count(), 1);
         assert_eq!(
             store
                 .read(|tx| tx.get_op("p", "O-2"))
@@ -7716,7 +11848,7 @@ gate = "{project_gate}"
             path: PathBuf::from(path).display().to_string(),
             workspace_id: "test".into(),
             pane_id: "test".into(),
-            branch: "p/merge".into(),
+            branch: "p/merge/home".into(),
         };
         merge_one(
             &worktree,
@@ -7863,6 +11995,173 @@ gate = "{project_gate}"
         let branches = &state.branches;
         assert!(!branches.contains("heat/t5"), "{branches}");
         assert!(!branches.contains("review/t5"), "{branches}");
+    }
+
+    /// A merge whose task and review branches are already on the integration
+    /// branch (they landed with another merge) is merged, not gated: the gate
+    /// would refuse a candidate that carries nothing new (Prometheus T-745).
+    #[test]
+    fn a_merge_whose_branches_are_already_on_dev_is_merged_without_a_gate() {
+        let scratch = Scratch::new("already-on-dev");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        sh(
+            &scratch.work,
+            "git fetch -q origin && git switch -qC landed origin/dev \
+             && git -c user.email=a@b -c user.name=a merge -q --no-ff origin/review/t5 -m landed \
+             && git push -q origin HEAD:dev",
+        );
+
+        let line = merge_one(&worktree, &repo("false"), &op(&candidate)).unwrap();
+
+        assert!(line.contains("already merged"), "{line}");
+    }
+
+    /// T-573: only a file under the voyage folder counts, with `{project}`
+    /// filled and `{milestone}` any one folder.
+    #[test]
+    fn only_a_file_under_the_voyage_folder_is_a_report() {
+        let template = "gear/{project}/voyages/{milestone}";
+        assert!(is_under_voyage(
+            "gear/p/voyages/M1/reviews/T-5.md",
+            template,
+            "p"
+        ));
+        assert!(is_under_voyage("gear/p/voyages/M1/plan.md", template, "p"));
+        // Any milestone, one folder: not another project's, not the folder
+        // itself, not a file that only looks like one.
+        assert!(!is_under_voyage(
+            "gear/other/voyages/M1/reviews/T-5.md",
+            template,
+            "p"
+        ));
+        assert!(!is_under_voyage("gear/p/voyages/M1", template, "p"));
+        assert!(!is_under_voyage("gear/p/voyages", template, "p"));
+        assert!(!is_under_voyage("src/lib.rs", template, "p"));
+        // The default template names no project, and matches the same way.
+        let default = gear_model::layout::VOYAGE_DIR;
+        assert!(is_under_voyage(
+            "gear/voyages/M3/reports/T-7.md",
+            default,
+            "p"
+        ));
+        assert!(!is_under_voyage("gear/voyages/M3", default, "p"));
+        // A merge that changes nothing is no report-only merge.
+        assert!(!reports_only(&[], template, "p"));
+        assert!(reports_only(
+            &[
+                "gear/p/voyages/M1/reports/T-5.md".to_string(),
+                "gear/p/voyages/M1/reviews/T-5.md".to_string(),
+            ],
+            template,
+            "p"
+        ));
+        assert!(!reports_only(
+            &[
+                "gear/p/voyages/M1/reports/T-5.md".to_string(),
+                "src/lib.rs".to_string(),
+            ],
+            template,
+            "p"
+        ));
+    }
+
+    /// The config of a test project whose voyage folder names the project
+    /// (T-573): `gear/<project>/voyages/<milestone>`.
+    fn repo_with_voyage_dir(gate: &str) -> Repo {
+        gear_app::config::parse(&format!(
+            "{}\nvoyage_dir = \"gear/{{project}}/voyages/{{milestone}}\"\n",
+            config_text(gate)
+        ))
+        .unwrap()
+        .repo_of_lane("heat")
+    }
+
+    /// A scratch repo carrying one report-only task: `heat/t6` holds a commit
+    /// that adds only `gear/p/voyages/M1/reviews/T-6.md`, and the review commit
+    /// on top of it adds only a record.
+    fn reports_only_task(scratch: &Scratch) -> String {
+        sh(
+            &scratch.work,
+            "git switch -qc report/t6 dev && mkdir -p gear/p/voyages/M1/reviews \
+             && echo record > gear/p/voyages/M1/reviews/T-6.md && git add -A \
+             && git -c user.email=a@b -c user.name=a commit -qm report \
+             && git -C ../origin.git fetch -q \"$(pwd)\" +HEAD:refs/heads/heat/t6 \
+             && git fetch -q origin",
+        );
+        let candidate = sh(&scratch.work, "git rev-parse HEAD");
+        sh(
+            &scratch.work,
+            "echo reviewed >> gear/p/voyages/M1/reviews/T-6.md && git add -A \
+             && git -c user.email=a@b -c user.name=a commit -qm 'review(T-6): the record is right' \
+             && git -C ../origin.git fetch -q \"$(pwd)\" +HEAD:refs/heads/heat/t6 \
+             && git fetch -q origin",
+        );
+        candidate.trim().to_string()
+    }
+
+    /// The merge op of `reports_only_task`.
+    fn reports_only_op(candidate: &str) -> OpRow {
+        let mut report = op(candidate);
+        report.task = Some("T-6".into());
+        report.payload = serde_json::json!({
+            "branch": "heat/t6",
+            "candidate": candidate,
+            "review": "review/t6",
+        });
+        report
+    }
+
+    /// T-573: a merge that carries only reports skips the gate (the user,
+    /// 2026-11-05: a merge holding one review record still paid a four-to-five
+    /// minute CI round). The gate here always fails, so the merge landing
+    /// proves it did not run.
+    #[test]
+    fn a_merge_that_carries_only_reports_skips_the_gate() {
+        let scratch = Scratch::new("reports-only");
+        let worktree = scratch.merge_worktree();
+        let candidate = reports_only_task(&scratch);
+
+        let line = merge_one(
+            &worktree,
+            &repo_with_voyage_dir("false"),
+            &reports_only_op(&candidate),
+        )
+        .expect("a report-only merge runs no gate");
+
+        assert!(line.contains("merged T-6 into dev"), "{line}");
+        assert!(line.contains("no gate: reports only"), "{line}");
+        // The conflict check and the push ran as usual: dev holds the record.
+        let dev = scratch.dev_log();
+        assert!(dev.contains("report"), "{dev}");
+        assert!(dev.contains("review(T-6)"), "{dev}");
+        assert!(!line.contains("gate failed"), "{line}");
+    }
+
+    /// The same merge with one ordinary file in it: the gate runs and its
+    /// failure ends the merge.
+    #[test]
+    fn a_merge_that_touches_another_file_still_gates() {
+        let scratch = Scratch::new("reports-plus");
+        let worktree = scratch.merge_worktree();
+        let candidate = reports_only_task(&scratch);
+        // One file outside the voyage folder, on the same candidate.
+        sh(
+            &scratch.work,
+            "git switch -q report/t6 && echo note > notes.txt && git add -A \
+             && git -c user.email=a@b -c user.name=a commit -qm notes \
+             && git -C ../origin.git fetch -q \"$(pwd)\" +HEAD:refs/heads/heat/t6 \
+             && git fetch -q origin",
+        );
+
+        let failed = merge_one(
+            &worktree,
+            &repo_with_voyage_dir("false"),
+            &reports_only_op(&candidate),
+        )
+        .expect_err("a merge with another file runs the gate, and it fails");
+        assert!(!failed.reason.contains("no gate"), "{}", failed.reason);
+        assert!(!scratch.dev_log().contains("report"), "nothing landed");
     }
 
     /// T-483: a confirmed merge closes the review branch it merged, whatever
@@ -8417,6 +12716,30 @@ gate = "{project_gate}"
         );
     }
 
+    /// T-563: a gate that pushed leaves the remote's chatter in its output;
+    /// the refusal the captain reads comes first and no `remote:` line is kept
+    /// (prometheus: the item led with push noise).
+    #[test]
+    fn a_failed_gate_keeps_its_refusal_and_drops_the_push_noise() {
+        let text =
+            "remote: \nremote: Create a pull request for 'p/heat/t1' on GitHub by visiting: \n\
+                    remote:      https://github.com/o/r/pull/new/p/heat/t1\n\
+                    To github.com:o/r.git\n\
+                     * [new branch]      p/heat/t1 -> p/heat/t1\n\
+                     - [deleted]         p/heat/t0\n\
+                    make gate\n  FAIL [t] the_broken_test\n\
+                    the judge refuses at judge: T-1 has no report\n";
+        let kept = without_push_noise(text);
+        assert!(!kept.contains("remote:"), "{kept}");
+        assert!(!kept.contains("To github.com"), "{kept}");
+        assert!(!kept.contains("[new branch]"), "{kept}");
+        assert!(!kept.contains("[deleted]"), "{kept}");
+        // The refusal is still what the captain reads first (T-219's lines).
+        let failures = failure_lines(&kept, 20);
+        assert_eq!(failures, vec!["  FAIL [t] the_broken_test"], "{failures:?}");
+        assert!(tail(&kept, 12).ends_with("the judge refuses at judge: T-1 has no report"));
+    }
+
     /// T-219: the failure lines are the ones that name a failure: a line that
     /// starts (after spaces) with FAIL, TIMEOUT or SIGSEGV, or one that holds
     /// `panicked at`, `error[` or `error:`.
@@ -8452,7 +12775,13 @@ gate = "{project_gate}"
     /// write to the production store (L-59).
     #[test]
     fn the_gate_runs_without_the_store_of_this_machine() {
-        let command = gate_command("cargo test", Path::new("/tmp"));
+        let command = gate_command(
+            "cargo test",
+            Path::new("/tmp"),
+            "p",
+            "o1",
+            &["T-1".to_string()],
+        );
         let removes = |name: &str| {
             command
                 .get_envs()
@@ -8715,45 +13044,228 @@ gate = "{project_gate}"
         assert!(log.contains("review"), "{log}");
     }
 
+    /// T-558: the review commit is pushed onto the task branch and no review
+    /// branch exists on the remote: the merge takes the task branch, which
+    /// holds the approved candidate and the review commit on top of it.
     #[test]
-    fn a_missing_review_branch_does_not_publish_a_partial_merge() {
-        // F6 of the review: a merge publishes the approved candidate *and* its
-        // review branch. A review branch that is gone on origin is not
-        // silently skipped: the merge fails with the git diagnostic, dev
-        // stays where it was, and nothing is pushed.
-        let scratch = Scratch::new("noreview");
-        // Only the review branch is gone; the task branch and the candidate
-        // are intact.
+    fn a_review_on_the_task_branch_merges_candidate_and_review() {
+        let scratch = Scratch::new("task-branch-review");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The reviewer's commit goes onto the task branch, and no review
+        // branch is on the remote. Its subject is the project's review message
+        // (T-564): anything else on the branch is a lane commit made after the
+        // hand-in.
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass, r5'",
+        );
+        publish(&scratch.work, "heat/t5");
         sh(
             &scratch.root,
             "git -C origin.git update-ref -d refs/heads/review/t5",
         );
-        let worktree = scratch.merge_worktree();
-        let before = scratch.dev_log();
 
-        let failed =
-            merge_one(&worktree, &repo("true"), &op(&scratch.head_of("heat/t5"))).unwrap_err();
+        let line = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap();
 
-        assert!(failed.reason.contains("review branch"), "{}", failed.reason);
+        assert!(line.contains("merged T-5"), "{line}");
         assert!(
-            failed.reason.contains("origin/review/t5"),
+            line.contains("origin/heat/t5"),
+            "the task branch is the source: {line}"
+        );
+        let log = scratch.dev_log();
+        assert!(log.contains("task"), "the candidate landed: {log}");
+        assert!(log.contains("r5"), "the review commit landed: {log}");
+        assert!(scratch.dev_has_task_commit());
+        // The task branch is closed with the merge, as before.
+        assert!(
+            !scratch.origin_branches().contains("heat/t5"),
+            "{:?}",
+            scratch.origin_branches()
+        );
+    }
+
+    /// T-564: a lane commit pushed onto the task branch after the hand-in is
+    /// not merged (prometheus, 2026-11-04: hull's fix on T-562 would have
+    /// landed unreviewed). The op fails `stuck` and names the commit.
+    #[test]
+    fn a_lane_commit_after_the_candidate_on_the_task_branch_is_refused() {
+        let scratch = Scratch::new("task-branch-lane-commit");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The review, then the lane's own fix on top of it.
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass' \
+             && echo w > w5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'fix the thing after hand-in'",
+        );
+        publish(&scratch.work, "heat/t5");
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+        let lane_commit = scratch.head_of("heat/t5");
+
+        let failed = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap_err();
+
+        assert_eq!(failed.blocker, Blocker::Stuck, "{}", failed.reason);
+        assert!(
+            failed.reason.contains(&lane_commit),
+            "the lane commit is named: {}",
+            failed.reason
+        );
+        assert!(
+            failed.reason.contains("fix the thing after hand-in"),
             "{}",
             failed.reason
         );
         assert!(
-            failed.reason.contains("rev-parse"),
-            "the git diagnostic: {}",
+            failed
+                .reason
+                .contains("a change after hand-in needs a new attempt"),
+            "{}",
             failed.reason
         );
-        assert_eq!(
-            failed.blocker,
-            Blocker::Stuck,
-            "a missing review does not clear"
+        // Nothing landed: dev is where it was.
+        assert!(!scratch.dev_log().contains("fix the thing"));
+    }
+
+    /// T-564: the lane commit merged in under a merge commit is caught too: the
+    /// range keeps every commit, and the merge commit's own subject is no pass.
+    #[test]
+    fn a_pulled_in_lane_commit_under_a_merge_commit_is_refused() {
+        let scratch = Scratch::new("task-branch-merge-commit");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass' \
+             && git checkout -q -b lane-side \
+             && echo w > w5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'lane fix' \
+             && git switch -q heat/t5 \
+             && git -c user.name=a -c user.email=a@b merge -q --no-ff lane-side -m 'review(T-5): pass'",
+        );
+        publish(&scratch.work, "heat/t5");
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+
+        let failed = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap_err();
+
+        assert_eq!(failed.blocker, Blocker::Stuck, "{}", failed.reason);
+        assert!(
+            failed.reason.contains("lane fix"),
+            "the pulled-in commit is named: {}",
+            failed.reason
+        );
+    }
+
+    /// T-564 review F1: the documented conflict fix is `merge dev into the
+    /// task branch, resolve, push, remerge` (course.md). That merge brings the
+    /// integration branch's own commits into the range, and they are reviewed
+    /// work already on the branch, not lane commits: the merge goes through.
+    #[test]
+    fn a_task_branch_that_merged_the_integration_branch_still_merges() {
+        let scratch = Scratch::new("task-branch-dev-merge");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The integration branch moves after the hand-in, and the task branch
+        // takes it in: the captain's conflict fix, with nothing to resolve.
+        sh(
+            &scratch.work,
+            "git switch -q dev && echo d > devd.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'dev moved'",
+        );
+        publish(&scratch.work, "dev");
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass' \
+             && git -c user.name=a -c user.email=a@b merge -q --no-edit dev",
+        );
+        publish(&scratch.work, "heat/t5");
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+
+        let line = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap();
+
+        assert!(line.contains("merged T-5"), "{line}");
+        let log = scratch.dev_log();
+        assert!(log.contains("review(T-5)"), "the review landed: {log}");
+        assert!(log.contains("dev moved"), "dev's commit is there: {log}");
+    }
+
+    /// T-558, the transition: a task reviewed before the change still has its
+    /// review branch on the remote, and that one merges exactly as it did.
+    #[test]
+    fn an_old_review_branch_still_on_the_remote_merges_as_before() {
+        let scratch = Scratch::new("old-review-branch");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The task branch has moved on since the hand-in; the review is on the
+        // review branch, as reviews of before T-558 were.
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo late > late.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm late",
+        );
+        publish(&scratch.work, "heat/t5");
+
+        let line = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap();
+
+        assert!(
+            line.contains("origin/review/t5"),
+            "the review branch is the source: {line}"
+        );
+        let log = scratch.dev_log();
+        assert!(log.contains("task"), "the candidate landed: {log}");
+        assert!(log.contains("review"), "the review landed: {log}");
+        assert!(
+            !log.contains("late"),
+            "work pushed after the hand-in is not merged: {log}"
+        );
+    }
+
+    #[test]
+    fn a_missing_task_branch_does_not_publish_a_partial_merge() {
+        // F6 of the review, for T-558: the review commit is pushed onto the
+        // task branch, so the task branch is what a merge publishes. One that
+        // is gone on origin (and no old review branch either) is not silently
+        // skipped: the merge fails with the git diagnostic, dev stays where it
+        // was, and nothing is pushed.
+        let scratch = Scratch::new("noreview");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The task branch and the old review branch are gone; the approved
+        // candidate is still on a pushed ref of its own.
+        sh(
+            &scratch.root,
+            &format!(
+                "git -C origin.git update-ref refs/heads/keep/t5 {candidate} \
+                 && git -C origin.git update-ref -d refs/heads/review/t5 \
+                 && git -C origin.git update-ref -d refs/heads/heat/t5"
+            ),
+        );
+        let before = scratch.dev_log();
+
+        let failed = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap_err();
+
+        assert_eq!(failed.blocker, Blocker::Stuck, "it does not clear");
+        assert!(
+            failed.reason.contains("task branch") && failed.reason.contains("origin/heat/t5"),
+            "the missing branch is named: {}",
+            failed.reason
         );
         assert_eq!(scratch.dev_log(), before, "dev is untouched");
         assert!(!scratch.dev_has_task_commit(), "no partial merge on dev");
-        let branches = scratch.origin_branches();
-        assert!(branches.contains("heat/t5"), "{branches}");
         // The worktree is back at the integration branch (nothing half-merged
         // for the next run).
         let head = sh(Path::new(&worktree.path), "git log --format=%s -1");
@@ -8761,18 +13273,26 @@ gate = "{project_gate}"
     }
 
     #[test]
-    fn a_missing_review_branch_fails_the_op_and_tells_the_captain() {
-        // The public path: the engine's merge step runs, the review branch is
-        // gone on origin, so the op fails with the git diagnostic, dev is
-        // untouched and the captain gets one item (F6 of the review).
+    fn a_missing_task_branch_fails_the_op_and_tells_the_captain() {
+        // The public path (T-558): the engine's merge step runs, the task
+        // branch is gone on origin and there is no old review branch, so the
+        // op fails with the git diagnostic, dev is untouched and the captain
+        // gets one item — as the missing review branch did before.
         let scratch = Scratch::new("noreview-op");
+        let (worktree, candidate) = scratch.prepared();
+        // The task branch and the old review branch are gone before the merge
+        // runs, and the candidate is on a ref of its own, so the op reaches the
+        // merge's own check rather than the "never pushed" one.
         sh(
             &scratch.root,
-            "git -C origin.git update-ref -d refs/heads/review/t5",
+            &format!(
+                "git -C origin.git update-ref refs/heads/keep/t5 {candidate} \
+                 && git -C origin.git update-ref -d refs/heads/review/t5 \
+                 && git -C origin.git update-ref -d refs/heads/heat/t5"
+            ),
         );
-        let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -8818,8 +13338,8 @@ gate = "{project_gate}"
         let op = merge_op(&mut store);
         assert_eq!(op.state, OpState::Failed, "{op:?}");
         let reason = op.result.clone().unwrap_or_default();
-        assert!(reason.contains("review branch"), "{reason}");
-        assert!(reason.contains("origin/review/t5"), "{reason}");
+        assert!(reason.contains("task branch"), "{reason}");
+        assert!(reason.contains("origin/heat/t5"), "{reason}");
         // dev is untouched: no partial merge.
         assert_eq!(scratch.dev_log(), "dev", "dev is untouched");
         assert!(!scratch.dev_has_task_commit());
@@ -8828,7 +13348,7 @@ gate = "{project_gate}"
             .read(|tx| tx.actionable_for("p", "p:captain", op.updated + 1))
             .unwrap();
         assert_eq!(inbox.len(), 1, "{inbox:?}");
-        assert!(inbox[0].body.contains("review branch"), "{}", inbox[0].body);
+        assert!(inbox[0].body.contains("task branch"), "{}", inbox[0].body);
     }
 
     #[test]
@@ -8843,7 +13363,7 @@ gate = "{project_gate}"
         );
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -8940,7 +13460,7 @@ gate = "{project_gate}"
         let scratch = Scratch::new("mergetime");
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -8996,7 +13516,7 @@ gate = "{project_gate}"
         let scratch = Scratch::new("captain-quota");
         let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
         herdr.add_agent("w9:p1", "claude", gear_herdr::AgentStatus::Idle);
         herdr.add_agent("w1:p1", "opencode", gear_herdr::AgentStatus::Idle);
         herdr.set_screen("w9:p1", "────────────────\n❯\n────────────────\nOpus 5.5 · medium /repo (dev) · ctx 63% · 5h 100%\n⏵⏵ bypass permissions on");
@@ -9216,7 +13736,7 @@ gate = "{project_gate}"
         let worktree = scratch.merge_worktree();
         let candidate = scratch.head_of("heat/t5");
         let (mut store, mut herdr, cfg) = pr_setup(&candidate);
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
 
         // The merge runs and the pull request's head is pushed.
         pr_tick(&mut store, &mut herdr, &cfg, 20);
@@ -9271,7 +13791,7 @@ gate = "{project_gate}"
         let worktree = scratch.merge_worktree();
         let candidate = scratch.head_of("heat/t5");
         let (mut store, mut herdr, cfg) = pr_setup(&candidate);
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
 
         // The op is Unknown: the engine stopped while its worker ran.
         let id = merge_op_in(&mut store, &candidate, OpState::Unknown);
@@ -9316,7 +13836,7 @@ gate = "{project_gate}"
         let worktree = scratch.merge_worktree();
         let candidate = scratch.head_of("heat/t5");
         let (mut store, mut herdr, cfg) = pr_setup(&candidate);
-        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
 
         let id = merge_op_in(&mut store, &candidate, OpState::Intended);
         pr_tick(&mut store, &mut herdr, &cfg, 20);
@@ -9375,9 +13895,10 @@ gate = "{project_gate}"
     #[should_panic(expected = "did not happen within")]
     fn a_fifo_handshake_that_never_happens_gives_up_instead_of_hanging() {
         let scratch = Scratch::new("fifo-bound");
-        // Nobody opens the other end of this fifo: the await gives up at its bound.
+        // Nobody opens the other end of this fifo: the await gives up at its
+        // bound. The bound is what is tested, so it is short.
         let running = fifo(&scratch.root, "nobody-running");
-        await_fifo_within(&running, std::time::Duration::from_secs(1));
+        await_fifo_within(&running, std::time::Duration::from_millis(50));
     }
 
     /// T-395: a merge that lost its push race (Unknown) is not starved by newer

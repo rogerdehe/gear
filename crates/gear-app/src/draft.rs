@@ -55,6 +55,9 @@ pub struct QueueItem {
     /// `review-model: gpt-6.1-sol`. It names an entry of `[models] review`
     /// and must differ from the lane's model.
     pub review_model: Option<String>,
+    /// `carried-by: T-<m>`: this task's work lands with T-m's merge; `-`
+    /// clears it.
+    pub carried_by: Option<String>,
     /// The voyage audit mark (T-505): `audit: true`. The task is run by
     /// reviewers against the integration branch and is never assigned to its
     /// lane.
@@ -105,6 +108,9 @@ pub enum StaffItem {
     RebindCancel { line: usize, lane: String },
     /// `- remerge T-<n>`: retry the task's failed merge (T-92).
     Remerge { line: usize, task: String },
+    /// `- merge-first T-<n>`: the task's queued merge runs next, on its own,
+    /// before every other ready merge including a `now` one (T-574).
+    MergeFirst { line: usize, task: String },
     /// `- drop <milestone>`: remove a milestone with no task and no history
     /// (T-473).
     Drop { line: usize, milestone: String },
@@ -642,6 +648,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
         mechanical: None,
         fresh: None,
         review_model: None,
+        carried_by: None,
         audit: None,
     })
 }
@@ -675,6 +682,7 @@ fn parse_queue_field(
         "mechanical" => "mechanical",
         "fresh" => "fresh",
         "review-model" => "review-model",
+        "carried-by" => "carried-by",
         "audit" => "audit",
         other => return Err(bad(line, format!("unknown queue field {other:?}"))),
     };
@@ -765,6 +773,24 @@ fn parse_queue_field(
                 ));
             }
             item.review_model = Some(value.to_string());
+        }
+        "carried-by" => {
+            let task = value.rsplit_once(':').map_or(value, |(_, task)| task);
+            let ok = value == "-"
+                || task
+                    .strip_prefix("T-")
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            if !ok {
+                return Err(bad(
+                    line,
+                    format!("`carried-by` is the task whose merge lands this work (T-<n>, or <project>:T-<n> for another project on the same repository), or `-` to clear it; got {value:?}"),
+                ));
+            }
+            item.carried_by = Some(if value == "-" {
+                String::new()
+            } else {
+                value.to_string()
+            });
         }
         "audit" => {
             // T-505: the mark is `true` (an audit) or `false` (no longer one).
@@ -942,6 +968,24 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
                 return Err(bad(line, "`remerge` takes only a task id"));
             }
             Ok(StaffItem::Remerge { line, task: task.to_string() })
+        }
+        "merge-first" => {
+            let task = tokens
+                .next()
+                .ok_or_else(|| bad(line, "`merge-first` needs a task id"))?;
+            if !is_task_id(task) {
+                return Err(bad(
+                    line,
+                    format!("`merge-first` needs a task id, got {task:?}"),
+                ));
+            }
+            if tokens.next().is_some() {
+                return Err(bad(line, "`merge-first` takes only a task id"));
+            }
+            Ok(StaffItem::MergeFirst {
+                line,
+                task: task.to_string(),
+            })
         }
         "drop" => {
             let milestone = tokens

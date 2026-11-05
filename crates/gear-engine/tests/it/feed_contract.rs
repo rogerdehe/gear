@@ -1438,3 +1438,412 @@ fn the_runway_counts_the_tasks_estimates_before_the_lanes_average() {
     feed::keep_lanes_fed(&mut w.store, "p", T0).unwrap();
     assert!(items(&mut w.store, "heat").is_empty());
 }
+
+// ---- the stalled voyage: nothing can start and the voyage is not finished
+// ---- (T-560)
+
+/// A task of the voyage M1.
+fn voyage_task(
+    tx: &gear_store::Tx<'_>,
+    id: &str,
+    rank: i64,
+    lane: &str,
+    state: TaskState,
+    deps: Vec<&str>,
+) -> gear_model::GearResult<()> {
+    tx.insert_task(&TaskRow {
+        repo: None,
+        base: None,
+        gate: None,
+        rework_estimate_min: None,
+        project: "p".into(),
+        id: id.into(),
+        rank,
+        state,
+        priority: "must".into(),
+        lane: Some(lane.into()),
+        milestone: Some("M1".into()),
+        required: false,
+        contract_version: 1,
+        deps: deps.into_iter().map(str::to_string).collect(),
+        followup_of: None,
+        wait_on: None,
+        wait_cond: None,
+        rework_note: None,
+        estimate_min: Some(30),
+        issue: None,
+        updated: T0,
+    })
+}
+
+/// The voyage M1, departed an hour ago.
+fn voyage(tx: &gear_store::Tx<'_>) -> gear_model::GearResult<()> {
+    tx.upsert_voyage(&gear_store::VoyageRow {
+        project: "p".into(),
+        milestone: "M1".into(),
+        title: "the goal".into(),
+        done: Some("the goal is met".into()),
+        bar: None,
+        eta: Some("4h".into()),
+        departure: Some(T0 - 3600),
+        departure_tasks: Some(3),
+        departure_estimate_min: Some(90),
+        updated: T0 - 3600,
+    })
+}
+
+/// A voyage whose work no lane can start: T-1 sits on a retired lane, T-2
+/// waits for T-3, and T-3 sits on a held lane.
+fn stalled_world() -> World {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "codex",
+                T0,
+            )?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
+            testing::seed_active_seat(tx, "p", "review", SeatRole::Lane, "w1:p3", "opencode", T0)?;
+            testing::seed_active_seat(tx, "p", "surface", SeatRole::Lane, "w1:p4", "opencode", T0)?;
+            tx.set_seat_state(
+                "p:review",
+                SeatState::Held,
+                Some("hold: the surface is rebuilt"),
+                T0,
+            )?;
+            tx.set_seat_state("p:surface", SeatState::Retired, None, T0)?;
+            voyage(tx)?;
+            voyage_task(tx, "T-1", 1, "surface", TaskState::Ready, vec![])?;
+            voyage_task(tx, "T-2", 2, "heat", TaskState::Ready, vec!["T-3"])?;
+            voyage_task(tx, "T-3", 3, "review", TaskState::Ready, vec![])?;
+            Ok(())
+        })
+        .unwrap();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    let mut cfg = EngineCfg {
+        tick_s: 4,
+        cooldown_s: 30,
+        doorbell_check_budget: 3,
+        ..Default::default()
+    };
+    for kind in ["codex", "opencode"] {
+        cfg.profiles.insert(kind.to_string(), profile(kind));
+    }
+    World { store, herdr, cfg }
+}
+
+/// A voyage whose one task sits on a held lane: no lane can start it.
+fn waiting_world(delivered: bool) -> World {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "codex",
+                T0,
+            )?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "review",
+                SeatRole::Lane,
+                LANE_PANE,
+                "opencode",
+                T0,
+            )?;
+            tx.set_seat_state(
+                "p:review",
+                SeatState::Held,
+                Some("hold: the surface is rebuilt"),
+                T0,
+            )?;
+            voyage(tx)?;
+            voyage_task(tx, "T-1", 1, "review", TaskState::Ready, vec![])?;
+            if delivered {
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 1,
+                    seat: "p:review".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Delivered,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    let mut cfg = EngineCfg {
+        tick_s: 4,
+        cooldown_s: 30,
+        doorbell_check_budget: 3,
+        ..Default::default()
+    };
+    for kind in ["codex", "opencode"] {
+        cfg.profiles.insert(kind.to_string(), profile(kind));
+    }
+    World { store, herdr, cfg }
+}
+
+/// T-575: a task whose attempt is delivered and not yet started is work in
+/// progress, not a queue (Prometheus 2026-11-05: T-748 attempt 1 was delivered,
+/// `gear queue` said "platform working T-748", and the item said "T-748 is
+/// queued" every few minutes).
+#[test]
+fn a_delivered_task_is_work_in_progress_not_a_stalled_queue() {
+    let mut w = waiting_world(true);
+
+    let changes = feed::keep_lanes_fed(&mut w.store, "p", T0 + 1).unwrap();
+
+    assert!(
+        !changes.iter().any(|change| change.lane == "stalled"),
+        "no stalled item for work in progress: {changes:?}"
+    );
+    assert!(
+        stalled_items(&mut w.store).is_empty(),
+        "the item is not written: {:?}",
+        stalled_items(&mut w.store)
+    );
+}
+
+/// The same task with no attempt is a task nothing started: the item is
+/// written, and it names what holds the task.
+#[test]
+fn a_task_with_no_attempt_is_still_named() {
+    let mut w = waiting_world(false);
+
+    let changes = feed::keep_lanes_fed(&mut w.store, "p", T0 + 1).unwrap();
+
+    assert!(
+        changes.contains(&feed::FeedChange {
+            lane: "stalled".into(),
+            action: "opened"
+        }),
+        "{changes:?}"
+    );
+    let items = stalled_items(&mut w.store);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(
+        items[0]
+            .body
+            .contains("T-1 waits for lane review (held: the surface is rebuilt)"),
+        "{}",
+        items[0].body
+    );
+    assert!(!items[0].body.contains("is queued"), "{}", items[0].body);
+}
+
+/// The items of the stalled thread.
+fn stalled_items(store: &mut Store) -> Vec<gear_store::MessageRow> {
+    store.read(|tx| tx.thread_messages("p", "stalled")).unwrap()
+}
+
+#[test]
+fn a_stalled_voyage_rings_the_captain_once_on_its_own_thread() {
+    let mut w = stalled_world();
+
+    let changes = feed::keep_lanes_fed(&mut w.store, "p", T0 + 1).unwrap();
+    assert!(
+        changes.contains(&feed::FeedChange {
+            lane: "stalled".into(),
+            action: "opened"
+        }),
+        "{changes:?}"
+    );
+    let items = stalled_items(&mut w.store);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].state, MsgState::Open);
+    assert_eq!(items[0].kind, MsgKind::System);
+    assert!(items[0].urgent, "the captain is woken by it");
+    assert_eq!(items[0].recipient, "p:captain");
+    assert_eq!(
+        items[0].body,
+        "voyage M1 is stopped: no lane can start anything, 3 tasks left. \
+         T-1 is on retired lane surface; \
+         T-2 waits for T-3 (review, queued); \
+         T-3 waits for lane review (held: the surface is rebuilt). \
+         Plan work that moves the goal, unblock or move these, or ask the user \
+         to stop the voyage."
+    );
+
+    // The state lasts: the item is updated, never opened twice.
+    let changes = feed::keep_lanes_fed(&mut w.store, "p", T0 + 5).unwrap();
+    assert!(
+        changes.contains(&feed::FeedChange {
+            lane: "stalled".into(),
+            action: "updated"
+        }),
+        "{changes:?}"
+    );
+    assert_eq!(stalled_items(&mut w.store).len(), 1, "one item, not two");
+}
+
+#[test]
+fn a_task_that_can_start_again_closes_the_stalled_item() {
+    let mut w = stalled_world();
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 1).unwrap();
+
+    // T-2 no longer waits for anything.
+    w.store
+        .write(|tx| {
+            let mut task = tx.get_task("p", "T-2")?.unwrap();
+            task.deps.clear();
+            tx.update_task(&task)
+        })
+        .unwrap();
+
+    let changes = feed::keep_lanes_fed(&mut w.store, "p", T0 + 5).unwrap();
+    assert!(
+        changes.contains(&feed::FeedChange {
+            lane: "stalled".into(),
+            action: "closed"
+        }),
+        "{changes:?}"
+    );
+    let items = stalled_items(&mut w.store);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].state, MsgState::Resolved);
+    assert_eq!(items[0].result.as_deref(), Some("a task can start again"));
+}
+
+#[test]
+fn a_voyage_with_no_task_left_keeps_the_project_quiet() {
+    let mut w = stalled_world();
+    // Everything of the voyage is done: the project stays quiet as T-232 has
+    // it, and no stalled item opens.
+    w.store
+        .write(|tx| {
+            for id in ["T-1", "T-2", "T-3"] {
+                let mut task = tx.get_task("p", id)?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let changes = feed::keep_lanes_fed(&mut w.store, "p", T0 + 1).unwrap();
+    assert!(changes.is_empty(), "{changes:?}");
+    assert!(stalled_items(&mut w.store).is_empty(), "quiet");
+}
+
+#[test]
+fn the_stalled_item_names_at_most_five_tasks() {
+    let mut w = stalled_world();
+    // Four more tasks that wait for T-3, all of them after the first three in
+    // the plan: seven tasks left, five of them named.
+    w.store
+        .write(|tx| {
+            for (id, rank) in [("T-4", 4), ("T-5", 5), ("T-6", 6), ("T-7", 7)] {
+                voyage_task(tx, id, rank, "heat", TaskState::Ready, vec!["T-3"])?;
+            }
+            let mut voyage = tx.get_voyage("p", "M1")?.unwrap();
+            voyage.departure_tasks = Some(7);
+            tx.upsert_voyage(&voyage)
+        })
+        .unwrap();
+
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 1).unwrap();
+    let items = stalled_items(&mut w.store);
+    let body = &items[0].body;
+    assert!(
+        body.contains("no lane can start anything, 7 tasks left."),
+        "{body}"
+    );
+    assert!(body.contains("T-5 waits for T-3"), "{body}");
+    assert!(!body.contains("T-6 waits for"), "{body}");
+    assert!(body.contains("and 2 more."), "{body}");
+}
+
+/// Acceptance (a) of T-560: every lane idle, two tasks left waiting on a task
+/// in review — one urgent item names both with their waits, and no lane gets
+/// an item of its own.
+#[test]
+fn a_voyage_stopped_by_a_task_in_review_names_the_tasks_that_wait_for_it() {
+    let mut w = stalled_world();
+    w.store
+        .write(|tx| {
+            // The three tasks of the fixture are done: only the review and the
+            // two tasks that wait for it are left.
+            for id in ["T-1", "T-2", "T-3"] {
+                let mut task = tx.get_task("p", id)?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+            }
+            // The two tasks that wait, and the one whose review holds them.
+            for (id, rank, lane) in [("T-4", 4, "heat"), ("T-5", 5, "review")] {
+                voyage_task(tx, id, rank, lane, TaskState::Ready, vec!["T-6"])?;
+            }
+            voyage_task(tx, "T-6", 6, "heat", TaskState::Verifying, vec![])?;
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-6".into(),
+                n: 1,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Submitted,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 1).unwrap();
+
+    let stalled = stalled_items(&mut w.store);
+    assert_eq!(stalled.len(), 1, "{stalled:?}");
+    assert!(stalled[0].urgent);
+    let body = &stalled[0].body;
+    for said in [
+        "no lane can start anything, 3 tasks left.",
+        "T-4 waits for T-6 (heat, in review)",
+        "T-5 waits for T-6 (heat, in review)",
+        "T-6 is in review",
+    ] {
+        assert!(body.contains(said), "{said} is missing from {body}");
+    }
+    for lane in ["heat", "review", "surface"] {
+        assert!(
+            items(&mut w.store, lane).is_empty(),
+            "no item for lane {lane}"
+        );
+    }
+}

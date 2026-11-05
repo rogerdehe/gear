@@ -477,6 +477,8 @@ pub struct DownSeat {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskBoard {
     pub id: String,
+    /// The branch the task merges into (see `graph::GraphTask::integration`).
+    pub integration: String,
     /// The queue position in the plan, ascending (the store's rank): the Now
     /// view's items to handle follow the plan, not the lanes' grouping (T-360).
     pub rank: i64,
@@ -523,6 +525,9 @@ pub struct TaskBoard {
     /// The tasks it depends on (T-349): the board's forecast waits for them to
     /// merge before the task can start.
     pub deps: Vec<String>,
+    /// The ones of them whose work is not merged yet (T-562): what the task
+    /// really waits for.
+    pub deps_open: Vec<String>,
 }
 
 /// The captain's inbox: how many items wait, and how long the oldest has.
@@ -785,6 +790,11 @@ pub fn project_for(
         }
     }
 
+    // The tasks whose work is merged (T-562): one query for the project, the
+    // rule the engine dispatches by. A task's words name the dependencies that
+    // still hold it, and the lane's next lookup reads the same set.
+    let merged: std::collections::BTreeSet<String> =
+        tx.merged_done_tasks(project)?.into_iter().collect();
     let mut totals = Totals::default();
     for task in &tasks {
         // A held task (Draft) is remaining work and counts (decision 04:45),
@@ -809,7 +819,20 @@ pub fn project_for(
         // The stage the graph gives this task, and its words (T-347): one
         // reading for the views and the lane lines.
         let stage = graph::stage_of(tx, project, task)?;
-        let stage_words = graph::Stage::words_of(stage, &task.deps, rounds, None);
+        let deps_open: Vec<String> = task
+            .deps
+            .iter()
+            .filter(|dep| !merged.contains(dep.as_str()))
+            .cloned()
+            .collect();
+        let stage_words = graph::Stage::words_of(
+            stage,
+            &deps_open,
+            task.deps.len(),
+            rounds,
+            None,
+            &graph::integration_of(task),
+        );
         // The latest attempt's round, for the new-session recovery mark
         // (T-481).
         let recovery = match tx.attempts_of_task(project, &task.id)?.last() {
@@ -817,6 +840,7 @@ pub fn project_for(
             None => false,
         };
         let line = TaskBoard {
+            integration: graph::integration_of(task),
             id: task.id.clone(),
             rank: task.rank,
             state: task.state,
@@ -839,6 +863,7 @@ pub fn project_for(
             dev_cost: side_cost_of(tx, project, &task.id, Side::Development)?,
             review_cost: side_cost_of(tx, project, &task.id, Side::Review)?,
             deps: task.deps.clone(),
+            deps_open,
         };
         match lanes.iter_mut().find(|lane| lane.lane == name) {
             Some(lane) => lane.tasks.push(line),

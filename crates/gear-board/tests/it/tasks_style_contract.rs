@@ -16,7 +16,8 @@ const T0: i64 = 1_800_000_000;
 fn task(id: &str, rank: i64, state: TaskState) -> TaskRow {
     TaskRow {
         repo: None,
-        base: None,
+        // v0.6.54: the stage words name the branch by its name.
+        base: Some("dev".into()),
         gate: None,
         rework_estimate_min: None,
         project: "p".into(),
@@ -208,7 +209,7 @@ fn a_merged_row_is_dim_while_its_stage_is_green() {
     let canvas = tasks(&mut store, 3);
     let (row, line) = row_with(&canvas, "goal four");
     assert_eq!(
-        canvas.style_at(column(&line, "merged"), row),
+        canvas.style_at(column(&line, "on dev"), row),
         Style::fg(Color::Ok),
         "the stage words are green: {line}"
     );

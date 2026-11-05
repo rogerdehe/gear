@@ -1155,9 +1155,9 @@ fn in_dir<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// T-438: a verdict whose review branch is on a *second* remote but not on the
-/// project's is refused — T-265 and T-375 checked the remote they pushed to,
-/// handed in, and the merge could not find `<origin>/<review branch>`, so the
+/// T-438, T-558: a verdict whose review commit is on a *second* remote but not
+/// on the project's task branch is refused — T-265 and T-375 checked the remote
+/// they pushed to, handed in, and the merge could not find the review, so the
 /// captain pushed and remerged by hand.
 #[test]
 fn a_review_pushed_to_another_remote_is_refused() {
@@ -1183,7 +1183,7 @@ fn a_review_pushed_to_another_remote_is_refused() {
     );
     git(
         &r.lane,
-        &["push", "-q", "backup", "HEAD:refs/heads/review/t1"],
+        &["push", "-q", "backup", "HEAD:refs/heads/heat/t1"],
     );
 
     let mut s = review_world();
@@ -1201,13 +1201,13 @@ fn a_review_pushed_to_another_remote_is_refused() {
 
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
-        err.detail.contains("cannot fetch origin/review/t1"),
+        err.detail.contains("cannot fetch origin/heat/t1"),
         "{}",
         err.detail
     );
-    // The refusal names the exact push of the review branch.
+    // The refusal names the exact push of the task branch (T-558).
     assert!(
-        err.detail.contains("`git push origin review/t1`"),
+        err.detail.contains("`git push origin heat/t1`"),
         "{}",
         err.detail
     );
@@ -1222,17 +1222,16 @@ fn a_review_pushed_to_another_remote_is_refused() {
         .is_empty());
 }
 
-/// T-438: the same verdict, pushed to the project's own remote exactly as the
-/// packet says, is taken.
+/// T-438, T-558: the same verdict, its review commit pushed onto the project's
+/// task branch exactly as the packet says, is taken.
 #[test]
 fn a_review_pushed_to_the_projects_remote_is_taken() {
     let r = repos();
-    git(&r.lane, &["switch", "-q", "-c", "review/t1", "origin/dev"]);
+    r.candidate("heat/t1", "origin/dev", "my work");
+    git(&r.lane, &["switch", "-q", "-c", "review/t1", "heat/t1"]);
     commit(&r.lane, "review-T-1.md", "review(T-1): pass");
-    git(
-        &r.lane,
-        &["push", "-q", "origin", "HEAD:refs/heads/review/t1"],
-    );
+    // The review commit goes onto the task branch.
+    publish(&r.origin, &r.lane, "refs/heads/review/t1", "heat/t1");
 
     let mut s = review_world();
     let (env, fp) = reviewer();
@@ -1289,17 +1288,16 @@ fn a_direction_check_is_not_checked_against_a_review_branch() {
     assert_eq!(sent.recipient, "p:captain");
 }
 
-/// T-438: the check is the reviewer's own commit, not its branch's old tip: a
-/// branch that is on the remote but behind the reviewer's HEAD is refused.
+/// T-438, T-558: the check is the reviewer's own commit, not the branch's old
+/// tip: a task branch that is on the remote but behind the reviewer's HEAD is
+/// refused.
 #[test]
-fn a_review_branch_behind_the_reviewers_head_is_refused() {
+fn a_task_branch_behind_the_reviewers_head_is_refused() {
     let r = repos();
-    git(&r.lane, &["switch", "-q", "-c", "review/t1", "origin/dev"]);
+    r.candidate("heat/t1", "origin/dev", "my work");
+    git(&r.lane, &["switch", "-q", "-c", "review/t1", "heat/t1"]);
     commit(&r.lane, "review-T-1.md", "the review");
-    git(
-        &r.lane,
-        &["push", "-q", "origin", "HEAD:refs/heads/review/t1"],
-    );
+    publish(&r.origin, &r.lane, "refs/heads/review/t1", "heat/t1");
     // A second commit the reviewer made after pushing, then not pushed.
     let head = commit(&r.lane, "fixes.md", "and a fix");
 
@@ -1319,7 +1317,7 @@ fn a_review_branch_behind_the_reviewers_head_is_refused() {
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
         err.detail
-            .contains(&format!("{head} is not on refs/remotes/origin/review/t1")),
+            .contains(&format!("{head} is not on refs/remotes/origin/heat/t1")),
         "{}",
         err.detail
     );

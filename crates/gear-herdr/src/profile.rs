@@ -483,7 +483,8 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             ],
             quota_bar: None,
             auth_markers: vec![],
-            backoff_markers: vec![],
+            // The retry line of a provider error: `⚠ Retrying in 3s · attempt 4 · Resource exhausted`, then `⚠ Retry due · attempt 5 · …`.
+            backoff_markers: vec!["Retrying in ".into(), "Retry due ·".into()],
             blocked_markers: vec![],
             error_markers: vec![],
             dialogs: vec![],
@@ -1106,8 +1107,13 @@ mod tests {
     }
 
     #[test]
-    fn only_the_codex_kind_has_back_off_signs_yet() {
-        for kind in ["opencode", "claude", "grok"] {
+    fn codex_and_opencode_have_back_off_signs() {
+        let opencode = builtin("opencode").unwrap();
+        assert!(opencode
+            .backoff("⚠ Retrying in 3s · attempt 4 · Resource exhausted. Please try again later."));
+        assert!(opencode.backoff("⚠ Retry due · attempt 5 · Resource exhausted."));
+        assert!(!opencode.backoff("Build · Gemini 4 Argon · 7m 56s"));
+        for kind in ["claude", "grok"] {
             let profile = builtin(kind).unwrap();
             assert!(profile.backoff_markers.is_empty(), "{kind}");
             assert!(!profile.backoff(CODEX_RETRYING), "{kind}");

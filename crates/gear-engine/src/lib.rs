@@ -25,6 +25,7 @@ pub mod dialog;
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
+pub mod finished;
 pub mod friction;
 pub mod guardrails;
 pub mod handover;
@@ -39,6 +40,7 @@ pub mod onboard;
 mod opencode;
 pub mod ops;
 pub mod overrun;
+pub mod panes;
 pub mod parallel;
 pub mod quiet;
 pub mod quota;
@@ -196,6 +198,8 @@ pub struct TickReport {
     pub friction: Vec<String>,
     /// Station message ids opened at ETA/task checkpoints (`project:M-n`).
     pub stations: Vec<String>,
+    /// Items resolved because their voyage finished (T-571, `project:M-n`).
+    pub finished: Vec<String>,
     /// Lanes alerted for being Working without their own development attempt.
     pub busy_lanes: Vec<String>,
     /// Seats rung for being blocked by a dialog for too long (lesson 7b).
@@ -210,6 +214,10 @@ pub struct TickReport {
     pub guardrails: Vec<String>,
     /// Seats whose agent was renamed back to its seat name this tick (T-134).
     pub renamed: Vec<String>,
+    /// Panes closed because their agent outlived its seat (T-561), one
+    /// `seat: pane` line each: a `Released` or `Retired` seat whose agent was
+    /// still running in Herdr.
+    pub gone_seats: Vec<String>,
     /// Seats whose name another pane holds (reported, never stolen; T-134).
     pub name_taken: Vec<String>,
     /// `seat: reason` of a name the engine could neither read nor give back
@@ -346,6 +354,22 @@ pub fn tick(
     }
     note_slow(&mut report, "stations", step);
 
+    // T-571: a finished voyage sends nothing. Once none of a voyage's tasks is
+    // open, the engine items it left behind (its branch sweep, its station, its
+    // merge failures and waits, its overruns, the stalled-voyage item, the open
+    // items of its tasks) resolve, so the doorbell below has nothing of it left
+    // to name.
+    let step = std::time::Instant::now();
+    for project in &projects {
+        match finished::close(store, project, now) {
+            Ok(closed) => report
+                .finished
+                .extend(closed.into_iter().map(|id| format!("{project}:{id}"))),
+            Err(error) => report.project_failed.push(project_error(project, &error)),
+        }
+    }
+    note_slow(&mut report, "finished voyages", step);
+
     // 1. observe: one agents() call for the whole session. If it fails, every
     //    project is marked and nothing at all is decided this tick.
     let step = std::time::Instant::now();
@@ -407,6 +431,16 @@ pub fn tick(
                 report.name_failed.extend(restored.failed);
                 note_slow(report, "names restore", step);
             }
+            // 0e. no agent outlives its seat (T-561): a pane whose agent still
+            //     carries the name of a released or retired seat is closed
+            //     every tick, and the captain hears of it once. The quota names
+            //     live agents, so a dead seat's pane must not stay in the count.
+            let step = std::time::Instant::now();
+            let closed = review::close_gone_seats(store, herdr, &project, &names, now)?;
+            report
+                .gone_seats
+                .extend(closed.into_iter().map(|pane| format!("{project}: {pane}")));
+            note_slow(report, "gone seats", step);
 
             // Seat observations (reads screen tails; no write transaction is held).
             // The profile table of this project: the built-ins with the project's
@@ -438,6 +472,12 @@ pub fn tick(
             // (T-97): the binding follows what the pane reports, so a delivery that
             // was never confirmed can be sent again without a store edit.
             observe::record_sessions(store, &observed)?;
+            let present: Vec<gear_store::SeatRow> = observed
+                .iter()
+                .filter(|obs| obs.presence == observe::Presence::Present)
+                .map(|obs| obs.seat.clone())
+                .collect();
+            session_runner::adopt_opencode_sessions(store, herdr, &present, now)?;
             note_slow(report, "observe seats", step);
             // A park whose time has come ends (T-190): the lane the captain
             // parked until a time that has passed works again.
@@ -838,6 +878,29 @@ pub fn tick(
             report.project_failed.push(project_error(&project, &error));
         }
         note_slow(&mut report, &format!("project {project}"), step);
+    }
+    // A paused project starts nothing, but a merge already running for it is
+    // collected when it finishes (Prometheus O-6339): its result is not lost.
+    let paused: Vec<String> = store
+        .read(|tx| tx.project_ids())?
+        .into_iter()
+        .filter(|project| !projects.contains(project))
+        .collect();
+    for project in &paused {
+        let Some(row) = store.read(|tx| tx.get_project(project))? else {
+            continue;
+        };
+        let Ok(config) = gear_app::config::parse_row(&row) else {
+            continue;
+        };
+        match merge::collect_finished(store, cfg, project, &config) {
+            Ok(Some(done)) => report.merged.extend(
+                done.into_iter()
+                    .map(|m| format!("{} @ {}", m.task, m.branch)),
+            ),
+            Ok(None) => {}
+            Err(error) => report.project_failed.push(project_error(project, &error)),
+        }
     }
     // 10. rings (T-487): the seats of every project bound to one pane are
     //     joined into one doorbell, each line naming its project, urgent
@@ -1512,6 +1575,24 @@ fn doorbell_inputs(
                 .flat_map(|view| view.open.into_iter().map(|message| message.id))
                 .collect();
             waiting.retain(|item| batch_ids.contains(&item.id));
+
+            // T-571: with no voyage of the project open, the captain is rung
+            // only for items a person or another seat addressed to it — nothing
+            // of a voyage that finished. The items it left open are resolved
+            // before this doorbell is built (`finished::close`); this keeps a
+            // stale one the store still holds from ringing again.
+            let sweep = finished::Sweep::read(tx, project)?;
+            if !sweep.empty() {
+                let mut stale = BTreeSet::new();
+                for item in &waiting {
+                    if let Some(message) = tx.get_message(project, &item.id)? {
+                        if sweep.why(&message).is_some() {
+                            stale.insert(item.id.clone());
+                        }
+                    }
+                }
+                waiting.retain(|item| !stale.contains(&item.id));
+            }
         }
 
         // A delivery/doorbell that still occupies the seat's slot, and when the

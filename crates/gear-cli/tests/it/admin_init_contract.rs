@@ -33,8 +33,12 @@ fn config(dir: &Path, repo: &Path) -> PathBuf {
 fn init(home: &Path, db: &Path, config: &Path, ctx: Option<&str>, admin: bool) -> Output {
     // T-83: `init` refuses a kind whose GEAR skill is missing; these tests are
     // about the caller checks, so the skill is installed in the test home.
-    for agent in gear_app::skill::SkillAgent::ALL {
-        gear_app::skill::install(*agent, home).expect("install the skill");
+    // Once per home: a second call in the same test reuses the copies.
+    if !home.join(".gear-test-skills").exists() {
+        for agent in gear_app::skill::SkillAgent::ALL {
+            gear_app::skill::install(*agent, home).expect("install the skill");
+        }
+        std::fs::write(home.join(".gear-test-skills"), "").expect("the marker");
     }
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_gear"));
     cmd.args(["admin", "init", config.to_str().expect("a utf-8 path")])
@@ -941,12 +945,53 @@ fn init_from_session(
     check: bool,
     db: Option<&Path>,
 ) -> Output {
+    run_init(home, socket, config, check, false, db)
+}
+
+/// The same with `--move-store` (T-551): the user says this session may move
+/// onto the store `db` names.
+fn init_moving_the_store(home: &Path, socket: &Path, config: &Path, db: &Path) -> Output {
+    run_init(home, socket, config, false, true, Some(db))
+}
+
+/// The line the registry holds for `socket`, if any (T-551).
+fn registered_store_of(home: &Path, socket: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(targets_tsv(home)).ok()?;
+    let socket = socket.to_str()?;
+    text.lines()
+        .filter_map(|line| line.split_once('\t'))
+        .find(|(s, _)| *s == socket)
+        .map(|(_, db)| db.to_string())
+}
+
+fn targets_tsv(home: &Path) -> PathBuf {
+    home.join(".config/gear/targets.tsv")
+}
+
+/// A path as the registry keeps it: canonical when it exists (T-551).
+fn canonical(path: &Path) -> String {
+    std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+}
+
+fn run_init(
+    home: &Path,
+    socket: &Path,
+    config: &Path,
+    check: bool,
+    move_store: bool,
+    db: Option<&Path>,
+) -> Output {
     for agent in gear_app::skill::SkillAgent::ALL {
         gear_app::skill::install(*agent, home).expect("install the skill");
     }
     let mut args = vec!["admin", "init"];
     if check {
         args.push("--check");
+    }
+    if move_store {
+        args.push("--move-store");
     }
     args.push(config.to_str().expect("a utf-8 path"));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_gear"));
@@ -1025,17 +1070,99 @@ fn init_refuses_a_config_for_another_herdr_session() {
     let o = init_from_session(&home, &default_socket, &beta, false, Some(&db));
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
 
-    // A store the caller names with `GEAR_DB` is not a session's: nothing is
-    // checked, so a named session's socket passes too.
+    // T-551: a store the caller names with `GEAR_DB` is no longer a silent
+    // move. alpha is registered on its own store, which exists, so an init
+    // naming another one is refused; `--move-store` is the user saying yes.
     let explicit = dir.join("explicit.db");
     let o = init_from_session(&home, &alpha, &beta, true, Some(&explicit));
-    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    let o = init_from_session(&home, &alpha, &beta, false, Some(&explicit));
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(stderr(&o).contains("--move-store"), "{}", stderr(&o));
+    let o = init_moving_the_store(&home, &alpha, &beta, &explicit);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(
         config_version(&explicit),
         1,
         "registered into the named store"
+    );
+    assert_eq!(
+        registered_store_of(&home, &alpha).as_deref(),
+        Some(canonical(&explicit).as_str()),
+        "--move-store moves the session's line"
+    );
+}
+
+/// T-551: an init never moves a Herdr session onto another store without
+/// being told. The session's engine runs only on the store the session is
+/// registered on, so a silent move leaves it refusing to start while the
+/// session's panes sit on a store nobody drives.
+#[test]
+fn init_refuses_to_move_a_sessions_store_without_the_flag() {
+    let dir = scratch("move-store");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("the home");
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let alpha = home.join(".config/herdr/sessions/alpha/herdr.sock");
+    let config = config_in_session(&dir, &repo, "alpha");
+
+    // alpha registers on its own store, as it always did.
+    let o = init_from_session(&home, &alpha, &config, false, None);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let own = home.join(".local/state/gear/alpha/gear.db");
+    assert_eq!(
+        registered_store_of(&home, &alpha).as_deref(),
+        Some(canonical(&own).as_str())
+    );
+
+    // The same store named explicitly is no move: it behaves as today.
+    let o = init_from_session(&home, &alpha, &config, true, Some(&own));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let o = init_from_session(&home, &alpha, &config, false, Some(&own));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+
+    // Another store, while the registered one exists: refused, naming the
+    // session, both paths and the flag — by `--check` and by an init.
+    let other = dir.join("other.db");
+    let o = init_from_session(&home, &alpha, &config, true, Some(&other));
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(!stdout(&o).contains("config ok"), "no headline");
+    let o = init_from_session(&home, &alpha, &config, false, Some(&other));
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.starts_with("ERROR BAD_FORMAT: "), "{err}");
+    assert!(
+        err.contains(alpha.to_str().expect("a utf-8 socket")),
+        "{err}"
+    );
+    assert!(err.contains(&canonical(&own)), "{err}");
+    assert!(err.contains(&canonical(&other)), "{err}");
+    assert!(err.contains("--move-store"), "{err}");
+    assert!(!other.exists(), "nothing was created");
+    assert_eq!(
+        registered_store_of(&home, &alpha).as_deref(),
+        Some(canonical(&own).as_str()),
+        "the session's line is unchanged"
+    );
+
+    // With `--move-store` the line is replaced.
+    let o = init_moving_the_store(&home, &alpha, &config, &other);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(config_version(&other), 1, "the project is in the new store");
+    assert_eq!(
+        registered_store_of(&home, &alpha).as_deref(),
+        Some(canonical(&other).as_str()),
+        "the move the user asked for is written"
+    );
+
+    // A registered store that is gone is no move: the session starts afresh,
+    // as today.
+    std::fs::remove_file(&other).expect("remove the moved store");
+    let third = dir.join("third.db");
+    let o = init_from_session(&home, &alpha, &config, false, Some(&third));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        registered_store_of(&home, &alpha).as_deref(),
+        Some(canonical(&third).as_str()),
+        "a store file that is gone registers as it always did"
     );
 }
 
@@ -1301,10 +1428,11 @@ fn lane_config(dir: &Path, repo: &Path, template: &str) -> PathBuf {
     path
 }
 
-/// T-373: a re-applied config that changes `conventions.seat_branch` prints,
-/// right after the project line, the worktree of every seat that has one: the
-/// branch it was made for, the branch new agents get, and the command that
-/// removes the old tree.
+/// T-373, T-559: a re-applied config that changes `conventions.seat_branch`
+/// prints, right after the project line, one line per seat that has a worktree:
+/// a path that is gone says so and names the branch new agents get (a worktree
+/// standing on the old branch is renamed in place instead — that path is tested
+/// in gear-app).
 #[test]
 fn a_changed_seat_branch_prints_the_worktree_it_leaves_behind() {
     let dir = scratch("seat-branch-moved");
@@ -1330,14 +1458,13 @@ fn a_changed_seat_branch_prints_the_worktree_it_leaves_behind() {
     let o = init(
         &dir,
         &db,
-        &lane_config(&dir, &repo, "{project}/home/{seat}"),
+        &lane_config(&dir, &repo, "{project}/{seat}/home"),
         None,
         true,
     );
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    let expected = "seat heat: its worktree /work/p-heat was made for branch p/seat/heat; \
-                    new agents of this seat get a worktree on p/home/heat; \
-                    remove the old one with `herdr worktree remove` once the seat runs in the new one";
+    let expected = "seat heat: its worktree /work/p-heat is not there any more, so nothing was \
+                    renamed; new agents of this seat get a worktree on p/heat/home";
     let out = String::from_utf8_lossy(&o.stdout).into_owned();
     let lines: Vec<&str> = out.lines().collect();
     let at = lines

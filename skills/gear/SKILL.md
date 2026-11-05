@@ -9,7 +9,7 @@ GEAR runs one piece of work — a new product, or one requirement inside an exis
 
 ## 1. Guard
 
-No `GEAR_CTX` in your environment and no seat bound to your pane → GEAR did not start you. Run no write command (`gear send`, `gear reply`, `gear plan apply`, `gear admin …`); tell the user. A seat bound to the pane you really run in needs no variable at all: `gear` there is that seat's home page.
+Run `gear --session <session> --pane <your pane>`. If it names no seat of yours, GEAR did not start you: run no write command (`gear send`, `gear reply`, `gear plan apply`, `gear admin …`); tell the user. If it names your seat, that seat is yours, with or without `GEAR_CTX` in your environment: a CLI that runs commands outside its pane never has it.
 
 ## 2. Start every turn with `gear`
 
@@ -26,7 +26,7 @@ No `GEAR_CTX` in your environment and no seat bound to your pane → GEAR did no
   - `result` — the exact command in your task packet. **Then end your turn.** Your next task is delivered as soon as you are idle; never wait for the review, never investigate GEAR to see why nothing came yet.
 - Answer a captain instruction with `gear send --kind progress --reply-to M-<n> "<text>"`.
 - Answer an estimate question with `gear send --kind progress --task T-<n> --attempt <a> --contract <c> --left <minutes> --blocker "<what stops you, or none>" "<done; left>"`, then keep working. When another task must merge first, send `gear send --kind blocked --task T-<n> --attempt <a> --contract <c> --on T-<m> "<done; what waits>"`; the clock pauses until it merges.
-- For a result or review, add `--friction "<what cost time the captain could fix>"` when a permission, slow build or test, unclear contract, missing tool or fixture, or other step cost time. The flag is required when the round exceeds its budget.
+- For a result or review, add `--friction "<what cost time the captain could fix>"` when a permission, slow build or test, unclear contract, missing tool or fixture, or other step cost time. Say so too when the checks the captain asked for took a fifth of the round or more: name them and their minutes. The flag is required when the round exceeds its budget.
 - If a command prints `UNCONFIRMED`, run it again with the same `--request-id`; never resend it reworded.
 - When your agent is switched to another CLI, the packet starts with a handover: read the previous session it names, check the worktree it describes, and do not start over on work you have not inspected. The template ships as `templates/handover.md`.
 - Do not edit the plan or the packets GEAR renders; do not start background jobs that keep writing after your turn ends.

@@ -9,10 +9,12 @@
 //! is cut at the right edge, the footer keeps the last row, and the panel is
 //! drawn over the view (as the prototype draws its window over the board).
 
+use crate::forecast;
 use crate::graph;
 use crate::idle::IdleReason;
 use crate::style::{lane_color, Color, Line, Style};
 use crate::{Board, LaneBoard, ProjectBoard, QuotaReading, QuotaWindow, TaskBoard, VoyageEntry};
+use std::collections::BTreeMap;
 
 /// The four views of the board: the tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -662,7 +664,16 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
             Style::fg(Color::Warn).and_bold(),
         );
         row += 1;
-        for line in wrap(voyage.done.as_deref().unwrap_or_default(), inside) {
+        // Folded, a long goal keeps to its first lines and ends in `…`, so it
+        // never pushes the task list off the screen; `d` shows all of it.
+        let mut lines = wrap(voyage.done.as_deref().unwrap_or_default(), inside);
+        if !screen.detail && lines.len() > GOAL_FOLDED_LINES {
+            lines.truncate(GOAL_FOLDED_LINES);
+            let last = lines.last_mut().expect("folded lines are not empty");
+            let keep = last.chars().count().min(inside.saturating_sub(2));
+            *last = format!("{} …", last.chars().take(keep).collect::<String>());
+        }
+        for line in lines {
             canvas.put_styled(
                 1,
                 row,
@@ -768,7 +779,7 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
 
 /// The numbers the header's time and tasks rows read (T-354), all in
 /// minutes.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct HeaderNumbers {
     /// The time the voyage used: from its departure to now while it sails, to
     /// its merge once it landed.
@@ -776,8 +787,11 @@ struct HeaderNumbers {
     /// The plan's eta.
     eta: i64,
     /// The end the lane forecast expects: the slowest lane's end after what is
-    /// used.
+    /// used, once the lanes no forecast can reach are left out (T-567).
     expected: i64,
+    /// The jobs that can never start, in the time line's words (T-567): the
+    /// first job, the dependency nothing will merge, and `+N more`.
+    blocked: Option<String>,
     /// The voyage still sails.
     sailing: bool,
     /// The plan's eta less the expected end (sailing) or the used time
@@ -785,8 +799,12 @@ struct HeaderNumbers {
     diff: i64,
     /// The voyage's tasks: the cancelled ones are not work.
     tasks: usize,
-    /// The tasks merged, in progress and not started.
+    /// The branch the voyage merges into: the one most of its tasks name.
+    integration: String,
+    /// The tasks on that branch, passed but not on it yet, in progress and
+    /// not started.
     merged: usize,
+    unlanded: usize,
     going: usize,
     waiting: usize,
 }
@@ -802,13 +820,7 @@ fn header_numbers(board: &Board, project: &ProjectBoard) -> HeaderNumbers {
         .and_then(|voyage| voyage.eta.as_deref())
         .map(duration_minutes)
         .unwrap_or(0);
-    let expected = project
-        .forecast
-        .iter()
-        .map(|end| end.end_min)
-        .max()
-        .map(|end| used + end)
-        .unwrap_or(used);
+    let (expected, blocked) = expected_of(used, &project.forecast);
     let sailing = voyage.is_some_and(|voyage| voyage.sailing);
     let diff = if sailing { eta - expected } else { eta - used };
 
@@ -817,6 +829,7 @@ fn header_numbers(board: &Board, project: &ProjectBoard) -> HeaderNumbers {
     let mut tasks = 0usize;
     let mut merged = 0usize;
     let mut waiting = 0usize;
+    let mut unlanded = 0usize;
     for task in project.lanes.iter().flat_map(|lane| lane.tasks.iter()) {
         if task.state == gear_model::TaskState::Cancelled {
             continue;
@@ -824,22 +837,96 @@ fn header_numbers(board: &Board, project: &ProjectBoard) -> HeaderNumbers {
         tasks += 1;
         match task.stage {
             graph::Stage::Merged => merged += 1,
-            graph::Stage::Deps | graph::Stage::Queued => waiting += 1,
+            graph::Stage::Passed | graph::Stage::Merging | graph::Stage::MergeFailed => {
+                unlanded += 1
+            }
+            graph::Stage::Deps | graph::Stage::Queued | graph::Stage::Held => waiting += 1,
             _ => {}
         }
     }
-    let going = tasks.saturating_sub(merged + waiting);
+    let going = tasks.saturating_sub(merged + waiting + unlanded);
+    let mut names: BTreeMap<&str, usize> = BTreeMap::new();
+    for task in project.lanes.iter().flat_map(|lane| lane.tasks.iter()) {
+        *names.entry(task.integration.as_str()).or_default() += 1;
+    }
+    let integration = names
+        .into_iter()
+        .max_by_key(|(_, n)| *n)
+        .map(|(name, _)| name.to_string())
+        .unwrap_or_else(|| "the integration branch".to_string());
 
     HeaderNumbers {
         used,
         eta,
         expected,
+        blocked,
         sailing,
         diff,
         tasks,
+        integration,
         merged,
+        unlanded,
         going,
         waiting,
+    }
+}
+
+/// The end the forecast expects and the tasks nothing will ever merge (T-567).
+///
+/// A lane end at or past [`forecast::NO_DEP`] is no forecast: the lane waits
+/// for a dependency no job of the queue speaks for, so it is left out of the
+/// expected end — one such lane used to put the whole time line 16 666 hours
+/// behind the plan. The lane is named instead: `blocked: T-570 waits for
+/// T-665, which nothing will merge`, the first such job, and `+N more` when
+/// there are several. The other lanes' forecast is what it always was.
+fn expected_of(used: i64, ends: &[forecast::LaneEnd]) -> (i64, Option<String>) {
+    let reachable = ends
+        .iter()
+        .map(|end| end.end_min)
+        .filter(|end| *end < forecast::NO_DEP);
+    let expected = reachable.max().map(|end| used + end).unwrap_or(used);
+    // The forecast of the lanes that can reach the branch is the whole
+    // forecast: a blocked job only speaks when there is one.
+    let blocked: Vec<&(String, String)> = ends
+        .iter()
+        .filter(|end| end.end_min >= forecast::NO_DEP)
+        .flat_map(|end| end.blocked.iter())
+        .collect();
+    let Some((task, dep)) = blocked.first() else {
+        return (expected, None);
+    };
+    let more = blocked.len() - 1;
+    let more = if more == 0 {
+        String::new()
+    } else {
+        format!(" (+{more} more)")
+    };
+    (
+        expected,
+        Some(format!(
+            "blocked: {task} waits for {dep}, which nothing will merge{more}"
+        )),
+    )
+}
+
+/// The unfolded header's slowest-lane clause (T-567 review F3): ` (slowest
+/// lane: heat)`, and nothing at all when no lane has a forecast — every lane
+/// blocked prints no empty clause.
+fn slowest_lane_clause(lane: &str) -> String {
+    if lane.is_empty() {
+        String::new()
+    } else {
+        format!(" (slowest lane: {lane})")
+    }
+}
+
+/// A time line's words with the jobs that can never start appended (T-567):
+/// `expected 8h00m of 50h00m, 42h behind · blocked: T-570 waits for T-665,
+/// which nothing will merge`.
+fn with_blocked(text: String, blocked: &Option<String>) -> String {
+    match blocked {
+        Some(blocked) => format!("{text} · {blocked}"),
+        None => text,
     }
 }
 
@@ -887,13 +974,16 @@ fn folded_rows(
         used,
         eta,
         expected,
+        blocked,
         sailing,
         diff,
         tasks,
         merged,
+        unlanded,
+        integration,
         going,
         waiting,
-    } = numbers;
+    } = numbers.clone();
 
     // The folded header's bar: the prototype's shorter one.
     let n = (width.saturating_sub(60) / 2).clamp(20, 40);
@@ -971,6 +1061,7 @@ fn folded_rows(
     } else {
         format!("took {} of {}, {} over", hm(used), hm(eta), hm(-diff))
     };
+    let short = with_blocked(short, &blocked);
     canvas.put_styled(16 + n, row, &short, time_style);
     canvas.put_styled(mx, row, "Tasks", Style::bold());
     canvas.put_styled(mx + 11, row, &"█".repeat(a), Style::fg(Color::Ok));
@@ -984,7 +1075,7 @@ fn folded_rows(
     canvas.put_styled(
         mx + 12 + n,
         row,
-        &format!("{merged}/{tasks} merged · {going} going · {waiting} waiting"),
+        &format!("{merged}/{tasks} on {integration} · {unlanded} passed, not on {integration} · {going} going · {waiting} waiting"),
         Style::PLAIN,
     );
     row += 1;
@@ -1019,13 +1110,16 @@ fn unfolded_rows(
         used,
         eta,
         expected,
+        blocked,
         sailing,
         diff,
         tasks,
         merged,
+        unlanded,
+        integration,
         going,
         waiting,
-    } = numbers;
+    } = numbers.clone();
 
     // The unfolded header's bar: the prototype's wider one.
     let n = width.saturating_sub(95).clamp(20, 50);
@@ -1099,16 +1193,20 @@ fn unfolded_rows(
     // The time against the plan in words, and the key of the bar's marks.
     canvas.put_styled(1, row, "Time", Style::bold());
     canvas.put_styled(15, row, &bar, time_style);
+    // The slowest lane the forecast can name (T-567): a lane waiting on a
+    // dependency nothing will merge is no finish at all, and is named apart.
     let slow = project
         .forecast
         .iter()
+        .filter(|end| end.end_min < forecast::NO_DEP)
         .max_by_key(|end| end.end_min)
         .map(|end| end.lane.clone())
         .unwrap_or_default();
+    let slow = slowest_lane_clause(&slow);
     let when = if sailing {
         if diff >= 0 {
             format!(
-                "used {} · planned {} · expected {} (slowest lane: {slow}), {} ahead of plan",
+                "used {} · planned {} · expected {}{slow}, {} ahead of plan",
                 hm(used),
                 hm(eta),
                 hm(expected),
@@ -1116,7 +1214,7 @@ fn unfolded_rows(
             )
         } else {
             format!(
-                "used {} · planned {} · expected {} (slowest lane: {slow}), {} behind plan",
+                "used {} · planned {} · expected {}{slow}, {} behind plan",
                 hm(used),
                 hm(eta),
                 hm(expected),
@@ -1138,6 +1236,7 @@ fn unfolded_rows(
             hm(-diff)
         )
     };
+    let when = with_blocked(when, &blocked);
     canvas.put_styled(17 + n, row, &when, Style::bold());
     row += 1;
     canvas.put_styled(
@@ -1160,7 +1259,7 @@ fn unfolded_rows(
         Style::fg(Color::Dim),
     );
     let mut words =
-        format!("{merged} of {tasks} merged · {going} in progress · {waiting} not started");
+        format!("{merged} of {tasks} on {integration} · {unlanded} passed, not on {integration} · {going} in progress · {waiting} not started");
     if !project.moved_out.is_empty() {
         let moved: Vec<&str> = project
             .moved_out
@@ -1258,6 +1357,9 @@ fn voyage_style(shown: Option<&VoyageEntry>, entry: &VoyageEntry) -> Style {
 fn is_wide(character: char) -> bool {
     matches!(character, '⛵' | '⚓' | '⏳')
 }
+
+/// How many lines of the goal the folded header shows (`d` shows all).
+const GOAL_FOLDED_LINES: usize = 3;
 
 /// The prototype's `wrap`: the words split on whitespace; a word that would
 /// pass `width` starts a new line.
@@ -2138,32 +2240,51 @@ fn idle_reason_text(project: &ProjectBoard, lane: &LaneBoard, landed: bool) -> (
             Style::fg(Color::Bad),
         );
     }
-    // The next task of the lane, and the first dependency it waits for.
-    let Some(next) = lane
+    // The next task of the lane: the first one in the plan's order whose
+    // dependencies are all merged — the rule the engine dispatches by (T-562).
+    let mut waiting: Vec<&TaskBoard> = lane
         .tasks
         .iter()
-        .find(|task| matches!(task.stage, graph::Stage::Deps | graph::Stage::Queued))
-    else {
+        .filter(|task| matches!(task.stage, graph::Stage::Deps | graph::Stage::Queued))
+        .collect();
+    waiting.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    if let Some(next) = waiting
+        .iter()
+        .find(|task| task.deps_open.is_empty())
+        .copied()
+    {
+        return (
+            format!("next {} is ready but not delivered", next.id),
+            Style::fg(Color::Bad),
+        );
+    }
+    // Nothing can start: the first one in the plan says which dependency holds
+    // it (T-562).
+    let Some(next) = waiting.first().copied() else {
         return (
             "nothing left planned for this lane".to_string(),
             Style::fg(Color::Bad),
         );
     };
-    for dep in &next.deps {
-        for owner in &project.lanes {
-            let Some(task) = owner.tasks.iter().find(|task| &task.id == dep) else {
-                continue;
-            };
-            if task.stage != graph::Stage::Merged {
-                return (
-                    format!(
-                        "next {} waits for {} ({}, {})",
-                        next.id, dep, owner.lane, task.stage_words
-                    ),
-                    Style::fg(Color::Bad),
-                );
-            }
-            break;
+    if let Some(dep) = next.deps_open.first() {
+        if let Some((owner, task)) = project.lanes.iter().find_map(|owner| {
+            owner
+                .tasks
+                .iter()
+                .find(|task| &task.id == dep)
+                .map(|task| (owner, task))
+        }) {
+            return (
+                format!(
+                    "next {} waits for {} ({}, {})",
+                    next.id, dep, owner.lane, task.stage_words
+                ),
+                Style::fg(Color::Bad),
+            );
         }
     }
     (
@@ -2323,9 +2444,11 @@ pub fn styled_lane_panel(lane: &LaneBoard, tasks: &[graph::GraphTask], color: Co
                 task.title.chars().take(30).collect::<String>(),
                 graph::Stage::words_of(
                     task.stage,
-                    &task.deps,
+                    &task.deps_open,
+                    task.deps.len(),
                     task.rounds,
-                    task.moved_to.as_deref()
+                    task.moved_to.as_deref(),
+                    &task.integration
                 )
             ),
             Style::fg(task.stage.color()),
@@ -2394,6 +2517,7 @@ pub fn reason_word(reason: &IdleReason) -> &'static str {
         IdleReason::Held { .. } => "held",
         IdleReason::Waiting { .. } => "waiting",
         IdleReason::DepWait { .. } => "dep wait",
+        IdleReason::Retired { .. } => "retired",
         IdleReason::Undelivered { .. } => "undelivered",
         IdleReason::NoWork => "no work",
     }
@@ -2475,6 +2599,70 @@ mod tests {
         assert_eq!(canvas.char_at(5, 0), ' ');
         assert_eq!(canvas.style_at(5, 0), Style::fg(Color::Warn));
         assert_eq!(canvas.text().lines().next().unwrap_or_default(), " M5 y");
+    }
+
+    /// T-567: the incident of prometheus M4 — "expected 16716h25m of 50h00m,
+    /// 16666h25m behind". A lane waiting on a dependency no job speaks for ends
+    /// a million minutes out; it is left out of `expected` (the other lanes'
+    /// max) and the time line names it instead.
+    #[test]
+    fn a_lane_only_a_dependency_nothing_merges_holds_is_named_not_forecast() {
+        let ends = vec![
+            forecast::LaneEnd {
+                lane: "mast".to_string(),
+                end_min: 2 * 60,
+                waits: Vec::new(),
+                blocked: Vec::new(),
+                pace: 1.0,
+            },
+            forecast::LaneEnd {
+                lane: "hull".to_string(),
+                end_min: forecast::NO_DEP + 30,
+                waits: vec![(forecast::NO_DEP, "T-665".to_string())],
+                blocked: vec![("T-570".to_string(), "T-665".to_string())],
+                pace: 1.0,
+            },
+        ];
+        // The expected end is the reachable lane's, after the time used.
+        let (expected, blocked) = expected_of(50 * 60, &ends);
+        assert_eq!(expected, 50 * 60 + 2 * 60);
+        assert_eq!(
+            blocked.as_deref(),
+            Some("blocked: T-570 waits for T-665, which nothing will merge")
+        );
+        // And it ends the time line, folded and unfolded alike.
+        assert_eq!(
+            with_blocked("expected 2h00m of 50h00m".to_string(), &blocked),
+            "expected 2h00m of 50h00m · blocked: T-570 waits for T-665, which nothing will merge"
+        );
+        assert_eq!(
+            with_blocked("expected 2h00m".to_string(), &None),
+            "expected 2h00m"
+        );
+
+        // Several blocked jobs: the first names the line, the rest are counted.
+        let mut more = ends.clone();
+        more[1]
+            .blocked
+            .push(("T-571".to_string(), "T-665".to_string()));
+        let (_, blocked) = expected_of(50 * 60, &more);
+        assert_eq!(
+            blocked.as_deref(),
+            Some("blocked: T-570 waits for T-665, which nothing will merge (+1 more)")
+        );
+
+        // A forecast with no blocked lane is the forecast it always was.
+        let (expected, blocked) = expected_of(0, &ends[..1]);
+        assert_eq!(expected, 2 * 60);
+        assert_eq!(blocked, None);
+    }
+
+    /// T-567 review F3: when every lane is blocked there is no slowest lane,
+    /// and the unfolded header prints no empty `(slowest lane: )`.
+    #[test]
+    fn a_header_with_no_lane_to_name_prints_no_slowest_lane() {
+        assert_eq!(slowest_lane_clause("heat"), " (slowest lane: heat)");
+        assert_eq!(slowest_lane_clause(""), "");
     }
 
     #[test]

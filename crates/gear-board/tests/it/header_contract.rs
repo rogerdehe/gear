@@ -82,7 +82,8 @@ fn world_of(tasks: &[(&str, TaskState)], eta: &str, departure_s: i64) -> Store {
                 let lane = if rank < 2 { "hull" } else { "keel" };
                 tx.insert_task(&TaskRow {
                     repo: None,
-                    base: None,
+                    // v0.6.54: the stage words name the branch by its name.
+                    base: Some("dev".into()),
                     gate: None,
                     rework_estimate_min: None,
                     project: "p".into(),
@@ -280,12 +281,15 @@ fn the_folded_header_gives_the_check_the_milestone_the_time_and_the_tasks() {
     );
     // The tasks, in three parts (merged, going, waiting; cancelled excluded).
     assert_eq!(at(row, 90, 5), "Tasks", "the tasks' label");
-    assert_eq!(at(row, 101, 13), "█".repeat(13), "1 of 3 merged");
+    assert_eq!(at(row, 101, 13), "█".repeat(13), "1 of 3 on dev");
     assert_eq!(at(row, 114, 13), "▓".repeat(13), "1 of 3 going");
     assert_eq!(at(row, 127, 14), "░".repeat(14), "the rest is not started");
-    assert!(
-        at(row, 142, 17).starts_with("1/3 merged · 1 go"),
-        "3 tasks, 1 merged, 1 going: {row:?}"
+    // v0.6.54: the row names the branch and counts what passed but is not on
+    // it yet; the 160-column frame cuts it after the unlanded count.
+    assert_eq!(
+        at(row, 142, 18),
+        "1/3 on dev · 0 pa",
+        "3 tasks: 1 on dev, 0 passed not on it, 1 going, 1 not started: {row:?}"
     );
     assert_eq!(canvas.style_at(101, time), Style::fg(Color::Ok));
     assert_eq!(canvas.style_at(114, time), Style::fg(Color::Warn));
@@ -819,4 +823,116 @@ fn a_station_ahead_without_a_projection_is_planned_by_nothing() {
         "▶ S1 the box — now"
     );
     assert_eq!(milestone_text(station_row(&rows, "S2")), "· S2 the views");
+}
+
+/// A long goal keeps to three lines in the folded header and ends in `…`, so
+/// the task list keeps its room; `d` shows the whole goal.
+#[test]
+fn a_long_goal_is_folded_to_three_lines_and_d_shows_it_all() {
+    let mut store = world_of(&[("T-1", TaskState::Ready)], "4h", 600);
+    let long = (1..=60)
+        .map(|n| format!("clause{n} keeps the board readable"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    store
+        .write(|tx| {
+            let mut voyage = tx.get_voyage("p", "M5")?.unwrap();
+            voyage.done = Some(long.clone());
+            tx.upsert_voyage(&voyage)
+        })
+        .unwrap();
+
+    let goal_rows = |rows: &[String]| {
+        let top = rows.iter().position(|r| r.contains("GOAL")).unwrap();
+        let bottom = rows.iter().skip(top).position(|r| r.contains('╚')).unwrap() + top;
+        rows[top + 1..bottom].to_vec()
+    };
+    let (_, _, _, folded) = drawn(&mut store);
+    let folded = goal_rows(&folded);
+    // Three lines of the goal and the quality bar.
+    assert_eq!(folded.len(), 4, "{folded:#?}");
+    assert!(folded[2].contains('…'), "{folded:#?}");
+    assert!(
+        !folded.iter().any(|r| r.contains("clause60")),
+        "{folded:#?}"
+    );
+
+    let (_, _, unfolded) = unfolded(&mut store);
+    let unfolded = goal_rows(&unfolded);
+    assert!(unfolded.len() > 4, "{unfolded:#?}");
+    assert!(
+        unfolded.iter().any(|r| r.contains("clause60")),
+        "{unfolded:#?}"
+    );
+}
+
+/// v0.6.54: a done task without a merge time is not merged. Its failed merge
+/// is counted in the header as passed and not on the branch, never as a merge
+/// that landed.
+#[test]
+fn a_done_task_without_a_merge_time_counts_as_passed_not_on_the_branch() {
+    let mut store = world_of(
+        &[("T-1", TaskState::Done), ("T-2", TaskState::Done)],
+        "2h",
+        3_600,
+    );
+    // T-1 is merged by `world_of`; T-2's merge failed.
+    store
+        .write(|tx| {
+            let op = tx.insert_op(&gear_store::NewOp {
+                project: "p".into(),
+                seat: "p:captain".into(),
+                generation: 1,
+                kind: gear_model::OpKind::Merge,
+                task: Some("T-2".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({}),
+                created: NOW,
+            })?;
+            tx.set_op_state("p", &op.id, gear_model::OpState::Failed, None, NOW + 60)?;
+            Ok(())
+        })
+        .unwrap();
+
+    let board = build(
+        &mut store,
+        &Options {
+            project: Some("p".into()),
+            ..Options::default()
+        },
+        NOW,
+    )
+    .unwrap();
+    // A wide screen: the folded row's words are not cut before the counts.
+    let screen = Screen {
+        tab: Tab::Now,
+        selected: 0,
+        detail: false,
+        opened: Vec::new(),
+        size: (220, 40),
+    };
+    let canvas = frame::canvas(&board, &screen, None);
+    let text = canvas.text();
+    // The folded header draws the time and the tasks on one row: the tasks'
+    // words follow the tasks' bar.
+    let row = text
+        .lines()
+        .find(|line| line.contains("Tasks") && line.contains("on dev"))
+        .unwrap_or_else(|| panic!("the Tasks row in:\n{text}"));
+    assert!(
+        row.contains("1/2 on dev · 1 passed, not on dev · 0 going"),
+        "1 of 2 on dev, 1 passed and not on it: {row:?}"
+    );
+    let t2 = board.projects[0].lanes.iter().flat_map(|lane| &lane.tasks);
+    let t2 = t2
+        .clone()
+        .find(|task| task.id == "T-2")
+        .expect("T-2 on the board");
+    assert_eq!(t2.stage, gear_board::graph::Stage::MergeFailed);
+    assert_eq!(
+        t2.stage_words,
+        "merge into dev failed, waits for the captain"
+    );
 }

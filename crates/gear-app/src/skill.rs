@@ -205,6 +205,22 @@ impl SkillAgent {
             SkillAgent::Agy => home.join(".gemini").join("antigravity-cli").join("skills"),
         }
     }
+
+    /// Where this machine's CLI reads the skill: [`Self::skills_root`], except
+    /// that Codex reads `$CODEX_HOME/skills` when `CODEX_HOME` is set. A copy
+    /// under `~/.codex` would never reach an agent started with it.
+    pub fn skills_dir(self, home: &Path) -> PathBuf {
+        let codex_home = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty());
+        self.skills_dir_with(home, codex_home.as_deref().map(Path::new))
+    }
+
+    /// [`Self::skills_dir`] with the `CODEX_HOME` given.
+    pub fn skills_dir_with(self, home: &Path, codex_home: Option<&Path>) -> PathBuf {
+        match (self, codex_home) {
+            (SkillAgent::Codex, Some(codex_home)) => codex_home.join("skills"),
+            _ => self.skills_root(home),
+        }
+    }
 }
 
 /// Is the GEAR skill installed for `agent` under `home` (T-83)? The CLI loads
@@ -223,7 +239,13 @@ pub fn installed(agent: SkillAgent, home: &Path) -> bool {
 /// `<the CLI's skills dir>/gear/`. An existing file is overwritten (the
 /// installed copy follows the binary). Returns the files written.
 pub fn install(agent: SkillAgent, home: &Path) -> GearResult<Vec<PathBuf>> {
-    let dir = agent.skills_root(home).join(SKILL_NAME);
+    install_into(&agent.skills_root(home))
+}
+
+/// Install the skill into a CLI's skills directory `root` (the caller has
+/// resolved it, for Codex with `CODEX_HOME`: [`SkillAgent::skills_dir`]).
+pub fn install_into(root: &Path) -> GearResult<Vec<PathBuf>> {
+    let dir = root.join(SKILL_NAME);
     let mut written = Vec::new();
     for topic in TOPICS {
         let path = dir.join(topic.file);
@@ -304,6 +326,23 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn codex_reads_its_skill_from_codex_home_when_it_is_set() {
+        let home = Path::new("/home/u");
+        assert_eq!(
+            SkillAgent::Codex.skills_dir_with(home, Some(Path::new("/data/codex-home"))),
+            Path::new("/data/codex-home/skills")
+        );
+        assert_eq!(
+            SkillAgent::Codex.skills_dir_with(home, None),
+            home.join(".codex").join("skills")
+        );
+        assert_eq!(
+            SkillAgent::Claude.skills_dir_with(home, Some(Path::new("/data/codex-home"))),
+            home.join(".claude").join("skills")
+        );
     }
 
     #[test]

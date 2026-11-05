@@ -19,10 +19,11 @@ pub struct InitResult {
     /// The seats of the project after this call (captain first, then the lanes
     /// in config order).
     pub seats: Vec<String>,
-    /// T-373: one display line per seat whose worktree the **old**
-    /// `conventions.seat_branch` made and the new config no longer uses —
-    /// empty when the `seat_branch` did not change. Nothing is removed: the
-    /// line names the path and the command that takes it away.
+    /// T-373, T-559: one display line per seat whose worktree the **old**
+    /// `conventions.seat_branch` named, when an apply changes it — empty when
+    /// the `seat_branch` did not change. A worktree standing on the old branch
+    /// is renamed to the new one in place (and on the remote too); one on
+    /// another branch is left alone and named. Nothing is removed.
     #[serde(default)]
     pub stale_worktrees: Vec<String>,
 }
@@ -128,14 +129,35 @@ pub fn init_with_home(
         }
     }
 
-    store.write(|tx| {
+    // T-559: the seat branch the project ran on before this apply, when the
+    // project is registered already and its stored config parses.
+    let previous_seat_branch = store
+        .read(|tx| Ok(tx.get_project(&project_id)?))?
+        .and_then(|project| config::parse(&project.config_toml).ok())
+        .map(|stored| stored.conventions.seat_branch);
+    let mut result = store.write(|tx| {
         match tx.get_project(&project_id)? {
             // The project is registered: the config changes.
             Some(project) => re_register(tx, &project, &config, config_text, confirmed, now),
             // The project is new: it is registered.
             None => register(tx, &config, config_text, now),
         }
-    })
+    })?;
+    // T-559: a changed `conventions.seat_branch` moves each seat's own branch
+    // where the seat's worktree stands on the old name, after the config is
+    // stored (git runs outside the store's transaction).
+    if let Some(previous) = previous_seat_branch.as_deref() {
+        if previous != config.conventions.seat_branch {
+            result.stale_worktrees = move_seat_branches(
+                store,
+                &project_id,
+                previous,
+                &config.conventions.seat_branch,
+                &config.conventions.remote,
+            )?;
+        }
+    }
+    Ok(result)
 }
 
 /// The checks `init` makes before it touches the store (T-228): the config's
@@ -661,44 +683,122 @@ fn register(
 /// stay the same string.
 const WORKTREE_PATH_KEY: &str = "engine.worktree_path.";
 
-/// The seat worktrees the stored `conventions.seat_branch` made that the new
-/// config no longer uses (T-373): one line per seat of the project that has a
-/// worktree path in meta, empty when the `seat_branch` did not change.
+/// T-559: a config apply that changes `conventions.seat_branch` moves the
+/// branch of each seat's own worktree from the old expansion to the new one, so
+/// nobody types anything. One line per seat goes back to the caller (the CLI
+/// prints it):
 ///
-/// The line is what the CLI prints; it takes nothing away — the seat keeps its
-/// worktree until its own agent runs in the new one, and the user removes the
-/// old tree then.
-fn stale_seat_worktrees(
-    tx: &Tx<'_>,
-    project: &ProjectRow,
-    config: &config::ProjectConfig,
+/// - a seat worktree standing on the old branch is renamed in place
+///   (`git branch -m <old> <new>`), and when the old name is on the remote the
+///   new one is pushed and the old one deleted there;
+/// - a seat whose worktree is on another branch is left alone and named (it may
+///   be mid-task on it); its next agent gets the new name;
+/// - a path that is gone, or a git that cannot tell, is named too.
+///
+/// Nothing is removed. The branch rename is a convenience of the apply, never a
+/// reason for it to fail: a git step that fails is reported in the seat's line.
+fn move_seat_branches(
+    store: &mut Store,
+    project: &str,
+    old_template: &str,
+    new_template: &str,
+    remote: &str,
 ) -> GearResult<Vec<String>> {
-    // A stored config that does not parse says nothing about the old branch.
-    let Ok(stored) = config::parse(&project.config_toml) else {
-        return Ok(Vec::new());
-    };
-    let old_template = &stored.conventions.seat_branch;
-    let new_template = &config.conventions.seat_branch;
-    if old_template == new_template {
-        return Ok(Vec::new());
-    }
+    let seats = store.read(|tx| Ok(tx.seats_of_project(project)?))?;
     let mut lines = Vec::new();
-    for seat in tx.seats_of_project(&project.id)? {
-        let Some(path) = tx.get_meta(&format!("{WORKTREE_PATH_KEY}{}", seat.id))? else {
+    for seat in seats {
+        let Some(path) =
+            store.read(|tx| tx.get_meta(&format!("{WORKTREE_PATH_KEY}{}", seat.id)))?
+        else {
             continue;
         };
         if path.is_empty() {
             continue;
         }
-        let old_branch = gear_model::branch::expand_seat(old_template, &project.id, &seat.name);
-        let new_branch = gear_model::branch::expand_seat(new_template, &project.id, &seat.name);
-        lines.push(format!(
-            "seat {}: its worktree {path} was made for branch {old_branch}; new agents of this seat get a worktree on {new_branch}; remove the old one with `herdr worktree remove` once the seat runs in the new one",
-            seat.name
-        ));
+        let old_branch = gear_model::branch::expand_seat(old_template, project, &seat.name);
+        let new_branch = gear_model::branch::expand_seat(new_template, project, &seat.name);
+        if old_branch == new_branch {
+            continue;
+        }
+        if !std::path::Path::new(&path).is_dir() {
+            lines.push(format!(
+                "seat {}: its worktree {path} is not there any more, so nothing was renamed; new agents of this seat get a worktree on {new_branch}",
+                seat.name
+            ));
+            continue;
+        }
+        let current = git_in(&path, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let current = match current {
+            Ok(current) => current,
+            Err(error) => {
+                lines.push(format!(
+                    "seat {}: git could not tell the branch of its worktree {path} ({error}); it was left alone, and new agents of this seat get a worktree on {new_branch}",
+                    seat.name
+                ));
+                continue;
+            }
+        };
+        if current != old_branch {
+            lines.push(format!(
+                "seat {}: its worktree {path} is on branch {current}, not {old_branch}: it was left alone, and new agents of this seat get a worktree on {new_branch}",
+                seat.name
+            ));
+            continue;
+        }
+        let renamed = git_in(&path, &["branch", "-m", &old_branch, &new_branch]);
+        let mut line = match renamed {
+            Ok(_) => format!(
+                "seat {}: its worktree {path} is now on branch {new_branch} (renamed from {old_branch})",
+                seat.name
+            ),
+            Err(ref error) => format!(
+                "seat {}: renaming {old_branch} to {new_branch} in its worktree {path} failed ({error}), so it was left alone; new agents of this seat get a worktree on {new_branch}",
+                seat.name
+            ),
+        };
+        if renamed.is_ok() && remote_has_branch(&path, remote, &old_branch) {
+            let pushed = git_in(
+                &path,
+                &[
+                    "push",
+                    remote,
+                    &format!("refs/heads/{new_branch}:refs/heads/{new_branch}"),
+                ],
+            );
+            match pushed {
+                Ok(_) => {
+                    let deleted = git_in(&path, &["push", remote, "--delete", &old_branch]);
+                    match deleted {
+                        Ok(_) => line.push_str(&format!(
+                            "; {remote} has {new_branch} now, and {old_branch} is gone there"
+                        )),
+                        Err(error) => line.push_str(&format!(
+                            "; {remote} has {new_branch} now, but deleting {old_branch} there failed ({error})"
+                        )),
+                    }
+                }
+                Err(error) => line.push_str(&format!(
+                    "; pushing {new_branch} to {remote} failed ({error}), so {remote} still has {old_branch}"
+                )),
+            }
+        }
+        lines.push(line);
     }
     Ok(lines)
 }
+
+/// The output of one git command in `dir`, trimmed; `Err` says why it is no
+/// answer (the exit status and git's own words). The runner lives with the seat
+/// branch code (T-565), which the engine calls too.
+fn git_in(dir: &str, args: &[&str]) -> Result<String, String> {
+    crate::seat_branch::git(dir, args)
+}
+
+/// Whether `remote` has the branch `branch` of the repository in `dir`.
+fn remote_has_branch(dir: &str, remote: &str, branch: &str) -> bool {
+    crate::seat_branch::has_branch(dir, remote, branch)
+}
+
 fn re_register(
     tx: &Tx<'_>,
     project: &ProjectRow,
@@ -913,7 +1013,9 @@ fn re_register(
         project: project_id,
         config_version: version,
         seats,
-        stale_worktrees: stale_seat_worktrees(tx, project, config)?,
+        // T-559: the seat-branch move happens after this transaction commits
+        // (`init_with_home` fills the lines in), since it runs git.
+        stale_worktrees: Vec::new(),
     })
 }
 

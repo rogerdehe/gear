@@ -1741,3 +1741,37 @@ fn the_captain_home_page_carries_the_goal_and_the_current_station() {
         plain_page.text
     );
 }
+
+/// A voyage never stands still on the captain's word: an apply that holds
+/// every lane while the voyage still has work is refused without the user's
+/// confirmation, and goes through with it.
+#[test]
+fn holding_every_lane_of_a_sailing_voyage_needs_the_users_word() {
+    let mut s = world();
+    run(&mut s, &plan(0, FULL), "v1", NOW).unwrap();
+    let hold = "<!-- gear-plan project=p base=1 -->\n# Staff\n- hold heat reason=clear the merge backlog\n";
+    let refused = run(&mut s, hold, "v2", NOW + 60).unwrap_err();
+    assert!(
+        refused.detail.contains("never stands still"),
+        "{}",
+        refused.detail
+    );
+    run_confirmed(&mut s, hold, "v3", NOW + 120).unwrap();
+}
+
+/// Holding one lane while another still has work is the captain's own call.
+#[test]
+fn holding_a_lane_while_another_works_needs_nothing() {
+    let mut s = world();
+    s.write(|tx| {
+        testing::seed_active_seat(tx, "p", "cold", SeatRole::Lane, "w1:p3", "opencode", NOW)
+    })
+    .unwrap();
+    let text = plan(0, FULL).replace(
+        "## NEW [should] lane=heat milestone=M1",
+        "## NEW [should] lane=cold milestone=M1",
+    );
+    run(&mut s, &text, "v1", NOW).unwrap();
+    let hold = "<!-- gear-plan project=p base=1 -->\n# Staff\n- hold heat reason=model change\n";
+    run(&mut s, hold, "v2", NOW + 60).unwrap();
+}

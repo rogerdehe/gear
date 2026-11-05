@@ -174,6 +174,58 @@ fn record(
     Ok(Prep::Ready)
 }
 
+/// How long an OpenCode `/new` waits for its session to appear before the
+/// captain is told to check the profile.
+const ADOPT_WITHIN_S: Ts = 600;
+
+/// Adopt the session an OpenCode `/new` opened (it appears with the first
+/// prompt after it): the newest session in the lane's worktree since the
+/// `/new`, not the old one, becomes the binding's. The round follows the
+/// binding, and the attempt takes it at hand-in.
+pub fn adopt_opencode_sessions(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seats: &[SeatRow],
+    now: Ts,
+) -> GearResult<()> {
+    for seat in seats {
+        let Some(mut state) = store
+            .read(|tx| tx.get_meta(&key(seat)))?
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        else {
+            continue;
+        };
+        if !state["adopt"].as_bool().unwrap_or(false)
+            || state["generation"].as_i64() != Some(seat.generation)
+        {
+            continue;
+        }
+        let Some(binding) = store.read(|tx| tx.get_binding(&seat.id, seat.generation))? else {
+            continue;
+        };
+        let directory = store
+            .read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(&seat.id)))?
+            .filter(|d| !d.is_empty());
+        let old = state.get("old_session_ref").and_then(Value::as_str);
+        let found = match (binding.kind.as_str(), directory) {
+            ("opencode", Some(directory)) => {
+                crate::opencode::new_session_since(herdr, &directory, time(&state, "t0"), old)
+            }
+            _ => None,
+        };
+        if let Some(id) = found {
+            store.write(|tx| tx.set_binding_session_ref(&seat.id, seat.generation, &id))?;
+        } else if now.saturating_sub(time(&state, "t0")) < ADOPT_WITHIN_S {
+            continue;
+        } else {
+            notify_new(store, seat, now)?;
+        }
+        state["adopt"] = json!(false);
+        save(store, seat, &state)?;
+    }
+    Ok(())
+}
+
 fn notify_new(store: &mut Store, seat: &SeatRow, now: Ts) -> GearResult<()> {
     store.write(|tx| {
         let Some(captain) = tx.captain_of(&seat.project)? else {
@@ -531,11 +583,37 @@ pub(crate) fn run(
             }
             if action_name == "new" {
                 let old = state.get("old_session_ref").and_then(Value::as_str);
-                let changed = binding
+                let mut changed = binding
                     .session_ref
                     .as_deref()
                     .filter(|s| !s.is_empty())
                     .is_some_and(|s| Some(s) != old);
+                // Herdr reports no session for an OpenCode pane: ask OpenCode
+                // for the session `/new` opened in the lane's worktree.
+                if !changed && binding.kind == "opencode" {
+                    let directory = store
+                        .read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(&seat.id)))?;
+                    if let Some(directory) = directory.filter(|d| !d.is_empty()) {
+                        let since = time(&state, "t0");
+                        if let Some(id) =
+                            crate::opencode::new_session_since(herdr, &directory, since, old)
+                        {
+                            store.write(|tx| {
+                                tx.set_binding_session_ref(&seat.id, binding.generation, &id)
+                            })?;
+                            changed = true;
+                        }
+                    }
+                }
+                // OpenCode opens the new session only with the first prompt
+                // (Lawrence T-34: the id appeared one second after the
+                // delivery): its `/new` is done once the composer is back.
+                // The session is adopted when it appears
+                // ([`adopt_opencode_sessions`]).
+                if is_ready && elapsed >= 5 && !changed && binding.kind == "opencode" {
+                    state["adopt"] = json!(true);
+                    return record(store, seat, task, attempt, role, "new", &mut state, now);
+                }
                 if is_ready && elapsed >= 5 && (changed || binding.kind == "codex") {
                     return record(
                         store,

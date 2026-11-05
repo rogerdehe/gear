@@ -26,8 +26,8 @@ fn world() -> Store {
 fn texts_match_design_09() {
     assert_eq!(continue_text("T-17", 4, "ops/tasks/T-17.md"),
         "Continue T-17 (contract v4). Run `gear` first (it records that you got this). Task packet: ops/tasks/T-17.md. Report progress/blocked/done with gear send.");
-    assert_eq!(assign_text("T-31", 2, 1, "heat/t31-login", "ops/tasks/T-31.md"),
-        "Rework T-31 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t31-login (in your worktree). Run `gear` first (it records that you got this). Task packet: ops/tasks/T-31.md. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle.");
+    assert_eq!(assign_text("T-31", 2, 1, "heat/t31-login", "origin", "ops/tasks/T-31.md"),
+        "Rework T-31 attempt 2 (contract v1): the review failed your last attempt; what to fix is the Rework section at the top of your task packet. Branch: heat/t31-login. Before you change anything: git switch heat/t31-login (your worktree may still be on the branch of the task you did last), then git pull --no-rebase origin heat/t31-login: the review is committed on it. Run `gear` first (it records that you got this). Task packet: ops/tasks/T-31.md. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle.");
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn texts_carry_no_screen_marker() {
         verified: true,
     };
     validate_template(&p, &continue_text("T-1", 1, "x.md")).unwrap();
-    validate_template(&p, &assign_text("T-1", 2, 1, "a/t1-x", "x.md")).unwrap();
+    validate_template(&p, &assign_text("T-1", 2, 1, "a/t1-x", "origin", "x.md")).unwrap();
 }
 
 #[test]

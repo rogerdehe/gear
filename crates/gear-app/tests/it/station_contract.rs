@@ -117,7 +117,7 @@ fn item(store: &mut Store, id: &str) -> MessageRow {
 }
 
 #[test]
-fn eta_quarters_open_once_and_keep_their_snapshots_open() {
+fn eta_quarters_ring_once_and_a_newer_station_supersedes_the_one_before() {
     let mut store = world("4h", 5);
     assert!(check(&mut store, 3599).is_empty());
     let first = check(&mut store, 3600);
@@ -150,11 +150,61 @@ fn eta_quarters_open_once_and_keep_their_snapshots_open() {
     let fourth = check(&mut store, 14400);
     assert_eq!(fourth.len(), 1);
     assert!(item(&mut store, &fourth[0]).body.contains("240 min"));
+    // T-568: a newer station resolves the one before it, and never rewrites its
+    // snapshot: the earlier body is exactly what it was.
+    let earlier = item(&mut store, &first[0]);
+    assert_eq!(earlier.body, message.body, "the snapshot is not rewritten");
+    assert_eq!(earlier.state, MsgState::Resolved);
     assert_eq!(
-        item(&mut store, &first[0]),
-        message,
-        "new stations do not mutate/close earlier snapshots"
+        earlier.result.as_deref(),
+        Some(format!("superseded by {}", second[0]).as_str()),
+        "the station right after it is the one that replaced it"
     );
+}
+
+/// T-568: three station items on one thread leave one open — the newest.
+#[test]
+fn three_stations_on_one_thread_leave_only_the_newest_open() {
+    let mut store = world("8h", 5);
+    let first = check(&mut store, 3600).remove(0);
+    let second = check(&mut store, 7200).remove(0);
+    let third = check(&mut store, 10800).remove(0);
+
+    let thread = store
+        .read(|tx| Ok(tx.thread_messages("p", "station:M2")?))
+        .unwrap();
+    assert_eq!(thread.len(), 3, "{thread:?}");
+    let open: Vec<&MessageRow> = thread
+        .iter()
+        .filter(|item| item.state == MsgState::Open)
+        .collect();
+    assert_eq!(open.len(), 1, "{thread:?}");
+    assert_eq!(open[0].id, third, "the newest is the one left open");
+    assert!(
+        open[0]
+            .body
+            .lines()
+            .nth(1)
+            .unwrap()
+            .starts_with("Station M2 ["),
+        "{}",
+        open[0].body
+    );
+    // The other two say why they closed, and keep their snapshots.
+    for (id, by) in [(&first, &second), (&second, &third)] {
+        let closed = item(&mut store, id);
+        assert_eq!(closed.state, MsgState::Resolved, "{closed:?}");
+        assert_eq!(
+            closed.result.as_deref(),
+            Some(format!("superseded by {by}").as_str())
+        );
+        assert!(closed
+            .body
+            .lines()
+            .nth(1)
+            .unwrap()
+            .starts_with("Station M2 ["));
+    }
 }
 
 #[test]
@@ -331,23 +381,30 @@ fn only_a_plan_decision_naming_the_item_can_close_it() {
     apply(&mut store, "- keep course", "unrelated", T0 + 3602).unwrap();
     assert_eq!(item(&mut store, &id).state, MsgState::Open);
     let second = check(&mut store, 7200).remove(0);
-    let decision = format!("- station {id}: time-box keep only the core");
+    // T-568: the newer station resolved the older one, saying so.
+    assert_eq!(
+        item(&mut store, &id).result.as_deref(),
+        Some(format!("superseded by {second}").as_str())
+    );
+    // A decision names the item that is still open: the newest station.
+    let decision = format!("- station {second}: time-box keep only the core");
     apply(&mut store, &decision, "decision", T0 + 7201).unwrap();
-    let message = item(&mut store, &id);
+    let message = item(&mut store, &second);
     assert_eq!(message.state, MsgState::Resolved);
     assert_eq!(
         message.result.as_deref(),
         Some(decision.trim_start_matches("- "))
     );
     assert_eq!(message.resolved, Some(T0 + 7201));
+    let third = check(&mut store, 10800).remove(0);
     assert_eq!(
-        item(&mut store, &second).state,
+        item(&mut store, &third).state,
         MsgState::Open,
         "names exactly one item"
     );
     apply(&mut store, &decision, "retained-decision", T0 + 7202).unwrap();
     assert_eq!(
-        item(&mut store, &id),
+        item(&mut store, &second),
         message,
         "retaining a decision in later plans is safe"
     );

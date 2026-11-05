@@ -338,7 +338,7 @@ fn start_hand_in_reviews(
                     // room. Otherwise the job waits for a seat instead of
                     // building a cold extra worktree (finding 2 of the T-18
                     // review).
-                    None => match seats_free_for_new(store, project, quota)? {
+                    None => match seats_free_for_new(store, herdr, project, quota)? {
                         true => create_temp_seat(store, project, &task.task, profile_name, now)?,
                         false => {
                             note_waiting(report, &task.task);
@@ -404,7 +404,9 @@ fn start_hand_in_reviews(
         //    `[quota].temps`). A `Released` seat used to skip this check, so
         //    several seats recovered by `release_dead_temps` started at once
         //    and passed the quota (F1 of the T-116 review).
-        if !occupies_quota(seat.state) && !has_free_slot(store, herdr, project, quota)? {
+        if !occupies_quota(seat.state)
+            && !has_free_slot(store, herdr, project, quota, Some(&seat.id))?
+        {
             note_waiting(report, &task.task);
             tell_captain(store, project, task, "every temp seat is in use", now)?;
             continue;
@@ -1046,13 +1048,15 @@ fn start_direction_checks(
             Some(seat) => seat,
             None => match free_seat(store, herdr, project, &row.id, &kind)? {
                 Some(seat) => take_seat(store, &seat, &row.id, attempt.n, profile_name, now)?,
-                None if seats_free_for_new(store, project, quota)? => {
+                None if seats_free_for_new(store, herdr, project, quota)? => {
                     create_temp_seat(store, project, &row.id, profile_name, now)?
                 }
                 None => continue,
             },
         };
-        if !occupies_quota(seat.state) && !has_free_slot(store, herdr, project, quota)? {
+        if !occupies_quota(seat.state)
+            && !has_free_slot(store, herdr, project, quota, Some(&seat.id))?
+        {
             continue;
         }
         let direction_branch = gear_model::branch::direction_branch(
@@ -1601,6 +1605,9 @@ thread_local! {
     /// Fail only the calls in the worktrees whose path contains this text
     /// (T-425): the incident's one broken worktree, not every seat's.
     static REVIEW_GIT_FAIL_ON: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// What a failing call reports (T-561): a remote's own words make the
+    /// failure an outage, not a broken worktree.
+    static REVIEW_GIT_FAIL_TEXT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -1617,7 +1624,9 @@ impl ReviewGit for FakeReviewGit {
         let only = REVIEW_GIT_FAIL_ON.with(|on| on.borrow().clone());
         if REVIEW_GIT_FAIL.with(|fail| fail.get()) || only.is_some_and(|only| path.contains(&only))
         {
-            Err("injected git failure".into())
+            Err(REVIEW_GIT_FAIL_TEXT
+                .with(|text| text.borrow().clone())
+                .unwrap_or_else(|| "injected git failure".into()))
         } else {
             Ok(String::new())
         }
@@ -1839,25 +1848,12 @@ fn prepare_review_tree(
         &["checkout", "-f", "-B", branch, &task.candidate],
     )
     .map_err(git_error)?;
-    // T-483: the review branch on the remote is cut at **this** attempt's
-    // candidate before the reviewer starts, so the reviewer's push of its
-    // review commit is a fast-forward. An earlier attempt's review stays in
-    // that attempt's record: the branch is only a pointer, and the earlier
-    // review commit stays reachable through it. A direction check has no
-    // review branch of the task (T-456): its own branch is not pointed.
-    if !direction {
-        review_git(
-            git,
-            path,
-            &[
-                "push",
-                "--force",
-                remote,
-                &format!("HEAD:refs/heads/{branch}"),
-            ],
-        )
-        .map_err(git_error)?;
-    }
+    // T-558: the review branch stays local — the reviewer works on it inside
+    // its own worktree (git refuses one branch in two worktrees, and the lane's
+    // worktree may hold the task branch), and pushes its review commit onto the
+    // TASK branch. So no branch of the review's own is created on the remote
+    // any more; `prepare_review_tree` only cuts the local one at the candidate.
+    let _ = (remote, direction);
     Ok(true)
 }
 
@@ -1899,6 +1895,13 @@ fn prepare_seat_tree(
         Ok(true) => {}
         Ok(false) => return Ok(false),
         Err(error) => {
+            // T-561: a remote that cannot be reached says nothing about the
+            // worktree. The failure is not counted, the attempt is not stuck,
+            // the seat is not retired: the next tick tries again, and the
+            // captain hears of it only when it has lasted half an hour.
+            if remote_failed(&error.detail) {
+                return note_remote_outage(store, seat, path, &error.detail, now).map(|()| false);
+            }
             // T-425: the failure is counted on the **seat**, not on the task:
             // a worktree that cannot check out fails every job it is given,
             // and the hand-in must go on to another seat.
@@ -1941,7 +1944,7 @@ fn prepare_seat_tree(
             // The third failure on one seat is the worktree's, not the task's:
             // the seat leaves the pool and the captain removes the worktree.
             if used >= 3 {
-                retire_checkout_seat(store, seat, path, &error.detail, now)?;
+                retire_checkout_seat(store, herdr, seat, path, &error.detail, now)?;
             }
             return Ok(false);
         }
@@ -1951,21 +1954,131 @@ fn prepare_seat_tree(
         tx.set_meta(&key, &job)?;
         // A checkout that lands clears the seat's failures: the count is of
         // failures in a row, not of a seat's whole life.
-        tx.set_meta(&checkout_fails_key(&seat.id), "")
+        tx.set_meta(&checkout_fails_key(&seat.id), "")?;
+        // A remote that is back clears its outage (T-561).
+        tx.set_meta(&remote_outage_key(&seat.id), "")
     })?;
     Ok(true)
 }
 
-/// Whether the project may add a seat: fewer seats exist than the quota allows.
-fn seats_free_for_new(store: &mut Store, project: &str, quota: i64) -> GearResult<bool> {
-    store.read(|tx| {
-        let seats = tx
+/// The git errors that mean "the remote could not be reached" (T-561): the
+/// transport words `merge.rs` treats as unreachable, plus the connection and
+/// timeout failures an SSH or HTTPS transport reports.
+const REMOTE_WORDS: &[&str] = &[
+    "fetch remote failed: ",
+    "Permission denied (publickey)",
+    "Could not read from remote repository",
+    "Could not resolve host",
+    "Connection refused",
+    "Connection timed out",
+    "Connection closed by",
+    "Operation timed out",
+    "Network is unreachable",
+    "ssh: connect to host",
+    "kex_exchange_identification",
+];
+
+/// Whether a checkout failed only because the remote could not be reached
+/// (T-561): the worktree is sound, so nothing about it is counted.
+fn remote_failed(detail: &str) -> bool {
+    REMOTE_WORDS.iter().any(|word| detail.contains(word))
+}
+
+fn remote_outage_key(seat: &str) -> String {
+    format!("engine.review_remote_outage.{seat}")
+}
+
+fn remote_outage_told_key(seat: &str) -> String {
+    format!("engine.review_remote_outage_told.{seat}")
+}
+
+/// How long a remote outage may last before the captain hears of it (T-561).
+const REMOTE_OUTAGE_S: i64 = 30 * 60;
+
+/// Record a checkout that failed on the remote, and tell the captain once when
+/// the outage has lasted half an hour (T-561). A short outage is retried on the
+/// next tick in silence: at 04:36 a GitHub SSH refusal retired a sound seat,
+/// and nothing on the screen said the worktree was fine.
+fn note_remote_outage(
+    store: &mut Store,
+    seat: &SeatRow,
+    path: &str,
+    error: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let key = remote_outage_key(&seat.id);
+    store.write(|tx| {
+        if tx.get_meta(&key)?.is_none_or(|seen| seen.trim().is_empty()) {
+            tx.set_meta(&key, &now.to_string())?;
+        }
+        Ok(())
+    })?;
+    let Some(first) = store
+        .read(|tx| tx.get_meta(&key))?
+        .and_then(|seen| seen.parse::<i64>().ok())
+    else {
+        return Ok(());
+    };
+    if now - first < REMOTE_OUTAGE_S {
+        return Ok(());
+    }
+    store.write(|tx| {
+        let told = remote_outage_told_key(&seat.id);
+        if tx.get_meta(&told)?.is_some() {
+            return Ok(());
+        }
+        let Some(captain) = tx.captain_of(&seat.project)? else {
+            return Ok(());
+        };
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: seat.project.clone(),
+            thread: format!("review-remote:{}", seat.id),
+            task: None,
+            attempt: None,
+            sender: "engine".into(),
+            sender_gen: 0,
+            recipient: captain.id,
+            kind: MsgKind::System,
+            urgent: false,
+            body: format!(
+                "reviewer {} could not reach the remote for {} min, so its worktree {path} \
+                 has not been checked out: {error}. The worktree is not broken and the seat \
+                 stays in the pool; the checkout is retried on every tick.",
+                seat.id,
+                (now - first) / 60
+            ),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Info,
+            created: now,
+        })?;
+        tx.set_meta(&told, &now.to_string())
+    })
+}
+
+/// Whether the project may add a seat: fewer seats exist than the quota allows,
+/// and fewer live reviewer agents than the quota allows (T-561). The second
+/// count is Herdr's: a seat the store calls `Released` whose agent still runs
+/// is a reviewer the user sees, so a start waits for it.
+fn seats_free_for_new(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    quota: i64,
+) -> GearResult<bool> {
+    let seats = store.read(|tx| {
+        Ok(tx
             .seats_of_project(project)?
             .into_iter()
             .filter(|seat| seat.role == SeatRole::Temp && seat.state != SeatState::Retired)
-            .count() as i64;
-        Ok(seats < quota)
-    })
+            .count() as i64)
+    })?;
+    if seats >= quota {
+        return Ok(false);
+    }
+    let live = crate::names::live_of_role(store, herdr, project, SeatRole::Temp, None);
+    Ok((live.len() as i64) < quota)
 }
 
 /// Bind a free seat to the new job. The seat keeps its worktree and its
@@ -2114,6 +2227,7 @@ fn has_free_slot(
     herdr: &mut dyn HerdrAct,
     project: &str,
     quota: i64,
+    except: Option<&str>,
 ) -> GearResult<bool> {
     let seats = store.read(|tx| tx.seats_of_project(project))?;
     let mut occupying = 0;
@@ -2129,7 +2243,11 @@ fn has_free_slot(
             occupying += 1;
         }
     }
-    Ok(occupying < quota)
+    // T-561: the seats are not the whole count. A reviewer whose seat says
+    // `Released` but whose agent is still in a pane holds a slot the user sees
+    // (the seat that is being started itself does not add one).
+    let live = crate::names::live_of_role(store, herdr, project, SeatRole::Temp, except);
+    Ok(occupying < quota && (live.len() as i64) < quota)
 }
 
 /// Whether Herdr shows an agent in the seat's pane: a parked (`Unknown`)
@@ -2363,7 +2481,18 @@ fn start_reviewer(
                 .as_deref()
                 .is_some_and(|started| started != cli)
         });
-        if model_moved || cli_moved {
+        // The chain's arguments alone (a reasoning effort, say) are a change
+        // too: the warm agent was started with the old ones.
+        // Compared only for the model the seat was started on: a seat that
+        // fell back to another model keeps that model's own arguments.
+        let recorded = store
+            .read(|tx| tx.get_meta(&review_model_key(&seat.id)))?
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+        let args_moved = entry.zip(recorded).is_some_and(|(entry, recorded)| {
+            recorded.get("model").and_then(|m| m.as_str()) == Some(entry.model())
+                && recorded.get("args") != Some(&serde_json::json!(entry.args()))
+        });
+        if model_moved || cli_moved || args_moved {
             crate::release::release_one(
                 store,
                 herdr,
@@ -2886,24 +3015,48 @@ fn end_stuck_seat_assignment(
 /// worktree is broken, so it leaves the pool (a `Retired` temp seat is never
 /// reused), its pending review is cleared so the hand-in goes to another seat
 /// on the next tick, and the captain is told once to remove the worktree.
+///
+/// T-561: the seat's agent leaves first, through the release every other exit
+/// uses ([`crate::release::release_one`]) — a retired seat with a live agent
+/// was four reviewers on a quota of three. A release that cannot close the
+/// pane does not keep the seat: the tick's sweep closes that pane, and the
+/// seat is retired all the same.
 fn retire_checkout_seat(
     store: &mut Store,
+    herdr: &mut dyn HerdrAct,
     seat: &SeatRow,
     path: &str,
     error: &str,
     now: Ts,
 ) -> GearResult<()> {
-    let reason =
+    let mut reason =
         format!("its worktree {path} failed three checkouts: {error}; remove that worktree");
-    store.write(|tx| {
-        tx.set_meta(&pending_review_key(&seat.id), "")?;
-        // A temp seat reaches Retired from Released (design/10), and it is out
-        // of the pool the moment it is not Released again.
-        if !matches!(seat.state, SeatState::Released | SeatState::Retired) {
-            tx.set_seat_state(&seat.id, SeatState::Released, Some(&reason), now)?;
+    store.write(|tx| tx.set_meta(&pending_review_key(&seat.id), ""))?;
+    // The row the release works on is the store's: the caller's may predate the
+    // failures that led here.
+    let current = store
+        .read(|tx| tx.get_seat(&seat.id))?
+        .unwrap_or_else(|| seat.clone());
+    if !matches!(current.state, SeatState::Released | SeatState::Retired) {
+        match crate::release::release_one(
+            store,
+            herdr,
+            &current.project,
+            &current,
+            None,
+            now,
+            "checkout",
+        ) {
+            // The pane is closed and the seat is `Releasing`: it is retired
+            // now (a reviewer sent on its way out is never reused) and its
+            // pane closed again by the sweep if the agent lingers.
+            Ok(_) => {}
+            Err(failure) => {
+                reason.push_str(&format!("; its pane could not be closed: {failure}"));
+            }
         }
-        tx.set_seat_state(&seat.id, SeatState::Retired, Some(&reason), now)
-    })?;
+    }
+    store.write(|tx| tx.set_seat_state(&seat.id, SeatState::Retired, Some(&reason), now))?;
     tell_captain_of_retired_seat(store, &seat.project, seat, &reason, now)
 }
 
@@ -2948,6 +3101,86 @@ fn tell_captain_of_retired_seat(
         })?;
         tx.set_meta(&told, &now.to_string())
     })
+}
+
+/// The seats that already left, closed and named (T-561).
+///
+/// The quota is a promise to the user — "planned three, four appeared, never
+/// acceptable" — and a seat's state in the store is not the promise: a seat the
+/// store calls `Released` or `Retired` may still have its agent in a pane (a
+/// release whose close was lost, a retire that only wrote the row). Every tick,
+/// every pane whose agent carries such a seat's name (`<project>-<seat>`) is
+/// closed, and the captain hears of it once per seat.
+///
+/// `names` is the tick's snapshot of Herdr's agent names: an unreadable list
+/// closes nothing (it is no evidence of an agent).
+pub fn close_gone_seats(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    names: &std::collections::BTreeMap<String, Option<String>>,
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    let mut closed = Vec::new();
+    for seat in store.read(|tx| tx.seats_of_project(project))? {
+        if !matches!(seat.state, SeatState::Retired | SeatState::Released) {
+            continue;
+        }
+        // A captain's pane is the user's and the captain's: the sweep never
+        // closes it (Prometheus, 2026-11-05).
+        if seat.role == SeatRole::Captain {
+            continue;
+        }
+        let wanted = crate::names::desired(&seat);
+        let panes: Vec<String> = names
+            .iter()
+            .filter(|(_, name)| name.as_deref() == Some(wanted.as_str()))
+            .map(|(pane, _)| pane.clone())
+            .collect();
+        for pane in panes {
+            // A pane that is already gone is fine; nothing here may fail the
+            // tick for the other seats.
+            if let Outcome::Ok(()) = crate::panes::close_seat_pane(store, herdr, &pane, &seat.id)? {
+                closed.push(pane.clone());
+                let told = format!("engine.seat_pane_closed.{}", seat.id);
+                let first = store.write(|tx| {
+                    if tx.get_meta(&told)?.is_some() {
+                        return Ok(false);
+                    }
+                    let Some(captain) = tx.captain_of(project)? else {
+                        return Ok(false);
+                    };
+                    tx.insert_message(&NewMessage {
+                        meta: None,
+                        project: project.to_string(),
+                        thread: format!("seat-pane:{}", seat.id),
+                        task: None,
+                        attempt: None,
+                        sender: "engine".into(),
+                        sender_gen: 0,
+                        recipient: captain.id,
+                        kind: MsgKind::System,
+                        urgent: false,
+                        body: format!(
+                            "{} ({}) is {} but its agent was still running in pane {pane}: \
+                             the pane is closed, so the live agents stay within the quota.",
+                            seat.id,
+                            seat.name,
+                            seat.state.as_str()
+                        ),
+                        reply_to: None,
+                        needs_ack: false,
+                        state: MsgState::Info,
+                        created: now,
+                    })?;
+                    tx.set_meta(&told, &now.to_string())?;
+                    Ok(true)
+                })?;
+                let _ = first;
+            }
+        }
+    }
+    Ok(closed)
 }
 
 /// Whether this attempt's checkout is already stuck (two different seats
@@ -3278,6 +3511,14 @@ fn review_packet_for(
             &lane,
             task,
         ),
+        // T-558: the review commit is pushed onto the task branch, not onto a
+        // branch of the review's own.
+        &crate::dispatch::task_branch(
+            &config.conventions.task_branch,
+            &config.project.id,
+            &lane,
+            task,
+        ),
         &commit,
         worktree,
         &review_recovery_line(store, config, task, attempt)?,
@@ -3561,6 +3802,7 @@ fn review_packet(
     integration: &str,
     audit: bool,
     branch: &str,
+    task_branch: &str,
     commit: &str,
     worktree: &str,
     recovery: &str,
@@ -3610,8 +3852,11 @@ fn review_packet(
          \n\
          Write the review in your worktree at the path your project uses for reviews, commit it \
          on `{branch}` with the message `{commit}` (replace `{{what}}` with what the commit does) \
-         and push it with exactly `git push {remote} HEAD:refs/heads/{branch}` (the candidate \
-         stays untouched; GEAR refuses the verdict until `{remote}/{branch}` holds your commit).\n\
+         and push it with exactly `git push {remote} HEAD:refs/heads/{task_branch}` (the review \
+         commit goes onto the task branch, which is what merges; GEAR refuses the verdict until \
+         `{remote}/{task_branch}` holds your commit). If that push is refused because the lane \
+         pushed meanwhile, `git pull --no-rebase {remote} {task_branch}` (a merge, never a \
+         rebase), then push again.\n\
          \n\
          Every finding is either blocking or logged: a blocking finding names the part of the \
          done-sentence or the bar it breaks. Fail only for a failed mechanical fact, a P0, or a \
@@ -4239,6 +4484,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         REVIEW_GIT_CALLS.with(|calls| calls.borrow_mut().clear());
         REVIEW_GIT_FAIL.with(|fail| fail.set(false));
         REVIEW_GIT_FAIL_ON.with(|on| *on.borrow_mut() = None);
+        REVIEW_GIT_FAIL_TEXT.with(|text| *text.borrow_mut() = None);
         let mut store = Store::open_in_memory().unwrap();
         store
             .write(|tx| {
@@ -5558,8 +5804,9 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(packet.contains("Run `gear --session "), "{packet}");
         assert!(
             packet.contains("Binding: task T-1, attempt 1, candidate ")
-                && packet
-                    .contains(", branch p/direction/t-1, worktree /fake-worktrees/p-review-1."),
+                && packet.contains(
+                    ", branch p/direction/t-1, worktree /fake-worktrees/p-review-1-home."
+                ),
             "the binding names the candidate, the branch and the worktree: {packet}"
         );
         let failed = store
@@ -5673,14 +5920,14 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let calls = REVIEW_GIT_CALLS.with(|calls| calls.borrow().clone());
         assert!(
             calls.iter().any(|(path, args)| {
-                path == "/fake-worktrees/p-review-1"
+                path == "/fake-worktrees/p-review-1-home"
                     && args == &["checkout".to_string(), "--detach".to_string()]
             }),
             "the worktree is detached: {calls:?}"
         );
         assert!(
             calls.iter().any(|(path, args)| {
-                path == "/fake-worktrees/p-review-1"
+                path == "/fake-worktrees/p-review-1-home"
                     && args
                         == &[
                             "branch".to_string(),
@@ -7459,10 +7706,11 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
     /// branch at **that** attempt's candidate, so the reviewer's push of its
     /// review commit is a fast-forward. Before this, `origin/review/t<n>` held
     /// the earlier attempt's review, the new candidate did not descend from
-    /// it, and the reviewer's push was refused (T-457 attempt 2). The earlier
-    /// review stays in that attempt's record: the branch is only a pointer.
+    /// it, and the reviewer's push was refused (T-457 attempt 2). T-558: the
+    /// review branch is local only — it is cut at the new candidate in the
+    /// reviewer's worktree and the remote's is left exactly as it was.
     #[test]
-    fn a_second_attempts_review_branch_is_pointed_at_its_candidate() {
+    fn a_second_attempts_review_branch_is_cut_at_its_candidate_and_not_pushed() {
         let root = crate::testtmp::temp("gear-review-second-attempt");
         sh(
             &root,
@@ -7531,24 +7779,18 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             T0
         )
         .unwrap());
-        // The remote's review branch is at the new candidate …
-        assert_eq!(sh(&root, "git -C origin.git rev-parse review/t1"), second);
+        // The reviewer's own branch is cut at the new candidate …
         assert_eq!(sh(&seat, "git rev-parse HEAD"), second);
-        // … and the reviewer's push of its review commit is a fast-forward.
-        let review = sh(
-            &seat,
-            "echo r2 > r2.txt && git add -A \
-             && git -c user.name=a -c user.email=a@b commit -qm r2 \
-             && git push -q origin HEAD:refs/heads/review/t1 && git rev-parse HEAD",
-        );
-        assert_eq!(sh(&root, "git -C origin.git rev-parse review/t1"), review);
         assert_eq!(
-            sh(
-                &root,
-                &format!("git -C origin.git merge-base --is-ancestor {second} review/t1; echo $?")
-            ),
-            "0",
-            "the review commit is a fast-forward of the candidate"
+            sh(&seat, "git rev-parse --abbrev-ref HEAD"),
+            "review/t1".to_string()
+        );
+        // … and the remote keeps the review branch it had: nothing is pushed
+        // there any more (T-558).
+        assert_eq!(
+            sh(&root, "git -C origin.git rev-parse review/t1"),
+            earlier_review,
+            "the remote's review branch is left as it was"
         );
         // The earlier attempt's review is still in the repository: moving the
         // branch deleted nothing.
@@ -7801,7 +8043,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(
             args.starts_with(&gear_herdr::render_args(
                 &cfg().profiles["codex"].unattended_args,
-                "/fake-worktrees/p-review-1"
+                "/fake-worktrees/p-review-1-home"
             )),
             "{args:?}"
         );
@@ -8368,39 +8610,47 @@ review = [
         assert!(packet.contains("Goal: the goal"), "{packet}");
     }
 
-    /// T-438: the packet names the exact push of the review branch onto the
-    /// project's remote — a reviewer of T-265 and of T-375 pushed to the
-    /// second remote its worktree also had, and the merge could not find
-    /// `<origin>/<review branch>` afterwards.
+    /// T-438, T-558: the packet names the exact push of the review commit onto
+    /// the project's remote — a reviewer of T-265 and of T-375 pushed to the
+    /// second remote its worktree also had, and the merge could not find the
+    /// review afterwards. It goes onto the TASK branch: a review leaves no
+    /// branch of its own on the remote.
     #[test]
-    fn the_review_packet_names_the_exact_push_of_the_review_branch() {
+    fn the_review_packet_names_the_exact_push_of_the_task_branch() {
         let mut store = world(CONFIG);
         let config = gear_app::config::parse(CONFIG).unwrap();
         let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
         assert!(
-            packet.contains("`git push origin HEAD:refs/heads/review/t1`"),
+            packet.contains("`git push origin HEAD:refs/heads/heat/t1`"),
             "{packet}"
         );
         assert!(
-            packet.contains("GEAR refuses the verdict until `origin/review/t1` holds your commit"),
-            "{packet}"
-        );
-
-        // A team's own remote and review branch are named as they are.
-        let text = format!(
-            "{CONFIG}\n[conventions]\nremote = \"upstream\"\nreview_branch = \"b/review/t{{n}}\"\n"
-        );
-        let config = gear_app::config::parse(&text).unwrap();
-        let mut store = world(&text);
-        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
-        assert!(
-            packet.contains("`git push upstream HEAD:refs/heads/b/review/t1`"),
+            packet.contains("GEAR refuses the verdict until `origin/heat/t1` holds your commit"),
             "{packet}"
         );
         assert!(
             packet.contains(
-                "GEAR refuses the verdict until `upstream/b/review/t1` holds your commit"
+                "If that push is refused because the lane pushed meanwhile, `git pull --no-rebase origin heat/t1` (a merge, never a rebase), then push again."
             ),
+            "{packet}"
+        );
+        assert!(
+            !packet.contains("refs/heads/review/t1"),
+            "no review branch is pushed: {packet}"
+        );
+
+        // A team's own remote and task branch are named as they are.
+        let text =
+            format!("{CONFIG}\n[conventions]\nremote = \"upstream\"\ntask_branch = \"b/t{{n}}\"\n");
+        let config = gear_app::config::parse(&text).unwrap();
+        let mut store = world(&text);
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
+        assert!(
+            packet.contains("`git push upstream HEAD:refs/heads/b/t1`"),
+            "{packet}"
+        );
+        assert!(
+            packet.contains("GEAR refuses the verdict until `upstream/b/t1` holds your commit"),
             "{packet}"
         );
     }
@@ -8452,7 +8702,7 @@ review = [
         // one worktree, on the seat's own branch, cut at the integration branch
         assert_eq!(
             worktrees(&herdr),
-            vec![("p/review-1".to_string(), "dev".to_string())]
+            vec![("p/review-1/home".to_string(), "dev".to_string())]
         );
 
         // The shell reports the checkout: the reviewer starts.
@@ -8477,7 +8727,7 @@ review = [
         // still one worktree, on the review branch, cut at the candidate
         assert_eq!(
             worktrees(&herdr),
-            vec![("p/review-1".to_string(), "dev".to_string())]
+            vec![("p/review-1/home".to_string(), "dev".to_string())]
         );
 
         // one agent, the reviewer's kind, on the review model
@@ -8491,7 +8741,7 @@ review = [
                     "check_for_update_on_startup=false".to_string(),
                     // T-76: the reviewer's worktree is the folder it runs in.
                     "-c".to_string(),
-                    "projects={\"/fake-worktrees/p-review-1\"={trust_level=\"trusted\"}}"
+                    "projects={\"/fake-worktrees/p-review-1-home\"={trust_level=\"trusted\"}}"
                         .to_string(),
                     // T-457: a resume runs in the reviewer's own worktree.
                     "-c".to_string(),
@@ -8743,7 +8993,7 @@ review = [
             .into_iter()
             .find(|command| command.contains("export GEAR_CTX="))
             .expect("the environment line");
-        let scratch = "/fake-worktrees/p-review-1/.gear/tmp";
+        let scratch = "/fake-worktrees/p-review-1-home/.gear/tmp";
         assert!(
             export.starts_with(&format!(
                 "mkdir -p '{scratch}'; export TMPDIR='{scratch}'; "
@@ -9623,7 +9873,7 @@ review = [
                     created: T0,
                 })?;
                 // The first job recorded the seat's worktree path.
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1-home")?;
                 Ok(())
             })
             .unwrap();
@@ -9701,7 +9951,7 @@ review = [
                     handover_id: None,
                     created: T0,
                 })?;
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1-home")?;
                 Ok(())
             })
             .unwrap();
@@ -9784,7 +10034,7 @@ review = [
 
         store
             .write(|tx| {
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1-home")?;
                 tx.insert_round(&gear_store::NewRound {
                     key: gear_store::RoundKey {
                         project: "p".into(),
@@ -9871,7 +10121,7 @@ review = [
                     handover_id: None,
                     created: T0,
                 })?;
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1-home")?;
                 Ok(())
             })
             .unwrap();
@@ -9936,7 +10186,7 @@ review = [
         let worktrees_after_first = worktrees(&herdr);
         assert_eq!(
             worktrees_after_first,
-            vec![("p/review-1".to_string(), "dev".to_string())]
+            vec![("p/review-1/home".to_string(), "dev".to_string())]
         );
         // The job's agent carries its seat's name (T-482).
         let names: Vec<String> = herdr
@@ -10059,7 +10309,7 @@ review = [
             "one worktree in total"
         );
         assert!(
-            herdr.calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { path, .. } if path.ends_with("p-review-1"))),
+            herdr.calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { path, .. } if path.ends_with("p-review-1-home"))),
             "reopened by path: {:?}",
             herdr.calls
         );
@@ -10867,7 +11117,7 @@ review = [
 
         store
             .write(|tx| {
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1-home")?;
                 tx.insert_round(&gear_store::NewRound {
                     key: gear_store::RoundKey {
                         project: "p".into(),
@@ -10963,7 +11213,7 @@ review = [
         assert_eq!(report.started, vec!["p:review-1".to_string()]);
         let (repo, branch, base, label) = created_worktree(&herdr);
         assert_eq!(repo, "/repo/web", "the worktree is in the task's repo");
-        assert_eq!(branch, "p/review-1");
+        assert_eq!(branch, "p/review-1/home");
         assert_eq!(base, "web-dev", "the repo's own integration branch");
         assert_eq!(label, "p-review-1-web", "the label names the repo");
         // The packet asks for the diff against that repo's integration branch.
@@ -11034,7 +11284,7 @@ profile = "opencode"
 "#;
         let mut store = world(&config);
         // Isolated repo doors prevent the fake's branch-only map from letting
-        // root's p/review-1 stand in for web's checkout. Distinct paths and
+        // root's p/review-1/home stand in for web's checkout. Distinct paths and
         // panes also make a checkout in the wrong repo observable.
         let mut web = FakeHerdr::new();
         let mut root = FakeHerdr::new();
@@ -11043,7 +11293,7 @@ profile = "opencode"
             (&mut root, "/root-review-1", "root:p1"),
         ] {
             door.add_shell(pane);
-            door.add_worktree("p/review-1", path, pane);
+            door.add_worktree("p/review-1/home", path, pane);
         }
         for (n, lane, door, path, pane, repo, base) in [
             (
@@ -11087,7 +11337,7 @@ profile = "opencode"
             // The real checkout is now on the job branch. Remove the fake's
             // anchor lookup and register that branch at the unchanged path.
             assert!(matches!(
-                door.worktree_remove("wt-p-review-1"),
+                door.worktree_remove("wt-p-review-1-home"),
                 Outcome::Ok(())
             ));
             door.add_shell(pane);
@@ -11210,7 +11460,7 @@ profile = "opencode"
             SeatState::Released
         );
         herdr.add_shell("child:p1");
-        herdr.add_worktree("p/review-1", "/child-review", "child:p1");
+        herdr.add_worktree("p/review-1/home", "/child-review", "child:p1");
         let report = start_reviews(
             &mut store,
             &mut herdr,
@@ -11741,6 +11991,114 @@ profile = "opencode"
     /// T-501: a reviewer that fell back keeps the model it fell back to for
     /// its next job while the model it left has not reset; after the reset its
     /// next job runs on the first entry again.
+    /// Only the review chain's arguments changed (same model, same CLI): the
+    /// warm reviewer was started with the old ones, so it is released too.
+    #[test]
+    fn warm_reviewer_whose_chain_args_changed_is_released() {
+        let changed = CONFIG.replace(
+            REVIEW_CHAIN,
+            r#"review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=low"] }]"#,
+        );
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        assert_eq!(
+            start_reviews(
+                &mut store,
+                &mut herdr,
+                &cfg(),
+                &cfg().profiles,
+                "p",
+                T0 + 10
+            )
+            .unwrap()
+            .started,
+            vec!["p:review-1"]
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&crate::model::model_meta_key("p:review-1")))
+                .unwrap()
+                .as_deref(),
+            Some("gpt-6.1-sol")
+        );
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
+                tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
+                tx.clear_seat_task("p:review-1")?;
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = changed.clone();
+                tx.update_project(&project)
+            })
+            .unwrap();
+        queue_review_job(&mut store, 2, "heat");
+        let _ = crate::release::take_release_log();
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 12,
+        )
+        .unwrap();
+        assert!(
+            report.started.is_empty(),
+            "the warm seat is not reused with the old arguments: {report:?}"
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat("p:review-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            SeatState::Releasing
+        );
+        let log = crate::release::take_release_log();
+        assert!(
+            log.iter().any(|line| line.contains("p:review-1")
+                && line.contains("caller=the review chain changed")),
+            "{log:?}"
+        );
+        crate::release::release_finished_reviews(&mut store, &mut herdr, "p", T0 + 13).unwrap();
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat("p:review-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            SeatState::Released
+        );
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 14,
+        )
+        .unwrap();
+        assert_eq!(report.started, vec!["p:review-1"], "{report:?}");
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&crate::model::model_meta_key("p:review-1")))
+                .unwrap()
+                .as_deref(),
+            Some("gpt-6.1-sol")
+        );
+        let entry = store
+            .read(|tx| tx.get_meta(&review_model_key("p:review-1")))
+            .unwrap()
+            .unwrap();
+        assert!(entry.contains("model_reasoning_effort=low"), "{entry}");
+    }
+
+    /// T-501: a reviewer that fell back keeps the model it fell back to for
+    /// its next job while the model it left has not reset; after the reset its
+    /// next job runs on the first entry again.
     #[test]
     fn a_fallen_back_reviewer_takes_its_next_job_on_the_fallback_until_the_reset() {
         let two = CONFIG.replace(
@@ -12042,6 +12400,351 @@ profile = "opencode"
             delivered.iter().any(|op| op.task.as_deref() == Some("T-2")),
             "the hand-in is delivered to the new seat"
         );
+    }
+
+    /// T-561 (1): a retired seat's agent leaves first. The incident's
+    /// retirement kept the pane up, so the user saw four reviewers on a quota
+    /// of three.
+    #[test]
+    fn a_retired_seat_closes_its_pane() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
+                tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
+                tx.clear_seat_task("p:review-1")
+            })
+            .unwrap();
+        queue_review_job(&mut store, 2, "heat");
+        let pane = store
+            .read(|tx| {
+                let seat = tx.get_seat("p:review-1")?.unwrap();
+                Ok(tx
+                    .get_binding(&seat.id, seat.generation)?
+                    .map(|binding| binding.pane_id))
+            })
+            .unwrap()
+            .expect("the reviewer has a pane");
+        REVIEW_GIT_FAIL_ON.with(|on| *on.borrow_mut() = Some("p-review-1".into()));
+        for tick in 0..3 {
+            start_reviews(
+                &mut store,
+                &mut herdr,
+                &cfg(),
+                &cfg().profiles,
+                "p",
+                T0 + 12 + tick,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            store
+                .read(|tx| tx.get_seat("p:review-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            SeatState::Retired
+        );
+        assert!(
+            herdr
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::PaneClose { pane: closed } if *closed == pane)),
+            "the retired seat's pane is closed: {:?}",
+            herdr.calls
+        );
+    }
+
+    /// T-561 (2): at 04:36 GitHub refused the SSH key three times and the seat
+    /// was retired while its worktree was sound. A remote's own words are not
+    /// the worktree's failure: nothing is counted, nothing is retired, and the
+    /// captain hears of it only once the outage has lasted half an hour.
+    #[test]
+    fn a_remote_outage_keeps_the_seat_and_is_told_after_half_an_hour() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+                judged(tx, "T-1", 1, "p:review-1", true)?;
+                tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
+                tx.clear_seat_task("p:review-1")
+            })
+            .unwrap();
+        queue_review_job(&mut store, 2, "heat");
+        let pane = store
+            .read(|tx| {
+                let seat = tx.get_seat("p:review-1")?.unwrap();
+                Ok(tx
+                    .get_binding(&seat.id, seat.generation)?
+                    .map(|binding| binding.pane_id))
+            })
+            .unwrap()
+            .expect("the reviewer has a pane");
+        REVIEW_GIT_FAIL_ON.with(|on| *on.borrow_mut() = Some("p-review-1".into()));
+        REVIEW_GIT_FAIL_TEXT.with(|text| {
+            *text.borrow_mut() = Some("git@github.com: Permission denied (publickey).".into())
+        });
+        for tick in 0..3 {
+            start_reviews(
+                &mut store,
+                &mut herdr,
+                &cfg(),
+                &cfg().profiles,
+                "p",
+                T0 + 12 + tick,
+            )
+            .unwrap();
+        }
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_ne!(
+            seat.state,
+            SeatState::Retired,
+            "a remote outage is not the worktree's failure"
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&checkout_fails_key("p:review-1")))
+                .unwrap()
+                .as_deref(),
+            Some(""),
+            "the outage is not counted"
+        );
+        assert!(
+            !herdr
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::PaneClose { pane: closed } if *closed == pane)),
+            "nothing closes the seat's pane: {:?}",
+            herdr.calls
+        );
+        let told = |store: &mut Store| {
+            store
+                .read(|tx| tx.thread_messages("p", "review-remote:p:review-1"))
+                .unwrap()
+        };
+        assert_eq!(told(&mut store).len(), 0, "a short outage is quiet");
+        // Half an hour after the first failure the captain hears of it, once.
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 12 + 30 * 60,
+        )
+        .unwrap();
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 12 + 60 * 60,
+        )
+        .unwrap();
+        let told = told(&mut store);
+        assert_eq!(told.len(), 1, "told once: {told:?}");
+        assert!(
+            told[0].body.contains("could not reach the remote"),
+            "{}",
+            told[0].body
+        );
+        assert_ne!(
+            store
+                .read(|tx| tx.get_seat("p:review-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            SeatState::Retired
+        );
+    }
+
+    /// T-561 (3), the sweep: whatever left a seat `Retired` or `Released`, an
+    /// agent that still carries its name is closed on the next tick, and the
+    /// captain is told once.
+    #[test]
+    fn a_live_agent_of_a_gone_seat_is_closed_and_named_once() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(
+            "wt1:p1",
+            "codex",
+            gear_herdr::AgentStatus::Idle,
+            "p-review-1",
+        );
+        store
+            .write(|tx| {
+                let seat =
+                    testing::seed_temp_seat(tx, "p", "review-1", "T-9", "wt1:p1", "codex", T0)?;
+                tx.set_seat_state(&seat.id, SeatState::Released, Some("review done"), T0 + 5)?;
+                tx.set_seat_state(&seat.id, SeatState::Retired, Some("gone"), T0 + 6)
+            })
+            .unwrap();
+        let names = crate::names::read(&mut herdr).unwrap();
+        let closed = close_gone_seats(&mut store, &mut herdr, "p", &names, T0 + 20).unwrap();
+        assert_eq!(closed, vec!["wt1:p1".to_string()]);
+        assert!(
+            !crate::names::read(&mut herdr)
+                .unwrap()
+                .contains_key("wt1:p1"),
+            "the pane is gone"
+        );
+        let told = store
+            .read(|tx| tx.thread_messages("p", "seat-pane:p:review-1"))
+            .unwrap();
+        assert_eq!(told.len(), 1, "the captain hears of it once: {told:?}");
+        assert!(told[0].body.contains("wt1:p1"), "{}", told[0].body);
+        // The next tick has nothing left to close.
+        let names = crate::names::read(&mut herdr).unwrap();
+        assert!(
+            close_gone_seats(&mut store, &mut herdr, "p", &names, T0 + 30)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.thread_messages("p", "seat-pane:p:review-1"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// Prometheus, 2026-11-05: a released seat's name on a pane that another
+    /// seat's active binding holds never closes that pane (the Prometheus
+    /// captain's pane carried a released Lawrence captain seat's name and was
+    /// closed), and a gone captain seat's pane is never closed by the sweep.
+    #[test]
+    fn a_gone_seats_name_on_a_pane_another_seat_holds_closes_nothing() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(
+            "wt1:p1",
+            "codex",
+            gear_herdr::AgentStatus::Idle,
+            "p-review-1",
+        );
+        herdr.add_agent_named("w9:p9", "claude", gear_herdr::AgentStatus::Idle, "p-oldcap");
+        store
+            .write(|tx| {
+                let seat =
+                    testing::seed_temp_seat(tx, "p", "review-1", "T-9", "wt1:p1", "codex", T0)?;
+                tx.set_seat_state(&seat.id, SeatState::Released, Some("review done"), T0 + 5)?;
+                tx.set_seat_state(&seat.id, SeatState::Retired, Some("gone"), T0 + 6)?;
+                // Another seat works in the same pane now.
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "keel",
+                    SeatRole::Lane,
+                    "wt1:p1",
+                    "codex",
+                    T0 + 7,
+                )?;
+                // A released captain seat whose name is on a pane nobody else holds.
+                let cap = testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "oldcap",
+                    SeatRole::Captain,
+                    "w9:p9",
+                    "claude",
+                    T0,
+                )?;
+                tx.set_seat_state(&cap.id, SeatState::Released, Some("released"), T0 + 8)
+            })
+            .unwrap();
+        let names = crate::names::read(&mut herdr).unwrap();
+        let closed = close_gone_seats(&mut store, &mut herdr, "p", &names, T0 + 20).unwrap();
+        assert!(closed.is_empty(), "nothing is closed: {closed:?}");
+        let names = crate::names::read(&mut herdr).unwrap();
+        assert!(
+            names.contains_key("wt1:p1"),
+            "the pane another seat holds stays"
+        );
+        assert!(
+            names.contains_key("w9:p9"),
+            "a captain's pane is never swept"
+        );
+    }
+
+    /// T-561 (3), the gate: live reviewer panes equal the quota while the seats
+    /// say fewer (a retired seat's agent still up) — no new reviewer starts
+    /// beside them.
+    #[test]
+    fn live_reviewer_panes_at_the_quota_start_no_new_reviewer() {
+        let config = CONFIG.replace("temps = 1", "temps = 3");
+        let mut store = world(&config);
+        let mut herdr = FakeHerdr::new();
+        store
+            .write(|tx| {
+                for (n, pane) in [(1, "wt1:p1"), (2, "wt2:p1"), (3, "wt3:p1")] {
+                    let seat = testing::seed_temp_seat(
+                        tx,
+                        "p",
+                        &format!("review-{n}"),
+                        "T-9",
+                        pane,
+                        "codex",
+                        T0,
+                    )?;
+                    tx.set_seat_state(&seat.id, SeatState::Released, Some("review done"), T0 + 5)?;
+                    tx.set_seat_state(&seat.id, SeatState::Retired, Some("gone"), T0 + 6)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        for (pane, name) in [
+            ("wt1:p1", "p-review-1"),
+            ("wt2:p1", "p-review-2"),
+            ("wt3:p1", "p-review-3"),
+        ] {
+            herdr.add_agent_named(pane, "codex", gear_herdr::AgentStatus::Idle, name);
+        }
+        // The seats say none can run (all retired); Herdr shows three agents.
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 20,
+        )
+        .unwrap();
+        assert!(report.started.is_empty(), "{report:?}");
+        assert_eq!(report.waiting, vec!["T-1".to_string()], "{report:?}");
+        let seats = store
+            .read(|tx| tx.seats_of_project("p"))
+            .unwrap()
+            .into_iter()
+            .filter(|seat| seat.role == SeatRole::Temp)
+            .count();
+        assert_eq!(seats, 3, "no fourth reviewer seat is created");
     }
 
     /// T-425: the attempt is marked stuck only when its checkout failed on two
@@ -12376,11 +13079,11 @@ profile = "opencode"
         // The count itself: the standby reviewer holds the slot, the released
         // one holds nothing.
         assert!(
-            !has_free_slot(&mut store, &mut herdr, "p", 1).unwrap(),
+            !has_free_slot(&mut store, &mut herdr, "p", 1, None).unwrap(),
             "the standby reviewer holds the slot"
         );
         assert!(
-            has_free_slot(&mut store, &mut herdr, "p", 2).unwrap(),
+            has_free_slot(&mut store, &mut herdr, "p", 2, None).unwrap(),
             "a second slot is free"
         );
 
@@ -12392,7 +13095,7 @@ profile = "opencode"
             })
             .unwrap();
         assert!(
-            !has_free_slot(&mut store, &mut herdr, "p", 1).unwrap(),
+            !has_free_slot(&mut store, &mut herdr, "p", 1, None).unwrap(),
             "the reviewer on its way out holds the slot"
         );
         store

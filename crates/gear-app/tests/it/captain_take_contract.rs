@@ -30,10 +30,16 @@ const USER_CALLER: [u32; 2] = [70_001, 70_000];
 const SERVICE: [u32; 2] = [4_000_001, 4_000_000];
 
 fn config(root: &Path) -> String {
+    config_of("p", root)
+}
+
+/// The config of project `id` on `root` (T-552: two projects share a checkout
+/// and a captain pane, as Prometheus and Lawrence do).
+fn config_of(id: &str, root: &Path) -> String {
     format!(
         r#"
 [project]
-id = "p"
+id = {id}
 herdr_session = "sess"
 repo = {root}
 
@@ -53,6 +59,7 @@ owns = ["src/"]
 kind = "opencode"
 profile = "opencode"
 "#,
+        id = serde_json::json!(id).to_string(),
         root = serde_json::json!(root.to_string_lossy()).to_string()
     )
 }
@@ -78,6 +85,22 @@ fn world(root: &Path) -> Store {
     })
     .unwrap();
     s
+}
+
+/// Project `q` on the same checkout and store as `p`, its captain seat bound to
+/// `pane` (T-552: one pane may hold two projects' captain seats, as Prometheus
+/// and Lawrence do).
+fn add_project(id: &str, root: &Path, pane: &str, store: &mut Store) {
+    store
+        .write(|tx| {
+            testing::seed_project(tx, id, "sess", NOW)?;
+            let mut project = tx.get_project(id)?.unwrap();
+            project.config_toml = config_of(id, root);
+            tx.update_project(&project)?;
+            testing::seed_active_seat(tx, id, "captain", SeatRole::Captain, pane, "codex", NOW)?;
+            Ok(())
+        })
+        .unwrap();
 }
 
 fn herdr() -> FakeHerdr {
@@ -404,4 +427,114 @@ fn take_outside_the_checkout_finds_the_only_project_and_refuses_an_unknown_name(
     )
     .unwrap_err();
     assert!(error.detail.contains("Projects: p"), "{}", error.detail);
+}
+
+/// T-552: a pane may hold the captain seats of more than one project (T-485).
+/// Taking the second project's seat keeps the name the agent already carries:
+/// renaming it after the second project takes the first captain's name away,
+/// and every prompt to that captain then fails with `agent_not_found`.
+#[test]
+fn take_keeps_the_captain_name_a_pane_already_holds() {
+    let root = tempfile::tempdir().unwrap();
+    let mut s = world(root.path());
+    add_project("q", root.path(), CAP_PANE, &mut s);
+    let mut herdr = herdr();
+    // The pane is Prometheus' captain and carries its name already.
+    herdr.set_agent_name(CAP_PANE, Some("p-captain"));
+
+    let taken = take(
+        &mut s,
+        &bare(),
+        &mut herdr,
+        &CAP_CALLER,
+        root.path(),
+        Some("q"),
+        NOW,
+    )
+    .unwrap();
+
+    assert_eq!(taken.project, "q");
+    assert_eq!(
+        taken.generation, 1,
+        "the seat the pane already holds is kept"
+    );
+    assert_eq!(
+        taken.named,
+        gear_herdr::Ensured::Kept,
+        "the name is reported as kept"
+    );
+    assert_eq!(
+        herdr.agent_name(CAP_PANE),
+        Some("p-captain"),
+        "the first captain keeps its name"
+    );
+    assert!(
+        herdr.renames_to("q-captain").is_empty(),
+        "no rename was attempted"
+    );
+    // Both captain seats are bound to the pane, and p's is untouched.
+    for seat in ["p:captain", "q:captain"] {
+        let binding = s.read(|tx| tx.get_binding(seat, 1)).unwrap().unwrap();
+        assert_eq!(
+            (binding.pane_id.as_str(), binding.status),
+            (CAP_PANE, BindingStatus::Active),
+            "{seat}"
+        );
+    }
+}
+
+/// T-552: a pane that holds no other project's captain is named as always.
+#[test]
+fn take_names_the_captain_of_a_pane_that_holds_no_other() {
+    let root = tempfile::tempdir().unwrap();
+    let mut s = world(root.path());
+    add_project("q", root.path(), CAP_PANE, &mut s);
+    let mut herdr = herdr();
+
+    let taken = take(
+        &mut s,
+        &bare(),
+        &mut herdr,
+        &NEW_CALLER,
+        root.path(),
+        Some("q"),
+        NOW,
+    )
+    .unwrap();
+
+    assert_eq!(taken.named, gear_herdr::Ensured::Renamed);
+    assert_eq!(herdr.agent_name(NEW_PANE), Some("q-captain"));
+    assert_eq!(herdr.renames_to("q-captain"), vec![NEW_PANE]);
+}
+
+/// T-552: a handover to a fresh pane names the captain as it always did — the
+/// pane holds no other project's captain seat.
+#[test]
+fn a_handover_to_a_fresh_pane_names_the_captain_as_before() {
+    let root = tempfile::tempdir().unwrap();
+    let mut s = world(root.path());
+    let mut herdr = herdr();
+    let captain = Env {
+        ctx: Some(GearCtx {
+            project: "p".into(),
+            seat: "captain".into(),
+            generation: 1,
+        }),
+        pane_id: Some(CAP_PANE.to_string()),
+        admin: false,
+    };
+
+    let done = gear_app::captain::handover(
+        &mut s,
+        &captain,
+        &mut herdr,
+        &CAP_CALLER,
+        root.path(),
+        NEW_PANE,
+        NOW,
+    )
+    .unwrap();
+
+    assert_eq!(done.named, gear_herdr::Ensured::Renamed);
+    assert_eq!(herdr.agent_name(NEW_PANE), Some("p-captain"));
 }

@@ -96,6 +96,7 @@ mod temps_quota_contract;
 mod time_contract;
 mod time_report_contract;
 mod verdict_item_contract;
+mod voyage_clock_contract;
 mod voyage_contract;
 mod voyage_report_contract;
 

@@ -28,9 +28,8 @@ check: prune-tmp ## the light run for lanes and reviewers: rustfmt check, then o
 	cargo fmt --all --check
 	tools/build-slot/build-slot.sh cargo nextest run -p $(CRATE) --no-fail-fast $(if $(strip $(TESTS)),-E '$(TESTS)')
 
-gate: prune-tmp ## the merge gate on the shared machine: rustfmt check, workspace build and the whole suite, each sized by build-slot at least 4 jobs, at normal priority (the test run measures the machine after the build)
-	cargo fmt --all --check
-	BUILD_SLOT_MIN=4 BUILD_SLOT_PRIORITY=normal tools/build-slot/build-slot.sh cargo build --workspace --all-targets && BUILD_SLOT_MIN=4 BUILD_SLOT_PRIORITY=normal tools/build-slot/build-slot.sh scripts/test.sh
+gate: prune-tmp ## the merge gate on the shared machine: rustfmt check, workspace build and the whole suite, each sized by build-slot at least 4 jobs; every phase is timed and the whole gate fails over 80 s
+	scripts/gate.sh
 
 full: prune-tmp ## full speed for one person alone on the machine: no caps
 	cargo build --workspace --all-targets && scripts/test.sh

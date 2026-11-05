@@ -229,3 +229,60 @@ fn an_empty_review_model_is_refused() {
         error.detail
     );
 }
+
+/// `carried-by: T-m` (Lawrence T-31, 2026-11-03): stored, shown back, kept by
+/// a block without it, cleared by `-`; a task that does not exist, or the task
+/// itself, is refused.
+#[test]
+fn carried_by_is_stored_shown_cleared_and_checked() {
+    let mut s = world();
+    run(
+        &mut s,
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n",
+        "r1",
+    )
+    .unwrap();
+    run_at(
+        &mut s,
+        "# Queue\n## T-1 [must] lane=heat\ncarried-by: T-2\ndeps: -\n",
+        "r2",
+    )
+    .unwrap();
+    let by = |s: &mut Store| s.read(|tx| tx.task_carried_by("p", "T-1")).unwrap();
+    assert_eq!(by(&mut s).as_deref(), Some("T-2"));
+    let shown = s.read(|tx| gear_app::plan::show(tx, "p", "T-1")).unwrap();
+    assert!(shown.contains("carried-by: T-2"), "{shown}");
+
+    run_at(&mut s, "# Queue\n## T-1 [must] lane=heat\ndeps: -\n", "r3").unwrap();
+    assert_eq!(
+        by(&mut s).as_deref(),
+        Some("T-2"),
+        "a block without it keeps it"
+    );
+
+    run_at(
+        &mut s,
+        "# Queue\n## T-1 [must] lane=heat\ncarried-by: -\ndeps: -\n",
+        "r4",
+    )
+    .unwrap();
+    assert_eq!(by(&mut s), None, "`-` clears it");
+
+    let bad = parse("<!-- gear-plan project=p base=0 -->\n# Queue\n## T-1 [must] lane=heat\ncarried-by: soon\ndeps: -\n")
+        .unwrap_err();
+    assert_eq!(bad.code, ErrorCode::BadFormat, "{}", bad.detail);
+    for (value, rid) in [("T-9", "r5"), ("T-1", "r6")] {
+        let error = run_at(
+            &mut s,
+            &format!("# Queue\n## T-1 [must] lane=heat\ncarried-by: {value}\ndeps: -\n"),
+            rid,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            ErrorCode::BadFormat,
+            "{value}: {}",
+            error.detail
+        );
+    }
+}

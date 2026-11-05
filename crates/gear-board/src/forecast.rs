@@ -25,8 +25,9 @@ use crate::graph::Stage;
 pub const REVIEW_MERGE_MIN: i64 = 15;
 
 /// A dependency no job of the queue speaks for: it never merges (minutes), the
-/// prototype's `10 ** 6`.
-const NO_DEP: i64 = 1_000_000;
+/// prototype's `10 ** 6`. A lane end at or past it is no forecast at all
+/// (T-567): the board leaves it out of `expected` and names the blocker.
+pub const NO_DEP: i64 = 1_000_000;
 
 /// The fewest minutes a job is given, whatever its estimate and time say.
 const LEAST_LEFT: i64 = 10;
@@ -64,6 +65,9 @@ pub struct LaneEnd {
     /// The idle stretches on the way there: how many minutes, and the task it
     /// waits to merge.
     pub waits: Vec<(i64, String)>,
+    /// The jobs of the lane that can never start (T-567): the job and the
+    /// dependency nothing will merge, in queue order.
+    pub blocked: Vec<(String, String)>,
     /// The lane's measured pace (actual minutes over estimate minutes of the
     /// jobs it merged), between 0.5 and 3.0; 1.0 when it merged nothing.
     pub pace: f64,
@@ -99,6 +103,7 @@ pub fn forecast(jobs: &[Job], lanes: &[String], review_merge_min: i64) -> Vec<La
             lane: lane.clone(),
             end_min: 0,
             waits: Vec::new(),
+            blocked: Vec::new(),
             pace: 1.0,
         })
         .collect();
@@ -107,6 +112,7 @@ pub fn forecast(jobs: &[Job], lanes: &[String], review_merge_min: i64) -> Vec<La
             let pace = paces[i];
             let mut free = 0;
             let mut waits: Vec<(i64, String)> = Vec::new();
+            let mut blocked: Vec<(String, String)> = Vec::new();
             let mut last = 0;
             // What the lane holds now, then what it has still to start: each
             // group in queue order.
@@ -128,6 +134,20 @@ pub fn forecast(jobs: &[Job], lanes: &[String], review_merge_min: i64) -> Vec<La
                 let mut start = free;
                 if matches!(job.stage, Stage::Queued | Stage::Deps) {
                     let (ready, blocker) = ready(&merged, &job.deps);
+                    // A dependency no job of the queue speaks for is what makes
+                    // a job unstartable (T-567; review F1): only that job is
+                    // named. A job that waits behind another queued job which is
+                    // itself blocked is not — the board names the task whose own
+                    // dependency nothing will merge (X waits for Y, Y waits for
+                    // Z: `Y waits for Z`), never a real queued job as the one
+                    // "nothing will merge".
+                    if let Some(dep) = job
+                        .deps
+                        .iter()
+                        .find(|dep| !dep.is_empty() && !merged.contains_key(*dep))
+                    {
+                        blocked.push((job.id.clone(), dep.clone()));
+                    }
                     if ready > free {
                         if let Some(blocker) = blocker {
                             waits.push((ready - free, blocker));
@@ -164,6 +184,7 @@ pub fn forecast(jobs: &[Job], lanes: &[String], review_merge_min: i64) -> Vec<La
                 lane: lane.clone(),
                 end_min: last.max(reviewing.unwrap_or(last)),
                 waits,
+                blocked,
                 pace,
             };
         }
@@ -330,6 +351,7 @@ mod tests {
                 lane: "temp".to_string(),
                 end_min: 0,
                 waits: Vec::new(),
+                blocked: Vec::new(),
                 pace: 1.0,
             }
         );
@@ -350,6 +372,88 @@ mod tests {
         let ends = forecast(&jobs, &["hull".to_string()], REVIEW_MERGE_MIN);
         assert_eq!(ends[0].waits, vec![(NO_DEP, "T-404".to_string())]);
         assert_eq!(ends[0].end_min, NO_DEP + 10 + REVIEW_MERGE_MIN);
+    }
+
+    /// T-567: the lane says which job can never start and what holds it, so
+    /// the board can name the blocker instead of a forecast a million minutes
+    /// out.
+    #[test]
+    fn a_job_waiting_on_a_dependency_nothing_merges_is_named_as_blocked() {
+        let job = |id: &str, lane: &str, stage: Stage, deps: &[&str]| Job {
+            id: id.to_string(),
+            lane: lane.to_string(),
+            stage,
+            est_min: 10,
+            actual_min: 0,
+            deps: deps.iter().map(|dep| dep.to_string()).collect(),
+        };
+        let jobs = vec![
+            job("T-1", "mast", Stage::Working, &[]),
+            // T-570 waits for T-665, whose merge keeps failing: no job of the
+            // queue speaks for it.
+            job("T-570", "hull", Stage::Deps, &["T-665"]),
+            job("T-571", "hull", Stage::Queued, &["T-665", "T-1"]),
+            job("T-9", "keel", Stage::Queued, &["T-1"]),
+        ];
+        let ends = forecast(
+            &jobs,
+            &["hull".to_string(), "mast".to_string(), "keel".to_string()],
+            REVIEW_MERGE_MIN,
+        );
+        let hull = lane(&ends, "hull");
+        assert_eq!(
+            hull.blocked,
+            vec![
+                ("T-570".to_string(), "T-665".to_string()),
+                ("T-571".to_string(), "T-665".to_string()),
+            ],
+            "{:?}",
+            hull.blocked
+        );
+        // The lane's end is past NO_DEP: no forecast at all.
+        assert!(hull.end_min >= NO_DEP, "{}", hull.end_min);
+        // The other lanes are forecast as before, and no blocked job.
+        assert!(lane(&ends, "mast").blocked.is_empty());
+        assert!(lane(&ends, "keel").blocked.is_empty());
+        assert_eq!(lane(&ends, "mast").end_min, 10 + REVIEW_MERGE_MIN);
+    }
+
+    /// T-567 review F1: a job that waits behind another queued job which is
+    /// itself blocked is not the one named — the board names the task whose own
+    /// dependency nothing will merge (X waits for Y, Y waits for Z: `Y waits
+    /// for Z`), so a real queued job is never called "nothing will merge".
+    #[test]
+    fn a_job_blocked_through_another_queued_job_is_not_named() {
+        let job = |id: &str, lane: &str, stage: Stage, deps: &[&str]| Job {
+            id: id.to_string(),
+            lane: lane.to_string(),
+            stage,
+            est_min: 10,
+            actual_min: 0,
+            deps: deps.iter().map(|dep| dep.to_string()).collect(),
+        };
+        let jobs = vec![
+            // X waits for Y, a real queued job of another lane; Y waits for Z,
+            // and no job of the queue is Z.
+            job("X", "hull", Stage::Deps, &["Y"]),
+            job("Y", "mast", Stage::Queued, &["Z"]),
+        ];
+        let ends = forecast(
+            &jobs,
+            &["hull".to_string(), "mast".to_string()],
+            REVIEW_MERGE_MIN,
+        );
+        assert!(
+            lane(&ends, "hull").blocked.is_empty(),
+            "X waits for a real job: {:?}",
+            lane(&ends, "hull").blocked
+        );
+        assert_eq!(
+            lane(&ends, "mast").blocked,
+            vec![("Y".to_string(), "Z".to_string())],
+            "{:?}",
+            lane(&ends, "mast").blocked
+        );
     }
 
     #[test]

@@ -160,7 +160,7 @@ fn world() -> Store {
             for (rank, task) in tasks.iter().enumerate() {
                 tx.insert_task(&TaskRow {
                     repo: None,
-                    base: None,
+                    base: Some("dev".into()),
                     gate: None,
                     rework_estimate_min: None,
                     project: "p".into(),
@@ -331,6 +331,7 @@ fn a_merged_task_draws_the_line_of_the_merge() {
     // The info column: when it was merged (the clock of the user) and how
     // long it took.
     assert!(row.contains(" · 44/40m"), "{row:?}");
+    // The info column says when the merge happened.
     assert!(row.contains("merged "), "{row:?}");
 
     // T-139 was reworked: the rework mark is in the review column.
@@ -362,7 +363,7 @@ fn a_task_in_review_draws_the_line_of_the_review() {
     assert_eq!(at(row, 9, 1), "◍", "{row:?}");
     assert_eq!(at(row, 10, 5), "─────", "{row:?}");
     assert_eq!(at(row, 15, 1), "◍", "{row:?}");
-    assert!(row.contains("passed, waits to merge"), "{row:?}");
+    assert!(row.contains("passed, not on dev yet"), "{row:?}");
 }
 
 #[test]
@@ -581,11 +582,13 @@ fn stage_world() -> Store {
                 ("T-30", TaskState::Verifying, vec![]),
                 ("T-31", TaskState::Verifying, vec![]),
                 ("T-32", TaskState::Done, vec![]),
+                ("T-33", TaskState::Draft, vec![]),
             ];
             for (rank, (id, state, deps)) in tasks.iter().enumerate() {
                 tx.insert_task(&TaskRow {
                     repo: None,
-                    base: None,
+                    // v0.6.54: the stage words name the branch by its name.
+                    base: Some("dev".into()),
                     gate: None,
                     rework_estimate_min: None,
                     project: "p".into(),
@@ -622,6 +625,7 @@ fn stage_world() -> Store {
                 ("T-29", 1, AttemptState::Submitted),
                 ("T-30", 1, AttemptState::Submitted),
                 ("T-31", 1, AttemptState::Submitted),
+                ("T-32", 1, AttemptState::Accepted),
             ];
             for (id, n, state) in &attempts {
                 let started = moment(12, 0);
@@ -647,6 +651,15 @@ fn stage_world() -> Store {
                 })?;
                 tx.set_attempt_time("p", id, *n, gear_store::AttemptStep::Started, started)?;
             }
+            // T-32's work is on the integration branch (v0.6.54): a done task
+            // is merged only when an attempt carries its merge time.
+            tx.set_attempt_time(
+                "p",
+                "T-32",
+                1,
+                gear_store::AttemptStep::Merged,
+                moment(12, 25),
+            )?;
             // The passed verdicts of the tasks that wait for their merge.
             for id in ["T-26", "T-27", "T-28"] {
                 tx.insert_verdict(&gear_store::VerdictRow {
@@ -738,8 +751,10 @@ fn stage_and_words(store: &mut Store, task: &str) -> (Stage, String) {
 #[test]
 fn each_stage_comes_from_a_fact_of_the_store() {
     let mut store = stage_world();
-    let table: [(&str, Stage, &str); 14] = [
-        ("T-20", Stage::Deps, "waits for 1 to merge"),
+    let table: [(&str, Stage, &str); 15] = [
+        ("T-20", Stage::Deps, "waits for T-1 to merge"),
+        // A held task stays on the board: a hold that drops it from the list hides it from the user.
+        ("T-33", Stage::Held, "on hold (the captain holds it)"),
         ("T-1", Stage::Queued, "queued"),
         ("T-23", Stage::Delivered, "delivered, not started"),
         ("T-21", Stage::Working, "working"),
@@ -749,14 +764,14 @@ fn each_stage_comes_from_a_fact_of_the_store() {
         ("T-31", Stage::Verdict, "waits for the captain's verdict"),
         ("T-24", Stage::SentBack, "sent back, rework queued"),
         ("T-25", Stage::Rework, "reworking (round 2)"),
-        ("T-28", Stage::Passed, "passed, waits to merge"),
+        ("T-28", Stage::Passed, "passed, not on dev yet"),
         ("T-26", Stage::Merging, "merging (gate running)"),
         (
             "T-27",
             Stage::MergeFailed,
-            "merge failed, waits for the captain",
+            "merge into dev failed, waits for the captain",
         ),
-        ("T-32", Stage::Merged, "merged"),
+        ("T-32", Stage::Merged, "on dev"),
     ];
     for (task, stage, words) in table {
         let (found, said) = stage_and_words(&mut store, task);
@@ -881,7 +896,7 @@ fn the_lane_panel_shows_each_task_in_its_stage() {
     // A failed merge is not a merge that runs.
     assert!(row("T-27").starts_with("  ✗ T-27 "), "{text}");
     assert!(
-        row("T-27").ends_with("merge failed, waits for the captain"),
+        row("T-27").ends_with("merge into dev failed, waits for the captain"),
         "{text}"
     );
     // The rework says which round it is, and a question is not work.
@@ -957,6 +972,7 @@ fn the_sixteen_stages_have_their_symbols_colours_and_words() {
 fn sample() -> GraphTask {
     GraphTask {
         id: "T-1".into(),
+        integration: "dev".into(),
         rank: 1,
         lane: "hull".into(),
         stage: Stage::Queued,
@@ -966,6 +982,7 @@ fn sample() -> GraphTask {
         actual_min: None,
         rounds: 0,
         deps: Vec::new(),
+        deps_open: Vec::new(),
         finished: None,
         started: None,
     }
@@ -1142,6 +1159,7 @@ fn m5() -> Vec<GraphTask> {
         .enumerate()
         .map(|(index, task)| GraphTask {
             id: task.id.into(),
+            integration: "dev".into(),
             rank: index as i64 + 1,
             lane: task.lane.into(),
             stage: task.stage,
@@ -1151,6 +1169,9 @@ fn m5() -> Vec<GraphTask> {
             actual_min: Some(task.actual),
             rounds: task.rounds,
             deps: task.deps.iter().map(|dep| dep.to_string()).collect(),
+            // The fixture writes the dependencies of a task that has not merged:
+            // all of them are still open.
+            deps_open: task.deps.iter().map(|dep| dep.to_string()).collect(),
             finished: task.merged.map(|minute| minute * 60),
             started: task.started.map(|minute| minute * 60),
         })
@@ -1222,8 +1243,9 @@ fn the_git_graph_has_the_rows_of_the_prototype_m5_voyage() {
         "{:?}",
         last_waiting.text
     );
+    // T-562: the words name the dependency that holds the task.
     assert!(
-        last_waiting.text.contains("waits for 1 to merge"),
+        last_waiting.text.contains("waits for T-262 to merge"),
         "{:?}",
         last_waiting.text
     );
@@ -1349,6 +1371,7 @@ fn a_task_that_started_and_waits_again_keeps_its_row() {
     // stage, so it still stands on its branch (F2 of the T-361 review).
     let tasks = vec![GraphTask {
         id: "T-3".into(),
+        integration: "dev".into(),
         rank: 3,
         stage: Stage::Queued,
         started: Some(60),
@@ -1391,4 +1414,147 @@ fn the_graph_of_the_shown_tasks_is_the_filtered_full_graph() {
         .read(|tx| gear_board::graph::tasks_shown(tx, "p", now, &shown))
         .unwrap();
     assert_eq!(narrowed, expected);
+}
+
+/// v0.6.54: a done task is merged only when an attempt carries its merge
+/// time. Without one, it is where its newest merge op says it is — a failed
+/// merge, a merge running, or passed and not on the branch yet.
+#[test]
+fn a_done_task_without_a_merge_time_is_where_its_merge_op_is() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p1", "pi", T0)?;
+            let tasks = [
+                ("T-1", Some(OpState::Failed)),
+                ("T-2", Some(OpState::Executing)),
+                ("T-3", None),
+            ];
+            for (rank, (id, op)) in tasks.iter().enumerate() {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: Some("dev".into()),
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: (*id).into(),
+                    rank: rank as i64 + 1,
+                    state: TaskState::Done,
+                    priority: "must".into(),
+                    lane: Some("hull".into()),
+                    milestone: Some("M5".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(20),
+                    issue: None,
+                    updated: T0,
+                })?;
+                if let Some(state) = op {
+                    let row = tx.insert_op(&NewOp {
+                        project: "p".into(),
+                        seat: "p:captain".into(),
+                        generation: 1,
+                        kind: OpKind::Merge,
+                        task: Some((*id).into()),
+                        attempt: Some(1),
+                        ref_msg: None,
+                        plan_version: None,
+                        payload: serde_json::json!({}),
+                        created: moment(12, 15),
+                    })?;
+                    tx.set_op_state("p", &row.id, *state, None, moment(12, 16))?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let table = [
+        (
+            "T-1",
+            Stage::MergeFailed,
+            "merge into dev failed, waits for the captain",
+        ),
+        ("T-2", Stage::Merging, "merging (gate running)"),
+        ("T-3", Stage::Passed, "passed, not on dev yet"),
+    ];
+    for (task, stage, words) in table {
+        let (found, said) = stage_and_words(&mut store, task);
+        assert_eq!(found, stage, "{task}");
+        assert_eq!(said, words, "{task}");
+    }
+}
+
+/// v0.6.54: the board names the branch the project calls its own (`base`), not
+/// a word: a task that merges into `main` reads "on main".
+#[test]
+fn a_task_whose_base_is_main_reads_on_main() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p1", "pi", T0)?;
+            tx.insert_task(&TaskRow {
+                repo: None,
+                base: Some("main".into()),
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: "T-1".into(),
+                rank: 1,
+                state: TaskState::Done,
+                priority: "must".into(),
+                lane: Some("hull".into()),
+                milestone: Some("M5".into()),
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: Some(20),
+                issue: None,
+                updated: T0,
+            })?;
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:hull".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Accepted,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: moment(12, 0),
+                updated: moment(12, 0),
+            })?;
+            tx.set_attempt_time(
+                "p",
+                "T-1",
+                1,
+                gear_store::AttemptStep::Merged,
+                moment(12, 30),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let (found, said) = stage_and_words(&mut store, "T-1");
+    assert_eq!(found, Stage::Merged);
+    assert_eq!(said, "on main");
 }

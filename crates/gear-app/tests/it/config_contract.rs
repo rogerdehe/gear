@@ -57,7 +57,7 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
     assert_eq!(cfg.lanes[1].not, vec!["UI".to_string()]);
     assert!(!cfg.quota.includes_captain);
     // T-467: the idle time before a seat of a role is released, default 30.
-    assert_eq!(cfg.quota.reviewer_release_idle_min, 30);
+    assert_eq!(cfg.quota.reviewer_release_idle_min, None);
     assert_eq!(cfg.quota.lane_release_idle_min, 30);
     assert_eq!(cfg.temps, None);
     assert_eq!(
@@ -71,6 +71,10 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             max_task_min: 60,
             branch_max_age_min: 120,
             branch_max_per_lane: 3,
+            // One merge after the other unless the project asks for a train.
+            merge_parallel: 1,
+            // T-545: each merge is gated alone unless the project asks for a batch.
+            merge_batch: 1,
             push_interval_min: 20,
             push_reply_min: 10,
             // T-255: `gate` has no default; the fixture names one.
@@ -78,7 +82,8 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             task_branch: "{lane}/t{n}".into(),
             review_branch: "review/t{n}".into(),
             direction_branch: "{project}/direction/{task}".into(),
-            seat_branch: "{project}/{seat}".into(),
+            // T-559: project / seat / home, like project / lane / task.
+            seat_branch: "{project}/{seat}/home".into(),
             remote: "origin".into(),
             voyage_dir: "gear/voyages/{milestone}".into(),
             // T-299: the commit messages are configuration too; the fixture
@@ -258,7 +263,7 @@ fn the_release_idle_times_are_config() {
         "temps = 4\nreviewer_release_idle_min = 5\nlane_release_idle_min = 90",
     );
     let cfg = parse(&text).unwrap();
-    assert_eq!(cfg.quota.reviewer_release_idle_min, 5);
+    assert_eq!(cfg.quota.reviewer_release_idle_min, Some(5));
     assert_eq!(cfg.quota.lane_release_idle_min, 90);
 }
 
@@ -573,6 +578,47 @@ fn scratch_dir_defaults_to_none_and_parses_a_path() {
         Some("~/gear-scratch")
     );
     assert_eq!(validate(&cfg), vec![], "a scratch_dir is valid");
+}
+
+// ---- `[conventions].merge_batch` (T-545): how many passed merges are merged
+// together and gated once. Absent, each merge is gated alone.
+
+#[test]
+fn merge_batch_defaults_to_one_and_a_project_may_raise_it() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert_eq!(cfg.conventions.merge_batch, 1, "the default is one");
+    assert_eq!(validate(&cfg), vec![], "the default is valid");
+
+    let cfg = parse(&MINIMAL.replace(GATE_LINE, "gate = \"make test\"\nmerge_batch = 4")).unwrap();
+    assert_eq!(cfg.conventions.merge_batch, 4);
+    assert_eq!(validate(&cfg), vec![], "a batch merge on its own is valid");
+}
+
+#[test]
+fn a_merge_batch_of_zero_is_refused() {
+    let cfg = parse(&MINIMAL.replace(GATE_LINE, "gate = \"make test\"\nmerge_batch = 0")).unwrap();
+    assert_eq!(fields(&validate(&cfg)), vec!["conventions.merge_batch"]);
+    assert!(!validate(&cfg)[0].problem.is_empty());
+}
+
+#[test]
+fn a_merge_batch_above_one_refuses_a_merge_train() {
+    // A batch is gated once and so cannot also gate side by side as a train.
+    let cfg = parse(&MINIMAL.replace(
+        GATE_LINE,
+        "gate = \"make test\"\nmerge_batch = 3\nmerge_parallel = 2",
+    ))
+    .unwrap();
+    let issues = validate(&cfg);
+    assert_eq!(fields(&issues), vec!["conventions.merge_batch"]);
+    assert!(
+        issues[0].problem.contains("merge_batch")
+            && issues[0].problem.contains("merge_parallel")
+            && issues[0].problem.contains('3')
+            && issues[0].problem.contains('2'),
+        "both fields and their values are named: {}",
+        issues[0].problem
+    );
 }
 
 // ---- `[conventions].max_task_min` (T-279): no task is planned longer than
@@ -967,6 +1013,7 @@ fn a_project_without_repos_has_only_the_root_repo() {
             integration: "dev".into(),
             release: "main".into(),
             gate: "make test".into(),
+            voyage_dir: gear_model::layout::VOYAGE_DIR.into(),
             github: None,
         }
     );
@@ -1428,6 +1475,8 @@ fn a_seat_branch_that_holds_a_task_or_review_branch_is_refused() {
     cfg.project.id = "p".into();
     cfg.lanes.truncate(1); // the lane "heat"
     cfg.conventions.task_branch = "{project}/{lane}/t{n}".into();
+    // The seat branch in the lane's own folder (the old default shape).
+    cfg.conventions.seat_branch = "{project}/{seat}".into();
     let issues = validate(&cfg);
     assert_eq!(fields(&issues), vec!["conventions.seat_branch"]);
     assert!(
@@ -1440,17 +1489,22 @@ fn a_seat_branch_that_holds_a_task_or_review_branch_is_refused() {
     assert!(
         issues[0]
             .problem
-            .contains("e.g. seat_branch = \"{project}/home/{seat}\""),
+            .contains("e.g. seat_branch = \"{project}/{seat}/home\""),
         "{}",
         issues[0].problem
     );
 
-    // A seat branch in its own folder collides with nothing.
+    // The default, project / seat / home, sits beside the task branches of its
+    // lane: they are siblings, not a ref and a folder of it (T-559).
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.project.id = "p".into();
     cfg.conventions.task_branch = "{project}/{lane}/t{n}".into();
-    cfg.conventions.seat_branch = "{project}/home/{seat}".into();
-    assert_eq!(validate(&cfg), vec![]);
+    cfg.conventions.seat_branch = "{project}/{seat}/home".into();
+    assert_eq!(
+        validate(&cfg),
+        vec![],
+        "p/heat/home and p/heat/t1 are siblings"
+    );
 
     // The defaults keep the three apart.
     let mut cfg = parse(MINIMAL).unwrap();
@@ -1463,6 +1517,8 @@ fn a_seat_branch_that_holds_a_task_or_review_branch_is_refused() {
     cfg.project.id = "p".into();
     cfg.lanes.truncate(1);
     cfg.conventions.review_branch = "{project}/review-1/t{n}".into();
+    // The reviewer's seat branch in the folder the review branch lives in.
+    cfg.conventions.seat_branch = "{project}/{seat}".into();
     let issues = validate(&cfg);
     assert_eq!(fields(&issues), vec!["conventions.seat_branch"]);
     assert!(

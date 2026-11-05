@@ -327,7 +327,7 @@ fn wait_merge(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg) {
 
 /// T-253: the dispatch packet and the lane's worktree come from
 /// `task_branch` and `seat_branch`; with `seat_branch = "w/{seat}"` the lane's
-/// worktree step names `w/heat`, not the default `p/heat`.
+/// worktree step names `w/heat`, not the default `p/heat/home`.
 #[test]
 fn the_dispatch_packet_and_the_lane_worktree_come_from_the_projects_templates() {
     let repo = Repo::new();
@@ -547,7 +547,7 @@ fn a_worktree_of_another_repository_is_not_used_and_opens_a_captain_item() {
         &format!(
             "git -C {} worktree add -q -b {branch} {path} dev",
             other.work.display(),
-            branch = "p/heat",
+            branch = "p/heat/home",
             path = foreign.display()
         ),
     );
@@ -556,7 +556,7 @@ fn a_worktree_of_another_repository_is_not_used_and_opens_a_captain_item() {
     let mut store = world(&config);
     let mut herdr = FakeHerdr::new();
     // Herdr answers the seat's branch with the other repository's worktree.
-    herdr.add_worktree("p/heat", &foreign.to_string_lossy(), "other:p1");
+    herdr.add_worktree("p/heat/home", &foreign.to_string_lossy(), "other:p1");
     let cfg = cfg();
 
     let active = onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
@@ -590,4 +590,113 @@ fn a_worktree_of_another_repository_is_not_used_and_opens_a_captain_item() {
         "{body}"
     );
     assert_eq!(items.len(), 1, "one item, not one per tick: {items:?}");
+}
+
+/// Whether `git <args>` succeeds in `dir`.
+fn git_ok(dir: &Path, args: &str) -> bool {
+    Command::new("git")
+        .args(args.split_whitespace())
+        .current_dir(dir)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// T-565: a project that never wrote a `seat_branch` line has no apply to run
+/// T-559's rename, so its seats keep the branch the previous default named
+/// (`p/heat`). The engine moves it to the current default's name
+/// (`p/heat/home`) at its next start, on the remote too when it is there.
+#[test]
+fn a_seat_branch_of_the_previous_default_is_moved_at_the_next_start() {
+    let repo = Repo::new();
+    // The seat's worktree stands on the old default's branch, pushed.
+    let path = repo.root.path().join("heat-home");
+    sh(
+        &repo.work,
+        &format!(
+            "git worktree add -q -b p/heat {} origin/dev",
+            path.display()
+        ),
+    );
+    publish(&path, "p/heat");
+    let config = repo.config("");
+    let mut store = world(&config);
+    store
+        .write(|tx| tx.set_meta("engine.worktree_path.p:heat", path.to_str().unwrap()))
+        .unwrap();
+    let mut herdr = FakeHerdr::new();
+    let cfg = cfg();
+
+    onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
+
+    // Locally: the ref moved, and the checkout that stood on it moved with it.
+    assert!(
+        git_ok(&repo.work, "rev-parse --verify refs/heads/p/heat/home"),
+        "the new name is a branch: {:?}",
+        sh(&repo.work, "git branch --list")
+    );
+    assert!(
+        !git_ok(&repo.work, "rev-parse --verify refs/heads/p/heat"),
+        "the old name is gone: {:?}",
+        sh(&repo.work, "git branch --list")
+    );
+    assert_eq!(sh(&path, "git rev-parse --abbrev-ref HEAD"), "p/heat/home");
+    // On the remote too: it was pushed there.
+    assert!(
+        git_ok(&repo.origin, "rev-parse --verify refs/heads/p/heat/home"),
+        "{:?}",
+        sh(&repo.origin, "git branch --list")
+    );
+    assert!(!git_ok(
+        &repo.origin,
+        "rev-parse --verify refs/heads/p/heat"
+    ));
+    // The captain hears about it once, in the seat's worktree item.
+    let items = store
+        .read(|tx| tx.thread_messages("p", "worktree:heat"))
+        .unwrap();
+    assert!(
+        items
+            .iter()
+            .any(|item| item.body.contains("p/heat/home") && item.body.contains("p/heat")),
+        "{items:?}"
+    );
+}
+
+/// T-565: a ref that is a folder of the seat branch but is not the seat's own
+/// old branch is named, never touched: git cannot create the branch past it,
+/// and GEAR does not go and delete somebody else's ref.
+#[test]
+fn a_foreign_ref_in_the_way_of_the_seat_branch_is_named_and_left_alone() {
+    let repo = Repo::new();
+    // A branch named after the project stands where the seat branch would go.
+    sh(&repo.work, "git branch p");
+    let config = repo.config("");
+    let mut store = world(&config);
+    let mut herdr = FakeHerdr::new();
+    let cfg = cfg();
+
+    onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
+
+    // The seat does not start, and the reason names the ref in the way.
+    let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+    assert_ne!(seat.state, SeatState::Active, "{seat:?}");
+    let reason = seat.state_reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("p/heat/home") && reason.contains("ref p"),
+        "{reason}"
+    );
+    // The foreign ref is untouched, and nothing was created over it.
+    assert!(git_ok(&repo.work, "rev-parse --verify refs/heads/p"));
+    assert!(!git_ok(
+        &repo.work,
+        "rev-parse --verify refs/heads/p/heat/home"
+    ));
+    let items = store
+        .read(|tx| tx.thread_messages("p", "worktree:heat"))
+        .unwrap();
+    assert!(
+        items.iter().any(|item| item.body.contains("ref p ")),
+        "{items:?}"
+    );
 }
