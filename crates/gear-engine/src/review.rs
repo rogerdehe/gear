@@ -5808,9 +5808,8 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(packet.contains("Run `gear --session "), "{packet}");
         assert!(
             packet.contains("Binding: task T-1, attempt 1, candidate ")
-                && packet.contains(
-                    ", branch p/direction/t-1, worktree /fake-worktrees/p-review-1-M5."
-                ),
+                && packet
+                    .contains(", branch p/direction/t-1, worktree /fake-worktrees/p-review-1-M5."),
             "the binding names the candidate, the branch and the worktree: {packet}"
         );
         let failed = store
