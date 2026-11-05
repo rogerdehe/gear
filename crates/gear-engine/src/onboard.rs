@@ -156,6 +156,21 @@ pub(crate) fn tmpdir_prefix(
     Some(format!("mkdir -p {scratch}; export TMPDIR={scratch}; "))
 }
 
+/// The project's `worktree_setup` as a shell prefix: run once per worktree,
+/// before the agent starts, marked done in the worktree's own git dir so a
+/// restart does not run it again. A failure is printed in the pane and the
+/// agent still starts.
+pub(crate) fn setup_prefix(conventions: &gear_app::config::Conventions) -> Option<String> {
+    let setup = conventions.worktree_setup.as_deref()?.trim();
+    if setup.is_empty() {
+        return None;
+    }
+    let setup = shell_quote(setup);
+    Some(format!(
+        "g=$(git rev-parse --git-dir 2>/dev/null); if [ -n \"$g\" ] && [ ! -e \"$g/gear-setup-done\" ]; then sh -c {setup} && touch \"$g/gear-setup-done\" || echo 'gear: worktree_setup failed'; fi; "
+    ))
+}
+
 /// The worktree default scratch (T-413) lives in `<worktree>/.gear/tmp`, so the
 /// repository ignores `.gear/`: the line is appended once to the common dir's
 /// `info/exclude`, which every worktree of the repository shares. A path that
@@ -925,6 +940,9 @@ fn onboard_seat(
         &seat.name,
         Some(&created.path),
     ) {
+        plan.env_command = format!("{prefix}{}", plan.env_command);
+    }
+    if let Some(prefix) = setup_prefix(&config.conventions) {
         plan.env_command = format!("{prefix}{}", plan.env_command);
     }
 
@@ -2712,6 +2730,26 @@ repo = "web"
             "{}",
             env_line(&herdr)
         );
+    }
+
+    /// A fresh worktree has only what git tracks (Carthage, 2026-11-05: no
+    /// `web/node_modules`, so a Vitest step could not run): the project's
+    /// `worktree_setup` runs once in the lane's pane before its agent starts.
+    #[test]
+    fn a_lane_runs_the_projects_worktree_setup_once_before_its_agent() {
+        let config_toml =
+            format!("{CONFIG}\n[conventions]\nworktree_setup = \"cd web && npm ci\"\n");
+        let mut store = world(&config_toml);
+        let mut herdr = FakeHerdr::new();
+
+        onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        let line = env_line(&herdr);
+        assert!(
+            line.starts_with("g=$(git rev-parse --git-dir 2>/dev/null); if [ -n \"$g\" ] && [ ! -e \"$g/gear-setup-done\" ]; then sh -c 'cd web && npm ci' && touch \"$g/gear-setup-done\""),
+            "{line}"
+        );
+        assert!(line.contains("export GEAR_CTX=toy:heat:1"), "{line}");
     }
 
     /// T-413 (F1 of its review): a `scratch_dir` is a configurable path, so a

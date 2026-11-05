@@ -169,9 +169,12 @@ pub fn build_with_agents(
                 .into_iter()
                 .filter_map(|mut thread| {
                     if !sailing {
-                        thread
-                            .open
-                            .retain(|message| message.kind != gear_model::MsgKind::System);
+                        // The reclaim item is the one engine item a finished
+                        // voyage still needs answered.
+                        thread.open.retain(|message| {
+                            message.kind != gear_model::MsgKind::System
+                                || message.thread == "reclaim"
+                        });
                     }
                     (!thread.open.is_empty()).then_some(thread)
                 })

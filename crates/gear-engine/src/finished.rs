@@ -177,6 +177,8 @@ fn why(
 /// The thread of the reclaim item: worktrees a landed voyage left behind.
 pub const RECLAIM_THREAD: &str = "reclaim";
 const RECLAIM_EVERY_S: i64 = 300;
+/// How long after its landing a voyage's leftovers are named.
+const RECLAIM_WITHIN_S: i64 = 24 * 3600;
 
 /// A landed voyage keeps no worktree (the user, 2026-11-05: Prometheus M4
 /// landed with fourteen worktrees and six Herdr workspaces left). Once the
@@ -193,8 +195,14 @@ pub fn reclaim(store: &mut Store, project: &str, now: Ts) -> GearResult<Option<&
         let Some(land) = sweep.rows.iter().rev().find_map(|row| row.land.clone()) else {
             return Ok(false);
         };
+        // Only a landing of the last day is checked: an older voyage was
+        // landed before this check existed, and its captain is not rung about
+        // it (Lawrence M1, landed days before: the user wants it left alone).
         Ok(tx.get_message(project, &land)?.is_some_and(|message| {
             message.state == MsgState::Resolved
+                && message
+                    .resolved
+                    .is_some_and(|at| now - at < RECLAIM_WITHIN_S)
                 && message
                     .result
                     .as_deref()

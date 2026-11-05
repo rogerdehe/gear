@@ -2670,6 +2670,9 @@ fn start_reviewer(
                 env_command = format!("{env_command}; {}", start.env);
             }
         }
+        if let Some(prefix) = crate::onboard::setup_prefix(&config.conventions) {
+            env_command = format!("{prefix}{env_command}");
+        }
         if !env_ready(store, herdr, &seat.id, generation, &pane, &env_command)? {
             return Ok(Started::NotYet);
         }
