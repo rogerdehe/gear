@@ -5427,6 +5427,8 @@ fn merge_lost_landed_key(project: &str, task: &str, attempt: i64) -> String {
 const LOST_SKIPPED: &str = "no longer checked: its voyage is finished or its candidate is gone";
 /// The word an open merge-lost item closes with once the work landed.
 const LOST_LANDED: &str = "its work landed";
+/// The word an open merge-lost item closes with once a merge of it is queued.
+const LOST_QUEUED: &str = "a merge of it is queued again";
 
 /// The accepted attempt the lost-merge scan looks at (T-397, T-408): what it
 /// needs to name the work, and why it may leave it alone.
@@ -5450,6 +5452,8 @@ struct Lost {
     /// The attempt carries a merge time: its work landed, by its own merge or
     /// with another task's (`integrated-by`).
     merged: bool,
+    /// A merge op of the task is queued, running or being recovered.
+    in_flight: bool,
 }
 
 /// Is the task's voyage open (T-408)? A voyage is its milestone, and it is open
@@ -5844,6 +5848,7 @@ fn tell_captain_lost(
                 // still lost until it lands (user, 2026-11-04).
                 settled: merged || in_flight,
                 merged,
+                in_flight,
             });
         }
         Ok((lost, carried_active))
@@ -5876,6 +5881,7 @@ fn tell_captain_lost(
         open_item,
         settled,
         merged,
+        in_flight,
     } in lost
     {
         // The work landed (its own merge, or another task's that carried it):
@@ -5899,6 +5905,13 @@ fn tell_captain_lost(
                 }
                 continue;
             }
+        }
+        // A merge of it is queued again (a red batch sent it back, or the
+        // captain's remerge): the item is answered, the merge will land it
+        // (Prometheus T-721/T-723, 2026-11-05).
+        if open_item && in_flight {
+            resolve_lost_with(store, project, &task, LOST_QUEUED, now)?;
+            continue;
         }
         if told {
             continue;
@@ -7117,6 +7130,53 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    /// A lost item closes once a merge of the task is queued again: the merge
+    /// will land it (Prometheus T-721/T-723, 2026-11-05: a red batch's members
+    /// were named lost, then queued again, and the items stayed open).
+    #[test]
+    fn a_lost_item_closes_once_a_merge_of_it_is_queued_again() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let open = |store: &mut Store| {
+            store
+                .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+                .unwrap()
+                .into_iter()
+                .filter(|item| item.state == MsgState::Open)
+                .count()
+        };
+        assert_eq!(open(&mut store), 1, "the lost work is named");
+
+        store
+            .write(|tx| {
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "branch": "heat/t5", "candidate": "abc1234" }),
+                    created: 25,
+                })?;
+                tx.set_meta(&settled_key("p"), "25")
+            })
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
+
+        assert_eq!(open(&mut store), 0, "a queued merge answers the item");
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items[0].result.as_deref(), Some(LOST_QUEUED));
     }
 
     /// T-397: a merge failed, its item was resolved without a remerge, and the
@@ -11671,11 +11731,12 @@ gate = "{project_gate}"
         assert_eq!(fs::read_to_string(&started).unwrap().lines().count(), 1);
         release_fifo(&release);
         assert_eq!(wait_merge(&mut store, &mut herdr, &cfg).len(), 1);
-        // The second merge runs next, and reports its own result.
+        // The second merge runs next, and reports its own result. Its branches
+        // are T-5's, already on dev, so it lands without a gate of its own.
         drive(&mut store, &mut herdr, &cfg, |store| {
             op_state(store, "O-2") == Some(OpState::Confirmed)
         });
-        assert_eq!(fs::read_to_string(&started).unwrap().lines().count(), 2);
+        assert_eq!(fs::read_to_string(&started).unwrap().lines().count(), 1);
         assert_eq!(
             store
                 .read(|tx| tx.get_op("p", "O-2"))
