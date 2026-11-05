@@ -485,6 +485,7 @@ pub fn merge_passed(
         }
         tell_captain_lost(store, project, &config, now)?;
         close_landed_failures(store, project, now)?;
+        close_settled_task_items(store, project, now)?;
     }
 
     // 1c. the task branches on the remote (the branch sweep): a cancelled
@@ -5410,6 +5411,79 @@ fn close_landed_failures(store: &mut Store, project: &str, now: Ts) -> GearResul
     })
 }
 
+/// Close the captain's items about a task that is over (T-569): a note on a
+/// settled task rings for hours otherwise (M-10318, a lane's note on T-715,
+/// still ringing after T-715 was done; five such items open, and seven
+/// merge-failed/merge-lost items naming tasks whose work had merged).
+///
+/// Two kinds close here, in the same periodic scan as [`close_landed_failures`]:
+/// - every open item on a task thread — `T-<n>:<attempt>` and the captain's
+///   own `T-<n>:cap` — while the task is done or cancelled, with `the task is
+///   <state>`;
+/// - every open `merge-failed:<task>` and `merge-lost:<task>` item of a task
+///   whose attempt has a merge time, with `its work landed`.
+///
+/// An item of a task still running stays open: it is the captain's to act on.
+fn close_settled_task_items(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
+    let unrest = |state: MsgState| matches!(state, MsgState::Open | MsgState::Waiting);
+    store.write(|tx| {
+        for task in tx.tasks_of_project(project)? {
+            if matches!(task.state, TaskState::Done | TaskState::Cancelled) {
+                let why = format!("the task is {}", task.state.as_str());
+                let mut threads: Vec<String> = tx
+                    .attempts_of_task(project, &task.id)?
+                    .into_iter()
+                    .map(|attempt| format!("{}:{}", task.id, attempt.n))
+                    .collect();
+                // The captain's own decision item hangs on `T-<n>:cap`.
+                threads.push(format!("{}:cap", task.id));
+                for thread in threads {
+                    for item in tx.thread_messages(project, &thread)? {
+                        if !unrest(item.state) {
+                            continue;
+                        }
+                        tx.update_message_state(
+                            project,
+                            &item.id,
+                            MsgState::Resolved,
+                            Some(&why),
+                            None,
+                            None,
+                            now,
+                        )?;
+                    }
+                }
+            }
+            // The work landed: an item that says the merge failed or was lost
+            // asks for a remerge of work that is already on the branch.
+            let landed = tx
+                .attempt_times_of_task(project, &task.id)?
+                .into_iter()
+                .any(|(_, times)| times.merged.is_some());
+            if !landed {
+                continue;
+            }
+            for thread in [failed_thread(&task.id), lost_thread(&task.id)] {
+                for item in tx.thread_messages(project, &thread)? {
+                    if !unrest(item.state) {
+                        continue;
+                    }
+                    tx.update_message_state(
+                        project,
+                        &item.id,
+                        MsgState::Resolved,
+                        Some(LOST_LANDED),
+                        None,
+                        None,
+                        now,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 /// Close the lost-merge item of a task the scan no longer checks (T-408): the
 /// captain can no longer act on it.
 fn resolve_lost(store: &mut Store, project: &str, task: &str, now: Ts) -> GearResult<()> {
@@ -7238,6 +7312,140 @@ mod tests {
         assert_eq!(items.len(), 1, "a second item was opened: {items:?}");
         assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
         assert_eq!(items[0].result.as_deref(), Some(LOST_SKIPPED));
+    }
+
+    /// T-569: a captain item on a task thread closes once the task is done,
+    /// and stays open while it runs (M-10318: a note on T-715 rang for hours
+    /// after the task was done).
+    #[test]
+    fn an_item_on_a_task_thread_closes_when_the_task_is_done() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 5);
+        // A note of a lane to the captain, on the task's own thread, and the
+        // captain's decision item on `T-5:cap`.
+        store
+            .write(|tx| {
+                for thread in ["T-5:1", "T-5:cap"] {
+                    tx.insert_message(&gear_store::NewMessage {
+                        meta: None,
+                        project: "p".into(),
+                        thread: thread.into(),
+                        task: Some("T-5".into()),
+                        attempt: Some(1),
+                        sender: "p:heat".into(),
+                        sender_gen: 1,
+                        recipient: "p:captain".into(),
+                        kind: gear_model::MsgKind::Instruction,
+                        urgent: true,
+                        body: "a note about T-5".into(),
+                        reply_to: None,
+                        needs_ack: false,
+                        state: MsgState::Open,
+                        created: 5,
+                    })?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let states = |store: &mut Store| {
+            store
+                .read(|tx| {
+                    Ok((
+                        tx.thread_messages("p", "T-5:1")?,
+                        tx.thread_messages("p", "T-5:cap")?,
+                    ))
+                })
+                .unwrap()
+        };
+
+        // The task still runs: its items stay open.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.state = TaskState::Running;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 10 + LOST_SCAN_EVERY_S).unwrap();
+        let (item, decision) = states(&mut store);
+        assert_eq!(item[0].state, MsgState::Open, "{item:?}");
+        assert_eq!(decision[0].state, MsgState::Open, "{decision:?}");
+
+        // The task is done: both close, and say why.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        merge_passed(
+            &mut store,
+            &mut herdr,
+            &cfg,
+            "p",
+            11 + 2 * LOST_SCAN_EVERY_S,
+        )
+        .unwrap();
+        let (item, decision) = states(&mut store);
+        assert_eq!(item[0].state, MsgState::Resolved, "{item:?}");
+        assert_eq!(item[0].result.as_deref(), Some("the task is done"));
+        assert_eq!(decision[0].state, MsgState::Resolved, "{decision:?}");
+        assert_eq!(decision[0].result.as_deref(), Some("the task is done"));
+    }
+
+    /// T-569: an open merge-failed item of a task whose attempt has a merge
+    /// time closes, even when the task is not done.
+    #[test]
+    fn a_failed_item_closes_once_its_attempt_has_a_merge_time() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 5);
+        store
+            .write(|tx| {
+                tx.insert_message(&gear_store::NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: failed_thread("T-5"),
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: gear_model::MsgKind::System,
+                    urgent: false,
+                    body: "the merge of T-5 failed".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: 5,
+                })
+            })
+            .unwrap();
+        let state = |store: &mut Store| {
+            store
+                .read(|tx| tx.thread_messages("p", &failed_thread("T-5")))
+                .unwrap()[0]
+                .state
+        };
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 10 + LOST_SCAN_EVERY_S).unwrap();
+        assert_eq!(state(&mut store), MsgState::Open, "nothing landed yet");
+
+        store
+            .write(|tx| tx.set_attempt_time("p", "T-5", 1, AttemptStep::Merged, 30))
+            .unwrap();
+        merge_passed(
+            &mut store,
+            &mut herdr,
+            &cfg,
+            "p",
+            31 + 2 * LOST_SCAN_EVERY_S,
+        )
+        .unwrap();
+        assert_eq!(state(&mut store), MsgState::Resolved, "its work landed");
     }
 
     /// A merge-lost item closes once the work landed with another task's
