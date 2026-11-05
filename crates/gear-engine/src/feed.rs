@@ -608,13 +608,14 @@ fn stalled(tx: &Tx<'_>, project: &str, captain: &str, now: Ts) -> GearResult<Opt
             stuck.push(task);
         }
     }
+    // A task in progress moves the voyage, and the tasks left wait for it
+    // (Prometheus 2026-11-05: T-792 waited on T-788 by design while three lanes
+    // worked, and this item rang every few minutes).
+    if working > 0 {
+        return close_stalled(tx, project, captain, now, IN_PROGRESS);
+    }
     if stuck.is_empty() {
-        let reason = if working > 0 {
-            IN_PROGRESS
-        } else {
-            NO_TASK_LEFT
-        };
-        return close_stalled(tx, project, captain, now, reason);
+        return close_stalled(tx, project, captain, now, NO_TASK_LEFT);
     }
     // A merge queued or running moves the voyage: the tasks left wait for it,
     // and they start when it lands (Prometheus 2026-11-05: eight items while
