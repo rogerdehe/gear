@@ -22,7 +22,7 @@
 
 use crate::Env;
 use gear_model::{ErrorCode, GearError, GearResult};
-use gear_store::Store;
+use gear_store::{Store, Tx};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -104,10 +104,28 @@ pub fn pushed_branch(
     lane: &str,
     task: &str,
 ) -> GearResult<String> {
-    if let Some(branch) = store.read(|tx| tx.task_branch_override(project, task))? {
-        return Ok(branch);
+    store.read(|tx| task_branch_of(tx, conventions, project, lane, task))
+}
+
+/// The branch of a known task (T-602): the branch the task itself names — its
+/// `task_branch_override`, set on a member of a feature and on the feature's
+/// integration task (M6.2) — else the project's `[conventions].task_branch`
+/// template as [`task_branch`] expands it. This is the one place that names a
+/// task's branch: GEAR F-2's reviewer was told `mast/t600`, a branch that never
+/// existed, and its hand-in was refused until it pushed to the feature's branch.
+///
+/// A caller with no store in hand keeps the template ([`task_branch`]).
+pub fn task_branch_of(
+    tx: &Tx<'_>,
+    conventions: &crate::config::Conventions,
+    project: &str,
+    lane: &str,
+    task: &str,
+) -> GearResult<String> {
+    match tx.task_branch_override(project, task)? {
+        Some(branch) => Ok(branch),
+        None => Ok(task_branch(conventions, project, lane, task)),
     }
-    Ok(task_branch(conventions, project, lane, task))
 }
 
 /// Refuse unless `candidate` is on `<remote>/<branch>` (T-83): M2.1's T-60 was
@@ -473,5 +491,57 @@ fn excerpt(stderr: &[u8]) -> String {
         format!("{head}…{tail}")
     } else {
         joined
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gear_store::testing;
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn world() -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", NOW)?;
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// T-602: the branch of a known task is one place — the branch the task
+    /// names when it names one (a member of a feature, the feature's integration
+    /// task), else the project's template.
+    #[test]
+    fn task_branch_of_reads_the_override_then_the_template() {
+        let mut store = world();
+        let conventions = crate::config::Conventions::default();
+        let branch = store
+            .read(|tx| task_branch_of(tx, &conventions, "p", "mast", "T-9"))
+            .unwrap();
+        assert_eq!(
+            branch,
+            task_branch(&conventions, "p", "mast", "T-9"),
+            "no override: the project's template, `{{lane}}/t{{n}}` by default"
+        );
+        assert_eq!(branch, "mast/t9");
+
+        store
+            .write(|tx| tx.set_task_branch_override("p", "T-9", "p/feature/f-1"))
+            .unwrap();
+        let branch = store
+            .read(|tx| task_branch_of(tx, &conventions, "p", "mast", "T-9"))
+            .unwrap();
+        assert_eq!(branch, "p/feature/f-1", "the branch the task itself names");
+
+        // The other task of the same project keeps the template: an override
+        // belongs to one task.
+        let other = store
+            .read(|tx| task_branch_of(tx, &conventions, "p", "mast", "T-10"))
+            .unwrap();
+        assert_eq!(other, "mast/t10");
     }
 }

@@ -1001,12 +1001,12 @@ fn finish_direction_results(
                 continue;
             };
             let repo = config.repo_of_task(&task);
-            let branch = gear_model::branch::expand(
-                &config.conventions.task_branch,
-                project,
-                &lane,
-                &task.id,
-            );
+            // T-602: one place names the branch of a known task — a member of a
+            // feature is pushed on the feature's branch, so that is the branch
+            // whose tip this check reads.
+            let branch = store.read(|tx| {
+                gear_app::base::task_branch_of(tx, &config.conventions, project, &lane, &task.id)
+            })?;
             let Some(tip) = repo_tips(tips, cfg, &repo.path, &config.conventions.remote)
                 .get(&branch)
                 .map(|(sha, _)| sha.clone())
@@ -1192,8 +1192,12 @@ fn start_direction_checks(
             continue;
         }
         let repo = config.repo_of_task(&row);
-        let branch =
-            gear_model::branch::expand(&config.conventions.task_branch, project, &lane, &row.id);
+        // T-602: one place names the branch of a known task — a member of a
+        // feature is pushed on the feature's branch, so that is the branch
+        // whose tip this check reads.
+        let branch = store.read(|tx| {
+            gear_app::base::task_branch_of(tx, &config.conventions, project, &lane, &row.id)
+        })?;
         let sha = if let Some(sha) = existing
             .as_ref()
             .filter(|v| v["state"] == "starting")
@@ -4198,6 +4202,14 @@ fn review_packet_for(
         Some(feature) => feature_review_section(store, &config.project.id, &feature)?,
         None => String::new(),
     };
+    // T-558: the review commit is pushed onto the task branch, not onto a
+    // branch of the review's own. T-602: the task branch is the task's own when
+    // it names one (a member of a feature: the feature's branch — GEAR F-2's
+    // reviewer was told `mast/t600`, and its hand-in was refused until it
+    // pushed to the feature's branch).
+    let task_branch = store.read(|tx| {
+        gear_app::base::task_branch_of(tx, &config.conventions, &config.project.id, &lane, task)
+    })?;
     let packet = review_packet(
         task,
         attempt,
@@ -4217,14 +4229,7 @@ fn review_packet_for(
             &lane,
             task,
         ),
-        // T-558: the review commit is pushed onto the task branch, not onto a
-        // branch of the review's own.
-        &crate::dispatch::task_branch(
-            &config.conventions.task_branch,
-            &config.project.id,
-            &lane,
-            task,
-        ),
+        &task_branch,
         &commit,
         worktree,
         &review_recovery_line(store, config, task, attempt)?,
@@ -9635,6 +9640,42 @@ review = [
         assert!(
             packet.contains("GEAR refuses the verdict until `upstream/b/t1` holds your commit"),
             "{packet}"
+        );
+    }
+
+    /// T-602: the branch a task names is the branch the review commit goes on.
+    /// GEAR F-2's reviewer was told `mast/t600` — a branch that never existed —
+    /// and its hand-in was refused until it pushed to `gear/feature/f-2`. A
+    /// task without a branch of its own keeps the packet it always had.
+    #[test]
+    fn the_review_packet_of_a_feature_task_names_the_feature_branch() {
+        let mut store = world(CONFIG);
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let normal = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
+        assert!(
+            normal.contains("`git push origin HEAD:refs/heads/heat/t1`"),
+            "{normal}"
+        );
+
+        // A member of a feature, and the feature's integration task, name the
+        // feature's branch: that is what merges.
+        store
+            .write(|tx| tx.set_task_branch_override("p", "T-1", "p/feature/f-1"))
+            .unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234", WORKTREE).unwrap();
+        assert!(
+            packet.contains("`git push origin HEAD:refs/heads/p/feature/f-1`"),
+            "{packet}"
+        );
+        assert!(
+            packet.contains(
+                "GEAR refuses the verdict until `origin/p/feature/f-1` holds your commit"
+            ),
+            "{packet}"
+        );
+        assert!(
+            !packet.contains("heat/t1"),
+            "the template branch is not named any more: {packet}"
         );
     }
 

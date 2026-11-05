@@ -971,23 +971,18 @@ fn queue_merge(
     let lane = task_row.lane.clone().unwrap_or_default();
     let review =
         gear_model::branch::review_branch(&conventions.review_branch, project, &lane, &task);
-    let branch = match (which, task_row.lane.as_deref()) {
-        (MergeBranch::Task, Some(_)) => Some(crate::base::task_branch(
-            &conventions,
-            project,
-            &lane,
-            &task,
-        )),
-        (MergeBranch::Review, _) => Some(review.clone()),
-        (MergeBranch::Task, None) => None,
-    };
     // T-582: a feature's integration task merges the feature's own branch and
     // keeps it (GEAR F-2: the op named `mast/t600`, a branch that never
     // existed, so a remerge could only retry the pinned, conflicting commit).
     let feature_branch = tx.task_branch_override(project, &task)?;
-    let branch = match (&feature_branch, which) {
-        (Some(feature), MergeBranch::Task) => Some(feature.clone()),
-        _ => branch,
+    // T-602: one place names the branch of a known task — the feature's own
+    // branch when the task names one, else the lane's template.
+    let branch = match which {
+        MergeBranch::Review => Some(review.clone()),
+        MergeBranch::Task if task_row.lane.is_some() || feature_branch.is_some() => Some(
+            crate::base::task_branch_of(tx, &conventions, project, &lane, &task)?,
+        ),
+        MergeBranch::Task => None,
     };
     let anchor = match task_row.lane.as_deref() {
         Some(lane) => tx.get_seat(&format!("{project}:{lane}"))?,

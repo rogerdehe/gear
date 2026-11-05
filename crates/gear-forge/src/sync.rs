@@ -124,9 +124,11 @@ struct Fact {
     /// The repo the task's lane works in: `owner/name` on GitHub.
     github: Github,
     integration: String,
-    /// The project's task-branch template (T-252), `None` = GEAR's own
-    /// `{lane}/t{n}`.
-    task_branch: Option<String>,
+    /// The branch the task's work goes on (T-252, T-602): the branch the task
+    /// itself names when it names one (a member of a feature pushes onto the
+    /// feature's branch), else the project's template — `{lane}/t<n>` when it
+    /// says nothing.
+    branch: String,
     issue: u64,
     goal: String,
     attempts: Vec<AttemptFact>,
@@ -314,7 +316,7 @@ fn adopt_claim(
         return Ok(None);
     }
     *budget -= 1;
-    let branch = branch_of(fact.task_branch.as_deref(), project, &fact.lane, &fact.task);
+    let branch = fact.branch.clone();
     // A forge that cannot answer keeps the claim unknown: the next tick
     // tries again.
     let pr = match forge.pr_by_head(&fact.github.repo, &branch) {
@@ -545,7 +547,7 @@ fn merged_result(state: &crate::PrState) -> Option<String> {
 /// request for its branch, naming the issue it closes and carrying the CLAIM
 /// marker.
 fn claim_call(project: &str, fact: &Fact) -> Call {
-    let branch = branch_of(fact.task_branch.as_deref(), project, &fact.lane, &fact.task);
+    let branch = fact.branch.clone();
     Call {
         key: format!("{}:claim", fact.task),
         task: fact.task.clone(),
@@ -828,12 +830,30 @@ fn facts(tx: &Tx<'_>, project: &str) -> GearResult<Vec<Fact>> {
                 op.task.as_deref() == Some(task.id.as_str()) && op.state == OpState::Confirmed
             })
             .and_then(|op| op.result);
+        // T-602: one place names the branch of a known task. `gear-forge`
+        // cannot depend on `gear-app` (`gear-app::base::task_branch_of` lives
+        // there, and gear-app depends on this crate), so the task's own branch
+        // is read from the store's accessor — the same key `task_branch_of`
+        // reads — and the template is expanded as it does.
+        let branch = match tx.task_branch_override(project, &task.id)? {
+            Some(branch) => branch,
+            None => gear_model::branch::expand(
+                config
+                    .conventions
+                    .task_branch
+                    .as_deref()
+                    .unwrap_or(gear_model::branch::TASK_BRANCH),
+                project,
+                &lane,
+                &task.id,
+            ),
+        };
         facts.push(Fact {
             task: task.id,
+            branch,
             lane,
             github,
             integration,
-            task_branch: config.conventions.task_branch.clone(),
             issue,
             goal,
             attempts,
@@ -842,18 +862,6 @@ fn facts(tx: &Tx<'_>, project: &str) -> GearResult<Vec<Fact>> {
         });
     }
     Ok(facts)
-}
-
-/// The branch of a task (T-252): the project's `[conventions].task_branch`
-/// template — `{lane}/t<n>` when it says nothing, the same rule as
-/// `gear_engine::dispatch::task_branch`.
-fn branch_of(template: Option<&str>, project: &str, lane: &str, task: &str) -> String {
-    gear_model::branch::expand(
-        template.unwrap_or(gear_model::branch::TASK_BRANCH),
-        project,
-        lane,
-        task,
-    )
 }
 
 /// The first words of a goal, for a pull request's title.
