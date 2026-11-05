@@ -967,10 +967,11 @@ fn onboard_seat(
             let name = crate::names::agent_name(&seat.project, &seat.name);
             let target = match crate::names::live_name(herdr, &pane) {
                 Some(live) => Some(live),
-                None => match crate::names::ensure(herdr, &pane, &name) {
+                None => match crate::names::ensure_for(store, herdr, &pane, &name) {
                     crate::names::Ensure::Renamed | crate::names::Ensure::Named => Some(name),
-                    // `Kept` is a `captain take` outcome (T-552); an engine's
-                    // naming never keeps a name.
+                    // `Kept` is a `captain take` outcome (T-552): the engine's
+                    // naming keeps a pane's other seat's name as `Named`
+                    // (T-570).
                     crate::names::Ensure::Taken { .. }
                     | crate::names::Ensure::NoAgent
                     | crate::names::Ensure::Kept

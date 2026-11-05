@@ -60,10 +60,30 @@ pub fn ensure_agent_name_with(
     pane: &str,
     name: &str,
 ) -> Ensured {
+    ensure_agent_name_keeping(herdr, names, pane, name, &[])
+}
+
+/// [`ensure_agent_name_with`], but the agent may keep any of `keep` as well
+/// (T-570): a pane can hold the seats of two projects (w2:p10 kept
+/// prometheus:captain and lawrence:captain in one agent), and the agent
+/// carries one name — the name of any seat bound to that pane is its own.
+///
+/// Only an agent with no name, or with a name no seat of the pane has, is
+/// renamed to `name`.
+pub fn ensure_agent_name_keeping(
+    herdr: &mut dyn HerdrAct,
+    names: &BTreeMap<String, Option<String>>,
+    pane: &str,
+    name: &str,
+    keep: &[String],
+) -> Ensured {
     match names.get(pane) {
         // The pane hosts no agent: nothing to name (a seat between agents).
         None => return Ensured::NoAgent,
         Some(Some(current)) if current == name => return Ensured::Named,
+        // A name of another seat bound to this same pane: it is the agent's,
+        // and renaming it would break every prompt by that name.
+        Some(Some(current)) if keep.iter().any(|held| held == current) => return Ensured::Named,
         Some(_) => {}
     }
     if let Some(pane) = name_holder(names, pane, name) {
