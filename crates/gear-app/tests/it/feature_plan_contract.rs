@@ -15,7 +15,7 @@ use gear_app::draft::parse;
 use gear_app::identity::Fingerprint;
 use gear_app::plan::apply;
 use gear_app::Env;
-use gear_model::{ErrorCode, GearCtx, SeatRole};
+use gear_model::{ErrorCode, GearCtx, SeatRole, TaskState};
 use gear_store::{testing, Store};
 
 const NOW: i64 = 1_800_000_000;
@@ -137,6 +137,19 @@ fn run_at(
 
 fn task(s: &mut Store, id: &str) -> gear_store::TaskRow {
     s.read(|tx| tx.get_task("p", id)).unwrap().unwrap()
+}
+
+/// Mark tasks Done: the feature's members and its carrier have landed.
+fn land(s: &mut Store, ids: &[&str]) {
+    s.write(|tx| {
+        for id in ids {
+            let mut row = tx.get_task("p", id)?.expect("the task");
+            row.state = TaskState::Done;
+            tx.update_task(&row)?;
+        }
+        Ok(())
+    })
+    .unwrap();
 }
 
 /// A plan of three members of feature F-1: two on `heat`, one on `wire`.
@@ -388,4 +401,198 @@ fn a_plan_without_a_feature_line_is_unchanged() {
         assert_eq!(row.gate.as_deref(), Some("make test"));
         assert_eq!(s.read(|tx| tx.task_branch_override("p", id)).unwrap(), None);
     }
+}
+
+/// T-578 F1: a task whose feature changes moves to that feature's branch and
+/// check. The stored mark is read before the write, so the change is seen: an
+/// existing task keeps neither its lane's integration branch nor its full gate.
+#[test]
+fn an_existing_tasks_feature_change_moves_its_branch_and_gate() {
+    let mut s = world();
+    run(
+        &mut s,
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
+        "r1",
+    )
+    .unwrap();
+    let row = task(&mut s, "T-1");
+    assert_eq!(row.base.as_deref(), Some("dev"));
+    assert_eq!(row.gate.as_deref(), Some("make test"));
+
+    run_at(
+        &mut s,
+        "# Queue\n## T-1 [must] lane=heat\nfeature: F-1\ndeps: -\n",
+        "r2",
+    )
+    .unwrap();
+
+    let row = task(&mut s, "T-1");
+    assert_eq!(
+        row.base.as_deref(),
+        Some("p/feature/f-1"),
+        "an existing task moves to the feature's branch"
+    );
+    assert_eq!(
+        row.gate.as_deref(),
+        Some("true"),
+        "its merge runs the feature's check, not the full gate"
+    );
+    assert_eq!(
+        s.read(|tx| tx.task_feature("p", "T-1")).unwrap().as_deref(),
+        Some("F-1"),
+        "the mark is stored"
+    );
+    let carrier = s
+        .read(|tx| tx.feature_carrier("p", "F-1"))
+        .unwrap()
+        .expect("the feature gets its integration task");
+    assert_ne!(carrier, "T-1");
+    assert_eq!(
+        task(&mut s, &carrier).deps,
+        vec!["T-1".to_string()],
+        "the carrier waits for the member it now has"
+    );
+}
+
+/// T-578 F1: clearing the feature (`feature: -`) puts the task back on its
+/// lane's integration branch with the project's full gate.
+#[test]
+fn clearing_a_feature_restores_the_lanes_branch_and_gate() {
+    let mut s = world();
+    run(
+        &mut s,
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\nfeature: F-1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
+        "r1",
+    )
+    .unwrap();
+    assert_eq!(
+        task(&mut s, "T-1").base.as_deref(),
+        Some("p/feature/f-1"),
+        "a new member starts on the feature's branch"
+    );
+
+    run_at(
+        &mut s,
+        "# Queue\n## T-1 [must] lane=heat\nfeature: -\ndeps: -\n",
+        "r2",
+    )
+    .unwrap();
+
+    let row = task(&mut s, "T-1");
+    assert_eq!(
+        row.base.as_deref(),
+        Some("dev"),
+        "a task whose feature is cleared is back on its lane's integration branch"
+    );
+    assert_eq!(
+        row.gate.as_deref(),
+        Some("make test"),
+        "and it meets the full gate again"
+    );
+    assert_eq!(s.read(|tx| tx.task_feature("p", "T-1")).unwrap(), None);
+}
+
+/// T-578 F2: a feature needs a carrier only while it has a member that is not
+/// terminal. Once every member landed, a later apply mints no second
+/// integration task, even when it names the feature again.
+#[test]
+fn a_re_apply_of_a_landed_feature_creates_no_carrier() {
+    let mut s = world();
+    run(
+        &mut s,
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\nfeature: F-1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
+        "r1",
+    )
+    .unwrap();
+    let carrier = s
+        .read(|tx| tx.feature_carrier("p", "F-1"))
+        .unwrap()
+        .expect("the feature has an integration task");
+    land(&mut s, &["T-1", &carrier]);
+
+    let later = run_at(
+        &mut s,
+        "# Queue\n## T-1 [must] lane=heat\nfeature: F-1\ndeps: -\n\n## NEW [should] lane=wire\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n",
+        "r2",
+    )
+    .unwrap();
+
+    assert_eq!(
+        later.created.len(),
+        1,
+        "only the new task is created: {:?}",
+        later.created
+    );
+    assert!(
+        !later.created.contains(&carrier),
+        "the landed carrier is not minted again: {:?}",
+        later.created
+    );
+    assert_eq!(
+        s.read(|tx| tx.feature_carrier("p", "F-1"))
+            .unwrap()
+            .as_deref(),
+        Some(carrier.as_str()),
+        "the landed feature keeps the carrier it had"
+    );
+    assert_eq!(
+        task(&mut s, &carrier).deps,
+        vec!["T-1".to_string()],
+        "its deps are not wiped"
+    );
+}
+
+/// T-578 F2: a member added after the feature landed gets a fresh carrier,
+/// waiting only for the members that are still open; the landed carrier keeps
+/// its own deps.
+#[test]
+fn a_member_added_after_the_feature_landed_gets_a_new_carrier() {
+    let mut s = world();
+    run(
+        &mut s,
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\nfeature: F-1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
+        "r1",
+    )
+    .unwrap();
+    let landed_carrier = s
+        .read(|tx| tx.feature_carrier("p", "F-1"))
+        .unwrap()
+        .expect("the feature has an integration task");
+    land(&mut s, &["T-1", &landed_carrier]);
+
+    let later = run_at(
+        &mut s,
+        "# Queue\n## NEW [should] lane=wire\nfeature: F-1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n",
+        "r2",
+    )
+    .unwrap();
+    let member = later.created[0].clone();
+    let new_carrier = s
+        .read(|tx| tx.feature_carrier("p", "F-1"))
+        .unwrap()
+        .expect("the feature has a carrier again");
+    assert_ne!(
+        new_carrier, landed_carrier,
+        "a member added after the landing starts a fresh carrier"
+    );
+    assert!(
+        later.created.contains(&new_carrier),
+        "the new carrier is created by this apply: {:?}",
+        later.created
+    );
+    assert_eq!(
+        task(&mut s, &new_carrier).deps,
+        vec![member.clone()],
+        "it waits for the open member only"
+    );
+    assert_eq!(
+        task(&mut s, &landed_carrier).deps,
+        vec!["T-1".to_string()],
+        "the landed carrier keeps its own deps"
+    );
+    assert_eq!(
+        task(&mut s, &member).base.as_deref(),
+        Some("p/feature/f-1"),
+        "the new member works on the feature's branch"
+    );
 }

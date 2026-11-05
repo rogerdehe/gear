@@ -992,11 +992,6 @@ fn apply_queue(
                 if let Some(by) = &item.carried_by {
                     tx.set_task_carried_by(project, id, by)?;
                 }
-                // The `feature:` of a task (M6.2): a block that names one sets
-                // it; a block without it keeps the feature the task has.
-                if let Some(feature) = &item.feature {
-                    tx.set_task_feature(project, id, feature)?;
-                }
                 // The `audit:` mark of a task (T-505): a block that names the
                 // field sets it; a block without it keeps the mark.
                 if let Some(audit) = item.audit {
@@ -1015,12 +1010,15 @@ fn apply_queue(
                 // (1) The `feature:` of a task (M6.2): a block that names one
                 // sets it, and a task whose feature changes moves to that
                 // feature's branch and check (or, cleared, back to its lane's
-                // integration branch and gate).
+                // integration branch and gate). A block without the field keeps
+                // the feature the task has. The stored mark is read before the
+                // write: read after it, "the feature changed" can never be seen
+                // and the branch and gate never move (T-578 F1).
                 if let Some(feature) = &item.feature {
                     let before = tx.task_feature(project, id)?;
+                    tx.set_task_feature(project, id, feature)?;
                     if feature.is_empty() {
                         if before.is_some() {
-                            tx.set_task_feature(project, id, "")?;
                             if let Some(config) = &config {
                                 let repo =
                                     config.repo_of_lane(item.lane.as_deref().unwrap_or_default());
@@ -1028,13 +1026,10 @@ fn apply_queue(
                                 task.gate = Some(repo.gate);
                             }
                         }
-                    } else {
-                        tx.set_task_feature(project, id, feature)?;
-                        if before.as_deref() != Some(feature.as_str()) {
-                            if let Some(work) = features.work(feature) {
-                                task.base = Some(work.branch.clone());
-                                task.gate = Some(work.check.clone());
-                            }
+                    } else if before.as_deref() != Some(feature.as_str()) {
+                        if let Some(work) = features.work(feature) {
+                            task.base = Some(work.branch.clone());
+                            task.gate = Some(work.check.clone());
                         }
                     }
                 }
@@ -1278,66 +1273,70 @@ fn apply_queue(
     // that brings the whole feature to the integration branch, where the full
     // gate runs once.
     for work in &features.works {
-        if work.new_carrier {
-            rank += 1;
-            let task = TaskRow {
-                repo: work.repo.clone(),
-                base: work.base.clone(),
-                gate: work.gate.clone(),
-                rework_estimate_min: None,
-                project: project.to_string(),
-                id: work.carrier.clone(),
-                rank,
-                state: TaskState::Ready,
-                priority: work.priority.clone(),
-                lane: Some(work.lane.clone()),
-                milestone: work.milestone.clone(),
-                required: false,
-                contract_version: 1,
-                deps: work.members.clone(),
-                followup_of: None,
-                wait_on: None,
-                wait_cond: None,
-                rework_note: None,
-                estimate_min: Some(10),
-                issue: work.issue,
-                updated: now,
-            };
-            tx.insert_task(&task)?;
-            let goal = work.carrier_goal();
-            let accept = work.carrier_accept();
-            tx.insert_contract(&ContractRow {
-                project: project.to_string(),
-                task: work.carrier.clone(),
-                version: 1,
-                goal: goal.clone(),
-                accept: accept.clone(),
-                evidence_files: Vec::new(),
-                evidence_due_min: None,
-                body: format!("goal: {goal}\naccept: {accept}\n"),
-                created: now,
-                mechanical: None,
-            })?;
-            tx.set_task_branch_override(project, &work.carrier, &work.branch)?;
-            tx.set_feature_carrier(project, &work.feature, &work.carrier)?;
-            created.push(work.carrier.clone());
-        } else {
-            let mut task = tx.get_task(project, &work.carrier)?.ok_or_else(|| {
-                bad(
-                    work.line,
-                    format!(
-                        "feature {}: its integration task {} is gone",
-                        work.feature, work.carrier
-                    ),
-                )
-            })?;
-            task.deps = work.members.clone();
-            if let Some(issue) = work.issue {
-                task.issue = Some(issue);
+        // A landed feature is left alone (T-578 F2): no new carrier is minted
+        // and its deps are not wiped to the open members it has none of.
+        if work.touch_carrier {
+            if work.new_carrier {
+                rank += 1;
+                let task = TaskRow {
+                    repo: work.repo.clone(),
+                    base: work.base.clone(),
+                    gate: work.gate.clone(),
+                    rework_estimate_min: None,
+                    project: project.to_string(),
+                    id: work.carrier.clone(),
+                    rank,
+                    state: TaskState::Ready,
+                    priority: work.priority.clone(),
+                    lane: Some(work.lane.clone()),
+                    milestone: work.milestone.clone(),
+                    required: false,
+                    contract_version: 1,
+                    deps: work.deps.clone(),
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(10),
+                    issue: work.issue,
+                    updated: now,
+                };
+                tx.insert_task(&task)?;
+                let goal = work.carrier_goal();
+                let accept = work.carrier_accept();
+                tx.insert_contract(&ContractRow {
+                    project: project.to_string(),
+                    task: work.carrier.clone(),
+                    version: 1,
+                    goal: goal.clone(),
+                    accept: accept.clone(),
+                    evidence_files: Vec::new(),
+                    evidence_due_min: None,
+                    body: format!("goal: {goal}\naccept: {accept}\n"),
+                    created: now,
+                    mechanical: None,
+                })?;
+                tx.set_task_branch_override(project, &work.carrier, &work.branch)?;
+                tx.set_feature_carrier(project, &work.feature, &work.carrier)?;
+                created.push(work.carrier.clone());
+            } else {
+                let mut task = tx.get_task(project, &work.carrier)?.ok_or_else(|| {
+                    bad(
+                        work.line,
+                        format!(
+                            "feature {}: its integration task {} is gone",
+                            work.feature, work.carrier
+                        ),
+                    )
+                })?;
+                task.deps = work.deps.clone();
+                if let Some(issue) = work.issue {
+                    task.issue = Some(issue);
+                }
+                task.updated = now;
+                tx.update_task(&task)?;
+                tx.set_task_branch_override(project, &work.carrier, &work.branch)?;
             }
-            task.updated = now;
-            tx.update_task(&task)?;
-            tx.set_task_branch_override(project, &work.carrier, &work.branch)?;
         }
         // The members keep no issue: it is the carrier's.
         for member in &work.members {
@@ -1804,11 +1803,21 @@ struct FeatureWork {
     /// when the project names none (a member's merge runs no gate).
     check: String,
     /// The feature's integration task: the one the store names, or a new id.
+    /// Empty when the feature has no member that is not terminal and names no
+    /// carrier: a landed feature needs none (T-578 F2).
     carrier: String,
     /// The apply creates the carrier.
     new_carrier: bool,
+    /// The apply creates or updates the carrier at all: a feature whose
+    /// members are all terminal and whose carrier is on record is left alone
+    /// (T-578 F2).
+    touch_carrier: bool,
     /// The members that are not cancelled, by task number.
     members: Vec<String>,
+    /// The members a carrier waits for: the ones that are not terminal, so a
+    /// member added after the feature landed starts a carrier over itself
+    /// only.
+    deps: Vec<String>,
     /// The members' goals, one per line, for the carrier's goal.
     goals: Vec<String>,
     /// The lane the carrier goes to: the one holding most members.
@@ -2044,20 +2053,32 @@ fn feature_work(
             .filter(|check| !check.trim().is_empty())
             .unwrap_or_else(|| "true".to_string());
         // (4) The carrier: the task the store names, or a new one when the
-        // feature has none (or the one it named has finished).
-        let mut new_carrier = false;
-        let carrier = match tx.feature_carrier(project, feature)? {
-            Some(carrier)
+        // feature has none.
+        //
+        // A feature needs a carrier only while it has a member that is not
+        // terminal (T-578 F2): re-applying a landed feature mints nothing, and
+        // a member added after it landed — with a terminal carrier on record —
+        // starts a fresh carrier over the members that are still open.
+        let stored = tx.feature_carrier(project, feature)?;
+        let open: Vec<String> = members
+            .iter()
+            .filter(|id| {
+                existing
+                    .get(*id)
+                    .is_none_or(|task| !task.state.is_terminal())
+            })
+            .cloned()
+            .collect();
+        let (carrier, new_carrier, touch_carrier) = match (stored, open.is_empty()) {
+            (stored, true) => (stored.unwrap_or_default(), false, false),
+            (Some(carrier), false)
                 if existing
                     .get(&carrier)
                     .is_some_and(|task| !task.state.is_terminal()) =>
             {
-                carrier
+                (carrier, false, true)
             }
-            _ => {
-                new_carrier = true;
-                tx.next_id(project, 'T')?
-            }
+            (_, false) => (tx.next_id(project, 'T')?, true, true),
         };
         let (repo, base, gate, integration) = match stored_config {
             Some(config) => {
@@ -2077,7 +2098,9 @@ fn feature_work(
             check,
             carrier,
             new_carrier,
+            touch_carrier,
             members: members.clone(),
+            deps: open,
             goals,
             lane,
             milestone,
