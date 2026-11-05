@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1190 -->
+<!-- gear-plan project=gear base=1191 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -334,7 +334,7 @@ estimate: 50
 deps: -
 fresh: landing records, unrelated to features
 
-## T-586 [must] lane=hull milestone=M6.2
+## T-586 [must] lane=mast milestone=M6.2
 goal: A captain's quiet page follows open work, not the last departure. crates/gear-app/src/home.rs, where `sailing` is computed: a captain is sailing when the project has no voyage, or ANY of its milestones has a task that is not terminal (`gear_board::stations::voyage_open` over every milestone of the project's tasks), not only `plan::current_voyage`. The voyage report and goal lines then show the voyage with open work. The doorbell already rings for those items, so page and doorbell agree again (GEAR M6.2 ran without a depart line: the page took the finished M6.1 and hid M-8020 while the doorbell rang it).
 accept: A test in home.rs (or crates/gear-app/tests/it app_home): a project whose last departed voyage is finished and which has another milestone with a running task shows that milestone's station item on the captain's page. Run only `make check CRATE=gear-app TESTS='test(home)'`; the merge gate runs `make gate`.
 estimate: 20
