@@ -1667,6 +1667,13 @@ fn require_integrated_by(store: &mut Store, draft: &Draft) -> GearResult<()> {
             &config.conventions.remote,
             &repo.integration,
         )?;
+        // A candidate the repository does not hold was never pushed: nothing
+        // can place it, so the captain's ruling names the merge that landed
+        // the work (Prometheus T-563: attempt 6 passed review, its commit
+        // exists nowhere, and T-582's merge landed the branch).
+        if !object_held(&repo.path, &config.conventions.remote, candidate) {
+            continue;
+        }
         if !crate::base::contains(std::path::Path::new(&repo.path), candidate, &reference)? {
             return Err(bad(
                 0,
@@ -1678,6 +1685,28 @@ fn require_integrated_by(store: &mut Store, draft: &Draft) -> GearResult<()> {
         }
     }
     Ok(())
+}
+
+/// Whether the repository holds `candidate` as a commit, after one fetch of
+/// the remote's branches when the clone does not have it yet. A git that
+/// cannot answer counts as held, so the ancestry check still runs.
+fn object_held(repo: &str, remote: &str, candidate: &str) -> bool {
+    let held = || {
+        Command::new("git")
+            .args(["cat-file", "-e", &format!("{candidate}^{{commit}}")])
+            .current_dir(repo)
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(true)
+    };
+    if held() {
+        return true;
+    }
+    let _ = Command::new("git")
+        .args(["fetch", "-q", remote])
+        .current_dir(repo)
+        .output();
+    held()
 }
 
 fn cancellable_done_tasks(store: &mut Store, draft: &Draft) -> GearResult<BTreeSet<String>> {
