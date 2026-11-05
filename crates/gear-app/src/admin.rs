@@ -448,6 +448,12 @@ fn retired_lane_names(tx: &Tx<'_>, project: &str) -> GearResult<Vec<String>> {
 pub fn branch_clash(config: &config::ProjectConfig, others: &[(String, String)]) -> Option<String> {
     let ours = repo_paths(config);
     let our_repos = config.repos();
+    // This project's config as the store holds it: a shared integration
+    // branch it already had is left alone, only a new one is refused.
+    let registered = others
+        .iter()
+        .find(|(id, _)| *id == config.project.id)
+        .and_then(|(_, text)| config::parse(text).ok());
     for (other_id, other_text) in others {
         if *other_id == config.project.id {
             continue;
@@ -492,8 +498,39 @@ pub fn branch_clash(config: &config::ProjectConfig, others: &[(String, String)])
                 "project {other_id} also works in {path} and keeps its voyages in the same folder {our_voyages}: put {{project}} in conventions.voyage_dir so the two projects' plans, reports and reviews cannot overwrite each other"
             ));
         }
+        if let Some((shared, branch)) = shared_integration(config, &other) {
+            let had = registered
+                .as_ref()
+                .is_some_and(|old| shared_integration(old, &other).is_some());
+            if !had {
+                return Some(format!(
+                    "project {other_id} also integrates into {branch} in {shared}: two voyages on one branch cannot be released apart, so give this project its own integration branch (`[conventions] integration`, or `integration` on its `[[repos]]` entry), any name your team uses"
+                ));
+            }
+        }
     }
     None
+}
+
+/// The repo path and integration branch `config` shares with `other`: the same
+/// repository (by canonical path) merging into the same branch.
+fn shared_integration(
+    config: &config::ProjectConfig,
+    other: &config::ProjectConfig,
+) -> Option<(String, String)> {
+    let canonical = |path: &str| match std::fs::canonicalize(path) {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(_) => path.to_string(),
+    };
+    let theirs: Vec<(String, String)> = other
+        .repos()
+        .into_iter()
+        .map(|repo| (canonical(&repo.path), repo.integration))
+        .collect();
+    config.repos().into_iter().find_map(|repo| {
+        let ours = (canonical(&repo.path), repo.integration);
+        theirs.contains(&ours).then_some(ours)
+    })
 }
 
 /// The GitHub issue clash of this config with `other` (T-302): a repo of each

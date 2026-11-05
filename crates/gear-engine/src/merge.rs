@@ -3344,7 +3344,7 @@ fn run_gate(
     // earlier gate must not name a culprit here. It is not removed after a
     // failure: the red batch reads it.
     let _ = std::fs::remove_file(gate_failed_path(dir));
-    let output = match gate_command(&gate, dir, project, round, tasks)
+    let output = match gate_command(&gate, dir, project, &integration, round, tasks)
         .stdin(stdin)
         .output()
     {
@@ -4531,7 +4531,14 @@ fn branch_on_remote(dir: &Path, remote: Target<'_>, branch: &str) -> bool {
 /// project's own build and test command, and it must never see the store of
 /// this machine (L-59). A test that inherited `GEAR_DB` would write to the
 /// production store; the tests give themselves a scratch home instead.
-fn gate_command(gate: &str, dir: &Path, project: &str, round: &str, tasks: &[String]) -> Command {
+fn gate_command(
+    gate: &str,
+    dir: &Path,
+    project: &str,
+    integration: &str,
+    round: &str,
+    tasks: &[String],
+) -> Command {
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg(gate)
@@ -4541,6 +4548,7 @@ fn gate_command(gate: &str, dir: &Path, project: &str, round: &str, tasks: &[Str
         .env(GATE_TEMPFAIL_ENV, gate_tempfail_path(dir))
         .env(GATE_FAILED_ENV, gate_failed_path(dir))
         .env(GATE_PROJECT_ENV, project)
+        .env(GATE_INTEGRATION_ENV, integration)
         .env(GATE_ROUND_ENV, round)
         .env(GATE_TASKS_ENV, tasks.join(" "));
     cmd
@@ -4572,6 +4580,12 @@ fn gate_failed_path(dir: &Path) -> std::path::PathBuf {
 /// The variable naming the project whose merge this gate run judges (T-555):
 /// a project's gate can name the CI branch it uses, and read the run it is.
 pub const GATE_PROJECT_ENV: &str = "GEAR_GATE_PROJECT";
+
+/// The variable naming the integration branch this gate run merges into: a
+/// CI that compares a candidate with the integration branch reads it here, so
+/// projects that share a repository with their own branches are each judged
+/// against their own.
+pub const GATE_INTEGRATION_ENV: &str = "GEAR_GATE_INTEGRATION";
 
 /// The variable naming this gate run (T-555): the id of its first merge op,
 /// lowercase without the dash — `O-6543` is `o6543` — so every gate run of a
@@ -12846,8 +12860,18 @@ gate = "{project_gate}"
             "cargo test",
             Path::new("/tmp"),
             "p",
+            "p/dev",
             "o1",
             &["T-1".to_string()],
+        );
+        let integration = command
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("GEAR_GATE_INTEGRATION"))
+            .and_then(|(_, value)| value);
+        assert_eq!(
+            integration,
+            Some(std::ffi::OsStr::new("p/dev")),
+            "the gate is told its integration branch"
         );
         let removes = |name: &str| {
             command

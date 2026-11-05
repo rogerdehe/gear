@@ -681,7 +681,7 @@ fn a_second_project_on_one_repo_needs_project_in_its_branch_templates() {
     let templated = project_on(
         "beta",
         &repo,
-        "task_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"\nseat_branch = \"{project}/home/{seat}\"\nvoyage_dir = \"gear/{project}/voyages/{milestone}\"\n",
+        "task_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"\nseat_branch = \"{project}/home/{seat}\"\nvoyage_dir = \"gear/{project}/voyages/{milestone}\"\nintegration = \"beta-dev\"\n",
     );
     let r = init_with_home(
         &mut s,
@@ -850,12 +850,37 @@ fn a_second_project_on_one_repo_needs_its_own_voyage_folder() {
         "nothing written"
     );
 
-    // A voyage folder that names the project registers.
+    // Its own voyage folder, but alpha's integration branch: refused too, so
+    // the two voyages can be released apart (user, 2026-11-05).
     let kept_apart =
         format!("{TEMPLATED}voyage_dir = \"gear/{{project}}/voyages/{{milestone}}\"\n");
     let beta = project_on("beta", &repo, &kept_apart);
-    let r = init_with_home(&mut s, &admin(), &beta, Some(home.path()), false, T0 + 2).unwrap();
+    let e = init_with_home(&mut s, &admin(), &beta, Some(home.path()), false, T0 + 2).unwrap_err();
+    assert_eq!(
+        e.detail,
+        format!(
+            "project alpha also integrates into dev in {shown}: two voyages on one branch cannot be released apart, so give this project its own integration branch (`[conventions] integration`, or `integration` on its `[[repos]]` entry), any name your team uses"
+        )
+    );
+
+    // Any branch of its own registers; the name is the team's.
+    let own = format!("{kept_apart}integration = \"testing\"\n");
+    let beta = project_on("beta", &repo, &own);
+    let r = init_with_home(&mut s, &admin(), &beta, Some(home.path()), false, T0 + 3).unwrap();
     assert_eq!((r.project.as_str(), r.config_version), ("beta", 1));
+
+    // A re-registration that keeps a shared branch it already had is left
+    // alone: only a new shared branch is refused.
+    let alpha_text = project_on("alpha", &repo, &kept_apart);
+    let shared = project_on("beta", &repo, &kept_apart);
+    let parsed = gear_app::config::parse(&shared).unwrap();
+    let with_old = [
+        ("alpha".to_string(), alpha_text.clone()),
+        ("beta".to_string(), shared.clone()),
+    ];
+    assert_eq!(gear_app::admin::branch_clash(&parsed, &with_old), None);
+    let first_time = [("alpha".to_string(), alpha_text)];
+    assert!(gear_app::admin::branch_clash(&parsed, &first_time).is_some());
 }
 
 /// T-302: two projects on one GitHub repository take the same issues unless
