@@ -4902,7 +4902,7 @@ quota_reset_h = {reset_h}
         assert_eq!(seat.generation, 2);
         assert_eq!(
             deliveries(&mut store),
-            vec!["Continue T-1: run `gear --session sess --pane w1:p1` first".to_string()]
+            vec!["Continue T-1: run `gear` first".to_string()]
         );
         let binding = store
             .read(|tx| tx.get_binding("p:heat", 2))
@@ -4993,7 +4993,7 @@ quota_reset_h = {reset_h}
         assert_eq!(seat.generation, 2);
         assert_eq!(
             deliveries(&mut store),
-            vec!["Continue T-1: run `gear --session sess --pane w1:p1` first".to_string()]
+            vec!["Continue T-1: run `gear` first".to_string()]
         );
         assert_eq!(parked_until(&mut store, "p:heat").unwrap(), None);
         assert!(load_wait(&mut store, "p:heat").unwrap().is_none());

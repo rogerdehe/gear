@@ -54,6 +54,17 @@ pub fn valid_name(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+/// Agent CLIs whose tools run in a shared background process outside the
+/// agent's pane (`opencode serve`, `codex app-server`). Only these name their
+/// seat on the command line (`gear --session <s> --pane <p>`); every other CLI
+/// runs its commands in its own pane, where GEAR finds it by itself.
+pub const TOOLS_OUTSIDE_PANE: [&str; 2] = ["opencode", "codex"];
+
+/// Whether an agent of `kind` runs its tools outside its pane.
+pub fn tools_outside_pane(kind: &str) -> bool {
+    TOOLS_OUTSIDE_PANE.contains(&kind)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

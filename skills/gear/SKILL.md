@@ -9,11 +9,11 @@ GEAR runs one piece of work — a new product, or one requirement inside an exis
 
 ## 1. Guard
 
-Run `gear --session <session> --pane <your pane>`. If it names no seat of yours, GEAR did not start you: run no write command (`gear send`, `gear reply`, `gear plan apply`, `gear admin …`); tell the user. If it names your seat, that seat is yours, with or without `GEAR_CTX` in your environment: a CLI that runs commands outside its pane never has it.
+Run `gear` once when you start. If it names no seat of yours, GEAR did not start you: run no write command (`gear send`, `gear reply`, `gear plan apply`, `gear admin …`); tell the user. If it names your seat, that seat is yours.
 
 ## 2. Start every turn with `gear`
 
-**Run every `gear` command the way GEAR's messages to you write it:** `gear --session <session> --pane <your pane> …`. Some CLIs run commands outside the agent's pane, and only these two arguments tell GEAR who you are; keep them on every `gear` command (`send`, `reply`, `plan apply`, …), and never use another seat's pane.
+Run `gear` commands exactly as GEAR's messages to you write them. A CLI that runs its commands outside its own pane (OpenCode, Codex) gets them as `gear --session <session> --pane <your pane> …`, since only those two arguments tell GEAR who it is; keep them on that seat's `gear` commands and never use another seat's pane. Every other CLI runs plain `gear`. Nothing else you run (git, grep, builds, tests) takes these arguments or a `gear` call in front of it.
 
 `gear` prints your home page: who you are, your task, what is waiting for you. Running it records that you saw it — that is how GEAR knows a message reached you. Run it whenever you are woken.
 
@@ -61,7 +61,7 @@ The user installs this skill into an agent CLI with `gear admin install-skill --
 
 | Code | Meaning | Do |
 |---|---|---|
-| `NOT_REGISTERED` | no valid seat for this process | run the command with `--session` and `--pane` as GEAR's messages write it; if it still fails, stop write commands and tell the captain/user |
+| `NOT_REGISTERED` | no valid seat for this process | run the command as GEAR's messages write it (OpenCode and Codex: with `--session` and `--pane`); if it still fails, stop write commands and tell the captain/user |
 | `STALE_GENERATION` | your seat was restarted or taken over | stop; run `gear` |
 | `FORBIDDEN` | your role or state may not do this | do not retry; ask |
 | `BAD_FORMAT` | arguments or text malformed (the detail says where) | fix and resend |

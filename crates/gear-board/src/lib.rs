@@ -1176,14 +1176,19 @@ pub fn project_for(
             let jobs: Vec<forecast::Job> = lanes
                 .iter()
                 .flat_map(|lane| {
-                    lane.tasks.iter().map(|task| forecast::Job {
-                        id: task.id.clone(),
-                        lane: lane.lane.clone(),
-                        stage: task.stage,
-                        est_min: task.est_min.unwrap_or(0),
-                        actual_min: task.actual_min.unwrap_or(0),
-                        deps: task.deps.clone(),
-                    })
+                    // A cancelled task is no work left: it is never played
+                    // forward, nor named as blocked (Prometheus T-572).
+                    lane.tasks
+                        .iter()
+                        .filter(|task| task.state != TaskState::Cancelled)
+                        .map(|task| forecast::Job {
+                            id: task.id.clone(),
+                            lane: lane.lane.clone(),
+                            stage: task.stage,
+                            est_min: task.est_min.unwrap_or(0),
+                            actual_min: task.actual_min.unwrap_or(0),
+                            deps: task.deps.clone(),
+                        })
                 })
                 .collect();
             let names: Vec<String> = lanes.iter().map(|lane| lane.lane.clone()).collect();

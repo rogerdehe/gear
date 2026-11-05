@@ -1627,7 +1627,8 @@ fn doorbell_inputs(
             })
             .map(|op| op.updated);
 
-        let command = gear_app::identity::seat_command(&binding.session, &binding.pane_id);
+        let command =
+            gear_app::identity::seat_command_for(&binding.kind, &binding.session, &binding.pane_id);
         inputs.push(doorbell::DoorbellInput {
             command,
             project: project.to_string(),
