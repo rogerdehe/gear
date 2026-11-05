@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1216 -->
+<!-- gear-plan project=gear base=1217 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -452,6 +452,13 @@ accept: The report lists the before and after times of each changed test and the
 estimate: 60
 deps: -
 fresh: gate time, unrelated
+
+## T-602 [now] lane=mast milestone=M6.2 required
+goal: One place names a task's branch, and it knows the feature override. crates/gear-app/src/base.rs: add `pub fn task_branch_of(tx: &Tx, conventions: &Conventions, project: &str, lane: &str, task: &str) -> GearResult<String>` that returns `tx.task_branch_override(project, task)` when set, else today's `task_branch(conventions, project, lane, task)`. Every caller that names the branch of a known task uses it: crates/gear-engine/src/review.rs (the review job packet and the review's push target: GEAR F-2's reviewer was told `mast/t600` and its hand-in was refused until it pushed to gear/feature/f-2), dispatch.rs (packet and `task_branch` uses), parallel.rs, handover.rs, quiet.rs, merge.rs (`branch_of` for a task), gear-app tasks.rs and plan.rs (replace the two local overrides v0.6.82 added), crates/gear-cli/src/main.rs, crates/gear-forge/src/sync.rs. A caller with no store at hand keeps the template (say so in one comment); config.rs validation stays as it is.
+accept: A test in review.rs `mod tests`: the review packet of an integration task names its feature branch as the branch to push the review commit to; a normal task's packet is unchanged. A unit test of `task_branch_of` both ways. Run only the new tests by name; the merge gate runs `make gate`.
+estimate: 40
+deps: -
+fresh: task branch naming
 
 ## T-583 [now] lane=mast milestone=M6.2 required
 goal: [feature 7/7] The captain's skill. skills/gear/references/captain.md `# Queue` field list: `feature` (`F-<n>`: the task is part of a feature; members merge into the feature branch with no CI, deps between members release on that merge, and GEAR creates one integration task per feature that reaches the integration branch with one review and the full gate; at most `feature_max_tasks` members; a dep from outside names the integration task; members share the feature's issue). skills/gear/references/decompose.md: a rule that a capability of several small tasks is one feature, cut at decomposition (an issue in issue mode), and that small unrelated tasks stay without a feature.
