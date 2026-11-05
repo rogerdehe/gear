@@ -1909,6 +1909,127 @@ fn carrier_feature(store: &mut Store, project: &str, task: &str) -> GearResult<O
     })
 }
 
+/// T-592: the members of a feature whose integration task is under review, each
+/// with the goal it carries and what its light check found. The integration
+/// task's review is the feature's one full review: it judges the whole branch,
+/// so it sees the members and the findings their light checks left — else the
+/// reviewer would judge work it never saw a note about.
+fn feature_review_section(store: &mut Store, project: &str, feature: &str) -> GearResult<String> {
+    let mut members: Vec<(String, String, Option<(i64, Vec<String>)>)> = store.read(|tx| {
+        let mut members = Vec::new();
+        for row in tx.tasks_of_project(project)? {
+            if tx.task_feature(project, &row.id)?.as_deref() != Some(feature) {
+                continue;
+            }
+            // The carrier is the task this packet is for; a cancelled member is
+            // no part of the branch.
+            if tx.feature_carrier(project, feature)?.as_deref() == Some(row.id.as_str()) {
+                continue;
+            }
+            if row.state == TaskState::Cancelled {
+                continue;
+            }
+            let goal = tx
+                .get_contract(project, &row.id, row.contract_version)?
+                .map(|contract| contract.goal)
+                .unwrap_or_default();
+            let check = light_check_findings(tx, project, feature, &row.id)?;
+            members.push((row.id.clone(), goal, check));
+        }
+        members.sort_by_key(|(id, _, _)| id.trim_start_matches("T-").parse::<i64>().unwrap_or(0));
+        Ok(members)
+    })?;
+    if members.is_empty() {
+        return Ok(String::new());
+    }
+    let mut section = format!(
+        "\n## The feature {feature}: its members and their light checks\n\
+         This is the feature's full review: judge the whole branch against the integration \
+         branch; a fail names every finding, the owner lane fixes them in one rework.\n\
+         Each member, with the goal it was judged by and what its light check found:\n"
+    );
+    for (task, goal, check) in members.drain(..) {
+        section.push_str(&format!("- {task} — {goal}\n"));
+        match check {
+            Some((attempt, findings)) if !findings.is_empty() => {
+                section.push_str(&format!("  light check (attempt {attempt}):\n"));
+                for finding in findings {
+                    section.push_str(&format!("  {finding}\n"));
+                }
+            }
+            Some((attempt, _)) => section.push_str(&format!(
+                "  light check (attempt {attempt}): no result was recorded\n"
+            )),
+            None => section.push_str("  light check: none ran\n"),
+        }
+    }
+    Ok(section)
+}
+
+/// T-592: the light check of the last attempt of `task` the feature checked —
+/// the attempt and the findings its reviewer wrote, as `gear send --direction`
+/// recorded them. A result that names another sha judges a push the member no
+/// longer has, so it is not the member's finding.
+fn light_check_findings(
+    tx: &Tx<'_>,
+    project: &str,
+    feature: &str,
+    task: &str,
+) -> GearResult<Option<(i64, Vec<String>)>> {
+    let mut checked: Option<(i64, Vec<String>)> = None;
+    for attempt in tx.attempts_of_task(project, task)? {
+        let marker = tx
+            .stage_check(project, task, attempt.n)?
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+        if marker
+            .as_ref()
+            .and_then(|marker| marker["feature"].as_str())
+            != Some(feature)
+        {
+            continue;
+        }
+        let job = tx
+            .get_meta(&direction_key(project, task, attempt.n))?
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+        let sha = job.as_ref().and_then(|job| {
+            job["checked_sha"]
+                .as_str()
+                .or_else(|| job["sha"].as_str())
+                .map(str::to_string)
+        });
+        let seat = job
+            .as_ref()
+            .and_then(|job| job["seat"].as_str())
+            .map(str::to_string);
+        let mut findings = Vec::new();
+        for result in tx.direction_results_of_attempt(project, task, attempt.n)? {
+            let meta = result
+                .meta
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            if !meta.as_ref().is_some_and(|meta| meta["direction"] == true) {
+                continue;
+            }
+            if let Some(sha) = sha.as_deref() {
+                if meta.as_ref().and_then(|meta| meta["sha"].as_str()) != Some(sha) {
+                    continue;
+                }
+            }
+            if let Some(seat) = seat.as_deref() {
+                if result.sender != seat {
+                    continue;
+                }
+            }
+            let body = result.body.trim();
+            if !body.is_empty() {
+                findings.push(body.to_string());
+            }
+        }
+        checked = Some((attempt.n, findings));
+    }
+    Ok(checked)
+}
+
 /// T-590: the seat recorded as a feature's reviewer, while it still exists and
 /// has not retired. A retired seat falls back to a new one, which is recorded
 /// in its place.
@@ -4068,6 +4189,14 @@ fn review_packet_for(
     let audit = store
         .read(|tx| tx.task_audit(&config.project.id, task))?
         .is_some();
+    // T-592: the integration task's review is the feature's one full review. It
+    // judges the whole branch, so it sees every member with its goal and what
+    // the member's light check found; a task that is no carrier has no section.
+    let feature = carrier_feature(store, &config.project.id, task)?;
+    let feature = match feature {
+        Some(feature) => feature_review_section(store, &config.project.id, &feature)?,
+        None => String::new(),
+    };
     let packet = review_packet(
         task,
         attempt,
@@ -4106,6 +4235,7 @@ fn review_packet_for(
             candidate,
             &config.conventions.remote,
         )?,
+        &feature,
     );
     // The review's own budget (design §5.1) and what a verdict past it must
     // carry (design §6.2): the reviewer is charged from its own start, and a
@@ -4383,6 +4513,7 @@ fn review_packet(
     worktree: &str,
     recovery: &str,
     rework: &str,
+    feature: &str,
 ) -> String {
     // T-505: the change-review instruction, or — for a voyage audit — what the
     // audit checks instead: there is no diff, and every gap it finds is a
@@ -4421,7 +4552,7 @@ fn review_packet(
          Bar (the quality this phase needs): {bar}\n\
          Candidate: {candidate}\n\
          {change}\n\
-         Your worktree: branch `{branch}`, checked out at the candidate.\n\
+         {feature}Your worktree: branch `{branch}`, checked out at the candidate.\n\
          \n\
          Rules: `gear --skill review` — the mechanical acceptance you run yourself, \
          the findings with their severity, the review template and the verdict rule.\n\
@@ -14980,6 +15111,116 @@ profile = "opencode"
                 .iter()
                 .all(|message| message.task.as_deref() != Some("T-1")),
             "no item opens for the member"
+        );
+    }
+
+    /// T-592: the integration task's review is the feature's full review, so its
+    /// packet lists every member with its goal and what its light check found.
+    #[test]
+    fn the_integration_tasks_review_packet_lists_the_members_and_their_findings() {
+        let mut store = feature_world();
+        let mut herdr = FakeHerdr::new();
+        // The second member carries its own goal, so the packet cannot show one
+        // member's goal for all of them.
+        store
+            .write(|tx| {
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-2".into(),
+                    version: 2,
+                    goal: "the second goal".into(),
+                    accept: "the second criteria".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0 + 3,
+                    mechanical: None,
+                })?;
+                let mut task = tx.get_task("p", "T-2")?.unwrap();
+                task.contract_version = 2;
+                tx.update_task(&task)?;
+                // The engine's hand-in of the integration task at the feature
+                // branch's tip.
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-9".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Submitted,
+                    candidate: Some("featuretip".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0 + 3,
+                    updated: T0 + 3,
+                })
+            })
+            .unwrap();
+
+        // Both members are light-checked: the first finds a misread direction,
+        // the second nothing.
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        stage_result(
+            &mut store,
+            "T-1",
+            1,
+            "F1: the second half of the feature goal is not built yet",
+            "abc1234",
+        );
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 12,
+        )
+        .unwrap();
+        stage_result(&mut store, "T-2", 1, "ok", "cand2");
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 14,
+        )
+        .unwrap();
+
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let packet =
+            review_packet_for(&mut store, &config, "T-9", 1, "featuretip", WORKTREE).unwrap();
+        assert!(
+            packet.contains(
+                "This is the feature's full review: judge the whole branch against the integration branch; a fail names every finding, the owner lane fixes them in one rework."
+            ),
+            "{packet}"
+        );
+        assert!(packet.contains("T-1 — the goal"), "{packet}");
+        assert!(
+            packet.contains(
+                "T-1 — the goal\n  light check (attempt 1):\n  F1: the second half of the feature goal is not built yet"
+            ),
+            "the first member's finding is listed: {packet}"
+        );
+        assert!(
+            packet.contains("T-2 — the second goal\n  light check (attempt 1):\n  ok"),
+            "the second member's goal and check are listed: {packet}"
         );
     }
 }
