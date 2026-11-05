@@ -229,8 +229,8 @@ fn hand_in(
         }
         Refresh::Refreshed { tip, subject } => {
             let report = format!(
-                "the feature branch {} at {tip}, refreshed from {} by {subject}",
-                job.branch, repo.integration
+                "the feature branch {} at {tip}, refreshed with the integration branch ({subject})",
+                job.branch
             );
             (tip, report)
         }
