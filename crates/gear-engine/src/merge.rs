@@ -1950,6 +1950,10 @@ struct BisectDone {
 struct BisectWorker {
     project: String,
     task: String,
+    /// The repo whose bisect worktree the search probes in: one search per
+    /// worktree at a time, so a second one waits its turn instead of finding
+    /// the worktree busy.
+    repo: String,
     /// The line the search found; `None` while it runs.
     done: Arc<Mutex<Option<BisectDone>>>,
 }
@@ -2043,6 +2047,17 @@ fn start_bisects(
         };
         let repo = config.repo_of_task(&row);
         let name = repo.name.clone();
+        let repo_key = worker_key(&repo);
+        // One search per worktree at a time: a request that finds the worktree
+        // taken stays pending and starts on a later tick.
+        let busy = cfg.merges.bisects.lock().map_or(true, |bisects| {
+            bisects
+                .values()
+                .any(|worker| worker.repo == repo_key && worker.done.lock().unwrap().is_none())
+        });
+        if busy {
+            continue;
+        }
         // The search runs once per candidate, whatever comes of it: a worktree
         // that cannot be had is not retried on every tick for ever.
         store.write(|tx| tx.set_meta(&key, BISECT_STARTED))?;
@@ -2083,6 +2098,7 @@ fn start_bisects(
             let worker = BisectWorker {
                 project: project.to_string(),
                 task: task.to_string(),
+                repo: repo_key,
                 done,
             };
             if let Ok(mut bisects) = cfg.merges.bisects.lock() {
