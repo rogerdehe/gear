@@ -6,7 +6,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
 **Use it for** big, long-running work with several agents and a plan that changes as you go. For anything smaller, talk to an agent directly.
 
-> **Status:** v0.6.56, an early release for trial use — what changed: [docs/releases/v0.6.56.md](docs/releases/v0.6.56.md). Feedback is welcome — see [Feedback](#feedback).
+> **Status:** v0.6.57, an early release for trial use — what changed: [docs/releases/v0.6.57.md](docs/releases/v0.6.57.md). Feedback is welcome — see [Feedback](#feedback).
 
 ## Requirements
 
@@ -19,7 +19,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 1. **The plugin** (downloads a prebuilt `gear` and checks its SHA-256; no Rust needed):
 
    ```bash
-   herdr plugin install rogerdehe/gear --ref v0.6.56
+   herdr plugin install rogerdehe/gear --ref v0.6.57
    ```
 
    Add `--yes` in a non-interactive shell.
