@@ -133,6 +133,9 @@ struct Fact {
     /// The engine's own merge line ("merged T-61 into dev: a1b2c3d"), when the
     /// merge has confirmed.
     merge_line: Option<String>,
+    /// Another task bound to the same issue has not landed (and is not
+    /// cancelled): the issue stays open until the last one lands.
+    issue_open_elsewhere: bool,
 }
 
 struct AttemptFact {
@@ -615,6 +618,11 @@ fn calls_after_claim(project: &str, fact: &Fact, pr: &PrRef) -> Vec<Call> {
                     body: format!("Landed in {}: {landed}{ci}", fact.integration),
                 },
             });
+            // An issue split into several tasks closes when its last task
+            // lands, never on the first (Carthage: #359 is seven tasks).
+            if fact.issue_open_elsewhere {
+                continue;
+            }
             calls.push(Call {
                 key: format!("{base}:close"),
                 task: fact.task.clone(),
@@ -743,7 +751,28 @@ fn facts(tx: &Tx<'_>, project: &str) -> GearResult<Vec<Fact>> {
         return Ok(Vec::new());
     };
     let mut facts = Vec::new();
-    for task in tx.tasks_of_project(project)? {
+    let tasks = tx.tasks_of_project(project)?;
+    // The issues with a bound task that has not landed: (issue, task).
+    let mut unlanded: Vec<(i64, String)> = Vec::new();
+    for task in &tasks {
+        let Some(issue) = task.issue else { continue };
+        if task.state == gear_model::TaskState::Cancelled {
+            continue;
+        }
+        let landed = tx
+            .attempt_times_of_task(project, &task.id)?
+            .iter()
+            .any(|(_, times)| times.merged.is_some());
+        if !landed {
+            unlanded.push((issue, task.id.clone()));
+        }
+    }
+    for task in tasks {
+        let issue_open_elsewhere = task.issue.is_some_and(|issue| {
+            unlanded
+                .iter()
+                .any(|(other_issue, other)| *other_issue == issue && *other != task.id)
+        });
         let Some(issue) = task.issue.and_then(|n| u64::try_from(n).ok()) else {
             continue;
         };
@@ -791,6 +820,7 @@ fn facts(tx: &Tx<'_>, project: &str) -> GearResult<Vec<Fact>> {
             goal,
             attempts,
             merge_line,
+            issue_open_elsewhere,
         });
     }
     Ok(facts)

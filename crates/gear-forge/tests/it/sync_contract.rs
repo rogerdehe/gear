@@ -1166,3 +1166,35 @@ fn the_calls_of_a_tick_are_spent_by_the_other_work() {
     let op = store.read(|tx| tx.get_op("p", &claim)).unwrap().unwrap();
     assert_eq!(op.state, OpState::Unknown, "the claim is still unknown");
 }
+
+/// An issue split into several tasks closes when its last task lands, never
+/// on the first (Carthage: #359 is seven tasks).
+#[test]
+fn an_issue_with_another_unlanded_task_stays_open() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            let mut other = tx.get_task("p", "T-1")?.unwrap();
+            other.id = "T-2".into();
+            other.state = gear_model::TaskState::Ready;
+            tx.insert_task(&other)
+        })
+        .unwrap();
+    deliver(&mut store);
+    hand_in(&mut store, "abc1234");
+    verdict(&mut store, true, "");
+    merged(&mut store, "merged T-1 into dev: def5678");
+    let forge = Fake::up();
+
+    tick(&mut store, &forge, 200);
+
+    let calls = forge.calls();
+    assert!(
+        calls.iter().any(|call| call.contains("Landed in dev")),
+        "the landing is still commented: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| call.starts_with("close ")),
+        "T-2 has not landed: {calls:?}"
+    );
+}
