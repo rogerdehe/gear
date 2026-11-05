@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1211 -->
+<!-- gear-plan project=gear base=1212 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -442,6 +442,13 @@ estimate: 15
 deps: -
 feature: F-2
 fresh: feature stage 3
+
+## T-601 [must] lane=hull milestone=M6.2
+goal: The merge gate keeps its headroom on a busy machine. Today two merges (T-572, T-596) failed only on the gate's 80 s wall time (81 s; suite 67 s) while lanes and reviewers built beside it; a quiet run takes 48 s. (1) Run `scripts/test.sh` three times while the machine is busy (a lane or a review building) and once quiet; list the 20 slowest tests with their times in gear/voyages/M6.2/reports/<task>.md. (2) For every test over 3 s under load: make it faster without weakening what it checks (a shorter real wait, a fake clock, a smaller fixture, no network or sleep), or, when it cannot be made fast, move it out of the merge gate's run into `make full` with one line saying why. (3) Do not touch the 80 s limit, the build-slot caps or the shard count. Target: the suite phase under 40 s on a busy machine.
+accept: The report lists the before and after times of each changed test and the suite time under load before and after; `make gate` passes twice on a busy machine under 60 s total. Run `make gate` for the numbers; the merge gate runs `make gate`.
+estimate: 60
+deps: -
+fresh: gate time, unrelated
 
 ## T-583 [now] lane=mast milestone=M6.2 required
 goal: [feature 7/7] The captain's skill. skills/gear/references/captain.md `# Queue` field list: `feature` (`F-<n>`: the task is part of a feature; members merge into the feature branch with no CI, deps between members release on that merge, and GEAR creates one integration task per feature that reaches the integration branch with one review and the full gate; at most `feature_max_tasks` members; a dep from outside names the integration task; members share the feature's issue). skills/gear/references/decompose.md: a rule that a capability of several small tasks is one feature, cut at decomposition (an issue in issue mode), and that small unrelated tasks stay without a feature.
