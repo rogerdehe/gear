@@ -505,9 +505,13 @@ pub fn verdict_hint(
     // Failed op still says), and once the captain's reopening fail is recorded
     // the item is an ordinary one — the historical op stays, but it has been
     // decided.
+    // Work that landed another way (a remerge that found it on the branch,
+    // or a carrier's merge) leaves nothing to settle: the item closes by a
+    // reply (Prometheus M-8886, M-8629, M-9797).
     let merge_failed = !reopened(tx, project, task, attempt, &candidate)?
         && !merge_in(gear_model::OpState::Confirmed)?
-        && merge_in(gear_model::OpState::Failed)?;
+        && merge_in(gear_model::OpState::Failed)?
+        && !work_landed(tx, project, task)?;
     // Any other item — an ordinary question about the same task — is answered
     // and closed by a reply, and settles nothing.
     if !review_fail && !captain_decision && !merge_failed {
@@ -572,6 +576,20 @@ fn reopened(
 /// row B03-01): the attempt that landed it, and the time it landed.
 ///
 /// `None` when the task has no merged attempt yet.
+/// Whether the work of `task` is on the integration branch: an attempt of it
+/// has a merge time, or the task that carries it (`carried-by`) has one
+/// (Prometheus, 2026-11-05: T-588 carried by the merged T-616 and T-563 by
+/// T-582 kept merge-failed items that neither a reply nor a remerge closed).
+pub fn work_landed(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<bool> {
+    if merged_at(tx, project, task)?.is_some() {
+        return Ok(true);
+    }
+    match tx.task_carried_by(project, task)? {
+        Some(carrier) if carrier != task => Ok(merged_at(tx, project, &carrier)?.is_some()),
+        _ => Ok(false),
+    }
+}
+
 pub fn merged_at(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<Ts>> {
     let mut merged = None;
     for (_, times) in tx.attempt_times_of_task(project, task)? {

@@ -1760,6 +1760,21 @@ impl<'s> Tx<'s> {
         rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
     }
 
+    /// The project's open and waiting items (T-571): what the sweep that ends
+    /// a voyage reads to close what it left behind.
+    pub fn open_messages_of_project(&self, project: &str) -> GearResult<Vec<MessageRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(&message_select(
+                " WHERE project=?1 AND state IN ('open','waiting') ORDER BY created, id",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], message_from_row)
+            .map_err(map_sqlite)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
+    }
+
     /// Direction results for one task attempt.
     pub fn direction_results_of_attempt(
         &self,
@@ -2304,6 +2319,26 @@ impl<'s> Tx<'s> {
             .map_err(map_sqlite)?;
         let rows = stmt
             .query_map(params![project], task_from_row)
+            .map_err(map_sqlite)?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row.map_err(map_sqlite)?);
+        }
+        Ok(tasks)
+    }
+
+    /// The tasks of one voyage, in rank then id order (T-571). A finished
+    /// voyage closes the engine items its tasks left open, and reading them
+    /// must not cost every other voyage's history.
+    pub fn tasks_of_voyage(&self, project: &str, milestone: &str) -> GearResult<Vec<TaskRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(&task_select(
+                " WHERE project=?1 AND milestone=?2 ORDER BY rank, id",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, milestone], task_from_row)
             .map_err(map_sqlite)?;
         let mut tasks = Vec::new();
         for row in rows {

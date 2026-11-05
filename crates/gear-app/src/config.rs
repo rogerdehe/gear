@@ -69,6 +69,7 @@ impl ProjectConfig {
             integration: self.conventions.integration.clone(),
             release: self.conventions.release.clone(),
             gate: self.conventions.gate.clone(),
+            voyage_dir: self.conventions.voyage_dir.clone(),
             github: self.github.as_ref().and_then(GithubSection::resolved),
         }
     }
@@ -151,6 +152,7 @@ impl ProjectConfig {
                 .gate
                 .clone()
                 .unwrap_or_else(|| self.conventions.gate.clone()),
+            voyage_dir: self.conventions.voyage_dir.clone(),
             // A repo's own `[github]`, and only that (T-79): a child repo
             // without one is local-only. It never inherits the project's
             // section, which names another repository — a GitHub mode that
@@ -390,6 +392,10 @@ pub struct Repo {
     pub release: String,
     /// The gate that runs in this repo before a merge.
     pub gate: String,
+    /// The project's voyage folder template (`[conventions].voyage_dir`, T-257
+    /// with `{project}` and `{milestone}`): a merge that changes only reports
+    /// in it needs no gate (T-573).
+    pub voyage_dir: String,
     /// The GitHub mode of this repo (T-79); `None` = local-only.
     pub github: Option<Github>,
 }

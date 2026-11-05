@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1176 -->
+<!-- gear-plan project=gear base=1181 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -77,6 +77,8 @@ eta: 4h
 - station M-7869: keep course T-561 merged, T-562 merging, T-560 queued, T-563..T-565 in review; v0.6.56 ships when the six are on dev
 - station M-7912: keep course T-563 hand-merged, T-564 merging after rework, T-565 and T-567 in rework/review; v0.6.56 ships when they are on dev
 - station M-7930: keep course T-568, T-570 merged and shipped in v0.6.59 with the pane-close guard; T-569 merging
+- station M-7948: keep course v0.6.60 shipped; T-571 remerged (gate wall time under load); T-572..T-575 in work
+- station M-7977: keep course T-573, T-575 merged; T-572 back for a conflict with T-573; T-574 and T-576 in review; v0.6.61 when they land
 - 2026-11-04 08:44 override: T-563 passes over F1 | why: the retired-lane test exists and passes as idle_contract::a_retired_lane_with_ready_tasks_says_they_will_not_start; only the contract's filter test(idle::) named the wrong place, and that wording was mine; every behaviour (1)-(3) the review found ok | changes: none to delivered behaviour
 # Queue
 
@@ -243,7 +245,7 @@ estimate: 45
 deps: -
 
 ## T-572 [now] lane=mast milestone=M6.2
-goal: [v0.6.60] A red merge round tells the captain why, and a refusal that repeats stops the splitting (user, 2026-11-05: Prometheus batches went red six times in an hour — 8, 3, 2, 1 members — every time for the same two browser cases missing cost declarations, a cause on dev that no split could fix, and the captain heard nothing). In crates/gear-engine/src/merge.rs `run_batch` and the batch collection: (1) after every red batch round, keep one item per project on thread `merge-red:<project>` (opened once, body updated, closed when a merge lands): the round's refusal lines as the gate printed them, the members, and how many red rounds and minutes this line has spent. (2) Keep each red round's refusal text, normalized (no shas, run ids or timings); when two consecutive red rounds with different member sets give the same refusal, stop splitting: requeue every member, set the batch line waiting, and make the item urgent: "the same refusal with different members: the cause is on <integration>, not in the batch". The line runs again when a merge op is queued anew (a remerge or a new pass), not before.
+goal: [v0.6.60] A red merge round tells the captain why, and a refusal that repeats stops the splitting (user, 2026-11-05: Prometheus batches went red six times in an hour — 8, 3, 2, 1 members — every time for the same two browser cases missing cost declarations, a cause on dev that no split could fix, and the captain heard nothing). In crates/gear-engine/src/merge.rs `run_batch` and the batch collection: (1) from the FIRST red batch round on, keep one urgent item per project on thread `merge-red:<project>` (opened at once, body updated each round, closed when a merge lands): the round's refusal lines as the gate printed them, the members, how many red rounds and minutes the line has spent, and what the captain can do: send the cause back to a lane, take a member out (a `fail` verdict or a cancel), or let GEAR split. Today the captain hears nothing until a lone merge fails (Prometheus 19:08-20:17: six red rounds, no item). The halving goes on meanwhile as the fallback, so the line never sits idle. (2) Keep each red round's refusal text, normalized (no shas, run ids or timings); when two consecutive red rounds with different member sets give the same refusal, stop splitting: requeue every member, set the batch line waiting, and make the item urgent: "the same refusal with different members: the cause is on <integration>, not in the batch". The line runs again when a merge op is queued anew (a remerge or a new pass), not before.
 accept: Tests in merge.rs `mod tests`: two red rounds with the same refusal and different members stop the splitting and leave one urgent merge-red item naming the refusal; a red round followed by a green one closes the item; different refusals keep today's halving. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
 estimate: 60
 deps: -
@@ -251,5 +253,23 @@ deps: -
 ## T-573 [now] lane=hull milestone=M6.2
 goal: [v0.6.60] A merge that carries only reports skips the gate (user, 2026-11-05: prometheus/web/t732 held one review record, and its merge would still pay a four-to-five-minute CI round). In crates/gear-engine/src/merge.rs, before a single or batch merge runs `[conventions] gate`: when every file the candidate (and the review commits) changes against the integration branch lies under the project's voyage folder (`[conventions] voyage_dir` with `{project}` filled and `{milestone}` as any folder), merge it without the gate (conflict check and push as usual) and say so in the merge result ("no gate: reports only"). In a batch, such members merge first and need no gate; the rest gate as today.
 accept: Tests: a candidate that adds only gear/p/voyages/M1/reviews/T-5.md merges without running the gate command (a gate command that fails proves it); a candidate touching any other file still gates. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
+estimate: 40
+deps: -
+
+## T-574 [now] lane=mast milestone=M6.2
+goal: [v0.6.60] The captain can put one merge first (2026-11-05: Prometheus's T-738 held the fix every red round waited for, and its merge was last of eight `now` merges plus seven recovered ones, an hour away; the GEAR captain moved it by editing the store). Add a `# Staff` line `- merge-first T-<n>`: the task's queued merge op runs next on its branch, alone (not batched), before every other ready merge including `now` ones; the line is one-shot (applied once, then removed from the file like `remerge`). Find where `remerge` is parsed and applied (crates/gear-app/src/plan.rs) and where the engine orders ready merges (crates/gear-engine/src/merge.rs `merge_order` / `now_first`).
+accept: Tests: with three ready merges, `- merge-first` on the last one makes it run first and alone; a task with no queued merge is refused with a line saying so. Run only `make check CRATE=gear-app TESTS='test(plan::) | test(remerge)'` and `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
+estimate: 40
+deps: -
+
+## T-575 [now] lane=hull milestone=M6.2
+goal: [v0.6.60] The stall check never calls a delivered task queued (Prometheus 2026-11-05: M-10694, M-10699, M-10700 said 'T-748 is queued' every few minutes while T-748 attempt 1 was delivered and `gear queue` showed 'platform working T-748'). Find the check that writes those items (grep "is queued" in crates/gear-engine/src, the stall/feed code of T-560) and count an attempt in state delivered (or any started attempt) as work in progress, the way `gear queue` does.
+accept: Test: a task whose attempt is delivered and not yet started is not named queued, and no stall item is written for it; a task with no attempt still is. Run only `make check CRATE=gear-engine TESTS='test(stall) | test(feed)'`; the merge gate runs `make gate`.
+estimate: 30
+deps: -
+
+## T-576 [now] lane=hull milestone=M6.2
+goal: [v0.6.61] A merge a red batch sends back is queued, not unknown (Prometheus 2026-11-05: O-7384..O-7390, T-716..T-726, sat `unknown` from 19:43 with "its batch failed the gate: it is gated again in a smaller batch"; no later batch took them, the lost scan said "nothing will merge it", and `- remerge T-722` was refused as "already unknown, not failed"). In crates/gear-engine/src/merge.rs, where a batch or train result requeues its members (Report::Requeue in the batch/train collection): the op goes back to `intended` with that reason, never `unknown` (unknown is only for a push whose outcome is not known). Also: `remerge` accepts an `unknown` op that no worker runs (it becomes intended), and the lost scan counts an `unknown` op as in flight.
+accept: Tests: a red batch of three leaves the members it sends back `intended`, and the next batch takes them; `- remerge` of a task whose op is unknown with no running worker queues it. Run only `make check CRATE=gear-engine TESTS='test(merge::)'` and `make check CRATE=gear-app TESTS='test(remerge)'`; the merge gate runs `make gate`.
 estimate: 40
 deps: -

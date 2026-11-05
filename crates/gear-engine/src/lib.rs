@@ -25,6 +25,7 @@ pub mod dialog;
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
+pub mod finished;
 pub mod friction;
 pub mod guardrails;
 pub mod handover;
@@ -197,6 +198,8 @@ pub struct TickReport {
     pub friction: Vec<String>,
     /// Station message ids opened at ETA/task checkpoints (`project:M-n`).
     pub stations: Vec<String>,
+    /// Items resolved because their voyage finished (T-571, `project:M-n`).
+    pub finished: Vec<String>,
     /// Lanes alerted for being Working without their own development attempt.
     pub busy_lanes: Vec<String>,
     /// Seats rung for being blocked by a dialog for too long (lesson 7b).
@@ -350,6 +353,22 @@ pub fn tick(
         }
     }
     note_slow(&mut report, "stations", step);
+
+    // T-571: a finished voyage sends nothing. Once none of a voyage's tasks is
+    // open, the engine items it left behind (its branch sweep, its station, its
+    // merge failures and waits, its overruns, the stalled-voyage item, the open
+    // items of its tasks) resolve, so the doorbell below has nothing of it left
+    // to name.
+    let step = std::time::Instant::now();
+    for project in &projects {
+        match finished::close(store, project, now) {
+            Ok(closed) => report
+                .finished
+                .extend(closed.into_iter().map(|id| format!("{project}:{id}"))),
+            Err(error) => report.project_failed.push(project_error(project, &error)),
+        }
+    }
+    note_slow(&mut report, "finished voyages", step);
 
     // 1. observe: one agents() call for the whole session. If it fails, every
     //    project is marked and nothing at all is decided this tick.
@@ -1556,6 +1575,24 @@ fn doorbell_inputs(
                 .flat_map(|view| view.open.into_iter().map(|message| message.id))
                 .collect();
             waiting.retain(|item| batch_ids.contains(&item.id));
+
+            // T-571: with no voyage of the project open, the captain is rung
+            // only for items a person or another seat addressed to it — nothing
+            // of a voyage that finished. The items it left open are resolved
+            // before this doorbell is built (`finished::close`); this keeps a
+            // stale one the store still holds from ringing again.
+            let sweep = finished::Sweep::read(tx, project)?;
+            if !sweep.empty() {
+                let mut stale = BTreeSet::new();
+                for item in &waiting {
+                    if let Some(message) = tx.get_message(project, &item.id)? {
+                        if sweep.why(&message).is_some() {
+                            stale.insert(item.id.clone());
+                        }
+                    }
+                }
+                waiting.retain(|item| !stale.contains(&item.id));
+            }
         }
 
         // A delivery/doorbell that still occupies the seat's slot, and when the

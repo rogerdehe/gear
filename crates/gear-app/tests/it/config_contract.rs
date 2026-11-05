@@ -1013,6 +1013,7 @@ fn a_project_without_repos_has_only_the_root_repo() {
             integration: "dev".into(),
             release: "main".into(),
             gate: "make test".into(),
+            voyage_dir: gear_model::layout::VOYAGE_DIR.into(),
             github: None,
         }
     );
