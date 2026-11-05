@@ -34,12 +34,12 @@ pub struct ReviewReport {
     /// The tasks whose review still waits: no free temp slot, or a reviewer
     /// that is not up yet.
     pub waiting: Vec<String>,
-    /// `project:task/attempt` of the mechanical hand-ins settled this tick
-    /// (T-273) — settled without a reviewer.
+    /// `project:task/attempt` of the hand-ins settled this tick without a
+    /// reviewer: a mechanical task (T-273) or a member of a feature (T-589).
     pub settled: Vec<String>,
-    /// `project:task/attempt: CODE: detail` of the mechanical hand-ins whose
-    /// settlement failed this tick: reported, never fatal; the hand-in is
-    /// reviewed as today (contract v2 of T-273).
+    /// `project:task/attempt: CODE: detail` of the hand-ins whose settlement
+    /// without a reviewer failed this tick: reported, never fatal; the hand-in
+    /// is reviewed as today (contract v2 of T-273).
     pub settle_failed: Vec<String>,
 }
 
@@ -218,6 +218,30 @@ fn start_hand_in_reviews(
         config.quota.temps,
     )?);
     for task in tasks {
+        // T-589: a member of a feature is not reviewed at its hand-in. Its work
+        // lands on the feature's branch through the light merge (a conflict
+        // check and the feature's own check), and its review is the light check
+        // of the next task (stage 2). The attempt is settled as accepted here,
+        // so the merge is queued at once and no review seat is taken. A rework
+        // (the captain's attempt n >= 2) settles the same way; the feature's
+        // own integration task is reviewed as any hand-in is.
+        if let Some(feature) = feature_member(store, project, &task.task)? {
+            match settle_feature_member(store, project, task, &feature, now) {
+                Ok(()) => {
+                    report
+                        .settled
+                        .push(format!("{project}:{}/{}", task.task, task.attempt));
+                    continue;
+                }
+                // The same rule as the mechanical settlement's (contract v2 of
+                // T-273): no error of this step stops the tick; the failure is
+                // reported and the hand-in is then reviewed as today.
+                Err(err) => report.settle_failed.push(format!(
+                    "{project}:{}/{}: {}: {}",
+                    task.task, task.attempt, err.code, err.detail
+                )),
+            }
+        }
         // T-273: a mechanical task is not reviewed. The attempt is settled as
         // a pass in this tick, and the merge gate decides; a task without
         // `mechanical` is reviewed as before.
@@ -240,9 +264,10 @@ fn start_hand_in_reviews(
             }
         }
         // Without `[temps]` there is no reviewer to start (T-273, F1 of its
-        // review): this guard comes **after** the mechanical branch, so a
-        // mechanical hand-in is settled in a project without reviewers too.
-        // The remaining hand-ins keep `tell_captain_of_hand_ins_without_reviewers`.
+        // review): this guard comes **after** the settlements without a
+        // reviewer, so such a hand-in is settled in a project without reviewers
+        // too. The remaining hand-ins keep
+        // `tell_captain_of_hand_ins_without_reviewers`.
         let Some(temps) = config.temps.as_ref() else {
             continue;
         };
@@ -428,6 +453,25 @@ fn start_hand_in_reviews(
     Ok(())
 }
 
+/// T-589: the feature whose member `task` is, if it is one: a task that stores a
+/// feature and is not that feature's integration task. Its work merges into the
+/// feature's branch through the light merge, and its review is the light check
+/// of the next task (stage 2), so its hand-in is accepted without a reviewer.
+/// The integration task brings the whole feature to the integration branch and
+/// is reviewed once with the full gate (stage 1); a task with no feature is
+/// reviewed as today.
+fn feature_member(store: &mut Store, project: &str, task: &str) -> GearResult<Option<String>> {
+    store.read(|tx| {
+        let Some(feature) = tx.task_feature(project, task)? else {
+            return Ok(None);
+        };
+        if tx.feature_carrier(project, &feature)?.as_deref() == Some(task) {
+            return Ok(None);
+        }
+        Ok(Some(feature))
+    })
+}
+
 /// T-273: the reason the attempt's **adopted** contract is mechanical, if it
 /// is. A mechanical task is not reviewed at all: it merges on its gate alone.
 ///
@@ -458,6 +502,15 @@ fn mechanical_reason(
     })
 }
 
+/// What a settlement without a reviewer tells the captain, once per task: the
+/// stem of the meta key that remembers it, the thread the line goes on, and the
+/// line itself.
+struct NoReviewTold {
+    key: &'static str,
+    thread: &'static str,
+    body: String,
+}
+
 /// T-273: settle a mechanical hand-in as a pass without a reviewer. The
 /// verdict is the same one a captain's pass writes, so the merge follows
 /// exactly as for a captain's pass (the merge step queues the op from it), and
@@ -467,6 +520,64 @@ fn settle_mechanical(
     project: &str,
     task: &ReviewTask,
     reason: &str,
+    now: Ts,
+) -> GearResult<()> {
+    settle_without_review(
+        store,
+        project,
+        task,
+        format!("mechanical: {reason}"),
+        NoReviewTold {
+            key: "mechanical_told",
+            thread: "mechanical",
+            body: format!(
+                "{} settled without review: mechanical ({reason}); the merge gate decides",
+                task.task
+            ),
+        },
+        now,
+    )
+}
+
+/// T-589: settle a feature member's hand-in as a pass without a reviewer. The
+/// verdict and the merge that follows are the same as for a mechanical task or
+/// a captain's pass; what decides is the light merge into the feature's branch,
+/// so the captain is told once, on the thread `feature:<task>`.
+fn settle_feature_member(
+    store: &mut Store,
+    project: &str,
+    task: &ReviewTask,
+    feature: &str,
+    now: Ts,
+) -> GearResult<()> {
+    settle_without_review(
+        store,
+        project,
+        task,
+        format!("feature {feature}: accepted at hand-in without a review"),
+        NoReviewTold {
+            key: "feature_member_told",
+            thread: "feature",
+            body: format!(
+                "{} settled without review: a member of feature {feature}; its merge into \
+                 the feature's branch and the feature check decide",
+                task.task
+            ),
+        },
+        now,
+    )
+}
+
+/// Settle a hand-in as a pass without a reviewer, on the path a mechanical task
+/// (T-273) and a feature's member (T-589) share. The verdict is the same one a
+/// captain's pass writes, so the merge follows exactly as for a captain's pass
+/// (the merge step queues the op from it), and the captain is told once.
+fn settle_without_review(
+    store: &mut Store,
+    project: &str,
+    task: &ReviewTask,
+    evidence: String,
+    told: NoReviewTold,
     now: Ts,
 ) -> GearResult<()> {
     store.write(|tx| {
@@ -480,14 +591,14 @@ fn settle_mechanical(
             contract_version: attempt.adopted_version,
             candidate: task.candidate.clone(),
             pass: true,
-            evidence: Some(format!("mechanical: {reason}")),
+            evidence: Some(evidence),
             rework: None,
             integrated_by: None,
             by_seat: "engine".into(),
         };
         gear_app::tasks::settle(tx, &verdict, now)?;
         // One message, not one per tick.
-        let told_key = format!("engine.mechanical_told.{project}.{}", task.task);
+        let told_key = format!("engine.{}.{project}.{}", told.key, task.task);
         if tx.get_meta(&told_key)?.is_some() {
             return Ok(());
         }
@@ -495,7 +606,7 @@ fn settle_mechanical(
             tx.insert_message(&NewMessage {
                 meta: None,
                 project: project.to_string(),
-                thread: format!("mechanical:{}", task.task),
+                thread: format!("{}:{}", told.thread, task.task),
                 task: Some(task.task.clone()),
                 attempt: Some(task.attempt),
                 sender: "engine".into(),
@@ -503,10 +614,7 @@ fn settle_mechanical(
                 recipient: captain.id.clone(),
                 kind: MsgKind::System,
                 urgent: false,
-                body: format!(
-                    "{} settled without review: mechanical ({reason}); the merge gate decides",
-                    task.task
-                ),
+                body: told.body,
                 reply_to: None,
                 needs_ack: false,
                 state: MsgState::Info,
@@ -4976,6 +5084,265 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             .filter(|seat| seat.role == SeatRole::Temp)
             .count();
         assert_eq!(temps, 1, "the reviewer judges the change");
+    }
+
+    /// The world of T-589: the task handed in by `world_mechanical`, marked with
+    /// the feature `feature` and, when `carrier` names one, that feature's
+    /// integration task.
+    fn world_feature(feature: &str, carrier: Option<&str>) -> Store {
+        let mut store = world_mechanical(CONFIG, None);
+        store
+            .write(|tx| {
+                tx.set_task_feature("p", "T-1", feature)?;
+                tx.set_feature_carrier("p", feature, carrier.unwrap_or("T-9"))
+            })
+            .unwrap();
+        store
+    }
+
+    /// The merge ops the project queued, in any state.
+    fn merge_ops(store: &mut Store) -> Vec<gear_store::OpRow> {
+        let mut merges: Vec<_> = Vec::new();
+        for state in [OpState::Intended, OpState::Executing] {
+            merges.extend(
+                store
+                    .read(|tx| tx.ops_in_state("p", state))
+                    .unwrap()
+                    .into_iter()
+                    .filter(|op| op.kind == OpKind::Merge),
+            );
+        }
+        merges
+    }
+
+    /// T-589: a member of a feature is accepted at hand-in — no review seat is
+    /// taken and its merge into the feature's branch queues at once.
+    #[test]
+    fn a_feature_members_hand_in_is_accepted_without_a_review() {
+        let mut store = world_feature("F-1", None);
+        let mut herdr = FakeHerdr::new();
+
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+
+        assert_eq!(report.settled, vec!["p:T-1/1".to_string()], "{report:?}");
+        assert!(report.settle_failed.is_empty(), "{report:?}");
+        assert!(report.started.is_empty(), "{report:?}");
+
+        // No reviewer: no seat, no worktree, no agent.
+        assert!(starts(&herdr).is_empty(), "{:?}", starts(&herdr));
+        assert!(worktrees(&herdr).is_empty());
+        let temps = store
+            .read(|tx| tx.seats_of_project("p"))
+            .unwrap()
+            .into_iter()
+            .filter(|seat| seat.role == SeatRole::Temp)
+            .count();
+        assert_eq!(temps, 0, "no review seat starts");
+
+        // The attempt is accepted and the task done: the review of the next
+        // task is where the work is looked at (stage 2).
+        let attempt = store
+            .read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.state, AttemptState::Accepted);
+        assert_eq!(
+            store
+                .read(|tx| tx.get_task("p", "T-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            TaskState::Done
+        );
+        let verdict = store
+            .read(|tx| tx.verdicts_of_task("p", "T-1"))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(verdict.passed);
+        assert_eq!(
+            verdict.evidence.as_deref(),
+            Some("feature F-1: accepted at hand-in without a review")
+        );
+        assert_eq!(verdict.by_seat, "engine");
+        assert_eq!(verdict.candidate, "abc1234");
+
+        // The merge queues at once, as for a captain's pass.
+        crate::merge::merge_passed(&mut store, &mut herdr, &cfg(), "p", T0 + 11).unwrap();
+        let merges = merge_ops(&mut store);
+        assert_eq!(merges.len(), 1, "{merges:?}");
+        assert_eq!(merges[0].task.as_deref(), Some("T-1"));
+        assert_eq!(merges[0].attempt, Some(1));
+
+        // One Info line for the captain, and a second tick adds nothing.
+        let told = thread(&mut store, "feature:T-1");
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].recipient, "p:captain");
+        assert_eq!(told[0].state, MsgState::Info);
+        assert!(!told[0].urgent);
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 20,
+        )
+        .unwrap();
+        assert_eq!(thread(&mut store, "feature:T-1").len(), 1);
+        assert_eq!(
+            store
+                .read(|tx| tx.verdicts_of_task("p", "T-1"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// T-589: a rework of a member (the captain's attempt 2) is settled the same
+    /// way: no reviewer, and its merge queues.
+    #[test]
+    fn a_feature_members_rework_is_accepted_without_a_review() {
+        let mut store = world_feature("F-1", None);
+        store
+            .write(|tx| {
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 2,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Submitted,
+                    candidate: Some("def5678".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0 + 5,
+                    updated: T0 + 5,
+                })
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+
+        assert_eq!(report.settled, vec!["p:T-1/2".to_string()], "{report:?}");
+        assert!(starts(&herdr).is_empty(), "{:?}", starts(&herdr));
+        assert_eq!(
+            store
+                .read(|tx| tx.get_attempt("p", "T-1", 2))
+                .unwrap()
+                .unwrap()
+                .state,
+            AttemptState::Accepted,
+            "the rework is accepted at hand-in: {report:?}"
+        );
+        crate::merge::merge_passed(&mut store, &mut herdr, &cfg(), "p", T0 + 11).unwrap();
+        let merges = merge_ops(&mut store);
+        assert_eq!(merges.len(), 1, "{merges:?}");
+        assert_eq!(merges[0].attempt, Some(2));
+    }
+
+    /// T-589: the feature's own integration task is not a member: its hand-in
+    /// waits for a review, as stage 1 has it.
+    #[test]
+    fn a_feature_integration_tasks_hand_in_still_waits_for_a_review() {
+        let mut store = world_feature("F-1", Some("T-1"));
+        let mut herdr = FakeHerdr::new();
+
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+
+        assert!(report.settled.is_empty(), "{report:?}");
+        let attempt = store
+            .read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.state, AttemptState::Submitted, "nothing settles it");
+        assert!(store
+            .read(|tx| tx.verdicts_of_task("p", "T-1"))
+            .unwrap()
+            .is_empty());
+        assert!(
+            thread(&mut store, "feature:T-1").is_empty(),
+            "no feature line"
+        );
+        let temps = store
+            .read(|tx| tx.seats_of_project("p"))
+            .unwrap()
+            .into_iter()
+            .filter(|seat| seat.role == SeatRole::Temp)
+            .count();
+        assert_eq!(temps, 1, "the reviewer judges the integration");
+    }
+
+    /// T-589: a task with no feature is reviewed as today.
+    #[test]
+    fn a_task_with_no_feature_is_reviewed_as_today() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+
+        let report = start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+
+        assert!(report.settled.is_empty(), "{report:?}");
+        assert!(report.settle_failed.is_empty(), "{report:?}");
+        let attempt = store
+            .read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.state, AttemptState::Submitted, "nothing settles it");
+        assert!(store
+            .read(|tx| tx.verdicts_of_task("p", "T-1"))
+            .unwrap()
+            .is_empty());
+        assert!(
+            thread(&mut store, "feature:T-1").is_empty(),
+            "no feature line"
+        );
+        let temps = store
+            .read(|tx| tx.seats_of_project("p"))
+            .unwrap()
+            .into_iter()
+            .filter(|seat| seat.role == SeatRole::Temp)
+            .count();
+        assert_eq!(temps, 1, "the reviewer starts as before");
     }
 
     /// T-273: a task without `mechanical` is reviewed as today.
