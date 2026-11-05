@@ -93,6 +93,7 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             plan_message: "{milestone}: {what}".into(),
             // T-413: no scratch directory named; the seat's worktree holds it.
             scratch_dir: None,
+            worktree_setup: None,
         }
     );
     assert_eq!(Conventions::default().gate, "", "the gate has no default");

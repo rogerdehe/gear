@@ -514,6 +514,11 @@ pub struct Conventions {
     /// each seat gets `<scratch_dir>/<project>/<seat>` as its `TMPDIR`. Absent
     /// = the seat's own worktree holds them, `<worktree>/.gear/tmp`.
     pub scratch_dir: Option<String>,
+    /// A shell command run once in every worktree GEAR opens for a seat,
+    /// before its agent starts (e.g. `cd web && npm ci`): a fresh worktree has
+    /// only what git tracks, never the installed dependencies. Absent = none.
+    #[serde(default)]
+    pub worktree_setup: Option<String>,
 }
 
 impl Default for Conventions {
@@ -541,6 +546,7 @@ impl Default for Conventions {
             review_message: gear_model::commit::REVIEW_MESSAGE.to_string(),
             plan_message: gear_model::commit::PLAN_MESSAGE.to_string(),
             scratch_dir: None,
+            worktree_setup: None,
         }
     }
 }
