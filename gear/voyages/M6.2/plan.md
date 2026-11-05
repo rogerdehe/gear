@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1199 -->
+<!-- gear-plan project=gear base=1200 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -9,6 +9,8 @@ eta: 4h
 depart: now
 
 # Decisions
+- 2026-11-05 16:30 scope: feature integration stage 2 (one reviewer per feature, light checks with the 5-minute reminder, owner-lane rework) joins M6.2 as feature F-1, the design agreed with the user; GEAR runs it as a feature first | why: the user: use what GEAR ships before the clients do
+- station M-8102: keep course | why: v0.6.80 released with stage 1; stage 2 planned as F-1 on GEAR itself
 - station M-8072: keep course | why: T-587, the last stage 1 task, moves to hull, which frees up after T-584 sooner than mast after T-585; stage 1 then ships without waiting for T-585 | else: time-box
 - station M-8048: keep course | why: the release does not wait for the whole voyage: feature stage 1 (T-578, T-579, T-582, T-583, T-587) ships to Carthage as soon as it merges, ahead of T-584..T-586 which sit behind it in each lane's queue; the projected 422m counts those too | else: time-box
 - 2026-11-05 16:40 hand-fix: T-581 conflicted with T-580 in dispatch.rs (both added tests at one place); dev merged into hull/t581 keeping both, dispatch tests 23/23, pushed 1f0736bf | why: merge conflict, a few lines
@@ -356,6 +358,46 @@ accept: Unit tests next to current_voyage: last departed voyage finished and an 
 estimate: 30
 deps: -
 fresh: current voyage, unrelated to records
+
+## T-589 [must] lane=mast milestone=M6.2 required
+goal: [feature stage 2, 1/5] A member's hand-in is accepted without a blocking review. crates/gear-engine/src/review.rs `tasks_to_review` (and `settle_mechanical`'s path): an attempt of a task with a stored feature (`tx.task_feature`, non-empty) that is not the feature's integration task (`feature_carrier`) is settled as accepted at hand-in, the way a mechanical task is, so its merge into the feature branch queues at once (the light merge: conflict check and `feature_check`). Its review becomes the light check of the next task (stage 2, 2/5); nothing waits on it. A rework (attempt >= 2, set by the captain) is settled the same way. A task with no feature is unchanged.
+accept: Tests in review.rs `mod tests`: a member's hand-in is accepted with no review seat taken and a merge op queued; the integration task's hand-in still waits for a review; a task with no feature is reviewed as today. Run only the new tests by name with `make check CRATE=gear-engine TESTS='test(review::tests::<name>)'`; the merge gate runs `make gate`.
+estimate: 40
+deps: -
+feature: F-1
+fresh: feature stage 2
+
+## T-590 [must] lane=hull milestone=M6.2 required
+goal: [feature stage 2, 2/5] One reviewer per feature, with its conversation kept, runs a light check on every member. crates/gear-engine/src/review.rs: (1) a store meta `feature_reviewer:{project}:{feature}` holds the seat id of the feature's reviewer: the first light check of the feature takes a seat as a review does today and records it; every later light check and the integration task's review go to that seat, waited for (never skipped) as T-480's `rework_seat_free` waits, and continue its conversation (no fresh session); a retired seat falls back to a new one, which is recorded. (2) The light check: when a member's attempt is accepted (stage 2, 1/5), a direction-check job (`start_direction_checks`' job and branch, `direction_key`) runs on the member's candidate in that seat, also for attempts >= 2 of members; its packet says: "Stage check of <T> in feature <F> (goal of the feature: <the integration task's goal>). Check the direction and plain breakage against the feature's goal; the full review comes once, on the feature's integration task. Report findings; you block nothing." Its result is stored on the member (as direction results are) and is never a verdict.
+accept: Tests in review.rs `mod tests`: two members of F-1 handed in one after the other get their light checks in the same seat, the second waiting for the first; the integration task's review lands in that seat; a member's light check opens no fail item and changes no task state. Run only the new tests by name; the merge gate runs `make gate`.
+estimate: 60
+deps: -
+feature: F-1
+fresh: feature stage 2
+
+## T-591 [must] lane=mast milestone=M6.2 required
+goal: [feature stage 2, 3/5] A light check is reminded at 5 minutes that it is a stage check, and is never stopped. crates/gear-engine/src/overrun.rs: a direction round of a feature member gets a budget of 5 minutes (not the task's estimate). When it is reached, the seat gets one interrupting prompt (as the overrun question is delivered today): "GEAR: <T> is a stage check of feature <F>, and 5 minutes have passed. Report what you found now. If you have a lead that needs more time, reply with one line saying why and keep going; the full review comes on the feature's integration task." The engine never ends the round, never sets a result for it and never judges it on course; a `progress` reply with a reason silences the reminder for that round; no second reminder.
+accept: Tests in overrun.rs `mod tests`: a member's direction round at 5 min gets the reminder once; a reply stops it; the round stays open with no result; a normal review round keeps its estimate budget. Run only the new tests by name; the merge gate runs `make gate`.
+estimate: 30
+deps: -
+feature: F-1
+fresh: feature stage 2
+
+## T-592 [must] lane=hull milestone=M6.2 required
+goal: [feature stage 2, 4/5] The feature's full review sees the light checks, and its rework goes to one owner lane. (1) crates/gear-engine/src/review.rs job_packet for an integration task: list each member with its goal and its light-check findings, and say "This is the feature's full review: judge the whole branch against the integration branch; a fail names every finding, the owner lane fixes them in one rework." (2) crates/gear-engine/src/dispatch.rs: T-581 keeps attempt 1 of an integration task out of delivery; a rework (attempt >= 2) of it IS delivered to the task's lane (the owner: the lane with most members, set at creation; the captain moves it with `lane=` like any task), and its packet's branch is the feature branch (`task_branch_override`), so the fix lands on the feature branch and the integration task hands in its tip. The same holds when the integration task's merge fails its full gate and the captain settles a fail.
+accept: Tests: the integration task's review packet lists the members and their findings; a fail of the integration task delivers attempt 2 to the owner lane with `git switch` to the feature branch; attempt 1 is still never delivered. Run only the new tests by name; the merge gate runs `make gate`.
+estimate: 50
+deps: -
+feature: F-1
+fresh: feature stage 2
+
+## T-593 [must] lane=mast milestone=M6.2 required
+goal: [feature stage 2, 5/5] The skill. skills/gear/references/captain.md (the `feature` field) and review.md: a member is accepted at hand-in and merges into the feature branch; one reviewer per feature runs a light check on each member (direction and plain breakage, blocks nothing, reminded at 5 minutes that it is a stage check, may go on with a reason); the integration task gets the full review and the full gate; a fail of either is one rework of the owner lane on the feature branch. At most six lines in all.
+accept: The two files say so in at most six lines; `make check CRATE=gear-app TESTS='test(skill)'` passes; the merge gate runs `make gate`.
+estimate: 15
+deps: -
+feature: F-1
+fresh: feature stage 2
 
 ## T-583 [now] lane=mast milestone=M6.2 required
 goal: [feature 7/7] The captain's skill. skills/gear/references/captain.md `# Queue` field list: `feature` (`F-<n>`: the task is part of a feature; members merge into the feature branch with no CI, deps between members release on that merge, and GEAR creates one integration task per feature that reaches the integration branch with one review and the full gate; at most `feature_max_tasks` members; a dep from outside names the integration task; members share the feature's issue). skills/gear/references/decompose.md: a rule that a capability of several small tasks is one feature, cut at decomposition (an issue in issue mode), and that small unrelated tasks stay without a feature.
