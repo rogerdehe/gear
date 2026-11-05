@@ -506,9 +506,10 @@ pub struct Conventions {
     /// branch: `{project}` and `{task}` (or `{n}`) are filled in. Default
     /// `{project}/direction/{task}`.
     pub direction_branch: String,
-    /// The branch of a seat's own worktree (T-252), with `{project}` and
-    /// `{seat}` filled in: the merge worktree is seat `merge`, so Herdr names
-    /// the worktree `<project>-<seat>`. Default `{project}/{seat}`.
+    /// The branch of a seat's own worktree (T-252, T-584), with `{project}`,
+    /// `{seat}` and `{voyage}` filled in: the merge worktree is seat `merge`,
+    /// so Herdr names the worktree `<project>-<seat>`, and each voyage's seats
+    /// get their own branch. Default `{project}/{seat}/{voyage}`.
     pub seat_branch: String,
     /// The git remote a hand-in is checked against (T-257): the branch is
     /// fetched from it and `<remote>/<branch>` is the ref the check reads.
@@ -2034,13 +2035,13 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
             "conventions.seat_branch",
             &conventions.seat_branch,
             &["seat"],
-            &["project", "seat"],
+            &["project", "seat", "voyage"],
         ),
     ];
     let mut usable = [false; 4];
     for (index, (field, template, required, allowed)) in templates.iter().enumerate() {
         let sample = if required.contains(&"seat") {
-            gear_model::branch::expand_seat(template, SAMPLE_PROJECT, SAMPLE_SEAT)
+            gear_model::branch::expand_seat(template, SAMPLE_PROJECT, SAMPLE_SEAT, SAMPLE_VOYAGE)
         } else {
             gear_model::branch::expand(template, SAMPLE_PROJECT, SAMPLE_LANE, SAMPLE_TASK)
         };
@@ -2105,14 +2106,18 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
             SAMPLE_TASK,
         );
         for seat in [lane.name.as_str(), MERGE_SEAT, REVIEW_SEAT] {
-            let seat_branch =
-                gear_model::branch::expand_seat(&conventions.seat_branch, project, seat);
+            let seat_branch = gear_model::branch::expand_seat(
+                &conventions.seat_branch,
+                project,
+                seat,
+                SAMPLE_VOYAGE,
+            );
             for (kind, branch) in [("task", &task), ("review", &review)] {
                 if one_branch_holds_the_other(&seat_branch, branch) {
                     issues.push(issue(
                         "conventions.seat_branch",
                         format!(
-                            "the seat branch {seat_branch} and the {kind} branch {branch} cannot both exist in git (a ref and a directory of the same name): give the seat branches their own folder, e.g. seat_branch = \"{{project}}/{{seat}}/home\""
+                            "the seat branch {seat_branch} and the {kind} branch {branch} cannot both exist in git (a ref and a directory of the same name): give the seat branches their own folder, e.g. seat_branch = \"{{project}}/{{seat}}/{{voyage}}\""
                         ),
                     ));
                 }
@@ -2362,10 +2367,13 @@ fn issue(field: &str, problem: String) -> ConfigIssue {
 }
 
 /// The sample a branch template is expanded with to check it (T-252): one
-/// project, one lane, one seat, one task.
+/// project, one lane, one seat, one task, one voyage. The voyage is a sample
+/// like the rest: `validate` reads no store, so a project's own voyage is
+/// expanded where its branches are cut (T-584).
 const SAMPLE_PROJECT: &str = "p";
 const SAMPLE_LANE: &str = "l";
 const SAMPLE_SEAT: &str = "s";
+const SAMPLE_VOYAGE: &str = "M1";
 const SAMPLE_TASK: &str = "T-1";
 
 /// The placeholders `template` names, filled in or not.
@@ -2824,14 +2832,19 @@ gate = "make test"
     }
 
     #[test]
-    fn the_default_seat_branch_is_project_seat_home() {
+    fn the_default_seat_branch_is_project_seat_voyage() {
         assert_eq!(
-            gear_model::branch::expand_seat(&Conventions::default().seat_branch, "p", "captain"),
-            "p/captain/home"
+            gear_model::branch::expand_seat(
+                &Conventions::default().seat_branch,
+                "p",
+                "captain",
+                "M2"
+            ),
+            "p/captain/M2"
         );
         assert_eq!(
-            gear_model::branch::expand_seat(&Conventions::default().seat_branch, "p", "heat"),
-            "p/heat/home"
+            gear_model::branch::expand_seat(&Conventions::default().seat_branch, "p", "heat", "M2"),
+            "p/heat/M2"
         );
         // Beside the lane's task branches, not above them: git can hold both.
         let cfg = parse(&harbor_config(std::path::Path::new("/repo"), None)).unwrap();

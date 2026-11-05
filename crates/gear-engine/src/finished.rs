@@ -404,8 +404,12 @@ fn merge_records(
         return Ok(None);
     }
     let repo = config.root_repo();
-    let branch =
-        gear_model::branch::expand_seat(&config.conventions.seat_branch, project, "captain");
+    let branch = gear_model::branch::expand_seat(
+        &config.conventions.seat_branch,
+        project,
+        "captain",
+        milestone,
+    );
     // A branch git would read as an option is never asked of it: a project
     // that names its seat branches that way has no records step.
     if branch == repo.integration || branch.starts_with('-') {
@@ -799,7 +803,7 @@ mod tests {
         herdr: gear_herdr::fake::FakeHerdr,
     }
 
-    const CAP: &str = "p/captain/home";
+    const CAP: &str = "p/captain/M1";
 
     fn config_text(repo: &Path) -> String {
         format!(
@@ -868,7 +872,7 @@ gate = "true"
             sh(
                 root.path(),
                 &format!(
-                    "git -C {} worktree add -q -b p/merge/home {} origin/dev",
+                    "git -C {} worktree add -q -b p/merge/M1 {} origin/dev",
                     work.display(),
                     merge.display()
                 ),
@@ -955,7 +959,7 @@ gate = "true"
                 })
                 .unwrap();
             let mut herdr = gear_herdr::fake::FakeHerdr::new();
-            herdr.add_worktree("p/merge/home", &merge.display().to_string(), "wt-merge:p1");
+            herdr.add_worktree("p/merge/M1", &merge.display().to_string(), "wt-merge:p1");
             Landed {
                 root,
                 work,

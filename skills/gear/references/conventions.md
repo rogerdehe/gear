@@ -40,7 +40,7 @@ The branch names, the remote and the voyage folder are configuration: a project 
 | `integration` / `release` / `staging` | `dev` / `main` / none | — |
 | `task_branch` | `{lane}/t{n}` | `{project}`, `{lane}`, `{n}` |
 | `review_branch` | `review/t{n}` | `{project}`, `{lane}`, `{n}` |
-| `seat_branch` | `{project}/{seat}/home` | `{project}`, `{seat}` |
+| `seat_branch` | `{project}/{seat}/{voyage}` | `{project}`, `{seat}`, `{voyage}` (`between-voyages` when no voyage is under way) |
 | `remote` | `origin` | — (the git remote a hand-in is checked against) |
 | `voyage_dir` | `gear/voyages/{milestone}` | `{project}`, `{milestone}`; its `plan.md`, `reports/` and `reviews/` |
 | `merge_message` | `merge({task}): {source}` | `{project}`, `{task}`, `{source}` |
@@ -134,7 +134,7 @@ Each seat GEAR starts gets its own scratch directory and `TMPDIR` points at it, 
 
 The engine sweeps the remote every 10 minutes. A cancelled task's branches are deleted (the captain is told each commit, so one can be restored). A task branch older than `branch_max_age_min` (default 120), or more task branches of the open voyages than lanes × `branch_max_per_lane` (default 3: two hand-ins out and one sent back), is named to the captain in one urgent item: a voyage's branch is meant to merge within that time, so its work is stuck and the captain decides — get it reviewed and merged, finish the rework first, or cancel the task.
 
-`[conventions] task_branch` (default `{lane}/t{n}`) and `review_branch` (default `review/t{n}`, local to the reviewer's worktree) name the branches; `{project}`, `{lane}`, `{n}` are filled in, e.g. `task_branch = "{project}/{lane}/t{n}"`. `seat_branch` (default `{project}/{seat}/home`, project / seat / home, as a task is project / lane / task) names the branch of each seat's own worktree, and of the merge worktree as seat `merge`, so Herdr names the worktree `<project>-<seat>` and `prometheus/web/home` sits beside the lane's task branches `prometheus/web/t675` instead of above them. Re-apply the config after changing it: GEAR renames the branch of each seat's worktree that still stands on the old name (`git branch -m`, and on the remote when it was pushed), and names a seat whose worktree is on another branch instead of touching it.
+`[conventions] task_branch` (default `{lane}/t{n}`) and `review_branch` (default `review/t{n}`, local to the reviewer's worktree) name the branches; `{project}`, `{lane}`, `{n}` are filled in, e.g. `task_branch = "{project}/{lane}/t{n}"`. `seat_branch` (default `{project}/{seat}/{voyage}`, project / seat / voyage, as a task is project / lane / task) names the branch of each seat's own worktree, and of the merge worktree as seat `merge`, so Herdr names the worktree `<project>-<seat>` and `prometheus/web/M6.2` sits beside the lane's task branches `prometheus/web/t675` instead of above them, one branch per voyage (`between-voyages` when no voyage is under way). Re-apply the config after changing it: GEAR renames the branch of each seat's worktree that still stands on the old name (`git branch -m`, and on the remote when it was pushed), and names a seat whose worktree is on another branch instead of touching it.
 
 The gate has no default: GEAR cannot know another project's build and test, so a project that names none is refused at `gear admin init` until it does (`make gate`, `go test ./...`, `npm test` — whatever exits non-zero on any failure and runs in seconds).
 

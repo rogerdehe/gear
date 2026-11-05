@@ -327,7 +327,7 @@ fn wait_merge(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg) {
 
 /// T-253: the dispatch packet and the lane's worktree come from
 /// `task_branch` and `seat_branch`; with `seat_branch = "w/{seat}"` the lane's
-/// worktree step names `w/heat`, not the default `p/heat/home`.
+/// worktree step names `w/heat`, not the default `p/heat/<voyage>`.
 #[test]
 fn the_dispatch_packet_and_the_lane_worktree_come_from_the_projects_templates() {
     let repo = Repo::new();
@@ -547,7 +547,7 @@ fn a_worktree_of_another_repository_is_not_used_and_opens_a_captain_item() {
         &format!(
             "git -C {} worktree add -q -b {branch} {path} dev",
             other.work.display(),
-            branch = "p/heat/home",
+            branch = "p/heat/between-voyages",
             path = foreign.display()
         ),
     );
@@ -556,7 +556,11 @@ fn a_worktree_of_another_repository_is_not_used_and_opens_a_captain_item() {
     let mut store = world(&config);
     let mut herdr = FakeHerdr::new();
     // Herdr answers the seat's branch with the other repository's worktree.
-    herdr.add_worktree("p/heat/home", &foreign.to_string_lossy(), "other:p1");
+    herdr.add_worktree(
+        "p/heat/between-voyages",
+        &foreign.to_string_lossy(),
+        "other:p1",
+    );
     let cfg = cfg();
 
     let active = onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
@@ -602,10 +606,11 @@ fn git_ok(dir: &Path, args: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// T-565: a project that never wrote a `seat_branch` line has no apply to run
-/// T-559's rename, so its seats keep the branch the previous default named
-/// (`p/heat`). The engine moves it to the current default's name
-/// (`p/heat/home`) at its next start, on the remote too when it is there.
+/// T-565, T-584: a project that never wrote a `seat_branch` line has no apply
+/// to run T-559's rename, so its seats keep the branch the previous default
+/// named (`p/heat/home`). The engine moves it to the current default's name
+/// (`p/heat/<voyage>`, here `p/heat/between-voyages`: no voyage has departed)
+/// at its next start, on the remote too when it is there.
 #[test]
 fn a_seat_branch_of_the_previous_default_is_moved_at_the_next_start() {
     let repo = Repo::new();
@@ -614,11 +619,11 @@ fn a_seat_branch_of_the_previous_default_is_moved_at_the_next_start() {
     sh(
         &repo.work,
         &format!(
-            "git worktree add -q -b p/heat {} origin/dev",
+            "git worktree add -q -b p/heat/home {} origin/dev",
             path.display()
         ),
     );
-    publish(&path, "p/heat");
+    publish(&path, "p/heat/home");
     let config = repo.config("");
     let mut store = world(&config);
     store
@@ -631,25 +636,34 @@ fn a_seat_branch_of_the_previous_default_is_moved_at_the_next_start() {
 
     // Locally: the ref moved, and the checkout that stood on it moved with it.
     assert!(
-        git_ok(&repo.work, "rev-parse --verify refs/heads/p/heat/home"),
+        git_ok(
+            &repo.work,
+            "rev-parse --verify refs/heads/p/heat/between-voyages"
+        ),
         "the new name is a branch: {:?}",
         sh(&repo.work, "git branch --list")
     );
     assert!(
-        !git_ok(&repo.work, "rev-parse --verify refs/heads/p/heat"),
+        !git_ok(&repo.work, "rev-parse --verify refs/heads/p/heat/home"),
         "the old name is gone: {:?}",
         sh(&repo.work, "git branch --list")
     );
-    assert_eq!(sh(&path, "git rev-parse --abbrev-ref HEAD"), "p/heat/home");
+    assert_eq!(
+        sh(&path, "git rev-parse --abbrev-ref HEAD"),
+        "p/heat/between-voyages"
+    );
     // On the remote too: it was pushed there.
     assert!(
-        git_ok(&repo.origin, "rev-parse --verify refs/heads/p/heat/home"),
+        git_ok(
+            &repo.origin,
+            "rev-parse --verify refs/heads/p/heat/between-voyages"
+        ),
         "{:?}",
         sh(&repo.origin, "git branch --list")
     );
     assert!(!git_ok(
         &repo.origin,
-        "rev-parse --verify refs/heads/p/heat"
+        "rev-parse --verify refs/heads/p/heat/home"
     ));
     // The captain hears about it once, in the seat's worktree item.
     let items = store
@@ -658,7 +672,8 @@ fn a_seat_branch_of_the_previous_default_is_moved_at_the_next_start() {
     assert!(
         items
             .iter()
-            .any(|item| item.body.contains("p/heat/home") && item.body.contains("p/heat")),
+            .any(|item| item.body.contains("p/heat/between-voyages")
+                && item.body.contains("p/heat/home")),
         "{items:?}"
     );
 }
@@ -683,14 +698,14 @@ fn a_foreign_ref_in_the_way_of_the_seat_branch_is_named_and_left_alone() {
     assert_ne!(seat.state, SeatState::Active, "{seat:?}");
     let reason = seat.state_reason.clone().unwrap_or_default();
     assert!(
-        reason.contains("p/heat/home") && reason.contains("ref p"),
+        reason.contains("p/heat/between-voyages") && reason.contains("ref p"),
         "{reason}"
     );
     // The foreign ref is untouched, and nothing was created over it.
     assert!(git_ok(&repo.work, "rev-parse --verify refs/heads/p"));
     assert!(!git_ok(
         &repo.work,
-        "rev-parse --verify refs/heads/p/heat/home"
+        "rev-parse --verify refs/heads/p/heat/between-voyages"
     ));
     let items = store
         .read(|tx| tx.thread_messages("p", "worktree:heat"))
