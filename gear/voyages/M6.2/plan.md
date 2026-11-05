@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1193 -->
+<!-- gear-plan project=gear base=1194 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -9,6 +9,7 @@ eta: 4h
 depart: now
 
 # Decisions
+- station M-8048: keep course | why: the release does not wait for the whole voyage: feature stage 1 (T-578, T-579, T-582, T-583, T-587) ships to Carthage as soon as it merges, ahead of T-584..T-586 which sit behind it in each lane's queue; the projected 422m counts those too | else: time-box
 - 2026-11-05 16:40 hand-fix: T-581 conflicted with T-580 in dispatch.rs (both added tests at one place); dev merged into hull/t581 keeping both, dispatch tests 23/23, pushed 1f0736bf | why: merge conflict, a few lines
 - station M-8020: keep course | why: stage 1 tasks are on pace, the next release carries T-577..T-586
 - 2026-11-05 16:20 confirmed: M6.2 departs now (it ran without a depart line, so GEAR took M6.1 for the current voyage and hid M6.2's items) | why: the user said to depart M6.2 with the old team
