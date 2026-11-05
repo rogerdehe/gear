@@ -1847,3 +1847,40 @@ fn a_voyage_stopped_by_a_task_in_review_names_the_tasks_that_wait_for_it() {
         );
     }
 }
+
+/// A merge queued or running moves the voyage: its tasks wait for it, so no
+/// stalled item rings, and an open one closes (Prometheus 2026-11-05: eight
+/// items while T-748's merge ran).
+#[test]
+fn a_running_merge_is_not_a_stopped_voyage() {
+    let mut w = stalled_world();
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 1).unwrap();
+    assert_eq!(stalled_items(&mut w.store).len(), 1);
+
+    w.store
+        .write(|tx| {
+            tx.insert_op(&gear_store::NewOp {
+                project: "p".into(),
+                seat: "p:review".into(),
+                generation: 1,
+                kind: gear_model::OpKind::Merge,
+                task: Some("T-3".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({}),
+                created: T0 + 2,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 5).unwrap();
+
+    let items = stalled_items(&mut w.store);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].state, MsgState::Resolved);
+    assert_eq!(
+        items[0].result.as_deref(),
+        Some("a merge is queued or running")
+    );
+}
