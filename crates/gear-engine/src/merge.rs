@@ -2175,6 +2175,15 @@ fn other_candidates(
             if carried_into(tx, project, &row.id, task)? {
                 continue;
             }
+            // A member of the feature this task integrates merged into the
+            // feature branch, which is this candidate: it lands with this
+            // merge. Waiting for it to reach the integration branch on its own
+            // deadlocked GEAR's own F-1 (T-594 waited for T-589..T-593).
+            if let Some(feature) = tx.task_feature(project, &row.id)? {
+                if tx.feature_carrier(project, &feature)?.as_deref() == Some(task) {
+                    continue;
+                }
+            }
             let attempts = tx.attempts_of_task(project, &row.id)?;
             let Some(latest) = attempts.last() else {
                 continue;
@@ -6797,6 +6806,43 @@ mod tests {
         let passed = passed_tasks(&mut store, "p").unwrap();
         assert_eq!(passed.len(), 1);
         assert_eq!(passed[0].0, "T-1");
+    }
+
+    /// A feature's integration task does not wait for its own members: they
+    /// merged into the feature branch, which is its candidate (GEAR F-1:
+    /// T-594 waited for T-589..T-593 forever). A task outside the feature
+    /// still waits for them.
+    #[test]
+    fn an_integration_task_does_not_wait_for_its_own_members() {
+        let mut store = pair_world("aaa1111", "bbb2222");
+        pass(&mut store, "T-1", "aaa1111", 1);
+        store
+            .write(|tx| {
+                tx.set_task_feature("p", "T-1", "F-1")?;
+                tx.set_feature_carrier("p", "F-1", "T-2")?;
+                Ok(())
+            })
+            .unwrap();
+        let waits_for_member = |store: &mut Store, task: &str| {
+            other_candidates(store, "p", task)
+                .unwrap()
+                .into_iter()
+                .any(|(other, _, _)| other == "T-1")
+        };
+        assert!(
+            !waits_for_member(&mut store, "T-2"),
+            "the integration task carries its member"
+        );
+        store
+            .write(|tx| {
+                tx.set_feature_carrier("p", "F-1", "T-9")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            waits_for_member(&mut store, "T-2"),
+            "a task that integrates another feature still waits"
+        );
     }
 
     /// A reviewed task whose own merge failed is not waited for: a candidate
