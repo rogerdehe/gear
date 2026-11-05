@@ -484,3 +484,21 @@ fn a_pass_naming_a_done_task_without_a_confirmed_merge_is_refused() {
     let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
     assert_eq!(times.merged, None, "nothing was settled");
 }
+
+/// A candidate the repository does not hold was never pushed: nothing can
+/// place it, so the captain's pass names the merge that landed the work
+/// (Prometheus T-563: attempt 6's commit exists nowhere, T-582 landed it).
+#[test]
+fn a_candidate_that_was_never_pushed_takes_the_captains_attribution() {
+    let repos = Repos::new();
+    let gone = "3a4f1a448";
+    let mut s = world(&repos, gone);
+    let text = format!(
+        "<!-- gear-plan project=p base=0 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate={gone} pass evidence=ops/reports/T-1.md integrated-by=T-2\n"
+    );
+
+    run(&mut s, &text, "r1").unwrap();
+
+    let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
+    assert_eq!(times.merged, Some(NOW + 10), "marked merged by T-2's merge");
+}
