@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1221 -->
+<!-- gear-plan project=gear base=1222 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -9,6 +9,7 @@ eta: 4h
 depart: now
 
 # Decisions
+- station M-8245: land | why: all five done clauses met (goal check above), 57 tasks merged, v0.6.83 live for every project
 - 2026-11-05 19:55 note: voyage report: 57 tasks done, 3h43m of a 4h eta; scope 1590m at departure -> 2110m (stages 2 and 3 of feature integration added as F-1 and F-2, as the user agreed); releases v0.6.69..v0.6.83; lanes hull and mast cost $4.11; no star decision; GEAR found and fixed five feature bugs on its own features before a client hit them (integration task waiting for its members, merge and remerge naming lane/t<n>, reviewers told lane/t<n>, false parallel alarms between members, a failed merge closed as voyage finished) and one engine fault (a seat error failing every tick) | why: the landing report for the user
 - station M-8246: keep course | why: T-602 is merging after the engine fix; v0.6.83 ships it, then the landing goes to the user
 - done (1): met | evidence: `captain handover --pane` names the new pane, moves the captain's agent name and sends one urgent item with the handover document's path, branch and commit (v0.6.19..v0.6.50, decisions 2026-11-02..04); used live 2026-11-05 when Lawrence's Claude captain (w1ZJ:pG) took over from opencode
