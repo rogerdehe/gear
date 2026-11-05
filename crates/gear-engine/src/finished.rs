@@ -203,10 +203,14 @@ pub fn reclaim(store: &mut Store, project: &str, now: Ts) -> GearResult<Option<&
                 && message
                     .resolved
                     .is_some_and(|at| now - at < RECLAIM_WITHIN_S)
-                && message
-                    .result
-                    .as_deref()
-                    .is_some_and(|result| result.starts_with("station "))
+                && message.result.as_deref().is_some_and(|result| {
+                    // Only a landing: `station M-n: land …`, never a
+                    // `keep course` (M6.2 was taken for landed).
+                    result.split_once(':').is_some_and(|(_, action)| {
+                        let action = action.trim();
+                        action == "land" || action.starts_with("land ")
+                    })
+                })
         }))
     })?;
     let open = store.read(|tx| {
