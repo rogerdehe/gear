@@ -3345,6 +3345,11 @@ fn render_apply(result: &gear_app::plan::ApplyResult) -> String {
     for id in &result.resolved {
         lines.push(format!("resolved {id}"));
     }
+    // The deps this apply pointed at a feature's integration task (T-587), in
+    // the apply's own words: `T-<x>: dep T-<m> -> T-<carrier> (feature F-<n>)`.
+    for line in &result.rewritten {
+        lines.push(line.clone());
+    }
     lines.join("\n")
 }
 
