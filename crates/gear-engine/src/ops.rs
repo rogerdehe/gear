@@ -2109,6 +2109,14 @@ fn start_confirmed_attempt(tx: &Tx<'_>, project: &str, op: &OpRow, now: Ts) -> G
     if !still_delivered {
         return Ok(false);
     }
+    // A task that cannot start any more (held or cancelled after the delivery)
+    // leaves its attempt alone: one task must not fail the project's tick.
+    let startable = tx.get_task(project, task)?.is_some_and(|row| {
+        gear_model::TaskState::can_transition(row.state, gear_model::TaskState::Running)
+    });
+    if !startable {
+        return Ok(false);
+    }
     gear_app::tasks::on_delivery_confirmed(tx, project, task, attempt, now)?;
     Ok(true)
 }

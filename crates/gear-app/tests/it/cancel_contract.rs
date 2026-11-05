@@ -907,3 +907,23 @@ fn holding_a_running_task_sets_it_aside_and_frees_the_lane() {
     .unwrap();
     assert_eq!(state(&mut s, "T-1"), TaskState::Ready);
 }
+
+/// A ready task whose attempt was delivered but not yet confirmed is set aside
+/// the same way when held: its attempt closes, so the confirmation cannot start
+/// a held task (Prometheus T-759, 2026-11-05: every tick failed for 25 min).
+#[test]
+fn holding_a_delivered_task_closes_its_attempt() {
+    let mut s = world();
+    s.write(|tx| start_attempt(tx, "p", "T-1", "p:heat", 1, T0))
+        .unwrap();
+    assert_eq!(state(&mut s, "T-1"), TaskState::Ready);
+    run(
+        &mut s,
+        "## T-1 [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nstate: hold\n\n## T-2 [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n",
+        1,
+        "v2",
+    )
+    .unwrap();
+    assert_eq!(state(&mut s, "T-1"), TaskState::Draft);
+    assert_eq!(attempt(&mut s, "T-1", 1), AttemptState::Abandoned);
+}
