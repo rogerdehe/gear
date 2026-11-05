@@ -419,6 +419,18 @@ fn apply_queue(
         .as_ref()
         .map(|config| config.conventions.max_task_min)
         .unwrap_or(crate::config::MAX_TASK_MIN);
+    // The features the queue blocks name (M6.2): a member's work goes on the
+    // feature's branch with the feature's check, and each feature gets one
+    // integration task that brings it to the integration branch. A project
+    // that names no `feature:` line is untouched by all of it.
+    let features = feature_work(
+        tx,
+        project,
+        draft,
+        &existing,
+        &new_ids,
+        stored_config.as_ref(),
+    )?;
     let mut graph: BTreeMap<String, Vec<String>> = existing
         .iter()
         .map(|(id, task)| (id.clone(), task.deps.clone()))
@@ -565,12 +577,35 @@ fn apply_queue(
                 ));
             }
         }
+        let task_id = item
+            .id
+            .clone()
+            .or_else(|| new_ids.get(&index).cloned())
+            .unwrap_or_else(|| "NEW".to_string());
         for dep in &item.deps {
             if !known.contains(dep) {
                 return Err(bad(
                     item.line,
                     format!("dep {dep} does not exist and is not created by this draft"),
                 ));
+            }
+            // (3) A task outside a feature never depends on one of its members
+            // (M6.2): a member's work is not on the integration branch until
+            // the feature's own integration task merges, so that is the task a
+            // wait outside the feature names.
+            if let Some(dep_feature) = features.mark(dep) {
+                if features.mark(&task_id) == Some(dep_feature) {
+                    continue;
+                }
+                if let Some(work) = features.work(dep_feature) {
+                    return Err(bad(
+                        item.line,
+                        format!(
+                            "{task_id}: deps on a feature's task {dep} name the feature's integration task {}",
+                            work.carrier
+                        ),
+                    ));
+                }
             }
         }
         // The follow-up names a task that exists (design §3.3): the field is
@@ -792,6 +827,19 @@ fn apply_queue(
                     }
                     None => (None, None, None),
                 };
+                // (1) A member of a feature works on the feature's branch and
+                // its merge runs the feature's check, never the project's gate
+                // (M6.2): the full gate runs once, on the feature's integration
+                // task.
+                let member = item
+                    .feature
+                    .as_deref()
+                    .filter(|feature| !feature.is_empty())
+                    .and_then(|feature| features.work(feature));
+                let (base, gate) = match member {
+                    Some(work) => (Some(work.branch.clone()), Some(work.check.clone())),
+                    None => (base, gate),
+                };
                 let task = TaskRow {
                     repo,
                     base,
@@ -821,11 +869,20 @@ fn apply_queue(
                     // carry it (checked above).
                     estimate_min: item.estimate.map(i64::from),
                     // The GitHub issue the task came from (T-79); the
-                    // parser keeps it inside the store's range.
-                    issue: item.issue.and_then(|number| i64::try_from(number).ok()),
+                    // parser keeps it inside the store's range. A member of a
+                    // feature keeps none: the issue moves to the feature's
+                    // integration task (M6.2).
+                    issue: if member.is_some() {
+                        None
+                    } else {
+                        item.issue.and_then(|number| i64::try_from(number).ok())
+                    },
                     updated: now,
                 };
                 tx.insert_task(&task)?;
+                if let Some(work) = member {
+                    tx.set_task_feature(project, &id, &work.feature)?;
+                }
                 // The `fresh:` mark (T-481): the task is unrelated to what the
                 // lane did before, so its first round starts a new
                 // conversation.
@@ -935,11 +992,6 @@ fn apply_queue(
                 if let Some(by) = &item.carried_by {
                     tx.set_task_carried_by(project, id, by)?;
                 }
-                // The `feature:` of a task (M6.2): a block that names one sets
-                // it; a block without it keeps the feature the task has.
-                if let Some(feature) = &item.feature {
-                    tx.set_task_feature(project, id, feature)?;
-                }
                 // The `audit:` mark of a task (T-505): a block that names the
                 // field sets it; a block without it keeps the mark.
                 if let Some(audit) = item.audit {
@@ -954,6 +1006,37 @@ fn apply_queue(
                 // block without `issue:` keeps the issue the task came from.
                 if let Some(issue) = item.issue.and_then(|number| i64::try_from(number).ok()) {
                     task.issue = Some(issue);
+                }
+                // (1) The `feature:` of a task (M6.2): a block that names one
+                // sets it, and a task whose feature changes moves to that
+                // feature's branch and check (or, cleared, back to its lane's
+                // integration branch and gate). A block without the field keeps
+                // the feature the task has. The stored mark is read before the
+                // write: read after it, "the feature changed" can never be seen
+                // and the branch and gate never move (T-578 F1).
+                if let Some(feature) = &item.feature {
+                    let before = tx.task_feature(project, id)?;
+                    tx.set_task_feature(project, id, feature)?;
+                    if feature.is_empty() {
+                        if before.is_some() {
+                            if let Some(config) = &config {
+                                let repo =
+                                    config.repo_of_lane(item.lane.as_deref().unwrap_or_default());
+                                task.base = Some(repo.integration);
+                                task.gate = Some(repo.gate);
+                            }
+                        }
+                    } else if before.as_deref() != Some(feature.as_str()) {
+                        if let Some(work) = features.work(feature) {
+                            task.base = Some(work.branch.clone());
+                            task.gate = Some(work.check.clone());
+                        }
+                    }
+                }
+                // (5) A member of a feature keeps no issue: it moves to the
+                // feature's integration task.
+                if features.mark(id).is_some_and(|feature| !feature.is_empty()) {
+                    task.issue = None;
                 }
                 match item.state.as_deref() {
                     Some("cancelled") => {
@@ -1182,6 +1265,90 @@ fn apply_queue(
         task.updated = now;
         tx.update_task(&task)?;
         not_mentioned.push(task.id);
+    }
+
+    // (4) The features' integration tasks (M6.2): one per feature, created in
+    // the apply that first names a member, and kept equal to the members that
+    // are not cancelled. Its branch is the feature's, so its merge is the one
+    // that brings the whole feature to the integration branch, where the full
+    // gate runs once.
+    for work in &features.works {
+        // A landed feature is left alone (T-578 F2): no new carrier is minted
+        // and its deps are not wiped to the open members it has none of.
+        if work.touch_carrier {
+            if work.new_carrier {
+                rank += 1;
+                let task = TaskRow {
+                    repo: work.repo.clone(),
+                    base: work.base.clone(),
+                    gate: work.gate.clone(),
+                    rework_estimate_min: None,
+                    project: project.to_string(),
+                    id: work.carrier.clone(),
+                    rank,
+                    state: TaskState::Ready,
+                    priority: work.priority.clone(),
+                    lane: Some(work.lane.clone()),
+                    milestone: work.milestone.clone(),
+                    required: false,
+                    contract_version: 1,
+                    deps: work.deps.clone(),
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(10),
+                    issue: work.issue,
+                    updated: now,
+                };
+                tx.insert_task(&task)?;
+                let goal = work.carrier_goal();
+                let accept = work.carrier_accept();
+                tx.insert_contract(&ContractRow {
+                    project: project.to_string(),
+                    task: work.carrier.clone(),
+                    version: 1,
+                    goal: goal.clone(),
+                    accept: accept.clone(),
+                    evidence_files: Vec::new(),
+                    evidence_due_min: None,
+                    body: format!("goal: {goal}\naccept: {accept}\n"),
+                    created: now,
+                    mechanical: None,
+                })?;
+                tx.set_task_branch_override(project, &work.carrier, &work.branch)?;
+                tx.set_feature_carrier(project, &work.feature, &work.carrier)?;
+                created.push(work.carrier.clone());
+            } else {
+                let mut task = tx.get_task(project, &work.carrier)?.ok_or_else(|| {
+                    bad(
+                        work.line,
+                        format!(
+                            "feature {}: its integration task {} is gone",
+                            work.feature, work.carrier
+                        ),
+                    )
+                })?;
+                task.deps = work.deps.clone();
+                if let Some(issue) = work.issue {
+                    task.issue = Some(issue);
+                }
+                task.updated = now;
+                tx.update_task(&task)?;
+                tx.set_task_branch_override(project, &work.carrier, &work.branch)?;
+            }
+        }
+        // The members keep no issue: it is the carrier's.
+        for member in &work.members {
+            let Some(mut task) = tx.get_task(project, member)? else {
+                continue;
+            };
+            if task.issue.is_some() {
+                task.issue = None;
+                task.updated = now;
+                tx.update_task(&task)?;
+            }
+        }
     }
 
     // Staff (T-55): park/hold/retire/release move a lane seat of this project
@@ -1620,6 +1787,346 @@ fn apply_queue(
         resolved,
         milestone_blocks,
     })
+}
+
+/// One feature of a plan apply (M6.2): the tasks marked `feature: F-<n>`, the
+/// integration task that brings them to the integration branch, and the branch
+/// their own work is merged into.
+#[derive(Debug, Clone)]
+struct FeatureWork {
+    /// `F-<n>`, as the block writes it.
+    feature: String,
+    /// The feature's branch: `[conventions].feature_branch` with `{project}`
+    /// and `{feature}` filled in.
+    branch: String,
+    /// What a member's gate becomes: `[conventions].feature_check`, or `true`
+    /// when the project names none (a member's merge runs no gate).
+    check: String,
+    /// The feature's integration task: the one the store names, or a new id.
+    /// Empty when the feature has no member that is not terminal and names no
+    /// carrier: a landed feature needs none (T-578 F2).
+    carrier: String,
+    /// The apply creates the carrier.
+    new_carrier: bool,
+    /// The apply creates or updates the carrier at all: a feature whose
+    /// members are all terminal and whose carrier is on record is left alone
+    /// (T-578 F2).
+    touch_carrier: bool,
+    /// The members that are not cancelled, by task number.
+    members: Vec<String>,
+    /// The members a carrier waits for: the ones that are not terminal, so a
+    /// member added after the feature landed starts a carrier over itself
+    /// only.
+    deps: Vec<String>,
+    /// The members' goals, one per line, for the carrier's goal.
+    goals: Vec<String>,
+    /// The lane the carrier goes to: the one holding most members.
+    lane: String,
+    milestone: Option<String>,
+    /// The highest priority of the members.
+    priority: String,
+    /// The issue every member names, if any: it moves to the carrier.
+    issue: Option<i64>,
+    /// The integration branch the carrier's work lands on.
+    integration: String,
+    /// The carrier's own repo, base and gate: its lane's, as a normal task —
+    /// it meets the full gate, never the feature's check.
+    repo: Option<String>,
+    base: Option<String>,
+    gate: Option<String>,
+    /// The draft line that first names the feature, for a refusal to name.
+    line: usize,
+}
+
+impl FeatureWork {
+    /// `Integrate feature F-<n>: <the members' goals, one per line>`.
+    fn carrier_goal(&self) -> String {
+        let mut goal = format!("Integrate feature {}:", self.feature);
+        for line in &self.goals {
+            goal.push_str(&format!("\n{line}"));
+        }
+        goal
+    }
+
+    /// The carrier's accept line: the full gate, on the feature merged into the
+    /// integration branch.
+    fn carrier_accept(&self) -> String {
+        format!(
+            "the full gate passes on the feature branch merged into {}",
+            self.integration
+        )
+    }
+}
+
+/// The features of one apply: every task's feature mark after it, and one work
+/// per feature that has members.
+#[derive(Debug, Clone)]
+struct Features {
+    works: Vec<FeatureWork>,
+    /// task → `F-<n>`, as this apply leaves it.
+    marks: BTreeMap<String, String>,
+}
+
+impl Features {
+    fn work(&self, feature: &str) -> Option<&FeatureWork> {
+        self.works.iter().find(|work| work.feature == feature)
+    }
+
+    /// The feature a task belongs to after this apply, if any.
+    fn mark(&self, task: &str) -> Option<&str> {
+        self.marks.get(task).map(String::as_str)
+    }
+}
+
+/// The features a plan's queue blocks name, and the one integration task each
+/// of them gets (M6.2). Nothing is written for a project that names no
+/// `feature:` line and holds no member.
+///
+/// A member's work goes on the feature's branch and its merge runs the
+/// feature's check, never the project's gate: the feature reaches the
+/// integration branch once, through its carrier, where the full gate runs. The
+/// carrier is a normal task of its lane's repo (integration base, full gate)
+/// whose branch is the feature's, its deps are the members that are not
+/// cancelled, and every member's `issue:` moves to it.
+fn feature_work(
+    tx: &Tx<'_>,
+    project: &str,
+    draft: &Draft,
+    existing: &BTreeMap<String, TaskRow>,
+    new_ids: &BTreeMap<usize, String>,
+    stored_config: Option<&crate::config::ProjectConfig>,
+) -> GearResult<Features> {
+    let conventions = stored_config
+        .map(|config| config.conventions.clone())
+        .unwrap_or_default();
+    // The feature each task is marked with after this apply.
+    let mut marks: BTreeMap<String, String> = BTreeMap::new();
+    for task in existing.values() {
+        if let Some(feature) = tx.task_feature(project, &task.id)? {
+            marks.insert(task.id.clone(), feature);
+        }
+    }
+    let mut cancelled: BTreeSet<String> = existing
+        .values()
+        .filter(|task| task.state == TaskState::Cancelled)
+        .map(|task| task.id.clone())
+        .collect();
+    // The blocks of this draft, by the task they write, and the first line that
+    // names each feature.
+    let mut drafted: BTreeMap<String, (usize, &QueueItem)> = BTreeMap::new();
+    let mut first_line: BTreeMap<String, usize> = BTreeMap::new();
+    for (index, item) in draft.queue.iter().enumerate() {
+        let Some(id) = item.id.clone().or_else(|| new_ids.get(&index).cloned()) else {
+            continue;
+        };
+        if item.state.as_deref() == Some("cancelled") {
+            cancelled.insert(id.clone());
+        }
+        if let Some(feature) = &item.feature {
+            if feature.is_empty() {
+                marks.remove(&id);
+            } else {
+                marks.insert(id.clone(), feature.clone());
+                first_line.entry(feature.clone()).or_insert(item.line);
+            }
+        }
+        drafted.insert(id, (index, item));
+    }
+    // The members of each feature: the marked tasks that are not cancelled.
+    let mut members: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (id, feature) in &marks {
+        if cancelled.contains(id) {
+            continue;
+        }
+        members.entry(feature.clone()).or_default().push(id.clone());
+    }
+    let number = |id: &str| id.trim_start_matches("T-").parse::<i64>().unwrap_or(0);
+    for list in members.values_mut() {
+        list.sort_by_key(|id| number(id));
+    }
+
+    let mut works: Vec<FeatureWork> = Vec::new();
+    for (feature, members) in &members {
+        let line = first_line.get(feature).copied().unwrap_or(0);
+        // (2) A feature holds a set of tasks a captain can still hold in mind
+        // and review as one: more is a voyage of its own.
+        let cap = conventions.feature_max_tasks;
+        if members.len() as u32 > cap {
+            return Err(bad(
+                line,
+                format!(
+                    "feature {feature} holds {} tasks, over the project's cap of {cap} ([conventions] feature_max_tasks): bigger work is a voyage of its own",
+                    members.len()
+                ),
+            ));
+        }
+        // The lane with the most members, ties to the first in the draft; the
+        // first member's milestone; the highest priority; the goals; the one
+        // issue the members name.
+        let mut lanes: Vec<(String, usize)> = Vec::new();
+        let mut milestone: Option<String> = None;
+        let mut highest: Option<(u8, String)> = None;
+        let mut named_issues: Vec<(String, i64)> = Vec::new();
+        let mut goals: Vec<String> = Vec::new();
+        for id in members {
+            let task = existing.get(id);
+            let item = drafted.get(id).map(|(_, item)| *item);
+            let lane = item
+                .and_then(|item| item.lane.clone())
+                .or_else(|| task.and_then(|task| task.lane.clone()))
+                .unwrap_or_default();
+            match lanes.iter_mut().find(|(name, _)| *name == lane) {
+                Some((_, count)) => *count += 1,
+                None => lanes.push((lane, 1)),
+            }
+            if milestone.is_none() {
+                milestone = item
+                    .and_then(|item| item.milestone.clone())
+                    .or_else(|| task.and_then(|task| task.milestone.clone()));
+            }
+            let (order, name) = match item {
+                Some(item) => (
+                    priority_order(priority_str(item.priority)),
+                    priority_str(item.priority).to_string(),
+                ),
+                None => {
+                    let name = task.map(|task| task.priority.clone()).unwrap_or_default();
+                    (priority_order(&name), name)
+                }
+            };
+            if highest.as_ref().is_none_or(|(best, _)| order < *best) {
+                highest = Some((order, name));
+            }
+            let issue = item
+                .and_then(|item| item.issue)
+                .and_then(|number| i64::try_from(number).ok())
+                .or_else(|| task.and_then(|task| task.issue));
+            if let Some(issue) = issue {
+                named_issues.push((id.clone(), issue));
+            }
+            let goal = match item.and_then(|item| item.goal.clone()) {
+                Some(goal) => Some(goal),
+                None => match task {
+                    Some(task) => tx
+                        .get_contract(project, id, task.contract_version)?
+                        .map(|contract| contract.goal),
+                    None => None,
+                },
+            };
+            if let Some(goal) = goal.filter(|goal| !goal.trim().is_empty()) {
+                goals.push(goal);
+            }
+        }
+        let mut lane = String::new();
+        let mut most = 0usize;
+        for (name, count) in &lanes {
+            if *count > most {
+                most = *count;
+                lane = name.clone();
+            }
+        }
+        // (5) The members' issue moves to the carrier, so a feature is one
+        // issue, not one per task.
+        let mut distinct: Vec<i64> = named_issues.iter().map(|(_, issue)| *issue).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        if distinct.len() > 1 {
+            let detail: Vec<String> = named_issues
+                .iter()
+                .map(|(id, issue)| format!("{id} names #{issue}"))
+                .collect();
+            return Err(bad(
+                line,
+                format!(
+                    "feature {feature}: every member must name the same issue or none ({}); the issue moves to the feature's integration task",
+                    detail.join(", ")
+                ),
+            ));
+        }
+        let branch = conventions
+            .feature_branch
+            .replace("{project}", project)
+            .replace("{feature}", &feature.to_lowercase());
+        let check = conventions
+            .feature_check
+            .clone()
+            .filter(|check| !check.trim().is_empty())
+            .unwrap_or_else(|| "true".to_string());
+        // (4) The carrier: the task the store names, or a new one when the
+        // feature has none.
+        //
+        // A feature needs a carrier only while it has a member that is not
+        // terminal (T-578 F2): re-applying a landed feature mints nothing, and
+        // a member added after it landed — with a terminal carrier on record —
+        // starts a fresh carrier over the members that are still open.
+        let stored = tx.feature_carrier(project, feature)?;
+        let open: Vec<String> = members
+            .iter()
+            .filter(|id| {
+                existing
+                    .get(*id)
+                    .is_none_or(|task| !task.state.is_terminal())
+            })
+            .cloned()
+            .collect();
+        let (carrier, new_carrier, touch_carrier) = match (stored, open.is_empty()) {
+            (stored, true) => (stored.unwrap_or_default(), false, false),
+            (Some(carrier), false)
+                if existing
+                    .get(&carrier)
+                    .is_some_and(|task| !task.state.is_terminal()) =>
+            {
+                (carrier, false, true)
+            }
+            (_, false) => (tx.next_id(project, 'T')?, true, true),
+        };
+        let (repo, base, gate, integration) = match stored_config {
+            Some(config) => {
+                let repo = config.repo_of_lane(&lane);
+                (
+                    Some(repo.path),
+                    Some(repo.integration.clone()),
+                    Some(repo.gate),
+                    repo.integration,
+                )
+            }
+            None => (None, None, None, conventions.integration.clone()),
+        };
+        works.push(FeatureWork {
+            feature: feature.clone(),
+            branch,
+            check,
+            carrier,
+            new_carrier,
+            touch_carrier,
+            members: members.clone(),
+            deps: open,
+            goals,
+            lane,
+            milestone,
+            priority: highest
+                .map(|(_, name)| name)
+                .unwrap_or_else(|| "should".to_string()),
+            issue: distinct.first().copied(),
+            integration,
+            repo,
+            base,
+            gate,
+            line,
+        });
+    }
+    Ok(Features { works, marks })
+}
+
+/// How urgent a priority is: 0 is `now`, 4 is `wont`.
+fn priority_order(priority: &str) -> u8 {
+    match priority {
+        "now" => 0,
+        "must" => 1,
+        "should" => 2,
+        "could" => 3,
+        _ => 4,
+    }
 }
 
 fn bad(line: usize, detail: impl std::fmt::Display) -> GearError {
