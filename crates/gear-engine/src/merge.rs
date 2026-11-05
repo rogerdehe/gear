@@ -454,11 +454,11 @@ pub fn merge_passed(
         // T-582: an integration task's branch is the feature's own branch, not
         // one the lane cut from the template, and the close keeps it (the
         // feature's; the captain deletes it at landing).
+        // T-602: one place names the branch of a known task.
         let feature_branch = store.read(|tx| tx.task_branch_override(project, &task))?;
-        let branch = match &feature_branch {
-            Some(branch) => branch.clone(),
-            None => branch_of(&config.conventions.task_branch, project, &lane, &task),
-        };
+        let branch = store.read(|tx| {
+            gear_app::base::task_branch_of(tx, &config.conventions, project, &lane, &task)
+        })?;
         let mut payload = serde_json::json!({
             "branch": branch,
             "candidate": candidate,
@@ -5682,6 +5682,11 @@ fn task_branches(
             lanes.push(lane.to_string());
         }
         for lane in lanes {
+            // T-602: this sweep names the branch the lane cut from the
+            // template, not the branch the task itself names: a feature's
+            // branch is not a task branch to close (T-582 keeps it through the
+            // integration task's merge, and the captain deletes it at landing),
+            // so it is never listed here.
             names.push((
                 branch_of(&config.conventions.task_branch, project, &lane, &task.id),
                 review_branch(&config.conventions.review_branch, project, &lane, &task.id),

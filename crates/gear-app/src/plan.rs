@@ -3655,10 +3655,13 @@ fn remerge(
     // T-582: a feature's integration task merges (and keeps) the feature's own
     // branch: the remerge then takes the branch the captain refreshed.
     let feature_branch = tx.task_branch_override(project, task_id)?;
-    let branch = match &feature_branch {
-        Some(feature) => feature.clone(),
-        None if lane.is_empty() => String::new(),
-        None => crate::base::task_branch(&conventions, project, &lane, task_id),
+    // T-602: one place names the branch of a known task — the feature's own
+    // branch when the task names one, else the lane's template. A task with
+    // neither a lane nor a branch names none.
+    let branch = if feature_branch.is_none() && lane.is_empty() {
+        String::new()
+    } else {
+        crate::base::task_branch_of(tx, &conventions, project, &lane, task_id)?
     };
     // T-405: a mechanically settled attempt has no reviewer, so it has no
     // review branch. Its merge op says so, and the merge does not require

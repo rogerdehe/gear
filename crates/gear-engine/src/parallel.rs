@@ -109,9 +109,12 @@ struct TaskIn {
     project: String,
     task: String,
     lane: String,
-    /// The task's own project's `[conventions].task_branch` template (T-253):
-    /// a task of another project is read from its own project's names.
-    task_branch: String,
+    /// The branch the task's work goes on (T-253, T-602): the branch the task
+    /// itself names when it names one (a member of a feature pushes onto the
+    /// feature's branch), else its own project's `[conventions].task_branch`
+    /// template — a task of another project is read from its own project's
+    /// names.
+    branch: String,
     /// The candidate of the task's latest attempt: the commit the engine
     /// merges when the review passes (T-61), and the one that tells a landed
     /// task from an open one (T-64).
@@ -427,8 +430,14 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
                 entries.push(TaskIn {
                     project: project.to_string(),
                     task: task.id.clone(),
+                    branch: gear_app::base::task_branch_of(
+                        tx,
+                        &config.conventions,
+                        project,
+                        &lane,
+                        &task.id,
+                    )?,
                     lane,
-                    task_branch: config.conventions.task_branch.clone(),
                     candidate,
                     base: task_base(&task),
                 });
@@ -455,8 +464,14 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
                     entries.push(TaskIn {
                         project: other.clone(),
                         task: task.id.clone(),
+                        branch: gear_app::base::task_branch_of(
+                            tx,
+                            &other_config.conventions,
+                            other,
+                            &lane,
+                            &task.id,
+                        )?,
                         lane,
-                        task_branch: other_config.conventions.task_branch.clone(),
                         candidate,
                         base: task_base(&task),
                     });
@@ -624,8 +639,7 @@ fn scan(input: &Input) -> Result<Findings, String> {
                 }
             }
         }
-        let name =
-            crate::dispatch::task_branch(&task.task_branch, &task.project, &task.lane, &task.task);
+        let name = &task.branch;
         let local = tips.revision(&format!("refs/heads/{name}"));
         let head = match local {
             Some(head) => Some(head),

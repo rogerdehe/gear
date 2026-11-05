@@ -184,12 +184,11 @@ pub fn collect(
         // branch (F-284). A reviewer works on the branch the engine checked out
         // for it, so its handover names that one.
         facts.branch = match seat.role {
-            SeatRole::Lane => Some(crate::dispatch::task_branch(
-                &conventions.task_branch,
-                project,
-                &seat.name,
-                &task,
-            )),
+            SeatRole::Lane => Some(store.read(|tx| {
+                // T-602: one place names the branch of a known task — the
+                // feature's own branch when the task names one.
+                gear_app::base::task_branch_of(tx, &conventions, project, &seat.name, &task)
+            })?),
             _ => facts.head.clone(),
         };
         facts.last_commit = run(cfg, path, &["log", "-1", "--format=%H %s"]);

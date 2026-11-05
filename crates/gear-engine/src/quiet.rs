@@ -74,15 +74,13 @@ fn last_push(
     seat: &SeatRow,
     attempt: &AttemptRow,
 ) -> GearResult<(String, Ts)> {
-    // The branch is the project's own (T-253): the template it names the task
-    // branch with, `{lane}/t{n}` when it says nothing.
+    // The branch is the project's own (T-253, T-602): the branch the task
+    // itself names when it names one (a member of a feature pushes there),
+    // else the template it names the task branch with, `{lane}/t{n}` when it
+    // says nothing.
     let conventions = crate::dispatch::conventions(tx, &seat.project);
-    let branch = crate::dispatch::task_branch(
-        &conventions.task_branch,
-        &seat.project,
-        &seat.name,
-        &attempt.task,
-    );
+    let branch =
+        gear_app::base::task_branch_of(tx, &conventions, &seat.project, &seat.name, &attempt.task)?;
     // The project's own remote (T-262): the push clock reads the ref its
     // `[conventions].remote` names.
     let remote = &conventions.remote;
