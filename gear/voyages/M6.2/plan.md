@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1174 -->
+<!-- gear-plan project=gear base=1175 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -234,4 +234,10 @@ deps: -
 goal: [v0.6.59] A pane that holds two seats keeps one agent name (2026-11-05: pane w2:p10 holds prometheus:captain and lawrence:captain; the user renamed its agent `prometheus-captain` and the engine's name restore set it back to `lawrence-captain`, so prompts to `prometheus-captain` failed with agent_not_found). In crates/gear-engine/src/names.rs `restore` (and the `ensure` used before deliveries): when the agent in the pane already carries the desired name of any seat whose active binding is that same pane, leave it; rename only an agent with no name or a name of no seat bound there. When it has no name, give it the name of the seat whose project has an open (departed, not landed) voyage first.
 accept: Tests in names.rs `mod tests`: two captain seats bound to one pane, the agent named after one of them, keeps its name over several restore passes and deliveries to either seat still find it; an unnamed agent there gets the open voyage's seat name. Run only `make check CRATE=gear-engine TESTS='test(names::)'`; the merge gate runs `make gate`.
 estimate: 30
+deps: -
+
+## T-571 [now] lane=hull milestone=M6.2
+goal: [v0.6.60] A finished voyage sends nothing (user, 2026-11-05: Lawrence's voyage M1 finished on 2026-11-04 — every task done or cancelled, every lane retired — yet its new captain was rung again and again for two branch warnings from 2026-11-03 (M-768, M-777), each doorbell carrying M1's goal, interrupting the work the user had given it). A voyage is finished when none of its tasks is open. (1) When a project's voyage finishes, the engine resolves that voyage's open engine items (branches:*, station:<M>, merge-failed:*, merge-lost:*, merge-wait:*, overrun:*, stalled, task threads of its tasks) with "voyage <M> is finished". (2) The doorbell (crates/gear-engine/src/doorbell.rs) names no goal of a finished voyage and rings for no item of one; a project with no open voyage gets a doorbell only for items addressed to its captain by a person or another seat. Find where the doorbell builds its "Your goal, voyage" line and its item list.
+accept: Tests: a project whose only voyage has every task done, with open branches:* and station items, gets them resolved and receives no doorbell on the following ticks; a project with an open voyage is unchanged. Run only `make check CRATE=gear-engine TESTS='test(doorbell) | test(merge::)'`; the merge gate runs `make gate`.
+estimate: 45
 deps: -
