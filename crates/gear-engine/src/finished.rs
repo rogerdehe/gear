@@ -51,10 +51,12 @@ struct FinishedRow {
 }
 
 /// The voyages of this project that are finished: departed, with tasks, and
-/// none of their tasks open (the rule `tasks_live_of_project` already uses,
-/// T-529: a voyage with a task that is not terminal is open).
-fn finished_voyages(tx: &Tx<'_>, project: &str) -> GearResult<Vec<FinishedRow>> {
-    let open = open_voyages(tx, project)?;
+/// open by neither of [`open_voyages`]'s rules.
+fn finished_voyages(
+    tx: &Tx<'_>,
+    project: &str,
+    open: &BTreeSet<String>,
+) -> GearResult<Vec<FinishedRow>> {
     let mut finished = Vec::new();
     for voyage in tx.voyages_of_project(project)? {
         if voyage.departure.is_none() || open.contains(&voyage.milestone) {
@@ -112,9 +114,12 @@ pub struct Sweep {
 
 impl Sweep {
     pub fn read(tx: &Tx<'_>, project: &str) -> GearResult<Sweep> {
-        let rows = finished_voyages(tx, project)?;
-        let any_open = !open_voyages(tx, project)?.is_empty();
-        Ok(Sweep { rows, any_open })
+        let open = open_voyages(tx, project)?;
+        let rows = finished_voyages(tx, project, &open)?;
+        Ok(Sweep {
+            rows,
+            any_open: !open.is_empty(),
+        })
     }
 
     pub fn empty(&self) -> bool {
