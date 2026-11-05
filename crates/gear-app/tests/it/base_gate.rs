@@ -1288,6 +1288,81 @@ fn a_direction_check_is_not_checked_against_a_review_branch() {
     assert_eq!(sent.recipient, "p:captain");
 }
 
+/// T-590: a feature member's light stage check hands its result in on the
+/// attempt that was accepted without a blocking review (the marker on the
+/// attempt names the job); a direction result on an accepted attempt with no
+/// stage check is still refused.
+#[test]
+fn a_feature_stage_check_reports_on_the_accepted_member() {
+    let r = repos();
+    git(
+        &r.lane,
+        &["switch", "-q", "-c", "direction/t1", "origin/dev"],
+    );
+    commit(&r.lane, "direction.md", "the direction is sound");
+
+    let mut s = review_world();
+    s.write(|tx| {
+        let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+        attempt.state = AttemptState::Accepted;
+        tx.update_attempt(&attempt)?;
+        let mut task = tx.get_task("p", "T-1")?.unwrap();
+        task.state = TaskState::Done;
+        tx.update_task(&task)?;
+        tx.set_meta(
+            "engine.direction.p.T-1.1",
+            &serde_json::json!({"seat": "p:r-1", "generation": 1, "state": "running", "sha": "abc123"})
+                .to_string(),
+        )?;
+        tx.set_stage_check(
+            "p",
+            "T-1",
+            1,
+            &serde_json::json!({"feature": "F-1", "state": "running"}).to_string(),
+        )
+    })
+    .unwrap();
+
+    let (env, fp) = reviewer();
+    let mut args = review(None);
+    args.kind = MsgKind::Result;
+    args.body = "F1: the direction misreads the feature goal".into();
+    args.verdict = None;
+    let sent = in_dir(&r.lane, || {
+        mail::send_direction(&mut s, &env, Some(&fp), &args, T0 + 5)
+    })
+    .unwrap();
+    assert_eq!(sent.recipient, "p:captain");
+    let stored = s
+        .read(|tx| tx.get_message("p", &sent.msg_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.meta.as_deref(),
+        Some(r#"{"direction":true,"sha":"abc123"}"#)
+    );
+
+    // Without the stage check's marker the accepted attempt takes no direction
+    // result: only a stage check reports on an accepted attempt.
+    let mut s = review_world();
+    s.write(|tx| {
+        let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+        attempt.state = AttemptState::Accepted;
+        tx.update_attempt(&attempt)?;
+        tx.set_meta(
+            "engine.direction.p.T-1.1",
+            &serde_json::json!({"seat": "p:r-1", "generation": 1, "state": "running", "sha": "abc123"})
+                .to_string(),
+        )
+    })
+    .unwrap();
+    let err = in_dir(&r.lane, || {
+        mail::send_direction(&mut s, &env, Some(&fp), &args, T0 + 5)
+    })
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadTransition);
+}
+
 /// T-438, T-558: the check is the reviewer's own commit, not the branch's old
 /// tip: a task branch that is on the remote but behind the reviewer's HEAD is
 /// refused.
