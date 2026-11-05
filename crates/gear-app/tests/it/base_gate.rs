@@ -1326,3 +1326,154 @@ fn a_task_branch_behind_the_reviewers_head_is_refused() {
         .unwrap()
         .is_none());
 }
+
+// ---------------------------------------------------------------- T-579
+
+/// A project whose root repo integrates on `dev`: a lane in the root is
+/// checked against it unless its open task names a base of its own (T-579).
+const ROOT_CONFIG: &str = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "heat"
+duty = "thermal calculation"
+owns = ["src/heat/"]
+kind = "opencode"
+profile = "opencode"
+
+[conventions]
+integration = "dev"
+release = "main"
+gate = "make test"
+"#;
+
+/// [`world`] with that config stored: the hand-in gate reads the project's
+/// conventions.
+fn world_with_config() -> Store {
+    let mut s = world();
+    s.write(|tx| {
+        let mut project = tx.get_project("p")?.unwrap();
+        project.config_toml = ROOT_CONFIG.to_string();
+        tx.update_project(&project)
+    })
+    .unwrap();
+    s
+}
+
+/// T-579: a lane whose open task names a base of its own — a member of a
+/// feature, whose work goes on the feature's branch (M6.2) — is checked
+/// against that branch, not the lane's integration branch: its candidate
+/// contains the feature's branch while `dev` has moved on.
+#[test]
+fn a_task_base_is_the_branch_its_hand_in_is_checked_against() {
+    let r = repos();
+    // The feature's branch on the remote, made from the integration branch.
+    r.candidate("p/feature/f-1", "origin/dev", "feature work");
+    // The integration branch moves on, so the feature's branch is behind it.
+    r.advance_dev("new work");
+    // The member works on its own task branch, containing the feature's.
+    let candidate = r.candidate("heat/t1", "p/feature/f-1", "my work");
+
+    let mut s = world_with_config();
+    s.write(|tx| {
+        let mut task = tx.get_task("p", "T-1")?.unwrap();
+        task.base = Some("p/feature/f-1".into());
+        tx.update_task(&task)
+    })
+    .unwrap();
+    let (env, _fp) = lane();
+    let mut gate = gear_app::base::gate_for(&mut s, &env).unwrap();
+    assert_eq!(
+        gate.integration, "p/feature/f-1",
+        "the open task's base, not the lane's integration branch"
+    );
+    // The gate_for worktree is this process's directory; the hand-in is
+    // checked in the lane's clone.
+    gate.worktree = r.lane.clone();
+
+    // The lane's integration branch would refuse this hand-in: the candidate
+    // does not contain the `dev` that moved on.
+    let refused = require_current_base(&r.lane, "origin", "dev", &candidate, 0).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::BadFormat, "{}", refused.detail);
+
+    // Against the task's base it is accepted and stored.
+    let (env, fp) = lane();
+    let sent = mail::send(
+        &mut s,
+        &env,
+        Some(&fp),
+        &result(&candidate, Some(gate)),
+        T0 + 5,
+    )
+    .unwrap();
+    assert_eq!(sent.recipient, "p:captain");
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!(
+        (attempt.state, attempt.candidate.as_deref()),
+        (AttemptState::Submitted, Some(candidate.as_str()))
+    );
+}
+
+/// T-579: a task that names no base keeps today's check — the integration
+/// branch of the lane's repo.
+#[test]
+fn a_task_without_a_base_keeps_the_lanes_integration_branch() {
+    let mut s = world_with_config();
+    let (env, _fp) = lane();
+    let gate = gear_app::base::gate_for(&mut s, &env).unwrap();
+    assert_eq!(gate.integration, "dev");
+    assert_eq!(gate.window_min, 30);
+}
+
+/// T-579: a hand-in is pushed to the branch the task names (`task_branch_
+/// override`: a feature's branch for a member), not the lane's task branch.
+#[test]
+fn a_task_branch_override_is_the_branch_a_hand_in_is_pushed_to() {
+    let r = repos();
+    // The work is pushed on the feature's branch, never on `heat/t1`.
+    let candidate = r.candidate("p/feature/f-1", "origin/dev", "feature work");
+    let mut s = world();
+    let (env, fp) = lane();
+    let gate = || {
+        Some(BaseGate {
+            worktree: r.lane.clone(),
+            integration: "dev".into(),
+            window_min: 30,
+        })
+    };
+
+    // Without the override the lane's task branch is checked, and it does not
+    // exist on the remote.
+    let refused =
+        mail::send(&mut s, &env, Some(&fp), &result(&candidate, gate()), T0 + 5).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::BadFormat, "{}", refused.detail);
+    assert!(
+        refused.detail.contains("origin/heat/t1"),
+        "{}",
+        refused.detail
+    );
+
+    s.write(|tx| tx.set_task_branch_override("p", "T-1", "p/feature/f-1"))
+        .unwrap();
+    let mut args = result(&candidate, gate());
+    args.request_id = "r-2".into();
+    let sent = mail::send(&mut s, &env, Some(&fp), &args, T0 + 6).unwrap();
+    assert_eq!(sent.recipient, "p:captain");
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!(
+        (attempt.state, attempt.candidate.as_deref()),
+        (AttemptState::Submitted, Some(candidate.as_str()))
+    );
+}
