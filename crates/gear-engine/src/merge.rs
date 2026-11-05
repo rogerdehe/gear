@@ -1196,7 +1196,7 @@ fn launch_batch(
 /// A lock in the worktree's git directory also excludes another runtime or a
 /// recovering engine. OS locks are released on process death; stale files are
 /// harmless. Never wait for a lock on the tick thread.
-fn merge_lock(dir: &Path) -> Result<Option<File>, String> {
+pub(crate) fn merge_lock(dir: &Path) -> Result<Option<File>, String> {
     let path = merge_lock_path(dir);
     let file = OpenOptions::new()
         .create(true)
@@ -2596,6 +2596,22 @@ fn integration_worktree(
     now: Ts,
 ) -> Result<gear_herdr::Worktree, String> {
     stage_worktree(store, herdr, repo, project, config, merges, now, 0)
+}
+
+/// The repo's integration worktree, opened the way every merge opens it (seat
+/// `merge`, `<project>/merge/home`), for a step that is not a merge op (T-585:
+/// a landing merges the captain's records there). It is the same worktree the
+/// merge queue uses, so the caller takes [`merge_lock`] before it touches it.
+pub(crate) fn open_integration_worktree(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    repo: &Repo,
+    project: &str,
+    config: &ProjectConfig,
+    now: Ts,
+) -> Result<gear_herdr::Worktree, String> {
+    let merges = MergeWorkers::default();
+    stage_worktree(store, herdr, repo, project, config, &merges, now, 0)
 }
 
 /// The worktree of one stage of a merge train: stage 0 is the integration
@@ -4696,11 +4712,15 @@ fn matching_paths(listed: &[String], changed: &[String]) -> Vec<String> {
 }
 
 /// Run one git command in `dir`; the output tail comes back as the error.
-fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     git_with_lock(dir, args, None)
 }
 
-fn git_with_lock(dir: &Path, args: &[&str], lock: Option<&File>) -> Result<String, String> {
+pub(crate) fn git_with_lock(
+    dir: &Path,
+    args: &[&str],
+    lock: Option<&File>,
+) -> Result<String, String> {
     let mut command = Command::new("git");
     // The engine is not a seat: its git runs — and any hook a repository
     // brings — must not see the seat identity of whoever started the engine
