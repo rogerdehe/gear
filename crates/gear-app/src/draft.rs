@@ -58,6 +58,9 @@ pub struct QueueItem {
     /// `carried-by: T-<m>`: this task's work lands with T-m's merge; `-`
     /// clears it.
     pub carried_by: Option<String>,
+    /// `feature: F-<n>`: the feature this task belongs to, whose branch it
+    /// merges into (M6.2); `-` clears it.
+    pub feature: Option<String>,
     /// The voyage audit mark (T-505): `audit: true`. The task is run by
     /// reviewers against the integration branch and is never assigned to its
     /// lane.
@@ -649,6 +652,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
         fresh: None,
         review_model: None,
         carried_by: None,
+        feature: None,
         audit: None,
     })
 }
@@ -683,6 +687,7 @@ fn parse_queue_field(
         "fresh" => "fresh",
         "review-model" => "review-model",
         "carried-by" => "carried-by",
+        "feature" => "feature",
         "audit" => "audit",
         other => return Err(bad(line, format!("unknown queue field {other:?}"))),
     };
@@ -787,6 +792,26 @@ fn parse_queue_field(
                 ));
             }
             item.carried_by = Some(if value == "-" {
+                String::new()
+            } else {
+                value.to_string()
+            });
+        }
+        "feature" => {
+            // The feature a task belongs to (M6.2): `F-<n>`, or `-` to clear
+            // it. A feature's members merge into its branch, not the
+            // integration branch.
+            let ok = value == "-"
+                || value
+                    .strip_prefix("F-")
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            if !ok {
+                return Err(bad(
+                    line,
+                    format!("`feature` is `F-<n>` (the feature the task belongs to), or `-` to clear it; got {value:?}"),
+                ));
+            }
+            item.feature = Some(if value == "-" {
                 String::new()
             } else {
                 value.to_string()

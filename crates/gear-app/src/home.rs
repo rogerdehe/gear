@@ -70,10 +70,18 @@ pub fn build_with_agents(
         // A captain whose voyage finished (a paused one is still open) sees only its seat and what a person or another seat
         // sent it: no voyage report, goal, snapshot or engine item (the user,
         // 2026-11-05: Lawrence's finished M1 filled every `gear` call).
-        let sailing = seat.role != SeatRole::Captain || {
-            let milestone = crate::plan::current_voyage(tx, &ctx.project)?;
-            milestone.is_empty() || gear_board::stations::voyage_open(tx, &ctx.project, &milestone)?
-        };
+        //
+        // T-588: the plan's own rule names the voyage (`plan::current_voyage`):
+        // the last departed voyage with open work, else a milestone with open
+        // work, else the last departed one. The page asks no rule of its own,
+        // so it cannot drift from the doorbell, the charter or the feed. GEAR
+        // M6.2 ran without a depart line, so a page that took the last
+        // departure took the finished M6.1 and hid M-8020 while the doorbell
+        // rang it (T-586's test).
+        let milestone = crate::plan::current_voyage(tx, &ctx.project)?;
+        let sailing = seat.role != SeatRole::Captain
+            || milestone.is_empty()
+            || gear_board::stations::voyage_open(tx, &ctx.project, &milestone)?;
         if seat.role == SeatRole::Captain && sailing {
             lines.extend(
                 gear_board::voyage::reports(tx, &ctx.project, now)?
@@ -82,10 +90,7 @@ pub fn build_with_agents(
             );
             // The voyage's goal, bar and course (T-336): the same one text
             // every captain output uses, right under the voyage report lines.
-            let milestone = crate::plan::current_voyage(tx, &ctx.project)?;
-            if !milestone.is_empty()
-                && gear_board::stations::voyage_open(tx, &ctx.project, &milestone)?
-            {
+            if !milestone.is_empty() {
                 if let Some(goal) = gear_board::stations::goal_text(tx, &ctx.project, &milestone)? {
                     lines.push(goal);
                 }
@@ -373,6 +378,8 @@ fn multi_page(
         for report in gear_board::voyage::reports(tx, project, now)? {
             lines.extend(report.lines());
         }
+        // The goal of the voyage the plan names (T-336, T-588): the same one
+        // text every captain output uses, never a second rule here.
         let milestone = crate::plan::current_voyage(tx, project)?;
         if !milestone.is_empty() && gear_board::stations::voyage_open(tx, project, &milestone)? {
             if let Some(goal) = gear_board::stations::goal_text(tx, project, &milestone)? {

@@ -24,7 +24,7 @@ const IDLE_BEFORE_NUDGE_S: i64 = 120;
 /// The text a stopped lane is nudged with (T-206).
 fn nudge_text(task: &str) -> String {
     format!(
-        "Continue {task}: your last turn stopped (a server error such as \"model at capacity\", a dropped connection, or a pause). Go on where you stopped; when done, hand in with gear send --kind handin."
+        "Continue {task}: your last turn stopped (a server error such as \"model at capacity\", a dropped connection, or a pause). Go on where you stopped; when done, hand in with gear send --kind result, as the task packet says."
     )
 }
 

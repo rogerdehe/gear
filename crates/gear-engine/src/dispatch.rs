@@ -516,6 +516,14 @@ pub(crate) fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<Task
                 .map(|mark| mark.is_some())
                 .unwrap_or(false)
         })
+        // T-581: a feature's integration task is handed in by the engine at the
+        // feature branch's tip, never worked by its lane — its first attempt,
+        // and a rework of it, which the captain re-plans with member work.
+        .filter(|task| {
+            !crate::feature::branch_override(tx, &seat.project, &task.id)
+                .map(|branch| branch.is_some())
+                .unwrap_or(false)
+        })
         .filter(|task| task.priority != "wont")
         // A dependency holds a task's first start only: once the lane has
         // worked on it, its rework never waits on a merge, and the deps hold
@@ -573,6 +581,160 @@ pub fn integration_branch(tx: &Tx<'_>, project: &str, lane: &str) -> String {
         gear_app::config::Conventions::default().integration
     } else {
         integration
+    }
+}
+
+/// The base a task's packet starts from (T-580): the task's own `base` when it
+/// has one (a member of a feature starts from the feature's branch), else the
+/// lane's integration branch.
+fn start_base(tx: &Tx<'_>, project: &str, seat: &SeatRow, task: &str) -> String {
+    tx.get_task(project, task)
+        .ok()
+        .flatten()
+        .and_then(|task| task.base)
+        .map(|base| base.trim().to_string())
+        .filter(|base| !base.is_empty())
+        .unwrap_or_else(|| integration_branch(tx, project, &seat.name))
+}
+
+/// The captain's thread for one base branch GEAR could not create (T-580):
+/// `feature-branch:<base>`.
+fn base_thread(base: &str) -> String {
+    format!("feature-branch:{base}")
+}
+
+/// One git command's stdout in `dir`; a failure is git's stderr (T-580).
+fn git_stdout(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(format!(
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+/// Tell the captain, once per base branch, that GEAR could not create it
+/// (T-580): the item follows the latest error while the failure lasts.
+fn tell_captain_base(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    task: &str,
+    base: &str,
+    error: &str,
+    now: Ts,
+) -> GearResult<()> {
+    store.write(|tx| {
+        let Some(captain) = tx.captain_of(project)? else {
+            return Ok(());
+        };
+        let body = format!(
+            "task {task} of lane {}: GEAR could not create its base branch {base} on the remote: {error}. The task waits: its packet starts the lane on {base}, so it is sent once the branch exists.",
+            seat.name
+        );
+        let thread = base_thread(base);
+        let open = tx
+            .thread_messages(project, &thread)?
+            .into_iter()
+            .find(|message| matches!(message.state, MsgState::Open | MsgState::Waiting));
+        if let Some(item) = open {
+            if item.body != body {
+                tx.update_message_body(project, &item.id, &body)?;
+            }
+            return Ok(());
+        }
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: project.to_string(),
+            thread,
+            task: Some(task.to_string()),
+            attempt: None,
+            sender: "engine".into(),
+            sender_gen: 0,
+            recipient: captain.id,
+            kind: MsgKind::System,
+            urgent: true,
+            body,
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+        Ok(())
+    })
+}
+
+/// Make sure a feature task's base branch exists on the remote before its
+/// packet says to start from it (T-580): when the base is not the lane's
+/// integration branch and the remote has no such branch, push it from the
+/// integration branch. `false` = git failed: the delivery waits for the next
+/// tick and the captain is told.
+fn ensure_base_branch(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    task: &str,
+    now: Ts,
+) -> GearResult<bool> {
+    let found = store.read(|tx| {
+        let Some(task_row) = tx.get_task(project, task)? else {
+            return Ok(None);
+        };
+        let Some(config) = tx
+            .get_project(project)?
+            .and_then(|row| gear_app::config::parse_row(&row).ok())
+        else {
+            return Ok(None);
+        };
+        let Some(base) = task_row
+            .base
+            .as_deref()
+            .map(str::trim)
+            .filter(|base| !base.is_empty())
+        else {
+            return Ok(None);
+        };
+        let integration = integration_branch(tx, project, &seat.name);
+        if base == integration {
+            return Ok(None);
+        }
+        Ok(Some((
+            base.to_string(),
+            integration,
+            config.conventions.remote.clone(),
+            config.repo_of_task(&task_row).path,
+        )))
+    })?;
+    let Some((base, integration, remote, repo)) = found else {
+        return Ok(true);
+    };
+    let dir = std::path::Path::new(&repo);
+    match git_stdout(dir, &["ls-remote", "--heads", &remote, &base]) {
+        Ok(heads) if !heads.is_empty() => return Ok(true),
+        Ok(_) => {}
+        Err(error) => {
+            tell_captain_base(store, project, seat, task, &base, &error, now)?;
+            return Ok(false);
+        }
+    }
+    let source = format!("{remote}/{integration}:refs/heads/{base}");
+    let created = git_stdout(dir, &["fetch", &remote, &integration])
+        .and_then(|_| git_stdout(dir, &["push", &remote, &source]));
+    match created {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            tell_captain_base(store, project, seat, task, &base, &error, now)?;
+            Ok(false)
+        }
     }
 }
 
@@ -764,6 +926,12 @@ pub fn prepare_dispatch(
         // What that worktree still holds uncommitted is read now, before the
         // attempt exists, and the packet names it.
         if matches!(action, Action::Assign { .. }) {
+            // T-580: a feature task's base branch exists on the remote before
+            // its packet names it. A git that fails leaves the delivery for
+            // the next tick and reads no worktree.
+            if !ensure_base_branch(store, project, seat, task, now)? {
+                continue;
+            }
             note_dirty_home(store, cfg, seat, task)?;
         }
         let attempt = store.write(|tx| {
@@ -958,7 +1126,8 @@ pub fn intend_dispatch(
                 // a rework (attempt n ≥ 2) says it is a rework (T-544) — the
                 // branch and the worktree are already there.
                 let branch = task_branch(&conventions.task_branch, project, &seat.name, task);
-                let integration = integration_branch(tx, project, &seat.name);
+                // T-580: a feature task starts from its own base branch.
+                let integration = start_base(tx, project, seat, task);
                 let mut text = if attempt.n == 1 {
                     first_attempt_text(
                         task,
@@ -1315,8 +1484,14 @@ mod tests {
     /// A config the engine can read: the project, its quota, its captain and
     /// its conventions.
     fn config_toml(integration: &str) -> String {
+        config_toml_in("/repo", integration)
+    }
+
+    /// The same config, with `repo` as the project's root repo (T-580: the
+    /// base-branch tests run git there).
+    fn config_toml_in(repo: &str, integration: &str) -> String {
         format!(
-            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/repo\"\n\
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"{repo}\"\n\
              [quota]\nlanes = 4\ntemps = 2\n\
              [captain]\npane = \"w1:p0\"\nkind = \"codex\"\nprofile = \"codex\"\n\
              [conventions]\nintegration = \"{integration}\"\n"
@@ -1891,6 +2066,196 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("git stash"), "{text}");
+    }
+
+    /// T-581: a feature's integration task is handed in by the engine at the
+    /// feature branch's tip, so it is never the lane's ready work — a normal
+    /// task of the same lane still is.
+    #[test]
+    fn a_feature_integration_task_is_never_the_lanes_ready_work() {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+                project.config_toml = config_toml("trunk");
+                tx.update_project(&project)?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    NOW,
+                )?;
+                tx.insert_task(&ready_task("T-1"))?;
+                tx.insert_task(&ready_task("T-9"))?;
+                tx.set_meta("task_branch_override:p:T-9", "p/feature/f-1")?;
+                Ok(())
+            })
+            .unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let ready = store.read(|tx| ready_tasks_of(tx, &seat)).unwrap();
+        assert_eq!(
+            ready
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["T-1"],
+            "the feature's integration task is not delivered"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // T-580: a feature task starts from its base branch, and that branch
+    // exists before the packet says so.
+    // ----------------------------------------------------------------
+
+    /// A repo whose `origin` holds `dev` (T-580): the lane's clone (standing on
+    /// `dev`) and the bare remote it pushes to.
+    fn base_fixture() -> (tempfile::TempDir, tempfile::TempDir) {
+        let bare = tempfile::tempdir().unwrap();
+        sh(bare.path(), "git init -q --bare -b dev .");
+        let work = tempfile::tempdir().unwrap();
+        sh(
+            work.path(),
+            &format!(
+                "git init -q -b dev && git remote add origin {} && \
+                 echo dev > a.txt && git add -A && \
+                 git -c user.email=gear@example.invalid -c user.name=gear commit -qm init && \
+                 git push -q origin dev",
+                bare.path().display()
+            ),
+        );
+        (work, bare)
+    }
+
+    /// The lane `heat` ready for `T-1`, whose base is `base`, in `repo` on the
+    /// `dev` integration branch.
+    fn feature_world(
+        repo: &str,
+        base: Option<&str>,
+    ) -> (
+        gear_store::Store,
+        gear_herdr::fake::FakeHerdr,
+        crate::EngineCfg,
+    ) {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+                project.config_toml = config_toml_in(repo, "dev");
+                tx.update_project(&project)?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    NOW,
+                )?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "captain",
+                    SeatRole::Captain,
+                    "w1:p0",
+                    "codex",
+                    NOW,
+                )?;
+                tx.set_meta(&crate::onboard::worktree_path_key("p:heat"), repo)?;
+                tx.set_meta(&format!("engine.session_fresh.{}", "p:heat"), "1")?;
+                let mut task = ready_task("T-1");
+                task.base = base.map(str::to_string);
+                tx.insert_task(&task)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut h = gear_herdr::fake::FakeHerdr::new();
+        h.add_agent_named("w1:p2", "opencode", gear_herdr::AgentStatus::Idle, "p-heat");
+        let cfg = crate::EngineCfg {
+            profiles: gear_herdr::builtins(),
+            ..Default::default()
+        };
+        (store, h, cfg)
+    }
+
+    /// A task with a base starts its branch from that base, and GEAR creates
+    /// the branch it names on the remote first.
+    #[test]
+    fn a_feature_task_starts_from_its_base_branch() {
+        let (work, bare) = base_fixture();
+        let repo = work.path().to_str().unwrap();
+        let (mut store, mut h, cfg) = feature_world(repo, Some("p/feature/f-1"));
+        let text = first_packet(&mut store, &mut h, &cfg, "T-1");
+        assert!(
+            text.contains("git switch -c heat/t1 origin/p/feature/f-1"),
+            "{text}"
+        );
+        // The branch was missing: it was pushed from dev before the packet.
+        let dev = sh(bare.path(), "git rev-parse dev");
+        assert_eq!(
+            sh(bare.path(), "git rev-parse p/feature/f-1"),
+            dev,
+            "the base branch is on the remote, at dev"
+        );
+    }
+
+    /// A task with no base is unchanged: the lane's integration branch, and no
+    /// branch is made.
+    #[test]
+    fn a_task_without_a_base_starts_from_the_integration_branch() {
+        let (work, bare) = base_fixture();
+        let repo = work.path().to_str().unwrap();
+        let (mut store, mut h, cfg) = feature_world(repo, None);
+        let text = first_packet(&mut store, &mut h, &cfg, "T-1");
+        assert!(text.contains("git switch -c heat/t1 origin/dev"), "{text}");
+        assert_eq!(
+            sh(
+                bare.path(),
+                "git for-each-ref --format='%(refname:short)' refs/heads"
+            ),
+            "dev",
+            "no other branch is made"
+        );
+    }
+
+    /// A base branch GEAR cannot make waits for the next tick and tells the
+    /// captain once, naming the git error.
+    #[test]
+    fn a_base_branch_that_cannot_be_made_waits_for_the_next_tick() {
+        // A repo with no `origin`: the first git read fails.
+        let work = tempfile::tempdir().unwrap();
+        sh(work.path(), "git init -q -b dev");
+        let repo = work.path().to_str().unwrap();
+        let (mut store, mut h, cfg) = feature_world(repo, Some("p/feature/f-1"));
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let actions = vec![(
+            seat,
+            Action::Assign {
+                task: "T-1".to_string(),
+            },
+        )];
+        let prepared = prepare_dispatch(&mut store, &mut h, &cfg, "p", &actions, NOW).unwrap();
+        assert!(prepared.is_empty(), "the delivery waits for the next tick");
+        assert!(
+            store
+                .read(|tx| tx.open_attempts_of_seat("p:heat"))
+                .unwrap()
+                .is_empty(),
+            "no attempt is opened for a packet that cannot go"
+        );
+        let items = store
+            .read(|tx| tx.thread_messages("p", "feature-branch:p/feature/f-1"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "one item per base branch");
+        assert!(items[0].body.contains("p/feature/f-1"), "{}", items[0].body);
+        assert!(
+            items[0].body.contains("git ls-remote"),
+            "the item names the git error: {}",
+            items[0].body
+        );
     }
 
     /// A worktree git cannot read is a clean one: nothing to say, nothing

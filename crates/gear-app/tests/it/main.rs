@@ -63,6 +63,7 @@ mod config_contract;
 mod coverage_contract;
 mod decision_contract;
 mod draft_contract;
+mod feature_plan_contract;
 mod github_contract;
 mod held_contract;
 mod home_task_contract;

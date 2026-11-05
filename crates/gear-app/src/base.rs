@@ -52,8 +52,21 @@ pub fn gate_for(store: &mut Store, env: &Env) -> GearResult<BaseGate> {
     })?;
     let config = crate::config::latest(store, &ctx.project)?;
     // The lane's own repo: a lane in a child repo is checked against that
-    // repo's integration branch, not the root's (T-54).
-    let integration = config.repo_of_lane(&ctx.seat).integration;
+    // repo's integration branch, not the root's (T-54). A lane whose open task
+    // names a base of its own is checked against that branch instead (T-579):
+    // a member of a feature works on the feature's branch, and its work
+    // contains that branch, not the integration branch the feature has not
+    // reached yet.
+    let base = store.read(|tx| {
+        let Some(attempt) = tx.open_attempts_of_seat(&ctx.seat_id())?.into_iter().next() else {
+            return Ok(None);
+        };
+        Ok(tx
+            .get_task(&ctx.project, &attempt.task)?
+            .and_then(|task| task.base)
+            .filter(|base| !base.trim().is_empty()))
+    })?;
+    let integration = base.unwrap_or_else(|| config.repo_of_lane(&ctx.seat).integration);
     let window_min = config.timing.handin_base_window_min;
     let worktree = std::env::current_dir().map_err(|e| {
         GearError::new(
@@ -78,6 +91,23 @@ pub fn task_branch(
     task: &str,
 ) -> String {
     gear_model::branch::expand(&conventions.task_branch, project, lane, task)
+}
+
+/// The branch a task's work is pushed to (T-83, T-579): the branch the task
+/// itself names with `task_branch_override` — a member of a feature pushes to
+/// the feature's branch (M6.2) — else the project's `[conventions].task_branch`
+/// template expanded as [`task_branch`] does.
+pub fn pushed_branch(
+    store: &mut Store,
+    conventions: &crate::config::Conventions,
+    project: &str,
+    lane: &str,
+    task: &str,
+) -> GearResult<String> {
+    if let Some(branch) = store.read(|tx| tx.task_branch_override(project, task))? {
+        return Ok(branch);
+    }
+    Ok(task_branch(conventions, project, lane, task))
 }
 
 /// Refuse unless `candidate` is on `<remote>/<branch>` (T-83): M2.1's T-60 was

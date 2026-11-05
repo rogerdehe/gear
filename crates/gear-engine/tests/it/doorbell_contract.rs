@@ -471,6 +471,71 @@ fn a_project_with_no_departed_voyage_has_no_goal_line() {
     );
 }
 
+/// T-588: the goal line names the voyage that runs, even when it never got a
+/// depart line — the last departed voyage is finished (GEAR M6.2's case, where
+/// every surface took the finished M6.1).
+#[test]
+fn the_goal_line_names_the_open_voyage_not_the_finished_departure() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", NOW)?;
+            for (milestone, done, departure) in [
+                ("M1", "the first goal is met", Some(NOW - 600)),
+                ("M2", "the second goal is met", None),
+            ] {
+                tx.upsert_voyage(&VoyageRow {
+                    project: "p".into(),
+                    milestone: milestone.into(),
+                    title: format!("voyage {milestone}"),
+                    done: Some(done.into()),
+                    bar: Some("FASTEST".into()),
+                    eta: Some("4h".into()),
+                    departure,
+                    departure_tasks: departure.map(|_| 1),
+                    departure_estimate_min: departure.map(|_| 30),
+                    updated: NOW,
+                })?;
+            }
+            for (id, rank, state, milestone) in [
+                ("T-1", 1, TaskState::Done, "M1"),
+                ("T-2", 2, TaskState::Ready, "M2"),
+            ] {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state,
+                    priority: "must".into(),
+                    lane: Some("hull".into()),
+                    milestone: Some(milestone.into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(30),
+                    issue: None,
+                    updated: NOW,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let goal = store
+        .read(|tx| goal_line(tx, "p"))
+        .unwrap()
+        .expect("the open voyage's goal line");
+    assert!(goal.contains("voyage M2"), "{goal}");
+    assert!(!goal.contains("voyage M1"), "{goal}");
+}
+
 #[test]
 fn a_captain_doorbell_repeats_the_voyage_goal() {
     let mut captain = input("captain");
@@ -711,7 +776,8 @@ fn a_kept_course_is_not_a_landing_for_the_reclaim() {
         })
         .unwrap();
 
-    let changed = gear_engine::finished::reclaim(&mut store, "p", NOW + 600).unwrap();
+    let mut herdr = gear_herdr::fake::FakeHerdr::new();
+    let changed = gear_engine::finished::reclaim(&mut store, &mut herdr, "p", NOW + 600).unwrap();
 
     assert_eq!(changed, None);
     let items = store

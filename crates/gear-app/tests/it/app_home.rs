@@ -1019,3 +1019,89 @@ fn a_finished_voyage_hides_its_own_items_and_shows_a_seat_take() {
     assert!(!home.text.contains("Station M1"), "{}", home.text);
     assert!(!home.text.contains("Your goal"), "{}", home.text);
 }
+
+/// T-586: the page follows open work, not the last departure. M1 departed and
+/// finished; M2 has a running task but never got a depart line, so the page
+/// must show M2 — its goal and its station item, the items the doorbell rings
+/// (GEAR M6.2 ran without a depart line: the page took the finished M6.1 and
+/// hid M-8020 while the doorbell rang it).
+#[test]
+fn a_finished_voyage_does_not_hide_another_that_still_runs() {
+    let mut s = world();
+    s.write(|tx| {
+        for (milestone, done, departure) in [
+            ("M1", "the first goal is met", Some(NOW - 7_200)),
+            ("M2", "the second goal is met", None),
+        ] {
+            tx.upsert_voyage(&gear_store::VoyageRow {
+                project: "p".into(),
+                milestone: milestone.into(),
+                title: format!("voyage {milestone}"),
+                done: Some(done.into()),
+                bar: Some("DELIVERABLE".into()),
+                eta: Some("4h".into()),
+                departure,
+                departure_tasks: departure.map(|_| 1),
+                departure_estimate_min: departure.map(|_| 30),
+                updated: NOW,
+            })?;
+        }
+        for (id, rank, state, milestone) in [
+            ("T-1", 1, gear_model::TaskState::Done, "M1"),
+            ("T-2", 2, gear_model::TaskState::Running, "M2"),
+        ] {
+            tx.insert_task(&gear_store::TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: id.into(),
+                rank,
+                state,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: Some(milestone.into()),
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: Some(30),
+                issue: None,
+                updated: NOW,
+            })?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    insert(
+        &mut s,
+        "station:M2",
+        "engine",
+        "p:captain",
+        MsgKind::System,
+        MsgState::Open,
+        "Station M2 [0 done] · 1 task left in the voyage",
+        NOW,
+    );
+
+    let home = home::build(
+        &mut s,
+        &seat_env("captain", CAP_PANE),
+        Some(&fp(CAP_PANE, "codex")),
+        NOW + 1,
+    )
+    .unwrap();
+
+    assert!(home.text.contains("Station M2"), "{}", home.text);
+    assert!(home.text.contains("Your goal, voyage M2"), "{}", home.text);
+    assert!(
+        !home.text.contains("Your goal, voyage M1"),
+        "a finished voyage keeps no goal line: {}",
+        home.text
+    );
+    assert!(home.text.contains("SNAPSHOT"), "{}", home.text);
+}

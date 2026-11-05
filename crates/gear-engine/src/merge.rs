@@ -422,13 +422,24 @@ pub fn merge_passed(
         if queued.contains(&(task.clone(), attempt)) {
             continue;
         }
-        let branch = branch_of(&config.conventions.task_branch, project, &lane, &task);
+        // T-582: an integration task's branch is the feature's own branch, not
+        // one the lane cut from the template, and the close keeps it (the
+        // feature's; the captain deletes it at landing).
+        let feature_branch = store.read(|tx| tx.task_branch_override(project, &task))?;
+        let branch = match &feature_branch {
+            Some(branch) => branch.clone(),
+            None => branch_of(&config.conventions.task_branch, project, &lane, &task),
+        };
         let mut payload = serde_json::json!({
             "branch": branch,
             "candidate": candidate,
             "attempt_candidate": attempt_candidate,
             "review": review_branch(&config.conventions.review_branch, project, &lane, &task),
         });
+        // T-582: the feature branch is not a task branch to close.
+        if feature_branch.is_some() {
+            payload["keep_branch"] = serde_json::json!(true);
+        }
         // T-405: the merge op of a mechanically settled attempt says so, so
         // the merge does not require a review branch that never existed.
         if mechanical {
@@ -1185,7 +1196,7 @@ fn launch_batch(
 /// A lock in the worktree's git directory also excludes another runtime or a
 /// recovering engine. OS locks are released on process death; stale files are
 /// harmless. Never wait for a lock on the tick thread.
-fn merge_lock(dir: &Path) -> Result<Option<File>, String> {
+pub(crate) fn merge_lock(dir: &Path) -> Result<Option<File>, String> {
     let path = merge_lock_path(dir);
     let file = OpenOptions::new()
         .create(true)
@@ -2354,7 +2365,13 @@ fn close_pr_branches(
             let lane = lane_of(store, project, op.task.as_deref()).unwrap_or_default();
             review_branch(&config.conventions.review_branch, project, &lane, &task)
         });
-    if !task_branch.is_empty() {
+    // T-582: a feature's own branch stays when its integration task lands.
+    let keep_branch = op
+        .payload
+        .get("keep_branch")
+        .and_then(|keep| keep.as_bool())
+        .unwrap_or(false);
+    if !task_branch.is_empty() && !keep_branch {
         delete_remote(dir, &task_branch, remote);
     }
     if !review.is_empty() {
@@ -2581,6 +2598,22 @@ fn integration_worktree(
     stage_worktree(store, herdr, repo, project, config, merges, now, 0)
 }
 
+/// The repo's integration worktree, opened the way every merge opens it (seat
+/// `merge`, `<project>/merge/home`), for a step that is not a merge op (T-585:
+/// a landing merges the captain's records there). It is the same worktree the
+/// merge queue uses, so the caller takes [`merge_lock`] before it touches it.
+pub(crate) fn open_integration_worktree(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    repo: &Repo,
+    project: &str,
+    config: &ProjectConfig,
+    now: Ts,
+) -> Result<gear_herdr::Worktree, String> {
+    let merges = MergeWorkers::default();
+    stage_worktree(store, herdr, repo, project, config, &merges, now, 0)
+}
+
 /// The worktree of one stage of a merge train: stage 0 is the integration
 /// worktree, stage `n` its sibling `<label>-<n+1>` on seat `merge-<n+1>`.
 #[allow(clippy::too_many_arguments)]
@@ -2656,6 +2689,11 @@ fn merge_label(project: &str, repo: &Repo) -> String {
 
 /// The repo a merge op works in: the repo of the task's lane (T-53). A task
 /// without a lane merges in the project root.
+///
+/// T-582: a task carries the branch it is merged into and the gate its merge
+/// runs. A member of a feature (`base` = the feature's branch) merges there, with
+/// the feature's own check instead of the project gate; the integration task
+/// merges the feature's branch into the integration branch with the full gate.
 fn repo_of_op(
     store: &mut Store,
     project: &str,
@@ -2666,10 +2704,29 @@ fn repo_of_op(
         Some(task) => store.read(|tx| tx.get_task(project, task))?,
         None => None,
     };
-    Ok(task
+    let mut repo = task
         .as_ref()
         .map(|row| config.repo_of_task(row))
-        .unwrap_or_else(|| config.root_repo()))
+        .unwrap_or_else(|| config.root_repo());
+    if let Some(row) = &task {
+        if let Some(base) = row
+            .base
+            .as_deref()
+            .map(str::trim)
+            .filter(|base| !base.is_empty())
+        {
+            repo.integration = base.to_string();
+        }
+        if let Some(gate) = row
+            .gate
+            .as_deref()
+            .map(str::trim)
+            .filter(|gate| !gate.is_empty())
+        {
+            repo.gate = gate.to_string();
+        }
+    }
+    Ok(repo)
 }
 
 /// The key of a merge worker: one worker per repo (T-53), so a merge in one
@@ -2874,6 +2931,8 @@ struct Prepared {
     base: String,
     /// T-573: the merge carries only reports, so no gate ran for it.
     no_gate: bool,
+    /// T-582: the branch is the feature's own, so the close keeps it.
+    keep_branch: bool,
 }
 
 /// The attempt the merge op names, as the review message's `{attempt}`.
@@ -3093,6 +3152,13 @@ fn prepare_merge(
         .get("mechanical")
         .and_then(|mechanical| mechanical.as_bool())
         .unwrap_or(false);
+    // T-582: the branch is a feature's own (`p/feature/f-1`): the close at the
+    // end of the merge keeps it, since the captain deletes it at landing.
+    let keep_branch = op
+        .payload
+        .get("keep_branch")
+        .and_then(|keep| keep.as_bool())
+        .unwrap_or(false);
     // T-532: a remerge carries the captain's conflict fix on the review
     // branch (decision 03:55): the review branch merged the integration branch
     // and the conflict was resolved there.
@@ -3308,6 +3374,7 @@ fn prepare_merge(
         pushed,
         base: base_ref,
         no_gate: false,
+        keep_branch: keep_branch.clone(),
     })
 }
 
@@ -3486,9 +3553,11 @@ fn closed_and_line(
         branch,
         review,
         pushed,
+        keep_branch,
         ..
     } = prepared;
-    let (closed, left, moved) = close_branches(dir, repo, branch, review, remote, pushed);
+    let (closed, left, moved) =
+        close_branches(dir, repo, branch, review, remote, pushed, *keep_branch);
 
     // The merge commit this line is about: a batch's op names the one it built
     // (T-547, F2 of the review), a single merge its own HEAD.
@@ -4330,6 +4399,7 @@ fn close_branches(
     review: &str,
     remote: Target<'_>,
     pushed: &Pushed,
+    keep_branch: bool,
 ) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut closed = Vec::new();
     let mut left = Vec::new();
@@ -4357,6 +4427,10 @@ fn close_branches(
         if name == repo.integration || name == repo.release {
             continue;
         }
+        // T-582: the feature's branch is not a task branch to close.
+        if keep_branch && name == task_branch {
+            continue;
+        }
         if name != task_branch && !is_task_branch(&name, task_branch) {
             // Not this task's branch: it stays, and the captain is told.
             left.push(name);
@@ -4382,7 +4456,8 @@ fn close_branches(
     // to the captain (the commit is kept by the remote's history until it is
     // pruned, and the lane's own branch has it).
     let task_ref = format!("{}/{task_branch}", remote.name);
-    if !closed.iter().any(|name| name == task_branch)
+    if !keep_branch
+        && !closed.iter().any(|name| name == task_branch)
         && !left.iter().any(|name| name == task_branch)
         && pushed.refs.iter().any(|name| name == &task_ref)
     {
@@ -4637,11 +4712,15 @@ fn matching_paths(listed: &[String], changed: &[String]) -> Vec<String> {
 }
 
 /// Run one git command in `dir`; the output tail comes back as the error.
-fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     git_with_lock(dir, args, None)
 }
 
-fn git_with_lock(dir: &Path, args: &[&str], lock: Option<&File>) -> Result<String, String> {
+pub(crate) fn git_with_lock(
+    dir: &Path,
+    args: &[&str],
+    lock: Option<&File>,
+) -> Result<String, String> {
     let mut command = Command::new("git");
     // The engine is not a seat: its git runs — and any hook a repository
     // brings — must not see the seat identity of whoever started the engine
@@ -14096,5 +14175,287 @@ gate = "{project_gate}"
             vec![raced, newer_a, newer_b],
             "oldest first, the raced one not starved"
         );
+    }
+
+    // ----------------------------------------------------------------
+    // T-582: a feature's members merge into the feature's own branch, with
+    // their own check; the feature reaches the integration branch through its
+    // integration task's merge, which leaves the feature branch on the remote.
+    // ----------------------------------------------------------------
+
+    /// Put a feature branch on the fixture's origin: `base` plus one commit of
+    /// its own, and return its tip (T-582).
+    fn feature_branch_on(work: &Path, base: &str) -> String {
+        sh(work, "git fetch -q origin");
+        sh(
+            work,
+            &format!(
+                "git switch -qC p/feature/f-1 origin/{base} && printf 'feature\\n' > f.txt && \
+                 git add -A && git -c user.email=a@b -c user.name=a commit -qm 'feature'"
+            ),
+        );
+        publish(work, "p/feature/f-1");
+        sh(work, "git rev-parse origin/p/feature/f-1")
+    }
+
+    /// A store whose one task is Verifying with a passed attempt at
+    /// `candidate`, carrying `base`/`gate` and, when `feature` names one, the
+    /// task branch override (T-582).
+    #[allow(clippy::too_many_arguments)]
+    fn feature_store(
+        repo: &Path,
+        config_gate: &str,
+        task: &str,
+        base: Option<&str>,
+        task_gate: Option<&str>,
+        feature: Option<&str>,
+        candidate: &str,
+    ) -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                tx.insert_project(&gear_store::ProjectRow {
+                    id: "p".into(),
+                    herdr_session: "sess".into(),
+                    config_toml: config_text_in(config_gate, repo),
+                    config_version: 1,
+                    quota_lanes: 1,
+                    quota_temps: 0,
+                    quota_includes_captain: false,
+                    plan_version: 0,
+                    created: 0,
+                })?;
+                for (name, role, pane) in [
+                    ("heat", gear_model::SeatRole::Lane, "w1:p1"),
+                    ("captain", gear_model::SeatRole::Captain, "w9:p1"),
+                ] {
+                    gear_store::testing::seed_active_seat(
+                        tx, "p", name, role, pane, "opencode", 0,
+                    )?;
+                }
+                tx.insert_task(&gear_store::TaskRow {
+                    repo: None,
+                    base: base.map(str::to_string),
+                    gate: task_gate.map(str::to_string),
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: task.into(),
+                    rank: 1,
+                    state: TaskState::Verifying,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: 0,
+                })?;
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: task.into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: gear_model::AttemptState::Accepted,
+                    candidate: Some(candidate.into()),
+                    report: None,
+                    safe_point: None,
+                    started: 0,
+                    updated: 0,
+                })?;
+                tx.insert_verdict(&gear_store::VerdictRow {
+                    project: "p".into(),
+                    task: task.into(),
+                    attempt: 1,
+                    contract_version: 1,
+                    candidate: candidate.into(),
+                    passed: true,
+                    evidence: Some("ops/reviews/T-5.md".into()),
+                    by_seat: "p:captain".into(),
+                    created: 0,
+                })?;
+                if let Some(branch) = feature {
+                    tx.set_task_branch_override("p", task, branch)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// The merge op `merge_passed` queued for the project, in whatever state
+    /// its worker has moved it to (the payload is what the tests read).
+    fn queued_merge_op(store: &mut Store) -> OpRow {
+        store
+            .read(|tx| tx.ops_of_kind_in_states("p", OpKind::Merge, &[]))
+            .unwrap()
+            .pop()
+            .expect("a merge op is queued")
+    }
+
+    /// The config the engine reads for the fixture (T-582).
+    fn parsed_config(gate: &str, work: &Path) -> ProjectConfig {
+        gear_app::config::parse(&config_text_in(gate, work)).unwrap()
+    }
+
+    /// The branches the fixture's origin still has.
+    fn origin_branches(root: &Path) -> String {
+        sh(
+            root,
+            "git -C origin.git for-each-ref --format='%(refname:short)' refs/heads",
+        )
+    }
+
+    /// T-582: an integration task's merge merges the feature's branch into the
+    /// integration branch, and the close keeps that branch on the remote.
+    #[test]
+    fn an_integration_task_merges_the_feature_branch_and_keeps_it() {
+        let scratch = Scratch::new("feature-integration");
+        let candidate = feature_branch_on(&scratch.work, "review/t5");
+        let mut store = feature_store(
+            &scratch.work,
+            "true",
+            "T-5",
+            None,
+            None,
+            Some("p/feature/f-1"),
+            &candidate,
+        );
+        let config = parsed_config("true", &scratch.work);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        merge_passed(&mut store, &mut herdr, &test_cfg(), "p", 10).unwrap();
+        let op = queued_merge_op(&mut store);
+        assert_eq!(
+            op.payload["branch"], "p/feature/f-1",
+            "the merge names the feature's branch: {:?}",
+            op.payload
+        );
+        assert_eq!(op.payload["keep_branch"], true, "{:?}", op.payload);
+        let repo = repo_of_op(&mut store, "p", &op, &config).unwrap();
+        assert_eq!(repo.integration, "dev", "the integration task lands on dev");
+
+        let worktree = scratch.merge_worktree();
+        let line = merge_one(&worktree, &repo, &op).unwrap();
+
+        assert!(line.contains("merged T-5 into dev"), "{line}");
+        let dev = scratch.dev_log();
+        assert!(dev.contains("task"), "the feature's work is on dev: {dev}");
+        assert!(dev.contains("feature"), "{dev}");
+        assert!(!line.contains("closed on origin: p/feature/f-1"), "{line}");
+        assert_eq!(
+            scratch.head_of("p/feature/f-1"),
+            candidate,
+            "the feature's branch is still on the remote"
+        );
+    }
+
+    /// T-582: a member of a feature merges into the feature's branch, and its
+    /// own gate (`true`) runs instead of the project's — which fails here, so a
+    /// merge that ran it could not land.
+    #[test]
+    fn a_member_merges_into_the_feature_branch_without_the_project_gate() {
+        let pair = Pair::new("feature-member", false);
+        feature_branch_on(&pair.work, "dev");
+        let mut store = feature_store(
+            &pair.work,
+            "false",
+            "T-1",
+            Some("p/feature/f-1"),
+            Some("true"),
+            None,
+            &pair.a,
+        );
+        let config = parsed_config("false", &pair.work);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        merge_passed(&mut store, &mut herdr, &test_cfg(), "p", 10).unwrap();
+        let op = queued_merge_op(&mut store);
+        assert_eq!(op.payload["branch"], "heat/t1", "{:?}", op.payload);
+        assert!(op.payload.get("keep_branch").is_none(), "{:?}", op.payload);
+        let repo = repo_of_op(&mut store, "p", &op, &config).unwrap();
+        assert_eq!(repo.integration, "p/feature/f-1", "the member lands there");
+        assert_eq!(
+            repo.gate, "true",
+            "the member's own check, not the project's"
+        );
+
+        let worktree = pair.merge_worktree();
+        let line = merge_one(&worktree, &repo, &op).unwrap();
+
+        assert!(line.contains("merged T-1 into p/feature/f-1"), "{line}");
+        let feature = sh(
+            &pair.root,
+            "git -C origin.git log --format=%s p/feature/f-1",
+        );
+        assert!(
+            feature.contains('a'),
+            "the member's work is there: {feature}"
+        );
+        assert!(feature.contains("r1"), "{feature}");
+        assert_eq!(
+            pair.dev_log(),
+            "dev",
+            "dev is untouched by a member's merge"
+        );
+        let branches = origin_branches(&pair.root);
+        assert!(!branches.contains("heat/t1"), "{branches}");
+    }
+
+    /// T-582: a member whose work conflicts with the feature's branch is
+    /// refused as any conflict is, and the branch is not moved.
+    #[test]
+    fn a_conflicting_member_is_refused_and_leaves_the_feature_branch() {
+        let scratch = Scratch::new("feature-conflict");
+        // The feature branch appends to the README where the task's commit
+        // does: the two cannot merge.
+        sh(
+            &scratch.work,
+            "git fetch -q origin && git switch -qC p/feature/f-1 origin/dev && \
+             printf 'dev\\nfeature\\n' > README.md && git add -A && \
+             git -c user.email=a@b -c user.name=a commit -qm feature",
+        );
+        publish(&scratch.work, "p/feature/f-1");
+        let before = sh(&scratch.work, "git rev-parse origin/p/feature/f-1");
+        let mut store = feature_store(
+            &scratch.work,
+            "true",
+            "T-5",
+            Some("p/feature/f-1"),
+            Some("true"),
+            None,
+            &scratch.head_of("heat/t5"),
+        );
+        let config = parsed_config("true", &scratch.work);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        merge_passed(&mut store, &mut herdr, &test_cfg(), "p", 10).unwrap();
+        let op = queued_merge_op(&mut store);
+        let repo = repo_of_op(&mut store, "p", &op, &config).unwrap();
+
+        let worktree = scratch.merge_worktree();
+        let failed = merge_one(&worktree, &repo, &op).unwrap_err();
+
+        assert!(
+            failed.reason.contains("conflict merging"),
+            "{}",
+            failed.reason
+        );
+        assert_eq!(
+            scratch.head_of("p/feature/f-1"),
+            before,
+            "the feature's branch is where it was"
+        );
+        assert!(origin_branches(&scratch.root).contains("heat/t5"));
     }
 }
