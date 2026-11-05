@@ -378,10 +378,11 @@ pub fn tick(
     note_slow(&mut report, "finished voyages", step);
 
     // A landed voyage keeps no worktree: what is left is named to the captain
-    // until it is gone.
+    // until it is gone. The landing merges the captain's records first
+    // (T-585), in the merge worktree.
     let step = std::time::Instant::now();
     for project in &projects {
-        if let Err(error) = finished::reclaim(store, project, now) {
+        if let Err(error) = finished::reclaim(store, herdr, project, now) {
             report.project_failed.push(project_error(project, &error));
         }
     }

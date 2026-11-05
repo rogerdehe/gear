@@ -711,7 +711,8 @@ fn a_kept_course_is_not_a_landing_for_the_reclaim() {
         })
         .unwrap();
 
-    let changed = gear_engine::finished::reclaim(&mut store, "p", NOW + 600).unwrap();
+    let mut herdr = gear_herdr::fake::FakeHerdr::new();
+    let changed = gear_engine::finished::reclaim(&mut store, &mut herdr, "p", NOW + 600).unwrap();
 
     assert_eq!(changed, None);
     let items = store
