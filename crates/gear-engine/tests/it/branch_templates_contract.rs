@@ -366,6 +366,7 @@ seat_branch = "w/{seat}""#,
 /// is `seat_branch`, and the merge runs on the task branch and the review
 /// branch of the project's templates.
 #[test]
+#[ignore = "T-601: a real merge over the project's templates, ~90 git processes, `make full` runs it"]
 fn the_review_and_the_merge_come_from_the_projects_templates() {
     let repo = Repo::new();
     let config = repo.config(
@@ -468,6 +469,7 @@ seat_branch = "w/{seat}""#,
 /// the final segment, so a last-segment match called `tasks/2/work` a branch of
 /// T-1 and deleted another task's work.
 #[test]
+#[ignore = "T-601: a real merge over the project's templates, ~90 git processes, `make full` runs it"]
 fn a_merge_closes_only_the_tasks_own_branches() {
     let repo = Repo::new();
     let config = repo.config(

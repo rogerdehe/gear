@@ -1384,6 +1384,7 @@ mod tests {
     /// here failed under the gate's parallel load (F-293); the plan is the fact
     /// that does not move with the machine's load.
     #[test]
+    #[ignore = "T-601: 10 000 messages size the long history it reads, `make full` runs it"]
     fn a_long_history_is_selected_by_index() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gear.db");
