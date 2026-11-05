@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1208 -->
+<!-- gear-plan project=gear base=1209 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -9,6 +9,7 @@ eta: 4h
 depart: now
 
 # Decisions
+- station M-8171: keep course | why: the 389m projection is stage 2 and 3 (F-1, F-2), added after departure as agreed design; stage 1, the eta's goal, shipped in v0.6.80; T-599 moves to hull to even the lanes | else: move F-2 to its own voyage
 - 2026-11-05 17:40 scope: feature stage 3 (refresh the feature branch before its full review, bisect a red full gate) joins M6.2 as feature F-2, the design agreed with the user | why: both lanes wait on reviews; it is the last stage of the agreed design
 - station M-8165: keep course | why: projected finish 233m inside the 4h eta; three tasks left, lanes balanced
 - station M-8132: keep course | why: the eta's goal (stage 1, clause 5) is released as v0.6.80; the 379m projection counts stage 2 (F-1), added after departure, and the T-584 rework; lanes are balanced (hull holds T-590 and its own T-584 rework, mast the rest) | else: move stage 2 to its own voyage
@@ -433,7 +434,7 @@ deps: -
 feature: F-2
 fresh: feature stage 3
 
-## T-599 [must] lane=mast milestone=M6.2 required
+## T-599 [must] lane=hull milestone=M6.2 required
 goal: [feature stage 3, 3/3] The skill: skills/gear/references/captain.md (the `feature` field): the feature branch is merged with the integration branch before the full review, a conflict there is one rework of the owner lane; a red full gate is bisected beside the train and the merge-failed item names the member. skills/gear/references/decompose.md: members that change one behaviour get deps between them (lesson F-331). At most five lines in all.
 accept: The two files say so in at most five lines; `make check CRATE=gear-app TESTS='test(skill)'` passes; the merge gate runs `make gate`.
 estimate: 15
