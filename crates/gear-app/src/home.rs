@@ -169,11 +169,18 @@ pub fn build_with_agents(
                 .into_iter()
                 .filter_map(|mut thread| {
                     if !sailing {
-                        // The reclaim item is the one engine item a finished
-                        // voyage still needs answered.
+                        // Only the engine items of the finished voyage are
+                        // hidden (its tasks, stations, merges, branch sweeps,
+                        // overruns, stall), the threads the doorbell also leaves
+                        // out; a seat take or a reclaim item still shows, or
+                        // the doorbell rings for an item the page hides
+                        // (Lawrence M-875).
                         thread.open.retain(|message| {
                             message.kind != gear_model::MsgKind::System
-                                || message.thread == "reclaim"
+                                || !(message.task.is_some()
+                                    || ["station:", "stalled", "merge-", "branches:", "overrun"]
+                                        .iter()
+                                        .any(|prefix| message.thread.starts_with(prefix)))
                         });
                     }
                     (!thread.open.is_empty()).then_some(thread)
