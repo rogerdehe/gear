@@ -4049,6 +4049,128 @@ mod tests {
             "step 3 is checked before step 4"
         );
     }
+
+    /// A voyage of the T-588 fixtures: `None` means it never departed.
+    fn a_voyage(tx: &Tx<'_>, milestone: &str, departure: Option<Ts>) {
+        tx.upsert_voyage(&gear_store::VoyageRow {
+            project: "p".into(),
+            milestone: milestone.into(),
+            title: format!("voyage {milestone}"),
+            done: Some("it ships".into()),
+            bar: Some("FASTEST".into()),
+            eta: Some("4h".into()),
+            departure,
+            departure_tasks: departure.map(|_| 1),
+            departure_estimate_min: departure.map(|_| 30),
+            updated: NOW,
+        })
+        .unwrap();
+    }
+
+    /// One task of a voyage, in the state the test needs (T-588).
+    fn a_task(tx: &Tx<'_>, id: &str, rank: i64, milestone: &str, state: TaskState) {
+        tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: "p".into(),
+            id: id.into(),
+            rank,
+            state,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: Some(milestone.into()),
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: Some(30),
+            issue: None,
+            updated: NOW,
+        })
+        .unwrap();
+    }
+
+    /// T-588: the last departed voyage finished, an older departed one open →
+    /// the open one, not the newest departure.
+    #[test]
+    fn the_current_voyage_is_the_last_departed_one_that_is_still_open() {
+        let mut s = world();
+        s.write(|tx| {
+            a_voyage(tx, "M1", Some(NOW - 7_200));
+            a_voyage(tx, "M2", Some(NOW - 3_600));
+            a_task(tx, "T-1", 1, "M1", TaskState::Ready);
+            a_task(tx, "T-2", 2, "M2", TaskState::Done);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            s.read(|tx| current_voyage(tx, "p")).unwrap(),
+            "M1",
+            "M2 departed last but has no open task: M1 still runs"
+        );
+    }
+
+    /// T-588: nothing open gives the last departed voyage — the answer of a
+    /// project between voyages, and empty for one that never departed.
+    #[test]
+    fn nothing_open_gives_the_last_departed_voyage() {
+        let mut s = world();
+        assert_eq!(s.read(|tx| current_voyage(tx, "p")).unwrap(), "");
+        s.write(|tx| {
+            a_voyage(tx, "M1", Some(NOW - 7_200));
+            a_voyage(tx, "M2", Some(NOW - 3_600));
+            a_task(tx, "T-1", 1, "M1", TaskState::Done);
+            a_task(tx, "T-2", 2, "M2", TaskState::Cancelled);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            s.read(|tx| current_voyage(tx, "p")).unwrap(),
+            "M2",
+            "both are finished: the last departure"
+        );
+    }
+
+    /// T-588: no depart line anywhere, yet open tasks — the voyage with the
+    /// most open tasks, ties by name (GEAR M6.2's case, T-586's fixture).
+    #[test]
+    fn a_milestone_without_a_depart_line_is_the_voyage_while_it_has_the_most_open_tasks() {
+        let mut s = world();
+        s.write(|tx| {
+            for milestone in ["M1", "M2", "M3"] {
+                a_voyage(tx, milestone, None);
+            }
+            a_task(tx, "T-1", 1, "M1", TaskState::Ready);
+            a_task(tx, "T-2", 2, "M2", TaskState::Ready);
+            a_task(tx, "T-3", 3, "M2", TaskState::Running);
+            a_task(tx, "T-4", 4, "M3", TaskState::Ready);
+            a_task(tx, "T-5", 5, "M3", TaskState::Running);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            s.read(|tx| current_voyage(tx, "p")).unwrap(),
+            "M2",
+            "M2 and M3 both have two open tasks: the name decides"
+        );
+        // One of M2's tasks lands: M3 is the one with the most open work.
+        s.write(|tx| {
+            let mut task = tx.get_task("p", "T-3")?.expect("T-3");
+            task.state = TaskState::Done;
+            tx.update_task(&task)
+        })
+        .unwrap();
+        assert_eq!(
+            s.read(|tx| current_voyage(tx, "p")).unwrap(),
+            "M3",
+            "the busiest open milestone, not the first name"
+        );
+    }
 }
 
 /// One line for a voyage (T-22): the milestone, its planned landing, the
@@ -5267,22 +5389,69 @@ fn voyage_of(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResult<String> {
     current_voyage(tx, project)
 }
 
-/// The voyage the project is in: the one that departed last.
+/// The voyage the project is in (T-588): open work first, then the last
+/// departure.
+///
+/// 1. Among the voyages that departed, the last departed one that still has a
+///    task that is not terminal.
+/// 2. When no departed voyage has open work but a milestone has, that
+///    milestone — the one with the most open tasks, ties by name.
+/// 3. When nothing is open, the last departed voyage.
+/// 4. Empty when the project never departed and no task is open.
+///
+/// Why open work comes first: GEAR M6.2 ran without a depart line while M6.1
+/// was finished and departed, so a rule that took the last departure answered
+/// M6.1 and every surface took the finished voyage while M6.2's work waited.
+/// The rule lives here and nowhere else, so no caller decides it on its own —
+/// T-586 taught the page and the doorbell drifted apart.
 pub fn current_voyage(tx: &Tx<'_>, project: &str) -> GearResult<String> {
-    let mut latest: Option<(Ts, String)> = None;
+    let tasks = tx.tasks_of_project(project)?;
+    let open = |milestone: &str| {
+        tasks
+            .iter()
+            .any(|task| task.milestone.as_deref() == Some(milestone) && !task.state.is_terminal())
+    };
+    let mut departed: Option<(Ts, String)> = None;
+    let mut departed_open: Option<(Ts, String)> = None;
     for voyage in tx.voyages_of_project(project)? {
         let Some(departure) = voyage.departure else {
             continue;
         };
-        if latest
-            .as_ref()
-            .map(|(at, _)| departure > *at)
-            .unwrap_or(true)
-        {
-            latest = Some((departure, voyage.milestone));
+        let later = |seen: &Option<(Ts, String)>| {
+            seen.as_ref().map(|(at, _)| departure > *at).unwrap_or(true)
+        };
+        if later(&departed) {
+            departed = Some((departure, voyage.milestone.clone()));
+        }
+        if open(&voyage.milestone) && later(&departed_open) {
+            departed_open = Some((departure, voyage.milestone));
         }
     }
-    Ok(latest.map(|(_, milestone)| milestone).unwrap_or_default())
+    if let Some((_, milestone)) = departed_open {
+        return Ok(milestone);
+    }
+    // A milestone may still be running without a depart line (T-586, GEAR
+    // M6.2): that milestone, the one with the most open tasks. The map is in
+    // name order, so a tie keeps the first name.
+    let mut by_milestone: BTreeMap<&str, usize> = BTreeMap::new();
+    for task in &tasks {
+        if task.state.is_terminal() {
+            continue;
+        }
+        if let Some(milestone) = task.milestone.as_deref() {
+            *by_milestone.entry(milestone).or_insert(0) += 1;
+        }
+    }
+    let mut busiest: Option<&str> = None;
+    for (milestone, count) in &by_milestone {
+        if busiest.is_none_or(|name| *count > by_milestone[name]) {
+            busiest = Some(milestone);
+        }
+    }
+    if let Some(milestone) = busiest {
+        return Ok(milestone.to_string());
+    }
+    Ok(departed.map(|(_, milestone)| milestone).unwrap_or_default())
 }
 
 /// Record a decision of the captain (§7.3): the line as it was written, its
