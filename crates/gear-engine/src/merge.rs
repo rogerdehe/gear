@@ -3183,6 +3183,7 @@ fn prepare_merge(
             "{task} was already merged: {sha} is on {remote_name}/{integration}"
         )));
     }
+    let head_before = git(dir, &["rev-parse", "HEAD"]).ok();
     for (target, source) in &merges {
         if let Err(reason) = git(
             dir,
@@ -3205,6 +3206,15 @@ fn prepare_merge(
                 "conflict merging {target}: {reason}"
             ))));
         }
+    }
+    // Every target was already on the branch ("Already up to date"): the work
+    // landed with another merge, and a gate would refuse a candidate that
+    // carries nothing new (Prometheus T-745/T-746, 2026-11-04).
+    if head_before.is_some() && git(dir, &["rev-parse", "HEAD"]).ok() == head_before {
+        probe.step("merge");
+        return Err(Step::Merged(format!(
+            "{task} was already merged: its work is on {remote_name}/{integration}"
+        )));
     }
 
     // 7. conflict markers that a merge left behind without reporting a
@@ -11773,6 +11783,26 @@ gate = "{project_gate}"
         let branches = &state.branches;
         assert!(!branches.contains("heat/t5"), "{branches}");
         assert!(!branches.contains("review/t5"), "{branches}");
+    }
+
+    /// A merge whose task and review branches are already on the integration
+    /// branch (they landed with another merge) is merged, not gated: the gate
+    /// would refuse a candidate that carries nothing new (Prometheus T-745).
+    #[test]
+    fn a_merge_whose_branches_are_already_on_dev_is_merged_without_a_gate() {
+        let scratch = Scratch::new("already-on-dev");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        sh(
+            &scratch.work,
+            "git fetch -q origin && git switch -qC landed origin/dev \
+             && git -c user.email=a@b -c user.name=a merge -q --no-ff origin/review/t5 -m landed \
+             && git push -q origin HEAD:dev",
+        );
+
+        let line = merge_one(&worktree, &repo("false"), &op(&candidate)).unwrap();
+
+        assert!(line.contains("already merged"), "{line}");
     }
 
     /// T-573: only a file under the voyage folder counts, with `{project}`
