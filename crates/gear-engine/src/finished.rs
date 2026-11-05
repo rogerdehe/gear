@@ -179,7 +179,7 @@ fn why(
 }
 
 /// The thread of the landing's records item (T-585): `records:<milestone>`.
-pub fn records_thread(milestone: &str) -> String {
+fn records_thread(milestone: &str) -> String {
     format!("records:{milestone}")
 }
 
@@ -346,7 +346,7 @@ fn landed_voyage(store: &mut Store, project: &str, now: Ts) -> GearResult<Option
 }
 
 /// What became of a landing's captain branch (T-585).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 enum Recorded {
     /// The branch's commits are on the integration branch under
     /// `records: <project> <milestone>`, and the branch is gone.
@@ -419,11 +419,16 @@ fn merge_records(
             let reason = format!("the captain's records are merged into {}", repo.integration);
             resolve_records(store, project, milestone, &reason, now)
         }
-        Recorded::Empty | Recorded::Missing => {
+        Recorded::Empty => {
             store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
             let reason = format!(
                 "the captain's branch {branch} held nothing the integration branch does not have"
             );
+            resolve_records(store, project, milestone, &reason, now)
+        }
+        Recorded::Missing => {
+            store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
+            let reason = format!("there is no branch {branch} on the remote");
             resolve_records(store, project, milestone, &reason, now)
         }
         Recorded::Busy => Ok(None),
