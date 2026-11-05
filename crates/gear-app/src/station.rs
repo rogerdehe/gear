@@ -12,6 +12,47 @@ pub fn is_station(message: &MessageRow) -> bool {
         && message.thread.starts_with("station:")
 }
 
+/// Why an older station item closes: a newer one says what is true now
+/// (T-568).
+const SUPERSEDED: &str = "superseded by";
+
+/// Resolve the earlier open items of a station thread (T-568): the captain's
+/// inbox holds the newest report of a voyage, not one per station.
+///
+/// `keep` is the id of an item that must stay open — the voyage's landing
+/// instruction, which is a one-time order and not a snapshot: a later report
+/// says nothing in its place.
+fn supersede_earlier(
+    tx: &Tx<'_>,
+    project: &str,
+    thread: &str,
+    newest: &str,
+    keep: Option<&str>,
+    now: Ts,
+) -> GearResult<()> {
+    if keep == Some(newest) {
+        return Ok(());
+    }
+    for item in tx.thread_messages(project, thread)? {
+        if item.id == newest || Some(item.id.as_str()) == keep {
+            continue;
+        }
+        if !matches!(item.state, MsgState::Open | MsgState::Waiting) {
+            continue;
+        }
+        tx.update_message_state(
+            project,
+            &item.id,
+            MsgState::Resolved,
+            Some(&format!("{SUPERSEDED} {newest}")),
+            None,
+            None,
+            now,
+        )?;
+    }
+    Ok(())
+}
+
 /// Return the ids opened this tick. Finished historical voyages are not
 /// retroactively reported, but a watched voyage can send its final task station.
 pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String>> {
@@ -128,6 +169,16 @@ Close this with `station <id>: land`.",
                 reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
             })?;
             tx.set_meta(&format!("{key}:land"), &message.id)?;
+            // T-568: the landing order replaces the reports before it, and no
+            // later report replaces the landing order (it is not a snapshot).
+            supersede_earlier(
+                tx,
+                project,
+                &format!("station:{}", report.milestone),
+                &message.id,
+                None,
+                now,
+            )?;
             opened.push(message.id);
         }
         if crossed.is_empty() {
@@ -210,6 +261,17 @@ Close this with `station <id>: land`.",
             state: MsgState::Open,
             created: now,
         })?;
+        // T-568: one open item per voyage: this report says what is true now,
+        // so the ones before it close as superseded. The landing order stays.
+        let land = tx.get_meta(&format!("{key}:land"))?;
+        supersede_earlier(
+            tx,
+            project,
+            &format!("station:{}", report.milestone),
+            &message.id,
+            land.as_deref(),
+            now,
+        )?;
         for marker in markers {
             tx.set_meta(&marker, &message.id)?;
         }

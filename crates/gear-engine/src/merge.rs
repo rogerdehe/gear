@@ -5070,7 +5070,7 @@ fn sweep_in(
         let Some(captain) = tx.captain_of(project)? else {
             return Ok(());
         };
-        tx.insert_message(&NewMessage {
+        let message = tx.insert_message(&NewMessage {
             meta: None,
             project: project.to_string(),
             thread: format!("branches:{now}"),
@@ -5087,6 +5087,27 @@ fn sweep_in(
             state: MsgState::Open,
             created: now,
         })?;
+        // T-568: this sweep's report replaces the ones before it (its thread is
+        // named after the tick, so they are found by their prefix): the
+        // captain's inbox holds one branch-sweep item, the newest, whose body
+        // already lists what is still true.
+        for item in tx.messages_in_threads_starting(project, "branches:")? {
+            if item.id == message.id {
+                continue;
+            }
+            if !matches!(item.state, MsgState::Open | MsgState::Waiting) {
+                continue;
+            }
+            tx.update_message_state(
+                project,
+                &item.id,
+                MsgState::Resolved,
+                Some(&format!("superseded by {}", message.id)),
+                None,
+                None,
+                now,
+            )?;
+        }
         Ok(())
     })
 }
@@ -9062,6 +9083,93 @@ gate = "{gate}"
                 .len(),
             1
         );
+    }
+
+    /// T-568: a sweep's report replaces the one the last sweep wrote — its
+    /// thread is named after the tick, so the captain ended up with 123 open
+    /// `branches:` items and doorbells for the old ones.
+    #[test]
+    fn three_branch_sweeps_leave_one_open_item() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(
+            root.path(),
+            &format!("git init -q --bare {}", origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git init -q -b dev {}", work.display()),
+        );
+        sh(
+            &work,
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base",
+        );
+        sh(
+            &work,
+            &format!("git remote add origin {}", origin.display()),
+        );
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        let config = gear_app::config::parse(&config_text_in("true", &work)).unwrap();
+        let remote = Target {
+            name: "origin",
+            runner: &GitRemote,
+        };
+        let dev = git(&work, &["rev-parse", "dev"]).unwrap();
+        let sweep = |store: &mut Store, name: &str, at: Ts| {
+            let found = vec![TaskBranch {
+                name: name.into(),
+                sha: dev.trim().into(),
+                task: "T-5".into(),
+                state: TaskState::Ready,
+                since: Some(0),
+                review: false,
+                open_voyage: true,
+            }];
+            sweep_in(
+                store,
+                "p",
+                &config,
+                &work,
+                remote,
+                found,
+                at,
+                "dev",
+                Some(dev.trim()),
+            )
+            .unwrap();
+        };
+        sweep(&mut store, "heat/t6", 1_000_000);
+        sweep(&mut store, "heat/t7", 2_000_000);
+        sweep(&mut store, "heat/t8", 3_000_000);
+
+        let items = store
+            .read(|tx| tx.messages_in_threads_starting("p", "branches:"))
+            .unwrap();
+        assert_eq!(items.len(), 3, "{items:?}");
+        let open: Vec<&gear_store::MessageRow> = items
+            .iter()
+            .filter(|item| item.state == MsgState::Open)
+            .collect();
+        assert_eq!(open.len(), 1, "one open sweep item: {items:?}");
+        assert_eq!(open[0].thread, "branches:3000000");
+        // Each one says which replaced it; the last one is the open item.
+        for pair in items.windows(2) {
+            assert_eq!(pair[0].state, MsgState::Resolved, "{:?}", pair[0]);
+            assert_eq!(
+                pair[0].result.as_deref(),
+                Some(format!("superseded by {}", pair[1].id).as_str()),
+                "the item says which one replaced it"
+            );
+        }
+        assert_eq!(items[items.len() - 1].id, open[0].id);
     }
 
     /// T-553: a done task whose merge waits for another task sits in
