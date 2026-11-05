@@ -30,6 +30,17 @@
 //! large repository that reads cost one project's tick 41.7 s. A pair of full
 //! commit ids names one result that never changes, so the second read is the
 //! cache's; an error from git is not a result and is not kept.
+//!
+//! T-596: a task is read against the branch its work merges into: its own
+//! `base` when it names one, else the repo's integration branch. A member of a
+//! feature merges into the feature's branch, so that is its base; read against
+//! the integration branch instead, it carried the files of every member merged
+//! into the feature before it and paired with each of them (M6.2 F-1: T-590
+//! was said to share T-589's report). The base's tip is the local ref, else
+//! `<remote>/<base>`, read with the branches and candidates of the pass; a
+//! member whose candidate is already in its base has landed there and is
+//! skipped like a landed task (T-64), and the base a task overlaps is the base
+//! its information line names.
 
 use gear_app::config::Repo;
 use gear_model::{GearResult, MsgKind, MsgState, TaskState, Ts};
@@ -105,6 +116,9 @@ struct TaskIn {
     /// merges when the review passes (T-61), and the one that tells a landed
     /// task from an open one (T-64).
     candidate: Option<String>,
+    /// The branch the task's work merges into (T-596): its own `base` when it
+    /// names one (a member of a feature), else the repo's integration branch.
+    base: Option<String>,
 }
 
 /// One scan: the repo, the tasks of that repo and the state it remembers.
@@ -138,13 +152,23 @@ struct Conflict {
     files: Vec<String>,
 }
 
+/// One task's overlap with the branch its work merges into (T-188, T-596): an
+/// information line, never a captain item.
+#[derive(Debug)]
+struct Integration {
+    /// The branch the task merges into: the repo's integration branch, or the
+    /// feature's branch a member merges into (T-596). The line names it.
+    base: String,
+    files: Vec<String>,
+}
+
 /// What one scan found: the pairs of tasks that share a file (the captain is
-/// told about them) and the tasks that overlap the integration branch (an
+/// told about them) and the tasks that overlap the branch they merge into (an
 /// information line, never a captain item).
 #[derive(Debug, Default)]
 struct Findings {
     pairs: BTreeMap<String, Conflict>,
-    integration: BTreeMap<String, Conflict>,
+    integration: BTreeMap<String, Integration>,
 }
 
 /// Is this path a test file? Two tasks that touch only tests do not conflict
@@ -256,9 +280,12 @@ pub fn check(store: &mut Store, project: &str, now: Ts) -> GearResult<Check> {
             for (pair, conflict) in &conflicts.integration {
                 let task = pair.strip_prefix("integration:").unwrap_or(pair);
                 let key = format!("{prefix}:integration:{task}");
+                // The line names the branch the task merges into (T-596): a
+                // member of a feature overlaps its feature's branch, not the
+                // integration branch the feature has not reached yet.
                 let info = serde_json::json!({
                     "task": task,
-                    "integration": input.integration,
+                    "integration": conflict.base,
                     "files": conflict.files,
                 });
                 tx.set_meta(&key, &info.to_string())?;
@@ -403,6 +430,7 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
                     lane,
                     task_branch: config.conventions.task_branch.clone(),
                     candidate,
+                    base: task_base(&task),
                 });
             }
             // The open tasks of every other project whose lane works in this
@@ -430,6 +458,7 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
                         lane,
                         task_branch: other_config.conventions.task_branch.clone(),
                         candidate,
+                        base: task_base(&task),
                     });
                 }
             }
@@ -457,6 +486,17 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
         }
         Ok(inputs)
     })
+}
+
+/// The branch a task's work merges into (T-596): the `base` the task names
+/// when it names one (a member of a feature), else none — the repo's
+/// integration branch, which the scan fills in.
+fn task_base(task: &TaskRow) -> Option<String> {
+    task.base
+        .as_deref()
+        .map(str::trim)
+        .filter(|base| !base.is_empty())
+        .map(str::to_string)
 }
 
 /// Is the task an open change? A draft, cancelled or failed task is not one:
@@ -550,18 +590,36 @@ fn scan(input: &Input) -> Result<Findings, String> {
     let mut branches = Vec::new();
     let mut findings = Findings::default();
     for task in &input.tasks {
-        // A task whose candidate is already in the integration branch has
+        // The branch the task merges into (T-596): its own base when it names
+        // one, else the integration branch. A member of a feature is read
+        // against the feature's branch: against the integration branch, it
+        // would list the files every member merged before it and pair with
+        // each of them (M6.2 F-1).
+        let base = task.base.as_deref().unwrap_or(&input.integration);
+        let base_tip = if base == input.integration {
+            integration.clone()
+        } else {
+            // The base's tip: the local ref, else the remote's. A branch
+            // neither names is the integration branch it will be cut from: a
+            // feature's branch starts life there (T-580).
+            tips.revision(&format!("refs/heads/{base}"))
+                .or_else(|| tips.revision(&format!("refs/remotes/{}/{base}", input.remote)))
+                .unwrap_or_else(|| integration.clone())
+        };
+        // A task whose candidate is already in the branch it merges into has
         // landed: the engine merged that commit, and whatever its branch still
-        // points at is work no merge will take (T-64). It is not an open
-        // change, so it neither conflicts with integration nor pairs with an
-        // open task.
+        // points at is work no merge will take (T-64). For a member of a
+        // feature that branch is the feature's (T-596): its work is in the
+        // feature, waiting for the feature to reach the integration branch. It
+        // is not an open change, so it neither overlaps its base nor pairs
+        // with an open task.
         // A candidate git cannot resolve (a commit this clone lacks, or a
         // branch name stored before T-421) is no candidate: the task is judged
         // by its branch below, and one such task never fails the whole repo's
         // scan (T-431).
         if let Some(candidate) = &task.candidate {
             if let Some(candidate) = tips.revision(candidate) {
-                if ancestor(&input.repo, &candidate, &integration)? {
+                if ancestor(&input.repo, &candidate, &base_tip)? {
                     continue;
                 }
             }
@@ -576,23 +634,22 @@ fn scan(input: &Input) -> Result<Findings, String> {
         let Some(head) = head else {
             continue;
         };
-        let files = changed(&input.repo, &integration, &head)?;
+        let files = changed(&input.repo, &base_tip, &head)?;
         if files.is_empty() {
             continue;
         } // includes already integrated Done branches
-          // An overlap with the integration branch is this project's business:
-          // another project's task that changed the same file is not reported
-          // by this project's scan, its own project reports it (T-281).
+          // An overlap with the branch the task merges into is this project's
+          // business: another project's task that changed the same file is not
+          // reported by this project's scan, its own project reports it (T-281).
         if task.project == input.project {
-            let integration_files = changed(&input.repo, &head, &integration)?;
-            let shared: Vec<_> = files.intersection(&integration_files).cloned().collect();
+            let base_files = changed(&input.repo, &head, &base_tip)?;
+            let shared: Vec<_> = files.intersection(&base_files).cloned().collect();
             let shared = real_files(&shared);
             if !shared.is_empty() {
                 findings.integration.insert(
                     format!("integration:{}", task.task),
-                    Conflict {
-                        left: format!("{} ({})", task.task, task.lane),
-                        right: format!("integration {}", input.integration),
+                    Integration {
+                        base: base.to_string(),
                         files: shared,
                     },
                 );
@@ -923,6 +980,12 @@ mod tests {
     /// A project of one repo with two lanes and one task each: the scan reads
     /// both branches, each both ways.
     fn store(repo: &Path) -> Store {
+        store_on_base(repo, None)
+    }
+
+    /// The same project with both tasks merging into `base` (T-596): the two
+    /// lanes are members of one feature.
+    fn store_on_base(repo: &Path, base: Option<&str>) -> Store {
         let mut store = Store::open_in_memory().unwrap();
         store
             .write(|tx| {
@@ -956,7 +1019,7 @@ profile = "codex"
                 for (n, lane) in [(1, "heat"), (2, "steady")] {
                     tx.insert_task(&TaskRow {
                         repo: None,
-                        base: None,
+                        base: base.map(str::to_string),
                         gate: None,
                         rework_estimate_min: None,
                         project: "p".into(),
@@ -982,6 +1045,36 @@ profile = "codex"
             })
             .unwrap();
         store
+    }
+
+    /// The feature's branch (T-596): `[conventions].feature_branch` as the
+    /// default writes it.
+    const FEATURE: &str = "p/feature/f-1";
+
+    /// A real repository with a feature (T-596) is built by [`feature_repo`]
+    /// and [`member`] below.
+
+    /// The overlap of one task with the branch it merges into, as the scan
+    /// wrote it (T-188, T-596): `(base, files)`.
+    fn overlap(store: &mut Store, task: &str) -> (String, Vec<String>) {
+        let raw = store
+            .read(|tx| tx.get_meta(&format!("parallel:p:integration:{task}")))
+            .unwrap()
+            .unwrap_or_else(|| panic!("{task} has no overlap line"));
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        (
+            value["integration"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            value["files"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|file| file.as_str().map(str::to_string))
+                .collect(),
+        )
     }
 
     /// T-435: one pair of commits is diffed once, however often a scan asks
@@ -1184,5 +1277,173 @@ profile = "codex"
             Some(&false)
         );
         assert_eq!(answers.get(&(path.clone(), dev.clone(), dev)), Some(&true));
+    }
+
+    /// A real repository with one feature (T-596): `dev` with the fixture
+    /// files, and the feature's branch `p/feature/f-1` cut from it.
+    fn feature_repo(name: &str) -> PathBuf {
+        let path = crate::testtmp::temp(name).join("repo");
+        std::fs::create_dir_all(&path).unwrap();
+        sh(&path, &["init", "-q", "-b", "dev"]);
+        sh(&path, &["config", "user.name", "test"]);
+        sh(&path, &["config", "user.email", "a@b"]);
+        sh(&path, &["config", "commit.gpgsign", "false"]);
+        sh(&path, &["config", "core.hooksPath", "/dev/null"]);
+        commit(&path, "base", SRC, "base\n");
+        commit(&path, "other", "other.rs", "base\n");
+        sh(&path, &["switch", "-qc", FEATURE]);
+        sh(&path, &["switch", "-q", "dev"]);
+        path
+    }
+
+    /// A member's branch cut from `from`, changing one file (T-596).
+    fn member(path: &Path, branch: &str, from: &str, file: &str, text: &str) -> String {
+        sh(path, &["switch", "-qc", branch, from]);
+        commit(path, text, file, &format!("{text}\n"))
+    }
+
+    /// One member's work merged into the feature's branch (T-596).
+    fn merge_into_feature(path: &Path, branch: &str) {
+        sh(path, &["switch", "-q", FEATURE]);
+        sh(
+            path,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                branch,
+                "-m",
+                &format!("merge {branch}"),
+            ],
+        );
+    }
+
+    /// One scan of the project's one repo, as the findings of the scan.
+    fn scanned(store: &mut Store, at: i64) -> Findings {
+        let inputs = inputs(store, "p", at).unwrap();
+        scan(&inputs[0]).unwrap()
+    }
+
+    /// T-596: a feature's member is read against the feature's branch. Against
+    /// the integration branch the second member carried the first's file —
+    /// merged into the feature before the second was cut from it — so the two
+    /// rang as one change (M6.2 F-1: T-590 was said to share T-589's report
+    /// with T-589). Against the feature's branch the first member has landed
+    /// there and the second changes a file of its own: no pair.
+    #[test]
+    fn two_members_of_a_feature_are_not_a_pair_when_one_landed_in_the_feature() {
+        let path = feature_repo("gear-parallel-feature-members");
+        member(&path, "heat/t1", FEATURE, "report.md", "one");
+        merge_into_feature(&path, "heat/t1");
+        member(&path, "steady/t2", FEATURE, "notes.md", "two");
+
+        // The fixture rings the way the scan read it before this task: against
+        // `dev`, the second member's diff holds the first's report too, and its
+        // own notes.
+        let mut without = store(&path);
+        store_with_candidates(&path, &mut without);
+        let found = scanned(&mut without, T0);
+        assert_eq!(
+            found.pairs.keys().collect::<Vec<_>>(),
+            vec![&"tasks:T-1:T-2".to_string()],
+            "the fixture rings against dev: {found:?}"
+        );
+        assert_eq!(
+            found.pairs["tasks:T-1:T-2"].files,
+            vec!["report.md".to_string()],
+            "the file the first member merged: {found:?}"
+        );
+
+        // Read against the feature's branch: the first member's candidate is in
+        // its base, so it has landed there; the second changes only its own file.
+        let mut store = store_on_base(&path, Some(FEATURE));
+        store_with_candidates(&path, &mut store);
+        let found = scanned(&mut store, T0);
+        assert!(found.pairs.is_empty(), "no pair: {found:?}");
+        let checked = check(&mut store, "p", T0).unwrap();
+        assert!(checked.problems.is_empty(), "{checked:?}");
+        assert!(checked.opened.is_empty(), "no item: {checked:?}");
+    }
+
+    /// T-596: two members of a feature that change one file are still a pair:
+    /// each is read against the feature's branch, not against the other's work.
+    #[test]
+    fn two_members_of_a_feature_that_change_one_file_are_still_a_pair() {
+        let path = feature_repo("gear-parallel-feature-one-file");
+        member(&path, "heat/t1", FEATURE, SRC, "one");
+        member(&path, "steady/t2", FEATURE, SRC, "two");
+
+        let mut store = store_on_base(&path, Some(FEATURE));
+        let found = scanned(&mut store, T0);
+        assert_eq!(
+            found.pairs.keys().collect::<Vec<_>>(),
+            vec![&"tasks:T-1:T-2".to_string()],
+            "the two share {SRC}: {found:?}"
+        );
+        assert_eq!(
+            found.pairs["tasks:T-1:T-2"].files,
+            vec![SRC.to_string()],
+            "one file, read against the feature's branch: {found:?}"
+        );
+    }
+
+    /// T-596: the information line of a member names the branch its work merges
+    /// into — the feature's, never the integration branch the feature has not
+    /// reached yet.
+    #[test]
+    fn the_overlap_line_of_a_member_names_the_feature_branch() {
+        let path = feature_repo("gear-parallel-feature-line");
+        // The second member is cut before the first lands, and both change one
+        // file: the feature's branch moved under the second, so it overlaps it.
+        member(&path, "steady/t2", FEATURE, SRC, "steady");
+        member(&path, "heat/t1", FEATURE, SRC, "heat");
+        merge_into_feature(&path, "heat/t1");
+
+        let mut store = store_on_base(&path, Some(FEATURE));
+        store_with_candidates(&path, &mut store);
+        let checked = check(&mut store, "p", T0).unwrap();
+        assert!(checked.problems.is_empty(), "{checked:?}");
+        assert!(checked.opened.is_empty(), "no pair: {checked:?}");
+        assert_eq!(
+            overlap(&mut store, "T-2"),
+            (FEATURE.to_string(), vec![SRC.to_string()]),
+            "the line names the feature's branch"
+        );
+    }
+
+    /// T-596: a feature's branch only the remote names is still the base of its
+    /// members: the local ref first, else `<remote>/<base>`, through the refs
+    /// the pass already read.
+    #[test]
+    fn a_feature_branch_only_the_remote_has_is_the_base_of_its_members() {
+        let path = feature_repo("gear-parallel-feature-remote");
+        // A file of the feature's own: read against `dev` it would be in both
+        // members' diffs, and the pair would name it.
+        sh(&path, &["switch", "-q", FEATURE]);
+        commit(&path, "feature file", "plan.md", "plan\n");
+        member(&path, "heat/t1", FEATURE, SRC, "one");
+        member(&path, "steady/t2", FEATURE, SRC, "two");
+        // The feature's branch lives on the remote alone: no local ref names it.
+        let tip = sh(&path, &["rev-parse", FEATURE]);
+        sh(
+            &path,
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{FEATURE}"),
+                &tip,
+            ],
+        );
+        sh(
+            &path,
+            &["update-ref", "-d", &format!("refs/heads/{FEATURE}")],
+        );
+
+        let mut store = store_on_base(&path, Some(FEATURE));
+        let found = scanned(&mut store, T0);
+        assert_eq!(
+            found.pairs["tasks:T-1:T-2"].files,
+            vec![SRC.to_string()],
+            "read against the remote's feature branch: {found:?}"
+        );
     }
 }

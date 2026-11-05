@@ -36,8 +36,8 @@ pub struct Queue {
     /// verdict (T-460), in plan order, each with the id of the item that waits
     /// in the captain's inbox: `T-142 waits for your verdict (M-418)`.
     pub waiting: Vec<String>,
-    /// The tasks that overlap the integration branch of their repo (T-188):
-    /// information lines, never items that wait for the captain.
+    /// The tasks that overlap the branch their work merges into (T-188,
+    /// T-596): information lines, never items that wait for the captain.
     pub overlaps: Vec<Overlap>,
 }
 
@@ -185,8 +185,8 @@ pub fn queue(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Queue> {
         lanes,
         reviewers,
         waiting: verdict_waits(tx, project, &tasks, now)?,
-        // The overlaps with the integration branch (T-188): the same
-        // information lines the board shows.
+        // The overlaps with the branch a task merges into (T-188, T-596): the
+        // same information lines the board shows.
         overlaps: gear_board::integration_overlaps_of(tx, project)?,
     })
 }
@@ -270,8 +270,8 @@ pub fn render(queue: &Queue) -> String {
     for text in &queue.waiting {
         lines.push(text.clone());
     }
-    // The overlaps with the integration branch (T-188): the same lines the
-    // board shows, after the lanes.
+    // The overlap with the branch a task merges into (T-188, T-596): the same
+    // lines the board shows, after the lanes.
     for overlap in &queue.overlaps {
         lines.push(gear_board::overlap_line(overlap));
     }

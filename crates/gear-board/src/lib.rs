@@ -322,19 +322,20 @@ pub struct Unconfirmed {
     pub age_s: i64,
 }
 
-/// One task that overlaps the integration branch of its repo (T-188).
+/// One task that overlaps the branch its work merges into (T-188, T-596).
 ///
-/// The overlap is an information line: the lane merges the integration branch
-/// in and the merge gate catches a conflict. It never waits for the captain.
+/// The overlap is an information line: the lane merges the branch in and the
+/// merge gate catches a conflict. It never waits for the captain.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Overlap {
-    /// The task that overlaps the integration branch.
+    /// The task that overlaps the branch it merges into.
     pub task: String,
     /// The repo the task is in; empty for the project root.
     pub repo: String,
-    /// The integration branch the task overlaps.
+    /// The branch the task merges into: the integration branch, or the
+    /// feature's branch a member of a feature merges into (T-596).
     pub integration: String,
-    /// The files the task and the integration branch share.
+    /// The files the task and that branch share.
     pub files: Vec<String>,
 }
 
@@ -1269,11 +1270,12 @@ fn is_verdict_item(item: &MessageRow) -> bool {
         || item.thread.starts_with("review-stall:")
 }
 
-/// The overlaps of the project with the integration branches (T-188).
+/// The overlaps of the project with the branches their work merges into (T-188,
+/// T-596).
 ///
 /// The engine's scan writes the meta keys
-/// `parallel:<project>[:<repo>]:integration:<task>`; the value holds the files
-/// the task and the integration branch share. A cleared key (an empty value)
+/// `parallel:<project>[:<repo>]:integration:<task>`; the value holds the branch
+/// and the files the task and that branch share. A cleared key (an empty value)
 /// shows nothing.
 pub fn integration_overlaps(store: &mut Store, project: &str) -> GearResult<Vec<Overlap>> {
     store.read(|tx| integration_overlaps_of(tx, project))
