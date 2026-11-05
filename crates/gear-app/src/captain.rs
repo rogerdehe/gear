@@ -108,18 +108,41 @@ pub fn handover_of(
     };
     // 2. The project: the caller's own, else the one whose checkout holds the
     //    working directory (the user's terminal in the project).
-    let project = match (named, &env.ctx) {
-        (Some(named), Some(ctx)) if ctx.project != named => {
-            return Err(GearError::new(
-                ErrorCode::Forbidden,
-                format!(
-                    "--project {named} names another project than this seat's ({})",
-                    ctx.project
-                ),
-            ));
+    //    A pane may hold the captain seats of several projects while its
+    //    GEAR_CTX names one of them (Prometheus, 2026-11-05: w2:p1X held
+    //    Prometheus and Lawrence, the handover without --project moved
+    //    Lawrence's seat, and --project prometheus was refused). A named
+    //    project is proven in step 3 like any other: the caller's pane must be
+    //    that captain's binding. Without a name, a pane that holds several
+    //    seats is asked to name one.
+    let project = match named {
+        Some(named) => {
+            if let Some(ctx) = &env.ctx {
+                if ctx.project != named && !captains_on(store, &real)?.iter().any(|p| p == named) {
+                    return Err(GearError::new(
+                        ErrorCode::Forbidden,
+                        format!(
+                            "--project {named} names another project than this seat's ({}), and this pane holds no captain seat of {named}",
+                            ctx.project
+                        ),
+                    ));
+                }
+            }
+            named.to_string()
         }
-        (Some(named), _) => named.to_string(),
-        (None, _) => project_of(store, env, cwd)?,
+        None => {
+            let held = captains_on(store, &real)?;
+            if held.len() > 1 {
+                return Err(GearError::new(
+                    ErrorCode::BadFormat,
+                    format!(
+                        "pane {real} holds the captain seats of {}: name the one that moves, `gear --session <session> captain handover --project <project> --pane <new pane>`",
+                        held.join(" and ")
+                    ),
+                ));
+            }
+            project_of(store, env, cwd)?
+        }
     };
     let captain = format!("{project}:captain");
     let seat = store
@@ -1502,6 +1525,25 @@ fn needs_of(
 
 /// The project a handover is for: the caller's context, else the project whose
 /// checkout holds the working directory (the user's own terminal).
+/// The projects whose captain is bound to `pane` at its current generation.
+fn captains_on(store: &mut Store, pane: &str) -> GearResult<Vec<String>> {
+    store.read(|tx| {
+        let mut held = Vec::new();
+        for project in tx.project_ids()? {
+            let Some(seat) = tx.get_seat(&format!("{project}:captain"))? else {
+                continue;
+            };
+            let bound = tx
+                .get_binding(&seat.id, seat.generation)?
+                .is_some_and(|binding| binding.pane_id == pane);
+            if bound {
+                held.push(project);
+            }
+        }
+        Ok(held)
+    })
+}
+
 fn project_of(store: &mut Store, env: &Env, cwd: &Path) -> GearResult<String> {
     if let Some(ctx) = &env.ctx {
         return Ok(ctx.project.clone());

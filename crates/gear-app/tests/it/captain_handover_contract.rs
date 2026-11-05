@@ -329,3 +329,70 @@ fn a_handover_from_the_users_terminal_may_name_its_project() {
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::Forbidden, "{}", error.detail);
 }
+
+/// Prometheus, 2026-11-05: one pane held the captain seats of two projects that
+/// share a checkout, and its GEAR_CTX named only one of them. A handover
+/// without `--project` is refused naming both; with `--project` the named
+/// project's seat moves, even though GEAR_CTX names the other.
+#[test]
+fn a_pane_holding_two_captain_seats_moves_the_named_one() {
+    let root = tempfile::tempdir().unwrap();
+    let mut s = world(root.path());
+    s.write(|tx| {
+        testing::seed_project(tx, "q", "sess", NOW)?;
+        let mut project = tx.get_project("q")?.unwrap();
+        project.config_toml = config(root.path()).replace("id = \"p\"", "id = \"q\"");
+        tx.update_project(&project)?;
+        testing::seed_active_seat(
+            tx,
+            "q",
+            "captain",
+            SeatRole::Captain,
+            CAP_PANE,
+            "codex",
+            NOW,
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let mut herdr = herdr();
+    // The pane's context names p; it also holds q's captain seat.
+    let captain = env(Some("captain"), 1, Some(CAP_PANE));
+
+    let error = handover(
+        &mut s,
+        &captain,
+        &mut herdr,
+        &CAP_CALLER,
+        root.path(),
+        NEW_PANE,
+        NOW,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat, "{}", error.detail);
+    assert!(
+        error.detail.contains("p and q") && error.detail.contains("--project"),
+        "{}",
+        error.detail
+    );
+    let p_seat = s.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
+    assert_eq!(p_seat.generation, 1, "nothing moved");
+
+    let done = handover_of(
+        &mut s,
+        &captain,
+        &mut herdr,
+        &CAP_CALLER,
+        root.path(),
+        Some("q"),
+        NEW_PANE,
+        NOW + 1,
+    )
+    .unwrap();
+    assert_eq!(
+        (done.project.as_str(), done.to.as_str(), done.asker),
+        ("q", NEW_PANE, Asker::Captain)
+    );
+    let p_seat = s.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
+    assert_eq!(p_seat.generation, 1, "p's captain stays where it was");
+}
