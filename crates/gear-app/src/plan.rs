@@ -948,7 +948,14 @@ fn apply_queue(
                     }
                     Some("ready") => task.state = TaskState::Ready,
                     Some("hold") => {
-                        if matches!(task.state, TaskState::Running | TaskState::Waiting) {
+                        // A ready task may already have an attempt delivered
+                        // and not yet confirmed: it is set aside too, or the
+                        // confirmation would start a held task (Prometheus
+                        // T-759, 2026-11-05: every tick failed for 25 min).
+                        if matches!(
+                            task.state,
+                            TaskState::Running | TaskState::Waiting | TaskState::Ready
+                        ) {
                             set_aside_task(tx, project, &task, by_seat, by_gen, now)?;
                         }
                         task.state = TaskState::Draft;
