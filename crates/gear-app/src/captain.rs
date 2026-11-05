@@ -30,6 +30,10 @@ use gear_model::{
 };
 use gear_store::{BindingRow, BindingStatus, NewMessage, Store, Tx};
 
+/// The folder name, in place of a voyage's, for a project whose last voyage
+/// has finished: its handovers and the like until the next kickoff.
+pub const BETWEEN_VOYAGES: &str = "between-voyages";
+
 /// How long the outgoing captain has to answer the request for its handover
 /// before the new captain is pointed at its session (handover.md part B).
 pub const HANDOVER_ASK_MIN: i64 = 10;
@@ -602,7 +606,18 @@ fn finish_rebind(
     let mut directory: Option<String> = None;
     let mut request: Option<HandoverRequest> = None;
     if let Some(previous) = previous {
-        let voyage = store.read(|tx| plan::current_voyage(tx, project))?;
+        // A finished voyage's handovers are history: a take between voyages
+        // reads and writes the project's own folder for that time, never the
+        // last voyage's (Lawrence 2026-11-05: the take named an M1 handover
+        // from before M1 landed).
+        let voyage = store.read(|tx| {
+            let voyage = plan::current_voyage(tx, project)?;
+            if voyage.is_empty() || gear_board::stations::voyage_open(tx, project, &voyage)? {
+                Ok(voyage)
+            } else {
+                Ok(BETWEEN_VOYAGES.to_string())
+            }
+        })?;
         if !voyage.is_empty() {
             let dir = format!(
                 "{}/handovers",
