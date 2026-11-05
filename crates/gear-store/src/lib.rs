@@ -1951,7 +1951,8 @@ impl<'s> Tx<'s> {
     }
 
     /// The command `seat` runs GEAR with, from its active binding:
-    /// `gear --session <session> --pane <pane>`. `None` without one.
+    /// `gear --session <session> --pane <pane>` when its CLI runs commands
+    /// outside its pane. `None` without one, or for any other CLI.
     pub fn seat_command(&self, seat: &str) -> GearResult<Option<String>> {
         let Some(row) = self.get_seat(seat)? else {
             return Ok(None);
@@ -1959,6 +1960,8 @@ impl<'s> Tx<'s> {
         Ok(self
             .get_binding(seat, row.generation)?
             .filter(|binding| binding.status == BindingStatus::Active)
+            // A CLI that runs commands in its own pane needs no arguments.
+            .filter(|binding| gear_model::ctx::tools_outside_pane(&binding.kind))
             .map(|binding| {
                 format!(
                     "gear --session {} --pane {}",

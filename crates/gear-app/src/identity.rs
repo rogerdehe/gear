@@ -32,11 +32,10 @@ pub enum Caller {
     Anonymous,
 }
 
-/// Agents whose tools run in a shared background process outside the pane:
-/// `opencode serve`, and Codex's `codex app-server` daemon (trial, 2026-10-26).
+/// Agents whose tools run in a shared background process outside the pane.
 /// A caller in no pane keeps its claim on such an agent's pane, still checked
 /// against the seat's binding.
-const TOOLS_OUTSIDE_PANE: [&str; 2] = ["opencode", "codex"];
+use gear_model::ctx::TOOLS_OUTSIDE_PANE;
 
 /// The sessions the shared daemons give their tool shells (T-328): `opencode
 /// serve` exports `OPENCODE_SESSION_ID` (the session id of the tool call, the
@@ -474,11 +473,21 @@ fn session_of_socket(socket: Option<&str>) -> String {
         .unwrap_or_else(|| "<session>".to_string())
 }
 
-/// The command a seat runs GEAR with: its Herdr session and pane named, so
-/// GEAR knows the caller whatever CLI it is and wherever that CLI runs its
-/// commands. Every text GEAR sends a seat writes its commands with this.
+/// The command a seat runs GEAR with when its CLI runs commands outside its
+/// pane: its Herdr session and pane named, so GEAR knows the caller.
 pub fn seat_command(session: &str, pane: &str) -> String {
     format!("gear --session {session} --pane {pane}")
+}
+
+/// The command GEAR's texts to a seat of `kind` spell: [`seat_command`] for a
+/// CLI whose tools run outside its pane, plain `gear` for every other CLI,
+/// which GEAR finds by its pane (user, 2026-11-05: no needless arguments).
+pub fn seat_command_for(kind: &str, session: &str, pane: &str) -> String {
+    if gear_model::ctx::tools_outside_pane(kind) {
+        seat_command(session, pane)
+    } else {
+        "gear".to_string()
+    }
 }
 
 /// [`seat_command`] for the seat's active binding; plain `gear` when it has
@@ -489,7 +498,7 @@ pub fn seat_command_of(tx: &Tx<'_>, seat_id: &str) -> GearResult<String> {
     };
     Ok(match tx.get_binding(seat_id, seat.generation)? {
         Some(binding) if binding.status == gear_store::BindingStatus::Active => {
-            seat_command(&binding.session, &binding.pane_id)
+            seat_command_for(&binding.kind, &binding.session, &binding.pane_id)
         }
         _ => "gear".to_string(),
     })
@@ -1006,4 +1015,22 @@ pub fn report_claim(
         })?;
         Ok(true)
     })
+}
+
+#[cfg(test)]
+mod seat_command_tests {
+    use super::seat_command_for;
+
+    #[test]
+    fn only_a_cli_that_runs_commands_outside_its_pane_names_its_seat() {
+        for kind in ["opencode", "codex"] {
+            assert_eq!(
+                seat_command_for(kind, "s", "w1:p2"),
+                "gear --session s --pane w1:p2"
+            );
+        }
+        for kind in ["claude", "pi", "grok"] {
+            assert_eq!(seat_command_for(kind, "s", "w1:p2"), "gear");
+        }
+    }
 }
