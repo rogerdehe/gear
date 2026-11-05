@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1173 -->
+<!-- gear-plan project=gear base=1174 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -76,6 +76,7 @@ eta: 4h
 - station M-7767: keep course T-558 and T-559 shipped as v0.6.55; T-560..T-565 are the v0.6.56 batch, four in review
 - station M-7869: keep course T-561 merged, T-562 merging, T-560 queued, T-563..T-565 in review; v0.6.56 ships when the six are on dev
 - station M-7912: keep course T-563 hand-merged, T-564 merging after rework, T-565 and T-567 in rework/review; v0.6.56 ships when they are on dev
+- station M-7930: keep course T-568, T-570 merged and shipped in v0.6.59 with the pane-close guard; T-569 merging
 - 2026-11-04 08:44 override: T-563 passes over F1 | why: the retired-lane test exists and passes as idle_contract::a_retired_lane_with_ready_tasks_says_they_will_not_start; only the contract's filter test(idle::) named the wrong place, and that wording was mine; every behaviour (1)-(3) the review found ok | changes: none to delivered behaviour
 # Queue
 
