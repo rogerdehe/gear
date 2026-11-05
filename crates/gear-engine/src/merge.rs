@@ -368,7 +368,19 @@ pub fn collect_finished(
             return Ok(None);
         };
         let op = worker.op.clone();
+        // A merge that ran alone and landed lets the batch grow again
+        // (Prometheus, 2026-11-04: red batches halved the cap to 1, the batch
+        // path never runs at 1, and only a batch that landed could double it,
+        // so every merge ran alone for the rest of the day).
+        let landed_alone = matches!(finished.result, Report::Merged(_));
         let done = settle_report(store, project, config, &op, finished.result, finished.at)?;
+        if landed_alone {
+            let batch = config.conventions.merge_batch.max(1) as usize;
+            let mut caps = cfg.merges.batch_cap.lock().unwrap();
+            if let Some(cap) = caps.get_mut(key) {
+                *cap = (*cap * 2).min(batch);
+            }
+        }
         // Keep the completion until its database write succeeded: a transient
         // store error must not lose the result or launch a second worker.
         workers.remove(key);
@@ -7716,6 +7728,14 @@ mod tests {
             "{}: {}",
             "the gate's own reason is kept",
             op_result(&mut store, "O-1")
+        );
+        // The red batch halved the cap to 1, where the batch path never runs;
+        // T-2 landing alone lets it grow back, so the next merges batch again
+        // (Prometheus, 2026-11-04: every merge ran alone after a red streak).
+        let caps = cfg.merges.batch_cap.lock().unwrap().clone();
+        assert!(
+            !caps.is_empty() && caps.values().all(|cap| *cap == 2),
+            "a merge that landed alone doubles the cap back to merge_batch: {caps:?}"
         );
     }
 
