@@ -31,6 +31,16 @@
 //! goes back to the queue, and the captain is told once which task it waits
 //! for.
 //!
+//! A feature's integration task (T-582: a `task_branch_override`, the branch the
+//! feature's members merged into) that fails its **full gate** has its members
+//! bisected (T-598): the feature branch's first-parent line after its fork from
+//! the integration branch, one probe per binary-search step, each probe merged
+//! onto the integration tip the failed merge used and gated with the project's
+//! gate. The bisect runs **beside** the merge train, never in it — its own
+//! worktree (`<project>-bisect`), its own lock, its own thread — and the line
+//! it finds is appended to the merge-failed item once it is done. One bisect
+//! per candidate: a candidate that fails again starts no second one.
+//!
 //! A project of several repos merges each of them on its own branch and with
 //! its own gate (T-53): the task's repo is its lane's repo, and one worker
 //! runs per repo.
@@ -96,6 +106,11 @@ pub struct MergeWorkers {
     /// project's `merge_batch`, doubled by every batch that landed whole and
     /// halved by a batch a gate turned red, up to `merge_batch` again.
     batch_cap: Arc<Mutex<BTreeMap<String, usize>>>,
+    /// The bisects running beside the merge train (T-598), keyed as the meta
+    /// that started them: a red full gate on a feature's integration task
+    /// searches its members in a worktree of its own, and the tick appends the
+    /// line it finds to the merge-failed item. No merge waits for one.
+    bisects: Arc<Mutex<BTreeMap<String, BisectWorker>>>,
 }
 
 impl MergeWorkers {
@@ -134,6 +149,20 @@ impl MergeWorkers {
             .unwrap()
             .values()
             .any(|worker| worker.op.project == project)
+    }
+
+    /// Whether a bisect of this project is still searching (T-598): the search
+    /// runs beside the merge train, so this never holds a merge, and a test
+    /// waits on [`MergeWorkers::wait_progress`] until it answers `false`.
+    pub fn bisect_running(&self, project: &str) -> bool {
+        self.bisects
+            .lock()
+            .map(|bisects| {
+                bisects.values().any(|worker| {
+                    worker.project == project && worker.done.lock().unwrap().is_none()
+                })
+            })
+            .unwrap_or(false)
     }
 }
 
@@ -507,6 +536,11 @@ pub fn merge_passed(
     // A worker survives between ticks: a finished one is collected, and the
     // tick launches nothing else.
     let collected = collect_finished(store, cfg, project, &config)?;
+    // T-598: the bisect a red feature gate asked for runs beside the train — a
+    // worktree and a thread of its own — and its line is appended to the
+    // merge-failed item here, on the tick that owns the store.
+    start_bisects(store, herdr, cfg, project, &config, now)?;
+    collect_bisects(store, cfg, project)?;
     if let Some(done) = collected {
         merged.extend(done);
         return Ok(merged);
@@ -927,7 +961,12 @@ fn settle_report(
         }
         // The worker already retried a reason that can clear (T-61): what
         // comes back is the failure that stands.
-        Report::Failed(failed) => fail_merge(store, project, op, &failed.reason, at)?,
+        Report::Failed(failed) => {
+            fail_merge(store, project, op, &failed.reason, at)?;
+            // T-598: a feature's integration task whose full gate said no gets
+            // its members bisected beside the merge train, once per candidate.
+            request_bisect(store, project, op, &failed)?;
+        }
         // T-576: a merge a batch or a train sends back is **queued again**, not
         // unknown (Prometheus 2026-11-05: O-7384..O-7390 sat `unknown` with
         // "its batch failed the gate: it is gated again in a smaller batch",
@@ -1417,6 +1456,11 @@ enum Blocker {
 struct Failed {
     reason: String,
     blocker: Blocker,
+    /// The integration tip the merge was built on, when the **gate** is what
+    /// said no (T-598): a feature's integration task bisects its members on it.
+    /// A conflict, a missing branch or a candidate on no pushed ref leaves it
+    /// empty, so those failures start no bisect.
+    gate: Option<String>,
 }
 
 impl Failed {
@@ -1425,6 +1469,7 @@ impl Failed {
         Failed {
             reason: reason.into(),
             blocker: Blocker::Clear,
+            gate: None,
         }
     }
 
@@ -1433,6 +1478,16 @@ impl Failed {
         Failed {
             reason: reason.into(),
             blocker: Blocker::Stuck,
+            gate: None,
+        }
+    }
+
+    /// The gate said no, on the integration tip `base` (T-598).
+    fn gated(base: Option<String>, reason: impl Into<String>) -> Failed {
+        Failed {
+            reason: reason.into(),
+            blocker: Blocker::Stuck,
+            gate: base,
         }
     }
 }
@@ -1854,6 +1909,490 @@ fn resolve_failed(store: &mut Store, project: &str, task: &str, now: Ts) -> Gear
         }
         Ok(())
     })
+}
+
+// ---------------------------------------------------------------------------
+// T-598: a red full gate on a feature names the member that turned it red.
+// ---------------------------------------------------------------------------
+
+/// The meta key of a candidate's bisect (T-598): one per candidate, so a second
+/// failure of the same candidate starts no second bisect. Its value is
+/// [`BISECT_PENDING`] with the request while the search waits to be started,
+/// and [`BISECT_STARTED`] once it runs — whatever comes of it.
+fn bisect_key(project: &str, task: &str, candidate: &str) -> String {
+    format!("engine.bisect.{project}:{task}:{candidate}")
+}
+
+/// The prefix of a project's bisect keys: the pending requests are the ones the
+/// tick starts.
+fn bisect_prefix(project: &str) -> String {
+    format!("engine.bisect.{project}:")
+}
+
+/// A bisect asked for and not yet started. Its value carries the four things
+/// the search needs, separated by the unit separator: the integration tip the
+/// failed merge used, the feature branch, the task and the candidate.
+const BISECT_PENDING: &str = "pending\u{1f}";
+
+/// A bisect that was started (running or finished): the candidate never starts
+/// another one.
+const BISECT_STARTED: &str = "started";
+
+/// What a finished bisect says: the one line the merge-failed item gets, or
+/// nothing when the search could not run at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BisectDone {
+    line: Option<String>,
+}
+
+/// A bisect running beside the merge train (T-598).
+#[derive(Debug)]
+struct BisectWorker {
+    project: String,
+    task: String,
+    /// The repo whose bisect worktree the search probes in: one search per
+    /// worktree at a time, so a second one waits its turn instead of finding
+    /// the worktree busy.
+    repo: String,
+    /// The line the search found; `None` while it runs.
+    done: Arc<Mutex<Option<BisectDone>>>,
+}
+
+/// What one bisect searches, as the worker thread needs it.
+struct BisectJob {
+    project: String,
+    task: String,
+    /// The candidate the failed merge approved: the feature branch's tip.
+    candidate: String,
+    /// The feature branch the integration task merges (`task_branch_override`).
+    branch: String,
+    /// The integration tip the failed merge was built on.
+    base: String,
+    /// The project's merge message: a member merge commit's subject names the
+    /// task the search reports.
+    merge_message: String,
+    /// The remote every ref is read from.
+    remote: String,
+    repo: Repo,
+}
+
+/// Queue the bisect of a feature's integration task whose full gate said no
+/// (T-598). Only a gate failure on a task whose branch is a feature's own asks
+/// for one, and only the first failure of a candidate: the meta key outlives
+/// the bisect, so a second failure starts no second search.
+fn request_bisect(store: &mut Store, project: &str, op: &OpRow, failed: &Failed) -> GearResult<()> {
+    if failed.blocker != Blocker::Stuck {
+        return Ok(());
+    }
+    let Some(base) = failed.gate.as_deref().filter(|base| !base.is_empty()) else {
+        return Ok(());
+    };
+    let Some(task) = op.task.as_deref().filter(|task| !task.is_empty()) else {
+        return Ok(());
+    };
+    // A feature's integration task is the one that merges the feature's branch
+    // (T-582): a normal task's failed merge starts no bisect.
+    let Some(branch) = store.read(|tx| tx.task_branch_override(project, task))? else {
+        return Ok(());
+    };
+    let candidate = op.payload["candidate"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if candidate.is_empty() {
+        return Ok(());
+    }
+    let key = bisect_key(project, task, &candidate);
+    if store.read(|tx| tx.get_meta(&key))?.is_some() {
+        return Ok(());
+    }
+    store.write(|tx| {
+        tx.set_meta(
+            &key,
+            &format!("{BISECT_PENDING}{base}\u{1f}{branch}\u{1f}{task}\u{1f}{candidate}"),
+        )
+    })
+}
+
+/// Start the bisects a red feature gate asked for, **beside** the merge train:
+/// a worktree of its own (`<project>-bisect`), a lock of its own, a thread of
+/// its own. Nothing here waits for a gate, and no merge waits for it.
+fn start_bisects(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    project: &str,
+    config: &ProjectConfig,
+    now: Ts,
+) -> GearResult<()> {
+    let pending: Vec<(String, String)> = store.read(|tx| {
+        let mut pending = Vec::new();
+        for key in tx.meta_keys_with_prefix(&bisect_prefix(project))? {
+            if let Some(value) = tx.get_meta(&key)? {
+                if let Some(request) = value.strip_prefix(BISECT_PENDING) {
+                    pending.push((key, request.to_string()));
+                }
+            }
+        }
+        Ok(pending)
+    })?;
+    for (key, request) in pending {
+        let parts: Vec<&str> = request.split('\u{1f}').collect();
+        let [base, branch, task, candidate] = parts[..] else {
+            continue;
+        };
+        let Some(row) = store.read(|tx| tx.get_task(project, task))? else {
+            continue;
+        };
+        let repo = config.repo_of_task(&row);
+        let name = repo.name.clone();
+        let repo_key = worker_key(&repo);
+        // One search per worktree at a time: a request that finds the worktree
+        // taken stays pending and starts on a later tick.
+        let busy = cfg.merges.bisects.lock().map_or(true, |bisects| {
+            bisects
+                .values()
+                .any(|worker| worker.repo == repo_key && worker.done.lock().unwrap().is_none())
+        });
+        if busy {
+            continue;
+        }
+        // The search runs once per candidate, whatever comes of it: a worktree
+        // that cannot be had is not retried on every tick for ever.
+        store.write(|tx| tx.set_meta(&key, BISECT_STARTED))?;
+        let worktree = match bisect_worktree(store, herdr, &repo, project, config, &cfg.merges, now)
+        {
+            Ok(worktree) => worktree,
+            // No worktree, no search: the merge-failed item keeps the gate's
+            // own reason, and the merge train is not held for a bisect.
+            Err(_) => continue,
+        };
+        let job = BisectJob {
+            project: project.to_string(),
+            task: task.to_string(),
+            candidate: candidate.to_string(),
+            branch: branch.to_string(),
+            base: base.to_string(),
+            merge_message: config.conventions.merge_message.clone(),
+            remote: config.conventions.remote.clone(),
+            repo: repo.clone(),
+        };
+        let done: Arc<Mutex<Option<BisectDone>>> = Arc::new(Mutex::new(None));
+        let output = done.clone();
+        let progress = cfg.merges.progress.clone();
+        let path = worktree.path.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("bisect-{project}-{name}"))
+            .spawn(move || {
+                let line = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_bisect(Path::new(&path), &job)
+                }))
+                .unwrap_or(None);
+                *output.lock().unwrap() = Some(BisectDone { line });
+                // A test waits on this, never on the clock (T-127).
+                *progress.0.lock().unwrap() += 1;
+                progress.1.notify_all();
+            });
+        if spawned.is_ok() {
+            let worker = BisectWorker {
+                project: project.to_string(),
+                task: task.to_string(),
+                repo: repo_key,
+                done,
+            };
+            if let Ok(mut bisects) = cfg.merges.bisects.lock() {
+                bisects.insert(key, worker);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Append the line a finished bisect found to the merge-failed item of its task
+/// (T-598), and forget the worker. The item belongs to the failure that asked
+/// for the search: when the merge landed or a retry closed it in the meantime,
+/// nothing is reopened.
+fn collect_bisects(store: &mut Store, cfg: &EngineCfg, project: &str) -> GearResult<()> {
+    let mut finished: Vec<(String, BisectDone)> = Vec::new();
+    {
+        let Ok(mut bisects) = cfg.merges.bisects.lock() else {
+            return Ok(());
+        };
+        let done: Vec<String> = bisects
+            .iter()
+            .filter(|(_, worker)| {
+                worker.project == project && worker.done.lock().unwrap().is_some()
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in done {
+            let Some(worker) = bisects.remove(&key) else {
+                continue;
+            };
+            let line = worker.done.lock().unwrap().clone();
+            if let Some(line) = line {
+                finished.push((worker.task.clone(), line));
+            }
+        }
+    }
+    for (task, done) in finished {
+        let Some(line) = done.line else {
+            continue;
+        };
+        store.write(|tx| {
+            let thread = failed_thread(&task);
+            let open = tx
+                .thread_messages(project, &thread)?
+                .into_iter()
+                .find(|item| item.state == MsgState::Open);
+            let Some(item) = open else {
+                return Ok(());
+            };
+            let body = format!("{}\n{line}", item.body);
+            tx.update_message_body(project, &item.id, &body)
+        })?;
+    }
+    Ok(())
+}
+
+/// The worktree of a bisect (T-598): `<project>-bisect`, opened as the merge
+/// worktree is, on the seat `bisect`'s own branch. It is never the merge
+/// worktree and never one of the train's stages: a bisect's probes reset and
+/// merge as they like there, and nothing may wait behind them.
+fn bisect_worktree(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    repo: &Repo,
+    project: &str,
+    config: &ProjectConfig,
+    merges: &MergeWorkers,
+    now: Ts,
+) -> Result<gear_herdr::Worktree, String> {
+    let seat = "bisect";
+    let label = bisect_label(project, repo);
+    let voyage = store
+        .read(|tx| gear_app::plan::current_voyage(tx, project))
+        .map_err(|error| error.detail)?;
+    let branch =
+        gear_model::branch::expand_seat(&config.conventions.seat_branch, project, seat, &voyage);
+    // T-565: the seat's own old branch is settled before the worktree is opened
+    // or created, exactly as the merge seat's is.
+    let old = gear_app::seat_branch::previous_default(project, seat);
+    if let Err(reason) =
+        gear_app::seat_branch::settle(&repo.path, &old, &branch, &config.conventions.remote)
+    {
+        return Err(format!("the bisect worktree's branch {branch}: {reason}"));
+    }
+    let worktree = match herdr.worktree_open(&repo.path, &branch, &label) {
+        Outcome::Ok(worktree) => worktree,
+        Outcome::Refused { code, .. } if code == "worktree_not_found" => {
+            match herdr.worktree_create(&repo.path, &branch, &repo.integration, &label) {
+                Outcome::Ok(worktree) => worktree,
+                other => return Err(step_failure("worktree_create", &other)),
+            }
+        }
+        other => return Err(step_failure("worktree_open", &other)),
+    };
+    crate::onboard::check_worktree(store, project, seat, &repo.path, &worktree.path, now)?;
+    // T-107: an older engine's pre-push hook is unset here too.
+    if !merges.hook_cleaned(&worktree.path) {
+        crate::onboard::forget_gear_hooks(std::path::Path::new(&worktree.path))?;
+        merges.hook_cleaned_now(&worktree.path);
+    }
+    Ok(worktree)
+}
+
+/// The label of a repo's bisect worktree: `<project>-bisect` for the project
+/// root, `<project>-bisect-<repo name>` for a child repo (as the merge worktree
+/// is labelled, T-53).
+fn bisect_label(project: &str, repo: &Repo) -> String {
+    if repo.name.is_empty() {
+        format!("{project}-bisect")
+    } else {
+        format!("{project}-bisect-{}", repo.name)
+    }
+}
+
+/// One member of a feature branch: the merge commit, and the task its subject
+/// names (or the commit's short sha when the subject names none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BisectMember {
+    sha: String,
+    name: String,
+}
+
+/// The line a bisect says when no member's prefix turns the gate red (T-598).
+const BISECT_NO_MEMBER: &str =
+    "bisect: every member is green alone; the red comes from the refresh or the mix";
+
+/// Binary-search a feature branch's members for the one that turns the gate red
+/// (T-598), in the bisect worktree at `dir`.
+///
+/// `None` when the search could not run (a worktree busy, a ref that cannot be
+/// read, a probe that could not be judged): the merge-failed item then keeps
+/// the gate's own reason. `Some(line)` is the one line the item gets.
+fn run_bisect(dir: &Path, job: &BisectJob) -> Option<String> {
+    // The worktree's own lock: two engines never probe the same worktree.
+    let lock = match merge_lock(dir) {
+        Ok(Some(lock)) => lock,
+        _ => return None,
+    };
+    let git = |args: &[&str]| git_with_lock(dir, args, Some(&lock));
+    let remote = &job.remote;
+    git(&[
+        "fetch",
+        "--prune",
+        remote,
+        &format!("+refs/heads/*:refs/remotes/{remote}/*"),
+    ])
+    .ok()?;
+    // The branch as the failed merge saw it: the approved candidate when it
+    // still resolves, the branch tip otherwise.
+    let tip = git(&[
+        "rev-parse",
+        "--verify",
+        &format!("{}^{{commit}}", job.candidate),
+    ])
+    .ok()
+    .map(|sha| sha.trim().to_string())
+    .or_else(|| {
+        git(&["rev-parse", &format!("{remote}/{}", job.branch)])
+            .ok()
+            .map(|sha| sha.trim().to_string())
+    })?;
+    let fork = git(&["merge-base", &job.base, &tip]).ok()?;
+    let fork = fork.trim().to_string();
+    let members = bisect_members(
+        &git(&[
+            "log",
+            "--first-parent",
+            "--reverse",
+            "--format=%H%x09%P%x09%s",
+            &format!("{fork}..{tip}"),
+        ])
+        .ok()?,
+        &job.merge_message,
+    );
+    if members.is_empty() {
+        return Some(BISECT_NO_MEMBER.to_string());
+    }
+    let n = members.len();
+    // The gate of the project, named by this search and judged in the tree the
+    // probes build.
+    let round = format!(
+        "bisect{}",
+        job.candidate.chars().take(7).collect::<String>()
+    );
+    let tasks = vec![job.task.clone()];
+    let probe = |count: usize| -> Option<bool> {
+        git(&["reset", "--hard", &job.base]).ok()?;
+        // The members up to `count`, exactly as the feature branch holds them.
+        if git(&[
+            "merge",
+            "--no-ff",
+            &members[count - 1].sha,
+            "-m",
+            &format!("bisect probe {count} of {n}"),
+        ])
+        .is_err()
+        {
+            let _ = git(&["merge", "--abort"]);
+            let _ = git(&["reset", "--hard", &job.base]);
+            return None;
+        }
+        // The gate's own "I could not judge this time" files belong to this
+        // run, as they do for a merge (T-548): a line an earlier probe left is
+        // never read here.
+        let tempfail = gate_tempfail_path(dir);
+        let _ = std::fs::remove_file(&tempfail);
+        let _ = std::fs::remove_file(gate_failed_path(dir));
+        let stdin = lock.try_clone().ok()?;
+        let output = gate_command(
+            &job.repo.gate,
+            dir,
+            &job.project,
+            &job.repo.integration,
+            &round,
+            &tasks,
+        )
+        .stdin(stdin)
+        .output()
+        .ok()?;
+        let asked_retry = tempfail.exists();
+        let _ = std::fs::remove_file(&tempfail);
+        let status = output.status.code().unwrap_or(0);
+        // 75, 126 and 127 — and a gate that wrote the tempfail file — are "I
+        // could not judge this time": a probe that cannot be judged says
+        // nothing about the member.
+        if asked_retry || matches!(status, 75 | 126 | 127) {
+            return None;
+        }
+        Some(!output.status.success())
+    };
+    // The smallest count that is red, assuming a red count stays red: at most
+    // ceil(log2(n)) probes, one more to confirm the last of them.
+    let mut low = 1usize;
+    let mut high = n;
+    let mut seen_red: Option<usize> = None;
+    while low < high {
+        let half = (low + high) / 2;
+        if probe(half)? {
+            seen_red = Some(half);
+            high = half;
+        } else {
+            low = half + 1;
+        }
+    }
+    if seen_red != Some(low) && !probe(low)? {
+        // No member's prefix is red: the red comes from something the members
+        // alone do not carry — the refresh, or the mix.
+        return Some(BISECT_NO_MEMBER.to_string());
+    }
+    let member = &members[low - 1];
+    Some(format!(
+        "bisect: the gate turns red at merge({}) {}",
+        member.name, member.sha
+    ))
+}
+
+/// The members of a feature branch from a first-parent `git log` (T-598): the
+/// merge commits after the fork, oldest first.
+fn bisect_members(log: &str, merge_message: &str) -> Vec<BisectMember> {
+    log.lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let sha = fields.next()?.trim();
+            let parents = fields.next()?.split_whitespace().count();
+            let subject = fields.next().unwrap_or_default();
+            // A merge commit is a member: the single commits on the line are
+            // the feature's own work, not a member's merge.
+            if sha.is_empty() || parents < 2 {
+                return None;
+            }
+            let name =
+                member_of(subject, merge_message).unwrap_or_else(|| sha.chars().take(7).collect());
+            Some(BisectMember {
+                sha: sha.to_string(),
+                name,
+            })
+        })
+        .collect()
+}
+
+/// The task a member merge commit's subject names (T-598): the project's merge
+/// message with `{task}` filled leaves `merge(<task>): …`.
+fn member_of(subject: &str, merge_message: &str) -> Option<String> {
+    let (pre, rest) = merge_message.split_once("{task}")?;
+    let post = rest.split('{').next().unwrap_or_default();
+    let subject = subject.strip_prefix(pre)?;
+    let task = if post.is_empty() {
+        subject.split_once(char::is_whitespace)?.0
+    } else {
+        subject.split_once(post)?.0
+    };
+    let task = task.trim();
+    (!task.is_empty()).then(|| task.to_string())
 }
 
 /// Whether the op still merges what was passed: its attempt is the task's
@@ -3455,6 +3994,14 @@ fn run_gate(
             dir,
             &["reset", "--hard", &format!("{remote_name}/{integration}")],
         );
+        // T-598: the tip the failed merge was built on. A feature's
+        // integration task bisects its members onto exactly this commit, so
+        // the probes judge the same base the red gate did. The worktree was
+        // just reset to it; a base that cannot be read starts no bisect.
+        let base = git(dir, &["rev-parse", "HEAD"])
+            .ok()
+            .map(|sha| sha.trim().to_string())
+            .filter(|sha| !sha.is_empty());
         // 126 and 127 are the shell's own "cannot run that" (126: not
         // executable, 127: not found): the toolchain is missing or broken,
         // not the work. 75 (EX_TEMPFAIL) is the gate's own "I could not judge
@@ -3475,7 +4022,7 @@ fn run_gate(
             if asked_retry || matches!(status, 75 | 126 | 127) {
                 Failed::clear(reason)
             } else {
-                Failed::stuck(reason)
+                Failed::gated(base, reason)
             },
         ));
     }
@@ -4023,9 +4570,11 @@ fn run_batch(
                 let (culprit, matching) = &suspects[0];
                 let culprit = *culprit;
                 let task = ops[culprit].op.task.clone().unwrap_or_default();
-                let (gate_reason, blocker) = match &step {
-                    Step::Failed(failed) => (failed.reason.clone(), failed.blocker),
-                    _ => (String::new(), Blocker::Stuck),
+                let (gate_reason, blocker, gate_base) = match &step {
+                    Step::Failed(failed) => {
+                        (failed.reason.clone(), failed.blocker, failed.gate.clone())
+                    }
+                    _ => (String::new(), Blocker::Stuck, None),
                 };
                 let reason = format!(
                     "{gate_reason}\nthe batch's failed paths match only {task}'s changes: {}",
@@ -4037,6 +4586,7 @@ fn run_batch(
                         Report::Failed(Failed {
                             reason: reason.clone(),
                             blocker,
+                            gate: gate_base.clone(),
                         })
                     } else {
                         Report::Requeue(format!(
@@ -14535,5 +15085,282 @@ gate = "{project_gate}"
             "the feature's branch is where it was"
         );
         assert!(origin_branches(&scratch.root).contains("heat/t5"));
+    }
+
+    // ----------------------------------------------------------------
+    // T-598: a red full gate on a feature names the member that turned it red,
+    // beside the merge train and never in it.
+    // ----------------------------------------------------------------
+
+    /// The branch a bisect worktree stands on: the seat `bisect`'s own, by the
+    /// project's `seat_branch` template and the voyage the store is in.
+    const BISECT_BRANCH: &str = "p/bisect/between-voyages";
+
+    /// The gate of a feature whose red is one member's file: it fails exactly
+    /// when `b.txt` — the work of the second member — is in the tree.
+    const MEMBER_GATE: &str = "test ! -f b.txt";
+
+    /// Put the pair's two member merges on a feature branch the way GEAR writes
+    /// them (`merge(T-1): …`, `merge(T-2): …`, one after the other on the
+    /// branch's first-parent line), publish it, and return the tip — the second
+    /// member's merge commit, which is the one that brings `b.txt` (T-598).
+    fn feature_with_members(pair: &Pair) -> String {
+        let out = sh(
+            &pair.work,
+            "git fetch -q origin && \
+             git switch -qC p/feature/f-1 origin/dev && \
+             git -c user.email=a@b -c user.name=a merge -q --no-ff heat/t1 \
+               -m 'merge(T-1): origin/heat/t1' && \
+             git -c user.email=a@b -c user.name=a merge -q --no-ff heat/t2 \
+               -m 'merge(T-2): origin/heat/t2' && \
+             git rev-parse HEAD",
+        );
+        publish(&pair.work, "p/feature/f-1");
+        out.trim().to_string()
+    }
+
+    /// The two worktrees a bisect needs beside the pair's own: the merge
+    /// worktree, and the bisect worktree on the seat's branch (T-598). Both are
+    /// real, and both are what Herdr hands back.
+    fn bisect_worktrees(pair: &Pair, herdr: &mut gear_herdr::fake::FakeHerdr) -> PathBuf {
+        let merge = pair.root.join("merge");
+        sh(
+            &pair.root,
+            &format!(
+                "git -C {} worktree add -q -b p/merge/between-voyages {} origin/dev",
+                pair.work.display(),
+                merge.display()
+            ),
+        );
+        herdr.add_worktree(
+            "p/merge/between-voyages",
+            &merge.display().to_string(),
+            "wt-merge:p1",
+        );
+        let bisect = pair.root.join("bisect");
+        sh(
+            &pair.root,
+            &format!(
+                "git -C {} worktree add -q -b {BISECT_BRANCH} {} origin/dev",
+                pair.work.display(),
+                bisect.display()
+            ),
+        );
+        herdr.add_worktree(BISECT_BRANCH, &bisect.display().to_string(), "wt-bisect:p1");
+        bisect
+    }
+
+    /// The engine's profiles the fixtures' seats name.
+    fn fixture_cfg() -> EngineCfg {
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+        cfg
+    }
+
+    /// One step of the engine over the project, and the wait for the merge
+    /// worker it launched (if it launched one).
+    fn merge_step(
+        store: &mut Store,
+        herdr: &mut gear_herdr::fake::FakeHerdr,
+        cfg: &EngineCfg,
+        now: Ts,
+    ) {
+        let seen = cfg.merges.progress();
+        merge_passed(store, herdr, cfg, "p", now).unwrap();
+        if cfg.merges.running("p") {
+            assert!(
+                cfg.merges.wait_progress(seen, WAIT),
+                "the merge worker did not report within {WAIT:?}"
+            );
+        }
+    }
+
+    /// The one open item of a task's failed merge (T-92).
+    fn open_failed_item(store: &mut Store, task: &str) -> String {
+        store
+            .read(|tx| tx.thread_messages("p", &format!("merge-failed:{task}")))
+            .unwrap()
+            .into_iter()
+            .find(|item| item.state == MsgState::Open)
+            .unwrap_or_else(|| panic!("{task} has an open merge-failed item"))
+            .body
+    }
+
+    /// The bisect meta of a candidate, as the store holds it (T-598).
+    fn bisect_meta(store: &mut Store) -> Vec<(String, String)> {
+        store
+            .read(|tx| {
+                let mut rows = Vec::new();
+                for key in tx.meta_keys_with_prefix("engine.bisect.p:")? {
+                    rows.push((key.clone(), tx.get_meta(&key)?.unwrap_or_default()));
+                }
+                Ok(rows)
+            })
+            .unwrap()
+    }
+
+    /// T-598: the merge of a feature's integration task fails its full gate, and
+    /// the bisect beside the train names the member that turned it red.
+    #[test]
+    fn a_red_feature_gate_names_the_member_that_turned_it_red() {
+        let pair = Pair::new("bisect-red", false);
+        let tip = feature_with_members(&pair);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        bisect_worktrees(&pair, &mut herdr);
+        let mut store = feature_store(
+            &pair.work,
+            MEMBER_GATE,
+            "T-9",
+            None,
+            None,
+            Some("p/feature/f-1"),
+            &tip,
+        );
+        let cfg = fixture_cfg();
+
+        // The integration task merges the feature branch, and its gate says no:
+        // the second member's file is in the tree.
+        let mut seen = cfg.merges.progress();
+        merge_step(&mut store, &mut herdr, &cfg, 20);
+        // The tick after it collects the failure: the captain's item says what
+        // the gate refused, and the bisect it asked for starts beside the train.
+        merge_step(&mut store, &mut herdr, &cfg, 21);
+        let item = open_failed_item(&mut store, "T-9");
+        assert!(item.contains("gate failed"), "{item}");
+        assert!(
+            !item.contains("bisect:"),
+            "the search has not reported: {item}"
+        );
+        // One request, for this candidate.
+        let meta = bisect_meta(&mut store);
+        assert_eq!(meta.len(), 1, "{meta:?}");
+        assert!(
+            meta[0].1.starts_with("pending") || meta[0].1 == "started",
+            "{meta:?}"
+        );
+
+        // The search runs beside the train; its line is appended once it is done.
+        while cfg.merges.bisect_running("p") {
+            assert!(
+                cfg.merges.wait_progress(seen, WAIT),
+                "the bisect did not report within {WAIT:?}"
+            );
+            seen = cfg.merges.progress();
+        }
+        merge_step(&mut store, &mut herdr, &cfg, 23);
+
+        let item = open_failed_item(&mut store, "T-9");
+        let expected = format!("bisect: the gate turns red at merge(T-2) {tip}");
+        assert!(item.contains(&expected), "{item:?} lacks {expected:?}");
+        assert!(
+            !item.contains("merge(T-1)"),
+            "the first member is green: {item}"
+        );
+        // One bisect per candidate: the meta says so, and the merge pushed
+        // nothing anywhere.
+        let meta = bisect_meta(&mut store);
+        assert_eq!(meta.len(), 1, "{meta:?}");
+        assert_eq!(meta[0].1, "started", "{meta:?}");
+        assert_eq!(pair.dev_log(), "dev", "nothing was pushed by the bisect");
+    }
+
+    /// T-598: a normal task's failed gate starts no bisect — only a feature's
+    /// integration task has members to search.
+    #[test]
+    fn a_normal_tasks_failed_merge_starts_no_bisect() {
+        let pair = Pair::new("bisect-normal", false);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        bisect_worktrees(&pair, &mut herdr);
+        let mut store = feature_store(&pair.work, "false", "T-1", None, None, None, &pair.a);
+        let cfg = fixture_cfg();
+
+        // The merge fails the project's gate, as any normal task's can, and the
+        // captain's item says so.
+        merge_step(&mut store, &mut herdr, &cfg, 20);
+        merge_step(&mut store, &mut herdr, &cfg, 21);
+        let item = open_failed_item(&mut store, "T-1");
+        assert!(item.contains("gate failed"), "{item}");
+
+        // Nothing asked for a search, and later ticks add no line to the item.
+        for now in [22, 23, 24] {
+            merge_step(&mut store, &mut herdr, &cfg, now);
+        }
+        assert!(
+            bisect_meta(&mut store).is_empty(),
+            "{:?}",
+            bisect_meta(&mut store)
+        );
+        let branches = herdr.worktree_branches();
+        assert_eq!(
+            branches.len(),
+            2,
+            "no worktree beside the two the fixture made: {branches:?}"
+        );
+        let item = open_failed_item(&mut store, "T-1");
+        assert!(!item.contains("bisect:"), "{item}");
+    }
+
+    /// T-598: the merge train is never held by a bisect — another task's merge
+    /// lands while the search is still probing.
+    #[test]
+    fn the_train_merges_another_task_while_the_bisect_runs() {
+        let pair = Pair::new("bisect-beside", false);
+        let tip = feature_with_members(&pair);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let bisect = bisect_worktrees(&pair, &mut herdr);
+        // The search's gate waits here until the test lets it go: while that
+        // file stands the bisect cannot finish, so a merge that lands meanwhile
+        // proves the train does not wait for it.
+        std::fs::write(bisect.join("blocked"), "blocked\n").unwrap();
+        let mut store = feature_store(
+            &pair.work,
+            "if [ -f blocked ]; then while [ -f blocked ]; do sleep 0.02; done; fi; test ! -f b.txt",
+            "T-9",
+            None,
+            None,
+            Some("p/feature/f-1"),
+            &tip,
+        );
+        // A second, ordinary task of the same project, on its own branch: its
+        // merge is the train's next one.
+        let third = add_third_task(&mut store, &pair);
+        pass(&mut store, "T-3", &third, 10);
+        let cfg = fixture_cfg();
+
+        // The feature's merge fails its gate; the tick after it starts the
+        // bisect, and the one after that merges the ordinary task.
+        let mut seen = cfg.merges.progress();
+        merge_step(&mut store, &mut herdr, &cfg, 20);
+        merge_step(&mut store, &mut herdr, &cfg, 21);
+        assert!(cfg.merges.bisect_running("p"), "the bisect runs");
+        merge_step(&mut store, &mut herdr, &cfg, 22);
+        merge_step(&mut store, &mut herdr, &cfg, 23);
+
+        // The ordinary task landed while the bisect was still blocked, and no
+        // line was written yet.
+        assert!(
+            pair.dev_log().contains('c'),
+            "T-3 landed: {}",
+            pair.dev_log()
+        );
+        let item = open_failed_item(&mut store, "T-9");
+        assert!(!item.contains("bisect:"), "the bisect still runs: {item}");
+
+        // Let the search go: its line reaches the item on a later tick.
+        std::fs::remove_file(bisect.join("blocked")).unwrap();
+        while cfg.merges.bisect_running("p") {
+            assert!(
+                cfg.merges.wait_progress(seen, WAIT),
+                "the bisect did not report within {WAIT:?}"
+            );
+            seen = cfg.merges.progress();
+        }
+        merge_step(&mut store, &mut herdr, &cfg, 25);
+        let item = open_failed_item(&mut store, "T-9");
+        let expected = format!("bisect: the gate turns red at merge(T-2) {tip}");
+        assert!(item.contains(&expected), "{item:?} lacks {expected:?}");
     }
 }

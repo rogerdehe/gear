@@ -807,12 +807,20 @@ pub fn tick(
             //     whose branch is the feature's own is never assigned to its
             //     lane, so when it is Ready and every member is merged it becomes
             //     a hand-in at the feature branch's tip, and step 7 gives it a
-            //     reviewer — one review and one full gate for the feature.
+            //     reviewer — one review and one full gate for the feature. The
+            //     feature branch catches up with the integration branch first
+            //     (T-597), in the merge worktree.
             let step = std::time::Instant::now();
             let features = match gear_app::config::latest(store, &project) {
-                Ok(config) => {
-                    feature::start_features(store, cfg, &mut tips_by_repo, &config, &project, now)?
-                }
+                Ok(config) => feature::start_features(
+                    store,
+                    herdr,
+                    cfg,
+                    &mut tips_by_repo,
+                    &config,
+                    &project,
+                    now,
+                )?,
                 // A config that does not parse is reported by the steps that
                 // need it; a feature hand-in waits for the next tick.
                 Err(_) => Default::default(),
