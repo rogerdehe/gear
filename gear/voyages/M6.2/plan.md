@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1175 -->
+<!-- gear-plan project=gear base=1176 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -240,4 +240,16 @@ deps: -
 goal: [v0.6.60] A finished voyage sends nothing (user, 2026-11-05: Lawrence's voyage M1 finished on 2026-11-04 — every task done or cancelled, every lane retired — yet its new captain was rung again and again for two branch warnings from 2026-11-03 (M-768, M-777), each doorbell carrying M1's goal, interrupting the work the user had given it). A voyage is finished when none of its tasks is open. (1) When a project's voyage finishes, the engine resolves that voyage's open engine items (branches:*, station:<M>, merge-failed:*, merge-lost:*, merge-wait:*, overrun:*, stalled, task threads of its tasks) with "voyage <M> is finished". (2) The doorbell (crates/gear-engine/src/doorbell.rs) names no goal of a finished voyage and rings for no item of one; a project with no open voyage gets a doorbell only for items addressed to its captain by a person or another seat. Find where the doorbell builds its "Your goal, voyage" line and its item list.
 accept: Tests: a project whose only voyage has every task done, with open branches:* and station items, gets them resolved and receives no doorbell on the following ticks; a project with an open voyage is unchanged. Run only `make check CRATE=gear-engine TESTS='test(doorbell) | test(merge::)'`; the merge gate runs `make gate`.
 estimate: 45
+deps: -
+
+## T-572 [now] lane=mast milestone=M6.2
+goal: [v0.6.60] A red merge round tells the captain why, and a refusal that repeats stops the splitting (user, 2026-11-05: Prometheus batches went red six times in an hour — 8, 3, 2, 1 members — every time for the same two browser cases missing cost declarations, a cause on dev that no split could fix, and the captain heard nothing). In crates/gear-engine/src/merge.rs `run_batch` and the batch collection: (1) after every red batch round, keep one item per project on thread `merge-red:<project>` (opened once, body updated, closed when a merge lands): the round's refusal lines as the gate printed them, the members, and how many red rounds and minutes this line has spent. (2) Keep each red round's refusal text, normalized (no shas, run ids or timings); when two consecutive red rounds with different member sets give the same refusal, stop splitting: requeue every member, set the batch line waiting, and make the item urgent: "the same refusal with different members: the cause is on <integration>, not in the batch". The line runs again when a merge op is queued anew (a remerge or a new pass), not before.
+accept: Tests in merge.rs `mod tests`: two red rounds with the same refusal and different members stop the splitting and leave one urgent merge-red item naming the refusal; a red round followed by a green one closes the item; different refusals keep today's halving. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
+estimate: 60
+deps: -
+
+## T-573 [now] lane=hull milestone=M6.2
+goal: [v0.6.60] A merge that carries only reports skips the gate (user, 2026-11-05: prometheus/web/t732 held one review record, and its merge would still pay a four-to-five-minute CI round). In crates/gear-engine/src/merge.rs, before a single or batch merge runs `[conventions] gate`: when every file the candidate (and the review commits) changes against the integration branch lies under the project's voyage folder (`[conventions] voyage_dir` with `{project}` filled and `{milestone}` as any folder), merge it without the gate (conflict check and push as usual) and say so in the merge result ("no gate: reports only"). In a batch, such members merge first and need no gate; the rest gate as today.
+accept: Tests: a candidate that adds only gear/p/voyages/M1/reviews/T-5.md merges without running the gate command (a gate command that fails proves it); a candidate touching any other file still gates. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
+estimate: 40
 deps: -
