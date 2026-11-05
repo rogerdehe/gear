@@ -554,6 +554,56 @@ fn a_finished_voyage_resolves_its_items_and_rings_nobody() {
     }
 }
 
+/// The landing order of a finished voyage stays open: it is answered by
+/// `station <id>: land`, never by the sweep (Prometheus M4: M-11240 opened and
+/// closed on the same tick, and the captain had nothing to land with).
+#[test]
+fn a_finished_voyage_keeps_its_landing_order_open() {
+    use gear_herdr::fake::FakeHerdr;
+    use gear_store::NewMessage;
+
+    let mut store = voyage_store(None, 2);
+    let land = store
+        .write(|tx| {
+            let land = tx.insert_message(&NewMessage {
+                project: "p".into(),
+                thread: "station:M1".into(),
+                task: None,
+                attempt: None,
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: "p:captain".into(),
+                kind: MsgKind::System,
+                urgent: true,
+                body: "Voyage M1 is ready to land".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: NOW + 10,
+                meta: None,
+            })?;
+            tx.set_meta("station:p:M1:land", &land.id)?;
+            for n in 1..=2 {
+                let mut task = tx.get_task("p", &format!("T-{n}"))?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+            }
+            Ok(land.id)
+        })
+        .unwrap();
+
+    let mut herdr = FakeHerdr::new();
+    let mut cfg = gear_engine::EngineCfg::default();
+    cfg.profiles = gear_herdr::builtins();
+    gear_engine::tick(&mut store, &mut herdr, &cfg, NOW + 600).unwrap();
+
+    let message = store
+        .read(|tx| tx.get_message("p", &land))
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.state, MsgState::Open, "{message:?}");
+}
+
 /// The same items in a project whose voyage is still open: untouched, and the
 /// captain is still rung.
 #[test]

@@ -117,6 +117,11 @@ pub fn apply(
     request_id: &str,
     now: Ts,
 ) -> GearResult<ApplyResult> {
+    // A landing retires every lane and releases every reviewer in the same
+    // apply: the user's "land" is the reclaim, never a later question
+    // (Prometheus M4 landed with three lanes still up).
+    let landing = with_landing_staff(store, draft)?;
+    let draft = landing.as_ref().unwrap_or(draft);
     // T-112: a Done task may be cancelled only when its accepted work is not on
     // the integration branch. That is a git question, so it is answered here,
     // before the write transaction (the store is never held while a subprocess
@@ -1707,6 +1712,76 @@ fn object_held(repo: &str, remote: &str, candidate: &str) -> bool {
         .current_dir(repo)
         .output();
     held()
+}
+
+/// The draft with a `retire` line for every lane and a `release` line for
+/// every reviewer that is still up, when it lands a voyage (an open
+/// `station M-<n>: land`) and no other voyage of the project is open. None
+/// when the draft lands nothing.
+fn with_landing_staff(store: &mut Store, draft: &Draft) -> GearResult<Option<Draft>> {
+    let project = draft.project.clone();
+    let lands = store.read(|tx| {
+        for decision in &draft.decisions {
+            let Some((id, response)) = decision
+                .strip_prefix("station ")
+                .and_then(|rest| rest.split_once(':'))
+            else {
+                continue;
+            };
+            let response = response.trim();
+            if response != "land" && !response.starts_with("land ") {
+                continue;
+            }
+            if let Some(message) = tx.get_message(&project, id.trim())? {
+                if message.state != gear_model::MsgState::Resolved {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    })?;
+    if !lands {
+        return Ok(None);
+    }
+    let seats = store.read(|tx| tx.seats_of_project(&project))?;
+    let named: BTreeSet<String> = draft
+        .staff
+        .iter()
+        .filter_map(|item| match item {
+            StaffItem::Retire { lane, .. } => Some(lane.clone()),
+            StaffItem::Release { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut landed = draft.clone();
+    for seat in seats {
+        let name = seat
+            .id
+            .strip_prefix(&format!("{project}:"))
+            .unwrap_or(&seat.id)
+            .to_string();
+        if named.contains(&name) {
+            continue;
+        }
+        match seat.role {
+            SeatRole::Lane
+                if !matches!(
+                    seat.state,
+                    SeatState::Retiring | SeatState::Retired | SeatState::Queued
+                ) =>
+            {
+                landed.staff.push(StaffItem::Retire {
+                    line: 0,
+                    lane: name,
+                });
+            }
+            SeatRole::Temp if seat.state == SeatState::Active => {
+                landed.staff.push(StaffItem::Release { line: 0, name });
+            }
+            _ => {}
+        }
+    }
+    Ok(Some(landed))
 }
 
 fn cancellable_done_tasks(store: &mut Store, draft: &Draft) -> GearResult<BTreeSet<String>> {

@@ -210,3 +210,12 @@ fn left_in_voyage(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<usi
     }
     Ok(left)
 }
+
+/// Whether the voyage still has a task that is not terminal: a finished
+/// voyage's goal is history, and a captain's home page does not carry it.
+pub fn voyage_open(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<bool> {
+    Ok(tx
+        .tasks_of_project(project)?
+        .iter()
+        .any(|task| task.milestone.as_deref() == Some(milestone) && !task.state.is_terminal()))
+}

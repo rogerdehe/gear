@@ -162,8 +162,8 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
                     "Voyage {} is ready to land: all {done} tasks are done (elapsed {} / eta {}).\n\
 1. Run `gear report voyage` and write the voyage report into # Decisions.\n\
 2. Review it with the user first: the report, the ★ decisions (only those), the friction reports that led to a change. Write each correction as `- <date> user: <text>`.\n\
-3. Only then ask about reclaiming the lanes and the release.\n\
-Close this with `station <id>: land`.",
+3. When the user says land: `station <id>: land` (it retires every lane and releases every reviewer), then remove every worktree of the project and close its Herdr workspaces.\n\
+This item stays open until that line.",
                     report.milestone, minutes(report.elapsed_min), report.eta.as_deref().unwrap_or("-")
                 ))?,
                 reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
@@ -367,6 +367,17 @@ fn require_land_ready(
             message.id
         ))
     })?;
+    // Accepted work that is not on the integration branch is not landed, and
+    // no confirmation lands it (Prometheus M4: T-588 was called landed while a
+    // stale `carried-by` kept its candidate off dev).
+    let unmerged = unmerged_tasks(tx, project, milestone)?;
+    if !unmerged.is_empty() {
+        return Err(bad(format!(
+            "station {}: land is refused: accepted work of {} is not on the integration branch; land it first (`- remerge T-<n>` under # Staff, and `carried-by: -` on a task whose carrier has already merged)",
+            message.id,
+            unmerged.join(", ")
+        )));
+    }
     let checks = crate::goal::goal_check(tx, project, milestone, voyage.done.as_deref())?;
     let open: Vec<usize> = checks
         .iter()
@@ -432,6 +443,38 @@ fn require_land_ready(
         )));
     }
     Ok(())
+}
+
+/// The done tasks of the voyage whose latest accepted attempt has no merge
+/// time: their work is not on the integration branch.
+fn unmerged_tasks(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<Vec<String>> {
+    let mut unmerged = Vec::new();
+    for task in tx.tasks_of_project(project)? {
+        if task.milestone.as_deref() != Some(milestone) || task.state != TaskState::Done {
+            continue;
+        }
+        // A voyage audit is judged against the integration branch: it has
+        // nothing to merge.
+        if tx.task_audit(project, &task.id)? == Some(true) {
+            continue;
+        }
+        let Some(latest) = tx
+            .attempts_of_task(project, &task.id)?
+            .into_iter()
+            .rev()
+            .find(|attempt| attempt.state == gear_model::AttemptState::Accepted)
+        else {
+            continue;
+        };
+        if tx
+            .attempt_times(project, &task.id, latest.n)?
+            .merged
+            .is_none()
+        {
+            unmerged.push(task.id.clone());
+        }
+    }
+    Ok(unmerged)
 }
 
 /// The tasks of the voyage cancelled, or moved out of it, since departure

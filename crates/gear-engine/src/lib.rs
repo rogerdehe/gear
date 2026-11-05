@@ -370,6 +370,16 @@ pub fn tick(
     }
     note_slow(&mut report, "finished voyages", step);
 
+    // A landed voyage keeps no worktree: what is left is named to the captain
+    // until it is gone.
+    let step = std::time::Instant::now();
+    for project in &projects {
+        if let Err(error) = finished::reclaim(store, project, now) {
+            report.project_failed.push(project_error(project, &error));
+        }
+    }
+    note_slow(&mut report, "reclaim", step);
+
     // 1. observe: one agents() call for the whole session. If it fails, every
     //    project is marked and nothing at all is decided this tick.
     let step = std::time::Instant::now();

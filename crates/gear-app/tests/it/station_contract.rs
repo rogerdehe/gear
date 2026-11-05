@@ -74,6 +74,10 @@ fn world(eta: &str, count: usize) -> Store {
 }
 
 fn finish(store: &mut Store, n: i64) {
+    finish_with(store, n, true);
+}
+
+fn finish_with(store: &mut Store, n: i64, merged: bool) {
     store
         .write(|tx| {
             let id = format!("T-{n}");
@@ -101,7 +105,11 @@ fn finish(store: &mut Store, n: i64) {
                 updated: T0 + n * 1200,
             })?;
             tx.set_attempt_time("p", &id, 1, AttemptStep::Started, T0 + (n - 1) * 1200)?;
-            tx.set_attempt_time("p", &id, 1, AttemptStep::Settled, T0 + n * 1200)
+            tx.set_attempt_time("p", &id, 1, AttemptStep::Settled, T0 + n * 1200)?;
+            if merged {
+                tx.set_attempt_time("p", &id, 1, AttemptStep::Merged, T0 + n * 1200)?;
+            }
+            Ok(())
         })
         .unwrap();
 }
@@ -223,7 +231,7 @@ fn three_done_uses_exactly_the_shared_pace_projection_and_slowest_lane() {
     assert_eq!(report.pace(), Some(2.0));
     assert_eq!(report.remaining_estimate_min, Some(90));
     assert_eq!(report.projected_min, Some(60 + 90 * 2));
-    assert_eq!(message.body, format!("Your goal, voyage M2: done: ship it · bar: stable · 5 tasks left in the voyage. Judge every decision against it.\nStation M2 [60 min, 3 done] · elapsed 60m / eta 8h · time left 420m · pace 2.00x · projected finish 240m from departure · tasks left 2 (90m) · lanes heat 180m · slowest lane heat 180m"));
+    assert_eq!(message.body, format!("Your goal, voyage M2: done: ship it · bar: stable · 2 tasks left in the voyage. Judge every decision against it.\nStation M2 [60 min, 3 done] · elapsed 60m / eta 8h · time left 420m · pace 2.00x · projected finish 240m from departure · tasks left 2 (90m) · lanes heat 180m · slowest lane heat 180m"));
     assert!(check(&mut store, 3601).is_empty());
     let (env, fp) = captain();
     let page = home::build(&mut store, &env, Some(&fp), T0 + 3601).unwrap();
@@ -311,7 +319,7 @@ fn each_third_completion_is_a_station_including_the_final_task() {
         "{land_body}"
     );
     assert!(
-        land_body.contains("Only then ask about reclaiming the lanes"),
+        land_body.contains("it retires every lane and releases every reviewer"),
         "{land_body}"
     );
     assert!(land_body.contains("station <id>: land"), "{land_body}");
@@ -772,4 +780,34 @@ fn a_station_item_in_waiting_is_settled_by_a_plan_line() {
         message.result.as_deref(),
         Some(decision.trim_start_matches("- "))
     );
+}
+
+/// A landing is refused while accepted work is not on the integration branch
+/// (Prometheus M4: T-588 was called landed while it was not on dev), and a
+/// landing retires every lane in the same apply (M4 landed with three lanes
+/// up).
+#[test]
+fn a_landing_needs_every_accepted_task_merged_and_retires_the_lanes() {
+    let mut store = world("8h", 6);
+    assert!(check(&mut store, 0).is_empty(), "watch the voyage first");
+    for n in 1..=5 {
+        finish(&mut store, n);
+    }
+    // T-6's accepted work never reached the integration branch.
+    finish_with(&mut store, 6, false);
+    let land = check(&mut store, 7200)
+        .into_iter()
+        .find(|id| item(&mut store, id).body.contains("ready to land"))
+        .unwrap();
+    let lines = format!("- done (1): met | evidence: all 6 tasks merged\n- station {land}: land");
+    let error = apply(&mut store, &lines, "land-unmerged", T0 + 7201).unwrap_err();
+    assert!(error.detail.contains("T-6"), "{}", error.detail);
+
+    store
+        .write(|tx| tx.set_attempt_time("p", "T-6", 1, AttemptStep::Merged, T0 + 7201))
+        .unwrap();
+    apply(&mut store, &lines, "land-merged", T0 + 7202).unwrap();
+    assert_eq!(item(&mut store, &land).state, MsgState::Resolved);
+    let lane = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+    assert_eq!(lane.state, gear_model::SeatState::Retiring, "{lane:?}");
 }
