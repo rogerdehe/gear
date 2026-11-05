@@ -75,6 +75,11 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             merge_parallel: 1,
             // T-545: each merge is gated alone unless the project asks for a batch.
             merge_batch: 1,
+            // M6.2: a feature's members merge into its own branch, no check of
+            // its own, at most 10 tasks.
+            feature_branch: "{project}/feature/{feature}".into(),
+            feature_check: None,
+            feature_max_tasks: 10,
             push_interval_min: 20,
             push_reply_min: 10,
             // T-255: `gate` has no default; the fixture names one.
@@ -619,6 +624,54 @@ fn a_merge_batch_above_one_refuses_a_merge_train() {
             && issues[0].problem.contains('2'),
         "both fields and their values are named: {}",
         issues[0].problem
+    );
+}
+
+// ---- `[conventions].feature_*` (M6.2): how a feature's work is integrated.
+// Its branch is a template that must name the feature, its optional check runs
+// on that branch after a member merges, and it holds at most this many tasks.
+
+#[test]
+fn the_feature_conventions_default_to_their_own_branch_check_and_cap() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert_eq!(
+        cfg.conventions.feature_branch,
+        "{project}/feature/{feature}"
+    );
+    assert_eq!(cfg.conventions.feature_check, None, "no check by default");
+    assert_eq!(cfg.conventions.feature_max_tasks, 10);
+    assert_eq!(validate(&cfg), vec![], "the defaults are valid");
+
+    let cfg = parse(&MINIMAL.replace(
+        GATE_LINE,
+        "gate = \"make test\"\nfeature_branch = \"f/{feature}\"\nfeature_check = \"make feature-check\"\nfeature_max_tasks = 3",
+    ))
+    .unwrap();
+    assert_eq!(cfg.conventions.feature_branch, "f/{feature}");
+    assert_eq!(
+        cfg.conventions.feature_check.as_deref(),
+        Some("make feature-check")
+    );
+    assert_eq!(cfg.conventions.feature_max_tasks, 3);
+    assert_eq!(validate(&cfg), vec![], "a feature's own settings are valid");
+}
+
+/// A feature branch template without `{feature}` names one branch for every
+/// feature, and a cap of zero holds no task at all.
+#[test]
+fn a_feature_branch_without_the_feature_and_a_cap_of_zero_are_refused() {
+    let cfg = parse(&MINIMAL.replace(
+        GATE_LINE,
+        "gate = \"make test\"\nfeature_branch = \"project/feature\"",
+    ))
+    .unwrap();
+    assert_eq!(fields(&validate(&cfg)), vec!["conventions.feature_branch"]);
+
+    let cfg =
+        parse(&MINIMAL.replace(GATE_LINE, "gate = \"make test\"\nfeature_max_tasks = 0")).unwrap();
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["conventions.feature_max_tasks"]
     );
 }
 

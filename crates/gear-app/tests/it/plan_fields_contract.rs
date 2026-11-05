@@ -871,3 +871,39 @@ fn a_cancel_with_nothing_pending_warns_and_a_moving_lane_is_refused() {
         error.detail
     );
 }
+
+/// M6.2: `feature: F-<n>` is parsed, stored with the task and shown back by
+/// `gear plan show` next to `carried-by`; a block without the field keeps the
+/// feature the task has, and `-` clears it.
+#[test]
+fn a_feature_mark_is_parsed_stored_shown_and_cleared() {
+    let mut s = world();
+    run(
+        &mut s,
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\nfeature: F-3\ndeps: -\n\n## NEW [should] lane=wire\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n",
+        "r1",
+    )
+    .unwrap();
+    let feature = |s: &mut Store, id: &str| s.read(|tx| tx.task_feature("p", id)).unwrap();
+    assert_eq!(feature(&mut s, "T-1").as_deref(), Some("F-3"));
+    assert_eq!(feature(&mut s, "T-2"), None, "a block without it has none");
+    let shown = s.read(|tx| gear_app::plan::show(tx, "p", "T-1")).unwrap();
+    assert!(shown.contains("feature: F-3"), "{shown}");
+
+    run_at(&mut s, "# Queue\n## T-1 [must] lane=heat\ndeps: -\n", "r2").unwrap();
+    assert_eq!(
+        feature(&mut s, "T-1").as_deref(),
+        Some("F-3"),
+        "a block without it keeps it"
+    );
+
+    run_at(
+        &mut s,
+        "# Queue\n## T-1 [must] lane=heat\nfeature: -\ndeps: -\n",
+        "r3",
+    )
+    .unwrap();
+    assert_eq!(feature(&mut s, "T-1"), None, "`-` clears it");
+    let shown = s.read(|tx| gear_app::plan::show(tx, "p", "T-1")).unwrap();
+    assert!(!shown.contains("feature:"), "{shown}");
+}
