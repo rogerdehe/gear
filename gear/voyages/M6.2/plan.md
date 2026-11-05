@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1204 -->
+<!-- gear-plan project=gear base=1205 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -367,6 +367,13 @@ accept: Tests in finished.rs `mod tests`: a voyage whose only task is done with 
 estimate: 25
 deps: -
 fresh: finished voyage, unrelated
+
+## T-596 [must] lane=mast milestone=M6.2 required
+goal: The parallel-change scan reads a task against its own base. crates/gear-engine/src/parallel.rs: each task entry carries its base (`task.base` when set, else the repo's integration branch). In the scan, a task whose base is not the repo's integration branch is diffed against that base's tip (local ref, else `<remote>/<base>`, read through the same Tips), and a task whose candidate is already in its base (a member merged into its feature branch) is skipped like a landed task (T-64). The integration-overlap line of such a task names its base. Today a feature member is diffed against dev, so every member lists the files of the members merged before it and every pair rings "share files" (GEAR M6.2 F-1: T-590 was reported to share T-589's report with T-589).
+accept: A test in parallel.rs `mod tests` (the git fixture the scan tests use): two members of feature `p/feature/f-1`, the first merged into the feature branch, the second branched from it with its own file: no pair is reported; two members that change one file both are still reported. Run only the new tests by name; the merge gate runs `make gate`.
+estimate: 30
+deps: -
+fresh: parallel scan for features
 
 ## T-589 [must] lane=mast milestone=M6.2 required
 goal: [feature stage 2, 1/5] A member's hand-in is accepted without a blocking review. crates/gear-engine/src/review.rs `tasks_to_review` (and `settle_mechanical`'s path): an attempt of a task with a stored feature (`tx.task_feature`, non-empty) that is not the feature's integration task (`feature_carrier`) is settled as accepted at hand-in, the way a mechanical task is, so its merge into the feature branch queues at once (the light merge: conflict check and `feature_check`). Its review becomes the light check of the next task (stage 2, 2/5); nothing waits on it. A rework (attempt >= 2, set by the captain) is settled the same way. A task with no feature is unchanged.
