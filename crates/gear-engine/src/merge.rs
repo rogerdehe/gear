@@ -11518,6 +11518,55 @@ gate = "{project_gate}"
         assert!(!branches.contains("review/t5"), "{branches}");
     }
 
+    /// T-573: only a file under the voyage folder counts, with `{project}`
+    /// filled and `{milestone}` any one folder.
+    #[test]
+    fn only_a_file_under_the_voyage_folder_is_a_report() {
+        let template = "gear/{project}/voyages/{milestone}";
+        assert!(is_under_voyage(
+            "gear/p/voyages/M1/reviews/T-5.md",
+            template,
+            "p"
+        ));
+        assert!(is_under_voyage("gear/p/voyages/M1/plan.md", template, "p"));
+        // Any milestone, one folder: not another project's, not the folder
+        // itself, not a file that only looks like one.
+        assert!(!is_under_voyage(
+            "gear/other/voyages/M1/reviews/T-5.md",
+            template,
+            "p"
+        ));
+        assert!(!is_under_voyage("gear/p/voyages/M1", template, "p"));
+        assert!(!is_under_voyage("gear/p/voyages", template, "p"));
+        assert!(!is_under_voyage("src/lib.rs", template, "p"));
+        // The default template names no project, and matches the same way.
+        let default = gear_model::layout::VOYAGE_DIR;
+        assert!(is_under_voyage(
+            "gear/voyages/M3/reports/T-7.md",
+            default,
+            "p"
+        ));
+        assert!(!is_under_voyage("gear/voyages/M3", default, "p"));
+        // A merge that changes nothing is no report-only merge.
+        assert!(!reports_only(&[], template, "p"));
+        assert!(reports_only(
+            &[
+                "gear/p/voyages/M1/reports/T-5.md".to_string(),
+                "gear/p/voyages/M1/reviews/T-5.md".to_string(),
+            ],
+            template,
+            "p"
+        ));
+        assert!(!reports_only(
+            &[
+                "gear/p/voyages/M1/reports/T-5.md".to_string(),
+                "src/lib.rs".to_string(),
+            ],
+            template,
+            "p"
+        ));
+    }
+
     /// The config of a test project whose voyage folder names the project
     /// (T-573): `gear/<project>/voyages/<milestone>`.
     fn repo_with_voyage_dir(gate: &str) -> Repo {
