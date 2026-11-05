@@ -178,6 +178,22 @@ pub fn start_reviews_with_tips(
             now,
         )?;
     }
+    // T-590: a member of a feature whose attempt was accepted gets the
+    // feature's light stage check, on the seat of the feature's reviewer. It
+    // never blocks anything: a hand-in that still waits for a seat comes
+    // first, and the check itself is no verdict.
+    let hand_ins_wait = !report.waiting.is_empty();
+    start_stage_checks(
+        store,
+        herdr,
+        cfg,
+        profiles,
+        project,
+        &config,
+        &mut report,
+        hand_ins_wait,
+        now,
+    )?;
     // T-376: the hand-in pass is done. A hand-in that still waits for a
     // reviewer 20 minutes after it was handed in rings the captain: the
     // "every temp seat is in use" notice covers only a full quota, and a
@@ -291,6 +307,14 @@ fn start_hand_in_reviews(
         if !profile.verified {
             continue;
         }
+        // T-590: a feature's integration task is reviewed by the one seat
+        // that light-checks the feature, waited for while it is busy. Its one
+        // review continues the conversation the light checks ran in.
+        let carrier = carrier_feature(store, project, &task.task)?;
+        let reserved = match &carrier {
+            Some(feature) => feature_reviewer_seat(store, project, feature)?,
+            None => None,
+        };
         // 2. the reviewer seat: created once and bound to the task for life.
         // T-480: a rework's review is the continuation of the review of the
         // attempt before it. It goes to the seat that reviewed attempt n-1 and
@@ -302,53 +326,85 @@ fn start_hand_in_reviews(
         } else {
             None
         };
-        let seat = match temp_seat_of(store, project, &task.task)? {
-            Some(seat)
-                if matches!(seat.state, SeatState::Standby | SeatState::Released)
-                    || (seat.state == SeatState::Starting && seat.task_id.is_some()) =>
-            {
-                take_seat(store, &seat, &task.task, task.attempt, profile_name, now)?
+        let seat = if let Some(seat) = reserved {
+            if !feature_seat_free(store, herdr, project, &seat, &task.task)? {
+                note_waiting(report, &task.task);
+                tell_captain(
+                    store,
+                    project,
+                    task,
+                    "the feature's reviewer is busy with its stage check",
+                    now,
+                )?;
+                continue;
             }
-            Some(seat) => seat,
-            None => match rework_seat {
-                Some(seat) if rework_seat_free(store, herdr, project, &seat, &task.task)? => {
+            take_seat(store, &seat, &task.task, task.attempt, profile_name, now)?
+        } else {
+            match temp_seat_of(store, project, &task.task)? {
+                Some(seat)
+                    if matches!(seat.state, SeatState::Standby | SeatState::Released)
+                        || (seat.state == SeatState::Starting && seat.task_id.is_some()) =>
+                {
                     take_seat(store, &seat, &task.task, task.attempt, profile_name, now)?
                 }
-                Some(_) => {
-                    note_waiting(report, &task.task);
-                    tell_captain(
-                        store,
-                        project,
-                        task,
-                        &format!(
-                            "the seat that reviewed attempt {} is busy",
-                            task.attempt - 1
-                        ),
-                        now,
-                    )?;
-                    continue;
-                }
-                // A seat that finished its last job is warm: the job takes it
-                // rather than building a new worktree (17 §8a).
-                None => match free_seat(store, herdr, project, &task.task, &kind)? {
-                    Some(seat) => {
+                Some(seat) => seat,
+                None => match rework_seat {
+                    Some(seat) if rework_seat_free(store, herdr, project, &seat, &task.task)? => {
                         take_seat(store, &seat, &task.task, task.attempt, profile_name, now)?
                     }
-                    // No warm seat free: a new one only while the quota has
-                    // room. Otherwise the job waits for a seat instead of
-                    // building a cold extra worktree (finding 2 of the T-18
-                    // review).
-                    None => match seats_free_for_new(store, herdr, project, quota)? {
-                        true => create_temp_seat(store, project, &task.task, profile_name, now)?,
-                        false => {
-                            note_waiting(report, &task.task);
-                            tell_captain(store, project, task, "every temp seat is in use", now)?;
-                            continue;
+                    Some(_) => {
+                        note_waiting(report, &task.task);
+                        tell_captain(
+                            store,
+                            project,
+                            task,
+                            &format!(
+                                "the seat that reviewed attempt {} is busy",
+                                task.attempt - 1
+                            ),
+                            now,
+                        )?;
+                        continue;
+                    }
+                    // A seat that finished its last job is warm: the job takes it
+                    // rather than building a new worktree (17 §8a).
+                    None => match free_seat(store, herdr, project, &task.task, &kind)? {
+                        Some(seat) => {
+                            take_seat(store, &seat, &task.task, task.attempt, profile_name, now)?
                         }
+                        // No warm seat free: a new one only while the quota has
+                        // room. Otherwise the job waits for a seat instead of
+                        // building a cold extra worktree (finding 2 of the T-18
+                        // review).
+                        None => match seats_free_for_new(store, herdr, project, quota)? {
+                            true => {
+                                create_temp_seat(store, project, &task.task, profile_name, now)?
+                            }
+                            false => {
+                                note_waiting(report, &task.task);
+                                tell_captain(
+                                    store,
+                                    project,
+                                    task,
+                                    "every temp seat is in use",
+                                    now,
+                                )?;
+                                continue;
+                            }
+                        },
                     },
                 },
-            },
+            }
         };
+        // T-590: the seat the feature's reviewer is, recorded with the first
+        // job that takes one; every later light check and this review come
+        // back to it.
+        if let Some(feature) = &carrier {
+            store.write(|tx| {
+                tx.set_feature_reviewer(project, feature, &seat.id)?;
+                tx.set_feature_seat(project, &seat.id, feature)
+            })?;
+        }
 
         // T-501: a reviewer that fell back stays on the model it fell back to
         // until the model it left resets — its next job takes that entry, and
@@ -641,6 +697,17 @@ fn job_packet(
     direction: bool,
     worktree: &str,
 ) -> GearResult<String> {
+    // T-590: a member's light stage check has its own packet; the direction
+    // and review packets below are untouched. The marker on the attempt is
+    // what names the job, so every path that rebuilds a packet (a start, a
+    // recovered delivery, a nudge) rebuilds the same one.
+    let stage = store
+        .read(|tx| tx.stage_check(&config.project.id, &task.task, task.attempt))?
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|marker| marker["feature"].as_str().map(str::to_string));
+    if let Some(feature) = stage {
+        return stage_packet(store, config, task, &feature, worktree);
+    }
     if !direction {
         return review_packet_for(
             store,
@@ -716,6 +783,67 @@ fn job_packet(
         version = version,
         goal = goal,
         accept = accept,
+    ))
+}
+
+/// T-590: the packet of a feature member's light stage check. It names the
+/// feature and the goal of its integration task, and asks only for the
+/// direction and plain breakage: the full review comes once, on the
+/// integration task. Its result is a direction result, never a verdict.
+fn stage_packet(
+    store: &mut Store,
+    config: &ProjectConfig,
+    task: &ReviewTask,
+    feature: &str,
+    worktree: &str,
+) -> GearResult<String> {
+    // The check's own branch, not the lane's (as a direction check): its
+    // worktree is cut at the candidate on the project's `direction_branch`.
+    let branch = gear_model::branch::direction_branch(
+        &config.conventions.direction_branch,
+        &config.project.id,
+        &task.lane,
+        &task.task,
+    );
+    // The goal of the feature is the goal of its integration task (M6.2).
+    let goal = match store.read(|tx| {
+        let Some(carrier) = tx.feature_carrier(&config.project.id, feature)? else {
+            return Ok(None);
+        };
+        let Some(row) = tx.get_task(&config.project.id, &carrier)? else {
+            return Ok(None);
+        };
+        tx.get_contract(&config.project.id, &carrier, row.contract_version)
+    })? {
+        Some(contract) => contract.goal,
+        None => "(the feature has no integration task yet)".to_string(),
+    };
+    let repo = store
+        .read(|tx| tx.get_task(&config.project.id, &task.task))?
+        .map(|row| config.repo_of_task(&row))
+        .unwrap_or_else(|| config.repo_of_lane(&task.lane));
+    Ok(format!(
+        "Stage check of {task} attempt {attempt} in feature {feature} (goal of the feature: \
+         {goal}). Check the direction and plain breakage against the feature's goal; the full \
+         review comes once, on the feature's integration task. Report findings; you block \
+         nothing. Binding: task {task}, attempt {attempt}, candidate {candidate}, branch \
+         {branch}, worktree {worktree}. Check the binding before reading: `pwd` must be the \
+         worktree, `git rev-parse --abbrev-ref HEAD` must be the branch, and `git rev-parse \
+         HEAD` must be the candidate.\n\
+         Run `gear` first (it records that you got this). No build, no tests; at most 10 \
+         minutes. Read the diff from {remote}/{integration}. Hand in only this command: gear \
+         send --kind result --task {task} --attempt {attempt} --direction \"<what you found; \
+         write `ok` first when nothing is misread>.\" The result is recorded on the member as \
+         a direction result and is never a verdict.",
+        task = task.task,
+        attempt = task.attempt,
+        feature = feature,
+        goal = goal,
+        candidate = task.candidate,
+        branch = branch,
+        worktree = worktree,
+        remote = config.conventions.remote,
+        integration = repo.integration,
     ))
 }
 
@@ -797,7 +925,10 @@ fn finish_direction_results(
                 // that attempt is no longer `Started` (the lane handed in, or
                 // the attempt ended any other way) the job is closed, whether
                 // or not a result came (T-258).
-                let live = attempt.state == AttemptState::Started;
+                // T-590: a member's light stage check runs on an accepted
+                // attempt and waits for its result as a live check does.
+                let stage = tx.stage_check(project, &task.id, attempt.n)?.is_some();
+                let live = attempt.state == AttemptState::Started || stage;
                 let result = tx.direction_results_of_attempt(project, &task.id, attempt.n)?.into_iter().find(|m| {
                     m.sender == seat_id && m.sender_gen == generation && m.meta.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()).is_some_and(|v| v["direction"] == true && v["sha"] == sha)
                 });
@@ -819,7 +950,10 @@ fn finish_direction_results(
                         // A late or superseded verdict reaches nobody but the
                         // captain: the lane is not told about the attempt it
                         // handed in, nor about a candidate it moved past.
-                        let recipients = if live && !superseded {
+                        // T-590: a stage check's findings are the captain's
+                        // information too — the check blocks nothing and is
+                        // never a verdict.
+                        let recipients = if live && !superseded && !stage {
                             vec![(Some(attempt.seat.clone()), MsgKind::Instruction, true, MsgState::Open), (captain.map(|s| s.id), MsgKind::System, false, MsgState::Info)]
                         } else {
                             vec![(captain.map(|s| s.id), MsgKind::System, false, MsgState::Info)]
@@ -842,6 +976,20 @@ fn finish_direction_results(
                     tx.insert_message(&NewMessage { meta: None, project: project.into(), thread: format!("direction:{}:{}:{sha}", task.id, attempt.n), task: Some(task.id.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0, recipient: seat_id.into(), kind: MsgKind::Instruction, urgent: false, body, reply_to: None, needs_ack: false, state: MsgState::Open, created: now })?;
                 }
                 tx.set_meta(&key, &serde_json::json!({"checked_sha":sha}).to_string())?;
+                // T-590: a stage check that ended is `done`; the attempt is
+                // checked once, whatever its job's meta becomes.
+                if let Some(raw) = tx.stage_check(project, &task.id, attempt.n)? {
+                    let feature = serde_json::from_str::<serde_json::Value>(&raw)
+                        .ok()
+                        .and_then(|marker| marker["feature"].as_str().map(str::to_string))
+                        .unwrap_or_default();
+                    tx.set_stage_check(
+                        project,
+                        &task.id,
+                        attempt.n,
+                        &serde_json::json!({"feature":feature,"state":"done"}).to_string(),
+                    )?;
+                }
                 if tx.get_seat(seat_id)?.is_some_and(|s| s.state == SeatState::Active && s.generation == generation && s.task_id.as_deref() == Some(task.id.as_str())) {
                     tx.set_seat_state(seat_id, SeatState::Standby, Some("direction check done"), now)?;
                     tx.clear_seat_task(seat_id)?;
@@ -1088,6 +1236,252 @@ fn start_direction_checks(
         }
     }
     Ok(())
+}
+
+/// T-590 (feature stage 2): the light stage check of a feature member.
+///
+/// When a member's attempt was accepted — settled at hand-in, stage 2 of the
+/// feature work — the feature's reviewer looks at it once, on the member's
+/// candidate: a direction job (`start_direction_checks`' job and branch) whose
+/// packet asks for the direction and plain breakage against the feature's
+/// goal. It is no verdict: its result is a direction result on the member, and
+/// the feature's one full review waits for the integration task.
+///
+/// One reviewer per feature: the first check takes a seat as a review does and
+/// records it (`feature_reviewer`); every later check goes to that seat and
+/// waits while it is busy, so it continues the conversation instead of
+/// starting a fresh one. A retired seat falls back to a new one, recorded in
+/// its place.
+fn start_stage_checks(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, Profile>,
+    project: &str,
+    config: &ProjectConfig,
+    report: &mut ReviewReport,
+    hand_ins_wait: bool,
+    now: Ts,
+) -> GearResult<()> {
+    let Some(temps) = config.temps.as_ref() else {
+        return Ok(());
+    };
+    // T-467: the same effective count as the hand-in reviews.
+    let quota = i64::from(crate::release::effective_temps(
+        store,
+        project,
+        config.quota.temps,
+    )?);
+    let mut checks: Vec<StageCheck> = store.read(|tx| {
+        let mut checks = Vec::new();
+        for row in tx.tasks_of_project(project)? {
+            let Some(feature) = tx.task_feature(project, &row.id)? else {
+                continue;
+            };
+            // The feature's integration task is reviewed, not stage-checked.
+            if tx.feature_carrier(project, &feature)?.as_deref() == Some(row.id.as_str()) {
+                continue;
+            }
+            let Some(attempt) = tx.attempts_of_task(project, &row.id)?.into_iter().last() else {
+                continue;
+            };
+            if attempt.state != AttemptState::Accepted {
+                continue;
+            }
+            let Some(candidate) = attempt.candidate.clone() else {
+                continue;
+            };
+            // Already checked (its result is in): never again for this attempt.
+            let marker = tx
+                .stage_check(project, &row.id, attempt.n)?
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+            if marker
+                .as_ref()
+                .is_some_and(|marker| marker["state"] == "done")
+            {
+                continue;
+            }
+            checks.push(StageCheck {
+                task: row.id.clone(),
+                attempt: attempt.n,
+                feature,
+                candidate,
+                lane: row.lane.clone().unwrap_or_default(),
+                writer: attempt.seat,
+            });
+        }
+        checks.sort_by(|a, b| a.task.cmp(&b.task));
+        Ok(checks)
+    })?;
+    for check in checks.drain(..) {
+        let key = direction_key(project, &check.task, check.attempt);
+        let existing = store
+            .read(|tx| tx.get_meta(&key))?
+            .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok());
+        // A check whose seat still works it is left alone; one whose seat is
+        // gone (released, retired, rebound) is started again below.
+        if let Some(job) = existing.as_ref().filter(|job| job["state"] == "running") {
+            if stage_job_live(store, job, &check.task)? {
+                continue;
+            }
+        }
+        // The model the reviewer runs on, read as a direction check reads it.
+        let writer = writer_current_model(store, config, &check.writer)?;
+        let review_model = store.read(|tx| tx.task_review_model(project, &check.task))?;
+        let entry =
+            crate::model::review_entry_for(config, writer.as_deref(), review_model.as_deref());
+        if entry.is_none() && !config.models.review.is_empty() {
+            continue;
+        }
+        let kind = entry
+            .and_then(ModelEntry::cli)
+            .unwrap_or(temps.kind.as_str())
+            .to_string();
+        let selected = if kind == temps.kind {
+            profiles
+                .get(&temps.profile)
+                .map(|p| (temps.profile.as_str(), p))
+        } else {
+            crate::restart::profile_for_kind(profiles, &kind)
+        };
+        let Some((profile_name, profile)) = selected.filter(|(_, p)| p.verified) else {
+            continue;
+        };
+        // The seat: this check's own start in flight, else the feature's
+        // recorded reviewer (waited for), else the first check of the feature
+        // takes a seat as a review does and records it.
+        let starting_seat = match existing
+            .as_ref()
+            .filter(|job| job["state"] == "starting")
+            .and_then(|job| job["seat"].as_str())
+        {
+            Some(id) => store
+                .read(|tx| tx.get_seat(id))?
+                .filter(|seat| seat.state != SeatState::Retired),
+            None => None,
+        };
+        let seat = match starting_seat {
+            Some(seat) => seat,
+            None => match feature_reviewer_seat(store, project, &check.feature)? {
+                Some(seat) => {
+                    if !feature_seat_free(store, herdr, project, &seat, &check.task)? {
+                        // The feature's one reviewer is busy: wait, never skip.
+                        note_waiting(report, &check.task);
+                        continue;
+                    }
+                    seat
+                }
+                None => {
+                    // A hand-in that still waits for a seat comes first.
+                    if hand_ins_wait {
+                        continue;
+                    }
+                    // A seat another feature already reviews on is not taken.
+                    let chosen = match free_seat(store, herdr, project, &check.task, &kind)? {
+                        Some(seat)
+                            if store
+                                .read(|tx| tx.feature_seat(project, &seat.id))?
+                                .is_none() =>
+                        {
+                            Some(seat)
+                        }
+                        _ => None,
+                    };
+                    match chosen {
+                        Some(seat) => {
+                            take_seat(store, &seat, &check.task, check.attempt, profile_name, now)?
+                        }
+                        None if seats_free_for_new(store, herdr, project, quota)? => {
+                            create_temp_seat(store, project, &check.task, profile_name, now)?
+                        }
+                        None => continue,
+                    }
+                }
+            },
+        };
+        if !occupies_quota(seat.state)
+            && !has_free_slot(store, herdr, project, quota, Some(&seat.id))?
+        {
+            continue;
+        }
+        let direction_branch = gear_model::branch::direction_branch(
+            &config.conventions.direction_branch,
+            project,
+            &check.lane,
+            &check.task,
+        );
+        store.write(|tx| {
+            tx.set_feature_reviewer(project, &check.feature, &seat.id)?;
+            tx.set_feature_seat(project, &seat.id, &check.feature)?;
+            tx.set_stage_check(
+                project,
+                &check.task,
+                check.attempt,
+                &serde_json::json!({"feature":check.feature,"state":"running"}).to_string(),
+            )?;
+            tx.set_meta(
+                &key,
+                &serde_json::json!({"seat":seat.id,"sha":check.candidate,"state":"starting","branch":direction_branch}).to_string(),
+            )
+        })?;
+        let task = ReviewTask {
+            task: check.task.clone(),
+            attempt: check.attempt,
+            writer: check.writer,
+            lane: check.lane,
+            candidate: check.candidate,
+        };
+        if matches!(
+            start_reviewer(
+                store, herdr, cfg, config, &seat, &task, entry, &kind, profile, true, now
+            )?,
+            Started::Yes
+        ) {
+            report.started.push(seat.id);
+        } else {
+            note_waiting(report, &task.task);
+        }
+    }
+    Ok(())
+}
+
+/// T-590: an accepted member's light stage check, as one tick reads it.
+struct StageCheck {
+    task: String,
+    attempt: i64,
+    feature: String,
+    candidate: String,
+    lane: String,
+    writer: String,
+}
+
+/// T-590: whether a running stage check's seat still works its job. A seat
+/// that was released, retired or rebound holds no job any more: the check
+/// starts again (on the feature's seat, or on the new seat a retired one falls
+/// back to).
+fn stage_job_live(store: &mut Store, job: &serde_json::Value, task: &str) -> GearResult<bool> {
+    let Some(id) = job["seat"].as_str() else {
+        return Ok(false);
+    };
+    let Some(seat) = store.read(|tx| tx.get_seat(id))? else {
+        return Ok(false);
+    };
+    if !matches!(
+        seat.state,
+        SeatState::Active | SeatState::Starting | SeatState::Queued
+    ) {
+        return Ok(false);
+    }
+    if job["generation"]
+        .as_i64()
+        .is_some_and(|generation| generation != seat.generation)
+    {
+        return Ok(false);
+    }
+    let pending = store
+        .read(|tx| tx.get_meta(&pending_review_key(&seat.id)))?
+        .filter(|value| !value.is_empty());
+    Ok(seat.task_id.as_deref() == Some(task) || pending.as_deref() == Some(task))
 }
 
 /// The reviewers whose verdict is in go to `Standby` (design §3.6).
@@ -1387,6 +1781,77 @@ fn rework_seat_free(
         return Ok(false);
     }
     Ok(true)
+}
+
+/// T-590: the feature whose integration task this task is, if it is one. The
+/// carrier is the generated task the feature's plan creates; the store keeps
+/// only `feature_carrier:<feature> → task`, so the pair is found from the
+/// members' marks.
+fn carrier_feature(store: &mut Store, project: &str, task: &str) -> GearResult<Option<String>> {
+    store.read(|tx| {
+        for row in tx.tasks_of_project(project)? {
+            let Some(feature) = tx.task_feature(project, &row.id)? else {
+                continue;
+            };
+            if tx.feature_carrier(project, &feature)?.as_deref() == Some(task) {
+                return Ok(Some(feature));
+            }
+        }
+        Ok(None)
+    })
+}
+
+/// T-590: the seat recorded as a feature's reviewer, while it still exists and
+/// has not retired. A retired seat falls back to a new one, which is recorded
+/// in its place.
+fn feature_reviewer_seat(
+    store: &mut Store,
+    project: &str,
+    feature: &str,
+) -> GearResult<Option<SeatRow>> {
+    store.read(|tx| {
+        let Some(id) = tx.feature_reviewer(project, feature)? else {
+            return Ok(None);
+        };
+        Ok(tx
+            .get_seat(&id)?
+            .filter(|seat| seat.state != SeatState::Retired))
+    })
+}
+
+/// T-590: whether the feature's reviewer seat can take `task` now. A seat that
+/// is busy — it works another job, waits for its agent, is parked, or holds
+/// another reservation — is waited for, never skipped (as T-480's
+/// `rework_seat_free` waits for a rework's seat). A `Starting` seat with this
+/// very job reserved is its own start in flight: the next tick goes on with
+/// it.
+fn feature_seat_free(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    seat: &SeatRow,
+    task: &str,
+) -> GearResult<bool> {
+    let pending = store
+        .read(|tx| tx.get_meta(&pending_review_key(&seat.id)))?
+        .filter(|value| !value.is_empty());
+    match seat.state {
+        SeatState::Retired => Ok(false),
+        SeatState::Queued | SeatState::Starting => Ok(pending.as_deref() == Some(task)),
+        SeatState::Standby | SeatState::Released => {
+            if pending.is_some_and(|value| value != task) {
+                return Ok(false);
+            }
+            if !agent_idle(store, herdr, seat)? {
+                return Ok(false);
+            }
+            if seat.state == SeatState::Standby && !last_job_recorded(store, project, seat)? {
+                return Ok(false);
+            }
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 /// A seat that finished its last job and holds no live one: a warm worktree
@@ -13773,6 +14238,365 @@ profile = "opencode"
             .filter(|seat| seat.role == SeatRole::Temp)
             .count();
         assert_eq!(seats, 8, "eight seats exist");
+    }
+
+    /// T-590: a project whose feature F-1 has two members whose attempts were
+    /// accepted at hand-in (stage 2 settles them without a blocking review),
+    /// and the feature's integration task T-9.
+    fn feature_world() -> Store {
+        let mut store = world(CONFIG);
+        store
+            .write(|tx| {
+                // T-2: the second member, handed in.
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.id = "T-2".into();
+                task.rank = 2;
+                task.state = TaskState::Ready;
+                tx.insert_task(&task)?;
+                let mut contract = tx.get_contract("p", "T-1", 1)?.unwrap();
+                contract.task = "T-2".into();
+                tx.insert_contract(&contract)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-2", "p:heat", 1, T0 + 1)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-2", 1, T0 + 1)?;
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-2",
+                    1,
+                    1,
+                    "cand2",
+                    "ops/reports/T-2.md",
+                    T0 + 1,
+                )?;
+                // T-9: the feature's integration task.
+                let mut carrier = tx.get_task("p", "T-2")?.unwrap();
+                carrier.id = "T-9".into();
+                carrier.rank = 9;
+                carrier.state = TaskState::Ready;
+                carrier.deps = vec![];
+                tx.insert_task(&carrier)?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-9".into(),
+                    version: 1,
+                    goal: "Integrate feature F-1: the members build the feature".into(),
+                    accept: "the full gate passes on the feature branch merged into dev".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0,
+                    mechanical: None,
+                })?;
+                tx.set_feature_carrier("p", "F-1", "T-9")?;
+                // Both members are accepted at hand-in: no stage check ran yet.
+                tx.set_task_feature("p", "T-1", "F-1")?;
+                tx.set_task_feature("p", "T-2", "F-1")?;
+                accept_at_hand_in(tx, "T-1", 1)?;
+                accept_at_hand_in(tx, "T-2", 1)
+            })
+            .unwrap();
+        store
+    }
+
+    /// The accepted hand-in of a member (stage 2, 1/5): the attempt is settled
+    /// as a pass, as `settle_mechanical` does for a mechanical task.
+    fn accept_at_hand_in(tx: &gear_store::Tx<'_>, task: &str, attempt: i64) -> GearResult<()> {
+        let attempt = tx.get_attempt("p", task, attempt)?.unwrap();
+        let verdict = gear_app::tasks::Verdict {
+            project: "p".into(),
+            task: task.into(),
+            attempt: attempt.n,
+            contract_version: attempt.adopted_version,
+            candidate: attempt.candidate.clone().unwrap(),
+            pass: true,
+            evidence: Some("accepted at hand-in".into()),
+            rework: None,
+            integrated_by: None,
+            by_seat: "engine".into(),
+        };
+        gear_app::tasks::settle(tx, &verdict, T0 + 2)
+    }
+
+    /// The direction job of a member's light stage check, if it has one.
+    fn stage_job(store: &mut Store, task: &str) -> Option<serde_json::Value> {
+        let attempt = store
+            .read(|tx| tx.attempts_of_task("p", task))
+            .unwrap()
+            .into_iter()
+            .last()
+            .map(|attempt| attempt.n)
+            .unwrap_or(1);
+        store
+            .read(|tx| tx.get_meta(&direction_key("p", task, attempt)))
+            .unwrap()
+            .filter(|raw| !raw.is_empty())
+            .map(|raw| serde_json::from_str(&raw).unwrap())
+    }
+
+    /// The direction result a stage check hands in, as `gear send --direction`
+    /// stores it.
+    fn stage_result(store: &mut Store, task: &str, attempt: i64, body: &str, sha: &str) {
+        let generation = store
+            .read(|tx| tx.get_seat("p:review-1"))
+            .unwrap()
+            .unwrap()
+            .generation;
+        store
+            .write(|tx| {
+                tx.insert_message(&NewMessage {
+                    meta: Some(serde_json::json!({"direction":true,"sha":sha}).to_string()),
+                    project: "p".into(),
+                    thread: "result:1".into(),
+                    task: Some(task.into()),
+                    attempt: Some(attempt),
+                    sender: "p:review-1".into(),
+                    sender_gen: generation,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::Result,
+                    urgent: false,
+                    body: body.into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Info,
+                    created: T0 + 11,
+                })
+                .map(|_| ())
+            })
+            .unwrap();
+    }
+
+    /// T-590: two members of F-1 handed in one after the other get their light
+    /// checks in the same seat, the second waiting for the first.
+    #[test]
+    fn two_feature_members_get_their_light_checks_in_the_same_seat() {
+        let mut store = feature_world();
+        let mut herdr = FakeHerdr::new();
+
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+
+        let first = stage_job(&mut store, "T-1").expect("the first member's check starts");
+        assert_eq!(first["state"], "running");
+        assert_eq!(first["sha"], "abc1234");
+        assert_eq!(first["seat"], "p:review-1");
+        assert_eq!(
+            store
+                .read(|tx| tx.feature_reviewer("p", "F-1"))
+                .unwrap()
+                .as_deref(),
+            Some("p:review-1"),
+            "the feature's reviewer is recorded with its first check"
+        );
+        assert!(
+            stage_job(&mut store, "T-2").is_none(),
+            "the second member's check waits for the first"
+        );
+
+        // The first check answers ok; its seat comes free.
+        stage_result(&mut store, "T-1", 1, "ok", "abc1234");
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 12,
+        )
+        .unwrap();
+
+        let second = stage_job(&mut store, "T-2").expect("the second check starts now");
+        assert_eq!(second["state"], "running");
+        assert_eq!(second["sha"], "cand2");
+        assert_eq!(
+            second["seat"], "p:review-1",
+            "in the same seat as the first"
+        );
+    }
+
+    /// T-590: the feature's integration task is reviewed in that seat, waited
+    /// for while the seat checks a member.
+    #[test]
+    fn the_integration_tasks_review_lands_in_the_features_seat() {
+        let mut store = feature_world();
+        let mut herdr = FakeHerdr::new();
+
+        // The first member's check takes the feature's seat.
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        assert_eq!(stage_job(&mut store, "T-1").unwrap()["seat"], "p:review-1");
+
+        // The engine hands the integration task in while the check runs.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-9")?.unwrap();
+                task.state = TaskState::Ready;
+                tx.update_task(&task)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-9", "p:heat", 1, T0 + 3)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-9", 1, T0 + 3)?;
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-9",
+                    1,
+                    1,
+                    "featuretip",
+                    "ops/reports/T-9.md",
+                    T0 + 3,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 12,
+        )
+        .unwrap();
+        assert!(
+            store
+                .read(|tx| tx.rounds_of_task("p", "T-9"))
+                .unwrap()
+                .iter()
+                .all(|round| round.role != "review"),
+            "the review waits for the seat the check holds"
+        );
+
+        // The check answers; the review then starts in the same seat.
+        stage_result(&mut store, "T-1", 1, "ok", "abc1234");
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 14,
+        )
+        .unwrap();
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 16,
+        )
+        .unwrap();
+        let rounds = store.read(|tx| tx.rounds_of_task("p", "T-9")).unwrap();
+        let review = rounds
+            .iter()
+            .find(|round| round.role == "review")
+            .expect("the integration task's review starts");
+        assert_eq!(
+            review.seat, "p:review-1",
+            "the feature's one review lands in its reviewer's seat"
+        );
+    }
+
+    /// T-590: a member's light check opens no item and changes no task state;
+    /// its result is never a verdict.
+    #[test]
+    fn a_members_light_check_opens_no_item_and_is_no_verdict() {
+        let mut store = feature_world();
+        let mut herdr = FakeHerdr::new();
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        assert!(stage_job(&mut store, "T-1").is_some());
+
+        // The check finds a misread direction.
+        stage_result(
+            &mut store,
+            "T-1",
+            1,
+            "F1: the direction misreads the feature goal",
+            "abc1234",
+        );
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 12,
+        )
+        .unwrap();
+
+        // No verdict, and no attempt or task move: the member stays accepted.
+        assert!(store
+            .read(|tx| tx.get_review_verdict("p", "T-1", 1))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .read(|tx| tx.get_attempt("p", "T-1", 1))
+                .unwrap()
+                .unwrap()
+                .state,
+            AttemptState::Accepted
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_task("p", "T-1"))
+                .unwrap()
+                .unwrap()
+                .state,
+            TaskState::Done
+        );
+        let marker: serde_json::Value = serde_json::from_str(
+            &store
+                .read(|tx| tx.stage_check("p", "T-1", 1))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker["state"], "done");
+
+        // The finding reaches the captain as information only: no item on the
+        // lane, no actionable item for the member.
+        let told = thread(&mut store, "direction:T-1:1:abc1234");
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].recipient, "p:captain");
+        assert_eq!(told[0].kind, MsgKind::System);
+        assert_eq!(told[0].state, MsgState::Info);
+        assert!(!told[0].urgent, "a light check blocks nothing");
+        assert!(
+            store
+                .read(|tx| tx.actionable_for("p", "p:heat", T0 + 20))
+                .unwrap()
+                .is_empty(),
+            "the lane is told nothing"
+        );
+        assert!(
+            store
+                .read(|tx| tx.actionable_for("p", "p:captain", T0 + 20))
+                .unwrap()
+                .iter()
+                .all(|message| message.task.as_deref() != Some("T-1")),
+            "no item opens for the member"
+        );
     }
 }
 
