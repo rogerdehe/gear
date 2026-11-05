@@ -359,10 +359,25 @@ pub fn with_goal(text: String, goal: Option<&str>) -> String {
 /// the station items never drift apart.
 pub fn goal_line(tx: &gear_store::Tx<'_>, project: &str) -> gear_model::GearResult<Option<String>> {
     let milestone = gear_app::plan::current_voyage(tx, project)?;
-    if milestone.is_empty() {
+    if milestone.is_empty() || voyage_finished(tx, project, &milestone)? {
         return Ok(None);
     }
     gear_board::stations::goal_text(tx, project, &milestone)
+}
+
+/// Is this voyage finished — none of its tasks open any more (T-571)? A
+/// finished voyage's goal is history: a doorbell that carried it rang a captain
+/// about a voyage that landed days ago, and interrupted the work the user had
+/// given it since.
+pub fn voyage_finished(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    milestone: &str,
+) -> gear_model::GearResult<bool> {
+    Ok(!tx
+        .tasks_live_of_project(project)?
+        .into_iter()
+        .any(|task| task.milestone.as_deref() == Some(milestone)))
 }
 
 /// Whether this seat may be rung right now.

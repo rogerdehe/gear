@@ -479,3 +479,136 @@ fn a_captain_doorbell_repeats_the_voyage_goal() {
     assert!(out[0].text.ends_with("\nYour goal, voyage M1: done: no red test on dev · bar: FASTEST. Judge every decision against it."), "{}", out[0].text);
     assert!(!out[1].text.contains("Your goal"), "{}", out[1].text);
 }
+
+/// T-571: a finished voyage sends nothing. The user, 2026-11-05: Lawrence's
+/// voyage M1 finished on 2026-11-04 — every task done, every lane retired — yet
+/// its new captain was rung again and again for two branch warnings from
+/// 2026-11-03, each doorbell carrying M1's goal.
+#[test]
+fn a_finished_voyage_resolves_its_items_and_rings_nobody() {
+    use gear_herdr::fake::FakeHerdr;
+    use gear_herdr::AgentStatus;
+    use gear_store::NewMessage;
+
+    let mut store = voyage_store(None, 2);
+    let (branch, station) = store
+        .write(|tx| {
+            let write = |thread: &str, body: &str| {
+                tx.insert_message(&NewMessage {
+                    project: "p".into(),
+                    thread: thread.into(),
+                    task: None,
+                    attempt: None,
+                    sender: gear_engine::doorbell::NOTICE_SENDER.into(),
+                    sender_gen: 1,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::System,
+                    urgent: false,
+                    body: body.into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: NOW + 10,
+                    meta: None,
+                })
+            };
+            let branch = write("branches:100", "4 task branches are on the remote")?;
+            let station = write("station:M1", "Station M1 [25% eta]: judge the course")?;
+            // Every task of the voyage is done: the voyage is finished.
+            for n in 1..=2 {
+                let mut task = tx.get_task("p", &format!("T-{n}"))?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+            }
+            Ok((branch.id, station.id))
+        })
+        .unwrap();
+
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent_named("w1:p1", "codex", AgentStatus::Idle, "p-captain");
+    herdr.add_agent_named("w1:p2", "pi", AgentStatus::Idle, "p-hull");
+    let mut cfg = gear_engine::EngineCfg::default();
+    cfg.profiles = gear_herdr::builtins();
+
+    // The tick that finds the voyage finished closes what it left open.
+    gear_engine::tick(&mut store, &mut herdr, &cfg, NOW + 600).unwrap();
+    for id in [&branch, &station] {
+        let message = store.read(|tx| tx.get_message("p", id)).unwrap().unwrap();
+        assert_eq!(message.state, MsgState::Resolved, "{message:?}");
+        assert_eq!(
+            message.result.as_deref(),
+            Some("voyage M1 is finished"),
+            "{message:?}"
+        );
+    }
+    // No goal of a finished voyage reaches a doorbell.
+    assert!(
+        store.read(|tx| goal_line(tx, "p")).unwrap().is_none(),
+        "a finished voyage names no goal"
+    );
+    // And the following ticks ring nobody: no doorbell op for the captain.
+    for at in [NOW + 900, NOW + 1200, NOW + 1500] {
+        gear_engine::tick(&mut store, &mut herdr, &cfg, at).unwrap();
+        let ops = store.read(|tx| tx.slot_ops("p:captain")).unwrap();
+        assert!(ops.is_empty(), "a finished voyage rings nobody: {ops:?}");
+    }
+}
+
+/// The same items in a project whose voyage is still open: untouched, and the
+/// captain is still rung.
+#[test]
+fn an_open_voyage_keeps_its_items_and_its_goal() {
+    use gear_engine::finished;
+    let mut store = voyage_store(None, 2);
+    let branch = store
+        .write(|tx| {
+            let branch = tx.insert_message(&gear_store::NewMessage {
+                project: "p".into(),
+                thread: "branches:100".into(),
+                task: None,
+                attempt: None,
+                sender: gear_engine::doorbell::NOTICE_SENDER.into(),
+                sender_gen: 1,
+                recipient: "p:captain".into(),
+                kind: MsgKind::System,
+                urgent: false,
+                body: "4 task branches are on the remote".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: NOW + 10,
+                meta: None,
+            })?;
+            Ok(branch.id)
+        })
+        .unwrap();
+    // One task is still open: nothing of the voyage closes.
+    assert!(finished::close(&mut store, "p", NOW + 600)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .read(|tx| tx.get_message("p", &branch))
+            .unwrap()
+            .unwrap()
+            .state,
+        MsgState::Open
+    );
+    assert!(
+        store.read(|tx| goal_line(tx, "p")).unwrap().is_some(),
+        "an open voyage keeps its goal"
+    );
+    // And the captain is still rung for it: the finished-voyage test's "no
+    // doorbell" assertion is not vacuous.
+    let mut herdr = gear_herdr::fake::FakeHerdr::new();
+    herdr.add_agent_named("w1:p1", "codex", gear_herdr::AgentStatus::Idle, "p-captain");
+    herdr.add_agent_named("w1:p2", "pi", gear_herdr::AgentStatus::Idle, "p-hull");
+    let mut cfg = gear_engine::EngineCfg::default();
+    cfg.profiles = gear_herdr::builtins();
+    gear_engine::tick(&mut store, &mut herdr, &cfg, NOW + 600).unwrap();
+    let ops = store.read(|tx| tx.slot_ops("p:captain")).unwrap();
+    assert!(
+        ops.iter().any(|op| op.kind == gear_model::OpKind::Doorbell),
+        "an open voyage still rings its captain: {ops:?}"
+    );
+}
