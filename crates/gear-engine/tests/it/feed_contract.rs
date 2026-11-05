@@ -1633,6 +1633,25 @@ fn a_delivered_task_is_work_in_progress_not_a_stalled_queue() {
     );
 }
 
+/// A task in progress moves the voyage, and a task that waits for it is not a
+/// stop (Prometheus 2026-11-05: T-792 waited on T-788 by design while three
+/// lanes worked, and the item rang every few minutes).
+#[test]
+fn a_task_that_waits_for_work_in_progress_is_not_a_stop() {
+    let mut w = waiting_world(true);
+    w.store
+        .write(|tx| voyage_task(tx, "T-2", 2, "review", TaskState::Ready, vec!["T-1"]))
+        .unwrap();
+
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 1).unwrap();
+
+    assert!(
+        stalled_items(&mut w.store).is_empty(),
+        "{:?}",
+        stalled_items(&mut w.store)
+    );
+}
+
 /// The same task with no attempt is a task nothing started: the item is
 /// written, and it names what holds the task.
 #[test]
