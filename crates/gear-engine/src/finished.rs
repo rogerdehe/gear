@@ -51,14 +51,12 @@ struct FinishedRow {
 }
 
 /// The voyages of this project that are finished: departed, with tasks, and
-/// none of their tasks open (the rule `tasks_live_of_project` already uses,
-/// T-529: a voyage with a task that is not terminal is open).
-fn finished_voyages(tx: &Tx<'_>, project: &str) -> GearResult<Vec<FinishedRow>> {
-    let open: BTreeSet<String> = tx
-        .tasks_live_of_project(project)?
-        .into_iter()
-        .filter_map(|task| task.milestone)
-        .collect();
+/// open by neither of [`open_voyages`]'s rules.
+fn finished_voyages(
+    tx: &Tx<'_>,
+    project: &str,
+    open: &BTreeSet<String>,
+) -> GearResult<Vec<FinishedRow>> {
     let mut finished = Vec::new();
     for voyage in tx.voyages_of_project(project)? {
         if voyage.departure.is_none() || open.contains(&voyage.milestone) {
@@ -82,6 +80,29 @@ fn finished_voyages(tx: &Tx<'_>, project: &str) -> GearResult<Vec<FinishedRow>> 
     Ok(finished)
 }
 
+/// The voyages of the project that are open: one with a task that is not
+/// terminal (T-529), and one whose Done tasks hold accepted work that is not on
+/// the integration branch (T-595). The second rule is the landing's own
+/// (`gear_app::station::unmerged_tasks`): GEAR M6.2 had every task Done, T-584's
+/// merge failed its gate, and the sweep closed the merge-failed and merge-lost
+/// items as "voyage M6.2 is finished" — nothing would ever merge it.
+fn open_voyages(tx: &Tx<'_>, project: &str) -> GearResult<BTreeSet<String>> {
+    let mut open: BTreeSet<String> = tx
+        .tasks_live_of_project(project)?
+        .into_iter()
+        .filter_map(|task| task.milestone)
+        .collect();
+    for voyage in tx.voyages_of_project(project)? {
+        if open.contains(&voyage.milestone) {
+            continue;
+        }
+        if !gear_app::station::unmerged_tasks(tx, project, &voyage.milestone)?.is_empty() {
+            open.insert(voyage.milestone);
+        }
+    }
+    Ok(open)
+}
+
 /// The finished voyages of a project, read once (T-571): the sweep that closes
 /// their items and the doorbell that names none of them use the same reading.
 pub struct Sweep {
@@ -93,14 +114,12 @@ pub struct Sweep {
 
 impl Sweep {
     pub fn read(tx: &Tx<'_>, project: &str) -> GearResult<Sweep> {
-        let rows = finished_voyages(tx, project)?;
-        let any_open = !tx
-            .tasks_live_of_project(project)?
-            .into_iter()
-            .filter_map(|task| task.milestone)
-            .collect::<BTreeSet<String>>()
-            .is_empty();
-        Ok(Sweep { rows, any_open })
+        let open = open_voyages(tx, project)?;
+        let rows = finished_voyages(tx, project, &open)?;
+        Ok(Sweep {
+            rows,
+            any_open: !open.is_empty(),
+        })
     }
 
     pub fn empty(&self) -> bool {
@@ -736,8 +755,8 @@ fn project_branches(repo: &str, remote: &str, project: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gear_model::{SeatRole, TaskState};
-    use gear_store::{testing, NewMessage, TaskRow, VoyageRow};
+    use gear_model::{AttemptState, SeatRole, TaskState};
+    use gear_store::{testing, AttemptRow, AttemptStep, NewMessage, TaskRow, VoyageRow};
     use std::process::Command;
 
     const NOW: Ts = 1_000;
@@ -971,6 +990,69 @@ gate = "true"
             );
         }
 
+        /// An accepted attempt of the voyage's only task: handed in and judged,
+        /// and merged at `merged` when its work reached the integration branch.
+        fn accepted(&mut self, merged: Option<Ts>) {
+            self.store
+                .write(|tx| {
+                    tx.insert_attempt(&AttemptRow {
+                        project: "p".into(),
+                        task: "T-1".into(),
+                        n: 1,
+                        seat: "p:hull".into(),
+                        generation: 1,
+                        contract_version: 1,
+                        adopted_version: 1,
+                        pending_update: None,
+                        state: AttemptState::Accepted,
+                        candidate: Some("abc1234".into()),
+                        report: Some("gear/voyages/M1/reports/T-1.md".into()),
+                        safe_point: None,
+                        started: NOW + 2,
+                        updated: NOW + 2,
+                        session_ref: None,
+                        session_cli: None,
+                        session_action: None,
+                        sent_at: None,
+                    })?;
+                    tx.set_attempt_time("p", "T-1", 1, AttemptStep::HandedIn, NOW + 2)?;
+                    tx.set_attempt_time("p", "T-1", 1, AttemptStep::Verdict, NOW + 3)?;
+                    if let Some(merged) = merged {
+                        tx.set_attempt_time("p", "T-1", 1, AttemptStep::Merged, merged)?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        /// The merge-failed item of the voyage's only task, open, as the merge
+        /// scan opens one. Returns its id.
+        fn merge_failed(&mut self) -> String {
+            self.store
+                .write(|tx| {
+                    Ok(tx
+                        .insert_message(&NewMessage {
+                            project: "p".into(),
+                            thread: "merge-failed:T-1".into(),
+                            task: Some("T-1".into()),
+                            attempt: Some(1),
+                            sender: "engine".into(),
+                            sender_gen: 0,
+                            recipient: "p:captain".into(),
+                            kind: MsgKind::System,
+                            urgent: true,
+                            body: "the gate is red: T-1 did not land".into(),
+                            reply_to: None,
+                            needs_ack: false,
+                            state: MsgState::Open,
+                            created: NOW + 4,
+                            meta: None,
+                        })?
+                        .id)
+                })
+                .unwrap()
+        }
+
         fn reclaim(&mut self, now: Ts) -> Option<&'static str> {
             reclaim(&mut self.store, &mut self.herdr, "p", now).unwrap()
         }
@@ -1163,5 +1245,44 @@ gate = "true"
         assert_eq!(landed.reclaim(NOW + 2 * RECLAIM_EVERY_S), None);
         assert_eq!(landed.dev_log(), after, "no second merge commit");
         assert_eq!(landed.origin_branches(), branches);
+    }
+
+    /// T-595: a voyage whose every task is Done but whose accepted work has not
+    /// merged is not finished: its merge-failed item stays open for the captain
+    /// (GEAR M6.2: T-584's merge failed its gate, and the sweep closed both
+    /// items as "voyage M6.2 is finished" — nothing would ever merge it).
+    #[test]
+    fn a_voyage_with_accepted_work_not_merged_is_not_finished() {
+        let mut landed = Landed::new("unmerged");
+        landed.accepted(None);
+        let item = landed.merge_failed();
+
+        let closed = close(&mut landed.store, "p", NOW + 600).unwrap();
+
+        assert!(closed.is_empty(), "nothing closes: {closed:?}");
+        let items = landed.items("merge-failed:T-1");
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].id, item);
+        assert_eq!(items[0].state, MsgState::Open, "the merge is still work");
+    }
+
+    /// T-595: once that attempt has a merge time the voyage is finished, and the
+    /// sweep closes the item as it did before.
+    #[test]
+    fn a_voyage_whose_accepted_work_merged_is_finished_and_its_item_closes() {
+        let mut landed = Landed::new("merged-work");
+        landed.accepted(Some(NOW + 5));
+        let item = landed.merge_failed();
+
+        let closed = close(&mut landed.store, "p", NOW + 600).unwrap();
+
+        assert_eq!(closed, vec![item.clone()]);
+        let items = landed.items("merge-failed:T-1");
+        assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
+        assert_eq!(
+            items[0].result.as_deref(),
+            Some(reason("M1").as_str()),
+            "{items:?}"
+        );
     }
 }

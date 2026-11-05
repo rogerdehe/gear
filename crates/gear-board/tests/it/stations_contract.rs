@@ -6,7 +6,9 @@
 //! `voyage-stations:<project>:<milestone>` and the task's id under
 //! `task-station:<project>:<task>`.
 
-use gear_board::stations::{course, goal_text, progress, StationProgress, StationState};
+use gear_board::stations::{
+    course, goal_text, progress, voyage_open, StationProgress, StationState,
+};
 use gear_model::{AttemptState, SeatRole, TaskState};
 use gear_store::{testing, AttemptRow, AttemptStep, Store, TaskRow, VoyageRow};
 
@@ -143,6 +145,38 @@ fn attempt(
     Ok(())
 }
 
+/// An accepted attempt of the task whose merge has not landed: it was handed
+/// in and settled, and its merge failed its gate (T-595).
+fn unmerged_attempt(
+    tx: &gear_store::Tx<'_>,
+    task: &str,
+    started: i64,
+) -> gear_model::GearResult<()> {
+    tx.insert_attempt(&AttemptRow {
+        project: "p".into(),
+        task: task.into(),
+        n: 1,
+        seat: "p:hull".into(),
+        generation: 1,
+        contract_version: 1,
+        adopted_version: 1,
+        pending_update: None,
+        state: AttemptState::Accepted,
+        candidate: Some("abc".into()),
+        report: None,
+        safe_point: None,
+        started,
+        updated: started,
+        session_ref: None,
+        session_cli: None,
+        session_action: None,
+        sent_at: None,
+    })?;
+    tx.set_attempt_time("p", task, 1, AttemptStep::Started, started)?;
+    tx.set_attempt_time("p", task, 1, AttemptStep::HandedIn, started + 60)?;
+    tx.set_attempt_time("p", task, 1, AttemptStep::Verdict, started + 60)
+}
+
 fn board(store: &mut Store) -> gear_board::ProjectBoard {
     let options = gear_board::Options {
         project: Some("p".into()),
@@ -220,6 +254,36 @@ fn the_course_names_the_station_that_is_now_and_what_is_left() {
         line,
         "station S2 (1 of 3 reached): the board shows the stations · 1 tasks left in S2 · 2 tasks left in the voyage"
     );
+}
+
+#[test]
+fn a_voyage_with_a_done_task_not_yet_merged_is_open() {
+    let mut store = world();
+    // The voyage is open while a task is Ready: nothing changed there.
+    assert!(store.read(|tx| voyage_open(tx, "p", "M5")).unwrap());
+    // Every task Done, T-4 and T-5 merged — but T-5's merge failed its gate
+    // and only its attempt is accepted: the voyage is not finished (T-595).
+    store
+        .write(|tx| {
+            for id in ["T-4", "T-5"] {
+                let mut task = tx.get_task("p", id)?.expect("a task");
+                task.state = TaskState::Done;
+                task.updated = NOW;
+                tx.update_task(&task)?;
+            }
+            attempt(tx, "T-4", NOW - 1_800, NOW - 1_200)?;
+            unmerged_attempt(tx, "T-5", NOW - 1_200)
+        })
+        .unwrap();
+    assert!(
+        store.read(|tx| voyage_open(tx, "p", "M5")).unwrap(),
+        "accepted work not on the integration branch keeps the voyage open"
+    );
+    // Once that attempt merges, the voyage is finished.
+    store
+        .write(|tx| tx.set_attempt_time("p", "T-5", 1, AttemptStep::Merged, NOW - 600))
+        .unwrap();
+    assert!(!store.read(|tx| voyage_open(tx, "p", "M5")).unwrap());
 }
 
 #[test]

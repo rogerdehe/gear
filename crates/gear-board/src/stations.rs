@@ -211,11 +211,21 @@ fn left_in_voyage(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<usi
     Ok(left)
 }
 
-/// Whether the voyage still has a task that is not terminal: a finished
-/// voyage's goal is history, and a captain's home page does not carry it.
+/// Whether the voyage still has a task that is not terminal (T-529), or a Done
+/// task whose accepted work is not on the integration branch (T-595): a
+/// finished voyage's goal is history, and a captain's home page does not carry
+/// it. It reads the store's `unmerged_done_tasks`, the same rule as the engine's
+/// sweep and the landing's refusal, so the board and the reclaim agree.
 pub fn voyage_open(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<bool> {
-    Ok(tx
+    let unfinished = tx
         .tasks_of_project(project)?
         .iter()
-        .any(|task| task.milestone.as_deref() == Some(milestone) && !task.state.is_terminal()))
+        .any(|task| task.milestone.as_deref() == Some(milestone) && !task.state.is_terminal());
+    if unfinished {
+        return Ok(true);
+    }
+    Ok(tx
+        .unmerged_done_tasks(project)?
+        .iter()
+        .any(|(_, of)| of.as_deref() == Some(milestone)))
 }
