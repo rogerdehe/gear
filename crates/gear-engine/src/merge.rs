@@ -11520,11 +11520,12 @@ gate = "{project_gate}"
         assert_eq!(fs::read_to_string(&started).unwrap().lines().count(), 1);
         release_fifo(&release);
         assert_eq!(wait_merge(&mut store, &mut herdr, &cfg).len(), 1);
-        // The second merge runs next, and reports its own result.
+        // The second merge runs next, and reports its own result. Its branches
+        // are T-5's, already on dev, so it lands without a gate of its own.
         drive(&mut store, &mut herdr, &cfg, |store| {
             op_state(store, "O-2") == Some(OpState::Confirmed)
         });
-        assert_eq!(fs::read_to_string(&started).unwrap().lines().count(), 2);
+        assert_eq!(fs::read_to_string(&started).unwrap().lines().count(), 1);
         assert_eq!(
             store
                 .read(|tx| tx.get_op("p", "O-2"))
