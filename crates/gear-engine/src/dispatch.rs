@@ -516,6 +516,14 @@ pub(crate) fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<Task
                 .map(|mark| mark.is_some())
                 .unwrap_or(false)
         })
+        // T-581: a feature's integration task is handed in by the engine at the
+        // feature branch's tip, never worked by its lane — its first attempt,
+        // and a rework of it, which the captain re-plans with member work.
+        .filter(|task| {
+            !crate::feature::branch_override(tx, &seat.project, &task.id)
+                .map(|branch| branch.is_some())
+                .unwrap_or(false)
+        })
         .filter(|task| task.priority != "wont")
         // A dependency holds a task's first start only: once the lane has
         // worked on it, its rework never waits on a merge, and the deps hold
@@ -1891,6 +1899,44 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("git stash"), "{text}");
+    }
+
+    /// T-581: a feature's integration task is handed in by the engine at the
+    /// feature branch's tip, so it is never the lane's ready work — a normal
+    /// task of the same lane still is.
+    #[test]
+    fn a_feature_integration_task_is_never_the_lanes_ready_work() {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+                project.config_toml = config_toml("trunk");
+                tx.update_project(&project)?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    NOW,
+                )?;
+                tx.insert_task(&ready_task("T-1"))?;
+                tx.insert_task(&ready_task("T-9"))?;
+                tx.set_meta("task_branch_override:p:T-9", "p/feature/f-1")?;
+                Ok(())
+            })
+            .unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let ready = store.read(|tx| ready_tasks_of(tx, &seat)).unwrap();
+        assert_eq!(
+            ready
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["T-1"],
+            "the feature's integration task is not delivered"
+        );
     }
 
     /// A worktree git cannot read is a clean one: nothing to say, nothing

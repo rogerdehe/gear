@@ -24,6 +24,7 @@ pub mod delivery;
 pub mod dialog;
 pub mod dispatch;
 pub mod doorbell;
+pub mod feature;
 pub mod feed;
 pub mod finished;
 pub mod friction;
@@ -236,6 +237,12 @@ pub struct TickReport {
     /// `project:task: CODE: detail` of the audits that could not be handed in
     /// this tick; reported, never fatal.
     pub audit_failed: Vec<String>,
+    /// `project:task/attempt` of the feature integration tasks handed in for
+    /// review this tick (T-581).
+    pub features: Vec<String>,
+    /// `project:task: CODE: detail` of the feature integration tasks that could
+    /// not be handed in this tick; reported, never fatal.
+    pub feature_failed: Vec<String>,
     /// The rounds that ended or learned a session this tick (design §4.1).
     pub rounds: crate::rounds::RoundReport,
     /// The steps of this tick that took over 200 ms, as `<step>: <ms> ms`
@@ -794,6 +801,24 @@ pub fn tick(
             report.audits.extend(audits.handed_in);
             report.audit_failed.extend(audits.failed);
             note_slow(report, "audit", step);
+
+            // 6f. a feature's integration task hands itself in (T-581): the task
+            //     whose branch is the feature's own is never assigned to its
+            //     lane, so when it is Ready and every member is merged it becomes
+            //     a hand-in at the feature branch's tip, and step 7 gives it a
+            //     reviewer — one review and one full gate for the feature.
+            let step = std::time::Instant::now();
+            let features = match gear_app::config::latest(store, &project) {
+                Ok(config) => {
+                    feature::start_features(store, cfg, &mut tips_by_repo, &config, &project, now)?
+                }
+                // A config that does not parse is reported by the steps that
+                // need it; a feature hand-in waits for the next tick.
+                Err(_) => Default::default(),
+            };
+            report.features.extend(features.handed_in);
+            report.feature_failed.extend(features.failed);
+            note_slow(report, "feature", step);
 
             // 7. review: a lane handed a result in → a temp reviewer starts. The
             //    lane is not blocked; the reviewer is a seat of its own.
