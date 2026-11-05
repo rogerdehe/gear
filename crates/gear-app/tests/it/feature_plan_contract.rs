@@ -4,8 +4,12 @@
 //!   feature's branch with the feature's check, never the project's gate;
 //! - a feature holds at most `[conventions].feature_max_tasks` tasks that are
 //!   not cancelled;
-//! - a task outside the feature never depends on one of its members: it waits
-//!   for the feature's integration task;
+//! - a task outside the feature never depends on one of its members: the wait
+//!   is rewritten to the feature's integration task, and the apply says so
+//!   (T-587);
+//! - a task that has started joins no feature (T-587);
+//! - a member waits on an unmerged dep outside its feature, so the feature's
+//!   branch is cut from an integration branch that holds it (T-587);
 //! - each feature gets one integration task, created in the apply that first
 //!   names a member and kept equal to the members that are not cancelled;
 //! - the members' issue moves to that integration task;
@@ -150,6 +154,50 @@ fn land(s: &mut Store, ids: &[&str]) {
         Ok(())
     })
     .unwrap();
+}
+
+/// The first attempt of a task, started: the task has begun (T-587).
+fn start(s: &mut Store, id: &str) {
+    s.write(|tx| {
+        tx.insert_attempt(&attempt(id, NOW))?;
+        tx.set_attempt_time("p", id, 1, gear_store::AttemptStep::Started, NOW)
+    })
+    .unwrap();
+}
+
+/// The task's work merged: Done, with an attempt whose merge landed (T-587).
+fn merge(s: &mut Store, id: &str) {
+    s.write(|tx| {
+        let mut row = tx.get_task("p", id)?.expect("the task");
+        row.state = TaskState::Done;
+        tx.update_task(&row)?;
+        tx.insert_attempt(&attempt(id, NOW))?;
+        tx.set_attempt_time("p", id, 1, gear_store::AttemptStep::Merged, NOW + 5)
+    })
+    .unwrap();
+}
+
+fn attempt(id: &str, at: i64) -> gear_store::AttemptRow {
+    gear_store::AttemptRow {
+        project: "p".into(),
+        task: id.into(),
+        n: 1,
+        seat: "p:heat".into(),
+        generation: 1,
+        contract_version: 1,
+        adopted_version: 1,
+        pending_update: None,
+        state: gear_model::AttemptState::Started,
+        candidate: None,
+        report: None,
+        safe_point: None,
+        started: at,
+        updated: at,
+        session_ref: None,
+        session_cli: None,
+        session_action: None,
+        sent_at: None,
+    }
 }
 
 /// A plan of three members of feature F-1: two on `heat`, one on `wire`.
@@ -318,25 +366,128 @@ fn a_member_over_the_cap_is_refused() {
     );
 }
 
-/// A task outside the feature does not depend on one of its members: its wait
-/// names the feature's integration task.
+/// T-587: a task that has started joins no feature. Its base and gate never
+/// change: the apply is refused and nothing of it is written.
 #[test]
-fn a_dep_from_outside_on_a_member_is_refused() {
+fn a_running_task_joining_a_feature_is_refused_and_keeps_its_base() {
     let mut s = world();
-    let error = run(
+    run(
         &mut s,
-        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\nfeature: F-1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [should] lane=wire\ngoal: B\naccept: b\nestimate: 30\ndeps: T-1\n",
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
         "r1",
+    )
+    .unwrap();
+    start(&mut s, "T-1");
+
+    let error = run_at(
+        &mut s,
+        "# Queue\n## T-1 [must] lane=heat\nfeature: F-1\ndeps: -\n",
+        "r2",
     )
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat, "{}", error.detail);
     assert!(
-        error
-            .detail
-            .contains("deps on a feature's task T-1 name the feature's integration task"),
+        error.detail.contains(
+            "T-1 has started: it finishes on the integration branch; only a task with no attempt joins a feature"
+        ),
         "{}",
         error.detail
     );
+    let row = task(&mut s, "T-1");
+    assert_eq!(
+        row.base.as_deref(),
+        Some("dev"),
+        "a started task keeps its lane's integration branch"
+    );
+    assert_eq!(row.gate.as_deref(), Some("make test"));
+    assert_eq!(s.read(|tx| tx.task_feature("p", "T-1")).unwrap(), None);
+    assert_eq!(
+        s.read(|tx| tx.feature_carrier("p", "F-1")).unwrap(),
+        None,
+        "a refused apply mints no carrier"
+    );
+}
+
+/// T-587: a task outside a feature waits for the feature's integration task,
+/// not for one of its members — and the apply says so in one line. A wait the
+/// task already has on the carrier is not written twice.
+#[test]
+fn an_outside_dep_on_a_member_names_the_integration_task() {
+    let mut s = world();
+    let result = run(
+        &mut s,
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\nfeature: F-1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [should] lane=wire\ngoal: B\naccept: b\nestimate: 30\ndeps: T-1\n",
+        "r1",
+    )
+    .unwrap();
+    let carrier = s
+        .read(|tx| tx.feature_carrier("p", "F-1"))
+        .unwrap()
+        .expect("the feature's integration task");
+    assert_eq!(
+        task(&mut s, "T-2").deps,
+        vec![carrier.clone()],
+        "the outside task waits for the carrier"
+    );
+    assert_eq!(
+        result.rewritten,
+        vec![format!("T-2: dep T-1 -> {carrier} (feature F-1)")],
+        "the apply names the rewrite"
+    );
+
+    // The same wait, now written together with the carrier: one entry, and the
+    // member's dep is rewritten again without doubling the carrier.
+    let later = run_at(
+        &mut s,
+        &format!("# Queue\n## T-2 [should] lane=wire\ndeps: T-1, {carrier}\n"),
+        "r2",
+    )
+    .unwrap();
+    assert_eq!(
+        task(&mut s, "T-2").deps,
+        vec![carrier.clone()],
+        "the carrier is named once"
+    );
+    assert_eq!(
+        later.rewritten,
+        vec![format!("T-2: dep T-1 -> {carrier} (feature F-1)")],
+        "one line per rewrite"
+    );
+}
+
+/// T-587: a member whose dep lies outside the feature and has not merged yet
+/// holds every member of that feature; once the dep has merged it is ignored.
+#[test]
+fn a_member_waits_for_an_unmerged_outside_dep_and_not_for_a_merged_one() {
+    let mut s = world();
+    run(
+        &mut s,
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=wire\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [should] lane=heat\nfeature: F-1\ngoal: B\naccept: b\nestimate: 30\ndeps: T-1\n\n## NEW [could] lane=heat\nfeature: F-1\ngoal: C\naccept: c\nestimate: 30\ndeps: -\n",
+        "r1",
+    )
+    .unwrap();
+    // T-1 is outside the feature and unmerged: both members wait for it, not
+    // only the one that names it.
+    assert_eq!(task(&mut s, "T-2").deps, vec!["T-1".to_string()]);
+    assert_eq!(
+        task(&mut s, "T-3").deps,
+        vec!["T-1".to_string()],
+        "no member is delivered before the outside dep merged"
+    );
+
+    merge(&mut s, "T-1");
+    run_at(
+        &mut s,
+        "# Queue\n## T-2 [should] lane=heat\nfeature: F-1\ndeps: T-1\n\n## T-3 [could] lane=heat\nfeature: F-1\ndeps: -\n",
+        "r2",
+    )
+    .unwrap();
+    assert_eq!(
+        task(&mut s, "T-3").deps,
+        Vec::<String>::new(),
+        "a merged outside dep is ignored"
+    );
+    assert_eq!(task(&mut s, "T-2").deps, vec!["T-1".to_string()]);
 }
 
 /// A later apply adds a member: the carrier's deps stay equal to the members,

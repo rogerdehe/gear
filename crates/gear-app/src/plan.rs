@@ -45,6 +45,10 @@ pub struct ApplyResult {
     /// the store (T-333), in the order their milestones are first named.
     #[serde(default)]
     pub milestone_blocks: Vec<String>,
+    /// Deps this apply pointed at a feature's integration task (T-587), one
+    /// line per rewrite: `T-<x>: dep T-<m> -> T-<carrier> (feature F-<n>)`.
+    #[serde(default)]
+    pub rewritten: Vec<String>,
     /// What the captain should know about this apply (design §7.2: a decision
     /// line that is not structured is logged as a note).
     #[serde(default)]
@@ -582,30 +586,34 @@ fn apply_queue(
             .clone()
             .or_else(|| new_ids.get(&index).cloned())
             .unwrap_or_else(|| "NEW".to_string());
+        // (1) A task that has started finishes on the integration branch
+        // (T-587): joining a feature moves it to the feature's branch with the
+        // feature's check, so the lane would land its work somewhere the
+        // feature's integration task has not reached. Only a task with no
+        // attempt joins a feature; its base and gate never change.
+        if let Some(feature) = item
+            .feature
+            .as_deref()
+            .filter(|feature| !feature.is_empty())
+        {
+            if existing.contains_key(&task_id)
+                && tx.task_feature(project, &task_id)?.as_deref() != Some(feature)
+                && !tx.attempts_of_task(project, &task_id)?.is_empty()
+            {
+                return Err(bad(
+                    item.line,
+                    format!(
+                        "{task_id} has started: it finishes on the integration branch; only a task with no attempt joins a feature"
+                    ),
+                ));
+            }
+        }
         for dep in &item.deps {
             if !known.contains(dep) {
                 return Err(bad(
                     item.line,
                     format!("dep {dep} does not exist and is not created by this draft"),
                 ));
-            }
-            // (3) A task outside a feature never depends on one of its members
-            // (M6.2): a member's work is not on the integration branch until
-            // the feature's own integration task merges, so that is the task a
-            // wait outside the feature names.
-            if let Some(dep_feature) = features.mark(dep) {
-                if features.mark(&task_id) == Some(dep_feature) {
-                    continue;
-                }
-                if let Some(work) = features.work(dep_feature) {
-                    return Err(bad(
-                        item.line,
-                        format!(
-                            "{task_id}: deps on a feature's task {dep} name the feature's integration task {}",
-                            work.carrier
-                        ),
-                    ));
-                }
             }
         }
         // The follow-up names a task that exists (design §3.3): the field is
@@ -731,7 +739,115 @@ fn apply_queue(
         }
         graph.insert(id, item.deps.clone());
     }
-    if let Some(cycle) = find_cycle(&graph) {
+    // (2) A task outside a feature never waits for one of its members (T-587):
+    // a member's work reaches the integration branch only when the feature's
+    // integration task merges, so the wait is rewritten to that task. The
+    // rewrite lands in the store, and the apply prints one line per rewrite.
+    let mut rewritten: Vec<String> = Vec::new();
+    let mut carriers: BTreeSet<String> = features
+        .works
+        .iter()
+        .map(|work| work.carrier.clone())
+        .filter(|carrier| !carrier.is_empty())
+        .collect();
+    // A feature that landed keeps its carrier on record (T-578 F2): its deps
+    // are its members too, and rewriting them would point an old carrier at the
+    // new one.
+    let mut features_on_record: BTreeSet<&str> =
+        features.marks.values().map(String::as_str).collect();
+    features_on_record.extend(features.works.iter().map(|work| work.feature.as_str()));
+    for feature in features_on_record {
+        if let Some(carrier) = tx.feature_carrier(project, feature)? {
+            if !carrier.is_empty() {
+                carriers.insert(carrier);
+            }
+        }
+    }
+    for (id, deps) in graph.iter_mut() {
+        // A carrier's own deps are its members (T-578): rewriting them would
+        // make it wait for itself.
+        if carriers.contains(id) {
+            continue;
+        }
+        let mut out: Vec<String> = Vec::with_capacity(deps.len());
+        for dep in deps.drain(..) {
+            let target = features
+                .mark(&dep)
+                .filter(|feature| features.mark(id) != Some(*feature))
+                .and_then(|feature| {
+                    features
+                        .work(feature)
+                        .map(|work| (feature.to_string(), work.carrier.clone()))
+                })
+                .filter(|(_, carrier)| !carrier.is_empty() && carrier.as_str() != id.as_str());
+            match target {
+                Some((feature, carrier)) => {
+                    rewritten.push(format!("{id}: dep {dep} -> {carrier} (feature {feature})"));
+                    if !out.contains(&carrier) {
+                        out.push(carrier);
+                    }
+                }
+                None => {
+                    if !out.contains(&dep) {
+                        out.push(dep);
+                    }
+                }
+            }
+        }
+        *deps = out;
+    }
+    // (3) A member that waits on work outside its feature which has not merged
+    // yet (T-587): no member of the feature is delivered until that work has
+    // merged, so the feature branch is cut from an integration branch that
+    // holds it. The wait becomes a dep of every member; a merged one is
+    // ignored, its work is already there.
+    let merged: BTreeSet<String> = tx.merged_done_tasks(project)?.into_iter().collect();
+    let mut outside: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for work in &features.works {
+        for member in &work.members {
+            for dep in graph.get(member).map(Vec::as_slice).unwrap_or_default() {
+                if features.mark(dep) == Some(work.feature.as_str()) || merged.contains(dep) {
+                    continue;
+                }
+                let held = outside.entry(work.feature.clone()).or_default();
+                if !held.contains(dep) {
+                    held.push(dep.clone());
+                }
+            }
+        }
+    }
+    for (feature, held) in &outside {
+        let Some(work) = features.work(feature) else {
+            continue;
+        };
+        for member in &work.members {
+            let deps = graph.entry(member.clone()).or_default();
+            for dep in held {
+                if !deps.contains(dep) {
+                    deps.push(dep.clone());
+                }
+            }
+        }
+    }
+    // The carriers are nodes of the dependency graph too (T-587): a task
+    // outside a feature waits for the carrier and the carrier waits for its
+    // members, so a member waiting on that outside task is a cycle no delivery
+    // ever breaks.
+    let mut cycles = graph.clone();
+    for work in &features.works {
+        if work.carrier.is_empty() {
+            continue;
+        }
+        let deps = if work.new_carrier {
+            work.deps.clone()
+        } else {
+            tx.get_task(project, &work.carrier)?
+                .map(|task| task.deps)
+                .unwrap_or_default()
+        };
+        cycles.insert(work.carrier.clone(), deps);
+    }
+    if let Some(cycle) = find_cycle(&cycles) {
         return Err(GearError::new(
             ErrorCode::BadFormat,
             format!("the dependencies form a cycle through {cycle}"),
@@ -860,7 +976,9 @@ fn apply_queue(
                     milestone: item.milestone.clone(),
                     required: item.required,
                     contract_version: 1,
-                    deps: item.deps.clone(),
+                    // The deps as this apply leaves them: a dep outside the
+                    // feature may have been rewritten to its carrier (T-587).
+                    deps: graph.get(&id).cloned().unwrap_or_default(),
                     followup_of: item.followup_of.clone(),
                     wait_on: None,
                     wait_cond: None,
@@ -971,7 +1089,7 @@ fn apply_queue(
                 }
                 task.milestone = item.milestone.clone();
                 task.required = item.required;
-                task.deps = item.deps.clone();
+                task.deps = graph.get(id).cloned().unwrap_or_default();
                 // The follow-up (design §3.3): the captain sets it on an
                 // existing task too — the field is live. A block without the
                 // field keeps the follow-up the task has.
@@ -1338,17 +1456,51 @@ fn apply_queue(
                 tx.set_task_branch_override(project, &work.carrier, &work.branch)?;
             }
         }
-        // The members keep no issue: it is the carrier's.
+        // The members keep no issue: it is the carrier's. They also wait for
+        // the feature's outside deps (T-587), the members this draft does not
+        // name included.
         for member in &work.members {
             let Some(mut task) = tx.get_task(project, member)? else {
                 continue;
             };
+            let mut changed = false;
             if task.issue.is_some() {
                 task.issue = None;
+                changed = true;
+            }
+            if let Some(deps) = graph.get(member) {
+                if task.deps != *deps {
+                    task.deps = deps.clone();
+                    changed = true;
+                }
+            }
+            if changed {
                 task.updated = now;
                 tx.update_task(&task)?;
             }
         }
+    }
+
+    // (2) The rewrites land in the store (T-587), for the tasks this draft does
+    // not name too: a task outside a feature waits for the feature's
+    // integration task, never for a member whose work is not on the
+    // integration branch yet.
+    for (id, deps) in &graph {
+        let Some(before) = existing.get(id) else {
+            continue;
+        };
+        if before.deps == *deps {
+            continue;
+        }
+        let Some(mut task) = tx.get_task(project, id)? else {
+            continue;
+        };
+        if task.deps == *deps {
+            continue;
+        }
+        task.deps = deps.clone();
+        task.updated = now;
+        tx.update_task(&task)?;
     }
 
     // Staff (T-55): park/hold/retire/release move a lane seat of this project
@@ -1786,6 +1938,7 @@ fn apply_queue(
         cancelled,
         resolved,
         milestone_blocks,
+        rewritten,
     })
 }
 
@@ -4049,6 +4202,128 @@ mod tests {
             "step 3 is checked before step 4"
         );
     }
+
+    /// A voyage of the T-588 fixtures: `None` means it never departed.
+    fn a_voyage(tx: &Tx<'_>, milestone: &str, departure: Option<Ts>) {
+        tx.upsert_voyage(&gear_store::VoyageRow {
+            project: "p".into(),
+            milestone: milestone.into(),
+            title: format!("voyage {milestone}"),
+            done: Some("it ships".into()),
+            bar: Some("FASTEST".into()),
+            eta: Some("4h".into()),
+            departure,
+            departure_tasks: departure.map(|_| 1),
+            departure_estimate_min: departure.map(|_| 30),
+            updated: NOW,
+        })
+        .unwrap();
+    }
+
+    /// One task of a voyage, in the state the test needs (T-588).
+    fn a_task(tx: &Tx<'_>, id: &str, rank: i64, milestone: &str, state: TaskState) {
+        tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: "p".into(),
+            id: id.into(),
+            rank,
+            state,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: Some(milestone.into()),
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: Some(30),
+            issue: None,
+            updated: NOW,
+        })
+        .unwrap();
+    }
+
+    /// T-588: the last departed voyage finished, an older departed one open →
+    /// the open one, not the newest departure.
+    #[test]
+    fn the_current_voyage_is_the_last_departed_one_that_is_still_open() {
+        let mut s = world();
+        s.write(|tx| {
+            a_voyage(tx, "M1", Some(NOW - 7_200));
+            a_voyage(tx, "M2", Some(NOW - 3_600));
+            a_task(tx, "T-1", 1, "M1", TaskState::Ready);
+            a_task(tx, "T-2", 2, "M2", TaskState::Done);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            s.read(|tx| current_voyage(tx, "p")).unwrap(),
+            "M1",
+            "M2 departed last but has no open task: M1 still runs"
+        );
+    }
+
+    /// T-588: nothing open gives the last departed voyage — the answer of a
+    /// project between voyages, and empty for one that never departed.
+    #[test]
+    fn nothing_open_gives_the_last_departed_voyage() {
+        let mut s = world();
+        assert_eq!(s.read(|tx| current_voyage(tx, "p")).unwrap(), "");
+        s.write(|tx| {
+            a_voyage(tx, "M1", Some(NOW - 7_200));
+            a_voyage(tx, "M2", Some(NOW - 3_600));
+            a_task(tx, "T-1", 1, "M1", TaskState::Done);
+            a_task(tx, "T-2", 2, "M2", TaskState::Cancelled);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            s.read(|tx| current_voyage(tx, "p")).unwrap(),
+            "M2",
+            "both are finished: the last departure"
+        );
+    }
+
+    /// T-588: no depart line anywhere, yet open tasks — the voyage with the
+    /// most open tasks, ties by name (GEAR M6.2's case, T-586's fixture).
+    #[test]
+    fn a_milestone_without_a_depart_line_is_the_voyage_while_it_has_the_most_open_tasks() {
+        let mut s = world();
+        s.write(|tx| {
+            for milestone in ["M1", "M2", "M3"] {
+                a_voyage(tx, milestone, None);
+            }
+            a_task(tx, "T-1", 1, "M1", TaskState::Ready);
+            a_task(tx, "T-2", 2, "M2", TaskState::Ready);
+            a_task(tx, "T-3", 3, "M2", TaskState::Running);
+            a_task(tx, "T-4", 4, "M3", TaskState::Ready);
+            a_task(tx, "T-5", 5, "M3", TaskState::Running);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            s.read(|tx| current_voyage(tx, "p")).unwrap(),
+            "M2",
+            "M2 and M3 both have two open tasks: the name decides"
+        );
+        // One of M2's tasks lands: M3 is the one with the most open work.
+        s.write(|tx| {
+            let mut task = tx.get_task("p", "T-3")?.expect("T-3");
+            task.state = TaskState::Done;
+            tx.update_task(&task)
+        })
+        .unwrap();
+        assert_eq!(
+            s.read(|tx| current_voyage(tx, "p")).unwrap(),
+            "M3",
+            "the busiest open milestone, not the first name"
+        );
+    }
 }
 
 /// One line for a voyage (T-22): the milestone, its planned landing, the
@@ -5267,22 +5542,69 @@ fn voyage_of(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResult<String> {
     current_voyage(tx, project)
 }
 
-/// The voyage the project is in: the one that departed last.
+/// The voyage the project is in (T-588): open work first, then the last
+/// departure.
+///
+/// 1. Among the voyages that departed, the last departed one that still has a
+///    task that is not terminal.
+/// 2. When no departed voyage has open work but a milestone has, that
+///    milestone — the one with the most open tasks, ties by name.
+/// 3. When nothing is open, the last departed voyage.
+/// 4. Empty when the project never departed and no task is open.
+///
+/// Why open work comes first: GEAR M6.2 ran without a depart line while M6.1
+/// was finished and departed, so a rule that took the last departure answered
+/// M6.1 and every surface took the finished voyage while M6.2's work waited.
+/// The rule lives here and nowhere else, so no caller decides it on its own —
+/// T-586 taught the page and the doorbell drifted apart.
 pub fn current_voyage(tx: &Tx<'_>, project: &str) -> GearResult<String> {
-    let mut latest: Option<(Ts, String)> = None;
+    let tasks = tx.tasks_of_project(project)?;
+    let open = |milestone: &str| {
+        tasks
+            .iter()
+            .any(|task| task.milestone.as_deref() == Some(milestone) && !task.state.is_terminal())
+    };
+    let mut departed: Option<(Ts, String)> = None;
+    let mut departed_open: Option<(Ts, String)> = None;
     for voyage in tx.voyages_of_project(project)? {
         let Some(departure) = voyage.departure else {
             continue;
         };
-        if latest
-            .as_ref()
-            .map(|(at, _)| departure > *at)
-            .unwrap_or(true)
-        {
-            latest = Some((departure, voyage.milestone));
+        let later = |seen: &Option<(Ts, String)>| {
+            seen.as_ref().map(|(at, _)| departure > *at).unwrap_or(true)
+        };
+        if later(&departed) {
+            departed = Some((departure, voyage.milestone.clone()));
+        }
+        if open(&voyage.milestone) && later(&departed_open) {
+            departed_open = Some((departure, voyage.milestone));
         }
     }
-    Ok(latest.map(|(_, milestone)| milestone).unwrap_or_default())
+    if let Some((_, milestone)) = departed_open {
+        return Ok(milestone);
+    }
+    // A milestone may still be running without a depart line (T-586, GEAR
+    // M6.2): that milestone, the one with the most open tasks. The map is in
+    // name order, so a tie keeps the first name.
+    let mut by_milestone: BTreeMap<&str, usize> = BTreeMap::new();
+    for task in &tasks {
+        if task.state.is_terminal() {
+            continue;
+        }
+        if let Some(milestone) = task.milestone.as_deref() {
+            *by_milestone.entry(milestone).or_insert(0) += 1;
+        }
+    }
+    let mut busiest: Option<&str> = None;
+    for (milestone, count) in &by_milestone {
+        if busiest.is_none_or(|name| *count > by_milestone[name]) {
+            busiest = Some(milestone);
+        }
+    }
+    if let Some(milestone) = busiest {
+        return Ok(milestone.to_string());
+    }
+    Ok(departed.map(|(_, milestone)| milestone).unwrap_or_default())
 }
 
 /// Record a decision of the captain (§7.3): the line as it was written, its
