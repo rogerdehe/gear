@@ -102,6 +102,9 @@ depart: now
 - 2026-11-05 15:05 scope: stage 1 only (T-577..T-583); stage 2 (one reviewer per feature, a light non-blocking check per task with a 5-minute reminder, the owner lane fixing a failed review) and stage 3 (refresh feature branches, bisect a red gate) are planned after stage 1 ships | why: the user wants it in Carthage's hands fast | else: all three stages at once
 - 2026-11-05 15:05 cut: T-572 cancelled: its attempt 2 passed review but never landed, and merged with today's dev its own test fails; kept at refs/backup/t572 and in gear/voyages/M7/backlog.md | why: it holds M6.2's landing and is not part of the feature work | else: rework it now
 
+# Verdicts
+- T-600 attempt=1 contract=1 candidate=37d97f9b fail rework="The pinned candidate 37d97f9b conflicts with F-1 on dev; the captain merged dev into gear/feature/f-2 (ff8b97a6). GEAR hands in the new tip; nothing for a lane to do."
+
 # Queue
 
 ## T-545 [now] lane=mast milestone=M6.2 required
