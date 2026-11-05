@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1185 -->
+<!-- gear-plan project=gear base=1189 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -6,8 +6,11 @@ Make the captain handover smooth: handovers between captains (another model, ano
 done: (1) a captain handed over with `gear captain handover --pane` learns it from GEAR alone: the new pane carries the captain's name, the old pane no longer does, and one urgent item names the handover document with its path, branch and commit; (2) `gear captain handover --facts` is short enough to read in one tool read and every fact in it is true: lanes summarized, releases read correctly, no stale instruction about an older handover, and a plan file named clean, draft or stale; (3) each fix is released as v0.6.x and is live for every project on this machine, and each captain is told; (4) before landing, this voyage's lessons are read against the skill GEAR ships and the skill is iterated, nothing added for its own sake; (5) feature integration, stage 1: tasks marked `feature: F-<n>` merge into the feature's branch with no CI (a conflict refuses the merge, an optional `feature_check` runs), deps inside a feature release on that merge, and the feature reaches the integration branch through one generated integration task whose candidate is the feature branch, reviewed once and gated once with the full gate; a project with no `feature:` line runs exactly as before; released and live for Carthage
 bar: DELIVERABLE: an error in normal use blocks the task; edge cases outside normal use are logged
 eta: 4h
+depart: now
 
 # Decisions
+- station M-8020: keep course | why: stage 1 tasks are on pace, the next release carries T-577..T-586
+- 2026-11-05 16:20 confirmed: M6.2 departs now (it ran without a depart line, so GEAR took M6.1 for the current voyage and hid M6.2's items) | why: the user said to depart M6.2 with the old team
 - 2026-11-02 03:00 scope: M6.2 is the captain handover (user): the backlog's eight findings from the Prometheus handover (outgoing Codex captain, incoming Claude captain, the GEAR captain's own look); handover fixes are made by the captain itself, not by lanes, because the handover is too critical to pass through a packet (user); other issues the user reports later become lane tasks
 - 2026-11-02 03:00 scope: taken now: (a) `--pane` sends nothing to the new captain; (b) the captain's agent name stays on the old pane; (c) the handover document's path, branch and commit are named to the new captain; (d) `--facts` prints every lane's full owns list; (e) facts that are wrong: releases from a checkout without tags, an older handover request read as an instruction, a stale plan shown as a draft; logged, not taken yet: the home page after a landing says nothing about the next voyage (the store keeps no landed state; weigh after (a)-(e) ship)
 - 2026-11-02 04:10 hand-fix: the handover fixes (a)-(e) made by the captain (user's order), plus Lawrence's report: the skill now names the captain-only registration before departure (`quota.lanes = 0`, verified on a scratch store); gating lane onboarding on an applied plan was tried and dropped (51 engine tests and the documented flow treat init as the departure); `make gate` 2378/2378 | why: the user ruled the handover is too critical to pass through a packet | else: lane tasks
@@ -330,6 +333,13 @@ accept: Tests in finished.rs `mod tests` with a fixture remote (as merge tests b
 estimate: 50
 deps: -
 fresh: landing records, unrelated to features
+
+## T-586 [must] lane=hull milestone=M6.2
+goal: A captain's quiet page follows open work, not the last departure. crates/gear-app/src/home.rs, where `sailing` is computed: a captain is sailing when the project has no voyage, or ANY of its milestones has a task that is not terminal (`gear_board::stations::voyage_open` over every milestone of the project's tasks), not only `plan::current_voyage`. The voyage report and goal lines then show the voyage with open work. The doorbell already rings for those items, so page and doorbell agree again (GEAR M6.2 ran without a depart line: the page took the finished M6.1 and hid M-8020 while the doorbell rang it).
+accept: A test in home.rs (or crates/gear-app/tests/it app_home): a project whose last departed voyage is finished and which has another milestone with a running task shows that milestone's station item on the captain's page. Run only `make check CRATE=gear-app TESTS='test(home)'`; the merge gate runs `make gate`.
+estimate: 20
+deps: -
+fresh: home page, unrelated
 
 ## T-583 [now] lane=mast milestone=M6.2 required
 goal: [feature 7/7] The captain's skill. skills/gear/references/captain.md `# Queue` field list: `feature` (`F-<n>`: the task is part of a feature; members merge into the feature branch with no CI, deps between members release on that merge, and GEAR creates one integration task per feature that reaches the integration branch with one review and the full gate; at most `feature_max_tasks` members; a dep from outside names the integration task; members share the feature's issue). skills/gear/references/decompose.md: a rule that a capability of several small tasks is one feature, cut at decomposition (an issue in issue mode), and that small unrelated tasks stay without a feature.
