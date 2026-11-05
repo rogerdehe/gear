@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1218 -->
+<!-- gear-plan project=gear base=1219 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -9,6 +9,11 @@ eta: 4h
 depart: now
 
 # Decisions
+- done (1): met | evidence: `captain handover --pane` names the new pane, moves the captain's agent name and sends one urgent item with the handover document's path, branch and commit (v0.6.19..v0.6.50, decisions 2026-11-02..04); used live 2026-11-05 when Lawrence's Claude captain (w1ZJ:pG) took over from opencode
+- done (2): met | evidence: `captain handover --facts` names the caller's project, finds the document on any branch, summarizes lanes and reads releases (v0.6.49, v0.6.50 and the M6.2 fixes); the Lawrence takeover read it in one tool read
+- done (3): met | evidence: v0.6.69..v0.6.82 released this voyage; each one installed, skill copies reinstalled for claude, codex, pi, opencode and grok, both engines restarted, captains of Carthage and Lawrence told (Prometheus' captain is not running; nothing changes for it without `feature:`)
+- done (4): met | evidence: the four lessons of 2026-11-05 read against the skill: two are fixed in code (T-588, T-595), the feature-deps rule went into decompose.md with T-599, the rename-accept lesson is covered by captain.md's "accept runs the tests of every crate that uses the changed code"; nothing added for its own sake
+- done (5): met | evidence: v0.6.80 (stage 1), v0.6.81 (the integration task carries its members), v0.6.82 (stage 2) live for Carthage; GEAR ran stages 2 and 3 as features F-1 (T-589..T-593, landed by T-594, f4b32836) and F-2 (T-597..T-599, landed by T-600, 08332bb2)
 - station M-8231: keep course | why: T-600 (F-2) is merging on v0.6.82 and T-602 fixes a normal-use error of features (reviewers told the wrong branch); landing after both
 - 2026-11-05 18:35 hand-fix: T-600 (F-2's integration) conflicted with F-1 on dev in feature.rs and captain.md; dev merged into gear/feature/f-2 keeping both (the rework hold before the refresh, both tests, the captain.md feature field with both stages' text), feature/merge/dispatch tests 150/150 | why: merge conflict, a few lines; F-2's own refresh is the code being landed
 - station M-8218: keep course | why: left are T-594 (F-1's merge, unblocked by v0.6.81) and F-2's integration T-600; T-601 handed in
