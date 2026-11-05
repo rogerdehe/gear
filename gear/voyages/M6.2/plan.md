@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1179 -->
+<!-- gear-plan project=gear base=1180 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -265,4 +265,10 @@ deps: -
 goal: [v0.6.60] The stall check never calls a delivered task queued (Prometheus 2026-11-05: M-10694, M-10699, M-10700 said 'T-748 is queued' every few minutes while T-748 attempt 1 was delivered and `gear queue` showed 'platform working T-748'). Find the check that writes those items (grep "is queued" in crates/gear-engine/src, the stall/feed code of T-560) and count an attempt in state delivered (or any started attempt) as work in progress, the way `gear queue` does.
 accept: Test: a task whose attempt is delivered and not yet started is not named queued, and no stall item is written for it; a task with no attempt still is. Run only `make check CRATE=gear-engine TESTS='test(stall) | test(feed)'`; the merge gate runs `make gate`.
 estimate: 30
+deps: -
+
+## T-576 [now] lane=hull milestone=M6.2
+goal: [v0.6.61] A merge a red batch sends back is queued, not unknown (Prometheus 2026-11-05: O-7384..O-7390, T-716..T-726, sat `unknown` from 19:43 with "its batch failed the gate: it is gated again in a smaller batch"; no later batch took them, the lost scan said "nothing will merge it", and `- remerge T-722` was refused as "already unknown, not failed"). In crates/gear-engine/src/merge.rs, where a batch or train result requeues its members (Report::Requeue in the batch/train collection): the op goes back to `intended` with that reason, never `unknown` (unknown is only for a push whose outcome is not known). Also: `remerge` accepts an `unknown` op that no worker runs (it becomes intended), and the lost scan counts an `unknown` op as in flight.
+accept: Tests: a red batch of three leaves the members it sends back `intended`, and the next batch takes them; `- remerge` of a task whose op is unknown with no running worker queues it. Run only `make check CRATE=gear-engine TESTS='test(merge::)'` and `make check CRATE=gear-app TESTS='test(remerge)'`; the merge gate runs `make gate`.
+estimate: 40
 deps: -
