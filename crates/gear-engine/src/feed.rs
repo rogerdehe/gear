@@ -41,6 +41,8 @@ const STALLED_THREAD: &str = "stalled";
 const STARTABLE_AGAIN: &str = "a task can start again";
 /// Why the stalled item closes when the voyage has no task left.
 const NO_TASK_LEFT: &str = "no task is left in the voyage";
+/// Why the item closes when every task left is being worked on (T-575).
+const IN_PROGRESS: &str = "a task is in progress";
 
 /// How many of the tasks left the stalled item names (T-560).
 const STALLED_SHOWN: usize = 5;
@@ -590,6 +592,29 @@ fn stalled(tx: &Tx<'_>, project: &str, captain: &str, now: Ts) -> GearResult<Opt
     if left.is_empty() {
         return close_stalled(tx, project, captain, now, NO_TASK_LEFT);
     }
+    // T-575: a task whose attempt is delivered or started is work in progress,
+    // not a queue (Prometheus 2026-11-05: T-748 attempt 1 was delivered,
+    // `gear queue` said "platform working T-748", and this item said "T-748 is
+    // queued" every few minutes). A voyage whose tasks are all being worked on
+    // is not stopped.
+    let mut working = 0;
+    let mut stuck = Vec::new();
+    for task in left {
+        if in_progress(tx, project, &task.id)? {
+            working += 1;
+        } else {
+            stuck.push(task);
+        }
+    }
+    if stuck.is_empty() {
+        let reason = if working > 0 {
+            IN_PROGRESS
+        } else {
+            NO_TASK_LEFT
+        };
+        return close_stalled(tx, project, captain, now, reason);
+    }
+    let left = stuck;
     let seats = tx.seats_of_project(project)?;
     let mut named = Vec::new();
     for task in left.iter().take(STALLED_SHOWN) {
@@ -656,6 +681,11 @@ fn wait_words(
     seats: &[SeatRow],
     now: Ts,
 ) -> GearResult<String> {
+    // T-575: an attempt delivered or started is work in progress — the words
+    // `gear queue` uses — never a task waiting in a queue.
+    if in_progress(tx, project, &task.id)? {
+        return Ok("is in progress".to_string());
+    }
     let Some(lane) = task.lane.as_deref() else {
         return Ok("is on no lane".to_string());
     };
@@ -730,6 +760,16 @@ fn wait_words(
             format!("is {}", gear_board::state_word(task.state))
         }
     })
+}
+
+/// Does this task have an attempt the seat still holds — delivered, started,
+/// stopped or unknown (T-575)? That is work in progress, the rule
+/// `gear_board::idle` counts the lane as working by.
+fn in_progress(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<bool> {
+    Ok(tx
+        .attempts_of_task(project, task)?
+        .iter()
+        .any(|attempt| attempt.state.occupies_seat()))
 }
 
 /// The lane and the state of a task as `gear_board::idle` says it:

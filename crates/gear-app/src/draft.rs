@@ -108,6 +108,9 @@ pub enum StaffItem {
     RebindCancel { line: usize, lane: String },
     /// `- remerge T-<n>`: retry the task's failed merge (T-92).
     Remerge { line: usize, task: String },
+    /// `- merge-first T-<n>`: the task's queued merge runs next, on its own,
+    /// before every other ready merge including a `now` one (T-574).
+    MergeFirst { line: usize, task: String },
     /// `- drop <milestone>`: remove a milestone with no task and no history
     /// (T-473).
     Drop { line: usize, milestone: String },
@@ -965,6 +968,24 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
                 return Err(bad(line, "`remerge` takes only a task id"));
             }
             Ok(StaffItem::Remerge { line, task: task.to_string() })
+        }
+        "merge-first" => {
+            let task = tokens
+                .next()
+                .ok_or_else(|| bad(line, "`merge-first` needs a task id"))?;
+            if !is_task_id(task) {
+                return Err(bad(
+                    line,
+                    format!("`merge-first` needs a task id, got {task:?}"),
+                ));
+            }
+            if tokens.next().is_some() {
+                return Err(bad(line, "`merge-first` takes only a task id"));
+            }
+            Ok(StaffItem::MergeFirst {
+                line,
+                task: task.to_string(),
+            })
         }
         "drop" => {
             let milestone = tokens

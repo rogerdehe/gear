@@ -1540,6 +1540,126 @@ fn stalled_world() -> World {
     World { store, herdr, cfg }
 }
 
+/// A voyage whose one task sits on a held lane: no lane can start it.
+fn waiting_world(delivered: bool) -> World {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "codex",
+                T0,
+            )?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "review",
+                SeatRole::Lane,
+                LANE_PANE,
+                "opencode",
+                T0,
+            )?;
+            tx.set_seat_state(
+                "p:review",
+                SeatState::Held,
+                Some("hold: the surface is rebuilt"),
+                T0,
+            )?;
+            voyage(tx)?;
+            voyage_task(tx, "T-1", 1, "review", TaskState::Ready, vec![])?;
+            if delivered {
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 1,
+                    seat: "p:review".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Delivered,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    let mut cfg = EngineCfg {
+        tick_s: 4,
+        cooldown_s: 30,
+        doorbell_check_budget: 3,
+        ..Default::default()
+    };
+    for kind in ["codex", "opencode"] {
+        cfg.profiles.insert(kind.to_string(), profile(kind));
+    }
+    World { store, herdr, cfg }
+}
+
+/// T-575: a task whose attempt is delivered and not yet started is work in
+/// progress, not a queue (Prometheus 2026-11-05: T-748 attempt 1 was delivered,
+/// `gear queue` said "platform working T-748", and the item said "T-748 is
+/// queued" every few minutes).
+#[test]
+fn a_delivered_task_is_work_in_progress_not_a_stalled_queue() {
+    let mut w = waiting_world(true);
+
+    let changes = feed::keep_lanes_fed(&mut w.store, "p", T0 + 1).unwrap();
+
+    assert!(
+        !changes.iter().any(|change| change.lane == "stalled"),
+        "no stalled item for work in progress: {changes:?}"
+    );
+    assert!(
+        stalled_items(&mut w.store).is_empty(),
+        "the item is not written: {:?}",
+        stalled_items(&mut w.store)
+    );
+}
+
+/// The same task with no attempt is a task nothing started: the item is
+/// written, and it names what holds the task.
+#[test]
+fn a_task_with_no_attempt_is_still_named() {
+    let mut w = waiting_world(false);
+
+    let changes = feed::keep_lanes_fed(&mut w.store, "p", T0 + 1).unwrap();
+
+    assert!(
+        changes.contains(&feed::FeedChange {
+            lane: "stalled".into(),
+            action: "opened"
+        }),
+        "{changes:?}"
+    );
+    let items = stalled_items(&mut w.store);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(
+        items[0]
+            .body
+            .contains("T-1 waits for lane review (held: the surface is rebuilt)"),
+        "{}",
+        items[0].body
+    );
+    assert!(!items[0].body.contains("is queued"), "{}", items[0].body);
+}
+
 /// The items of the stalled thread.
 fn stalled_items(store: &mut Store) -> Vec<gear_store::MessageRow> {
     store.read(|tx| tx.thread_messages("p", "stalled")).unwrap()

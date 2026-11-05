@@ -1163,6 +1163,22 @@ fn apply_queue(
             )?;
             continue;
         }
+        if let StaffItem::MergeFirst { task, .. } = item {
+            mark_merge_first(tx, project, task, staff_line(item))?;
+            staffed.push(format!("merge-first {task}"));
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
+            continue;
+        }
         if let StaffItem::Retry { lane, .. } = item {
             retry_lane(tx, project, lane, staff_line(item), now)?;
             staffed.push(format!("retry {lane}"));
@@ -1279,6 +1295,7 @@ fn apply_queue(
                 ))
             }
             StaffItem::Remerge { .. } => unreachable!("remerge is applied above"),
+            StaffItem::MergeFirst { .. } => unreachable!("merge-first is applied above"),
             StaffItem::Retry { .. } => unreachable!("retry is applied above"),
             StaffItem::Release { .. } => unreachable!("release is applied above"),
             StaffItem::Rebind { .. } => unreachable!("rebind is applied above"),
@@ -1905,6 +1922,7 @@ pub fn staff_line(item: &StaffItem) -> usize {
         | StaffItem::Retry { line, .. }
         | StaffItem::Release { line, .. }
         | StaffItem::Remerge { line, .. }
+        | StaffItem::MergeFirst { line, .. }
         | StaffItem::Rebind { line, .. }
         | StaffItem::RebindCancel { line, .. }
         | StaffItem::Drop { line, .. }
@@ -2610,6 +2628,49 @@ fn project_config(tx: &Tx<'_>, project: &str) -> GearResult<Option<crate::config
     Ok(Some(crate::config::parse(&row.config_toml)?))
 }
 
+/// The key the captain's `- merge-first T-<n>` writes (T-574): the task whose
+/// queued merge goes next, on its own. The engine reads it when it orders its
+/// ready merges and clears it when that merge starts.
+pub fn merge_first_key(project: &str) -> String {
+    format!("engine.merge_first.{project}")
+}
+
+/// `- merge-first T-<n>` (T-574): the task's queued merge runs next on its
+/// branch, alone (never batched), before every other ready merge — `now`
+/// ones included. The user's Prometheus, 2026-11-05: T-738 held the fix every
+/// red round waited for, and its merge was last of fifteen.
+///
+/// Only a task with a merge already in the queue can be moved: a task with
+/// none is refused with a line saying so, like every plan line. The line is
+/// one-shot — the apply removes it from the file, and the engine clears the
+/// mark when the merge starts.
+fn mark_merge_first(tx: &Tx<'_>, project: &str, task: &str, line: usize) -> GearResult<()> {
+    if tx.get_task(project, task)?.is_none() {
+        return Err(bad(line, format!("no task {task} in this project")));
+    }
+    let mut queued = false;
+    for state in [
+        gear_model::OpState::Intended,
+        gear_model::OpState::Executing,
+        gear_model::OpState::Unknown,
+    ] {
+        queued = queued
+            || tx
+                .ops_in_state(project, state)?
+                .iter()
+                .any(|op| op.kind == gear_model::OpKind::Merge && op.task.as_deref() == Some(task));
+    }
+    if !queued {
+        return Err(bad(
+            line,
+            format!(
+                "{task} has no queued merge: `merge-first` moves a merge that is already waiting in the queue"
+            ),
+        ));
+    }
+    tx.set_meta(&merge_first_key(project), task)
+}
+
 /// `- remerge T-<n>` (T-92): the captain retries a merge that failed on
 /// something that can clear (a flaky test, a broken gate run). A new merge op
 /// is queued for the task's accepted attempt and candidate.
@@ -3093,6 +3154,60 @@ mod tests {
         assert_eq!(
             s.read(|tx| tx.get_task("p", "T-2")).unwrap().unwrap().state,
             TaskState::Ready
+        );
+    }
+
+    /// T-574: `- merge-first T-<n>` moves a merge that is already queued, and
+    /// refuses a task that has none.
+    #[test]
+    fn merge_first_moves_a_queued_merge_and_refuses_a_task_without_one() {
+        let mut s = world();
+        run(
+            &mut s,
+            &draft_text(
+                0,
+                "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
+            ),
+            "r1",
+        )
+        .unwrap();
+        let staff = |line: &str| format!("<!-- gear-plan project=p base=1 -->\n# Staff\n{line}\n");
+
+        // No merge is queued for T-1 yet: the line is refused and says so.
+        let refused = run(&mut s, &staff("- merge-first T-1"), "r2").unwrap_err();
+        assert!(
+            refused.detail.contains("has no queued merge"),
+            "{}",
+            refused.detail
+        );
+        assert!(
+            refused.detail.contains("T-1"),
+            "the task is named: {}",
+            refused.detail
+        );
+
+        // Once the merge waits in the queue, the line marks it.
+        s.write(|tx| {
+            tx.insert_op(&gear_store::NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: gear_model::OpKind::Merge,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({"branch": "heat/t1", "candidate": "abc1234"}),
+                created: NOW,
+            })
+        })
+        .unwrap();
+        run(&mut s, &staff("- merge-first T-1"), "r3").unwrap();
+        assert_eq!(
+            s.read(|tx| tx.get_meta(&merge_first_key("p")))
+                .unwrap()
+                .as_deref(),
+            Some("T-1")
         );
     }
 
@@ -4587,6 +4702,7 @@ fn staff_text(item: &StaffItem) -> String {
         StaffItem::Retry { lane, .. } => format!("retry {lane}"),
         StaffItem::Release { name, .. } => format!("release {name}"),
         StaffItem::Remerge { task, .. } => format!("remerge {task}"),
+        StaffItem::MergeFirst { task, .. } => format!("merge-first {task}"),
         StaffItem::Rebind {
             lane, repo, owns, ..
         } => format!("rebind {lane} repo={repo} owns=[{}]", owns.join(", ")),
