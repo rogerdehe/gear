@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1205 -->
+<!-- gear-plan project=gear base=1206 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -399,7 +399,7 @@ deps: -
 feature: F-1
 fresh: feature stage 2
 
-## T-592 [must] lane=mast milestone=M6.2 required
+## T-592 [must] lane=hull milestone=M6.2 required
 goal: [feature stage 2, 4/5] The feature's full review sees the light checks, and its rework goes to one owner lane. (1) crates/gear-engine/src/review.rs job_packet for an integration task: list each member with its goal and its light-check findings, and say "This is the feature's full review: judge the whole branch against the integration branch; a fail names every finding, the owner lane fixes them in one rework." (2) crates/gear-engine/src/dispatch.rs: T-581 keeps attempt 1 of an integration task out of delivery; a rework (attempt >= 2) of it IS delivered to the task's lane (the owner: the lane with most members, set at creation; the captain moves it with `lane=` like any task), and its packet's branch is the feature branch (`task_branch_override`), so the fix lands on the feature branch and the integration task hands in its tip. The same holds when the integration task's merge fails its full gate and the captain settles a fail.
 accept: Tests: the integration task's review packet lists the members and their findings; a fail of the integration task delivers attempt 2 to the owner lane with `git switch` to the feature branch; attempt 1 is still never delivered. Run only the new tests by name; the merge gate runs `make gate`.
 estimate: 50
