@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1201 -->
+<!-- gear-plan project=gear base=1202 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -359,6 +359,13 @@ accept: Unit tests next to current_voyage: last departed voyage finished and an 
 estimate: 30
 deps: -
 fresh: current voyage, unrelated to records
+
+## T-595 [now] lane=hull milestone=M6.2 required
+goal: A voyage with accepted work not yet merged is not finished. crates/gear-app/src/station.rs: make `unmerged_tasks` public (`pub fn unmerged_tasks`). crates/gear-engine/src/finished.rs `finished_voyages`: a voyage whose `unmerged_tasks` is not empty is open, so its merge-failed, merge-lost and other items stay open (GEAR M6.2: T-584's merge failed its gate while every task was done, the sweep closed both items as "voyage M6.2 is finished" and nothing would ever merge it). crates/gear-board/src/stations.rs `voyage_open` answers the same (open when a task is not terminal or a done task is unmerged), so the home page and the reclaim agree.
+accept: Tests in finished.rs `mod tests`: a voyage whose only task is done with an accepted, unmerged attempt keeps its merge-failed item open; once the attempt has a merge time the sweep closes it as today. A test in gear-board that `voyage_open` is true for that voyage. Run only the new tests by name; the merge gate runs `make gate`.
+estimate: 25
+deps: -
+fresh: finished voyage, unrelated
 
 ## T-589 [must] lane=mast milestone=M6.2 required
 goal: [feature stage 2, 1/5] A member's hand-in is accepted without a blocking review. crates/gear-engine/src/review.rs `tasks_to_review` (and `settle_mechanical`'s path): an attempt of a task with a stored feature (`tx.task_feature`, non-empty) that is not the feature's integration task (`feature_carrier`) is settled as accepted at hand-in, the way a mechanical task is, so its merge into the feature branch queues at once (the light merge: conflict check and `feature_check`). Its review becomes the light check of the next task (stage 2, 2/5); nothing waits on it. A rework (attempt >= 2, set by the captain) is settled the same way. A task with no feature is unchanged.
