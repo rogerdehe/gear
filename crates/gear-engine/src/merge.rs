@@ -916,7 +916,13 @@ fn settle_report(
         // The worker already retried a reason that can clear (T-61): what
         // comes back is the failure that stands.
         Report::Failed(failed) => fail_merge(store, project, op, &failed.reason, at)?,
-        Report::Requeue(reason) => retry_merge(store, project, op, &reason, at)?,
+        // T-576: a merge a batch or a train sends back is **queued again**, not
+        // unknown (Prometheus 2026-11-05: O-7384..O-7390 sat `unknown` with
+        // "its batch failed the gate: it is gated again in a smaller batch",
+        // no later batch took them, the lost scan called them lost and
+        // `- remerge` refused them). Unknown is kept for a push whose outcome
+        // is not known; a requeue knows its outcome (nothing was pushed).
+        Report::Requeue(reason) => requeue_merge(store, project, op, &reason, at)?,
         Report::Train(results) => {
             for (one, report) in results {
                 merged.extend(settle_report(store, project, config, &one, report, at)?);
@@ -1249,6 +1255,28 @@ fn retry_merge(
             .is_some_and(|row| matches!(row.state, OpState::Executing | OpState::Unknown))
         {
             tx.set_op_state(project, &op.id, OpState::Unknown, Some(reason), now)?;
+        }
+        Ok(())
+    })
+}
+
+/// Queue a merge again that a batch or a train sent back (T-576): the op goes
+/// back to `intended` with the reason, so the queue takes it in the next round.
+fn requeue_merge(
+    store: &mut Store,
+    project: &str,
+    op: &OpRow,
+    reason: &str,
+    now: Ts,
+) -> GearResult<()> {
+    store.write(|tx| {
+        if tx.get_op(project, &op.id)?.is_some_and(|row| {
+            matches!(
+                row.state,
+                OpState::Intended | OpState::Executing | OpState::Unknown
+            )
+        }) {
+            tx.set_op_state(project, &op.id, OpState::Intended, Some(reason), now)?;
         }
         Ok(())
     })
@@ -8160,6 +8188,127 @@ mod tests {
         store
     }
 
+    /// A third handed-in task, T-3, on its own branch of the scratch repo: its
+    /// candidate is returned.
+    fn add_third_task(store: &mut Store, pair: &Pair) -> String {
+        let candidate = sh(
+            &pair.work,
+            "git switch -qc t3 dev && echo c > c.txt && git add c.txt \
+             && git -c user.email=a@b -c user.name=a commit -qm c \
+             && git -C ../origin.git fetch -q \"$(pwd)\" +HEAD:refs/heads/heat/t3 \
+             && git rev-parse HEAD",
+        )
+        .trim()
+        .to_string();
+        store
+            .write(|tx| {
+                tx.insert_task(&gear_store::TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-3".into(),
+                    rank: 3,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: 0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-3", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-3", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-3", 1, 1, &candidate, "report", 0)?;
+                Ok(())
+            })
+            .unwrap();
+        candidate
+    }
+
+    /// T-576: a red batch of three sends its members back **queued**, not
+    /// unknown (Prometheus 2026-11-05: O-7384..O-7390 sat `unknown` with "its
+    /// batch failed the gate: it is gated again in a smaller batch", no later
+    /// batch took them, the lost scan called them lost and `- remerge`
+    /// refused them).
+    #[test]
+    fn a_red_batch_leaves_its_members_queued_and_the_next_batch_takes_them() {
+        let pair = Pair::new("batch-queued", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        let third = add_third_task(&mut store, &pair);
+        // The gate says no to the whole batch.
+        batch_of(&mut store, "false", 3);
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        pass(&mut store, "T-3", &third, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        // One red batch, then collected: every member is queued again.
+        let seen = cfg.merges.progress();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
+        assert!(cfg.merges.running("p"), "the batch runs");
+        assert!(cfg.merges.wait_progress(seen, WAIT), "the batch reports");
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 31).unwrap();
+
+        let ids: Vec<String> = ["T-1", "T-2", "T-3"]
+            .iter()
+            .map(|task| {
+                store
+                    .read(|tx| Ok(tx.ops_in_state("p", OpState::Intended)?))
+                    .unwrap()
+                    .into_iter()
+                    .find(|op| op.kind == OpKind::Merge && op.task.as_deref() == Some(task))
+                    .unwrap_or_else(|| panic!("{task} is queued again"))
+                    .id
+            })
+            .collect();
+        for id in &ids {
+            let op = store.read(|tx| tx.get_op("p", id)).unwrap().unwrap();
+            assert_eq!(op.state, OpState::Intended, "{id} is queued, not unknown");
+            assert!(
+                op.result
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("gated again in a smaller batch")),
+                "{id}: {:?}",
+                op.result
+            );
+        }
+
+        // The next round takes them: a passing gate lands all three.
+        batch_of(&mut store, "true", 3);
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            ["T-1", "T-2", "T-3"].iter().all(|task| {
+                store
+                    .read(|tx| {
+                        Ok(tx
+                            .ops_in_state("p", OpState::Confirmed)?
+                            .into_iter()
+                            .any(|op| op.kind == OpKind::Merge && op.task.as_deref() == Some(task)))
+                    })
+                    .unwrap()
+            })
+        });
+        let log = pair.dev_log();
+        for subject in ["a", "c"] {
+            assert!(log_has(&log, subject), "{subject} landed: {log}");
+        }
+    }
+
     /// The project merges in batches of `size`, with `gate` as its gate
     /// (T-547).
     fn batch_of(store: &mut Store, gate: &str, size: usize) {
@@ -8451,9 +8600,11 @@ mod tests {
         merge_passed(&mut store, &mut herdr, &cfg, "p", 31).unwrap();
 
         for id in ["O-1", "O-2"] {
+            // T-576: sent back is queued again (`intended`), not unknown: the
+            // push's outcome is known (nothing landed).
             assert_eq!(
                 op_state(&mut store, id),
-                Some(OpState::Unknown),
+                Some(OpState::Intended),
                 "{id} is queued again"
             );
             let reason = op_result(&mut store, id);

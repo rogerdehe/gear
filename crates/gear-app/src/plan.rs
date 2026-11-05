@@ -2763,6 +2763,21 @@ fn remerge(
             // A voided merge merged nothing: the accepted attempt above may be
             // queued again.
             gear_model::OpState::Failed | gear_model::OpState::Void => {}
+            // T-576: an op left `unknown` has no worker running it — a worker's
+            // op is executing or submitted — so the captain may queue the merge
+            // again. It goes back to intended, and the new op below is the one
+            // that carries the rework (Prometheus 2026-11-05: `- remerge T-722`
+            // was refused as "already unknown, not failed" while the op sat
+            // unknown and nothing would ever take it).
+            gear_model::OpState::Unknown => {
+                tx.set_op_state(
+                    project,
+                    &last_id,
+                    gear_model::OpState::Intended,
+                    Some("remerge: queued again by the captain"),
+                    now,
+                )?;
+            }
             gear_model::OpState::Confirmed => {
                 return Err(bad(
                     line,

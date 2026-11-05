@@ -240,6 +240,11 @@ impl OpState {
                 | (Executing, Intended)
                 | (Submitted, Confirmed | Failed)
                 | (Unknown, Confirmed | Failed)
+                // T-576: an op whose worker let go without a verdict (a batch
+                // or a train that sent it back) is queued again, not unknown.
+                // Unknown means the outcome is not known; a merge queued again
+                // re-runs from the remote, so nothing is retried blindly.
+                | (Unknown, Intended)
         )
     }
 
