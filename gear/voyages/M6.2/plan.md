@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1195 -->
+<!-- gear-plan project=gear base=1196 -->
 # Goal
 Make the captain handover smooth: handovers between captains (another model, another CLI, another person's pane) will happen often across the projects that use GEAR, and a broken handover takes the whole project down with it. M6.2 fixes what the first real handover (Prometheus, 2026-11-02, Codex → Claude) exposed, and gets each fix into the projects' hands. Further non-handover issues the user reports become tasks here for the lanes.
 
@@ -9,6 +9,7 @@ eta: 4h
 depart: now
 
 # Decisions
+- station M-8072: keep course | why: T-587, the last stage 1 task, moves to hull, which frees up after T-584 sooner than mast after T-585; stage 1 then ships without waiting for T-585 | else: time-box
 - station M-8048: keep course | why: the release does not wait for the whole voyage: feature stage 1 (T-578, T-579, T-582, T-583, T-587) ships to Carthage as soon as it merges, ahead of T-584..T-586 which sit behind it in each lane's queue; the projected 422m counts those too | else: time-box
 - 2026-11-05 16:40 hand-fix: T-581 conflicted with T-580 in dispatch.rs (both added tests at one place); dev merged into hull/t581 keeping both, dispatch tests 23/23, pushed 1f0736bf | why: merge conflict, a few lines
 - station M-8020: keep course | why: stage 1 tasks are on pace, the next release carries T-577..T-586
@@ -343,7 +344,7 @@ estimate: 20
 deps: -
 fresh: home page, unrelated
 
-## T-587 [must] lane=mast milestone=M6.2 required
+## T-587 [must] lane=hull milestone=M6.2 required
 goal: [feature 2b] A plan written before features moves to them in one apply, crates/gear-app/src/plan.rs on top of T-578. (1) `feature: F-n` on an existing task that has any attempt (started, handed in, merged) is BadFormat: "T-<n> has started: it finishes on the integration branch; only a task with no attempt joins a feature"; its base and gate never change. (2) Replace T-578's refusal of an outside dep on a member: the dep is rewritten to the feature's integration task in the store (the outside task's deps name the carrier instead, once), and the apply prints one line per rewrite (`T-<x>: dep T-<m> -> T-<carrier> (feature F-n)`). (3) A member whose dep lies outside its feature and has not merged yet: no member of that feature is delivered until every such dep has merged (they become deps of every member, so the feature branch is cut from an integration branch that holds them); a merged outside dep is ignored.
 accept: Tests in crates/gear-app/tests/it/feature_plan_contract.rs: a running task given `feature:` is refused and keeps its base; an outside task depending on a member now depends on the carrier and the output names it; a member with an unmerged outside dep is held, and with a merged one it is not. Run only `make check CRATE=gear-app TESTS='test(feature)'`; the merge gate runs `make gate`.
 estimate: 40
