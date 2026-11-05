@@ -76,7 +76,7 @@ fn queued_lane_gets_worktree_env_and_agent() {
     assert!(herdr
         .worktree_branches()
         .contains(&"toy/heat/between-voyages"));
-    let scratch = "/fake-worktrees/toy-heat-home/.gear/tmp";
+    let scratch = "/fake-worktrees/toy-heat-between-voyages/.gear/tmp";
     assert!(herdr.calls.iter().any(|c| matches!(c, Call::PaneRun { command, .. }
         if command == &format!("mkdir -p '{scratch}'; export TMPDIR='{scratch}'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}; {}", cfg().db_path, gear_engine::onboard::EDITOR_ENV))), "{:?}", herdr.calls);
     assert!(
@@ -473,7 +473,7 @@ gate = "make test"
     // Its worktree was trusted before the start: one entry, written once.
     let trust = std::fs::read_to_string(home.join(".grok/trusted_folders.toml")).unwrap();
     assert!(
-        trust.contains("[folders.\"/fake-worktrees/toy-grok1-home\"]"),
+        trust.contains("[folders.\"/fake-worktrees/toy-grok1-between-voyages\"]"),
         "{trust}"
     );
     assert!(trust.contains("trusted = true"), "{trust}");

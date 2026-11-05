@@ -5809,7 +5809,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(
             packet.contains("Binding: task T-1, attempt 1, candidate ")
                 && packet.contains(
-                    ", branch p/direction/t-1, worktree /fake-worktrees/p-review-1-home."
+                    ", branch p/direction/t-1, worktree /fake-worktrees/p-review-1-between-voyages."
                 ),
             "the binding names the candidate, the branch and the worktree: {packet}"
         );
@@ -5924,14 +5924,14 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let calls = REVIEW_GIT_CALLS.with(|calls| calls.borrow().clone());
         assert!(
             calls.iter().any(|(path, args)| {
-                path == "/fake-worktrees/p-review-1-home"
+                path == "/fake-worktrees/p-review-1-between-voyages"
                     && args == &["checkout".to_string(), "--detach".to_string()]
             }),
             "the worktree is detached: {calls:?}"
         );
         assert!(
             calls.iter().any(|(path, args)| {
-                path == "/fake-worktrees/p-review-1-home"
+                path == "/fake-worktrees/p-review-1-between-voyages"
                     && args
                         == &[
                             "branch".to_string(),
@@ -8047,7 +8047,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(
             args.starts_with(&gear_herdr::render_args(
                 &cfg().profiles["codex"].unattended_args,
-                "/fake-worktrees/p-review-1-home"
+                "/fake-worktrees/p-review-1-between-voyages"
             )),
             "{args:?}"
         );
@@ -8745,7 +8745,7 @@ review = [
                     "check_for_update_on_startup=false".to_string(),
                     // T-76: the reviewer's worktree is the folder it runs in.
                     "-c".to_string(),
-                    "projects={\"/fake-worktrees/p-review-1-home\"={trust_level=\"trusted\"}}"
+                    "projects={\"/fake-worktrees/p-review-1-between-voyages\"={trust_level=\"trusted\"}}"
                         .to_string(),
                     // T-457: a resume runs in the reviewer's own worktree.
                     "-c".to_string(),
@@ -8997,7 +8997,7 @@ review = [
             .into_iter()
             .find(|command| command.contains("export GEAR_CTX="))
             .expect("the environment line");
-        let scratch = "/fake-worktrees/p-review-1-home/.gear/tmp";
+        let scratch = "/fake-worktrees/p-review-1-between-voyages/.gear/tmp";
         assert!(
             export.starts_with(&format!(
                 "mkdir -p '{scratch}'; export TMPDIR='{scratch}'; "
@@ -9877,7 +9877,10 @@ review = [
                     created: T0,
                 })?;
                 // The first job recorded the seat's worktree path.
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1-home")?;
+                tx.set_meta(
+                    &path_key("p:review-1"),
+                    "/fake-worktrees/p-review-1-between-voyages",
+                )?;
                 Ok(())
             })
             .unwrap();
@@ -9955,7 +9958,10 @@ review = [
                     handover_id: None,
                     created: T0,
                 })?;
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1-home")?;
+                tx.set_meta(
+                    &path_key("p:review-1"),
+                    "/fake-worktrees/p-review-1-between-voyages",
+                )?;
                 Ok(())
             })
             .unwrap();
@@ -10038,7 +10044,10 @@ review = [
 
         store
             .write(|tx| {
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1-home")?;
+                tx.set_meta(
+                    &path_key("p:review-1"),
+                    "/fake-worktrees/p-review-1-between-voyages",
+                )?;
                 tx.insert_round(&gear_store::NewRound {
                     key: gear_store::RoundKey {
                         project: "p".into(),
@@ -10125,7 +10134,10 @@ review = [
                     handover_id: None,
                     created: T0,
                 })?;
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1-home")?;
+                tx.set_meta(
+                    &path_key("p:review-1"),
+                    "/fake-worktrees/p-review-1-between-voyages",
+                )?;
                 Ok(())
             })
             .unwrap();
@@ -10313,7 +10325,7 @@ review = [
             "one worktree in total"
         );
         assert!(
-            herdr.calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { path, .. } if path.ends_with("p-review-1-home"))),
+            herdr.calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { path, .. } if path.ends_with("p-review-1-between-voyages"))),
             "reopened by path: {:?}",
             herdr.calls
         );
@@ -11121,7 +11133,10 @@ review = [
 
         store
             .write(|tx| {
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1-home")?;
+                tx.set_meta(
+                    &path_key("p:review-1"),
+                    "/fake-worktrees/p-review-1-between-voyages",
+                )?;
                 tx.insert_round(&gear_store::NewRound {
                     key: gear_store::RoundKey {
                         project: "p".into(),
@@ -11341,7 +11356,7 @@ profile = "opencode"
             // The real checkout is now on the job branch. Remove the fake's
             // anchor lookup and register that branch at the unchanged path.
             assert!(matches!(
-                door.worktree_remove("wt-p-review-1-home"),
+                door.worktree_remove("wt-p-review-1-between-voyages"),
                 Outcome::Ok(())
             ));
             door.add_shell(pane);

@@ -2606,7 +2606,9 @@ fn stage_worktree(
     // `[conventions].seat_branch` template with the project's voyage,
     // `<project>/merge/<voyage>` by default (T-584: project / seat / voyage,
     // like project / lane / task).
-    let voyage = store.read(|tx| gear_app::plan::current_voyage(tx, project))?;
+    let voyage = store
+        .read(|tx| gear_app::plan::current_voyage(tx, project))
+        .map_err(|e| e.detail)?;
     let branch =
         gear_model::branch::expand_seat(&config.conventions.seat_branch, project, &seat, &voyage);
     // T-565: the merge seat has no seat row, so no apply and no lane pass moves
@@ -8205,13 +8207,13 @@ mod tests {
         sh(
             &pair.root,
             &format!(
-                "git -C {} worktree add -q -b p/merge-2/home {} origin/dev",
+                "git -C {} worktree add -q -b p/merge-2/between-voyages {} origin/dev",
                 pair.work.display(),
                 path.display()
             ),
         );
         herdr.add_worktree(
-            "p/merge-2/home",
+            "p/merge-2/between-voyages",
             &path.display().to_string(),
             "wt-merge-2:p1",
         );

@@ -819,7 +819,9 @@ fn onboard_seat(
     let repo = config.repo_of_lane(&seat.name);
     // T-584: the lane's seat branch names the voyage the project is in, so the
     // plan expands the template with it.
-    let voyage = store.read(|tx| gear_app::plan::current_voyage(tx, &seat.project))?;
+    let voyage = store
+        .read(|tx| gear_app::plan::current_voyage(tx, &seat.project))
+        .map_err(|e| e.detail)?;
     let mut plan = plan_onboard(
         seat,
         &kind,
@@ -2362,7 +2364,7 @@ repo = "web"
             env.contains(r#"OPENCODE_CONFIG_CONTENT='{"model":"minimax-cn/MiniMax-M3.1-Flash"}'"#),
             "the environment line must carry the lane's model: {env}"
         );
-        assert!(env.starts_with(&format!("mkdir -p '/fake-worktrees/toy-heat-home/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat-home/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path)), "{env}");
+        assert!(env.starts_with(&format!("mkdir -p '/fake-worktrees/toy-heat-between-voyages/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat-between-voyages/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path)), "{env}");
         // The model is only read by a process that inherits the pane's
         // environment, so the agent gets a private server.
         assert!(
@@ -2520,7 +2522,7 @@ repo = "web"
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
         assert_eq!(active, vec!["toy:heat".to_string()]);
-        assert_eq!(env_line(&herdr), format!("mkdir -p '/fake-worktrees/toy-heat-home/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat-home/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}; {}", cfg().db_path, EDITOR_ENV));
+        assert_eq!(env_line(&herdr), format!("mkdir -p '/fake-worktrees/toy-heat-between-voyages/.gear/tmp'; export TMPDIR='/fake-worktrees/toy-heat-between-voyages/.gear/tmp'; export GEAR_CTX=toy:heat:1; export GEAR_DB={}; {}", cfg().db_path, EDITOR_ENV));
         assert_eq!(start_args(&herdr), vec!["--auto".to_string()]);
     }
 
