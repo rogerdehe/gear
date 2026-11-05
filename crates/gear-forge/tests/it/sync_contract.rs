@@ -149,10 +149,10 @@ impl Forge for Fake {
     }
 }
 
-/// A config with project `p` in GitHub mode.
+/// A config with project `p` in GitHub mode, landing through pull requests.
 fn config() -> String {
     "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/tmp/gear-sync-fixture\"\n\
-     \n[github]\nrepo = \"owner/name\"\n\
+     \n[github]\nrepo = \"owner/name\"\nmerge = \"pr\"\n\
      \n[conventions]\nintegration = \"dev\"\n"
         .to_string()
 }
@@ -1197,4 +1197,32 @@ fn an_issue_with_another_unlanded_task_stays_open() {
         !calls.iter().any(|call| call.starts_with("close ")),
         "T-2 has not landed: {calls:?}"
     );
+}
+
+/// `merge = "push"`: no pull request is opened for a task (Carthage: a draft
+/// claim before the lane had pushed was refused a hundred times), and the
+/// issue still closes when the task lands.
+#[test]
+fn push_mode_opens_no_pull_request_and_still_closes_the_issue() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = project.config_toml.replace("merge = \"pr\"\n", "");
+            tx.update_project(&project)
+        })
+        .unwrap();
+    deliver(&mut store);
+    let forge = Fake::up();
+    tick(&mut store, &forge, 100);
+    assert!(forge.calls().is_empty(), "{:?}", forge.calls());
+
+    hand_in(&mut store, "abc1234");
+    verdict(&mut store, true, "");
+    merged(&mut store, "merged T-1 into dev: def5678");
+    tick(&mut store, &forge, 200);
+
+    let calls = forge.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].starts_with("close owner/name#12"), "{calls:?}");
 }
