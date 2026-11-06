@@ -126,8 +126,12 @@ pub fn free_busy_lanes(
             continue;
         }
         let view = store.read(|tx| crate::dispatch::lane_view(tx, seat, Some(obs.clone()), now))?;
-        // Never for a lane with an open attempt.
-        if view.attempt.is_some() {
+        // Never for a lane with an attempt it is working: Started or Stopped.
+        // A Delivered attempt is the delivery that waits (T-612 F1): the lane
+        // is not working on it yet, so it does not block the Esc.
+        if view.attempt.as_ref().is_some_and(|attempt| {
+            matches!(attempt.state, AttemptState::Started | AttemptState::Stopped)
+        }) {
             clear_busy(store, &seat.id)?;
             continue;
         }
@@ -848,16 +852,19 @@ mod tests {
         s
     }
 
-    /// A delivery intended for the lane: the engine's Deliver op.
+    /// A delivery intended for the lane, as `intend_dispatch` writes it: the
+    /// `Delivered` attempt first (the delivery that waits), then the Deliver
+    /// op that names it.
     fn intended(s: &mut Store, at: i64) {
         s.write(|tx| {
+            let attempt = gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, at)?;
             tx.insert_op(&NewOp {
                 project: "p".into(),
                 seat: "p:heat".into(),
                 generation: 1,
                 kind: OpKind::Deliver,
                 task: Some("T-1".into()),
-                attempt: Some(1),
+                attempt: Some(attempt.n),
                 ref_msg: None,
                 plan_version: None,
                 payload: serde_json::json!({ "text": "packet" }),
@@ -884,10 +891,11 @@ mod tests {
         }
     }
 
-    /// T-612: a working lane with no attempt and a ready task gets one Esc
-    /// after 3 minutes and the captain's item after 6.
+    /// T-612: a working lane whose delivery waits (a `Delivered` attempt, the
+    /// state `intend_dispatch` writes) and a ready task gets one Esc after 3
+    /// minutes and the captain's item after 6.
     #[test]
-    fn a_busy_lane_with_no_attempt_is_freed_with_one_esc() {
+    fn a_busy_lane_with_a_waiting_delivery_is_freed_with_one_esc() {
         let mut s = world_ready();
         intended(&mut s, T);
         let mut herdr = FakeHerdr::new();
@@ -966,13 +974,13 @@ mod tests {
         assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
         // A working lane with no ready task: no Esc.
         let mut s = world_ready();
+        intended(&mut s, T);
         s.write(|tx| {
             let mut task = tx.get_task("p", "T-1")?.unwrap();
             task.state = TaskState::Running;
             tx.update_task(&task)
         })
         .unwrap();
-        intended(&mut s, T);
         let working = observation(&mut s, true);
         free_busy_lanes(&mut s, &mut herdr, "p", &[working.clone()], T).unwrap();
         free_busy_lanes(&mut s, &mut herdr, "p", &[working.clone()], T + 180).unwrap();
