@@ -10,9 +10,11 @@
 //! (the reviewer's rule), and a lane that waits for its provider is not stuck
 //! (T-75).
 
-use gear_herdr::{AgentStatus, HerdrAct, Outcome};
+use std::collections::BTreeMap;
+
+use gear_herdr::{AgentStatus, HerdrAct, Outcome, Profile};
 use gear_model::{AttemptState, GearResult, MsgKind, MsgState, OpKind, SeatRole, SeatState, Ts};
-use gear_store::{NewMessage, NewOp, Store, Tx};
+use gear_store::{NewMessage, NewOp, SeatRow, Store, Tx};
 
 use crate::observe::SeatObs;
 
@@ -245,6 +247,8 @@ fn clear_busy(store: &mut Store, seat: &str) -> GearResult<()> {
 pub fn nudge_stopped_lanes(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
+    cfg: &crate::EngineCfg,
+    profiles: &BTreeMap<String, Profile>,
     project: &str,
     observed: &[SeatObs],
     now: Ts,
@@ -293,6 +297,13 @@ pub fn nudge_stopped_lanes(
         if !obs.idle {
             // A working agent clears the idle mark.
             store.write(|tx| tx.set_meta(&key, ""))?;
+            continue;
+        }
+        // T-629: a provider's content refusal, twice in a row on one attempt,
+        // moves the lane to the next model of its chain (or holds it).
+        if refusal_step(store, herdr, cfg, profiles, project, seat, &attempt, now)? {
+            nudged.push(seat.id.clone());
+            flagged.push(seat.id.clone());
             continue;
         }
         // The first idle tick of the episode is kept; the nudge follows two
@@ -412,6 +423,200 @@ pub fn nudge_stopped_lanes(
         nudged.push(seat.id.clone());
     }
     Ok((nudged, flagged))
+}
+
+/// T-629: the mark of the refusal item of one attempt: one item per attempt.
+fn refusal_key(seat: &str, task: &str, attempt: i64) -> String {
+    format!("engine.lanerefusal.{seat}.{task}.{attempt}")
+}
+
+/// T-629: the refusal marker `error` carries, if any.
+fn refusal_marker(profile: &Profile, error: &str) -> Option<String> {
+    profile
+        .refusal_markers
+        .iter()
+        .find(|marker| error.contains(marker.as_str()))
+        .cloned()
+}
+
+/// T-629: the entry after `current` in the chain; `None` when the chain is
+/// exhausted. The same rule as the quota path's `next_entry`.
+fn next_entry<'a>(
+    chain: &[&'a gear_app::config::ModelEntry],
+    current: Option<&str>,
+) -> Option<&'a gear_app::config::ModelEntry> {
+    let Some(current) = current else {
+        return chain.first().copied();
+    };
+    match chain.iter().position(|entry| entry.model() == current) {
+        Some(index) => chain.get(index + 1).copied(),
+        None => chain.first().copied(),
+    }
+}
+
+/// T-629: the seat's session log's last two assistant records. Both ended with
+/// a content refusal: the lane moves to the next model of its chain the way a
+/// quota stop does, and one captain item names the provider, the attempt and
+/// the marker. With no next model the item says so and the lane is held.
+fn refusal_step(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &crate::EngineCfg,
+    profiles: &BTreeMap<String, Profile>,
+    project: &str,
+    seat: &SeatRow,
+    attempt: &InFlight,
+    now: Ts,
+) -> GearResult<bool> {
+    let Some(profile) = profiles.get(&seat.profile) else {
+        return Ok(false);
+    };
+    let Some(log) = profile
+        .usage_log
+        .as_deref()
+        .and_then(gear_usage::UsageLog::from_name)
+    else {
+        return Ok(false);
+    };
+    let Some(round) = store.read(|tx| tx.open_round_of_seat(&seat.id))? else {
+        return Ok(false);
+    };
+    let Some(session) = round.sessions.last() else {
+        return Ok(false);
+    };
+    let Some(errors) = gear_usage::last_assistant_errors(log, session) else {
+        return Ok(false);
+    };
+    if errors.len() < 2 {
+        return Ok(false);
+    }
+    let (Some(first), Some(second)) = (&errors[0], &errors[1]) else {
+        return Ok(false);
+    };
+    let (Some(first_marker), Some(second_marker)) = (
+        refusal_marker(profile, first),
+        refusal_marker(profile, second),
+    ) else {
+        return Ok(false);
+    };
+    let marker = second_marker.clone();
+    let _ = first_marker;
+    // One item per attempt: the mark says it was opened.
+    let key = refusal_key(&seat.id, &attempt.task, attempt.attempt);
+    if store
+        .read(|tx| tx.get_meta(&key))?
+        .is_some_and(|value| !value.is_empty())
+    {
+        return Ok(false);
+    }
+    let config = match gear_app::config::latest(store, project) {
+        Ok(config) => config,
+        Err(_) => return Ok(false),
+    };
+    let chain = crate::model::role_chain(&config, &seat.name);
+    let current = crate::quota::meta_get(store, &crate::model::model_meta_key(&seat.id))?;
+    let current = current
+        .filter(|model| !model.is_empty())
+        .or_else(|| chain.first().map(|entry| entry.model().to_string()));
+    let provider = current
+        .as_deref()
+        .map(|model| model.split('/').next().unwrap_or(model).to_string())
+        .unwrap_or_default();
+    let next = next_entry(&chain, current.as_deref());
+    match next {
+        Some(entry) => {
+            // The entry names the CLI that runs the model; without one the
+            // lane's own CLI runs it (the quota path's rule).
+            let current_cli = crate::restart::current_cli(store, seat)?;
+            let default_cli = config
+                .lanes
+                .iter()
+                .find(|lane| lane.name == seat.name)
+                .map(|lane| lane.kind.as_str());
+            let target_cli = entry
+                .cli()
+                .or(default_cli)
+                .map(str::to_string)
+                .or(current_cli.clone());
+            let target = gear_app::config::ModelEntry::Entry(gear_app::config::ModelSpec {
+                model: entry.model().to_string(),
+                cli: target_cli,
+                args: entry.args().to_vec(),
+                context_window_k: entry.context_window_k(),
+            });
+            crate::restart::advance(
+                store,
+                herdr,
+                cfg,
+                profiles,
+                project,
+                seat,
+                Some(&target),
+                now,
+            )?;
+            let body = format!(
+                "{}: the provider {} refused the output twice in a row on attempt {} (marker: {}); the lane moves to {}",
+                seat.id,
+                provider,
+                attempt.attempt,
+                marker,
+                entry.model()
+            );
+            open_item(store, project, seat, &body, now)?;
+            store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
+            Ok(true)
+        }
+        None => {
+            let body = format!(
+                "{}: the provider {} refused the output twice in a row on attempt {} (marker: {}); the chain has no next model, the lane is held",
+                seat.id, provider, attempt.attempt, marker
+            );
+            open_item(store, project, seat, &body, now)?;
+            store.write(|tx| {
+                tx.set_seat_state(
+                    &seat.id,
+                    SeatState::Held,
+                    Some("refusal: no next model"),
+                    now,
+                )?;
+                tx.set_meta(&key, &now.to_string())
+            })?;
+            Ok(true)
+        }
+    }
+}
+
+/// T-629: one captain item on the seat's refusal thread.
+fn open_item(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    body: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let Some(captain) = store.read(|tx| tx.captain_of(project))? else {
+        return Ok(());
+    };
+    store.write(|tx| {
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: project.to_string(),
+            thread: format!("refusal:{}", seat.id),
+            task: None,
+            attempt: None,
+            sender: "engine".into(),
+            sender_gen: 0,
+            recipient: captain.id.clone(),
+            kind: MsgKind::System,
+            urgent: true,
+            body: body.to_string(),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+        Ok(())
+    })
 }
 
 /// The attempt of a seat that is in flight: the one that is `Started` (the
@@ -568,7 +773,7 @@ mod tests {
     use crate::observe::Presence;
     use gear_herdr::fake::{Call, FakeHerdr};
     use gear_model::{MsgKind, MsgState, TaskState};
-    use gear_store::{testing, AttemptStep, ContractRow, NewMessage, TaskRow};
+    use gear_store::{testing, AttemptStep, ContractRow, NewMessage, NewRound, RoundKey, TaskRow};
 
     const T: i64 = 1_800_000_000;
     const PANE: &str = "w1:p2";
@@ -959,6 +1164,270 @@ mod tests {
             .read(|tx| tx.thread_messages("p", "busy-lane:p:heat"))
             .unwrap()
             .is_empty());
+    }
+
+    /// T-629: a lane on pi with a chain, an attempt in flight, and a round
+    /// whose session is a pi session file.
+    fn refusal_world(
+        session: &str,
+    ) -> (
+        Store,
+        FakeHerdr,
+        crate::EngineCfg,
+        BTreeMap<String, Profile>,
+    ) {
+        let mut s = Store::open_in_memory().unwrap();
+        s.write(|tx| {
+            testing::seed_project(tx, "p", "sess", T)?;
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+[quota]
+lanes = 1
+temps = 0
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "pi"
+profile = "pi"
+[models]
+lanes = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash"]
+"#
+            .into();
+            tx.update_project(&project)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, PANE, "pi", T)?;
+            tx.insert_task(&TaskRow {
+                project: "p".into(),
+                id: "T-1".into(),
+                rank: 1,
+                state: TaskState::Ready,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: None,
+                issue: None,
+                updated: T,
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+            })?;
+            tx.insert_contract(&ContractRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                version: 1,
+                goal: "g".into(),
+                accept: "a".into(),
+                evidence_files: vec![],
+                evidence_due_min: None,
+                body: String::new(),
+                created: T,
+                mechanical: None,
+            })?;
+            gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T)?;
+            gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T)?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T)?;
+            let key = RoundKey {
+                project: "p".into(),
+                task: "T-1".into(),
+                attempt: 1,
+                role: "dev".into(),
+            };
+            tx.insert_round(&NewRound {
+                key: key.clone(),
+                seat: "p:heat".into(),
+                generation: 1,
+                cli: "pi".into(),
+                model: Some("minimax-cn/MiniMax-M3.1-Flash".into()),
+                start_at: T,
+            })?;
+            tx.add_round_session(&key, session)?;
+            Ok(())
+        })
+        .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "pi", AgentStatus::Idle);
+        let mut cfg = crate::EngineCfg::default();
+        cfg.profiles = gear_herdr::builtins();
+        let profiles = gear_herdr::builtins();
+        (s, herdr, cfg, profiles)
+    }
+
+    /// A pi session file: one assistant record per entry; an entry is the
+    /// error text of a record that ended with `stopReason` `error`.
+    fn pi_session(dir: &std::path::Path, records: &[Option<&str>]) -> String {
+        let path = dir.join("session.jsonl");
+        let mut text = String::new();
+        for (index, error) in records.iter().enumerate() {
+            let mut message = serde_json::json!({
+                "role": "assistant",
+                "usage": {"input": 10, "output": 5},
+            });
+            match error {
+                Some(error) => {
+                    message["stopReason"] = serde_json::json!("error");
+                    message["errorMessage"] = serde_json::json!(error);
+                }
+                None => {
+                    message["stopReason"] = serde_json::json!("stop");
+                }
+            }
+            text.push_str(&format!(
+                "{{\"type\":\"message\",\"timestamp\":{},\"message\":{}}}\n",
+                T + index as i64,
+                message
+            ));
+        }
+        std::fs::write(&path, text).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    /// T-629: two refusals in a row on one attempt switch the lane to the
+    /// chain's next model and open one item.
+    #[test]
+    fn refusal_two_in_a_row_switches_the_lane_and_opens_one_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = pi_session(
+            dir.path(),
+            &[
+                Some("Output data may contain inappropriate content"),
+                Some("Output data may contain inappropriate content"),
+            ],
+        );
+        let (mut s, mut herdr, cfg, profiles) = refusal_world(&session);
+        let o = observation(&mut s, false);
+        let (nudged, flagged) = nudge_stopped_lanes(
+            &mut s,
+            &mut herdr,
+            &cfg,
+            &profiles,
+            "p",
+            &[o.clone()],
+            T + 10,
+        )
+        .unwrap();
+        assert_eq!(nudged, vec!["p:heat".to_string()]);
+        assert_eq!(flagged, vec!["p:heat".to_string()]);
+        let plan = crate::restart::pending(&mut s, "p:heat")
+            .unwrap()
+            .expect("a restart plan");
+        assert_eq!(plan.model, "deepseek/deepseek-flash");
+        let items = s
+            .read(|tx| tx.thread_messages("p", "refusal:p:heat"))
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].body.contains("minimax-cn"), "{}", items[0].body);
+        assert!(items[0].body.contains("attempt 1"), "{}", items[0].body);
+        assert!(
+            items[0].body.contains("inappropriate content"),
+            "{}",
+            items[0].body
+        );
+        // No second item on the next tick.
+        nudge_stopped_lanes(
+            &mut s,
+            &mut herdr,
+            &cfg,
+            &profiles,
+            "p",
+            &[o.clone()],
+            T + 20,
+        )
+        .unwrap();
+        assert_eq!(
+            s.read(|tx| tx.thread_messages("p", "refusal:p:heat"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// T-629: one refusal followed by a normal turn does nothing.
+    #[test]
+    fn refusal_one_then_a_normal_turn_does_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = pi_session(
+            dir.path(),
+            &[Some("Output data may contain inappropriate content"), None],
+        );
+        let (mut s, mut herdr, cfg, profiles) = refusal_world(&session);
+        let o = observation(&mut s, false);
+        let (nudged, flagged) = nudge_stopped_lanes(
+            &mut s,
+            &mut herdr,
+            &cfg,
+            &profiles,
+            "p",
+            &[o.clone()],
+            T + 10,
+        )
+        .unwrap();
+        assert!(nudged.is_empty(), "{nudged:?}");
+        assert!(flagged.is_empty(), "{flagged:?}");
+        assert!(crate::restart::pending(&mut s, "p:heat").unwrap().is_none());
+        assert!(s
+            .read(|tx| tx.thread_messages("p", "refusal:p:heat"))
+            .unwrap()
+            .is_empty());
+    }
+
+    /// T-629: no next model opens the item and holds the lane.
+    #[test]
+    fn refusal_with_no_next_model_opens_the_item_and_holds_the_lane() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = pi_session(
+            dir.path(),
+            &[
+                Some("Output data may contain inappropriate content"),
+                Some("Output data may contain inappropriate content"),
+            ],
+        );
+        let (mut s, mut herdr, cfg, profiles) = refusal_world(&session);
+        // The chain has one model: the current one.
+        s.write(|tx| {
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = project.config_toml.replace(
+                r#"lanes = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash"]"#,
+                r#"lanes = ["minimax-cn/MiniMax-M3.1-Flash"]"#,
+            );
+            tx.update_project(&project)
+        })
+        .unwrap();
+        let o = observation(&mut s, false);
+        let (_, flagged) = nudge_stopped_lanes(
+            &mut s,
+            &mut herdr,
+            &cfg,
+            &profiles,
+            "p",
+            &[o.clone()],
+            T + 10,
+        )
+        .unwrap();
+        assert_eq!(flagged, vec!["p:heat".to_string()]);
+        let items = s
+            .read(|tx| tx.thread_messages("p", "refusal:p:heat"))
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].body.contains("no next model"), "{}", items[0].body);
+        let seat = s.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Held);
     }
 
     /// T-612: a lane that is idle, or has no ready task, is not busy.
