@@ -580,6 +580,9 @@ pub fn merge_passed(
     start_bisects(store, herdr, cfg, project, &config, now)?;
     collect_bisects(store, cfg, project)?;
     if let Some(done) = collected {
+        // T-627: a feature's integration task landed: its members' merge
+        // worktree is done.
+        remove_landed_feature_worktrees(store, herdr, project, &config, &done)?;
         merged.extend(done);
         return Ok(merged);
     }
@@ -625,6 +628,9 @@ pub fn merge_passed(
         }
         // The repo the work is in: the repo of the task's lane (T-53).
         let repo = repo_of_op(store, project, &op, &config)?;
+        // T-627: a member of a feature merges into the feature's branch, not
+        // the repo's integration branch: it runs in a worktree of its own.
+        let feature = feature_target(store, project, &op, &config)?;
         // A repo in pull-request mode lands through its pull request
         // (design §11.2): the merge needs the claim's pull request.
         let pr = match pr_claim(store, project, &op, &repo)? {
@@ -674,7 +680,7 @@ pub fn merge_passed(
         // merged into one worktree and gated once. `merge_parallel` is not
         // consulted then; a batch of one op takes the normal single path.
         let batch = config.conventions.merge_batch.max(1) as usize;
-        if pr.is_none() && batch > 1 && !single && !alone {
+        if pr.is_none() && batch > 1 && !single && !alone && feature.is_none() {
             let cap = cfg
                 .merges
                 .batch_cap
@@ -732,7 +738,7 @@ pub fn merge_passed(
                 }
             }
         }
-        if pr.is_none() && parallel > 1 && !single && !alone {
+        if pr.is_none() && parallel > 1 && !single && !alone && feature.is_none() {
             let mut train = vec![op.clone()];
             for later in ready.iter().skip(position + 1) {
                 if train.len() >= parallel {
@@ -794,7 +800,22 @@ pub fn merge_passed(
                 }
             }
         }
-        let worktree =
+        let worktree = if feature.is_some() {
+            // T-627: the feature's own worktree and lock, beside the train.
+            match feature_worktree(store, herdr, &repo, project, &cfg.merges, now) {
+                Ok(worktree) => {
+                    if worktree_in_use(&workers, &worktree.path) {
+                        continue;
+                    }
+                    close_merge_waits(store, project, now)?;
+                    worktree
+                }
+                Err(reason) => {
+                    tell_captain_merge_wait(store, project, &reason, now)?;
+                    return Ok(merged);
+                }
+            }
+        } else {
             match integration_worktree(store, herdr, &repo, project, &config, &cfg.merges, now) {
                 Ok(worktree) => {
                     if worktree_in_use(&workers, &worktree.path) {
@@ -808,7 +829,8 @@ pub fn merge_passed(
                     tell_captain_merge_wait(store, project, &reason, now)?;
                     return Ok(merged);
                 }
-            };
+            }
+        };
         // A merge op the engine recovered (Unknown) runs again: it is
         // Executing while its worker runs, so the completion writes the
         // Submitted result (design §11.2 step 3).
@@ -3277,6 +3299,87 @@ fn integration_worktree(
     stage_worktree(store, herdr, repo, project, config, merges, now, 0)
 }
 
+/// T-627: the label of a feature's merge worktree: `<project>-merge-<feature>`
+/// (the feature's branch's last name), with the repo's name for a child repo.
+fn feature_merge_label(project: &str, repo: &Repo, branch: &str) -> String {
+    let feature = branch.rsplit('/').next().unwrap_or(branch);
+    if repo.name.is_empty() {
+        format!("{project}-merge-{feature}")
+    } else {
+        format!("{project}-merge-{}-{feature}", repo.name)
+    }
+}
+
+/// T-627: the merge worktree of a feature's branch. A member of a feature
+/// merges into the feature's branch, not the repo's integration branch: it
+/// gets a worktree and a lock of its own (`<project>-merge-<feature>`), so it
+/// runs beside the integration train instead of waiting behind its gate. The
+/// worktree holds the feature's branch; the merge resets it to the remote
+/// tip and pushes HEAD back to that branch.
+fn feature_worktree(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    repo: &Repo,
+    project: &str,
+    merges: &MergeWorkers,
+    now: Ts,
+) -> Result<gear_herdr::Worktree, String> {
+    let branch = repo.integration.clone();
+    let label = feature_merge_label(project, repo, &branch);
+    let worktree = match herdr.worktree_open(&repo.path, &branch, &label) {
+        Outcome::Ok(worktree) => worktree,
+        Outcome::Refused { code, .. } if code == "worktree_not_found" => {
+            match herdr.worktree_create(&repo.path, &branch, &branch, &label) {
+                Outcome::Ok(worktree) => worktree,
+                other => return Err(step_failure("worktree_create", &other)),
+            }
+        }
+        other => return Err(step_failure("worktree_open", &other)),
+    };
+    crate::onboard::check_worktree(store, project, "merge", &repo.path, &worktree.path, now)?;
+    if !merges.hook_cleaned(&worktree.path) {
+        crate::onboard::forget_gear_hooks(std::path::Path::new(&worktree.path))?;
+        merges.hook_cleaned_now(&worktree.path);
+    }
+    Ok(worktree)
+}
+
+/// T-627: a feature's integration task landed: its members' merge worktree is
+/// done. The worktree is opened by the feature's branch and removed; a
+/// worktree that is not there is nothing to do.
+fn remove_landed_feature_worktrees(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    config: &ProjectConfig,
+    done: &[Merged],
+) -> GearResult<()> {
+    for one in done {
+        let Some(feature) = store.read(|tx| tx.task_branch_override(project, &one.task))? else {
+            continue;
+        };
+        // The integration task's op branch is the feature's branch; a member's
+        // is too, so the base says which one landed.
+        if one.branch != feature {
+            continue;
+        }
+        let Some(row) = store.read(|tx| tx.get_task(project, &one.task))? else {
+            continue;
+        };
+        let own = config.repo_of_task(&row).integration;
+        let base = row.base.as_deref().unwrap_or_default().trim();
+        if base != own {
+            continue;
+        }
+        let repo = config.repo_of_task(&row);
+        let label = feature_merge_label(project, &repo, &feature);
+        if let Outcome::Ok(worktree) = herdr.worktree_open(&repo.path, &feature, &label) {
+            let _ = herdr.worktree_remove(&worktree.workspace_id);
+        }
+    }
+    Ok(())
+}
+
 /// The repo's integration worktree, opened the way every merge opens it (seat
 /// `merge`, `<project>/merge/home`), for a step that is not a merge op (T-585:
 /// a landing merges the captain's records there). It is the same worktree the
@@ -3411,6 +3514,34 @@ fn repo_of_op(
         }
     }
     Ok(repo)
+}
+
+/// T-627: the feature branch a merge targets, when its target is not the
+/// repo's own integration branch. A member of a feature carries `base` = the
+/// feature's branch; the feature's integration task carries its lane's
+/// integration branch. `None` for an ordinary merge.
+fn feature_target(
+    store: &mut Store,
+    project: &str,
+    op: &OpRow,
+    config: &ProjectConfig,
+) -> GearResult<Option<String>> {
+    let Some(task) = op.task.as_deref() else {
+        return Ok(None);
+    };
+    let Some(row) = store.read(|tx| tx.get_task(project, task))? else {
+        return Ok(None);
+    };
+    let Some(base) = row
+        .base
+        .as_deref()
+        .map(str::trim)
+        .filter(|base| !base.is_empty())
+    else {
+        return Ok(None);
+    };
+    let own = config.repo_of_task(&row).integration;
+    Ok((base != own).then(|| base.to_string()))
 }
 
 /// The key of a merge worker: one worker per repo (T-53), so a merge in one
@@ -15972,6 +16103,241 @@ gate = "{project_gate}"
             "the feature's branch is where it was"
         );
         assert!(origin_branches(&scratch.root).contains("heat/t5"));
+    }
+
+    /// T-627: a store with a feature's two members (T-1, T-2) and its
+    /// integration task (T-3). The members merge into the feature's branch
+    /// with the feature's check; the integration task merges the feature's
+    /// branch into dev with the project's gate.
+    fn feature_world(candidate_a: &str, candidate_b: &str, candidate_c: &str) -> Store {
+        let mut store = pair_world(candidate_a, candidate_b);
+        store
+            .write(|tx| {
+                for task in ["T-1", "T-2"] {
+                    let mut row = tx.get_task("p", task)?.unwrap();
+                    row.base = Some("p/feature/f-1".into());
+                    row.gate = Some("true".into());
+                    tx.update_task(&row)?;
+                }
+                tx.insert_task(&gear_store::TaskRow {
+                    repo: None,
+                    base: Some("dev".into()),
+                    gate: Some("true".into()),
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-3".into(),
+                    rank: 3,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: 0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-3", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-3", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-3", 1, 1, candidate_c, "report", 0)?;
+                tx.set_task_branch_override("p", "T-3", "p/feature/f-1")?;
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// The feature's merge worktree: a real checkout of the feature's branch,
+    /// registered with the fake Herdr the way the engine opens it (T-627).
+    fn feature_worktree_on(pair: &Pair, feature: &str) -> PathBuf {
+        sh(&pair.work, "git switch -q dev");
+        let path = pair.root.join("feature-merge");
+        sh(
+            &pair.root,
+            &format!(
+                "git -C {} worktree add -q {} {feature}",
+                pair.work.display(),
+                path.display()
+            ),
+        );
+        path
+    }
+
+    /// T-627: a member of a feature merges into the feature's branch in its
+    /// own worktree while an integration merge holds the integration
+    /// worktree's lock.
+    #[test]
+    fn a_feature_members_merge_runs_beside_an_integration_merge_that_holds_its_lock() {
+        let pair = Pair::new("feature-beside", false);
+        let feature_tip = feature_branch_on(&pair.work, "dev");
+        let feature_path = feature_worktree_on(&pair, "p/feature/f-1");
+        let mut store = feature_world(&pair.a, &pair.b, &feature_tip);
+        pass(&mut store, "T-1", &pair.a, 1);
+        pass(&mut store, "T-3", &feature_tip, 1);
+        let cfg = test_cfg();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let integration = pair.merge_worktree();
+        herdr.add_worktree(
+            "p/merge/between-voyages",
+            &integration.path,
+            &integration.pane_id,
+        );
+        herdr.add_worktree(
+            "p/feature/f-1",
+            &feature_path.to_string_lossy(),
+            "wt-feature:p1",
+        );
+        // The integration merge holds its worktree's lock.
+        let held = merge_lock(Path::new(&integration.path)).unwrap().unwrap();
+
+        ticks(&mut store, &mut herdr, &cfg, 4);
+        drop(held);
+
+        let feature = sh(
+            &pair.root,
+            "git -C origin.git log --format=%s p/feature/f-1",
+        );
+        assert!(
+            feature.contains("merge(T-1)"),
+            "the member landed in the feature branch: {feature}"
+        );
+        assert_eq!(
+            pair.dev_log(),
+            "dev",
+            "dev is untouched by a member's merge"
+        );
+        let integration_op = store
+            .read(|tx| tx.ops_of_kind_in_states("p", OpKind::Merge, &[]))
+            .unwrap()
+            .into_iter()
+            .find(|op| op.task.as_deref() == Some("T-3"))
+            .expect("the integration task's merge is queued");
+        assert_eq!(
+            integration_op.state,
+            OpState::Unknown,
+            "the integration merge waits for its lock: {:?}",
+            integration_op.state
+        );
+        // The feature's worktree was opened under its own label, not the
+        // integration one.
+        let opened = herdr
+            .calls
+            .iter()
+            .find_map(|call| match call {
+                gear_herdr::fake::Call::WorktreeOpen { branch, label, .. }
+                    if branch == "p/feature/f-1" =>
+                {
+                    Some(label.clone())
+                }
+                _ => None,
+            })
+            .expect("the engine opened the feature's merge worktree");
+        assert_eq!(opened, "p-merge-f-1", "the label names the feature");
+    }
+
+    /// T-627: two members of one feature still take turns in its one merge
+    /// worktree.
+    #[test]
+    fn two_members_of_one_feature_take_turns() {
+        let pair = Pair::new("feature-turns", false);
+        let feature_tip = feature_branch_on(&pair.work, "dev");
+        let feature_path = feature_worktree_on(&pair, "p/feature/f-1");
+        let mut store = feature_world(&pair.a, &pair.b, &feature_tip);
+        pass(&mut store, "T-1", &pair.a, 1);
+        pass(&mut store, "T-2", &pair.b, 1);
+        let cfg = test_cfg();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree(
+            "p/feature/f-1",
+            &feature_path.to_string_lossy(),
+            "wt-feature:p1",
+        );
+
+        // One tick: the first member runs, the second waits for the same
+        // worktree.
+        let seen = cfg.merges.progress();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
+        assert!(
+            cfg.merges.wait_progress(seen, WAIT),
+            "the first member's merge reported"
+        );
+        let states: Vec<(String, OpState)> = store
+            .read(|tx| tx.ops_of_kind_in_states("p", OpKind::Merge, &[]))
+            .unwrap()
+            .into_iter()
+            .map(|op| (op.task.unwrap_or_default(), op.state))
+            .collect();
+        assert!(
+            states.iter().any(|(task, state)| task == "T-1"
+                && matches!(state, OpState::Executing | OpState::Submitted)),
+            "the first member ran: {states:?}"
+        );
+        assert!(
+            states
+                .iter()
+                .any(|(task, state)| task == "T-2" && *state == OpState::Intended),
+            "the second member waits: {states:?}"
+        );
+
+        quiet_ticks(&mut store, &mut herdr, &cfg, 6);
+        let feature = sh(
+            &pair.root,
+            "git -C origin.git log --format=%s p/feature/f-1",
+        );
+        assert!(feature.contains("merge(T-1)"), "{feature}");
+        assert!(feature.contains("merge(T-2)"), "{feature}");
+        let states: Vec<(String, OpState)> = store
+            .read(|tx| tx.ops_of_kind_in_states("p", OpKind::Merge, &[]))
+            .unwrap()
+            .into_iter()
+            .map(|op| (op.task.unwrap_or_default(), op.state))
+            .collect();
+        assert!(
+            states.iter().all(|(_, state)| *state == OpState::Confirmed),
+            "both members landed: {states:?}"
+        );
+    }
+
+    /// T-627: the feature's merge worktree is removed when its integration
+    /// task lands.
+    #[test]
+    fn a_landed_feature_integration_task_removes_the_feature_worktree() {
+        let pair = Pair::new("feature-remove", false);
+        let feature_tip = feature_branch_on(&pair.work, "dev");
+        let feature_path = feature_worktree_on(&pair, "p/feature/f-1");
+        let mut store = feature_world(&pair.a, &pair.b, &feature_tip);
+        pass(&mut store, "T-3", &feature_tip, 1);
+        let cfg = test_cfg();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let integration = pair.merge_worktree();
+        herdr.add_worktree(
+            "p/merge/between-voyages",
+            &integration.path,
+            &integration.pane_id,
+        );
+        herdr.add_worktree(
+            "p/feature/f-1",
+            &feature_path.to_string_lossy(),
+            "wt-feature:p1",
+        );
+
+        quiet_ticks(&mut store, &mut herdr, &cfg, 4);
+
+        assert!(
+            pair.dev_log().contains("feature"),
+            "the feature landed on dev: {}",
+            pair.dev_log()
+        );
+        assert!(
+            !herdr.worktree_branches().contains(&"p/feature/f-1"),
+            "the feature's merge worktree is removed: {:?}",
+            herdr.worktree_branches()
+        );
     }
 
     // ----------------------------------------------------------------
