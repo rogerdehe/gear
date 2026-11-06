@@ -2,7 +2,7 @@
 use gear_app::identity::Fingerprint;
 use gear_app::{draft, home, mail, plan, station, Env};
 use gear_model::{AttemptState, ErrorCode, GearCtx, MsgKind, MsgState, SeatRole, TaskState};
-use gear_store::{testing, AttemptRow, AttemptStep, MessageRow, NewMessage, Store};
+use gear_store::{testing, AttemptRow, AttemptStep, MessageRow, NewMessage, Store, VoyageIssueRow};
 
 const T0: i64 = 1_800_000_000;
 const PANE: &str = "w1:p1";
@@ -122,6 +122,67 @@ fn check(store: &mut Store, seconds: i64) -> Vec<String> {
 
 fn item(store: &mut Store, id: &str) -> MessageRow {
     store.read(|tx| tx.get_message("p", id)).unwrap().unwrap()
+}
+
+/// The same apply, confirmed by the user (T-461): the draft carries the flag
+/// and a `confirmed:` line.
+fn apply_confirmed(
+    store: &mut Store,
+    decisions: &str,
+    rid: &str,
+    now: i64,
+) -> gear_model::GearResult<plan::ApplyResult> {
+    let base = store.read(|tx| tx.plan_version("p")).unwrap();
+    let text = format!(
+        "<!-- gear-plan project=p base={base} -->\n# Decisions\n{decisions}\n- 2026-10-27 10:05 confirmed: the goal clause is met | why: the user said land\n"
+    );
+    let mut parsed = draft::parse(&text).unwrap();
+    parsed.confirmed = true;
+    let (env, fp) = captain();
+    plan::apply(store, &env, Some(&fp), None, &parsed, &text, rid, now)
+}
+
+/// A labeled GitHub issue of voyage M2, as the label scan records it (T-645).
+fn labeled_issue(store: &mut Store, number: i64, labeled: i64) {
+    store
+        .write(|tx| {
+            tx.upsert_voyage_issue(&VoyageIssueRow {
+                project: "p".into(),
+                number,
+                milestone: "M2".into(),
+                title: format!("issue {number}"),
+                body_hash: "hash".into(),
+                labeled,
+                first_seen: T0,
+                last_seen: T0,
+            })
+        })
+        .unwrap();
+}
+
+/// The issue's intake item in `state` (T-648: a resolved one defers it).
+fn intake_item(store: &mut Store, number: i64, state: MsgState) {
+    store
+        .write(|tx| {
+            tx.insert_message(&NewMessage {
+                meta: None,
+                project: "p".into(),
+                thread: format!("intake:M2:#{number}"),
+                task: None,
+                attempt: None,
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: "p:captain".into(),
+                kind: MsgKind::System,
+                urgent: false,
+                body: "the issue".into(),
+                reply_to: None,
+                needs_ack: false,
+                state,
+                created: T0,
+            })
+        })
+        .unwrap();
 }
 
 #[test]
@@ -903,4 +964,65 @@ fn a_kept_course_landing_order_still_takes_the_landing() {
 
     apply(&mut store, &lines, "land-again", T0 + 7203).unwrap();
     assert_eq!(item(&mut store, &land).resolved, Some(T0 + 7202));
+}
+
+/// T-648: a labeled issue still pending refuses the landing, even when the
+/// user confirmed it: it is neither planned nor deferred.
+#[test]
+fn a_pending_labeled_issue_refuses_the_land_even_when_confirmed() {
+    let mut store = world("8h", 6);
+    assert!(check(&mut store, 0).is_empty(), "watch the voyage first");
+    for n in 1..=6 {
+        finish(&mut store, n);
+    }
+    labeled_issue(&mut store, 7, 1);
+    let land = check(&mut store, 7200)
+        .into_iter()
+        .find(|id| item(&mut store, id).body.contains("ready to land"))
+        .unwrap();
+    let error = apply_confirmed(
+        &mut store,
+        &format!("- done (1): met | evidence: all 6 tasks merged\n- station {land}: land"),
+        "land-pending",
+        T0 + 7201,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat, "{error:?}");
+    assert!(
+        error
+            .detail
+            .contains("labeled issue(s) #7 are not planned or deferred"),
+        "{error:?}"
+    );
+    assert_eq!(
+        item(&mut store, &land).state,
+        MsgState::Open,
+        "the order stays open"
+    );
+}
+
+/// T-648: a deferred issue lands, and the landing item lists it.
+#[test]
+fn a_deferred_labeled_issue_lands_and_is_listed() {
+    let mut store = world("8h", 6);
+    assert!(check(&mut store, 0).is_empty(), "watch the voyage first");
+    for n in 1..=6 {
+        finish(&mut store, n);
+    }
+    labeled_issue(&mut store, 7, 1);
+    intake_item(&mut store, 7, MsgState::Resolved);
+    let land = check(&mut store, 7200)
+        .into_iter()
+        .find(|id| item(&mut store, id).body.contains("ready to land"))
+        .unwrap();
+    let body = item(&mut store, &land).body;
+    assert!(body.contains("issues: deferred #7"), "{body}");
+    apply(
+        &mut store,
+        &format!("- done (1): met | evidence: all 6 tasks merged\n- station {land}: land"),
+        "land-deferred",
+        T0 + 7201,
+    )
+    .unwrap();
+    assert_eq!(item(&mut store, &land).state, MsgState::Resolved);
 }
