@@ -42,8 +42,21 @@ pub fn holds(tail: &str, text: &str) -> bool {
         .filter(|line| !line.trim().is_empty())
         .collect();
     let start = lines.len().saturating_sub(TAIL_LINES);
-    lines[start..].iter().any(|line| line.contains(&needle))
+    lines[start..]
+        .iter()
+        .any(|line| input_text(line).starts_with(needle.trim_start()))
 }
+
+/// A line with its prompt marker and box border taken off: the text in an
+/// input box starts the line, while the same words inside output do not
+/// (Lawrence M2: `/new` was read as held because the lane's last report named
+/// `admin-web/src/views/studio/new/api.ts`, so it was never typed).
+fn input_text(line: &str) -> &str {
+    line.trim_start_matches(|c: char| c.is_whitespace() || PROMPT_MARKS.contains(&c))
+}
+
+/// The characters a CLI puts before the text in its input box.
+const PROMPT_MARKS: &[char] = &['>', '›', '❯', '»', '│', '┃', '|', '▌', '$'];
 
 #[cfg(test)]
 mod tests {
@@ -65,6 +78,14 @@ mod tests {
     fn only_the_tail_window_counts() {
         let tail = format!("{}\n> \n  ? for shortcuts", "old output\n".repeat(10));
         assert!(!holds(&tail, "Continue T-1: run `gear` first"));
+    }
+
+    #[test]
+    fn a_command_named_inside_output_is_not_held() {
+        let tail = " - Out of scope: admin-web/src/views/studio/new/api.ts still reads PoolEntry[]\n────\n────\n/repo (lane/t128)\n↑79k ↓19k";
+        assert!(!holds(tail, "/new"));
+        assert!(holds("────\n/new\n────\n/repo (lane/t128)", "/new"));
+        assert!(holds("╭───╮\n│ > /new │\n╰───╯", "/new"));
     }
 
     #[test]
