@@ -3,6 +3,7 @@
 Postponed from M6 (2026-11-01, landing): the items M6 did not close, as M6 recorded them.
 
 ## Candidates
+- **A member added to fix a red feature gate opens a new integration task** (Lawrence M2, 2026-11-06: T-96 passed review, went red at the full gate, the captain added member T-106, and the apply made T-107 the F-1 carrier with T-96 waiting on it, so the fix costs a second integration review). A feature whose carrier is accepted and whose merge failed keeps that carrier: the new member merges into the feature branch and the carrier is remerged at the new tip (v0.6.93 takes member merges), with no new task.
 - **A merge-failed item names its queued remerge** (from M6.3 T-628, cut at station M-8318): while a remerge op of the task is Intended or Unknown, the merge-failed item says "remerge queued (O-n)" and offers no second remerge (Lawrence M-921, 2026-11-06).
 
 - Endless thinking — postponed from M5 (2026-10-28, user): pi has a `thinkingBudgets` setting and extension events with an abort signal, so an extension could stop a turn whose thinking passes N tokens; OpenCode has nothing. GEAR's own remedy would be an interrupt plus a new session. Decide only if a kept model shows it.

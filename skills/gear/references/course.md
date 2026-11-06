@@ -52,6 +52,7 @@ The engine rings you for each of these. Answer each the same hour.
 | A lane is busy with no task while work waits | a deadlock: it never idles, so it never gets work | look at its screen; end the turn |
 | Two lanes change the same files | a merge will fail | order the two tasks, or merge one first |
 | A quota stop parked a lane | the lane is stopped for hours | switch it to another model, or let it wait |
+| A reviewer must pick up a fixed account or a changed environment | its agent still runs on the old one | `- restart <reviewer>` under `# Staff`, then `gear plan apply`: its agent exits and starts again in the same pane and worktree, seat and generation kept; a working reviewer restarts right after its verdict |
 | A fail verdict | a reviewer found a problem | §2: rework with the smallest fix, or log and pass |
 | A merge failed | it did not land on the integration branch | `- remerge T-<n>` under `# Staff`, then `gear plan apply`: it retries the accepted candidate (a flaky gate, a push race). A real conflict: merge the integration branch into the task's branch, resolve it there, push, then `- remerge T-<n>`; the remerge merges that branch, which contains the candidate. A genuinely red candidate is a code fix first, in a new task |
 | A merge keeps failing on a cause another task fixes | every round that carries it sends its batchmates back | add `deps: T-<fix>` to the accepted task: its merge waits until the fix lands |

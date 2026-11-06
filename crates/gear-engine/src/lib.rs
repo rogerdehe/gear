@@ -180,6 +180,12 @@ pub struct TickReport {
     pub settle_failed: Vec<String>,
     /// Reviewer seats started this tick (a lane handed a result in).
     pub reviewers: Vec<String>,
+    /// Reviewer seats kept warm this tick (T-630): a `Standby` reviewer
+    /// started so the next review finds a seat.
+    pub warm: Vec<String>,
+    /// Reviewer seats whose agent was exited and started again in place
+    /// (`- restart <reviewer>`, T-630).
+    pub restarted: Vec<String>,
     /// Reviewer seats released this tick (their task left review).
     pub released: Vec<String>,
     /// Reviewer seats released this tick because they run no reviewer
@@ -858,6 +864,18 @@ pub fn tick(
             report.settle_failed.extend(reviews.settle_failed);
             note_slow(report, "review", step);
 
+            // 7a. the reviewer seats stay up (T-630): while the voyage has open
+            //     tasks and is not landed, one reviewer a tick is started in
+            //     `Standby` while the quota has room and no review waits for a
+            //     seat, so the next review finds a warm seat.
+            let step = std::time::Instant::now();
+            if !hours::resting(store, &project, now)? {
+                report.warm.extend(review::keep_reviewer_seats(
+                    store, herdr, cfg, &profiles, &project, now,
+                )?);
+            }
+            note_slow(report, "warm seats", step);
+
             // 7b. a reviewer that stopped before its verdict is told to go on
             //     (L-53); past its nudge budget it is flagged for the captain.
             let step = std::time::Instant::now();
@@ -884,6 +902,15 @@ pub fn tick(
             let releases = release::release_finished_reviews(store, herdr, &project, now)?;
             report.released.extend(releases.released);
             note_slow(report, "release", step);
+
+            // 8b. a reviewer the captain asked to restart (T-630): an idle
+            //     one's agent is exited and started again in the same pane and
+            //     worktree; a working one restarts right after its verdict.
+            let step = std::time::Instant::now();
+            report.restarted.extend(release::restart_reviewers(
+                store, herdr, cfg, &profiles, &project, now,
+            )?);
+            note_slow(report, "restart reviewers", step);
 
             // 8a. retire: a Retiring lane that is idle at a safe point says
             //     goodbye, closes its pane and becomes Retired (T-65).
