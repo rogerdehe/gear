@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1246 -->
+<!-- gear-plan project=gear base=1247 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -9,6 +9,13 @@ eta: 6h
 depart: now
 
 # Decisions
+- station M-8462: land | why: every task of M6.3 is merged on dev (T-629 last, 13:41Z); the six done clauses are met below; released as v0.6.102
+- done (1): met | evidence: F-3 (T-603 pane split, T-604 start in a new pane, T-605 seat rebind and old pane close, T-606 /model in place for pi and Claude) merged into dev with T-621; a failed start leaves the old agent (T-604 tests)
+- done (2): met | evidence: T-607 merged: 15 failed ticks (60 s or more) open one urgent engine-failed item, a good tick resolves it
+- done (3): met | evidence: T-608 merged (gate headroom; warm gate 29-37 s against 80 s); T-609 merged T-572's merge-red item on today's dev
+- done (4): met | evidence: T-610 (a nudge closes itself), T-611 (no captain-only command to a lane), T-612 attempt 2 (a busy lane with no attempt is freed), T-613/T-614 (carried-by never hides a merge), T-616 (a respawned reviewer's first call names its pane) merged
+- done (5): met | evidence: T-617 (an issue closes on its last task's landing), T-618 (a landed voyage's clean worktrees are removed), T-619 (records after a landing merge with no gate) merged
+- done (6): met | evidence: v0.6.88 to v0.6.102 released, installed on this machine, skills reinstalled, both engines restarted after each; Lawrence's and Carthage's captains told through Herdr
 - station M-8462: keep course | why: every task but T-629 is merged; mast finishes it (~40m), hull has nothing left in scope, and the voyage lands after T-629 merges
 - station M-8439: keep course | why: 60m left, 5 must tasks (hull 87m, mast 98m); each is a client fix or a done item, none is cut; the lanes are even, so a move gains nothing; about 40m over the eta, reported to the user with the third-lane offer
 - station M-8433: cut | why: 74m left, mast 130m (T-620 then T-623, T-624, T-626, T-629) and hull 85m; T-626 (15m, init warns on a missing context window) goes to the M7 backlog: since v0.6.90 a missing window reads the CLI's own and never compacts; mast's rest is gear-app and lane_nudge.rs work, hull's rest is merge.rs, so no task moves without moving owns
