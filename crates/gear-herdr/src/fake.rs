@@ -302,6 +302,8 @@ impl FakeHerdr {
     pub fn exit_agent(&mut self, pane: &str) {
         let p = self.panes.get_mut(pane).expect("unknown pane");
         p.agent = None;
+        // A real agent that exits loses its name with it: the pane is a shell.
+        p.name = None;
         p.revision += 1;
     }
 
