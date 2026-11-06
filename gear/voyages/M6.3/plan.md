@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1241 -->
+<!-- gear-plan project=gear base=1242 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 6h
 depart: now
 
 # Decisions
+- station M-8370: keep course | why: the queue holds hull 185m (T-607 then 5) and mast 150m (T-619 then 5) against 151m left; hull's rest is merge.rs and F-3 work, which no move to mast would speed up
 - station M-8349: keep course | why: the queue holds hull 235m (T-605 then 6 tasks) and mast 245m (T-618 then 7) against 180m left; the lanes are even after M-8342, so a move gains nothing; the gap needs a third lane, which is the user's word and was offered
 - station M-8342: move | why: hull holds about 360m (T-630 then 9 tasks) and mast 170m against 204m left; T-612 (30m) and T-629 (45m) move to mast and live in lane_nudge.rs, mast's file, so hull keeps F-3, T-630 and merge.rs; the eta stays and the gap is reported to the user with the third-lane offer
 - 2026-11-06 10:35 hand-fix: (v0.6.92) a commit that writes only the voyage's records merges with the reviewed work; T-604's report commit had refused its accepted merge | why: lanes write their report after the hand-in; remerge T-604
