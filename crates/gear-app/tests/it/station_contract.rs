@@ -132,7 +132,10 @@ fn eta_quarters_ring_once_and_a_newer_station_supersedes_the_one_before() {
     assert_eq!(first.len(), 1);
     let message = item(&mut store, &first[0]);
     assert!(message.body.contains("25% eta"), "{}", message.body);
-    assert_eq!(message.body.lines().count(), 2);
+    // The goal, the station line, and the reminder that a station never
+    // stops the voyage.
+    assert_eq!(message.body.lines().count(), 3);
+    assert!(message.body.contains("A station never stops the voyage"));
     // T-336: the voyage's goal line first, the text of today second.
     assert_eq!(message.body.lines().next(), Some("Your goal, voyage M2: done: ship it · bar: stable · 5 tasks left in the voyage. Judge every decision against it."), "{}", message.body);
     assert!(
@@ -231,7 +234,7 @@ fn three_done_uses_exactly_the_shared_pace_projection_and_slowest_lane() {
     assert_eq!(report.pace(), Some(2.0));
     assert_eq!(report.remaining_estimate_min, Some(90));
     assert_eq!(report.projected_min, Some(60 + 90 * 2));
-    assert_eq!(message.body, format!("Your goal, voyage M2: done: ship it · bar: stable · 2 tasks left in the voyage. Judge every decision against it.\nStation M2 [60 min, 3 done] · elapsed 60m / eta 8h · time left 420m · pace 2.00x · projected finish 240m from departure · tasks left 2 (90m) · lanes heat 180m · slowest lane heat 180m"));
+    assert_eq!(message.body, format!("Your goal, voyage M2: done: ship it · bar: stable · 2 tasks left in the voyage. Judge every decision against it.\nStation M2 [60 min, 3 done] · elapsed 60m / eta 8h · time left 420m · pace 2.00x · projected finish 240m from departure · tasks left 2 (90m) · lanes heat 180m · slowest lane heat 180m\nA station never stops the voyage: keep every lane working; what only the user can do waits for the landing."));
     assert!(check(&mut store, 3601).is_empty());
     let (env, fp) = captain();
     let page = home::build(&mut store, &env, Some(&fp), T0 + 3601).unwrap();
@@ -258,7 +261,7 @@ fn simultaneous_and_missed_checkpoints_coalesce_into_one_line() {
         "{}",
         message.body
     );
-    assert_eq!(message.body.lines().count(), 2);
+    assert_eq!(message.body.lines().count(), 3);
     assert!(
         message
             .body

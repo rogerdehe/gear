@@ -244,6 +244,9 @@ This item stays open until that line.",
         } else {
             body
         };
+        // A station is a mark, never a stop (Carthage, 2026-11-05: its captain
+        // waited at S1 for the user's real sign-ins and test money).
+        let body = format!("{body}\nA station never stops the voyage: keep every lane working; what only the user can do waits for the landing.");
         let message = tx.insert_message(&NewMessage {
             meta: None,
             project: project.into(),

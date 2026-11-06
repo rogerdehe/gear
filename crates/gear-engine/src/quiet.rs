@@ -281,6 +281,107 @@ fn think_notify(
 /// A 15-minute think clock (M4.1): a working lane whose session file grows
 /// while its worktree does not change is asked to stop thinking. The
 /// fingerprint and its clock are persisted per seat across engine restarts.
+/// How long the captain sits idle in a sailing voyage before GEAR reminds it,
+/// and how long before it reminds it again.
+const CAPTAIN_IDLE: i64 = 15 * 60;
+const CAPTAIN_AGAIN: i64 = 30 * 60;
+
+fn captain_idle_key(seat: &str) -> String {
+    format!("engine.quiet.captain_idle.{seat}")
+}
+fn captain_told_key(seat: &str) -> String {
+    format!("engine.quiet.captain_told.{seat}")
+}
+
+/// A voyage never stops on its own (the user, 2026-11-05: Carthage's captain
+/// ended its turn at station S1 to wait for real sign-ins and test money from
+/// the user, and nothing reminded it to go on). When the captain's agent has
+/// sat idle for `CAPTAIN_IDLE` while its voyage still has open tasks, one item
+/// tells it to go on; again after `CAPTAIN_AGAIN` if it is still idle.
+pub fn captain_sailing(
+    store: &mut Store,
+    project: &str,
+    observed: &[SeatObs],
+    now: Ts,
+) -> GearResult<()> {
+    for obs in observed.iter().filter(|o| {
+        o.seat.project == project
+            && o.seat.role == SeatRole::Captain
+            && o.presence == Presence::Present
+    }) {
+        let seat = obs.seat.id.clone();
+        store.write(|tx| {
+            if !obs.idle {
+                tx.delete_meta(&captain_idle_key(&seat))?;
+                return Ok(());
+            }
+            let since = match tx
+                .get_meta(&captain_idle_key(&seat))?
+                .and_then(|v| v.parse::<Ts>().ok())
+            {
+                Some(since) => since,
+                None => {
+                    tx.set_meta(&captain_idle_key(&seat), &now.to_string())?;
+                    return Ok(());
+                }
+            };
+            if now - since < CAPTAIN_IDLE {
+                return Ok(());
+            }
+            let milestone = gear_app::plan::current_voyage(tx, project)?;
+            if milestone.is_empty() {
+                return Ok(());
+            }
+            let left = tx
+                .tasks_live_of_project(project)?
+                .into_iter()
+                .filter(|task| task.milestone.as_deref() == Some(milestone.as_str()))
+                .count();
+            if left == 0 {
+                return Ok(());
+            }
+            if tx
+                .get_meta(&captain_told_key(&seat))?
+                .and_then(|v| v.parse::<Ts>().ok())
+                .is_some_and(|told| now - told < CAPTAIN_AGAIN)
+            {
+                return Ok(());
+            }
+            let thread = format!("sailing:{milestone}");
+            if tx
+                .thread_messages(project, &thread)?
+                .iter()
+                .any(|m| m.state == MsgState::Open)
+            {
+                return Ok(());
+            }
+            tx.insert_message(&NewMessage {
+                meta: None,
+                project: project.into(),
+                thread,
+                task: None,
+                attempt: None,
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: seat.clone(),
+                kind: MsgKind::System,
+                urgent: true,
+                body: format!(
+                    "Voyage {milestone} is sailing ({left} tasks left) and you have been idle for {} min. A voyage never stops on its own: a station is a mark to measure against, never a stop, and what only the user can do (a real sign-in, test money, a browser) is listed for the landing while the voyage goes on. Run `gear`, keep every lane working, and resolve this item.",
+                    (now - since) / 60
+                ),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: now,
+            })?;
+            tx.set_meta(&captain_told_key(&seat), &now.to_string())?;
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
 pub fn thinks(store: &mut Store, project: &str, observed: &[SeatObs], now: Ts) -> GearResult<()> {
     for obs in observed
         .iter()
@@ -1031,6 +1132,102 @@ mod tests {
             messages(&mut s, "quiet-lane:p:heat").is_empty(),
             "declared task waits are not stalled work"
         );
+    }
+
+    /// A captain idle for 15 minutes while its voyage has open tasks is told
+    /// to go on, once per 30 minutes; a busy captain or a finished voyage is
+    /// not (Carthage, 2026-11-05: its captain stopped at station S1).
+    #[test]
+    fn an_idle_captain_of_a_sailing_voyage_is_told_to_go_on() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.write(|tx| {
+            testing::seed_project(tx, "p", "sess", T)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T)?;
+            tx.upsert_voyage(&gear_store::VoyageRow {
+                project: "p".into(),
+                milestone: "M1".into(),
+                title: "v".into(),
+                done: Some("done".into()),
+                bar: Some("FASTEST".into()),
+                eta: Some("4h".into()),
+                departure: Some(T),
+                departure_tasks: Some(1),
+                departure_estimate_min: Some(30),
+                updated: T,
+            })?;
+            tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: "T-1".into(),
+                rank: 1,
+                state: TaskState::Ready,
+                priority: "must".into(),
+                lane: Some("hull".into()),
+                milestone: Some("M1".into()),
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: Some(30),
+                issue: None,
+                updated: T,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+        let captain = |s: &mut Store, idle: bool| SeatObs {
+            seat: s.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap(),
+            presence: Presence::Present,
+            status: Some(if idle {
+                AgentStatus::Idle
+            } else {
+                AgentStatus::Working
+            }),
+            flags: Default::default(),
+            idle,
+            screen: None,
+            session: None,
+        };
+        let items = |s: &mut Store| s.read(|tx| tx.thread_messages("p", "sailing:M1")).unwrap();
+        let obs = captain(&mut s, true);
+        captain_sailing(&mut s, "p", &[obs.clone()], T).unwrap();
+        captain_sailing(&mut s, "p", &[obs.clone()], T + 14 * 60).unwrap();
+        assert!(items(&mut s).is_empty(), "not yet 15 minutes idle");
+        captain_sailing(&mut s, "p", &[obs.clone()], T + 15 * 60).unwrap();
+        let told = items(&mut s);
+        assert_eq!(told.len(), 1);
+        assert!(told[0].body.contains("never stops"), "{}", told[0].body);
+        assert!(told[0].urgent);
+        // Resolved, still idle: not again before 30 minutes.
+        s.write(|tx| {
+            tx.update_message_state(
+                "p",
+                &told[0].id,
+                MsgState::Resolved,
+                None,
+                None,
+                None,
+                T + 16 * 60,
+            )
+        })
+        .unwrap();
+        captain_sailing(&mut s, "p", &[obs.clone()], T + 40 * 60).unwrap();
+        assert_eq!(items(&mut s).len(), 1, "once per 30 minutes");
+        captain_sailing(&mut s, "p", &[obs.clone()], T + 46 * 60).unwrap();
+        assert_eq!(items(&mut s).len(), 2, "again after 30 minutes");
+        // A working captain resets the clock.
+        let busy = captain(&mut s, false);
+        captain_sailing(&mut s, "p", &[busy], T + 47 * 60).unwrap();
+        assert!(s
+            .read(|tx| tx.get_meta(&captain_idle_key("p:captain")))
+            .unwrap()
+            .is_none());
     }
 
     fn observation(s: &mut Store) -> SeatObs {

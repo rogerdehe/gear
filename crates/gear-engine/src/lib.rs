@@ -637,6 +637,7 @@ pub fn tick(
                 now,
             )?;
             store.write(|tx| quiet::tick(tx, cfg, &mut tips_by_repo, &project, now))?;
+            quiet::captain_sailing(store, &project, &observed, now)?;
             note_slow(report, "quiet", step);
 
             // 2. confirm: settle Submitted/Unknown doorbells from view evidence.
