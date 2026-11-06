@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1232 -->
+<!-- gear-plan project=gear base=1233 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -172,4 +172,10 @@ deps: -
 goal: A merge-failed item says when its remerge is queued (Lawrence, 2026-11-06: M-921 merge-failed:T-63 kept `next: remerge T-63` while O-760, the remerge, was Intended behind the running train; the captain's second remerge was refused and it asked why). crates/gear-engine/src/merge.rs: when a remerge op of the task is Intended or Unknown, the open merge-failed item's body ends with "remerge queued (O-n): it runs when the merge running into <branch> ends", and the hint offers no remerge; when the remerge starts, the item says it is running.
 accept: A test in merge.rs `mod tests`: a failed merge then a queued remerge updates the item's body with the queued line; the line is gone once the op runs. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
 estimate: 20
+deps: -
+
+## T-629 [must] lane=hull milestone=M6.3 required
+goal: A provider's content refusal is seen (Lawrence M2, 2026-11-06 09:26-09:31Z: DashScope's content review cut the web lane's output four times, "Output data may contain inappropriate content", because the zh-CN copy named a channel stratum; the lane went idle after each and 12 tasks waited; GEAR noticed nothing). crates/gear-engine (where an idle lane with an open attempt is read, beside lane_nudge.rs or quota.rs): when the seat's session log's last assistant record ended with an error whose text is a content refusal (pi: `stopReason` "error" and an `errorMessage` matching the refusal markers of the profile; add `refusal_markers` to the pi and opencode profiles with "inappropriate content", "content_filter", "data_inspection_failed"), and that happened twice in a row on one attempt, the engine moves the lane to the next model of its chain the way a quota stop does (restart path, the task continues) and opens one captain item naming the provider, the attempt and the marker; with no next model, the item says so and the lane is held.
+accept: Tests with a pi session fixture: two refusals in a row on one attempt switch the lane to the chain's next model and open one item; one refusal followed by a normal turn does nothing; no next model opens the item and holds the lane. Run only `make check CRATE=gear-engine TESTS='test(refusal)'`; the merge gate runs `make gate`.
+estimate: 45
 deps: -
