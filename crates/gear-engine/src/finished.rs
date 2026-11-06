@@ -263,11 +263,19 @@ pub fn reclaim(
             continue;
         }
         left.extend(project_worktrees(&repo.path, project));
-        left.extend(project_branches(
-            &repo.path,
-            &config.conventions.remote,
-            project,
-        ));
+        // The release and staging branches outlive every voyage; the
+        // integration branch is the voyage's and goes with it (a departure
+        // cuts it again from the release branch).
+        let keep = [repo.release.as_str(), config.conventions.staging.as_str()];
+        left.extend(
+            project_branches(&repo.path, &config.conventions.remote, project)
+                .into_iter()
+                .filter(|entry| {
+                    entry
+                        .strip_prefix("branch ")
+                        .is_none_or(|name| !keep.contains(&name))
+                }),
+        );
     }
     left.extend(project_workspaces(project));
     let changed = store.write(|tx| {
@@ -1137,6 +1145,40 @@ gate = "true"
             landed.items(&records_thread("M1")).is_empty(),
             "nothing to tell the captain"
         );
+    }
+
+    /// The project's release branch is never named as a leftover of a landed
+    /// voyage; a voyage's own branch still is.
+    #[test]
+    fn the_reclaim_never_names_the_projects_release_branch() {
+        let mut landed = Landed::new("long-lived");
+        landed
+            .store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = project.config_toml.replace(
+                    "integration = \"dev\"\n",
+                    "integration = \"dev\"\nrelease = \"p/main\"\n",
+                );
+                tx.update_project(&project)
+            })
+            .unwrap();
+        for branch in ["p/main", "p/hull/t9"] {
+            sh(
+                &landed.root.path(),
+                &format!("git -C {} branch {branch} dev", landed.origin.display()),
+            );
+        }
+
+        landed.reclaim(NOW + 600);
+
+        let item = landed
+            .items(RECLAIM_THREAD)
+            .into_iter()
+            .next()
+            .expect("the reclaim names what is left");
+        assert!(item.body.contains("branch p/hull/t9"), "{}", item.body);
+        assert!(!item.body.contains("branch p/main"), "{}", item.body);
     }
 
     /// T-585: a conflicting branch opens one item on thread `records:M1`,

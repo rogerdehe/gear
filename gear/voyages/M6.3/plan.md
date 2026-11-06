@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1223 -->
+<!-- gear-plan project=gear base=1224 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -125,4 +125,10 @@ deps: -
 goal: The captain's skill says how records travel after a landing (with the records task above). skills/gear/references/captain.md, in the landing part: a change that only touches the voyage's folder (plan, report, lessons) after the landing is committed and pushed to the captain's seat branch, and GEAR merges it with no gate; never run the project's full gate for it. One or two lines, nothing else.
 accept: The two lines are in captain.md and `make check` passes. Run only `make check CRATE=gear-app TESTS='test(skill)'`; the merge gate runs `make gate`.
 estimate: 10
+deps: -
+
+## T-622 [must] lane=hull milestone=M6.3 required
+goal: A project's integration branch lives for one voyage: a landing's reclaim deletes it once it is on the release branch, and the next departure cuts it again (Carthage M1: carthage/dev was removed at the reclaim, and nothing would recreate it: every lane, review and merge worktree is created from `origin/<integration>`). crates/gear-engine: before the first worktree of a voyage is created (onboard.rs, review.rs and merge.rs call `worktree_create(..., &repo.integration, ...)`), when `refs/remotes/<remote>/<integration>` is missing after the fetch, push `<remote>/<release>` to `refs/heads/<integration>` once, fetch again and tell the captain in one Info item ("<integration> was missing; cut from <release> at <sha>"). An integration branch equal to the release branch is never created or deleted. In crates/gear-engine/src/finished.rs `reclaim`, the integration branch is named only when its tip is on the release branch (otherwise it holds unreleased work: it is named with "not on <release>" and kept).
+accept: Tests with a temp repo: a missing integration branch is cut from release before the first lane worktree and the item names the sha; a present one is untouched; the reclaim names an integration branch whose tip is on release and keeps one with extra commits. Run only `make check CRATE=gear-engine TESTS='test(onboard::) | test(finished::)'`; the merge gate runs `make gate`.
+estimate: 45
 deps: -
