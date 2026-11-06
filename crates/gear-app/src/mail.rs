@@ -588,7 +588,27 @@ fn send_inner(
             } else if args.kind == MsgKind::Result {
                 let result_task = task.as_deref().ok_or_else(|| GearError::new(ErrorCode::BadFormat, "a result needs `--task`"))?;
                 let result_attempt = args.attempt.ok_or_else(|| GearError::new(ErrorCode::BadFormat, "a result needs `--attempt`"))?;
-                let owner = tx.get_attempt(&ctx.project, result_task, result_attempt)?.ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no attempt {result_attempt} of task {result_task}")))?;
+                let owner = match tx.get_attempt(&ctx.project, result_task, result_attempt)? {
+                    Some(owner) => owner,
+                    None => {
+                        // T-778: a task that is ready for this lane but has no
+                        // attempt yet has not been delivered. The lane should
+                        // end its turn; GEAR delivers it when it is idle.
+                        return Err(if not_delivered(tx, &ctx.project, result_task, &seat)? {
+                            GearError::new(
+                                ErrorCode::NoTarget,
+                                format!(
+                                    "{result_task} is not delivered yet: end your turn; GEAR delivers it when you are idle"
+                                ),
+                            )
+                        } else {
+                            GearError::new(
+                                ErrorCode::NoTarget,
+                                format!("no attempt {result_attempt} of task {result_task}"),
+                            )
+                        });
+                    }
+                };
                 if owner.seat != seat.id || (owner.state == AttemptState::Delivered && owner.generation != ctx.generation) {
                     return Err(GearError::new(ErrorCode::Forbidden, format!("attempt {result_attempt} of task {result_task} is not owned by this seat and generation")));
                 }
@@ -1306,6 +1326,20 @@ fn rework_waiting(
     }))
 }
 
+/// Whether `task` is ready for this lane and has no attempt yet: the lane has
+/// not been given it (T-778). A `gear send` for it says what to do instead of
+/// a bare NO_TARGET.
+fn not_delivered(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    seat: &gear_store::SeatRow,
+) -> GearResult<bool> {
+    Ok(tx.get_task(project, task)?.is_some_and(|row| {
+        row.state == TaskState::Ready && row.lane.as_deref() == Some(seat.name.as_str())
+    }))
+}
+
 /// A declared wait (design §5.3): the lane's task cannot finish until another
 /// task lands, or until something outside GEAR is done (a CI run, evidence
 /// the captain must fix) (T-440).
@@ -1331,12 +1365,27 @@ fn declare_wait(
     body: &str,
     now: Ts,
 ) -> GearResult<()> {
-    let attempt_row = tx.get_attempt(project, task, attempt)?.ok_or_else(|| {
-        GearError::new(
-            ErrorCode::NoTarget,
-            format!("no attempt {attempt} of task {task} in project {project}"),
-        )
-    })?;
+    let attempt_row = match tx.get_attempt(project, task, attempt)? {
+        Some(row) => row,
+        None => {
+            // T-778: a task that is ready for this lane but has no attempt yet
+            // has not been delivered; say what to do instead of a bare
+            // NO_TARGET.
+            return Err(if not_delivered(tx, project, task, seat)? {
+                GearError::new(
+                    ErrorCode::NoTarget,
+                    format!(
+                        "{task} is not delivered yet: end your turn; GEAR delivers it when you are idle"
+                    ),
+                )
+            } else {
+                GearError::new(
+                    ErrorCode::NoTarget,
+                    format!("no attempt {attempt} of task {task} in project {project}"),
+                )
+            });
+        }
+    };
     if attempt_row.seat != seat.id {
         return Err(GearError::new(
             ErrorCode::Forbidden,

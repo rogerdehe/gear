@@ -1174,6 +1174,14 @@ pub fn project_for(
                 .iter()
                 .any(|lane| lane.tasks.iter().any(|task| !task.state.is_terminal())) =>
         {
+            // A dependency on a cancelled task is no wait: plan apply drops it
+            // for dispatch, and the forecast drops it too (Lawrence M2: T-72).
+            let cancelled: std::collections::BTreeSet<&str> = lanes
+                .iter()
+                .flat_map(|lane| lane.tasks.iter())
+                .filter(|task| task.state == TaskState::Cancelled)
+                .map(|task| task.id.as_str())
+                .collect();
             let jobs: Vec<forecast::Job> = lanes
                 .iter()
                 .flat_map(|lane| {
@@ -1188,7 +1196,12 @@ pub fn project_for(
                             stage: task.stage,
                             est_min: task.est_min.unwrap_or(0),
                             actual_min: task.actual_min.unwrap_or(0),
-                            deps: task.deps.clone(),
+                            deps: task
+                                .deps
+                                .iter()
+                                .filter(|dep| !cancelled.contains(dep.as_str()))
+                                .cloned()
+                                .collect(),
                         })
                 })
                 .collect();

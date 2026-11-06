@@ -887,11 +887,7 @@ fn expected_of(used: i64, ends: &[forecast::LaneEnd]) -> (i64, Option<String>) {
     let expected = reachable.max().map(|end| used + end).unwrap_or(used);
     // The forecast of the lanes that can reach the branch is the whole
     // forecast: a blocked job only speaks when there is one.
-    let blocked: Vec<&(String, String)> = ends
-        .iter()
-        .filter(|end| end.end_min >= forecast::NO_DEP)
-        .flat_map(|end| end.blocked.iter())
-        .collect();
+    let blocked: Vec<&(String, String)> = ends.iter().flat_map(|end| end.blocked.iter()).collect();
     let Some((task, dep)) = blocked.first() else {
         return (expected, None);
     };
