@@ -49,6 +49,13 @@ pub enum Call {
     PaneClose {
         pane: String,
     },
+    /// Herdr `pane.split` (T-603): the pane split, the direction and the cwd
+    /// of the new pane's shell.
+    PaneSplit {
+        pane: String,
+        direction: String,
+        cwd: String,
+    },
     PaneType {
         pane: String,
         text: String,
@@ -295,6 +302,8 @@ impl FakeHerdr {
     pub fn exit_agent(&mut self, pane: &str) {
         let p = self.panes.get_mut(pane).expect("unknown pane");
         p.agent = None;
+        // A real agent that exits loses its name with it: the pane is a shell.
+        p.name = None;
         p.revision += 1;
     }
 
@@ -365,6 +374,19 @@ impl FakeHerdr {
             path,
             branch: branch.into(),
         }
+    }
+
+    /// The next free pane id in `pane`'s workspace (`w1:p1` → `w1:p2`).
+    fn next_pane_id(&self, pane: &str) -> String {
+        let workspace = pane.split(':').next().unwrap_or(pane);
+        let prefix = format!("{workspace}:p");
+        let mut next = 1;
+        for id in self.panes.keys() {
+            if let Some(n) = id.strip_prefix(&prefix).and_then(|n| n.parse::<u32>().ok()) {
+                next = next.max(n + 1);
+            }
+        }
+        format!("{workspace}:p{next}")
     }
 
     fn act<T>(&mut self, call: Call, ok: impl FnOnce(&mut Self) -> Outcome<T>) -> Outcome<T> {
@@ -773,6 +795,29 @@ impl HerdrAct for FakeHerdr {
         )
     }
 
+    fn pane_split(&mut self, pane_id: &str, direction: &str, cwd: &str) -> Outcome<String> {
+        let pane = pane_id.to_string();
+        self.act(
+            Call::PaneSplit {
+                pane: pane_id.into(),
+                direction: direction.into(),
+                cwd: cwd.into(),
+            },
+            move |s| {
+                if !s.panes.contains_key(&pane) {
+                    return Outcome::Refused {
+                        code: "pane_not_found".into(),
+                        message: format!("no pane {pane}"),
+                    };
+                }
+                let new_pane = s.next_pane_id(&pane);
+                // A split pane starts as a shell: no agent in it.
+                s.add_shell(&new_pane);
+                Outcome::Ok(new_pane)
+            },
+        )
+    }
+
     fn set_title(&mut self, pane_id: &str, title: &str) -> Outcome<()> {
         self.act(
             Call::SetTitle {
@@ -973,6 +1018,47 @@ mod tests {
             h.tab_rename("w1:t9", "p board"),
             Outcome::Refused { .. }
         ));
+    }
+
+    #[test]
+    fn pane_split_creates_a_shell_pane_and_records_the_call() {
+        let mut h = FakeHerdr::new();
+        h.add_agent_named("w1:p1", "pi", AgentStatus::Idle, "p-heat");
+        let Outcome::Ok(new_pane) = h.pane_split("w1:p1", "right", "/worktrees/t603") else {
+            panic!("a split of a known pane must name the new pane");
+        };
+        assert_eq!(new_pane, "w1:p2");
+        assert!(
+            h.agent_get(&new_pane).unwrap().is_none(),
+            "the new pane holds a shell, no agent"
+        );
+        assert_eq!(
+            h.calls,
+            vec![Call::PaneSplit {
+                pane: "w1:p1".into(),
+                direction: "right".into(),
+                cwd: "/worktrees/t603".into(),
+            }]
+        );
+        // A second split takes the next id, and an unknown pane is refused.
+        assert_eq!(
+            h.pane_split("w1:p1", "down", "/x"),
+            Outcome::Ok("w1:p3".into())
+        );
+        assert!(matches!(
+            h.pane_split("w9:p1", "right", "/x"),
+            Outcome::Refused { .. }
+        ));
+        // An injected failure is Uncertain and creates no pane.
+        h.inject_next = Some(Inject::Uncertain);
+        assert!(matches!(
+            h.pane_split("w1:p1", "right", "/x"),
+            Outcome::Uncertain { .. }
+        ));
+        assert!(
+            !h.panes().unwrap().contains(&"w1:p4".to_string()),
+            "an uncertain split created no pane"
+        );
     }
 
     #[test]

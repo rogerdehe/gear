@@ -58,6 +58,12 @@ fn release_line(seat: &SeatRow, from: SeatState, reason: &str, caller: &str) -> 
     )
 }
 
+/// One line in the engine log from a step that is not a release (T-607):
+/// the engine's own failure bookkeeping logs a store write that failed.
+pub(crate) fn log_line(line: String) {
+    log_release(line);
+}
+
 fn log_release(line: String) {
     RELEASE_LOG.with(|lines| {
         let mut lines = lines.borrow_mut();

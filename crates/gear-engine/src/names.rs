@@ -169,14 +169,64 @@ pub fn live_of_role(
         .filter(|seat| except.is_none_or(|except| except != seat.id))
         .map(desired)
         .collect();
+    // T-605: the old pane of a seat's own CLI switch is not a live agent of
+    // the quota while the plan runs; it belongs to the switch.
+    let switching = switching_old_panes(store, project);
     names
         .into_iter()
+        .filter(|(pane, _)| !switching.iter().any(|old| old == pane))
         .filter(|(_, name)| {
             name.as_deref()
                 .is_some_and(|name| wanted.iter().any(|wanted| wanted == name))
         })
         .map(|(pane, _)| pane)
         .collect()
+}
+
+/// The old panes of the seats' own CLI switches (T-605): while a split restart
+/// plan runs, the old agent's pane belongs to the seat's switch — it is not a
+/// live agent of the lane or temp quota, and no sweep closes it as a stray.
+pub(crate) fn switching_old_panes(store: &mut Store, project: &str) -> Vec<String> {
+    let mut panes = Vec::new();
+    let Ok(seats) = store.read(|tx| tx.seats_of_project(project)) else {
+        return panes;
+    };
+    for seat in seats {
+        let Ok(Some(plan)) = crate::restart::pending(store, &seat.id) else {
+            continue;
+        };
+        if plan.new_pane.is_none() {
+            continue;
+        }
+        let generation = if plan.old_generation > 0 {
+            plan.old_generation
+        } else {
+            plan.generation.saturating_sub(1)
+        };
+        let Ok(Some(binding)) = store.read(|tx| tx.get_binding(&seat.id, generation)) else {
+            continue;
+        };
+        panes.push(binding.pane_id);
+    }
+    panes
+}
+
+/// Whether the seat's name moves to another pane later in this switch (T-605):
+/// until the Finish phase has moved it, the name pass must not rename the new
+/// pane and report the old pane as a holder.
+fn name_moves_later(store: &mut Store, seat: &str) -> bool {
+    match crate::restart::pending(store, seat) {
+        Ok(Some(plan)) => {
+            plan.new_pane.is_some()
+                && matches!(
+                    plan.phase,
+                    crate::restart::Phase::Split
+                        | crate::restart::Phase::Start
+                        | crate::restart::Phase::Finish
+                )
+        }
+        _ => false,
+    }
 }
 
 /// Every seat whose binding is `pane`, with when that binding was made, across
@@ -315,6 +365,12 @@ pub fn restore(
     // back before another asks. The order stays as the store gives it.
     let mut names = names.clone();
     for seat in seats {
+        // T-605: a CLI switch moves the seat's name to its new pane in the
+        // Finish phase; until then the old pane holds it and the new one
+        // carries a temporary name, so the pass leaves the seat alone.
+        if name_moves_later(store, &seat.id) {
+            continue;
+        }
         let Some(binding) = store.read(|tx| tx.get_binding(&seat.id, seat.generation))? else {
             continue;
         };

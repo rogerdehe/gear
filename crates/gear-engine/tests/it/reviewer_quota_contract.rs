@@ -15,7 +15,7 @@ use gear_engine::observe::{Presence, SeatObs};
 use gear_engine::quota::apply_quota_policy;
 use gear_engine::EngineCfg;
 use gear_herdr::fake::{Call, FakeHerdr};
-use gear_herdr::{AgentStatus, ScreenFlag};
+use gear_herdr::{AgentStatus, HerdrRead, ScreenFlag};
 use gear_model::{AttemptState, MsgState, OpKind, OpState, SeatRole, SeatState, TaskState};
 use gear_store::{testing, ContractRow, SeatRow, Store, TaskRow};
 
@@ -278,48 +278,41 @@ fn a_spent_codex_reviewer_is_restarted_on_the_review_fallback() {
         "nothing is closed on the first tick"
     );
 
-    // The limit is confirmed: the Codex agent is told to exit.
-    let report = tick(&mut store, &mut herdr, true, T0 + 20);
-    assert!(report.events.is_empty(), "{:?}", report.events);
-    let exit_command = gear_herdr::builtin("codex").unwrap().exit_command;
-    // M4 §12 item 4: codex exits with the typed `/quit`, not with keys.
-    assert_eq!(
-        exit_prompts(&herdr),
-        vec![exit_command.unwrap_or_default()],
-        "{:?}",
-        herdr.calls
-    );
-    assert!(exits(&herdr).is_empty(), "no exit keys for codex any more");
-    assert!(
-        starts(&herdr).is_empty(),
-        "nothing starts before the pane is a shell"
-    );
-    assert!(
-        gear_engine::restart::pending(&mut store, "p:r-1")
-            .unwrap()
-            .is_some(),
-        "the restart is durable"
-    );
-    // The seat leaves the doorbell's reach before its agent goes.
-    assert_eq!(reviewer(&mut store).state, SeatState::Missing);
-
-    // The agent leaves: OpenCode starts in the same pane on the fallback model
-    // and the reviewer gets its packet again.
-    herdr.exit_agent(REVIEW_PANE);
-    // T-531: the start makes the session and the model gate reads it; the bar
-    // confirms, so no key is typed.
+    // The limit is confirmed: the restart runs. T-604: a pane is split for
+    // OpenCode, which starts there on the fallback model; the old codex agent
+    // keeps its pane (T-605 exits it). T-531: the start makes the session and
+    // the model gate reads it; the bar confirms, so no key is typed.
     herdr.api_replies.extend([
         Ok(serde_json::json!({"data":[{"providerID":"opencode-go", "id":"deepseek-v4-pro", "variants":[]}]})),
         Ok(serde_json::json!({"data":{"id":"ses_review", "model":{"providerID":"opencode-go", "id":"deepseek-v4-pro"}}})),
         Ok(serde_json::json!({"data":[{"providerID":"opencode-go", "id":"deepseek-v4-pro", "variants":[]}]})),
         Ok(serde_json::json!({"data":{"model":{"providerID":"opencode-go", "id":"deepseek-v4-pro"}}})),
     ]);
-    let report = tick(&mut store, &mut herdr, false, T0 + 30);
+    let report = tick(&mut store, &mut herdr, true, T0 + 20);
+    // T-605: the seat is rebound and the packet delivered; the old agent is
+    // told to quit and its pane is closed last, so the restart is not done yet.
+    assert!(report.events.is_empty(), "{:?}", report.events);
+    assert!(exits(&herdr).is_empty(), "no exit keys for codex");
+    assert_eq!(
+        exit_prompts(&herdr),
+        vec!["/quit".to_string()],
+        "the old agent is told to quit: {:?}",
+        herdr.calls
+    );
+    assert!(
+        herdr.agent_get(REVIEW_PANE).unwrap().is_some(),
+        "the old agent is still there until it leaves"
+    );
+    let plan = gear_engine::restart::pending(&mut store, "p:r-1")
+        .unwrap()
+        .expect("the plan waits for the old pane's close");
+    assert_eq!(plan.phase, gear_engine::restart::Phase::Close, "{plan:?}");
 
     let started = starts(&herdr);
     assert_eq!(started.len(), 1, "{started:?}");
     assert_eq!(started[0].0, "opencode", "the CLI of the fallback entry");
-    assert_eq!(started[0].1, REVIEW_PANE, "the same pane");
+    let split_pane = started[0].1.clone();
+    assert_ne!(split_pane, REVIEW_PANE, "the old agent keeps its pane");
     assert_eq!(
         started[0].2,
         vec![
@@ -344,19 +337,12 @@ fn a_spent_codex_reviewer_is_restarted_on_the_review_fallback() {
         .unwrap()
         .unwrap();
     assert_eq!(binding.kind, "opencode");
-    assert_eq!(binding.pane_id, REVIEW_PANE);
+    assert_eq!(binding.pane_id, split_pane);
     assert_eq!(
         binding.status,
         gear_store::BindingStatus::Active,
         "the new agent is up before the packet goes"
     );
-    assert_eq!(report.events.len(), 1, "{:?}", report.events);
-    assert!(
-        report.events[0].contains("restarted on opencode"),
-        "{:?}",
-        report.events
-    );
-
     // The job travels with the seat: a full review packet for the same task
     // and attempt, not the lane's "Continue T-n".
     let packet = store
@@ -385,6 +371,30 @@ fn a_spent_codex_reviewer_is_restarted_on_the_review_fallback() {
     assert!(
         !text.contains("Continue T-7"),
         "not a lane's continue line: {text}"
+    );
+
+    // The old agent leaves: its pane is closed last and the restart ends.
+    herdr.exit_agent(REVIEW_PANE);
+    let report = tick(&mut store, &mut herdr, true, T0 + 30);
+    assert_eq!(report.events.len(), 1, "{:?}", report.events);
+    assert!(
+        report.events[0].contains("restarted on opencode"),
+        "{:?}",
+        report.events
+    );
+    assert!(
+        herdr
+            .calls
+            .iter()
+            .any(|call| matches!(call, Call::PaneClose { pane } if pane == REVIEW_PANE)),
+        "the old pane is closed last: {:?}",
+        herdr.calls
+    );
+    assert!(
+        gear_engine::restart::pending(&mut store, "p:r-1")
+            .unwrap()
+            .is_none(),
+        "the plan is cleared"
     );
 
     // The captain hears about the move in an information line.

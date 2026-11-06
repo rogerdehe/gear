@@ -1,30 +1,34 @@
-//! Changing an agent's model **in place** (T-33): the OpenCode session's own
-//! API (`session.switchModel`), then the status bar must show the wanted
-//! model. No exit, no restart: the conversation stays. No key is typed at all
-//! (T-531): `/model`, the picker filter and the variant dialog write the
-//! variant and the recent list into `~/.local/state/opencode/model.json`, the
-//! default of every OpenCode session on the machine, which is not the seat's
-//! own change to make.
+//! Changing an agent's model **in place** (T-33, T-606). OpenCode is switched
+//! through its session's own API (`session.switchModel`), then the status bar
+//! must show the wanted model; no key is typed at all (T-531): `/model`, the
+//! picker filter and the variant dialog write the variant and the recent list
+//! into `~/.local/state/opencode/model.json`, the default of every OpenCode
+//! session on the machine, which is not the seat's own change to make. pi and
+//! Claude Code are switched by typing `/model <id>` into their own input and
+//! pressing Enter, then their footer must show the model. In every case no
+//! exit, no restart: the conversation stays.
 //!
 //! The switch is a **state machine across ticks** (review F2/F3/F6): the plan
-//! (the status-bar text to reach) is stored in the seat's meta *before* the
-//! first API call, the whole visible screen is re-read before every request,
-//! and a slow service or render gets a tick to answer instead of burning a
-//! failed attempt. An engine restart mid-switch resumes the plan instead of
-//! asking the service blindly.
+//! (the status-bar or footer text to reach) is stored in the seat's meta
+//! *before* the first request or key, the whole visible screen is re-read
+//! before every step, and a slow service or render gets a tick to answer
+//! instead of burning a failed attempt. An engine restart mid-switch resumes
+//! the plan instead of asking the service or typing blindly.
 //!
 //! Never calls into a working agent (review F8): the pane's occupant and status
-//! are read again immediately before any request; a stale `idle` from this
-//! tick's observation is not trusted.
+//! are read again immediately before any request or key; a stale `idle` from
+//! this tick's observation is not trusted.
 //!
-//! Only the OpenCode protocol is implemented: it is the one the SOP
-//! (`gear --skill agent:opencode`, ops/bin/switch-model.sh) verifies, and
-//! guessing another CLI's picker is worse than flagging the seat (P2). A CLI
-//! without a picker GEAR drives (pi) is not switched here at all: the caller
-//! starts it again on the next model ([`crate::restart`]).
+//! Three protocols are driven (T-606): OpenCode's session API (the one the SOP
+//! `gear --skill agent:opencode`, ops/bin/switch-model.sh, verifies), and the
+//! typed `/model <id>` command of pi and Claude Code, whose footer then shows
+//! the model. Codex keeps the restart: its `/model` opens a picker with no
+//! argument form GEAR can drive yet. A CLI without any of these is not
+//! switched here at all: the caller starts it again on the next model
+//! ([`crate::restart`]).
 
 use gear_app::config::ModelSwitch;
-use gear_herdr::{HerdrAct, Profile};
+use gear_herdr::{HerdrAct, Outcome, Profile};
 use gear_model::{GearResult, Ts};
 use gear_store::Store;
 
@@ -58,25 +62,32 @@ pub enum SwitchOutcome {
     Failed,
 }
 
-/// Can GEAR change this CLI's model **in place** (T-33)? Only OpenCode's
-/// protocol is driven today: the picker, the variant dialog and the status
-/// bar (SOP `gear --skill agent:opencode`).
+/// Can GEAR change this CLI's model **in place** (T-33, T-606)? OpenCode's
+/// session API (SOP `gear --skill agent:opencode`), and the typed
+/// `/model <id>` command of pi and Claude Code, whose footer shows the model.
 ///
-/// A CLI without a picker GEAR drives (pi) is **not** switched in place: it is
-/// closed and started again on the next model ([`crate::restart`]), the same
-/// pane and worktree, the lane's task delivered again in the new session.
+/// Codex is **not** switched in place: its `/model` opens a picker with no
+/// argument form GEAR can drive yet, so it is closed and started again on the
+/// next model ([`crate::restart`]), the same pane and worktree, the lane's
+/// task delivered again in the new session.
 pub fn switches_in_place(kind: &str) -> bool {
-    kind == "opencode"
+    matches!(kind, "opencode" | "pi" | "claude")
 }
 
-/// The one step a plan has left (T-531): the service accepted the target, so
-/// the switch waits for `session.get` and the TUI bar. The stored text stays
-/// `api-confirm`: a plan written by an earlier binary with a typed step
-/// (`escape`, `command`, `filter`, `variant`, `confirm`) no longer parses and
-/// is dropped.
+/// A CLI GEAR switches by typing `/model <id>` into its own input (T-606).
+fn typed_command(kind: &str) -> bool {
+    matches!(kind, "pi" | "claude")
+}
+
+/// The one step a plan has left (T-531, T-606): the switch was asked for, so
+/// it waits for its confirmation — `session.get` and the TUI bar for OpenCode,
+/// the footer showing the model for pi and Claude. The stored text stays
+/// `api-confirm` for every kind: a plan written by an earlier binary with a
+/// typed step (`escape`, `command`, `filter`, `variant`, `confirm`) no longer
+/// parses and is dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
-    /// Service accepted the target; wait for session.get and the TUI bar.
+    /// The switch was asked for; wait for its confirmation.
     ApiConfirm,
 }
 
@@ -297,13 +308,14 @@ pub fn begin(
     Ok(Ok(()))
 }
 
-/// Switch a seat's OpenCode agent through the session API alone (T-531): the
-/// model is set with `session.switchModel` and the status bar confirms it; no
-/// key is ever typed into the pane. A durable plan prevents dispatch while a
-/// TUI render lags, including across an engine restart.
+/// Switch a seat's agent in place: OpenCode through the session API alone
+/// (T-531), pi and Claude by typing `/model <id>` (T-606). The status bar or
+/// footer confirms it. A durable plan prevents dispatch while a TUI render
+/// lags, including across an engine restart.
 ///
-/// Nothing here falls back to keys: a seat the service cannot switch is
-/// `Failed` and the caller flags it.
+/// Nothing here falls back to keys for OpenCode: a seat its service cannot
+/// switch is `Failed` and the caller flags it. A pi or Claude command that
+/// does not confirm twice is `Failed` too, and the caller restarts the seat.
 pub fn switch_model(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -315,8 +327,9 @@ pub fn switch_model(
     now: Ts,
 ) -> GearResult<SwitchOutcome> {
     let _ = now;
-    // (3) Only OpenCode's session API is driven: any other kind fails with
-    // nothing sent, as the in-place switch always did for it.
+    // (3) Only the kinds GEAR drives a protocol for are switched in place: any
+    // other kind fails with nothing sent, as the in-place switch always did
+    // for it.
     if !switches_in_place(&profile.kind) {
         clear_pending(store, seat_id)?;
         return Ok(SwitchOutcome::Failed);
@@ -344,12 +357,6 @@ pub fn switch_model(
         clear_pending(store, seat_id)?;
         return Ok(SwitchOutcome::Failed);
     };
-    // (1) A binding with no service session cannot be switched through the
-    // API, and nothing is typed for it any more.
-    let Some(session) = binding.session_ref.as_deref().filter(|id| !id.is_empty()) else {
-        clear_pending(store, seat_id)?;
-        return Ok(SwitchOutcome::Failed);
-    };
     // Herdr can report a launch-pending/unknown agent before the TUI is ready.
     // Record the wait now so onboarding resumes it on the following tick.
     let mut plan = resumed
@@ -362,6 +369,27 @@ pub fn switch_model(
             waited: 0,
         });
     set_pending(store, seat_id, &plan)?;
+    // T-606: pi and Claude take the model as a typed command; their pane is
+    // all that is needed, no service session.
+    if typed_command(&profile.kind) {
+        return switch_by_command(
+            store,
+            herdr,
+            seat_id,
+            profile,
+            labels,
+            model,
+            resumed.is_some(),
+            &binding.pane_id,
+            plan,
+        );
+    }
+    // (1) A binding with no service session cannot be switched through the
+    // API, and nothing is typed for it any more.
+    let Some(session) = binding.session_ref.as_deref().filter(|id| !id.is_empty()) else {
+        clear_pending(store, seat_id)?;
+        return Ok(SwitchOutcome::Failed);
+    };
     match herdr.agent_get(&binding.pane_id) {
         Ok(Some(info)) if info.agent.as_deref() == Some("opencode") => {
             if !matches!(
@@ -468,6 +496,102 @@ pub fn switch_model(
     Ok(SwitchOutcome::Waiting)
 }
 
+/// Switch a pi or Claude seat by typing `/model <id>` into its own input
+/// (T-606): the command goes in as one typed line and one Enter, and the
+/// footer showing the model's bar label confirms it within [`WAIT_TICKS`].
+/// Two tries without a confirmation are `Failed`: the caller falls back to the
+/// restart ([`crate::restart`]).
+fn switch_by_command(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat_id: &str,
+    profile: &Profile,
+    labels: &ModelSwitch,
+    model: &str,
+    resumed: bool,
+    pane: &str,
+    mut plan: Pending,
+) -> GearResult<SwitchOutcome> {
+    // Never types into a working agent: the pane's occupant and status are
+    // read again right now, as for OpenCode.
+    match herdr.agent_get(pane) {
+        Ok(Some(info)) if info.agent.as_deref() == Some(profile.kind.as_str()) => {
+            if !matches!(
+                info.agent_status,
+                gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done
+            ) {
+                return wait_for_agent(store, seat_id, &mut plan);
+            }
+        }
+        Ok(_) => return wait_for_agent(store, seat_id, &mut plan),
+        Err(_) => return Ok(SwitchOutcome::Waiting),
+    }
+    let Ok(screen) = herdr.read_screen(pane) else {
+        return Ok(SwitchOutcome::Waiting);
+    };
+    if footer_confirmed(&screen, &labels.bar, profile.tail_lines) {
+        clear_pending(store, seat_id)?;
+        return Ok(if resumed {
+            SwitchOutcome::Done
+        } else {
+            SwitchOutcome::Already
+        });
+    }
+    // The first try: the command goes in once.
+    if plan.tries == 0 {
+        if !type_command(herdr, pane, model) {
+            return wait_for_agent(store, seat_id, &mut plan);
+        }
+        plan.tries = 1;
+        plan.waited = 0;
+        set_pending(store, seat_id, &plan)?;
+        return Ok(SwitchOutcome::Waiting);
+    }
+    // A command was typed: give the footer [`WAIT_TICKS`] ticks to show it.
+    if plan.waited < WAIT_TICKS {
+        plan.waited += 1;
+        set_pending(store, seat_id, &plan)?;
+        return Ok(SwitchOutcome::Waiting);
+    }
+    // The first command did not show: one more try, then `Failed`.
+    if plan.tries >= 2 {
+        clear_pending(store, seat_id)?;
+        return Ok(SwitchOutcome::Failed);
+    }
+    if !type_command(herdr, pane, model) {
+        return wait_for_agent(store, seat_id, &mut plan);
+    }
+    plan.tries = 2;
+    plan.waited = 0;
+    set_pending(store, seat_id, &plan)?;
+    Ok(SwitchOutcome::Waiting)
+}
+
+/// Type `/model <id>` and press Enter in one go: the text first, then the key
+/// after the TUI took it (L-71). `false` when the pane refused either.
+fn type_command(herdr: &mut dyn HerdrAct, pane: &str, model: &str) -> bool {
+    if !matches!(
+        herdr.pane_type(pane, &format!("/model {model}")),
+        Outcome::Ok(())
+    ) {
+        return false;
+    }
+    herdr.type_settle();
+    !matches!(
+        herdr.send_keys(pane, &["enter".into()]),
+        Outcome::Refused { .. }
+    )
+}
+
+/// The status line/footer of the screen shows `bar`: pi and Claude print the
+/// model they run on there. Only the last `tail_lines` lines are read, so a
+/// conversation that quotes the model is not a confirmation.
+fn footer_confirmed(screen: &str, bar: &str, tail_lines: u32) -> bool {
+    let lines: Vec<&str> = screen.lines().collect();
+    let start = lines.len().saturating_sub(tail_lines as usize);
+    lines[start..].iter().any(|line| line.contains(bar))
+}
+
 fn wait_for_agent(store: &mut Store, seat: &str, plan: &mut Pending) -> GearResult<SwitchOutcome> {
     plan.waited += 1;
     if plan.waited > WAIT_TICKS * 2 {
@@ -526,14 +650,20 @@ mod tests {
     use gear_store::testing;
     use std::collections::BTreeSet;
 
-    /// T-114: only OpenCode's picker is driven, so only OpenCode is switched
-    /// in place. A CLI without one (pi) is started again on the next model.
+    /// T-114, T-606: OpenCode's session API and the typed `/model <id>` of pi
+    /// and Claude are driven in place. Codex's `/model` opens a picker with no
+    /// argument form GEAR can drive yet, so it is restarted.
     /// T-531: a seat of any other kind is `Failed` and nothing is sent for it.
     #[test]
-    fn only_opencode_is_switched_in_place() {
-        assert!(switches_in_place("opencode"));
-        for kind in ["pi", "codex", "claude", "grok"] {
-            assert!(!switches_in_place(kind), "{kind} has no picker GEAR drives");
+    fn the_kinds_gear_switches_in_place() {
+        for kind in ["opencode", "pi", "claude"] {
+            assert!(switches_in_place(kind), "{kind} is switched in place");
+        }
+        for kind in ["codex", "grok"] {
+            assert!(
+                !switches_in_place(kind),
+                "{kind} has no protocol GEAR drives"
+            );
         }
         let (mut store, mut herdr) = api_world();
         let profile = gear_herdr::builtin("codex").unwrap();
@@ -887,13 +1017,202 @@ mod tests {
     }
 
     fn world() -> Store {
+        world_kind("opencode")
+    }
+
+    fn world_kind(kind: &str) -> Store {
         let mut s = Store::open_in_memory().unwrap();
         s.write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, PANE, "opencode", T0)
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, PANE, kind, T0)
         })
         .unwrap();
         s
+    }
+
+    /// A pi or Claude seat whose footer names another model.
+    fn command_world(kind: &str) -> (Store, FakeHerdr) {
+        let store = world_kind(kind);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(PANE, kind, gear_herdr::AgentStatus::Idle, "p-heat");
+        herdr.set_screen(PANE, "── footer ──\nmodel: Old Provider");
+        (store, herdr)
+    }
+
+    fn command_labels() -> ModelSwitch {
+        ModelSwitch {
+            picker: "New Provider".into(),
+            bar: "New Provider".into(),
+            variant: None,
+        }
+    }
+
+    /// T-606: a pi seat is switched by one typed `/model <id>` and its Enter;
+    /// the footer showing the model confirms it.
+    #[test]
+    fn a_pi_seat_is_switched_by_one_model_command_and_its_footer() {
+        let (mut store, mut herdr) = command_world("pi");
+        let profile = gear_herdr::builtin("pi").unwrap();
+        assert_eq!(
+            switch_model(
+                &mut store,
+                &mut herdr,
+                "p:heat",
+                &profile,
+                Some(&idle()),
+                &command_labels(),
+                "provider/new",
+                T0,
+            )
+            .unwrap(),
+            SwitchOutcome::Waiting
+        );
+        assert_eq!(
+            typed(&herdr),
+            vec!["/model provider/new".to_string(), "enter".to_string()]
+        );
+        herdr.set_screen(PANE, "── footer ──\nmodel: New Provider");
+        assert_eq!(
+            switch_model(
+                &mut store,
+                &mut herdr,
+                "p:heat",
+                &profile,
+                Some(&idle()),
+                &command_labels(),
+                "provider/new",
+                T0 + 1,
+            )
+            .unwrap(),
+            SwitchOutcome::Done
+        );
+        assert!(pending(&mut store, "p:heat").unwrap().is_none());
+    }
+
+    /// T-606: a Claude seat is switched the same way, by `/model <id>`.
+    #[test]
+    fn a_claude_seat_is_switched_by_one_model_command_and_its_footer() {
+        let (mut store, mut herdr) = command_world("claude");
+        let profile = gear_herdr::builtin("claude").unwrap();
+        assert_eq!(
+            switch_model(
+                &mut store,
+                &mut herdr,
+                "p:heat",
+                &profile,
+                Some(&idle()),
+                &command_labels(),
+                "provider/new",
+                T0,
+            )
+            .unwrap(),
+            SwitchOutcome::Waiting
+        );
+        assert_eq!(
+            typed(&herdr),
+            vec!["/model provider/new".to_string(), "enter".to_string()]
+        );
+        herdr.set_screen(PANE, "model: New Provider");
+        assert_eq!(
+            switch_model(
+                &mut store,
+                &mut herdr,
+                "p:heat",
+                &profile,
+                Some(&idle()),
+                &command_labels(),
+                "provider/new",
+                T0 + 1,
+            )
+            .unwrap(),
+            SwitchOutcome::Done
+        );
+        assert!(pending(&mut store, "p:heat").unwrap().is_none());
+    }
+
+    /// T-606: a footer that never shows the model is `Failed` after two tries,
+    /// and the plan is cleared so the caller can restart the seat.
+    #[test]
+    fn a_footer_that_never_shows_the_model_fails_after_two_tries() {
+        let (mut store, mut herdr) = command_world("pi");
+        let profile = gear_herdr::builtin("pi").unwrap();
+        let mut outcomes = Vec::new();
+        for tick in 0..40 {
+            let outcome = switch_model(
+                &mut store,
+                &mut herdr,
+                "p:heat",
+                &profile,
+                Some(&idle()),
+                &command_labels(),
+                "provider/new",
+                T0 + tick,
+            )
+            .unwrap();
+            outcomes.push(outcome.clone());
+            if outcome != SwitchOutcome::Waiting {
+                break;
+            }
+        }
+        assert_eq!(
+            outcomes.last(),
+            Some(&SwitchOutcome::Failed),
+            "{outcomes:?}"
+        );
+        let commands = typed(&herdr)
+            .iter()
+            .filter(|text| *text == "/model provider/new")
+            .count();
+        assert_eq!(commands, 2, "two tries: {:?}", herdr.calls);
+        assert!(pending(&mut store, "p:heat").unwrap().is_none());
+    }
+
+    /// T-606: a footer that already shows the model sends nothing.
+    #[test]
+    fn a_pi_footer_already_on_the_model_sends_nothing() {
+        let (mut store, mut herdr) = command_world("pi");
+        herdr.set_screen(PANE, "── footer ──\nmodel: New Provider");
+        let profile = gear_herdr::builtin("pi").unwrap();
+        assert_eq!(
+            switch_model(
+                &mut store,
+                &mut herdr,
+                "p:heat",
+                &profile,
+                Some(&idle()),
+                &command_labels(),
+                "provider/new",
+                T0,
+            )
+            .unwrap(),
+            SwitchOutcome::Already
+        );
+        assert!(typed(&herdr).is_empty(), "{:?}", herdr.calls);
+    }
+
+    /// T-606: a busy pi agent is waited for, never typed into.
+    #[test]
+    fn a_busy_pi_agent_is_never_typed_into() {
+        let (mut store, mut herdr) = command_world("pi");
+        let profile = gear_herdr::builtin("pi").unwrap();
+        let mut busy = idle();
+        busy.idle = false;
+        busy.status = Some(gear_herdr::AgentStatus::Working);
+        assert_eq!(
+            switch_model(
+                &mut store,
+                &mut herdr,
+                "p:heat",
+                &profile,
+                Some(&busy),
+                &command_labels(),
+                "provider/new",
+                T0,
+            )
+            .unwrap(),
+            SwitchOutcome::Waiting
+        );
+        assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
     }
 
     fn labels() -> ModelSwitch {

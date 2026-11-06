@@ -24,6 +24,7 @@ pub mod delivery;
 pub mod dialog;
 pub mod dispatch;
 pub mod doorbell;
+pub mod failure;
 pub mod feature;
 pub mod feed;
 pub mod finished;
@@ -263,6 +264,21 @@ fn project_error(project: &str, error: &gear_model::GearError) -> String {
     format!("{project}: {}: {}", error.code, error.detail)
 }
 
+/// T-607: one project's failed tick is reported and remembered for the
+/// captain's failure item. The first error of the tick is the one the item
+/// names; a later step's error does not replace it.
+fn note_failed(
+    report: &mut TickReport,
+    failed: &mut std::collections::BTreeMap<String, gear_model::GearError>,
+    project: &str,
+    error: &gear_model::GearError,
+) {
+    report.project_failed.push(project_error(project, error));
+    failed
+        .entry(project.to_string())
+        .or_insert_with(|| error.clone());
+}
+
 /// The time past which a tick step is named in [`TickReport::slow`] (T-386).
 const SLOW_STEP_MS: u128 = 200;
 
@@ -283,6 +299,11 @@ pub fn tick(
     now: Ts,
 ) -> GearResult<TickReport> {
     let mut report = TickReport::default();
+    // T-607: the projects whose tick failed, with the error the captain's item
+    // names. Settled at the end of the tick (or before the observation-failed
+    // return), so a spell is counted once per tick.
+    let mut failed: std::collections::BTreeMap<String, gear_model::GearError> =
+        std::collections::BTreeMap::new();
 
     // Settle recorded lane rebinds before onboarding or dispatch sees config.
     // T-243: a project whose step fails is reported and the other projects go
@@ -291,7 +312,7 @@ pub fn tick(
     let step = std::time::Instant::now();
     for project in store.read(|tx| tx.active_project_ids())? {
         if let Err(error) = gear_app::plan::reconcile_rebinds(store, &project) {
-            report.project_failed.push(project_error(&project, &error));
+            note_failed(&mut report, &mut failed, &project, &error);
         }
     }
     note_slow(&mut report, "reconcile rebinds", step);
@@ -341,7 +362,7 @@ pub fn tick(
                         .map(|error| format!("{project}: {error}")),
                 );
             }
-            Err(error) => report.project_failed.push(project_error(project, &error)),
+            Err(error) => note_failed(&mut report, &mut failed, project, &error),
         }
     }
     note_slow(&mut report, "parallel check", step);
@@ -350,7 +371,7 @@ pub fn tick(
     let step = std::time::Instant::now();
     for project in &projects {
         if let Err(error) = gear_forge::sync(store, project, now) {
-            report.project_failed.push(project_error(project, &error));
+            note_failed(&mut report, &mut failed, project, &error);
         }
     }
     note_slow(&mut report, "forge sync", step);
@@ -362,7 +383,7 @@ pub fn tick(
             Ok(ids) => report
                 .stations
                 .extend(ids.into_iter().map(|id| format!("{project}:{id}"))),
-            Err(error) => report.project_failed.push(project_error(project, &error)),
+            Err(error) => note_failed(&mut report, &mut failed, project, &error),
         }
     }
     note_slow(&mut report, "stations", step);
@@ -378,7 +399,7 @@ pub fn tick(
             Ok(closed) => report
                 .finished
                 .extend(closed.into_iter().map(|id| format!("{project}:{id}"))),
-            Err(error) => report.project_failed.push(project_error(project, &error)),
+            Err(error) => note_failed(&mut report, &mut failed, project, &error),
         }
     }
     note_slow(&mut report, "finished voyages", step);
@@ -389,7 +410,7 @@ pub fn tick(
     let step = std::time::Instant::now();
     for project in &projects {
         if let Err(error) = finished::reclaim(store, herdr, project, now) {
-            report.project_failed.push(project_error(project, &error));
+            note_failed(&mut report, &mut failed, project, &error);
         }
     }
     note_slow(&mut report, "reclaim", step);
@@ -408,6 +429,10 @@ pub fn tick(
             store.write(|tx| busy::observation_lost(tx, project))?;
         }
         report.observe_failed = projects;
+        // T-607: the tick did not finish, so only the projects that failed are
+        // counted; no project is called good on a partial tick.
+        let counted: Vec<String> = failed.keys().cloned().collect();
+        failure::settle(store, &counted, &failed, now);
         return Ok(report);
     };
 
@@ -947,7 +972,7 @@ pub fn tick(
     for project in &projects {
         let step = std::time::Instant::now();
         if let Err(error) = one_project(store, &mut report, project) {
-            report.project_failed.push(project_error(&project, &error));
+            note_failed(&mut report, &mut failed, project, &error);
         }
         note_slow(&mut report, &format!("project {project}"), step);
     }
@@ -971,7 +996,7 @@ pub fn tick(
                     .map(|m| format!("{} @ {}", m.task, m.branch)),
             ),
             Ok(None) => {}
-            Err(error) => report.project_failed.push(project_error(project, &error)),
+            Err(error) => note_failed(&mut report, &mut failed, project, &error),
         }
     }
     // 10. rings (T-487): the seats of every project bound to one pane are
@@ -1171,6 +1196,11 @@ pub fn tick(
             report.settle_failed.push(format!("stall alert {seat}: {}", e.detail));
         }
     }
+    // T-607: a project that failed this tick is counted (and rings the captain
+    // once the spell is long enough); a project that did not fail has its
+    // spell resolved and reset. A store write that fails is logged and the
+    // tick goes on.
+    failure::settle(store, &projects, &failed, now);
     Ok(report)
 }
 
