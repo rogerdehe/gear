@@ -631,6 +631,28 @@ fn a_remerge_of_a_candidate_not_on_the_integration_branch_queues_the_op() {
     );
 }
 
+/// Lawrence M-1549: the lost-merge item ("nothing will merge it") closes when
+/// the remerge is queued; it cannot be answered or remerged twice.
+#[test]
+fn a_queued_remerge_closes_the_lost_merge_item() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (work, candidate) = repo(scratch.path(), false);
+    let mut s = world_at(Some(&work), Some("review/t{n}"));
+    accepted_task_on(&mut s, &candidate);
+    let lost = open_item(&mut s, "merge-lost:T-1");
+
+    run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap();
+
+    let item = s.read(|tx| tx.get_message("p", &lost)).unwrap().unwrap();
+    assert_eq!(item.state, MsgState::Resolved, "{item:?}");
+    assert!(
+        item.result
+            .as_deref()
+            .is_some_and(|r| r.starts_with("remerge queued (O-")),
+        "{item:?}"
+    );
+}
+
 /// A voided merge merged nothing: the accepted attempt is queued again.
 #[test]
 fn a_remerge_retries_a_voided_merge() {
