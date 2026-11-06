@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1228 -->
+<!-- gear-plan project=gear base=1229 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 6h
 depart: now
 
 # Decisions
+- station M-8289: keep course | why: projected 321m against the 6h eta; the lanes are even now (hull 255m, mast 209m)
 - station M-8284: keep course | why: projected 299m against the 6h eta; hull holds 239m of engine work and mast 65m: when mast's queue runs out, the engine tasks that touch no hull file in flight move to mast
 - 2026-11-06 07:58 confirmed: M6.3 departure, not departed -> departs now with the scope above (every proposed item but the graceful engine restart), eta 6h | why: the user agreed the scope after being told the plan would be written and the voyage would depart on that agreement
 - 2026-11-06 user: M6.3 takes every item proposed for it except the graceful engine restart, which stays in M7
