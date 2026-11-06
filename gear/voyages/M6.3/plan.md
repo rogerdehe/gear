@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1227 -->
+<!-- gear-plan project=gear base=1228 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -144,4 +144,16 @@ deps: -
 goal: A feature's spread deps are kept apart from a member's own (Lawrence M2, 2026-11-06: T-86's block said `deps: -` and the apply kept T-63, T-79 and T-80; they were F-4's outside wait, written by T-587 into every member's stored deps, so every later apply read them back as the member's own and the captain could neither release a member nor cancel a task the feature waits on). crates/gear-app/src/plan.rs, rule (3) of the feature deps: record the spread per feature in meta (`feature_wait:{project}:{feature}`, the outside deps and the member that declares each); at the start of each apply, strip the previously recorded spread from every member's stored deps before the graph is read, then compute the spread again from the members' own deps and store it again; the apply prints one line per member that waits on work it did not name: `T-86 waits on T-63 (F-4: T-89 needs it)`. `gear plan show T-n` prints the spread on its own line (`waits (feature F-4): T-63, T-79, T-80`), not in `deps:`.
 accept: Tests in crates/gear-app/tests/it/feature_plan_contract.rs: a member whose block drops its outside dep releases every other member on the next apply; a member's own `deps: -` is kept while another member still declares the outside dep, and the output names that member; `plan show` keeps the spread out of `deps:`. Run only `make check CRATE=gear-app TESTS='test(feature)'`; the merge gate runs `make gate`.
 estimate: 40
+deps: -
+
+## T-625 [must] lane=hull milestone=M6.3 required
+goal: A model with no `context_window_k` is not compacted before every packet (Lawrence M2, 2026-11-06: web was compacted at 9.6 % of 1M and console at 22 % of 500k, because crates/gear-engine/src/session.rs `context_large` returns true when the entry has no window). With no window, read it from the seat CLI's own model table when the profile has one (pi: the `contextWindow` of the model in pi's models file), else use a default of 200k; a window that cannot be read is never "large" by itself: only a measured context at half the window compacts. Keep today's rule when a window is set.
+accept: Tests in session.rs `mod tests`: an entry with no window and a 30k context does not compact; with no window and 120k it compacts (half of the 200k default); a set window keeps today's rule. Run only `make check CRATE=gear-engine TESTS='test(session::)'`; the merge gate runs `make gate`.
+estimate: 25
+deps: -
+
+## T-626 [should] lane=mast milestone=M6.3
+goal: `gear admin init` warns about a model with no `context_window_k` (same case). crates/gear-app/src/admin.rs (or kickoff.rs, where init prints the staffing): for every lane, review and captain model entry without `context_window_k`, print one warning line `model <id> has no context_window_k: GEAR assumes 200k (or the CLI's own table); set it to the model's window`. No refusal.
+accept: A test in crates/gear-cli/tests/it/admin_init_contract.rs: a config with a model lacking the window prints the warning and applies. Run only `make check CRATE=gear-cli TESTS='test(admin_init)'`; the merge gate runs `make gate`.
+estimate: 15
 deps: -
