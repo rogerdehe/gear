@@ -1,0 +1,5 @@
+# M7 lessons
+
+- **A packet names only test patterns that exist (F-346, 2026-11-06):** T-640 pointed at "the existing request-capture test pattern" for the real Herdr client; no test in the tree starts a Herdr socket, so the lane searched, asked, and built a fake socket server. Before naming a pattern, find one test that uses it and name that test.
+- **A packet that adds a trait method names every implementor (T-640, 2026-11-06):** `HerdrAct::workspace_close` compiled in gear-herdr, but `crates/gear-engine/examples/opencode_live.rs` implements HerdrAct too, and the merge gate (which builds examples) failed. Before writing such a packet, `grep -rn "impl .*<Trait> for"` across the workspace and list each file in the contract.
+- **Code that spells a GitHub write command trips the lanes' guardrail (T-636, 2026-11-06):** pi's auto-deny pattern for `gh label create` matched a shell heredoc that only wrote Rust source holding that text. A packet whose code or test names a `gh` write says: write those files with the edit tool, never through the shell.

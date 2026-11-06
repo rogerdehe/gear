@@ -3,3 +3,4 @@ mod builtin_contract;
 mod codex_dialogs_contract;
 mod profile_contract;
 mod session_fields_contract;
+mod workspace_close_contract;

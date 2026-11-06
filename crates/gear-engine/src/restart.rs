@@ -4216,9 +4216,17 @@ switch_grace_min = 10
         assert!(text.contains("## 2. Summary"), "{text}");
         assert!(text.contains("## 3. Free notes"), "{text}");
         assert!(text.contains("Uncommitted changes: src/a.rs"), "{text}");
+        // The worktree is on `work`, not the task's branch: a commit there
+        // would be lost when the lane switches to heat/t1 (Lawrence F-85,
+        // F-100), so the document stays untracked and survives the switch.
         assert!(
-            sh(dir.path(), "git log -1 --format=%s").contains("gear: handover of p:heat"),
-            "the document is committed on the seat's branch"
+            !sh(dir.path(), "git log -1 --format=%s").contains("gear: handover of p:heat"),
+            "no handover commit on another task's branch"
+        );
+        sh(dir.path(), "git stash -q && git checkout -q -b heat/t1");
+        assert!(
+            std::path::Path::new(&doc).exists(),
+            "the document survives the switch to the task's branch"
         );
     }
 

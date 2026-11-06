@@ -353,7 +353,7 @@ fn urgent_doorbell_waits_for_session_preparation_and_delivery() {
     assert!(
         h.prompts_to(PANE)
             .iter()
-            .any(|p| p.contains("item(s) waiting")),
+            .any(|p| p.contains("item(s) waiting") || p.contains("message(s) for you")),
         "{:?}",
         h.calls
     );

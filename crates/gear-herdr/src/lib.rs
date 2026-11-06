@@ -306,6 +306,9 @@ pub trait HerdrAct: HerdrRead {
     /// Herdr `worktree.remove` (never forced): removes the checkout and its
     /// workspace; the branch is kept.
     fn worktree_remove(&mut self, workspace_id: &str) -> Outcome<()>;
+    /// Herdr `workspace.close`: closes the workspace `workspace_id` and its
+    /// panes (the call behind `herdr workspace close <id>`, T-640).
+    fn workspace_close(&mut self, workspace_id: &str) -> Outcome<()>;
 }
 
 /// How long the terminal needs after typed text before the Enter that follows
@@ -677,6 +680,14 @@ impl HerdrAct for SocketHerdr {
             "force": false,
         });
         match self.client.call("worktree.remove", params) {
+            Ok(_) => Outcome::Ok(()),
+            Err(e) => outcome_from_error(&e),
+        }
+    }
+
+    fn workspace_close(&mut self, workspace_id: &str) -> Outcome<()> {
+        let params = json!({ "workspace_id": workspace_id });
+        match self.client.call("workspace.close", params) {
             Ok(_) => Outcome::Ok(()),
             Err(e) => outcome_from_error(&e),
         }

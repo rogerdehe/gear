@@ -381,7 +381,10 @@ fn a_reply_to_the_current_job_rings_after_the_packet() {
 
     let said = w.herdr.prompts_to(REV_PANE);
     assert_eq!(said.len(), 1, "{said:?}");
-    assert!(said[0].contains("1 item(s) waiting for you"), "{said:?}");
+    assert!(
+        said[0].contains("1 message(s) for you") || said[0].contains("1 item(s) waiting for you"),
+        "{said:?}"
+    );
 }
 
 #[test]
@@ -599,12 +602,21 @@ fn a_new_reviewers_gear_shows_no_message_from_an_earlier_job() {
 
 /// The message ids a doorbell text names, in order.
 fn named_by(text: &str) -> Vec<String> {
-    text.split_once(". Run")
-        .unwrap()
-        .0
-        .split_whitespace()
-        .filter(|word| word.starts_with("M-"))
-        .map(str::to_string)
+    // T-631: an idle seat gets the bodies as text, one `[<id> from ...]`
+    // header per item; a working seat keeps the one-line text.
+    if let Some((head, _)) = text.split_once(". Run") {
+        return head
+            .split_whitespace()
+            .filter(|word| word.starts_with("M-"))
+            .map(str::to_string)
+            .collect();
+    }
+    text.lines()
+        .filter_map(|line| {
+            let header = line.strip_prefix('[')?.split_once(']')?.0;
+            let id = header.split_once(" from ")?.0;
+            Some(id.rsplit(':').next().unwrap_or(id).to_string())
+        })
         .collect()
 }
 
@@ -613,7 +625,9 @@ fn doorbells_to<'a>(w: &'a World, pane: &str) -> Vec<&'a str> {
     w.herdr
         .prompts_to(pane)
         .into_iter()
-        .filter(|text| text.contains("item(s) waiting for you"))
+        .filter(|text| {
+            text.contains("item(s) waiting for you") || text.contains("message(s) for you")
+        })
         .collect()
 }
 
@@ -767,6 +781,10 @@ fn inbox_threads(home: &str) -> Vec<(bool, Vec<String>)> {
 
 /// The `(<k> urgent)` count of a doorbell text, zero when it carries none.
 fn urgent_in_doorbell(text: &str) -> usize {
+    // T-631: the inline text marks each urgent item's header.
+    if text.contains("message(s) for you") {
+        return text.matches(", urgent]").count();
+    }
     let Some(start) = text.find(" (") else {
         return 0;
     };

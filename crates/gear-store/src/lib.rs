@@ -52,6 +52,11 @@ pub const DEFAULT_ROUND_BUDGET_MIN: i64 = 30;
 /// of the same model to measure (§5.1).
 pub const DEFAULT_REVIEW_BUDGET_MIN: i64 = 30;
 
+/// How many applied plan versions a project keeps (T-646): the store used to
+/// keep every draft, and a long voyage's history grew to most of the file.
+/// The newest versions stay; the oldest are pruned when a plan is inserted.
+pub const PLAN_VERSIONS_KEPT: i64 = 20;
+
 pub struct Store {
     conn: rusqlite::Connection,
 }
@@ -2267,7 +2272,28 @@ impl<'s> Tx<'s> {
                 ],
             )
             .map_err(map_sqlite)?;
+        // T-646: keep only the newest versions; the older drafts are pruned.
+        self.tx
+            .execute(
+                "DELETE FROM plans WHERE project = ?1 AND version <= ?2",
+                params![row.project, row.version - PLAN_VERSIONS_KEPT],
+            )
+            .map_err(map_sqlite)?;
         Ok(())
+    }
+
+    /// The oldest stored plan version of the project; `None` when it has none
+    /// (T-646: the history may be pruned).
+    pub fn oldest_plan_version(&self, project: &str) -> GearResult<Option<i64>> {
+        let version: Option<i64> = self
+            .tx
+            .query_row(
+                "SELECT MIN(version) FROM plans WHERE project=?1",
+                params![project],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite)?;
+        Ok(version)
     }
 
     /// Highest applied plan version of the project; 0 when none.

@@ -59,6 +59,7 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -111,6 +112,10 @@ pub struct MergeWorkers {
     /// searches its members in a worktree of its own, and the tick appends the
     /// line it finds to the merge-failed item. No merge waits for one.
     bisects: Arc<Mutex<BTreeMap<String, BisectWorker>>>,
+    /// Set when the engine is being replaced (T-632): no new worker starts, a
+    /// running one finishes and is collected, and the ops that would have
+    /// started stay in their state for the next engine.
+    draining: Arc<AtomicBool>,
 }
 
 impl MergeWorkers {
@@ -163,6 +168,34 @@ impl MergeWorkers {
                 })
             })
             .unwrap_or(false)
+    }
+
+    /// Stop starting merge workers (T-632): a worker already running finishes
+    /// and is collected, and every op that would have started stays in its
+    /// state for the next engine.
+    pub fn drain(&self) {
+        self.draining.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the merge step must start nothing (T-632).
+    pub fn draining(&self) -> bool {
+        self.draining.load(Ordering::SeqCst)
+    }
+
+    /// Whether no merge worker and no bisect is running (T-632): the engine may
+    /// be replaced without cutting a merge.
+    pub fn idle(&self) -> bool {
+        let workers_idle = self.workers.lock().map(|w| w.is_empty()).unwrap_or(false);
+        let bisects_idle = self
+            .bisects
+            .lock()
+            .map(|bisects| {
+                bisects
+                    .values()
+                    .all(|worker| worker.done.lock().unwrap().is_some())
+            })
+            .unwrap_or(false);
+        workers_idle && bisects_idle
     }
 }
 
@@ -603,6 +636,11 @@ pub fn merge_passed(
     for (position, op) in ready.iter().enumerate() {
         if taken.contains(&op.id) {
             continue;
+        }
+        // T-632: the engine is being replaced. No worker starts, and this op
+        // stays in its state for the next engine.
+        if cfg.merges.draining() {
+            return Ok(merged);
         }
         let op = op.clone();
         let task = op.task.clone().unwrap_or_default();
@@ -1136,6 +1174,10 @@ fn launch_train(
     workers: &mut BTreeMap<String, Worker>,
     now: Ts,
 ) -> GearResult<()> {
+    // T-632: no worker starts while draining; its ops stay Intended.
+    if cfg.merges.draining() {
+        return Ok(());
+    }
     let paths: Vec<String> = worktrees
         .iter()
         .map(|worktree| worktree.path.clone())
@@ -1243,6 +1285,10 @@ fn launch_batch(
     workers: &mut BTreeMap<String, Worker>,
     now: Ts,
 ) -> GearResult<()> {
+    // T-632: no worker starts while draining; its ops stay Intended.
+    if cfg.merges.draining() {
+        return Ok(());
+    }
     let paths = vec![worktree.path.clone()];
     let mut members = Vec::new();
     for op in &batch {
@@ -2151,6 +2197,10 @@ fn start_bisects(
     config: &ProjectConfig,
     now: Ts,
 ) -> GearResult<()> {
+    // T-632: no bisect starts while draining; its request stays pending.
+    if cfg.merges.draining() {
+        return Ok(());
+    }
     let pending: Vec<(String, String)> = store.read(|tx| {
         let mut pending = Vec::new();
         for key in tx.meta_keys_with_prefix(&bisect_prefix(project))? {
@@ -6072,6 +6122,32 @@ fn task_branches(
     Ok(found)
 }
 
+/// The command that lists the task branches on the remote (T-633): the
+/// task-branch template up to its first `{` is the prefix, or the whole remote
+/// list when the template starts with a placeholder.
+fn branch_list_command(template: &str, remote: &str) -> String {
+    match template.split_once('{') {
+        Some(("", _)) => "git branch -r".to_string(),
+        Some((prefix, _)) => format!("git branch -r --list '{remote}/{prefix}*'"),
+        None => format!("git branch -r --list '{remote}/{template}*'"),
+    }
+}
+
+/// Append at most ten lines of a section, then the line that names the rest
+/// (T-633). The section header already carries the full count.
+fn push_section(body: &mut String, lines: &[String], command: &str) {
+    const SECTION_LINES: usize = 10;
+    for line in lines.iter().take(SECTION_LINES) {
+        body.push_str(&format!("- {line}\n"));
+    }
+    if lines.len() > SECTION_LINES {
+        body.push_str(&format!(
+            "- … and {} more: `{command}`\n",
+            lines.len() - SECTION_LINES
+        ));
+    }
+}
+
 /// Delete the branches of cancelled tasks and name the branches older than
 /// the project's limit, in one item to the captain.
 fn sweep_in(
@@ -6204,15 +6280,14 @@ fn sweep_in(
                 .lines()
                 .filter(|line| !line.trim().is_empty())
                 .collect();
+            // T-633: the line names the count and the newest commit only, so
+            // a branch with many commits does not grow the item.
             left.push(format!(
-                "{} ({}, done, commits not on {integration}: {})",
+                "{} ({}, done, {} commit(s) not on {integration}, newest: {})",
                 branch.name,
                 branch.task,
-                if commits.is_empty() {
-                    "none readable".to_string()
-                } else {
-                    commits.join("; ")
-                }
+                commits.len(),
+                commits.first().copied().unwrap_or("none readable")
             ));
             continue;
         }
@@ -6240,6 +6315,9 @@ fn sweep_in(
     if deleted.is_empty() && old.is_empty() && crowded.is_empty() && left.is_empty() {
         return Ok(());
     }
+    // T-633: every section lists at most ten lines, then the command that
+    // shows the rest; the header keeps the full count.
+    let branch_list = branch_list_command(&config.conventions.task_branch, remote.name);
     let mut body = String::new();
     if !crowded.is_empty() {
         body.push_str(&format!(
@@ -6248,9 +6326,7 @@ fn sweep_in(
             config.lanes.len().max(1),
             config.conventions.branch_max_per_lane.max(1)
         ));
-        for line in &crowded {
-            body.push_str(&format!("- {line}\n"));
-        }
+        push_section(&mut body, &crowded, &branch_list);
     }
     if !old.is_empty() {
         body.push_str(&format!(
@@ -6258,18 +6334,14 @@ fn sweep_in(
             old.len(),
             limit / 60
         ));
-        for line in &old {
-            body.push_str(&format!("- {line}\n"));
-        }
+        push_section(&mut body, &old, &branch_list);
     }
     if !left.is_empty() {
         body.push_str(&format!(
             "{} branch(es) of done tasks still hold commits the {integration} branch does not have (the task is done, so nothing will merge them): merge or restore them by hand, or delete the branch if the commits write only reports.\n",
             left.len()
         ));
-        for line in &left {
-            body.push_str(&format!("- {line}\n"));
-        }
+        push_section(&mut body, &left, &branch_list);
     }
     if !deleted.is_empty() {
         body.push_str(&format!(
@@ -6278,9 +6350,7 @@ fn sweep_in(
             remote.name,
             remote.name
         ));
-        for line in &deleted {
-            body.push_str(&format!("- {line}\n"));
-        }
+        push_section(&mut body, &deleted, &branch_list);
     }
     let urgent = !old.is_empty() || !crowded.is_empty();
     store.write(|tx| {
@@ -6488,6 +6558,9 @@ struct Lost {
     merged: bool,
     /// A merge op of the task is queued, running or being recovered.
     in_flight: bool,
+    /// The carrier whose merge landed without this task's candidate (T-615):
+    /// the item names it and the way out.
+    carried: Option<(String, Ts)>,
 }
 
 /// Is the task's voyage open (T-408)? A voyage is its milestone, and it is open
@@ -6997,8 +7070,11 @@ fn tell_captain_lost(
 ) -> GearResult<()> {
     // One scan of the ops and one of the tasks per tick, like the merge keys of
     // the queue step: a project with no lost task pays two reads.
-    let (lost, carried_active) = store.read(|tx| {
+    let (lost, carried_active, landed_carried) = store.read(|tx| {
         let mut carried_active: Vec<(String, String)> = Vec::new();
+        // T-615: carried tasks whose candidate is inside the carrier's merged
+        // candidate: their work landed with that merge.
+        let mut landed_carried: Vec<(String, i64, Ts)> = Vec::new();
         let mut in_flight = std::collections::HashSet::new();
         for state in [
             OpState::Intended,
@@ -7067,12 +7143,34 @@ fn tell_captain_lost(
                                 | TaskState::Waiting
                         )
                     });
-                if gear_app::tasks::merged_at(tx, carrier_project, carrier)?.is_none()
+                let carrier_merged_at = gear_app::tasks::merged_at(tx, carrier_project, carrier)?;
+                if carrier_merged_at.is_none()
                     && carrier_active
                     && now - accepted_at < LAND_WITHIN_S
                 {
                     carried_active.push((task.id.clone(), by.clone()));
                     continue;
+                }
+                // T-615: the carrier has merged. Its merged candidate is the
+                // one the carried work had to be inside; when it is, the work
+                // landed with that merge, and when it is not, the work is lost
+                // and the item names the carrier and the way out.
+                if let Some(merged_at) = carrier_merged_at {
+                    let carrier_candidate = tx
+                        .attempts_of_task(carrier_project, carrier)?
+                        .into_iter()
+                        .last()
+                        .and_then(|attempt| attempt.candidate);
+                    let repo = config.repo_of_task(task);
+                    if carrier_candidate
+                        .as_deref()
+                        .is_some_and(|carrier_candidate| {
+                            is_ancestor(Path::new(&repo.path), &candidate, carrier_candidate)
+                        })
+                    {
+                        landed_carried.push((task.id.clone(), latest.n, merged_at));
+                        continue;
+                    }
                 }
             }
             // The old filters of T-397 say only whether a **new** item is
@@ -7109,6 +7207,15 @@ fn tell_captain_lost(
             // against even when its lane moves (design, `repo_of_task`), and
             // merge execution asks the same question (see `repo_of_op`).
             let repo = config.repo_of_task(task);
+            // T-615: the carrier whose merge did not contain this candidate.
+            let carried = match tx.task_carried_by(project, &task.id)? {
+                Some(by) => {
+                    let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, &by);
+                    gear_app::tasks::merged_at(tx, carrier_project, carrier)?
+                        .map(|merged_at| (by, merged_at))
+                }
+                None => None,
+            };
             lost.push(Lost {
                 task: task.id.clone(),
                 attempt: latest.n,
@@ -7122,9 +7229,10 @@ fn tell_captain_lost(
                 settled: merged || in_flight,
                 merged,
                 in_flight,
+                carried,
             });
         }
-        Ok((lost, carried_active))
+        Ok((lost, carried_active, landed_carried))
     })?;
     // A lost item about a task whose carrier is active again is answered.
     for (task, by) in carried_active {
@@ -7144,6 +7252,30 @@ fn tell_captain_lost(
             )?;
         }
     }
+    // T-615: a carried candidate inside the carrier's merged candidate landed
+    // with that merge: the attempt takes the merge time, and an item still
+    // open about it is answered.
+    for (task, attempt, merged_at) in landed_carried {
+        let open = store.read(|tx| {
+            Ok(tx
+                .thread_messages(project, &lost_thread(&task))?
+                .into_iter()
+                .any(|message| message.state == MsgState::Open))
+        })?;
+        store.write(|tx| {
+            if tx.attempt_times(project, &task, attempt)?.merged.is_none() {
+                tx.set_attempt_time(project, &task, attempt, AttemptStep::Merged, merged_at)?;
+                tx.set_meta(
+                    &merge_lost_landed_key(project, &task, attempt),
+                    &merged_at.to_string(),
+                )?;
+            }
+            Ok(())
+        })?;
+        if open {
+            resolve_lost_with(store, project, &task, LOST_LANDED, now)?;
+        }
+    }
     for Lost {
         task,
         attempt,
@@ -7155,6 +7287,7 @@ fn tell_captain_lost(
         settled,
         merged,
         in_flight,
+        carried,
     } in lost
     {
         // The work landed (its own merge, or another task's that carried it):
@@ -7249,10 +7382,17 @@ fn tell_captain_lost(
             })?;
             continue;
         }
-        let body = format!(
-            "{task} attempt {attempt} was accepted but is not merged and nothing will merge it: \
-             `- remerge {task}` under `# Staff` retries it"
-        );
+        // T-615: a carrier that landed without this work is named, with the
+        // way out: clear the mark and remerge the task alone.
+        let body = match &carried {
+            Some((by, _)) => format!(
+                "{task} attempt {attempt} was accepted but is not merged: its carrier {by} landed without its work. Set `carried-by: -` on {task} and `- remerge {task}` under `# Staff` retries it"
+            ),
+            None => format!(
+                "{task} attempt {attempt} was accepted but is not merged and nothing will merge it: \
+                 `- remerge {task}` under `# Staff` retries it"
+            ),
+        };
         store.write(|tx| {
             let captain = tx.captain_of(project)?.ok_or_else(|| {
                 GearError::new(
@@ -8703,6 +8843,120 @@ mod tests {
             .read(|tx| tx.ops_of_kind_in_states("p", OpKind::Merge, &[]))
             .unwrap();
         assert_eq!(merges.len(), 1, "{merges:?}");
+    }
+
+    /// A done task `task` whose attempt was accepted with `candidate` and
+    /// marked `carried-by: by` (T-615).
+    fn accepted_carried(
+        tx: &gear_store::Tx<'_>,
+        task: &str,
+        candidate: &str,
+        by: &str,
+    ) -> GearResult<()> {
+        gear_app::tasks::start_attempt(tx, "p", task, "p:heat", 1, 0)?;
+        gear_app::tasks::on_delivery_confirmed(tx, "p", task, 1, 0)?;
+        gear_app::tasks::submit_result(tx, "p", task, 1, 1, candidate, "report", 0)?;
+        let mut attempt = tx.get_attempt("p", task, 1)?.unwrap();
+        attempt.state = gear_model::AttemptState::Accepted;
+        tx.update_attempt(&attempt)?;
+        let mut row = tx.get_task("p", task)?.unwrap();
+        row.state = TaskState::Done;
+        tx.update_task(&row)?;
+        tx.set_task_carried_by("p", task, by)
+    }
+
+    /// T-615 (M6.3): a carried task whose carrier merged a candidate that does
+    /// not contain its own accepted candidate is lost work: the merge-lost item
+    /// names the carrier and the way out. A carried candidate inside the
+    /// carrier's merged candidate landed with that merge: no item.
+    #[test]
+    fn a_carried_task_whose_carrier_landed_without_it_is_named_lost() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(
+            root.path(),
+            &format!("git init -q --bare {}", origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git init -q -b dev {}", work.display()),
+        );
+        sh(
+            &work,
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base",
+        );
+        let base = sh(&work, "git rev-parse HEAD").trim().to_string();
+        sh(
+            &work,
+            &format!("git remote add origin {}", origin.display()),
+        );
+        // The carried work, not on dev.
+        sh(&work, "git switch -q -c heat/t5");
+        sh(
+            &work,
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m carried",
+        );
+        let carried = sh(&work, "git rev-parse HEAD").trim().to_string();
+        // The carrier's work, on dev.
+        sh(&work, "git switch -q dev");
+        sh(
+            &work,
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m carrier",
+        );
+        let carrier = sh(&work, "git rev-parse HEAD").trim().to_string();
+        sh(&work, "git push -q origin dev");
+        sh(&work, "git fetch -q origin");
+
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &work);
+                tx.update_project(&project)?;
+                // T-5: its candidate is not inside the carrier's.
+                accepted_carried(tx, "T-5", &carried, "T-9")?;
+                // T-6: its candidate is inside the carrier's.
+                let mut row = tx.get_task("p", "T-5")?.unwrap();
+                row.id = "T-6".into();
+                row.rank = 6;
+                row.state = TaskState::Ready;
+                tx.insert_task(&row)?;
+                accepted_carried(tx, "T-6", &base, "T-9")?;
+                // T-9: done, its merge landed with `carrier`.
+                let mut row = tx.get_task("p", "T-5")?.unwrap();
+                row.id = "T-9".into();
+                row.rank = 9;
+                row.state = TaskState::Ready;
+                tx.insert_task(&row)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-9", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-9", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-9", 1, 1, &carrier, "report", 0)?;
+                tx.set_attempt_time("p", "T-9", 1, AttemptStep::Merged, 10)?;
+                let mut row = tx.get_task("p", "T-9")?.unwrap();
+                row.state = TaskState::Done;
+                tx.update_task(&row)?;
+                Ok(())
+            })
+            .unwrap();
+        let config = gear_app::config::parse(&config_text_in("true", &work)).unwrap();
+
+        tell_captain_lost(&mut store, "p", &config, 20).unwrap();
+
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(items[0].body.contains("T-9"), "{}", items[0].body);
+        assert!(items[0].body.contains("carried-by: -"), "{}", items[0].body);
+        assert!(items[0].body.contains("- remerge T-5"), "{}", items[0].body);
+        let none = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-6"))
+            .unwrap();
+        assert!(
+            none.is_empty(),
+            "its candidate is inside the carrier's: {none:?}"
+        );
     }
 
     /// A merge queued before the task was marked `carried-by` is closed, not
@@ -16629,5 +16883,219 @@ gate = "{project_gate}"
         let item = open_failed_item(&mut store, "T-9");
         let expected = format!("bisect: the gate turns red at merge(T-2) {tip}");
         assert!(item.contains(&expected), "{item:?} lacks {expected:?}");
+    }
+
+    // ---- T-633: the branch item stays short ------------------------------
+
+    #[test]
+    fn the_branch_list_command_names_the_task_prefix() {
+        assert_eq!(
+            branch_list_command("{lane}/t{n}", "origin"),
+            "git branch -r"
+        );
+        assert_eq!(
+            branch_list_command("heat/t{n}", "origin"),
+            "git branch -r --list 'origin/heat/t*'"
+        );
+        assert_eq!(
+            branch_list_command("heat/t", "origin"),
+            "git branch -r --list 'origin/heat/t*'"
+        );
+    }
+
+    #[test]
+    fn a_sweep_over_many_left_branches_stays_short() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(
+            root.path(),
+            &format!("git init -q --bare {}", origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git init -q -b dev {}", work.display()),
+        );
+        sh(
+            &work,
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base",
+        );
+        sh(
+            &work,
+            &format!("git remote add origin {}", origin.display()),
+        );
+        sh(&work, "git push -q origin HEAD:refs/heads/dev");
+        // Thirty commits the integration branch does not have, and 25 done
+        // tasks whose branches all point at that tip.
+        sh(&work, "git switch -q -c work");
+        for i in 0..30 {
+            sh(
+                &work,
+                &format!(
+                    "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m 'work {i}'"
+                ),
+            );
+        }
+        let tip = sh(&work, "git rev-parse HEAD").trim().to_string();
+        for n in 1..=25 {
+            sh(
+                &work,
+                &format!("git push -q origin {tip}:refs/heads/heat/t{n}"),
+            );
+        }
+        let mut store = Store::open_in_memory().unwrap();
+        let config_text = format!(
+            "{}\ntask_branch = \"heat/t{{n}}\"\n",
+            config_text_in("true", &work)
+        );
+        store
+            .write(|tx| {
+                tx.insert_project(&gear_store::ProjectRow {
+                    id: "p".into(),
+                    herdr_session: "sess".into(),
+                    config_toml: config_text.clone(),
+                    config_version: 1,
+                    quota_lanes: 1,
+                    quota_temps: 0,
+                    quota_includes_captain: false,
+                    plan_version: 0,
+                    created: 0,
+                })?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    gear_model::SeatRole::Lane,
+                    "w1:p1",
+                    "opencode",
+                    0,
+                )?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "captain",
+                    gear_model::SeatRole::Captain,
+                    "w9:p1",
+                    "claude",
+                    0,
+                )?;
+                for n in 1..=25 {
+                    tx.insert_task(&gear_store::TaskRow {
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
+                        project: "p".into(),
+                        id: format!("T-{n}"),
+                        rank: n,
+                        state: TaskState::Done,
+                        priority: "must".into(),
+                        lane: Some("heat".into()),
+                        milestone: None,
+                        required: false,
+                        contract_version: 1,
+                        deps: vec![],
+                        followup_of: None,
+                        wait_on: None,
+                        wait_cond: None,
+                        rework_note: None,
+                        estimate_min: None,
+                        issue: None,
+                        updated: 0,
+                    })?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let config = gear_app::config::parse(&config_text).unwrap();
+        let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
+        let repo = config.repo_of_task(&tasks[0]);
+        let now = 3 * 3600;
+        let heads = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        let found = task_branches(&mut store, "p", &config, &tasks, &repo, &heads).unwrap();
+        let remote = Target {
+            name: "origin",
+            runner: &GitRemote,
+        };
+        let dev = git(&work, &["rev-parse", "dev"]).unwrap();
+        sweep_in(
+            &mut store,
+            "p",
+            &config,
+            &work,
+            remote,
+            found,
+            now,
+            "dev",
+            Some(dev.trim()),
+        )
+        .unwrap();
+
+        let items = store
+            .read(|tx| tx.actionable_for("p", "p:captain", now))
+            .unwrap();
+        assert_eq!(items.len(), 1, "{:?}", items);
+        let body = &items[0].body;
+        assert!(
+            body.chars().count() < 4000,
+            "the item stays short: {} chars",
+            body.chars().count()
+        );
+        let lines: Vec<&str> = body
+            .lines()
+            .filter(|line| line.starts_with("- heat/t"))
+            .collect();
+        assert_eq!(lines.len(), 10, "ten lines: {body}");
+        for line in &lines {
+            assert!(
+                line.contains("30 commit(s) not on dev, newest: "),
+                "each names its count and newest commit: {line}"
+            );
+        }
+        assert!(
+            body.contains("- … and 15 more: `git branch -r --list 'origin/heat/t*'`"),
+            "the rest is named: {body}"
+        );
+        assert!(
+            body.contains("25 branch(es) of done tasks"),
+            "the header keeps the full count: {body}"
+        );
+    }
+
+    // ---- T-632: the merge workers can drain ------------------------------
+
+    #[test]
+    fn draining_starts_no_worker_and_leaves_the_op_intended() {
+        let scratch = Scratch::new("drain-start");
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, "true");
+        cfg.merges.drain();
+
+        let merged = merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+
+        assert!(merged.is_empty());
+        assert_eq!(
+            op_state(&mut store, "O-1"),
+            Some(OpState::Intended),
+            "the op stays for the next engine"
+        );
+        assert!(!cfg.merges.running("p"), "no worker started");
+        assert!(cfg.merges.idle());
+    }
+
+    #[test]
+    fn a_worker_started_before_drain_finishes_and_is_collected() {
+        let scratch = Scratch::new("drain-collect");
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, "true");
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        assert!(cfg.merges.running("p"), "the worker started");
+        cfg.merges.drain();
+        assert!(!cfg.merges.idle(), "a worker is still running");
+
+        // The worker finishes; the next step collects it even while draining.
+        let merged = wait_merge(&mut store, &mut herdr, &cfg);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(op_state(&mut store, "O-1"), Some(OpState::Confirmed));
+        assert!(cfg.merges.idle(), "nothing runs any more");
     }
 }

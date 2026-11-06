@@ -189,9 +189,14 @@ fn full_messaging_loop() {
     assert!(text.contains("M-1"));
     assert!(text.contains("Schema v1 or v2?"));
 
-    // 5. engine confirms the doorbell from the view.
+    // 5. the inline ring was confirmed on submit (T-631), so the view adds
+    // nothing.
     let rep = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 65).unwrap();
-    assert_eq!(rep.confirmed.len(), 1);
+    assert!(
+        rep.confirmed.is_empty(),
+        "the ring was confirmed on submit: {:?}",
+        rep.confirmed
+    );
     let ring_op = w
         .store
         .read(|tx| tx.last_op("p:captain", OpKind::Doorbell))

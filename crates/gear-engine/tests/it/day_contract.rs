@@ -295,12 +295,9 @@ fn a_day_of_two_fleets_in_different_zones_rings_once_and_settles_the_named_proje
     assert!(text.contains(&p_item), "p's item is named: {text}");
     assert!(text.contains(&q_item), "q's item is named: {text}");
     assert!(
-        text.contains("- p:") && text.contains("- q:"),
-        "each line names its project: {text}"
-    );
-    assert!(
-        text.contains("across 2 projects"),
-        "the doorbell says it holds two projects: {text}"
+        text.contains(&format!("[p:{} from", p_item))
+            && text.contains(&format!("[q:{} from", q_item)),
+        "each header names its project: {text}"
     );
 
     // A reply with a qualified id settles q's item and leaves p's open.

@@ -15,6 +15,9 @@ fn item(id: &str) -> DoorbellItem {
         urgent: false,
         at_once: false,
         cut: false,
+        sender: "p:captain".into(),
+        body: "please look".into(),
+        needs_ack: false,
     }
 }
 
@@ -60,18 +63,27 @@ fn urgent_count_and_covers_order_without_duplicates() {
             urgent: true,
             at_once: true,
             cut: false,
+            sender: "p:captain".into(),
+            body: "please look".into(),
+            needs_ack: false,
         },
         DoorbellItem {
             id: "M-1".into(),
             urgent: false,
             at_once: false,
             cut: false,
+            sender: "p:captain".into(),
+            body: "please look".into(),
+            needs_ack: false,
         },
         DoorbellItem {
             id: "M-7".into(),
             urgent: false,
             at_once: false,
             cut: false,
+            sender: "p:captain".into(),
+            body: "please look".into(),
+            needs_ack: false,
         },
     ];
     let out = decide(&[i], 90, NOW);
@@ -129,11 +141,17 @@ fn a_working_seat_is_rung_at_once_for_an_at_once_message() {
         urgent: true,
         at_once: true,
         cut: false,
+        sender: "p:captain".into(),
+        body: "please look".into(),
+        needs_ack: false,
     }];
 
     let out = decide(&[working], 90, NOW);
     assert_eq!(out.len(), 1, "typed while the agent works");
-    assert_eq!(out[0].text, "GEAR: 1 item(s) waiting for you (1 urgent): M-4. Run the command `gear --session s --pane w1:p1` (exactly this, nothing added) in your own shell; it shows only your items.");
+    assert_eq!(
+        out[0].text,
+        "GEAR: 1 item(s) waiting for you (1 urgent): M-4. Run the command `gear --session s --pane w1:p1` (exactly this, nothing added) in your own shell; it shows only your items."
+    );
 }
 
 #[test]
@@ -147,12 +165,18 @@ fn a_working_seat_is_told_only_about_the_at_once_messages() {
             urgent: true,
             at_once: true,
             cut: false,
+            sender: "p:captain".into(),
+            body: "please look".into(),
+            needs_ack: false,
         },
         DoorbellItem {
             id: "M-5".into(),
             urgent: false,
             at_once: false,
             cut: false,
+            sender: "p:captain".into(),
+            body: "please look".into(),
+            needs_ack: false,
         },
     ];
 
@@ -173,12 +197,18 @@ fn an_idle_seat_is_told_about_everything() {
             urgent: true,
             at_once: true,
             cut: false,
+            sender: "p:captain".into(),
+            body: "please look".into(),
+            needs_ack: false,
         },
         DoorbellItem {
             id: "M-5".into(),
             urgent: false,
             at_once: false,
             cut: false,
+            sender: "p:captain".into(),
+            body: "please look".into(),
+            needs_ack: false,
         },
     ];
 
@@ -300,12 +330,18 @@ fn the_text_names_every_id_and_the_command_to_run() {
             urgent: false,
             at_once: false,
             cut: false,
+            sender: "p:captain".into(),
+            body: "please look".into(),
+            needs_ack: false,
         },
         DoorbellItem {
             id: "M-13".into(),
             urgent: false,
             at_once: false,
             cut: false,
+            sender: "p:captain".into(),
+            body: "please look".into(),
+            needs_ack: false,
         },
     ];
     let said = text(&items, false, "gear --session s --pane w1:p1");
