@@ -135,8 +135,9 @@ struct Fact {
     /// The engine's own merge line ("merged T-61 into dev: a1b2c3d"), when the
     /// merge has confirmed.
     merge_line: Option<String>,
-    /// Another task bound to the same issue has not landed (and is not
-    /// cancelled): the issue stays open until the last one lands.
+    /// Another task bound to the same issue is not done and not cancelled:
+    /// the issue stays open until every task bound to it is done or cancelled
+    /// (T-617).
     issue_open_elsewhere: bool,
 }
 
@@ -558,7 +559,12 @@ fn claim_call(project: &str, fact: &Fact) -> Call {
             base: fact.integration.clone(),
             title: format!("{} (#{})", first_words(&fact.goal), fact.issue),
             body: format!(
-                "Closes #{}\n\n{}",
+                "{} #{}\n\n{}",
+                if fact.issue_open_elsewhere {
+                    "Part of"
+                } else {
+                    "Closes"
+                },
                 fact.issue,
                 marker::claim(&format!("{project}:{}", fact.lane), fact.issue)
             ),
@@ -772,25 +778,23 @@ fn facts(tx: &Tx<'_>, project: &str) -> GearResult<Vec<Fact>> {
     };
     let mut facts = Vec::new();
     let tasks = tx.tasks_of_project(project)?;
-    // The issues with a bound task that has not landed: (issue, task).
-    let mut unlanded: Vec<(i64, String)> = Vec::new();
+    // The issues with a bound task that is not done or cancelled: (issue,
+    // task). The issue closes only when every task bound to it is done or
+    // cancelled, with at least one done (T-617).
+    let mut open: Vec<(i64, String)> = Vec::new();
     for task in &tasks {
         let Some(issue) = task.issue else { continue };
-        if task.state == gear_model::TaskState::Cancelled {
+        if matches!(
+            task.state,
+            gear_model::TaskState::Done | gear_model::TaskState::Cancelled
+        ) {
             continue;
         }
-        let landed = tx
-            .attempt_times_of_task(project, &task.id)?
-            .iter()
-            .any(|(_, times)| times.merged.is_some());
-        if !landed {
-            unlanded.push((issue, task.id.clone()));
-        }
+        open.push((issue, task.id.clone()));
     }
     for task in tasks {
         let issue_open_elsewhere = task.issue.is_some_and(|issue| {
-            unlanded
-                .iter()
+            open.iter()
                 .any(|(other_issue, other)| *other_issue == issue && *other != task.id)
         });
         let Some(issue) = task.issue.and_then(|n| u64::try_from(n).ok()) else {
