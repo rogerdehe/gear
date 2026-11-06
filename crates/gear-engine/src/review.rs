@@ -203,6 +203,154 @@ pub fn start_reviews_with_tips(
     Ok(report)
 }
 
+/// Keep the project's reviewer seats up (T-630).
+///
+/// While the current voyage has open tasks and is not landed, the engine keeps
+/// `[quota] temps` reviewer seats up: when fewer seats occupy the quota than it
+/// allows and no review waits for a seat, it starts one reviewer a tick in
+/// `Standby` — its seat worktree on its seat branch, its agent up, no job — so
+/// the next review finds a warm seat instead of a cold start (Lawrence M2,
+/// 2026-11-06: three idle reviewers were released to pick up a fixed account,
+/// and GEAR started only the one a review was due for).
+///
+/// A landed voyage starts none: its reviewers are released (T-546). A hand-in
+/// that waits for a seat comes first (T-424): its review takes the seat.
+pub fn keep_reviewer_seats(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, Profile>,
+    project: &str,
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    let mut started = Vec::new();
+    let Some(row) = store.read(|tx| tx.get_project(project))? else {
+        return Ok(started);
+    };
+    let Ok(config) = gear_app::config::parse_row(&row) else {
+        return Ok(started);
+    };
+    // Without `[temps]` there is no reviewer to keep up.
+    let Some(temps) = config.temps.as_ref() else {
+        return Ok(started);
+    };
+    // The voyage: open tasks and not landed.
+    let voyage = store.read(|tx| gear_app::plan::current_voyage(tx, project))?;
+    if voyage.is_empty() {
+        return Ok(started);
+    }
+    let open = store.read(|tx| {
+        Ok(tx.tasks_of_project(project)?.iter().any(|task| {
+            task.milestone.as_deref() == Some(voyage.as_str()) && !task.state.is_terminal()
+        }))
+    })?;
+    if !open {
+        return Ok(started);
+    }
+    if store.read(|tx| crate::quiet::voyage_landed(tx, project, &voyage))? {
+        return Ok(started);
+    }
+    // A review that waits for a seat comes first (T-424).
+    if crate::release::hand_ins_waiting(store, project)? > 0 {
+        return Ok(started);
+    }
+    // T-467: the reviewer count in effect: a raise the user confirmed, else
+    // the configured `[quota].temps`.
+    let quota = i64::from(crate::release::effective_temps(
+        store,
+        project,
+        config.quota.temps,
+    )?);
+    if !has_free_slot(store, herdr, project, quota, None)? {
+        return Ok(started);
+    }
+    // The model and the CLI a review of this project would run: the review
+    // chain's first entry, else the temps kind.
+    let entry = crate::model::review_entry_for(&config, None, None);
+    let kind = entry
+        .and_then(ModelEntry::cli)
+        .unwrap_or(temps.kind.as_str())
+        .to_string();
+    let selected = if kind == temps.kind {
+        profiles
+            .get(&temps.profile)
+            .map(|profile| (temps.profile.as_str(), profile))
+    } else {
+        crate::restart::profile_for_kind(profiles, &kind)
+    };
+    let Some((profile_name, profile)) = selected else {
+        return Ok(started);
+    };
+    // An unverified profile may not take over a real project (design/04).
+    if !profile.verified {
+        return Ok(started);
+    }
+    // A free seat: one that was released (its worktree and cache stay), else a
+    // new one.
+    let seat = match free_released_seat(store, herdr, project)? {
+        Some(seat) => seat,
+        None => create_standby_seat(store, project, profile_name, now)?,
+    };
+    store.write(|tx| tx.set_seat_profile(&seat.id, profile_name))?;
+    if let Started::Yes = start_standby_reviewer(
+        store, herdr, cfg, &config, &seat, entry, &kind, profile, now,
+    )? {
+        started.push(seat.id);
+    }
+    Ok(started)
+}
+
+/// A reviewer seat that was released and runs no agent: its worktree and build
+/// cache stay, so the next start is warm (17 §8a). A seat whose pane still
+/// holds an agent is not picked (T-561): it is a reviewer the user sees.
+fn free_released_seat(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+) -> GearResult<Option<SeatRow>> {
+    let mut free = Vec::new();
+    for seat in store.read(|tx| tx.seats_of_project(project))? {
+        if seat.role != SeatRole::Temp || seat.state != SeatState::Released {
+            continue;
+        }
+        if seat.task_id.is_some() {
+            continue;
+        }
+        if shows_an_agent(store, herdr, &seat)? {
+            continue;
+        }
+        free.push(seat);
+    }
+    free.sort_by_key(|seat| seat.state_since);
+    Ok(free.into_iter().next())
+}
+
+/// Create a temp seat for a warm start: no job, no reservation (T-630).
+fn create_standby_seat(
+    store: &mut Store,
+    project: &str,
+    profile: &str,
+    now: Ts,
+) -> GearResult<SeatRow> {
+    store.write(|tx| {
+        let name = next_temp_name(tx, project)?;
+        let seat = SeatRow {
+            id: format!("{project}:{name}"),
+            project: project.to_string(),
+            role: SeatRole::Temp,
+            name,
+            profile: profile.to_string(),
+            generation: 0,
+            state: SeatState::Queued,
+            state_since: now,
+            state_reason: Some("kept warm for the next review".to_string()),
+            task_id: None,
+        };
+        tx.insert_seat(&seat)?;
+        Ok(seat)
+    })
+}
+
 /// A task that waits is named once: the report says which tasks wait, not
 /// how often they were asked for a seat.
 fn note_waiting(report: &mut ReviewReport, task: &str) {
@@ -2865,7 +3013,7 @@ pub(crate) fn pending_review_key(seat: &str) -> String {
     format!("engine.review_pending.{seat}")
 }
 
-fn review_model_key(seat: &str) -> String {
+pub(crate) fn review_model_key(seat: &str) -> String {
     format!("engine.review_model_entry.{seat}")
 }
 
@@ -2999,6 +3147,337 @@ enum Started {
     /// that is still starting) or a seat that was parked for a human — its
     /// state says which.
     NotYet,
+}
+
+/// Start a reviewer in `Standby` with no job (T-630): the pane, the
+/// environment and the agent of `start_reviewer`, without the job's branch and
+/// packet. The seat's worktree is opened or created on its seat branch at the
+/// integration branch, so the next review finds a warm seat.
+fn start_standby_reviewer(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    config: &ProjectConfig,
+    seat: &SeatRow,
+    entry: Option<&ModelEntry>,
+    kind: &str,
+    profile: &Profile,
+    now: Ts,
+) -> GearResult<Started> {
+    let repo = config.root_repo();
+    let seat_branch = gear_model::branch::expand_seat(
+        &config.conventions.seat_branch,
+        &config.project.id,
+        &seat.name,
+        &store.read(|tx| gear_app::plan::current_voyage(tx, &config.project.id))?,
+    );
+    let seat_label = worktree_label(config, &seat.name, &repo);
+    let label = agent_name(config, &seat.name);
+    let model = entry.map(ModelEntry::model);
+
+    // 1. the pane: the seat's, from its binding, else the seat's worktree —
+    //    opened, or created once at the integration branch.
+    let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
+    let live = binding
+        .as_ref()
+        .filter(|binding| binding.status != BindingStatus::Void);
+    let pane = match live.map(|binding| binding.pane_id.clone()) {
+        Some(pane) => pane,
+        None => {
+            let by_path = match worktree_in(store, &seat.id, &repo, &config.root_repo().path)? {
+                Some(path) => herdr.worktree_open_path(&repo.path, &path, &seat_label),
+                None => Outcome::Refused {
+                    code: "worktree_not_found".into(),
+                    message: String::new(),
+                },
+            };
+            let opened = match by_path {
+                Outcome::Refused { code, .. } if code == "worktree_not_found" => {
+                    herdr.worktree_open(&repo.path, &seat_branch, &seat_label)
+                }
+                other => other,
+            };
+            let worktree = match opened {
+                Outcome::Ok(worktree) => worktree,
+                Outcome::Refused { code, .. } if code == "worktree_not_found" => {
+                    match herdr.worktree_create(
+                        &repo.path,
+                        &seat_branch,
+                        &repo.integration,
+                        &seat_label,
+                    ) {
+                        Outcome::Ok(worktree) => worktree,
+                        other => {
+                            park(
+                                store,
+                                &seat.id,
+                                &step_failure("worktree_create", &other),
+                                now,
+                            )?;
+                            return Ok(Started::NotYet);
+                        }
+                    }
+                }
+                Outcome::Uncertain { .. } => return Ok(Started::NotYet),
+                other => {
+                    park(store, &seat.id, &step_failure("worktree_open", &other), now)?;
+                    return Ok(Started::NotYet);
+                }
+            };
+            if let Err(reason) = crate::onboard::check_worktree(
+                store,
+                &seat.project,
+                &seat.name,
+                &repo.path,
+                &worktree.path,
+                now,
+            ) {
+                park(store, &seat.id, &reason, now)?;
+                return Ok(Started::NotYet);
+            }
+            if let Err(reason) =
+                crate::onboard::forget_gear_hooks(std::path::Path::new(&worktree.path))
+            {
+                park(store, &seat.id, &format!("old hook: {reason}"), now)?;
+                return Ok(Started::NotYet);
+            }
+            store.write(|tx| {
+                if let Some(previous) = tx.get_meta(&path_key(&seat.id))? {
+                    let previous_repo = tx
+                        .get_meta(&repo_key(&seat.id))?
+                        .unwrap_or_else(|| config.root_repo().path);
+                    tx.set_meta(&repo_path_key(&seat.id, &previous_repo), &previous)?;
+                }
+                tx.set_meta(&repo_path_key(&seat.id, &repo.path), &worktree.path)?;
+                tx.set_meta(&path_key(&seat.id), &worktree.path)?;
+                tx.set_meta(&repo_key(&seat.id), &repo.path)
+            })?;
+            worktree.pane_id
+        }
+    };
+
+    // 2. a new start is a new generation of the seat: the previous binding is
+    //    voided and a pending one is opened on the same pane. An interrupted
+    //    start keeps the pending binding it already has.
+    let pending = binding
+        .as_ref()
+        .map(|binding| binding.status == BindingStatus::Pending)
+        .unwrap_or(false);
+    let generation = if pending {
+        seat.generation
+    } else {
+        seat.generation + 1
+    };
+    if !pending {
+        if let Err(reason) = store.write(|tx| {
+            gear_app::seats::begin_onboard(tx, &seat.id, &pane, kind, now)?;
+            Ok(())
+        }) {
+            park(
+                store,
+                &seat.id,
+                &format!("begin_onboard: {}", reason.detail),
+                now,
+            )?;
+            return Ok(Started::NotYet);
+        }
+    }
+
+    // 3. the occupant of the pane: an agent this engine started for this very
+    //    generation is adopted; any other agent is never typed into.
+    let occupant = match herdr.agent_get(&pane) {
+        Ok(info) => info,
+        Err(error) => {
+            park(store, &seat.id, &format!("agent_get: {}", error.0), now)?;
+            return Ok(Started::NotYet);
+        }
+    };
+    if occupant.as_ref().is_some_and(|agent| {
+        !matches!(
+            agent.agent_status,
+            gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done
+        )
+    }) {
+        return Ok(Started::NotYet);
+    }
+    if occupant.is_some() && !recorded_start(store, &seat.id, generation, &pane, kind)? {
+        park(
+            store,
+            &seat.id,
+            "the reviewer's pane is held by another agent",
+            now,
+        )?;
+        return Ok(Started::NotYet);
+    }
+    let Some(path) = worktree_path(store, &seat.id)? else {
+        park(store, &seat.id, "the seat's worktree path is unknown", now)?;
+        return Ok(Started::NotYet);
+    };
+    store.write(|tx| tx.set_meta(&crate::onboard::worktree_path_key(&seat.id), &path))?;
+
+    if occupant.is_none() {
+        // 4. the environment: the call context and the model when the CLI
+        //    takes one, in the confirmed shell.
+        let mut env_command = match crate::onboard::tmpdir_prefix(
+            &config.conventions,
+            &config.project.id,
+            &seat.name,
+            Some(&path),
+        ) {
+            Some(prefix) => format!(
+                "{prefix}export GEAR_CTX={}:{}:{}; export GEAR_DB={}; {}",
+                config.project.id,
+                seat.name,
+                generation,
+                cfg.db_path,
+                crate::onboard::EDITOR_ENV
+            ),
+            None => format!(
+                "export GEAR_CTX={}:{}:{}; export GEAR_DB={}; {}",
+                config.project.id,
+                seat.name,
+                generation,
+                cfg.db_path,
+                crate::onboard::EDITOR_ENV
+            ),
+        };
+        if let Some(start) = model.and_then(|model| model_start(kind, model)) {
+            if !start.env.is_empty() {
+                env_command = format!("{env_command}; {}", start.env);
+            }
+        }
+        if let Some(prefix) = crate::onboard::setup_prefix(&config.conventions) {
+            env_command = format!("{prefix}{env_command}");
+        }
+        if !env_ready(store, herdr, &seat.id, generation, &pane, &env_command)? {
+            return Ok(Started::NotYet);
+        }
+        record_start(store, &seat.id, generation, &pane, kind, &label)?;
+        if let Some(model) = model {
+            store.write(|tx| tx.set_meta(&crate::model::model_meta_key(&seat.id), model))?;
+        }
+    }
+
+    let started = match occupant {
+        Some(info) => {
+            if !recorded_start(store, &seat.id, generation, &pane, kind)? {
+                park(
+                    store,
+                    &seat.id,
+                    "the reviewer's pane is held by another agent",
+                    now,
+                )?;
+                return Ok(Started::NotYet);
+            }
+            info
+        }
+        None => {
+            // 5. the agent's args: the profile's unattended args, the rules,
+            //    the model when the CLI takes one and the chain entry's
+            //    arguments.
+            let mut args = reviewer_args(store, config, profile, kind, entry, "")?;
+            let rules = crate::rules::arguments(
+                store,
+                &seat.project,
+                seat.role,
+                &seat.name,
+                &cfg.db_path,
+                profile,
+                false,
+            )?;
+            args.splice(
+                profile.unattended_args.len()..profile.unattended_args.len(),
+                rules,
+            );
+            if kind == "opencode" {
+                if let Some(model) = model.filter(|model| !model.is_empty()) {
+                    match crate::opencode::start_args(
+                        store,
+                        herdr,
+                        &seat.id,
+                        generation,
+                        &path,
+                        config,
+                        model,
+                        cfg.model_list_wait_s,
+                        cfg.model_list_poll_ms,
+                    ) {
+                        Ok(session_args) => args.extend(session_args),
+                        Err(reason) => {
+                            park(store, &seat.id, &reason, now)?;
+                            return Ok(Started::NotYet);
+                        }
+                    }
+                }
+            }
+            record_start(store, &seat.id, generation, &pane, kind, &label)?;
+            if let Err(reason) = crate::trust::trust_worktree(kind, &path, now) {
+                store.write(|tx| tx.set_meta(&start_key(&seat.id, generation), ""))?;
+                park(store, &seat.id, &format!("trust: {reason}"), now)?;
+                return Ok(Started::NotYet);
+            }
+            let args = gear_herdr::render_args(&args, &path);
+            match herdr.agent_start(&label, kind, &pane, &args) {
+                Outcome::Ok(info) => info,
+                Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
+                    return Ok(Started::NotYet);
+                }
+                other => {
+                    let tail = herdr.read_tail(&pane, 16).unwrap_or_default();
+                    let reason = match crate::start::cli_missing(&tail, kind) {
+                        Some(line) => crate::start::cli_missing_text(kind, &line),
+                        None => step_failure("agent_start", &other),
+                    };
+                    park(store, &seat.id, &reason, now)?;
+                    return Ok(Started::NotYet);
+                }
+            }
+        }
+    };
+
+    // The chain's model before the reviewer gets any work (T-33, F5).
+    if let Some(model) = model.filter(|_| kind == "opencode") {
+        match crate::switch::ensure_model(store, herdr, seat, profile, config, model, now)? {
+            crate::switch::ModelGate::Ready => {}
+            crate::switch::ModelGate::Waiting => return Ok(Started::NotYet),
+            crate::switch::ModelGate::Failed(reason) => {
+                park(store, &seat.id, &reason, now)?;
+                return Ok(Started::NotYet);
+            }
+        }
+    }
+
+    // 6. the seat is up and warm: no job, no packet. The binding becomes the
+    //    seat's live one and the seat waits in `Standby` for the next review.
+    let session_ref = started
+        .agent_session
+        .as_ref()
+        .map(|session| session.value.as_str());
+    store
+        .write(|tx| {
+            gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now)?;
+            tx.set_meta(
+                &review_model_key(&seat.id),
+                &review_model_entry(kind, entry),
+            )?;
+            if let Some(model) = model {
+                tx.set_meta(&crate::model::model_meta_key(&seat.id), model)?;
+            }
+            require_transition(
+                SeatState::can_transition(SeatRole::Temp, SeatState::Active, SeatState::Standby),
+                "seat",
+                SeatState::Active.as_str(),
+                SeatState::Standby.as_str(),
+            )?;
+            tx.set_seat_state(
+                &seat.id,
+                SeatState::Standby,
+                Some("kept warm for the next review"),
+                now,
+            )
+        })
+        .map_err(|e| GearError::new(e.code, format!("finish_onboard: {}", e.detail)))?;
+    Ok(Started::Yes)
 }
 
 /// Give the reviewer its worktree, its environment, its agent and the review
@@ -15297,6 +15776,195 @@ profile = "opencode"
             packet.contains("T-2 — the second goal\n  light check (attempt 1):\n  ok"),
             "the second member's goal and check are listed: {packet}"
         );
+    }
+
+    /// T-630: the config with room for three reviewer seats.
+    const CONFIG_THREE_SLOTS: &str = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 3
+
+[captain]
+pane = "w1:p9"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[temps]
+kind = "codex"
+profile = "codex"
+
+[models]
+lanes = ["minimax-cn/MiniMax-M3.1-Flash"]
+review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] }]
+"#;
+
+    /// T-630: a voyage M1 with one open task, and `up` reviewer seats in
+    /// `Standby` with their agents in the fake session. `landed` resolves the
+    /// voyage's landing order.
+    fn warm_world(up: usize, landed: bool) -> (Store, FakeHerdr) {
+        REVIEW_GIT_FAKE.with(|fake| fake.set(true));
+        let mut store = Store::open_in_memory().unwrap();
+        let mut herdr = FakeHerdr::new();
+        store
+            .write(|tx| {
+                tx.insert_project(&ProjectRow {
+                    id: "p".into(),
+                    herdr_session: "sess".into(),
+                    config_toml: CONFIG_THREE_SLOTS.into(),
+                    config_version: 1,
+                    quota_lanes: 1,
+                    quota_temps: 3,
+                    quota_includes_captain: false,
+                    plan_version: 0,
+                    created: T0,
+                })?;
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "captain",
+                    SeatRole::Captain,
+                    "w1:p9",
+                    "claude",
+                    T0,
+                )?;
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-1".into(),
+                    rank: 1,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: Some("M1".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+                tx.set_voyage_departure("p", "M1", T0, 1, T0)?;
+                for n in 1..=up {
+                    let pane = format!("w2:p{n}");
+                    let seat = testing::seed_active_seat(
+                        tx,
+                        "p",
+                        &format!("review-{n}"),
+                        SeatRole::Temp,
+                        &pane,
+                        "codex",
+                        T0,
+                    )?;
+                    tx.set_seat_state(&seat.id, SeatState::Standby, Some("review done"), T0)?;
+                    herdr.add_agent(&pane, "codex", gear_herdr::AgentStatus::Idle);
+                }
+                if landed {
+                    let message = tx.insert_message(&NewMessage {
+                        meta: None,
+                        project: "p".into(),
+                        thread: "station:M1".into(),
+                        task: None,
+                        attempt: None,
+                        sender: "engine".into(),
+                        sender_gen: 0,
+                        recipient: "p:captain".into(),
+                        kind: MsgKind::System,
+                        urgent: true,
+                        body: "Voyage M1 is ready to land".into(),
+                        reply_to: None,
+                        needs_ack: false,
+                        state: MsgState::Open,
+                        created: T0,
+                    })?;
+                    tx.set_meta("station:p:M1:land", &message.id)?;
+                    tx.update_message_state(
+                        "p",
+                        &message.id,
+                        MsgState::Resolved,
+                        Some(&format!("station {}: land", message.id)),
+                        None,
+                        None,
+                        T0,
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        (store, herdr)
+    }
+
+    /// T-630: a voyage with work and two of three seats up starts the third in
+    /// `Standby`, one a tick; the quota is full then, so no fourth starts.
+    #[test]
+    fn a_voyage_with_work_keeps_its_reviewer_seats_up() {
+        let (mut store, mut herdr) = warm_world(2, false);
+        let started = keep_reviewer_seats(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        assert_eq!(started, vec!["p:review-3".to_string()]);
+        let seat = store.read(|tx| tx.get_seat("p:review-3")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Standby, "the seat waits warm");
+        assert!(seat.task_id.is_none(), "no job");
+        // Its seat worktree on its seat branch, and one agent.
+        let created = worktrees(&herdr);
+        assert_eq!(created.len(), 1, "{created:?}");
+        assert!(created[0].0.contains("review-3"), "{created:?}");
+        assert_eq!(starts(&herdr).len(), 1);
+        // The quota is full: the next tick starts none.
+        let again = keep_reviewer_seats(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 20,
+        )
+        .unwrap();
+        assert!(again.is_empty(), "{again:?}");
+    }
+
+    /// T-630: a landed voyage starts no reviewer seat, though its quota has
+    /// room.
+    #[test]
+    fn a_landed_voyage_starts_no_reviewer_seat() {
+        let (mut store, mut herdr) = warm_world(1, true);
+        let started = keep_reviewer_seats(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        assert!(started.is_empty(), "{started:?}");
+        assert!(worktrees(&herdr).is_empty(), "no cold worktree");
+        assert!(starts(&herdr).is_empty(), "no agent");
     }
 }
 

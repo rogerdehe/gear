@@ -100,6 +100,10 @@ pub enum StaffItem {
     /// or Queued (its agent is gone, the engine onboards it again) (T-133).
     /// `- release review-1`: a reviewer seat in Standby is released (T-140).
     Release { line: usize, name: String },
+    /// `- restart review-1`: an idle reviewer's agent is exited and started
+    /// again in the same pane and worktree, its seat and generation kept; a
+    /// working reviewer restarts right after its verdict (T-630).
+    Restart { line: usize, name: String },
     /// `- rebind heat repo=backend owns=[src/, tests/]`.
     Rebind {
         line: usize,
@@ -960,6 +964,15 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
             }
             Ok(StaffItem::Release { line, name: name.to_string() })
         }
+        "restart" => {
+            let name = tokens
+                .next()
+                .ok_or_else(|| bad(line, "`restart` needs a reviewer"))?;
+            if tokens.next().is_some() {
+                return Err(bad(line, "`restart` takes only a reviewer"));
+            }
+            Ok(StaffItem::Restart { line, name: name.to_string() })
+        }
         "rebind" => {
             let lane = tokens.next().ok_or_else(|| bad(line, "`rebind` needs a lane"))?;
             // `- rebind <lane> cancel` withdraws a pending request (T-305).
@@ -1088,7 +1101,7 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
         }
         other => Err(bad(
             line,
-            format!("unknown staff verb {other:?}, expected temp, park, hold, release, retire, retry, rebind, remerge, raise or drop"),
+            format!("unknown staff verb {other:?}, expected temp, park, hold, release, restart, retire, retry, rebind, remerge, raise or drop"),
         )),
     }
 }
