@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1236 -->
+<!-- gear-plan project=gear base=1237 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 6h
 depart: now
 
 # Decisions
+- station M-8318: cut | why: projected 401m against the 6h eta, hull holds 390m and mast 235m; T-628 (a merge-failed item names its queued remerge, 20m) is outside the done line and goes to the M7 backlog; the merge worktrees and lost scan hull keeps are merge.rs work no other lane can take without a file move costing more than it saves; the 2026-11-06 hand-fix v0.6.91 (a landed task is never waited for; the board never forecasts a blocked job in hours) took no lane time
 - station M-8316: move | why: projected 452m against 360m, hull 345m and mast 123m; finished.rs, quiet.rs and lane_nudge.rs move to mast with T-610, T-618 and T-619 (100m), so hull keeps the files of F-3, T-630, merge and review; the eta stays and the rest is reported to the user
 - 2026-11-06 09:55 confirmed: lanes hull and mast owns, gear-engine whole -> hull all but finished.rs, quiet.rs, lane_nudge.rs, which go to mast | why: the user (2026-11-06, through Lawrence's captain, see T-623): a lane's paths are the captain's work, not staffing
 - 2026-11-06 09:45 note: the GEAR captain told Lawrence's captain to release its idle DashScope reviewers so they restart; release ends a seat and GEAR starts reviewers only on demand, so two stayed down against the user's resident reviewers | why: logged as the cause of T-630; a reviewer is never released to restart it
@@ -179,6 +180,7 @@ estimate: 40
 deps: -
 
 ## T-628 [should] lane=hull milestone=M6.3
+state: cancelled
 goal: A merge-failed item says when its remerge is queued (Lawrence, 2026-11-06: M-921 merge-failed:T-63 kept `next: remerge T-63` while O-760, the remerge, was Intended behind the running train; the captain's second remerge was refused and it asked why). crates/gear-engine/src/merge.rs: when a remerge op of the task is Intended or Unknown, the open merge-failed item's body ends with "remerge queued (O-n): it runs when the merge running into <branch> ends", and the hint offers no remerge; when the remerge starts, the item says it is running.
 accept: A test in merge.rs `mod tests`: a failed merge then a queued remerge updates the item's body with the queued line; the line is gone once the op runs. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
 estimate: 20
