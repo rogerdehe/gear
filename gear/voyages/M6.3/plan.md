@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1247 -->
+<!-- gear-plan project=gear base=1248 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -9,7 +9,8 @@ eta: 6h
 depart: now
 
 # Decisions
-- station M-8462: land | why: every task of M6.3 is merged on dev (T-629 last, 13:41Z); the six done clauses are met below; released as v0.6.102
+- 2026-11-06 09:26 hand-fix: T-625 delivered by hand in v0.6.90 (a lane compacts only at half a window GEAR knows) | why: the user wanted the 9 % compaction fixed at once; T-625 was cancelled for it
+- station M-8478: land | why: every task of M6.3 is merged on dev (T-629 last, 13:41Z); the six done clauses are met below; released as v0.6.102
 - done (1): met | evidence: F-3 (T-603 pane split, T-604 start in a new pane, T-605 seat rebind and old pane close, T-606 /model in place for pi and Claude) merged into dev with T-621; a failed start leaves the old agent (T-604 tests)
 - done (2): met | evidence: T-607 merged: 15 failed ticks (60 s or more) open one urgent engine-failed item, a good tick resolves it
 - done (3): met | evidence: T-608 merged (gate headroom; warm gate 29-37 s against 80 s); T-609 merged T-572's merge-red item on today's dev
