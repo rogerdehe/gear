@@ -712,8 +712,9 @@ fn release_standby_above(
 /// `release_finished_reviews`, not by this sweep.
 ///
 /// T-546: with no work left at all — no task of the project that is not done
-/// or cancelled — a Standby reviewer has nothing to review ever, so every one
-/// of them is released at once, whatever idle time the project sets.
+/// or cancelled — and the voyage landed, a Standby reviewer has nothing to
+/// review ever, so every one of them is released at once, whatever idle time
+/// the project sets. Before the landing an idle reviewer is kept.
 ///
 /// T-424: no Standby reviewer is surplus while a hand-in waits for a reviewer.
 /// A hand-in that waits needs a seat that is up, and a released Standby
@@ -734,16 +735,21 @@ pub fn release_idle_standby(
     if standby.is_empty() {
         return Ok(report);
     }
-    // T-546: a project with no work left keeps no reviewer up at all. With no
-    // task of the project that is not done or cancelled, a Standby reviewer
-    // has nothing to review ever: it is released at once, whatever idle time
-    // the project sets (2026-11-03, a landed voyage left two up because
-    // `reviewer_release_idle_min` was unset).
+    // T-546: a landed voyage keeps no reviewer up: with no task of the project
+    // that is not done or cancelled and its voyage landed, a Standby reviewer
+    // has nothing to review ever and is released at once (2026-11-03, a landed
+    // voyage left two up). Before the landing reviewers stay: the end of a
+    // voyage still brings rework, late tasks and feature checks, and a
+    // released reviewer is cold-started for each (Carthage M1, GEAR M6.2).
     let work_left = store
         .read(|tx| tx.tasks_live_of_project(project))?
         .into_iter()
         .any(|task| !matches!(task.state, TaskState::Done | TaskState::Cancelled));
-    if !work_left {
+    let landed = store.read(|tx| {
+        let voyage = gear_app::plan::current_voyage(tx, project)?;
+        Ok(voyage.is_empty() || crate::quiet::voyage_landed(tx, project, &voyage)?)
+    })?;
+    if !work_left && landed {
         for seat in standby {
             match release_one(store, herdr, project, &seat, None, now, "idle-standby") {
                 Ok(true) => report.released.push(seat.id.clone()),
@@ -3286,6 +3292,64 @@ profile = "codex"
             let seat = store.read(|tx| tx.get_seat(name)).unwrap().unwrap();
             assert_eq!(seat.state, SeatState::Released, "{name} is free");
         }
+    }
+
+    /// T-546: every task done but the voyage not landed keeps the reviewers:
+    /// the end of a voyage still brings rework, late tasks and feature checks
+    /// (Carthage M1 added T-60 after its last task, GEAR M6.2 cold-started
+    /// reviewers for its feature checks). The landing releases them.
+    #[test]
+    fn every_task_done_keeps_the_reviewers_until_the_landing() {
+        let (mut store, mut herdr) =
+            world_without_idle_time(&[TaskState::Done, TaskState::Cancelled]);
+        let order = store
+            .write(|tx| {
+                for id in ["T-1", "T-2"] {
+                    let mut task = tx.get_task("p", id)?.unwrap();
+                    task.milestone = Some("M1".into());
+                    tx.update_task(&task)?;
+                }
+                tx.set_voyage_departure("p", "M1", T0, 2, T0)?;
+                let message = tx.insert_message(&gear_store::NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: "station:M1".into(),
+                    task: None,
+                    attempt: None,
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: gear_model::MsgKind::System,
+                    urgent: true,
+                    body: "Voyage M1 is ready to land".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: gear_model::MsgState::Open,
+                    created: T0,
+                })?;
+                tx.set_meta("station:p:M1:land", &message.id)?;
+                Ok(message.id)
+            })
+            .unwrap();
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+        assert_eq!(exits(&herdr), 0, "no reviewer goes before the landing");
+
+        store
+            .write(|tx| {
+                tx.update_message_state(
+                    "p",
+                    &order,
+                    gear_model::MsgState::Resolved,
+                    Some(&format!("station {order}: land")),
+                    None,
+                    None,
+                    T0 + 15,
+                )
+            })
+            .unwrap();
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+        assert_eq!(exits(&herdr), 2, "the landing releases both");
     }
 
     /// T-546: one task that is not done or cancelled is work left, so the

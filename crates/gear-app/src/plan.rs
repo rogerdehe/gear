@@ -2423,7 +2423,9 @@ fn with_landing_staff(store: &mut Store, draft: &Draft) -> GearResult<Option<Dra
                 continue;
             }
             if let Some(message) = tx.get_message(&project, id.trim())? {
-                if message.state != gear_model::MsgState::Resolved {
+                if message.state != gear_model::MsgState::Resolved
+                    || crate::station::relands(tx, &project, &message)?
+                {
                     return Ok(true);
                 }
             }

@@ -295,7 +295,7 @@ fn captain_told_key(seat: &str) -> String {
 }
 
 /// Whether the voyage has landed: its landing order was answered `land`.
-fn voyage_landed(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<bool> {
+pub(crate) fn voyage_landed(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<bool> {
     let Some(id) = tx.get_meta(&format!("station:{project}:{milestone}:land"))? else {
         return Ok(false);
     };
