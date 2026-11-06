@@ -122,10 +122,28 @@ pub fn task_branch_of(
     lane: &str,
     task: &str,
 ) -> GearResult<String> {
-    match tx.task_branch_override(project, task)? {
-        Some(branch) => Ok(branch),
-        None => Ok(task_branch(conventions, project, lane, task)),
+    if let Some(branch) = tx.task_branch_override(project, task)? {
+        return Ok(branch);
     }
+    // A task keeps the branch its first attempt was told, whichever lane works
+    // on it now (Lawrence M2 F-71: T-126 moved from web to align, and its
+    // rework named `align/t126`, a branch that never existed).
+    let first_lane = tx
+        .attempts_of_task(project, task)?
+        .into_iter()
+        .min_by_key(|attempt| attempt.n)
+        .and_then(|attempt| {
+            attempt
+                .seat
+                .split_once(':')
+                .map(|(_, name)| name.to_string())
+        });
+    Ok(task_branch(
+        conventions,
+        project,
+        first_lane.as_deref().unwrap_or(lane),
+        task,
+    ))
 }
 
 /// Refuse unless `candidate` is on `<remote>/<branch>` (T-83): M2.1's T-60 was
@@ -543,5 +561,42 @@ mod tests {
             .read(|tx| task_branch_of(tx, &conventions, "p", "mast", "T-10"))
             .unwrap();
         assert_eq!(other, "mast/t10");
+    }
+
+    /// F-71: a task moved to another lane after its first attempt keeps the
+    /// branch that attempt was told; the rework is not sent to a branch that
+    /// never existed.
+    #[test]
+    fn a_task_moved_to_another_lane_keeps_its_first_branch() {
+        let mut store = world();
+        let conventions = crate::config::Conventions::default();
+        store
+            .write(|tx| {
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-9".into(),
+                    n: 1,
+                    seat: "p:web".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: gear_model::AttemptState::Rejected,
+                    candidate: Some("abc1234".into()),
+                    report: None,
+                    safe_point: None,
+                    started: NOW,
+                    updated: NOW,
+                })
+            })
+            .unwrap();
+        let branch = store
+            .read(|tx| task_branch_of(tx, &conventions, "p", "align", "T-9"))
+            .unwrap();
+        assert_eq!(branch, "web/t9");
     }
 }
