@@ -211,7 +211,8 @@ fn left_in_voyage(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<usi
     Ok(left)
 }
 
-/// Whether the voyage still has a task that is not terminal (T-529), or a Done
+/// Whether the voyage still has a task that is not terminal (T-529), an open
+/// land order, or a Done
 /// task whose accepted work is not on the integration branch (T-595): a
 /// finished voyage's goal is history, and a captain's home page does not carry
 /// it. It reads the store's `unmerged_done_tasks`, the same rule as the engine's
@@ -223,6 +224,17 @@ pub fn voyage_open(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<bo
         .any(|task| task.milestone.as_deref() == Some(milestone) && !task.state.is_terminal());
     if unfinished {
         return Ok(true);
+    }
+    // Every task merged, but the land order still waits for its answer: the
+    // voyage is not finished, and the captain's page must show that order
+    // (Lawrence M2, M-1846: the home page was empty while the doorbell rang).
+    if let Some(land) = tx.get_meta(&format!("station:{project}:{milestone}:land"))? {
+        if tx
+            .get_message(project, &land)?
+            .is_some_and(|message| message.state == gear_model::MsgState::Open)
+        {
+            return Ok(true);
+        }
     }
     Ok(tx
         .unmerged_done_tasks(project)?

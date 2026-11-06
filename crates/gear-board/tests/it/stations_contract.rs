@@ -284,6 +284,49 @@ fn a_voyage_with_a_done_task_not_yet_merged_is_open() {
         .write(|tx| tx.set_attempt_time("p", "T-5", 1, AttemptStep::Merged, NOW - 600))
         .unwrap();
     assert!(!store.read(|tx| voyage_open(tx, "p", "M5")).unwrap());
+    // Every task merged, but the land order is still open: the voyage is not
+    // finished until it is answered (Lawrence M-1846).
+    let land = store
+        .write(|tx| {
+            let land = tx.insert_message(&gear_store::NewMessage {
+                project: "p".into(),
+                thread: "station:M5".into(),
+                task: None,
+                attempt: None,
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: "p:captain".into(),
+                kind: gear_model::MsgKind::System,
+                urgent: true,
+                body: "Voyage M5 is ready to land".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: gear_model::MsgState::Open,
+                created: NOW,
+                meta: None,
+            })?;
+            tx.set_meta("station:p:M5:land", &land.id)?;
+            Ok(land.id)
+        })
+        .unwrap();
+    assert!(
+        store.read(|tx| voyage_open(tx, "p", "M5")).unwrap(),
+        "an open land order keeps the voyage open"
+    );
+    store
+        .write(|tx| {
+            tx.update_message_state(
+                "p",
+                &land,
+                gear_model::MsgState::Resolved,
+                Some("station: land"),
+                None,
+                None,
+                NOW + 1,
+            )
+        })
+        .unwrap();
+    assert!(!store.read(|tx| voyage_open(tx, "p", "M5")).unwrap());
 }
 
 #[test]
