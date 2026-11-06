@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1244 -->
+<!-- gear-plan project=gear base=1245 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 6h
 depart: now
 
 # Decisions
+- station M-8439: keep course | why: 60m left, 5 must tasks (hull 87m, mast 98m); each is a client fix or a done item, none is cut; the lanes are even, so a move gains nothing; about 40m over the eta, reported to the user with the third-lane offer
 - station M-8433: cut | why: 74m left, mast 130m (T-620 then T-623, T-624, T-626, T-629) and hull 85m; T-626 (15m, init warns on a missing context window) goes to the M7 backlog: since v0.6.90 a missing window reads the CLI's own and never compacts; mast's rest is gear-app and lane_nudge.rs work, hull's rest is merge.rs, so no task moves without moving owns
 - station M-8413: cut | why: 90m left, hull 150m and mast 114m; T-615 (25m, the lost scan names a carrier that landed without the carried work) goes to the M7 backlog: done item (4)'s carried-by line is T-614's, merged; hull keeps T-609, T-622 and T-627 (feature merges in their own worktree, which Lawrence needs); mast was handed the T-619 decisions it looped on
 - station M-8370: keep course | why: the queue holds hull 185m (T-607 then 5) and mast 150m (T-619 then 5) against 151m left; hull's rest is merge.rs and F-3 work, which no move to mast would speed up
