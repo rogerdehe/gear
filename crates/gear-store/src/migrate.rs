@@ -35,6 +35,8 @@
 //! deliveries). Both steps only create indexes: no row changes.
 //! **v10** adds the indexes for the live work a tick reads (T-529): `tasks_state`,
 //! `tasks_milestone` and `rounds_open`.
+//! **v11** adds `voyage_issues` (T-645): the GitHub issues a voyage's label
+//! found, with the body hash the scan last read.
 
 use gear_model::{ErrorCode, GearError, GearResult};
 use rusqlite::{params, Transaction};
@@ -42,7 +44,7 @@ use rusqlite::{params, Transaction};
 use crate::{map_sqlite, SCHEMA_SQL};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// The oldest version the steps know. A store without a stamp is this old:
 /// nothing ever wrote a version before v1.
@@ -94,6 +96,10 @@ pub const STEPS: &[Step] = &[
     Step {
         from: 9,
         apply: step_9_to_10,
+    },
+    Step {
+        from: 10,
+        apply: step_10_to_11,
     },
 ];
 
@@ -301,6 +307,13 @@ fn step_9_to_10(tx: &Transaction<'_>) -> GearResult<()> {
          CREATE INDEX IF NOT EXISTS rounds_open ON rounds (project, end_at);",
     )
     .map_err(map_sqlite)?;
+    Ok(())
+}
+
+/// v11 (T-645): `voyage_issues`, the GitHub issues a voyage's label found.
+/// The schema creates the table; an older store keeps every row it has.
+fn step_10_to_11(tx: &Transaction<'_>) -> GearResult<()> {
+    tx.execute_batch(SCHEMA_SQL).map_err(map_sqlite)?;
     Ok(())
 }
 

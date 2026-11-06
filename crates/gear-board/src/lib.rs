@@ -19,6 +19,7 @@ pub mod frame;
 pub mod golden;
 pub mod graph;
 pub mod idle;
+pub mod issues;
 mod screen;
 pub mod stations;
 pub mod style;

@@ -249,3 +249,12 @@ CREATE TABLE IF NOT EXISTS decisions (
 CREATE INDEX IF NOT EXISTS tasks_state ON tasks (project, state);
 CREATE INDEX IF NOT EXISTS tasks_milestone ON tasks (project, milestone, state);
 CREATE INDEX IF NOT EXISTS rounds_open ON rounds (project, end_at);
+
+-- T-645 (v11): the GitHub issues a voyage's label found. `labeled` says whether
+-- the issue still carries the voyage's label; `body_hash` is what the scan last
+-- read, so a changed issue becomes one captain item.
+CREATE TABLE IF NOT EXISTS voyage_issues (
+  project TEXT NOT NULL, number INTEGER NOT NULL, milestone TEXT NOT NULL,
+  title TEXT NOT NULL, body_hash TEXT NOT NULL, labeled INTEGER NOT NULL,
+  first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+  PRIMARY KEY (project, number));
