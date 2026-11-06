@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1258 -->
+<!-- gear-plan project=gear base=1260 -->
 # Goal
 Client fleets run smoothly: the merge, restart and message problems Lawrence met are gone, a new GEAR binary takes over every engine on the machine by itself with no merge cut, and a voyage takes GitHub issues by a label that names the project and the voyage. Each fix is released and live for every project on this machine.
 
@@ -9,6 +9,8 @@ eta: 8h
 depart: now
 
 # Decisions
+- 2026-11-06 rework: T-651 attempt 1 failed review: gear-engine's FakeForge lacks the new `Forge::create_label`, so the workspace does not build | why: the F-4 packets missed the trait's implementors (the T-640 lesson again); mast reworks with the exact method
+- station M-8607: keep course | why: 18 done, 3 left (75m), projected 123m from departure; hull 24m (T-637, T-638), mast T-639 then T-651 when hull's F-4 members merge
 - station M-8591: keep course | why: 15 done, 6 left, projected 143m from departure; mast just took T-639 from hull (T-650, T-639, then T-651 after hull's F-4 members), hull holds T-636 to T-638 in gear-forge
 - 2026-11-06 19:20 staff: T-639 moves from hull to mast | why: mast runs dry in 10 min (T-650 docs, then T-651 waits for hull's F-4 members) while hull holds T-636, T-637, T-638 and T-639; T-639 (15m, finished.rs only) moves to mast, and finished.rs moves with it from hull's owns to mast's, as in M6.3
 - station M-8571: keep course | why: 12 done, 9 left, projected 143m from departure against 404m left; hull 67m (T-635 then the F-4 forge members and T-639), mast 28m then the F-4 integration T-651 once hull's members merge; a move of hull's gear-engine/gear-forge work would need an owns change for little gain

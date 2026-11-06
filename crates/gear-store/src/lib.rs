@@ -610,6 +610,24 @@ pub struct VoyageRow {
     pub updated: Ts,
 }
 
+/// One GitHub issue a voyage's label found (T-645): what the scan last saw of
+/// it, so the board can show its state and a change becomes one captain item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoyageIssueRow {
+    pub project: String,
+    /// The GitHub issue number.
+    pub number: i64,
+    /// The voyage the label named.
+    pub milestone: String,
+    pub title: String,
+    /// The hash of the body the scan last read.
+    pub body_hash: String,
+    /// 1 while the issue still carries the voyage's label.
+    pub labeled: i64,
+    pub first_seen: Ts,
+    pub last_seen: Ts,
+}
+
 /// One station of a voyage (M5 S3): its id as the plan names it (`S1`, `S2`,
 /// …) and what reaching it needs, in the user's words.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3036,6 +3054,54 @@ impl<'s> Tx<'s> {
         Ok(voyages)
     }
 
+    // ---- voyage issues (T-645)
+
+    /// Record what the label scan saw of a voyage's issue: one row per
+    /// (project, number), updated in place.
+    pub fn upsert_voyage_issue(&self, row: &VoyageIssueRow) -> GearResult<()> {
+        self.tx
+            .execute(
+                "INSERT INTO voyage_issues
+                   (project, number, milestone, title, body_hash, labeled, first_seen, last_seen)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(project, number) DO UPDATE SET
+                   milestone=excluded.milestone, title=excluded.title,
+                   body_hash=excluded.body_hash, labeled=excluded.labeled,
+                   last_seen=excluded.last_seen",
+                params![
+                    row.project,
+                    row.number,
+                    row.milestone,
+                    row.title,
+                    row.body_hash,
+                    row.labeled,
+                    row.first_seen,
+                    row.last_seen,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// A voyage's issues, ordered by number.
+    pub fn voyage_issues(&self, project: &str, milestone: &str) -> GearResult<Vec<VoyageIssueRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(
+                "SELECT project, number, milestone, title, body_hash, labeled, first_seen, last_seen
+                 FROM voyage_issues WHERE project=?1 AND milestone=?2 ORDER BY number",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, milestone], voyage_issue_from_row)
+            .map_err(map_sqlite)?;
+        let mut issues = Vec::new();
+        for row in rows {
+            issues.push(row.map_err(map_sqlite)?);
+        }
+        Ok(issues)
+    }
+
     // ---- review blocks (T-23)
 
     /// Record the blocking findings of a review (the ids the reviewer named).
@@ -4719,6 +4785,19 @@ fn voyage_from_row(row: &rusqlite::Row) -> rusqlite::Result<VoyageRow> {
         departure_tasks: row.get(7)?,
         departure_estimate_min: row.get(9)?,
         updated: row.get(8)?,
+    })
+}
+
+fn voyage_issue_from_row(row: &rusqlite::Row) -> rusqlite::Result<VoyageIssueRow> {
+    Ok(VoyageIssueRow {
+        project: row.get(0)?,
+        number: row.get(1)?,
+        milestone: row.get(2)?,
+        title: row.get(3)?,
+        body_hash: row.get(4)?,
+        labeled: row.get(5)?,
+        first_seen: row.get(6)?,
+        last_seen: row.get(7)?,
     })
 }
 

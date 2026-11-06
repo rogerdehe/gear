@@ -333,7 +333,7 @@ fn a_version_9_store_is_carried_up_to_10() {
             .as_deref(),
         Some(SCHEMA_VERSION.to_string().as_str())
     );
-    assert_eq!(SCHEMA_VERSION, 10, "this binary writes v10");
+    assert_eq!(SCHEMA_VERSION, 11, "this binary writes v11");
     // The rows are untouched: the live read still finds the open work.
     assert_eq!(
         store

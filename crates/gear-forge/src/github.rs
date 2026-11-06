@@ -364,6 +364,24 @@ impl Forge for GitHub {
         ];
         self.run(&args).map(|_| ())
     }
+
+    /// `label create --force` creates the label or updates it when it exists,
+    /// so the call is idempotent (T-636).
+    fn create_label(&self, repo: &str, name: &str, description: &str) -> ForgeResult<()> {
+        let args: Vec<String> = vec![
+            "label".into(),
+            "create".into(),
+            name.into(),
+            "--repo".into(),
+            repo.into(),
+            "--description".into(),
+            description.into(),
+            "--color".into(),
+            "0E8A16".into(),
+            "--force".into(),
+        ];
+        self.run(&args).map(|_| ())
+    }
 }
 
 /// What `gh pr view --json isDraft` answers.

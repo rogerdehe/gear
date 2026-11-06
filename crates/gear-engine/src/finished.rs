@@ -331,10 +331,19 @@ pub fn reclaim(
         }
         match herdr.worktree_remove(&workspace.id) {
             Outcome::Ok(()) => {}
-            Outcome::Refused { .. } | Outcome::Uncertain { .. } => left.push(format!(
-                "workspace {} ({}) (could not close)",
-                workspace.id, workspace.label
-            )),
+            Outcome::Refused { .. } | Outcome::Uncertain { .. } => {
+                // T-639: the worktree is already gone (the merge removed it, or
+                // the folder was deleted); the workspace itself still has to
+                // close, or it stays on the session for good (M-8482: w1KM
+                // gear-merge stayed).
+                match herdr.workspace_close(&workspace.id) {
+                    Outcome::Ok(()) => {}
+                    Outcome::Refused { .. } | Outcome::Uncertain { .. } => left.push(format!(
+                        "workspace {} ({}) (could not close)",
+                        workspace.id, workspace.label
+                    )),
+                }
+            }
         }
     }
     let changed = store.write(|tx| {
@@ -420,6 +429,13 @@ fn landed_voyage(store: &mut Store, project: &str, now: Ts) -> GearResult<Option
         else {
             return Ok(None);
         };
+        // The landing must be the project's current voyage: a voyage that
+        // departed after it, its tasks all done but not landed, is not swept
+        // by the earlier voyage's landing (GEAR M7, 2026-11-06: M6.3's landing
+        // of that morning reclaimed during M7 while its last merge ran).
+        if gear_app::plan::current_voyage(tx, project)? != milestone {
+            return Ok(None);
+        }
         // Only a landing of the last day is checked: an older voyage was
         // landed before this check existed, and its captain is not rung about
         // it (Lawrence M1, landed days before: the user wants it left alone).
@@ -1392,6 +1408,8 @@ gate = "true"
             .write(|tx| {
                 let mut voyage = tx.get_voyage("p", "M1")?.unwrap();
                 voyage.milestone = "M0".into();
+                // An old voyage: it departed the day before M1.
+                voyage.departure = Some(NOW - 86_400);
                 tx.upsert_voyage(&voyage)?;
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.id = "T-0".into();
@@ -1431,6 +1449,40 @@ gate = "true"
         landed.records("voyages/M1/report.md", "the voyage report");
 
         assert!(landed.reclaim(NOW + 600).is_some(), "the reclaim ran");
+    }
+
+    /// A later voyage that departed and is not landed holds the reclaim of an
+    /// earlier landing, even with every task done (GEAR M7).
+    #[test]
+    fn a_later_voyage_not_landed_holds_the_earlier_landings_reclaim() {
+        let mut landed = Landed::new("later");
+        landed
+            .store
+            .write(|tx| {
+                tx.upsert_voyage(&VoyageRow {
+                    project: "p".into(),
+                    milestone: "M2".into(),
+                    title: "voyage M2".into(),
+                    done: Some("more".into()),
+                    bar: Some("FASTEST".into()),
+                    eta: Some("4h".into()),
+                    departure: Some(NOW + 100),
+                    departure_tasks: Some(1),
+                    departure_estimate_min: Some(30),
+                    updated: NOW + 100,
+                })?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.id = "T-2".into();
+                task.milestone = Some("M2".into());
+                tx.insert_task(&task)
+            })
+            .unwrap();
+
+        assert_eq!(landed.reclaim(NOW + 600), None);
+        assert!(
+            landed.items(RECLAIM_THREAD).is_empty(),
+            "M1's landing reclaims nothing while M2 is not landed"
+        );
     }
 
     /// The project's release branch is never named as a leftover of a landed
@@ -1801,5 +1853,53 @@ gate = "true"
         assert!(item.body.contains("branch p/hull/t10"), "{}", item.body);
         assert!(item.body.contains("extra commits"), "{}", item.body);
         assert!(!item.body.contains("branch p/hull/t9"), "{}", item.body);
+    }
+
+    /// A `herdr` on PATH whose `workspace list` names one workspace of the
+    /// project: the reclaim reads the real command, the fake answers the
+    /// remove and the close.
+    fn stub_workspace_list(dir: &Path, workspace: &str, label: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("herdr");
+        let json = format!(
+            r#"{{"result":{{"workspaces":[{{"workspace_id":"{workspace}","label":"{label}","agent_status":"unknown"}}]}}}}"#
+        );
+        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{json}'\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// T-639: a workspace whose worktree is already gone is closed with
+    /// `workspace_close`; the reclaim names nothing left (M-8482: w1KM
+    /// gear-merge stayed on the session).
+    #[test]
+    fn a_workspace_whose_worktree_is_gone_is_closed() {
+        let mut landed = Landed::new("workspace-gone");
+        // The fake knows no worktree of w1KM, so `worktree_remove` is refused;
+        // the pane under the workspace lets `workspace_close` succeed.
+        landed.herdr.add_shell("w1KM:p1");
+        let bin = landed.root.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        stub_workspace_list(&bin, "w1KM", "p-merge");
+        let old = std::env::var_os("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", bin.display(), old.to_string_lossy()),
+        );
+        let changed = landed.reclaim(NOW + 600);
+        std::env::set_var("PATH", old);
+
+        assert_eq!(changed, None, "nothing is left to name");
+        assert!(
+            landed.herdr.calls.iter().any(|call| matches!(
+                call,
+                Call::WorkspaceClose { workspace } if workspace == "w1KM"
+            )),
+            "the workspace is closed: {:?}",
+            landed.herdr.calls
+        );
+        assert!(
+            landed.items(RECLAIM_THREAD).is_empty(),
+            "the reclaim item names nothing left"
+        );
     }
 }

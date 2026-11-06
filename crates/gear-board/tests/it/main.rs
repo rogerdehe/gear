@@ -12,6 +12,7 @@ mod graph_contract;
 mod header_contract;
 mod held_contract;
 mod idle_contract;
+mod issues_contract;
 mod measures_contract;
 mod multi_project_contract;
 mod overlaps_contract;
