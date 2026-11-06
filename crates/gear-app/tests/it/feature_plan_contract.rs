@@ -765,7 +765,14 @@ fn a_done_member_stays_a_dep_of_its_carrier_on_a_later_apply() {
         .read(|tx| tx.feature_carrier("p", "F-1"))
         .unwrap()
         .expect("the feature has an integration task");
-    land(&mut s, &["T-1"]);
+    // Both members are done (passed review), neither merged.
+    land(&mut s, &["T-1", "T-2"]);
+    s.write(|tx| {
+        let mut row = tx.get_task("p", &carrier)?.expect("the carrier");
+        row.deps = vec!["T-2".to_string()];
+        tx.update_task(&row)
+    })
+    .unwrap();
     run_at(
         &mut s,
         "# Queue\n## T-1 [must] lane=wire\nfeature: F-1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
