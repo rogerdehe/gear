@@ -34,6 +34,48 @@ fn idle_key(seat: &str, task: &str, attempt: i64) -> String {
     format!("engine.lanenudge.{seat}.{task}.{attempt}")
 }
 
+/// T-610: an engine nudge to a lane closes itself. The stopped-lane nudge is
+/// a delivery op; a lane may not resolve it and the captain may not either, so
+/// the engine voids it with the reason when the attempt it names has been
+/// handed in, has a newer attempt, or its task is terminal. A nudge for a
+/// still-open attempt stays.
+pub fn resolve_nudges(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
+    let open = store.read(|tx| {
+        tx.ops_of_kind_in_states(
+            project,
+            OpKind::Deliver,
+            &[
+                gear_model::OpState::Intended,
+                gear_model::OpState::Executing,
+                gear_model::OpState::Submitted,
+                gear_model::OpState::Unknown,
+            ],
+        )
+    })?;
+    for op in open {
+        if op.payload.get("nudge").is_none() {
+            continue;
+        }
+        let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
+            continue;
+        };
+        let reason = store.read(|tx| crate::quiet::attempt_closed(tx, project, task, attempt))?;
+        let Some(reason) = reason else {
+            continue;
+        };
+        store.write(|tx| {
+            tx.set_op_state(
+                project,
+                &op.id,
+                gear_model::OpState::Void,
+                Some(&reason),
+                now,
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// Tell the lanes that stopped to go on.
 ///
 /// A lane seat (role `Lane`) with an attempt in flight, that is neither
@@ -52,6 +94,7 @@ pub fn nudge_stopped_lanes(
     observed: &[SeatObs],
     now: Ts,
 ) -> GearResult<(Vec<String>, Vec<String>)> {
+    resolve_nudges(store, project, now)?;
     let mut nudged = Vec::new();
     let mut flagged = Vec::new();
     for obs in observed {
@@ -359,4 +402,245 @@ pub fn nudges_of(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearResul
         .iter()
         .filter(|op| op.payload.get("nudge").is_some())
         .count() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gear_model::{MsgKind, MsgState, TaskState};
+    use gear_store::{testing, AttemptStep, ContractRow, NewMessage, TaskRow};
+
+    const T: i64 = 1_800_000_000;
+    const PANE: &str = "w1:p2";
+
+    fn world() -> Store {
+        let mut s = Store::open_in_memory().unwrap();
+        s.write(|tx| {
+            testing::seed_project(tx, "p", "sess", T)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, PANE, "pi", T)?;
+            tx.insert_task(&TaskRow {
+                project: "p".into(),
+                id: "T-1".into(),
+                rank: 1,
+                state: TaskState::Ready,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: None,
+                issue: None,
+                updated: T,
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+            })?;
+            tx.insert_contract(&ContractRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                version: 1,
+                goal: "g".into(),
+                accept: "a".into(),
+                evidence_files: vec![],
+                evidence_due_min: None,
+                body: String::new(),
+                created: T,
+                mechanical: None,
+            })?;
+            gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T)?;
+            gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T)?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T)?;
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    fn nudge(s: &mut Store, at: i64) -> String {
+        s.write(|tx| {
+            let op = tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: OpKind::Deliver,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({ "text": "continue", "nudge": 1 }),
+                created: at,
+            })?;
+            Ok(op.id)
+        })
+        .unwrap()
+    }
+
+    fn state(s: &mut Store, id: &str) -> gear_model::OpState {
+        s.read(|tx| {
+            Ok(tx
+                .ops_of_seat_kind("p:heat", OpKind::Deliver)?
+                .into_iter()
+                .find(|op| op.id == id)
+                .unwrap()
+                .state)
+        })
+        .unwrap()
+    }
+
+    /// T-610: the stopped-lane nudge closes itself when the attempt it names
+    /// was handed in; a nudge for a still-open attempt stays.
+    #[test]
+    fn a_stopped_lane_nudge_closes_on_the_hand_in_of_its_attempt() {
+        let mut s = world();
+        let id = nudge(&mut s, T + 100);
+        resolve_nudges(&mut s, "p", T + 200).unwrap();
+        assert_eq!(state(&mut s, &id), gear_model::OpState::Intended);
+        s.write(|tx| {
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+            attempt.state = AttemptState::Submitted;
+            tx.update_attempt(&attempt)
+        })
+        .unwrap();
+        resolve_nudges(&mut s, "p", T + 300).unwrap();
+        assert_eq!(state(&mut s, &id), gear_model::OpState::Void);
+        let result = s
+            .read(|tx| {
+                Ok(tx
+                    .ops_of_seat_kind("p:heat", OpKind::Deliver)?
+                    .into_iter()
+                    .find(|op| op.id == id)
+                    .unwrap()
+                    .result)
+            })
+            .unwrap();
+        assert!(
+            result
+                .as_deref()
+                .is_some_and(|r| r.contains("was handed in")),
+            "{result:?}"
+        );
+    }
+
+    /// T-610: a nudge for a still-open attempt stays.
+    #[test]
+    fn a_stopped_lane_nudge_for_a_still_open_attempt_stays() {
+        let mut s = world();
+        let id = nudge(&mut s, T + 100);
+        resolve_nudges(&mut s, "p", T + 200).unwrap();
+        assert_eq!(state(&mut s, &id), gear_model::OpState::Intended);
+    }
+
+    /// T-610: the stopped-lane nudge closes when its task is cancelled.
+    #[test]
+    fn a_stopped_lane_nudge_closes_on_a_cancel_of_its_task() {
+        let mut s = world();
+        let id = nudge(&mut s, T + 100);
+        s.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.state = TaskState::Cancelled;
+            tx.update_task(&task)
+        })
+        .unwrap();
+        resolve_nudges(&mut s, "p", T + 200).unwrap();
+        assert_eq!(state(&mut s, &id), gear_model::OpState::Void);
+    }
+
+    /// T-610: the stopped-lane nudge closes when a newer attempt exists.
+    #[test]
+    fn a_stopped_lane_nudge_closes_on_a_newer_attempt() {
+        let mut s = world();
+        let id = nudge(&mut s, T + 100);
+        s.write(|tx| {
+            tx.insert_attempt(&gear_store::AttemptRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 2,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Started,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T + 150,
+                updated: T + 150,
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+            })
+        })
+        .unwrap();
+        resolve_nudges(&mut s, "p", T + 200).unwrap();
+        assert_eq!(state(&mut s, &id), gear_model::OpState::Void);
+    }
+
+    /// The lane's hand-in answered the captain's item: the item closes.
+    #[test]
+    fn the_captains_item_closes_when_the_lane_hands_in() {
+        let mut s = world();
+        let item = s
+            .write(|tx| {
+                tx.insert_message(&NewMessage {
+                    project: "p".into(),
+                    thread: "quiet:p:heat".into(),
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::System,
+                    urgent: true,
+                    body: "no word".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: T + 100,
+                    meta: None,
+                })
+            })
+            .unwrap();
+        s.write(|tx| {
+            tx.insert_message(&NewMessage {
+                project: "p".into(),
+                thread: "T-1:1".into(),
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                sender: "p:heat".into(),
+                sender_gen: 1,
+                recipient: "p:captain".into(),
+                kind: MsgKind::Result,
+                urgent: false,
+                body: "done".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Info,
+                created: T + 150,
+                meta: None,
+            })
+            .map(|_| ())
+        })
+        .unwrap();
+        // The quiet module owns the captain item; the lane nudge's own
+        // resolution is the op. Here the quiet item is resolved by the same
+        // rule, so call the quiet resolver.
+        s.write(|tx| crate::quiet::resolve_nudges(tx, "p", T + 200))
+            .unwrap();
+        let item = s
+            .read(|tx| tx.thread_messages("p", "quiet:p:heat"))
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == item.id)
+            .unwrap();
+        assert_eq!(item.state, MsgState::Resolved);
+    }
 }
