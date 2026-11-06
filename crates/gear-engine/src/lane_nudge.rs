@@ -10,8 +10,9 @@
 //! (the reviewer's rule), and a lane that waits for its provider is not stuck
 //! (T-75).
 
-use gear_model::{AttemptState, GearResult, OpKind, SeatRole, SeatState, Ts};
-use gear_store::{NewOp, Store, Tx};
+use gear_herdr::{AgentStatus, HerdrAct, Outcome};
+use gear_model::{AttemptState, GearResult, MsgKind, MsgState, OpKind, SeatRole, SeatState, Ts};
+use gear_store::{NewMessage, NewOp, Store, Tx};
 
 use crate::observe::SeatObs;
 
@@ -76,6 +77,155 @@ pub fn resolve_nudges(store: &mut Store, project: &str, now: Ts) -> GearResult<(
     Ok(())
 }
 
+/// How long a lane may be working with no open attempt while its next task
+/// waits before it is freed with one Esc (T-612).
+const BUSY_BEFORE_ESC_S: i64 = 180;
+
+/// How long after the Esc the lane may still be busy before the captain is
+/// told (T-612).
+const BUSY_BEFORE_TOLD_S: i64 = 180;
+
+fn busy_key(seat: &str) -> String {
+    format!("engine.lanenudge.busy.{seat}")
+}
+fn busy_esc_key(seat: &str) -> String {
+    format!("engine.lanenudge.busy.esc.{seat}")
+}
+fn busy_told_key(seat: &str) -> String {
+    format!("engine.lanenudge.busy.told.{seat}")
+}
+
+/// T-612: a lane that is working with no open attempt while a task is ready
+/// for it (a delivery is intended) is freed with one Esc after 3 minutes; if
+/// it is still working with no attempt 3 minutes later, one Info item tells
+/// the captain. Never for a lane with an open attempt.
+pub fn free_busy_lanes(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    observed: &[SeatObs],
+    now: Ts,
+) -> GearResult<(Vec<String>, Vec<String>)> {
+    let mut freed = Vec::new();
+    let mut told = Vec::new();
+    for obs in observed {
+        let seat = &obs.seat;
+        if seat.role != SeatRole::Lane || seat.project != project {
+            continue;
+        }
+        if !matches!(
+            seat.state,
+            SeatState::Active | SeatState::Standby | SeatState::Retiring
+        ) {
+            clear_busy(store, &seat.id)?;
+            continue;
+        }
+        // A lane that is not working is not busy.
+        if obs.status != Some(AgentStatus::Working) {
+            clear_busy(store, &seat.id)?;
+            continue;
+        }
+        let view = store.read(|tx| crate::dispatch::lane_view(tx, seat, Some(obs.clone()), now))?;
+        // Never for a lane with an open attempt.
+        if view.attempt.is_some() {
+            clear_busy(store, &seat.id)?;
+            continue;
+        }
+        // A task must be ready for it and a delivery intended.
+        let delivery_intended = store.read(|tx| {
+            Ok(tx
+                .slot_ops(&seat.id)?
+                .iter()
+                .any(|op| op.kind == OpKind::Deliver))
+        })?;
+        if view.ready_tasks.is_empty() || !delivery_intended {
+            clear_busy(store, &seat.id)?;
+            continue;
+        }
+        // The first tick the condition holds is kept.
+        let since = store
+            .read(|tx| tx.get_meta(&busy_key(&seat.id)))?
+            .and_then(|s| s.trim().parse::<Ts>().ok());
+        let Some(since) = since else {
+            store.write(|tx| tx.set_meta(&busy_key(&seat.id), &now.to_string()))?;
+            continue;
+        };
+        if now - since < BUSY_BEFORE_ESC_S {
+            continue;
+        }
+        let esc = store
+            .read(|tx| tx.get_meta(&busy_esc_key(&seat.id)))?
+            .is_some_and(|v| !v.is_empty());
+        if !esc {
+            let pane = store.read(|tx| {
+                Ok(tx
+                    .get_binding(&seat.id, seat.generation)?
+                    .map(|binding| binding.pane_id))
+            })?;
+            let Some(pane) = pane else {
+                continue;
+            };
+            if matches!(
+                herdr.send_keys(&pane, &["esc".into()]),
+                Outcome::Refused { .. }
+            ) {
+                continue;
+            }
+            store.write(|tx| tx.set_meta(&busy_esc_key(&seat.id), "1"))?;
+            freed.push(seat.id.clone());
+            continue;
+        }
+        if now - since < BUSY_BEFORE_ESC_S + BUSY_BEFORE_TOLD_S {
+            continue;
+        }
+        let told_mark = store
+            .read(|tx| tx.get_meta(&busy_told_key(&seat.id)))?
+            .is_some_and(|v| !v.is_empty());
+        if told_mark {
+            continue;
+        }
+        let Some(captain) = store.read(|tx| tx.captain_of(project))? else {
+            continue;
+        };
+        let task = view.ready_tasks.first().map(|task| task.id.clone());
+        store.write(|tx| {
+            tx.insert_message(&NewMessage {
+                project: project.to_string(),
+                thread: format!("busy-lane:{}", seat.id),
+                task: task.clone(),
+                attempt: None,
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: captain.id.clone(),
+                kind: MsgKind::System,
+                urgent: false,
+                body: format!(
+                    "lane {}: working with no open attempt for {} min while {} waits; one Esc did not free it. Look at its pane.",
+                    seat.name,
+                    now.saturating_sub(since) / 60,
+                    task.as_deref().unwrap_or("its next task"),
+                ),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Info,
+                created: now,
+                meta: None,
+            })?;
+            tx.set_meta(&busy_told_key(&seat.id), "1")
+        })?;
+        told.push(seat.id.clone());
+    }
+    Ok((freed, told))
+}
+
+fn clear_busy(store: &mut Store, seat: &str) -> GearResult<()> {
+    store.write(|tx| {
+        tx.set_meta(&busy_key(seat), "")?;
+        tx.set_meta(&busy_esc_key(seat), "")?;
+        tx.set_meta(&busy_told_key(seat), "")
+    })
+}
+
 /// Tell the lanes that stopped to go on.
 ///
 /// A lane seat (role `Lane`) with an attempt in flight, that is neither
@@ -90,6 +240,7 @@ pub fn resolve_nudges(store: &mut Store, project: &str, now: Ts) -> GearResult<(
 /// hears about it once, on the lane's stall thread.
 pub fn nudge_stopped_lanes(
     store: &mut Store,
+    herdr: &mut dyn HerdrAct,
     project: &str,
     observed: &[SeatObs],
     now: Ts,
@@ -97,6 +248,9 @@ pub fn nudge_stopped_lanes(
     resolve_nudges(store, project, now)?;
     let mut nudged = Vec::new();
     let mut flagged = Vec::new();
+    let (freed, told) = free_busy_lanes(store, herdr, project, observed, now)?;
+    nudged.extend(freed);
+    flagged.extend(told);
     for obs in observed {
         let seat = &obs.seat;
         if seat.role != SeatRole::Lane {
@@ -407,6 +561,8 @@ pub fn nudges_of(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearResul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observe::Presence;
+    use gear_herdr::fake::{Call, FakeHerdr};
     use gear_model::{MsgKind, MsgState, TaskState};
     use gear_store::{testing, AttemptStep, ContractRow, NewMessage, TaskRow};
 
@@ -642,5 +798,184 @@ mod tests {
             .find(|m| m.id == item.id)
             .unwrap();
         assert_eq!(item.state, MsgState::Resolved);
+    }
+
+    /// A lane with a Ready task and no attempt: the world for T-612.
+    fn world_ready() -> Store {
+        let mut s = Store::open_in_memory().unwrap();
+        s.write(|tx| {
+            testing::seed_project(tx, "p", "sess", T)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, PANE, "pi", T)?;
+            tx.insert_task(&TaskRow {
+                project: "p".into(),
+                id: "T-1".into(),
+                rank: 1,
+                state: TaskState::Ready,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: None,
+                issue: None,
+                updated: T,
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+            })?;
+            tx.insert_contract(&ContractRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                version: 1,
+                goal: "g".into(),
+                accept: "a".into(),
+                evidence_files: vec![],
+                evidence_due_min: None,
+                body: String::new(),
+                created: T,
+                mechanical: None,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    /// A delivery intended for the lane: the engine's Deliver op.
+    fn intended(s: &mut Store, at: i64) {
+        s.write(|tx| {
+            tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: OpKind::Deliver,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({ "text": "packet" }),
+                created: at,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn observation(s: &mut Store, working: bool) -> SeatObs {
+        SeatObs {
+            seat: s.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap(),
+            presence: Presence::Present,
+            status: Some(if working {
+                AgentStatus::Working
+            } else {
+                AgentStatus::Idle
+            }),
+            flags: Default::default(),
+            idle: !working,
+            screen: None,
+            session: None,
+        }
+    }
+
+    /// T-612: a working lane with no attempt and a ready task gets one Esc
+    /// after 3 minutes and the captain's item after 6.
+    #[test]
+    fn a_busy_lane_with_no_attempt_is_freed_with_one_esc() {
+        let mut s = world_ready();
+        intended(&mut s, T);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "pi", AgentStatus::Working);
+        let o = observation(&mut s, true);
+        // The first tick sets the busy mark: no Esc yet.
+        free_busy_lanes(&mut s, &mut herdr, "p", &[o.clone()], T).unwrap();
+        assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
+        // 3 minutes later: one Esc.
+        let (freed, told) =
+            free_busy_lanes(&mut s, &mut herdr, "p", &[o.clone()], T + 180).unwrap();
+        assert_eq!(freed, vec!["p:heat".to_string()]);
+        assert!(told.is_empty());
+        assert!(
+            herdr.calls.iter().any(|call| matches!(
+                call,
+                Call::SendKeys { pane, keys } if pane == PANE && keys == &["esc".to_string()]
+            )),
+            "{:?}",
+            herdr.calls
+        );
+        // 3 minutes later: one Info item to the captain.
+        let (freed, told) =
+            free_busy_lanes(&mut s, &mut herdr, "p", &[o.clone()], T + 360).unwrap();
+        assert!(freed.is_empty());
+        assert_eq!(told, vec!["p:heat".to_string()]);
+        let items = s
+            .read(|tx| tx.thread_messages("p", "busy-lane:p:heat"))
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, MsgKind::System);
+        assert_eq!(items[0].state, MsgState::Info);
+        assert_eq!(items[0].recipient, "p:captain");
+        assert!(
+            items[0].body.contains("one Esc did not free it"),
+            "{}",
+            items[0].body
+        );
+        // No more items.
+        free_busy_lanes(&mut s, &mut herdr, "p", &[o.clone()], T + 500).unwrap();
+        assert_eq!(
+            s.read(|tx| tx.thread_messages("p", "busy-lane:p:heat"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// T-612: a lane with an open attempt gets nothing.
+    #[test]
+    fn a_busy_lane_with_an_open_attempt_gets_nothing() {
+        let mut s = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "pi", AgentStatus::Working);
+        let o = observation(&mut s, true);
+        free_busy_lanes(&mut s, &mut herdr, "p", &[o.clone()], T).unwrap();
+        free_busy_lanes(&mut s, &mut herdr, "p", &[o.clone()], T + 180).unwrap();
+        free_busy_lanes(&mut s, &mut herdr, "p", &[o.clone()], T + 360).unwrap();
+        assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
+        assert!(s
+            .read(|tx| tx.thread_messages("p", "busy-lane:p:heat"))
+            .unwrap()
+            .is_empty());
+    }
+
+    /// T-612: a lane that is idle, or has no ready task, is not busy.
+    #[test]
+    fn an_idle_lane_or_a_lane_with_no_ready_task_is_not_busy() {
+        let mut s = world_ready();
+        intended(&mut s, T);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "pi", AgentStatus::Idle);
+        let idle = observation(&mut s, false);
+        free_busy_lanes(&mut s, &mut herdr, "p", &[idle.clone()], T).unwrap();
+        free_busy_lanes(&mut s, &mut herdr, "p", &[idle.clone()], T + 180).unwrap();
+        assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
+        // A working lane with no ready task: no Esc.
+        let mut s = world_ready();
+        s.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.state = TaskState::Running;
+            tx.update_task(&task)
+        })
+        .unwrap();
+        intended(&mut s, T);
+        let working = observation(&mut s, true);
+        free_busy_lanes(&mut s, &mut herdr, "p", &[working.clone()], T).unwrap();
+        free_busy_lanes(&mut s, &mut herdr, "p", &[working.clone()], T + 180).unwrap();
+        assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
     }
 }
