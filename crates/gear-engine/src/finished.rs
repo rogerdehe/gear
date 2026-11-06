@@ -429,6 +429,13 @@ fn landed_voyage(store: &mut Store, project: &str, now: Ts) -> GearResult<Option
         else {
             return Ok(None);
         };
+        // The landing must be the project's current voyage: a voyage that
+        // departed after it, its tasks all done but not landed, is not swept
+        // by the earlier voyage's landing (GEAR M7, 2026-11-06: M6.3's landing
+        // of that morning reclaimed during M7 while its last merge ran).
+        if gear_app::plan::current_voyage(tx, project)? != milestone {
+            return Ok(None);
+        }
         // Only a landing of the last day is checked: an older voyage was
         // landed before this check existed, and its captain is not rung about
         // it (Lawrence M1, landed days before: the user wants it left alone).
@@ -1401,6 +1408,8 @@ gate = "true"
             .write(|tx| {
                 let mut voyage = tx.get_voyage("p", "M1")?.unwrap();
                 voyage.milestone = "M0".into();
+                // An old voyage: it departed the day before M1.
+                voyage.departure = Some(NOW - 86_400);
                 tx.upsert_voyage(&voyage)?;
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.id = "T-0".into();
@@ -1440,6 +1449,40 @@ gate = "true"
         landed.records("voyages/M1/report.md", "the voyage report");
 
         assert!(landed.reclaim(NOW + 600).is_some(), "the reclaim ran");
+    }
+
+    /// A later voyage that departed and is not landed holds the reclaim of an
+    /// earlier landing, even with every task done (GEAR M7).
+    #[test]
+    fn a_later_voyage_not_landed_holds_the_earlier_landings_reclaim() {
+        let mut landed = Landed::new("later");
+        landed
+            .store
+            .write(|tx| {
+                tx.upsert_voyage(&VoyageRow {
+                    project: "p".into(),
+                    milestone: "M2".into(),
+                    title: "voyage M2".into(),
+                    done: Some("more".into()),
+                    bar: Some("FASTEST".into()),
+                    eta: Some("4h".into()),
+                    departure: Some(NOW + 100),
+                    departure_tasks: Some(1),
+                    departure_estimate_min: Some(30),
+                    updated: NOW + 100,
+                })?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.id = "T-2".into();
+                task.milestone = Some("M2".into());
+                tx.insert_task(&task)
+            })
+            .unwrap();
+
+        assert_eq!(landed.reclaim(NOW + 600), None);
+        assert!(
+            landed.items(RECLAIM_THREAD).is_empty(),
+            "M1's landing reclaims nothing while M2 is not landed"
+        );
     }
 
     /// The project's release branch is never named as a leftover of a landed
