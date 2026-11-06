@@ -69,6 +69,7 @@ mod held_contract;
 mod home_task_contract;
 mod integrated_by_contract;
 mod kickoff_contract;
+mod mail_contract;
 mod multi_captain_contract;
 mod multi_home_contract;
 mod packet_contract;
