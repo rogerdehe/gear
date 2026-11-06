@@ -250,6 +250,9 @@ impl HerdrAct for NoKeys {
     fn pane_run(&mut self, pane: &str, command: &str) -> Outcome<()> {
         self.0.pane_run(pane, command)
     }
+    fn workspace_close(&mut self, workspace_id: &str) -> Outcome<()> {
+        self.0.workspace_close(workspace_id)
+    }
     fn agent_start(
         &mut self,
         name: &str,
