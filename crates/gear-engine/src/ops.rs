@@ -142,6 +142,10 @@ pub fn deliver_doorbell_now(
         urgent,
         at_once: true,
         cut: false,
+        // T-631: this path keeps the one-line text, so the body is not read.
+        sender: String::new(),
+        body: String::new(),
+        needs_ack: false,
     }];
     // Design §10.4: a lane with no open attempt gets the text that tells it
     // to stop working on earlier things.
@@ -235,6 +239,8 @@ pub fn deliver_doorbell_now(
         PromptPolicy::Doorbell {
             working: true,
             unknown: urgent,
+            // T-631: this path keeps the one-line text.
+            inline: false,
         },
     );
     let state = match &outcome {
@@ -337,6 +343,22 @@ pub fn intend_rings(
             .find(|entry| entry.seat == ring.seat)
             .map(|entry| entry.covers.clone())
             .unwrap_or_default();
+        let mut payload = serde_json::json!({
+            "text": ring.text,
+            "covers": primary_covers,
+            "pane": ring.pane_id,
+            "ring": ring.seats.iter().map(|seat| serde_json::json!({
+                "project": seat.project,
+                "seat": seat.seat,
+                "generation": seat.generation,
+                "covers": seat.covers,
+            })).collect::<Vec<_>>(),
+        });
+        // T-631: only a ring whose full text went out is inline; a cut one
+        // waits for a view as before.
+        if ring.inline {
+            payload["inline"] = serde_json::json!(true);
+        }
         let primary = tx.insert_op(&NewOp {
             project: ring.project.clone(),
             seat: ring.seat.clone(),
@@ -346,17 +368,7 @@ pub fn intend_rings(
             attempt: None,
             ref_msg: None,
             plan_version: None,
-            payload: serde_json::json!({
-                "text": ring.text,
-                "covers": primary_covers,
-                "pane": ring.pane_id,
-                "ring": ring.seats.iter().map(|seat| serde_json::json!({
-                    "project": seat.project,
-                    "seat": seat.seat,
-                    "generation": seat.generation,
-                    "covers": seat.covers,
-                })).collect::<Vec<_>>(),
-            }),
+            payload,
             created: now,
         })?;
         ops.push(primary.clone());
@@ -588,7 +600,7 @@ pub fn execute_intended(
                     return Err(GearError::new(
                         ErrorCode::BadFormat,
                         format!("waiting operation {} was prepared", item.id()),
-                    ))
+                    ));
                 }
                 (Prepared::Run { .. }, Some(Aimed::Sent)) => (OpState::Submitted, None),
                 // Nothing was typed: the op waits for the next tick (the agent
@@ -612,7 +624,7 @@ pub fn execute_intended(
                     return Err(GearError::new(
                         ErrorCode::BadFormat,
                         format!("operation {} has no outcome", item.id()),
-                    ))
+                    ));
                 }
             };
             require_transition(
@@ -864,7 +876,11 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
                 }
             }
         }
-        PromptPolicy::Doorbell { working, unknown }
+        PromptPolicy::Doorbell {
+            working,
+            unknown,
+            inline: op.payload.get("inline").and_then(|v| v.as_bool()) == Some(true),
+        }
     };
     Ok(Prepared::Run {
         probe: (op.kind == OpKind::Deliver).then(|| {
@@ -925,12 +941,13 @@ pub enum Aimed {
 enum PromptPolicy {
     /// A task packet. `working`: a rework packet for an agent that queues
     /// input while it works may go mid-turn (T-290).
-    Delivery {
-        working: bool,
-    },
+    Delivery { working: bool },
     Doorbell {
         working: bool,
         unknown: bool,
+        /// T-631: the ring's full text went out, so a text already in the
+        /// composer is submitted with the Enter, never typed again.
+        inline: bool,
     },
 }
 
@@ -957,11 +974,14 @@ fn aim(
                             matches!(policy, PromptPolicy::Doorbell { working: true, .. })
                                 || matches!(policy, PromptPolicy::Delivery { working: true })
                         }
-                        gear_herdr::AgentStatus::Unknown => matches!(policy, PromptPolicy::Doorbell { unknown: true, .. }),
+                        gear_herdr::AgentStatus::Unknown => {
+                            matches!(policy, PromptPolicy::Doorbell { unknown: true, .. })
+                        }
                         gear_herdr::AgentStatus::Blocked => false,
                     };
                     if !ready {
-                        let reason = format!("agent in {pane_id} is not ready ({:?})", info.agent_status);
+                        let reason =
+                            format!("agent in {pane_id} is not ready ({:?})", info.agent_status);
                         return match policy {
                             PromptPolicy::Delivery { .. } => Aimed::Retry(reason),
                             PromptPolicy::Doorbell { .. } => Aimed::Refused(reason),
@@ -970,13 +990,19 @@ fn aim(
                 }
                 Ok(None) => return Aimed::Gone(format!("no agent in the pane {pane_id}")),
                 Ok(Some(_)) => return Aimed::Gone(format!("the agent in {pane_id} changed kind")),
-                Err(e) => return Aimed::Retry(format!("the pane {pane_id} could not be read: {}", e.0)),
+                Err(e) => {
+                    return Aimed::Retry(format!("the pane {pane_id} could not be read: {}", e.0));
+                }
             }
             // T-453: a step that types confirms the previous Enter took before
             // it types. A delivery whose text already sits in the composer (its
             // Enter was lost) is submitted with the Enter, never typed again:
-            // typing it again would join it to itself.
-            if matches!(policy, PromptPolicy::Delivery { .. }) {
+            // typing it again would join it to itself. T-631: an inline ring
+            // goes the same way.
+            if matches!(
+                policy,
+                PromptPolicy::Delivery { .. } | PromptPolicy::Doorbell { inline: true, .. }
+            ) {
                 if let Ok(tail) = herdr.read_tail(pane_id, UNSENT_READ_LINES) {
                     if crate::composer::holds(&tail, text) {
                         return match herdr.send_keys(pane_id, &["enter".to_string()]) {
@@ -990,59 +1016,56 @@ fn aim(
                 }
             }
             match herdr.prompt(&name, text) {
-            Outcome::Ok(()) => Aimed::Sent,
-            Outcome::Uncertain { reason } => Aimed::Uncertain(reason),
-            Outcome::Refused { code, message } => {
-                // Herdr refused the text: `agent_get` decides (design §10.1).
-                match herdr.agent_get(pane_id) {
-                    Ok(Some(info)) if info.agent.as_deref() == Some(kind) => {
-                        // The agent of the seat is there: it lost its name
-                        // (M3.1). Nothing else is asked — `agent_get` alone
-                        // decides (design §10.1). It is named again and the
-                        // text goes next tick, and nothing is restarted.
-                        // The naming gives the agent its name back (naming.rs).
-                        let note = match crate::names::ensure_keeping(
-                            herdr,
-                            names,
-                            pane_id,
-                            agent_name,
-                            keep,
-                        ) {
-                            crate::names::Ensure::Renamed => "it was renamed".to_string(),
-                            crate::names::Ensure::Named => {
-                                "it already carried the name".to_string()
-                            }
-                            crate::names::Ensure::Taken { holder } => {
-                                format!("the name is held by {holder:?}")
-                            }
-                            crate::names::Ensure::NoAgent => "the agent is gone".to_string(),
-                            // Only a `captain take` keeps a name (T-552).
-                            crate::names::Ensure::Kept => "its name was kept".to_string(),
-                            crate::names::Ensure::Failed(reason) => {
-                                format!("the rename failed ({reason})")
-                            }
-                        };
-                        Aimed::Retry(format!(
-                            "the agent of {pane_id} lost its name ({code}: {message}); {note} and the text goes again next tick"
-                        ))
+                Outcome::Ok(()) => Aimed::Sent,
+                Outcome::Uncertain { reason } => Aimed::Uncertain(reason),
+                Outcome::Refused { code, message } => {
+                    // Herdr refused the text: `agent_get` decides (design §10.1).
+                    match herdr.agent_get(pane_id) {
+                        Ok(Some(info)) if info.agent.as_deref() == Some(kind) => {
+                            // The agent of the seat is there: it lost its name
+                            // (M3.1). Nothing else is asked — `agent_get` alone
+                            // decides (design §10.1). It is named again and the
+                            // text goes next tick, and nothing is restarted.
+                            // The naming gives the agent its name back (naming.rs).
+                            let note = match crate::names::ensure_keeping(
+                                herdr, names, pane_id, agent_name, keep,
+                            ) {
+                                crate::names::Ensure::Renamed => "it was renamed".to_string(),
+                                crate::names::Ensure::Named => {
+                                    "it already carried the name".to_string()
+                                }
+                                crate::names::Ensure::Taken { holder } => {
+                                    format!("the name is held by {holder:?}")
+                                }
+                                crate::names::Ensure::NoAgent => "the agent is gone".to_string(),
+                                // Only a `captain take` keeps a name (T-552).
+                                crate::names::Ensure::Kept => "its name was kept".to_string(),
+                                crate::names::Ensure::Failed(reason) => {
+                                    format!("the rename failed ({reason})")
+                                }
+                            };
+                            Aimed::Retry(format!(
+                                "the agent of {pane_id} lost its name ({code}: {message}); {note} and the text goes again next tick"
+                            ))
+                        }
+                        Ok(None) => Aimed::Gone(format!(
+                            "{code}: {message} (no agent in the pane {pane_id})"
+                        )),
+                        Ok(Some(info)) => Aimed::Gone(format!(
+                            "{code}: {message} (the pane {pane_id} hosts a {} agent, not the seat's {kind})",
+                            info.agent.as_deref().unwrap_or("unknown")
+                        )),
+                        // The pane could not be read: that is an observation
+                        // failure, never "the agent is gone" (design/08). Nothing
+                        // was typed, so the text may go next tick.
+                        Err(error) => Aimed::Retry(format!(
+                            "{code}: {message} (the pane {pane_id} could not be read: {})",
+                            error.0
+                        )),
                     }
-                    Ok(None) => Aimed::Gone(format!(
-                        "{code}: {message} (no agent in the pane {pane_id})"
-                    )),
-                    Ok(Some(info)) => Aimed::Gone(format!(
-                        "{code}: {message} (the pane {pane_id} hosts a {} agent, not the seat's {kind})",
-                        info.agent.as_deref().unwrap_or("unknown")
-                    )),
-                    // The pane could not be read: that is an observation
-                    // failure, never "the agent is gone" (design/08). Nothing
-                    // was typed, so the text may go next tick.
-                    Err(error) => Aimed::Retry(format!(
-                        "{code}: {message} (the pane {pane_id} could not be read: {})",
-                        error.0
-                    )),
                 }
             }
-        }},
+        }
         // The agent had lost its name: it was renamed now, the text goes next
         // tick. Nothing is typed and nothing is restarted — the sender too
         // (design §10.1 has no exception for it).
@@ -1271,6 +1294,79 @@ pub fn confirm_pending_held(
         }
         for state in [OpState::Submitted, OpState::Unknown] {
             for op in tx.ops_in_state(project, state)? {
+                // T-631: an inline ring went out as text in the prompt, so the
+                // seat read its items already. It is confirmed at once and its
+                // showing recorded, so the next tick rings nothing. A needs_ack
+                // item stays open: only its showing is recorded here.
+                if state == OpState::Submitted
+                    && op.kind == OpKind::Doorbell
+                    && op.payload.get("inline").and_then(|v| v.as_bool()) == Some(true)
+                {
+                    let covers = |value: &serde_json::Value| -> Vec<String> {
+                        value
+                            .get("covers")
+                            .and_then(|v| v.as_array())
+                            .map(|ids| {
+                                ids.iter()
+                                    .filter_map(|id| id.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
+                    tx.insert_view(&gear_store::ViewRecord {
+                        project: op.project.clone(),
+                        seat: op.seat.clone(),
+                        generation: op.generation,
+                        ts: now,
+                        shown_msgs: covers(&op.payload),
+                        shown_ops: vec![],
+                        shown_task: None,
+                        shown_attempt: None,
+                        shown_contract: None,
+                    })?;
+                    // T-487: every other seat of a joined ring gets its own
+                    // view, with its own covers.
+                    if let Some(entries) = op.payload.get("ring").and_then(|v| v.as_array()) {
+                        for entry in entries {
+                            let (Some(entry_project), Some(entry_seat), Some(generation)) = (
+                                entry.get("project").and_then(|v| v.as_str()),
+                                entry.get("seat").and_then(|v| v.as_str()),
+                                entry.get("generation").and_then(|v| v.as_i64()),
+                            ) else {
+                                continue;
+                            };
+                            if entry_seat == op.seat && generation == op.generation {
+                                continue;
+                            }
+                            tx.insert_view(&gear_store::ViewRecord {
+                                project: entry_project.to_string(),
+                                seat: entry_seat.to_string(),
+                                generation,
+                                ts: now,
+                                shown_msgs: covers(entry),
+                                shown_ops: vec![],
+                                shown_task: None,
+                                shown_attempt: None,
+                                shown_contract: None,
+                            })?;
+                        }
+                    }
+                    require_transition(
+                        state.can_transition(OpState::Confirmed),
+                        "operation",
+                        state.as_str(),
+                        "confirmed",
+                    )?;
+                    tx.set_op_state(
+                        project,
+                        &op.id,
+                        OpState::Confirmed,
+                        Some(&format!("inline text @ {now}")),
+                        now,
+                    )?;
+                    confirmed.push(op.id.clone());
+                    continue;
+                }
                 // What proves the op, and whether that proof is a view of the
                 // reviewer's own seat (T-267).
                 let evidence = match op.kind {
@@ -3582,6 +3678,154 @@ mod tests {
             enters(&herdr, LANE_PANE),
             before + 1,
             "the retry presses it again"
+        );
+    }
+
+    // ---- T-631: an idle seat gets its messages as text ---------------------
+
+    /// A doorbell item carrying its sender and body, as the tick builds it.
+    fn inline_item(id: &str, body: &str, urgent: bool) -> crate::doorbell::DoorbellItem {
+        crate::doorbell::DoorbellItem {
+            id: id.into(),
+            urgent,
+            at_once: urgent,
+            cut: false,
+            sender: "p:captain".into(),
+            body: body.into(),
+            needs_ack: false,
+        }
+    }
+
+    /// An idle captain seat's doorbell input on `pane`.
+    fn inline_input(
+        pane: &str,
+        waiting: Vec<crate::doorbell::DoorbellItem>,
+    ) -> crate::doorbell::DoorbellInput {
+        crate::doorbell::DoorbellInput {
+            project: "p".into(),
+            seat: "p:captain".into(),
+            generation: 1,
+            pane_id: pane.into(),
+            idle: true,
+            status: Some(AgentStatus::Idle),
+            slot_busy: false,
+            last_settled_at: None,
+            no_task: false,
+            waiting,
+            goal: None,
+            command: "gear --session sess --pane w1:p1".into(),
+        }
+    }
+
+    fn inline_ring(waiting: Vec<crate::doorbell::DoorbellItem>) -> crate::doorbell::Ring {
+        crate::doorbell::rings(&[inline_input(CAP_PANE, waiting)], &BTreeSet::new(), 0, T0)
+            .pop()
+            .expect("a ring")
+    }
+
+    #[test]
+    fn an_idle_seat_gets_its_messages_as_text_and_the_ring_confirms_at_once() {
+        // T-631: two short messages go out as one prompt holding both bodies;
+        // the ring is confirmed on submit and its showing recorded, so the
+        // next tick rings nothing.
+        let mut store = interrupt_world();
+        let ring = inline_ring(vec![
+            inline_item("M-1", "first body", false),
+            inline_item("M-2", "second body", true),
+        ]);
+        assert!(ring.inline);
+        store
+            .write(|tx| intend_rings(tx, &[ring.clone()], T0))
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(CAP_PANE, "codex", AgentStatus::Idle, "p-captain");
+
+        let done = execute_intended(&mut store, &mut herdr, "p", T0 + 1).unwrap();
+
+        assert_eq!(done, vec![("O-1".to_string(), "submitted".to_string())]);
+        let prompts = herdr.prompts_to(CAP_PANE);
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert_eq!(prompts[0], ring.text);
+        assert!(prompts[0].contains("first body") && prompts[0].contains("second body"));
+        assert!(prompts[0].contains("[M-1 from p:captain]"));
+        assert!(prompts[0].contains("[M-2 from p:captain, urgent]"));
+        assert!(prompts[0].contains("Reply with `gear --session sess --pane w1:p1 reply <id>"));
+
+        let (confirmed, flagged) =
+            confirm_pending_held(&mut store, "p", 3, 60, &[], &BTreeSet::new(), T0 + 2).unwrap();
+        assert_eq!(confirmed, vec!["O-1".to_string()]);
+        assert!(flagged.is_empty());
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Confirmed);
+        let views = store.read(|tx| tx.views_since("p:captain", 1, 0)).unwrap();
+        assert!(
+            views
+                .iter()
+                .any(|view| view.shown_msgs == vec!["M-1".to_string(), "M-2".to_string()]),
+            "the view lists both ids: {views:?}"
+        );
+    }
+
+    #[test]
+    fn a_multi_line_ring_is_typed_whole_and_not_reported_as_held() {
+        // T-631: the composer's held-text check must not take the typed ring
+        // for text stuck in the input box.
+        let mut store = interrupt_world();
+        let ring = inline_ring(vec![
+            inline_item("M-1", "first body", false),
+            inline_item("M-2", "second body", false),
+        ]);
+        store
+            .write(|tx| intend_rings(tx, &[ring.clone()], T0))
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(CAP_PANE, "codex", AgentStatus::Idle, "p-captain");
+        // The pane shows the ring already typed, above its empty composer.
+        herdr.set_screen(
+            CAP_PANE,
+            &format!("{}\n────\n────\n/repo (lane/t631)\n↑79k ↓19k", ring.text),
+        );
+
+        execute_intended(&mut store, &mut herdr, "p", T0 + 1).unwrap();
+
+        assert_eq!(
+            herdr.prompts_to(CAP_PANE),
+            vec![ring.text.as_str()],
+            "the whole ring is typed"
+        );
+        assert_eq!(enters(&herdr, CAP_PANE), 0, "not taken for held text");
+    }
+
+    #[test]
+    fn a_long_ring_is_cut_and_waits_for_a_view() {
+        // T-631: over 4000 chars the ring is cut and is not inline, so it
+        // waits for a view as before.
+        let mut store = interrupt_world();
+        let ring = inline_ring(vec![inline_item("M-1", &"x".repeat(6_000), false)]);
+        assert!(!ring.inline);
+        assert!(
+            ring.text.ends_with(
+                "… cut here: run `gear --session sess --pane w1:p1` to read all 1 item(s)."
+            ),
+            "{}",
+            ring.text
+        );
+        store
+            .write(|tx| intend_rings(tx, &[ring.clone()], T0))
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(CAP_PANE, "codex", AgentStatus::Idle, "p-captain");
+        execute_intended(&mut store, &mut herdr, "p", T0 + 1).unwrap();
+
+        let (confirmed, _) =
+            confirm_pending_held(&mut store, "p", 3, 60, &[], &BTreeSet::new(), T0 + 2).unwrap();
+        assert!(confirmed.is_empty(), "it waits for a view: {confirmed:?}");
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Submitted);
+        assert_eq!(
+            op.payload.get("inline").and_then(|v| v.as_bool()),
+            None,
+            "not inline"
         );
     }
 }

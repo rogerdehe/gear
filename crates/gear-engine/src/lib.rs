@@ -1617,6 +1617,10 @@ fn doorbell_inputs(
             // reviewer cuts that turn and goes even while the seat holds a
             // delivery slot (the review it was just handed).
             cut: doorbell::ends_direction_check(message),
+            // T-631: the inline text carries the sender and the body.
+            sender: message.sender.clone(),
+            body: message.body.clone(),
+            needs_ack: message.needs_ack,
         };
         let mut waiting: Vec<doorbell::DoorbellItem> = Vec::new();
         let declared_wait = waits::waiting_seat(tx, &seat.id)?;
