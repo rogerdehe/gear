@@ -7191,13 +7191,18 @@ fn tell_captain_lost(
             // candidate lands with T-107, the feature's new integration task):
             // its open merge-lost and merge-failed items close, as a reply
             // cannot close them.
-            if open_item {
+            // Lawrence M2, later: T-96, T-107 and T-98 (integration tasks a
+            // new one superseded) stayed "merge failed" on the board after
+            // their work landed: the attempt is marked merged as well, so
+            // every view reads it as landed.
+            if !merged {
                 let reference = format!(
                     "refs/remotes/{}/{}",
                     config.conventions.remote, repo.integration
                 );
                 if is_ancestor(Path::new(&repo.path), &candidate, &reference) {
                     store.write(|tx| {
+                        tx.set_attempt_time(project, &task, attempt, AttemptStep::Merged, now)?;
                         tx.set_meta(
                             &merge_lost_landed_key(project, &task, attempt),
                             &now.to_string(),
@@ -7236,6 +7241,7 @@ fn tell_captain_lost(
         );
         if is_ancestor(Path::new(&repo.path), &candidate, &reference) {
             store.write(|tx| {
+                tx.set_attempt_time(project, &task, attempt, AttemptStep::Merged, now)?;
                 tx.set_meta(
                     &merge_lost_landed_key(project, &task, attempt),
                     &now.to_string(),
@@ -8880,6 +8886,8 @@ mod tests {
             .unwrap();
         assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
         assert_eq!(items[0].result.as_deref(), Some(LOST_LANDED));
+        let times = store.read(|tx| tx.attempt_times("p", "T-5", 1)).unwrap();
+        assert!(times.merged.is_some(), "the attempt reads as landed");
     }
 
     /// T-408: a task of a voyage whose tasks are all terminal is not checked —

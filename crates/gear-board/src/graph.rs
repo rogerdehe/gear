@@ -294,9 +294,22 @@ fn tasks_of(
             .map(|contract| contract.goal)
             .unwrap_or_default();
         let (actual, finished) = actual_of(&history, now);
+        // A member of a feature that landed is on the integration branch: it
+        // reads as its feature's integration task does (Lawrence M2: members
+        // of F-1, landed on lawrence/dev, read "on lawrence/feature/f-1").
+        let mut integration = integration_of(row);
+        if let Some(feature) = tx.task_feature(project, &row.id)? {
+            if let Some(carrier) = tx.feature_carrier(project, &feature)? {
+                if merged.contains(&carrier) {
+                    if let Some(carrier_row) = tx.get_task(project, &carrier)? {
+                        integration = integration_of(&carrier_row);
+                    }
+                }
+            }
+        }
         tasks.push(GraphTask {
             id: row.id.clone(),
-            integration: integration_of(row),
+            integration,
             rank: row.rank,
             lane: row.lane.clone().unwrap_or_default(),
             stage: stage_of(tx, project, row)?,

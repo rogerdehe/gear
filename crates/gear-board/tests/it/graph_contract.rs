@@ -1558,3 +1558,36 @@ fn a_task_whose_base_is_main_reads_on_main() {
     assert_eq!(found, Stage::Merged);
     assert_eq!(said, "on main");
 }
+
+/// A member of a feature that landed reads as on the integration branch, not
+/// on the feature's branch (Lawrence M2: F-1's members read "on
+/// lawrence/feature/f-1" after F-1 landed on lawrence/dev).
+#[test]
+fn a_member_of_a_landed_feature_reads_on_the_integration_branch() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            let mut member = tx.get_task("p", "T-135")?.unwrap();
+            member.base = Some("p/feature/f-1".into());
+            tx.update_task(&member)?;
+            tx.set_task_feature("p", "T-135", "F-1")?;
+            tx.set_feature_carrier("p", "F-1", "T-139")
+        })
+        .unwrap();
+    let integration = |store: &mut Store| {
+        store
+            .read(|tx| tasks(tx, "p", T0 + 86_400))
+            .unwrap()
+            .into_iter()
+            .find(|task| task.id == "T-135")
+            .unwrap()
+            .integration
+    };
+    // T-139, the carrier, is merged into dev: the member is on dev.
+    assert_eq!(integration(&mut store), "dev");
+    // A carrier that has not merged leaves the member on the feature branch.
+    store
+        .write(|tx| tx.set_feature_carrier("p", "F-1", "T-1"))
+        .unwrap();
+    assert_eq!(integration(&mut store), "p/feature/f-1");
+}
