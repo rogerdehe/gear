@@ -301,12 +301,18 @@ fn the_taskless_doorbell_text_says_so() {
             urgent: false,
             at_once: false,
             cut: false,
+            sender: "p:captain".into(),
+            body: "please look".into(),
+            needs_ack: false,
         },
         DoorbellItem {
             id: "M-13".into(),
             urgent: true,
             at_once: false,
             cut: false,
+            sender: "p:captain".into(),
+            body: "please look".into(),
+            needs_ack: false,
         },
     ];
     let said = text(&items, true, "gear --session s --pane w1:p1");

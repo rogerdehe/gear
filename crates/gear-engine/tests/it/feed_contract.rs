@@ -613,7 +613,11 @@ fn a_twenty_minute_old_viewed_item_rings_urgently_once_per_period() {
     );
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1200).unwrap();
     assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 1);
-    assert!(w.herdr.prompts_to(CAP_PANE)[0].contains("1 urgent"));
+    assert!(
+        w.herdr.prompts_to(CAP_PANE)[0].contains(", urgent]"),
+        "the inline header marks it urgent: {:?}",
+        w.herdr.prompts_to(CAP_PANE)
+    );
     assert!(
         w.store
             .read(|tx| tx.get_message("p", &id))
