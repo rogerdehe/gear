@@ -1517,10 +1517,12 @@ pub(crate) fn reconcile_config(
         // T-464: a model change that runs on the seat's own CLI is switched
         // through the CLI's own model command — the agent and its conversation
         // stay, nothing is restarted and no handover is written. Only a CLI
-        // GEAR drives a picker for is switched in place (T-114): another CLI,
-        // a CLI without a picker, or a change of launch arguments keeps the
-        // restart path below. The durable switch plan is recorded here; the
-        // tick's switch step takes the first step and continues it.
+        // GEAR drives a protocol for is switched in place (T-114, T-606):
+        // OpenCode's session API, pi's and Claude's typed `/model <id>`.
+        // Another CLI, a CLI without such a protocol (codex), or a change of
+        // launch arguments keeps the restart path below. The durable switch
+        // plan is recorded here; the tick's switch step takes the first step
+        // and continues it.
         let in_place = !model.is_empty()
             && current_model.as_deref() != Some(model)
             && current_cli == target_cli
@@ -1842,7 +1844,9 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         let dir = tempfile::tempdir().unwrap();
         let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap(), false);
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
-        change(&mut store, "pi", "new-model");
+        // T-606: a pi model change alone is switched in place now; a change
+        // of launch arguments keeps the restart path this test drives.
+        change_to(&mut store, "pi", "new-model", "[\"--effort\", \"high\"]");
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
         herdr.exit_agent(PANE);
         advance_pending(&mut store, &mut herdr, &cfg, T + 2);
@@ -1873,7 +1877,9 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         let (mut store, mut herdr, mut cfg) = world(dir.path().to_str().unwrap(), false);
         cfg.db_path = dir.path().join("gear.db").to_string_lossy().into();
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
-        change(&mut store, "pi", "new-model");
+        // T-606: a pi model change alone is switched in place now; a change
+        // of launch arguments keeps the restart path this test drives.
+        change_to(&mut store, "pi", "new-model", "[\"--effort\", \"high\"]");
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
         herdr.exit_agent(PANE);
         advance_pending(&mut store, &mut herdr, &cfg, T + 2);
@@ -2015,7 +2021,9 @@ lanes = [{{model="{model}", cli="{kind}"}}]
             .unwrap();
         herdr.set_agent_session(PANE, "");
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
-        change(&mut store, "pi", "new-model");
+        // T-606: a pi model change alone is switched in place now; a change
+        // of launch arguments keeps the restart path this test drives.
+        change_to(&mut store, "pi", "new-model", "[\"--effort\", \"high\"]");
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
         assert!(pending(&mut store, "p:heat").unwrap().is_some());
         assert!(!herdr.calls.iter().any(|c| matches!(
@@ -2055,7 +2063,9 @@ lanes = [{{model="{model}", cli="{kind}"}}]
             .write(|tx| tx.set_binding_session_ref("p:heat", 1, ""))
             .unwrap();
         herdr.set_agent_session(PANE, "");
-        change(&mut store, "pi", "new-model");
+        // T-606: a pi model change alone is switched in place now; a change
+        // of launch arguments keeps the restart path this test drives.
+        change_to(&mut store, "pi", "new-model", "[\"--effort\", \"high\"]");
 
         // The agent is still present when config reconciliation persists the
         // plan, so GEAR cannot yet know that a fresh session will be needed.
@@ -2179,7 +2189,9 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         let dir = tempfile::tempdir().unwrap();
         let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap(), false);
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
-        change(&mut store, "pi", "new-model");
+        // T-606: a pi model change alone is switched in place now; a CLI
+        // change keeps the restart path this test drives.
+        change(&mut store, "codex", "new-model");
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
         assert!(pending(&mut store, "p:heat").unwrap().is_some());
         assert!(store
@@ -2237,7 +2249,7 @@ lanes = [{{model="{model}", cli="{kind}"}}]
             })
             .unwrap();
         assert!(
-            args.windows(2).any(|w| w == ["--model", "new-model"]),
+            args.windows(2).any(|w| w == ["-m", "new-model"]),
             "{args:?}"
         );
         assert_eq!(
@@ -2313,7 +2325,9 @@ lanes = [{{model="{model}", cli="{kind}"}}]
                 tx.set_seat_state("p:heat", SeatState::Held, Some("hold: the user asked"), T)
             })
             .unwrap();
-        change(&mut store, "pi", "new-model");
+        // T-606: a pi model change alone is switched in place now; a change
+        // of launch arguments keeps the restart path this test drives.
+        change_to(&mut store, "pi", "new-model", "[\"--effort\", \"high\"]");
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
         assert!(
             pending(&mut store, "p:heat").unwrap().is_none(),
@@ -2499,7 +2513,9 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         let dir = tempfile::tempdir().unwrap();
         let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap(), false);
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
-        change(&mut store, "pi", "new-model");
+        // T-606: a pi model change alone is switched in place now; a change
+        // of launch arguments keeps the restart path this test drives.
+        change_to(&mut store, "pi", "new-model", "[\"--effort\", \"high\"]");
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
         herdr.exit_agent(PANE);
         advance_pending(&mut store, &mut herdr, &cfg, T + 2);
@@ -2566,7 +2582,9 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         let dir = tempfile::tempdir().unwrap();
         let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap(), false);
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
-        change(&mut store, "pi", "new-model");
+        // T-606: a pi model change alone is switched in place now; a change
+        // of launch arguments keeps the restart path this test drives.
+        change_to(&mut store, "pi", "new-model", "[\"--effort\", \"high\"]");
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
         herdr.exit_agent(PANE);
         advance_pending(&mut store, &mut herdr, &cfg, T + 2);
@@ -3617,18 +3635,18 @@ bar = "New Provider"
         );
     }
 
-    /// T-114: a CLI GEAR does not drive a picker for (pi) is still restarted
-    /// on the next model — the model is given at the start.
+    /// T-114, T-606: a CLI GEAR drives no protocol for (codex) is still
+    /// restarted on the next model — the model is given at the start.
     #[test]
-    fn a_chain_head_model_change_on_a_cli_without_a_picker_restarts() {
-        let (mut store, mut herdr, cfg) = world("pi");
+    fn a_chain_head_model_change_on_codex_restarts() {
+        let (mut store, mut herdr, cfg) = world("codex");
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
         herdr.calls.clear();
-        change_head(&mut store, "pi", "provider/new");
+        change_head(&mut store, "codex", "provider/new");
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
         assert!(
             pending(&mut store, "p:heat").unwrap().is_some(),
-            "pi is restarted, not switched in place"
+            "codex is restarted, not switched in place"
         );
         assert!(crate::switch::pending(&mut store, "p:heat")
             .unwrap()
@@ -3641,5 +3659,130 @@ bar = "New Provider"
             "no model command is typed: {:?}",
             herdr.calls
         );
+    }
+
+    /// T-606: a pi seat on the same CLI is switched in place by typing
+    /// `/model <id>` once; the footer showing the model's bar label confirms
+    /// it, and nothing is restarted.
+    #[test]
+    fn a_chain_head_model_change_on_pi_switches_in_place_by_command() {
+        let (mut store, mut herdr, cfg) = world("pi");
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        herdr.calls.clear();
+        change_head(&mut store, "pi", "provider/new");
+        herdr.set_screen(PANE, "── pi ──\nmodel: Old Provider");
+        herdr.screen_after = vec![(
+            "/model provider/new".into(),
+            "── pi ──\nmodel: New Provider".into(),
+        )];
+
+        tick(&mut store, &mut herdr, &cfg, true, T + 1);
+        assert_eq!(texts(&herdr), vec!["/model provider/new".to_string()]);
+        assert_eq!(keys(&herdr), vec!["enter".to_string()]);
+        assert!(
+            crate::switch::pending(&mut store, "p:heat")
+                .unwrap()
+                .is_some(),
+            "the switch waits for the footer"
+        );
+
+        tick(&mut store, &mut herdr, &cfg, true, T + 2);
+        assert!(
+            crate::switch::pending(&mut store, "p:heat")
+                .unwrap()
+                .is_none(),
+            "the footer confirmed the switch"
+        );
+        assert!(
+            pending(&mut store, "p:heat").unwrap().is_none(),
+            "no restart: {:?}",
+            herdr.calls
+        );
+        assert!(
+            !herdr
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::AgentStart { .. })),
+            "no restart: {:?}",
+            herdr.calls
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&model_meta_key("p:heat")))
+                .unwrap()
+                .as_deref(),
+            Some("provider/new"),
+            "the new model is recorded"
+        );
+    }
+
+    /// T-606: a Claude seat is switched the same way, by `/model <id>`.
+    #[test]
+    fn a_chain_head_model_change_on_claude_switches_in_place_by_command() {
+        let (mut store, mut herdr, cfg) = world("claude");
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        herdr.calls.clear();
+        change_head(&mut store, "claude", "provider/new");
+        herdr.set_screen(PANE, "model: Old Provider");
+        herdr.screen_after = vec![("/model provider/new".into(), "model: New Provider".into())];
+
+        tick(&mut store, &mut herdr, &cfg, true, T + 1);
+        assert_eq!(texts(&herdr), vec!["/model provider/new".to_string()]);
+        assert_eq!(keys(&herdr), vec!["enter".to_string()]);
+        tick(&mut store, &mut herdr, &cfg, true, T + 2);
+        assert!(
+            crate::switch::pending(&mut store, "p:heat")
+                .unwrap()
+                .is_none(),
+            "the footer confirmed the switch"
+        );
+        assert!(
+            pending(&mut store, "p:heat").unwrap().is_none(),
+            "no restart: {:?}",
+            herdr.calls
+        );
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&model_meta_key("p:heat")))
+                .unwrap()
+                .as_deref(),
+            Some("provider/new")
+        );
+    }
+
+    /// T-606: a footer that never shows the model fails the typed command
+    /// after two tries, and the restart takes over.
+    #[test]
+    fn a_pi_command_that_never_shows_falls_back_to_the_restart() {
+        let (mut store, mut herdr, cfg) = world("pi");
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        herdr.calls.clear();
+        change_head(&mut store, "pi", "provider/new");
+        // The footer never names the new model: the Enter changes nothing.
+        herdr.set_screen(PANE, "── pi ──\nmodel: Old Provider");
+        herdr.screen_after = vec![];
+
+        for n in 1..=40 {
+            tick(&mut store, &mut herdr, &cfg, true, T + n);
+            if pending(&mut store, "p:heat").unwrap().is_some() {
+                break;
+            }
+        }
+        assert!(
+            pending(&mut store, "p:heat").unwrap().is_some(),
+            "the restart takes over: {:?}",
+            herdr.calls
+        );
+        assert!(
+            crate::switch::pending(&mut store, "p:heat")
+                .unwrap()
+                .is_none(),
+            "the failed switch plan is cleared"
+        );
+        let commands = texts(&herdr)
+            .iter()
+            .filter(|text| *text == "/model provider/new")
+            .count();
+        assert_eq!(commands, 2, "two tries: {:?}", herdr.calls);
     }
 }
