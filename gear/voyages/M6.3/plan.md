@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1224 -->
+<!-- gear-plan project=gear base=1225 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -131,4 +131,10 @@ deps: -
 goal: A project's integration branch lives for one voyage: a landing's reclaim deletes it once it is on the release branch, and the next departure cuts it again (Carthage M1: carthage/dev was removed at the reclaim, and nothing would recreate it: every lane, review and merge worktree is created from `origin/<integration>`). crates/gear-engine: before the first worktree of a voyage is created (onboard.rs, review.rs and merge.rs call `worktree_create(..., &repo.integration, ...)`), when `refs/remotes/<remote>/<integration>` is missing after the fetch, push `<remote>/<release>` to `refs/heads/<integration>` once, fetch again and tell the captain in one Info item ("<integration> was missing; cut from <release> at <sha>"). An integration branch equal to the release branch is never created or deleted. In crates/gear-engine/src/finished.rs `reclaim`, the integration branch is named only when its tip is on the release branch (otherwise it holds unreleased work: it is named with "not on <release>" and kept).
 accept: Tests with a temp repo: a missing integration branch is cut from release before the first lane worktree and the item names the sha; a present one is untouched; the reclaim names an integration branch whose tip is on release and keeps one with extra commits. Run only `make check CRATE=gear-engine TESTS='test(onboard::) | test(finished::)'`; the merge gate runs `make gate`.
 estimate: 45
+deps: -
+
+## T-623 [must] lane=mast milestone=M6.3 required
+goal: A lane's paths and words are the captain's, not staffing (Lawrence M2, 2026-11-06: adding 15 files to a lane's `owns` and fixing a command in a charter were refused with STAFF_LOCKED until the user confirmed; the user: that is the captain's work). crates/gear-app/src/admin.rs `staffing_changed`: compare `[quota]`, `[models]`, the set of lanes with each lane's name, kind, profile and models, and `[temps]` kind and profile; a change only to a lane's `duty`, `owns`, `not` or `charter`, or to `[temps].charter`, is not a staffing change and applies without `--confirmed`. `staffing_changes` keeps listing every difference, and the apply output prints those non-staffing lines under "changed (captain's)". Today's ownership checks (overlap between lanes, open tasks' paths) still run on the new owns.
+accept: Tests in crates/gear-cli/tests/it/admin_init_contract.rs: mid-voyage, a change of a lane's owns and charter applies without --confirmed and is printed; a change of a lane's model or of quota.lanes is still STAFF_LOCKED. Run only `make check CRATE=gear-cli TESTS='test(admin_init)'`; the merge gate runs `make gate`.
+estimate: 30
 deps: -
