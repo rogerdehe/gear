@@ -537,6 +537,11 @@ fn send_inner(
             // before anything is written (T-21). Only a temp reviewer's
             // findings are read: a lane or the captain is refused as a
             // reviewer, and that is the error they should see.
+            let handed_path = if seat.role == SeatRole::Temp {
+                crate::review::findings_path(&args.body)
+            } else {
+                None
+            };
             let review = match (args.kind, args.verdict) {
                 (MsgKind::Review, Some(verdict)) => Some(crate::review::Review {
                     project: ctx.project.clone(),
@@ -555,11 +560,11 @@ fn send_inner(
                 _ => None,
             };
 
-            // The body of a review is the findings; the captain reads the
-            // verdict in the first line of the item (design/07: the inbox
-            // shows the body).
+            // The body of a review is the verdict, the blocking findings by
+            // title and where the full review is (T-641): the captain reads
+            // the item, the rework lane reads the findings in the store.
             let body = match &review {
-                Some(review) => format!("{}\n{}", crate::review::headline(review), review.findings),
+                Some(review) => review_body(review, handed_path.as_deref()),
                 None => args.body.clone(),
             };
 
@@ -1282,6 +1287,50 @@ fn progress_meta(left: Option<i64>, blocker: Option<&str>) -> GearResult<Option<
         );
     }
     Ok(Some(serde_json::Value::Object(fields).to_string()))
+}
+
+/// T-641: the body of a review message — the verdict, the blocking findings
+/// by title and where the full review is. The whole findings stay in the
+/// verdict row, where the rework lane reads them.
+fn review_body(review: &crate::review::Review, handed_path: Option<&str>) -> String {
+    let mut body = crate::review::headline(review);
+    let titles = blocking_titles(&review.findings, &review.blocking);
+    if titles.is_empty() {
+        body.push_str("\nblocking: none");
+    } else {
+        for title in titles {
+            body.push_str(&format!("\nblocking: {title}"));
+        }
+    }
+    if let Some(path) = handed_path {
+        body.push_str(&format!("\nfull review: {path}"));
+    }
+    body.push_str(&format!("\nfindings: `gear --show {}`", review.task));
+    body
+}
+
+/// The title line of each blocking finding: the first findings line that
+/// starts with the id followed by a space or `[`, after an optional `- `,
+/// cut to 160 characters. An id with no line of its own is named by itself,
+/// so the captain still sees that it blocks.
+fn blocking_titles(findings: &str, blocking: &str) -> Vec<String> {
+    let lines: Vec<&str> = findings.lines().collect();
+    blocking
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|id| {
+            let line = lines.iter().find_map(|line| {
+                let text = line.strip_prefix("- ").unwrap_or(line).trim_start();
+                let rest = text.strip_prefix(id)?;
+                (rest.starts_with(' ') || rest.starts_with('[')).then_some(text)
+            });
+            match line {
+                Some(text) => text.chars().take(160).collect(),
+                None => id.chars().take(160).collect(),
+            }
+        })
+        .collect()
 }
 
 /// T-266: the rework that waits for a lane whose hand-in failed.
