@@ -281,6 +281,10 @@ pub trait HerdrAct: HerdrRead {
     /// nothing — so a test never sleeps on the wall clock (T-127).
     fn type_settle(&mut self);
     fn pane_close(&mut self, pane_id: &str) -> Outcome<()>;
+    /// Herdr `pane.split` (never focuses): split `pane_id` `direction`
+    /// (`right` or `down`) into a new pane whose shell starts in `cwd`. The
+    /// reply names the new pane's id, which is what the caller gets (T-603).
+    fn pane_split(&mut self, pane_id: &str, direction: &str, cwd: &str) -> Outcome<String>;
     fn set_title(&mut self, pane_id: &str, title: &str) -> Outcome<()>;
     fn notify(&mut self, title: &str, body: &str) -> Outcome<()>;
     /// Herdr `worktree.create` (never focuses): new branch `branch` cut from
@@ -565,6 +569,36 @@ impl HerdrAct for SocketHerdr {
         }
     }
 
+    fn pane_split(&mut self, pane_id: &str, direction: &str, cwd: &str) -> Outcome<String> {
+        // An unknown direction is rejected before anything runs.
+        let direction = match direction {
+            "right" => board_herdr::SplitDirection::Right,
+            "down" => board_herdr::SplitDirection::Down,
+            other => {
+                return Outcome::Refused {
+                    code: "invalid_params".into(),
+                    message: format!("pane split direction {other:?} is neither right nor down"),
+                }
+            }
+        };
+        // The CLI derives the workspace from the pane it splits; the socket
+        // call takes it explicitly when the pane id names one.
+        let workspace = pane_id
+            .split_once(':')
+            .map(|(workspace, _)| workspace.to_string());
+        let params = json!({
+            "workspace_id": workspace,
+            "target_pane_id": pane_id,
+            "cwd": cwd,
+            "direction": direction,
+            "focus": false,
+        });
+        match self.client.call("pane.split", params) {
+            Ok(reply) => pane_from_split_reply(&reply),
+            Err(e) => outcome_from_error(&e),
+        }
+    }
+
     fn set_title(&mut self, pane_id: &str, title: &str) -> Outcome<()> {
         // Herdr has no "pane.title" call: the pane title is metadata reported
         // by the pane's owner. GEAR reports it under the source "gear".
@@ -646,6 +680,23 @@ impl HerdrAct for SocketHerdr {
             Ok(_) => Outcome::Ok(()),
             Err(e) => outcome_from_error(&e),
         }
+    }
+}
+
+/// The new pane id in a `pane.split` reply: the socket answers
+/// `{"pane":{"pane_id":…}}`, the CLI wraps the same object as
+/// `.result.pane.pane_id` (T-603). A reply that names no pane → Uncertain:
+/// the split may have happened even though GEAR cannot name the new pane.
+fn pane_from_split_reply(reply: &Value) -> Outcome<String> {
+    let pane = reply
+        .pointer("/result/pane/pane_id")
+        .or_else(|| reply.pointer("/pane/pane_id"))
+        .and_then(Value::as_str);
+    match pane {
+        Some(pane_id) => Outcome::Ok(pane_id.to_string()),
+        None => Outcome::Uncertain {
+            reason: format!("pane split reply names no pane: {reply}"),
+        },
     }
 }
 
@@ -844,6 +895,27 @@ mod tests {
         assert_eq!(w.pane_id, "w3:p1");
         assert_eq!(w.branch, "t1-store");
         assert_eq!(w.path, "/Volumes/Data/.herdr-worktrees/gear/t1-store");
+    }
+
+    #[test]
+    fn pane_split_reply_names_the_new_pane() {
+        // The CLI envelope the packet names.
+        let cli = serde_json::json!({
+            "type": "pane_info",
+            "result": {"pane": {"pane_id": "w1:p2", "terminal_id": "term-2"}}
+        });
+        assert_eq!(pane_from_split_reply(&cli), Outcome::Ok("w1:p2".into()));
+        // The socket reply the real door receives.
+        let socket = serde_json::json!({
+            "type": "pane_info",
+            "pane": {"pane_id": "w1:p3", "terminal_id": "term-3"}
+        });
+        assert_eq!(pane_from_split_reply(&socket), Outcome::Ok("w1:p3".into()));
+        // A reply that names no pane leaves the new pane unnamed.
+        assert!(matches!(
+            pane_from_split_reply(&Value::Null),
+            Outcome::Uncertain { .. }
+        ));
     }
 
     #[test]
