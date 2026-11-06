@@ -672,19 +672,17 @@ fn apply_queue(
             }
             // A carrier that is done and merged lands nothing more: the mark
             // would keep this task's work off the integration branch for good
-            // (Prometheus T-779). A mark the task already has is left alone.
+            // (Prometheus T-779). Refused even when the task already has the
+            // mark: the captain must drop the line (T-614).
             let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, by);
-            let already = tx.task_carried_by(project, &id)?.as_deref() == Some(by);
             let landed = tx
                 .get_task(carrier_project, carrier)?
                 .is_some_and(|task| task.state == TaskState::Done)
                 && crate::tasks::merged_at(tx, carrier_project, carrier)?.is_some();
-            if landed && !already {
+            if landed {
                 return Err(bad(
                     item.line,
-                    format!(
-                        "{id}: `carried-by` {by} has already merged, so it cannot carry {id}'s work: leave the field out (or `carried-by: -`) and {id} merges on its own"
-                    ),
+                    format!("{by} has merged: its merge cannot carry {id}'s work; drop the line"),
                 ));
             }
         }
@@ -1107,8 +1105,19 @@ fn apply_queue(
                 if let Some(model) = &item.review_model {
                     tx.set_task_review_model(project, id, model)?;
                 }
-                if let Some(by) = &item.carried_by {
-                    tx.set_task_carried_by(project, id, by)?;
+                // The `carried-by:` mark (T-614): a block that names one sets
+                // it; a block that no longer has the line clears it (as
+                // `carried-by: -` does), so a dropped mark cannot keep the
+                // task's work off the integration branch.
+                let had = tx.task_carried_by(project, id)?;
+                let want = item.carried_by.as_deref().unwrap_or("");
+                if had.as_deref().unwrap_or("") != want {
+                    tx.set_task_carried_by(project, id, want)?;
+                    if want.is_empty() && had.is_some() {
+                        warnings.push(format!(
+                            "{id}: `carried-by` cleared (the block no longer names it)"
+                        ));
+                    }
                 }
                 // The `audit:` mark of a task (T-505): a block that names the
                 // field sets it; a block without it keeps the mark.
