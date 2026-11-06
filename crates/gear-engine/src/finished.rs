@@ -276,6 +276,11 @@ pub fn reclaim(
         // cuts it again from the release branch).
         let keep = [repo.release.as_str(), config.conventions.staging.as_str()];
         for branch in project_branches(&repo.path, &config.conventions.remote, project) {
+            // T-622: the integration branch is handled below: it is deleted
+            // only when its tip is on the release branch.
+            if branch.name == repo.integration {
+                continue;
+            }
             if keep.contains(&branch.name.as_str()) {
                 continue;
             }
@@ -287,6 +292,30 @@ pub fn reclaim(
                 }
             } else {
                 left.push(format!("branch {} (extra commits)", branch.name));
+            }
+        }
+        // T-622: the integration branch lives for one voyage. It is deleted
+        // only when its tip is on the release branch (everything it holds is
+        // released); otherwise it holds unreleased work and stays, named. An
+        // integration branch equal to the release branch is never deleted.
+        if repo.integration != repo.release {
+            if let Some(tip) =
+                remote_branch_tip(&repo.path, &config.conventions.remote, &repo.integration)
+            {
+                if branch_on_release(&repo.path, &config, &tip, &repo.release) {
+                    if let Err(reason) = delete_remote_branch(
+                        &repo.path,
+                        &config.conventions.remote,
+                        &repo.integration,
+                    ) {
+                        left.push(format!("branch {} ({reason})", repo.integration));
+                    }
+                } else {
+                    left.push(format!(
+                        "branch {} (not on {})",
+                        repo.integration, repo.release
+                    ));
+                }
             }
         }
     }
@@ -788,6 +817,43 @@ fn branch_on_integration(repo: &str, config: &ProjectConfig, tip: &str) -> bool 
     .is_ok()
 }
 
+/// The tip of a branch on the remote, if it is there (T-622).
+fn remote_branch_tip(repo: &str, remote: &str, branch: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args([
+            "ls-remote",
+            "--heads",
+            remote,
+            &format!("refs/heads/{branch}"),
+        ])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().next())
+        .map(str::to_string)
+}
+
+/// Whether the branch's tip is on the release branch (T-622).
+fn branch_on_release(repo: &str, config: &ProjectConfig, tip: &str, release: &str) -> bool {
+    let remote = &config.conventions.remote;
+    merge::git(
+        Path::new(repo),
+        &[
+            "merge-base",
+            "--is-ancestor",
+            tip,
+            &format!("{remote}/{release}"),
+        ],
+    )
+    .is_ok()
+}
+
 /// Delete a branch on the remote.
 fn delete_remote_branch(repo: &str, remote: &str, branch: &str) -> Result<(), String> {
     merge::git(Path::new(repo), &["push", remote, "--delete", branch])?;
@@ -971,6 +1037,10 @@ gate = "true"
                 &format!("git remote add origin {}", origin.display()),
             );
             sh(&work, "git push -q origin HEAD:refs/heads/dev");
+            // T-622: the release branch, at the integration branch's tip: the
+            // landing's reclaim deletes the integration branch once it is on
+            // release.
+            sh(&work, "git push -q origin HEAD:refs/heads/main");
             // The captain's seat branch: pushed at the landing's branch point.
             sh(
                 &work,
@@ -1470,6 +1540,48 @@ gate = "true"
             .expect("the reclaim names the dirty worktree");
         assert!(item.body.contains("worktree"), "{}", item.body);
         assert!(item.body.contains("uncommitted changes"), "{}", item.body);
+    }
+
+    /// T-622: the integration branch is deleted when its tip is on the release
+    /// branch (everything it holds is released), and kept when it holds
+    /// unreleased work.
+    #[test]
+    fn the_reclaim_deletes_an_integration_branch_on_release_and_keeps_one_with_unreleased_work() {
+        // Everything on dev is on main: the branch goes.
+        let mut landed = Landed::new("integration-on-release");
+        sh(&landed.work, "git push -q origin dev:refs/heads/main");
+        landed.reclaim(NOW + 600);
+        let branches = landed.origin_branches();
+        assert!(
+            !branches.lines().any(|branch| branch == "dev"),
+            "the integration branch on release is deleted: {branches}"
+        );
+
+        // A commit on dev that main does not have: the branch holds
+        // unreleased work and stays, named.
+        let mut landed = Landed::new("integration-extra");
+        sh(&landed.work, "git push -q origin dev:refs/heads/main");
+        sh(
+            &landed.work,
+            "echo extra > extra.txt && git add extra.txt && \
+             git commit -q -m extra && git push -q origin dev",
+        );
+        landed.reclaim(NOW + 600);
+        let branches = landed.origin_branches();
+        assert!(
+            branches.lines().any(|branch| branch == "dev"),
+            "the integration branch with unreleased work is kept: {branches}"
+        );
+        let item = landed
+            .items(RECLAIM_THREAD)
+            .into_iter()
+            .next()
+            .expect("the reclaim names the integration branch");
+        assert!(
+            item.body.contains("branch dev (not on main)"),
+            "{}",
+            item.body
+        );
     }
 
     /// T-618: a branch whose tip is on the integration branch is deleted on

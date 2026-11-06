@@ -2248,6 +2248,9 @@ fn bisect_worktree(
     let worktree = match herdr.worktree_open(&repo.path, &branch, &label) {
         Outcome::Ok(worktree) => worktree,
         Outcome::Refused { code, .. } if code == "worktree_not_found" => {
+            // T-622: the integration branch a landing's reclaim deleted is cut
+            // again from the release branch before the worktree.
+            crate::onboard::ensure_integration(store, project, config, repo, now)?;
             match herdr.worktree_create(&repo.path, &branch, &repo.integration, &label) {
                 Outcome::Ok(worktree) => worktree,
                 other => return Err(step_failure("worktree_create", &other)),
@@ -3297,6 +3300,9 @@ fn stage_worktree(
     let worktree = match herdr.worktree_open(&repo.path, &branch, &label) {
         Outcome::Ok(worktree) => worktree,
         Outcome::Refused { code, .. } if code == "worktree_not_found" => {
+            // T-622: the integration branch a landing's reclaim deleted is cut
+            // again from the release branch before the worktree.
+            crate::onboard::ensure_integration(store, project, config, repo, now)?;
             match herdr.worktree_create(&repo.path, &branch, &repo.integration, &label) {
                 Outcome::Ok(worktree) => worktree,
                 other => return Err(step_failure("worktree_create", &other)),
