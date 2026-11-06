@@ -2594,6 +2594,8 @@ quota_reset_h = {reset_h}
                     T0,
                 )?;
                 tx.set_binding_session_ref("p:heat", 1, "ses_lane")?;
+                // T-604: a CLI change splits a pane in the seat's worktree.
+                tx.set_meta(&crate::onboard::worktree_path_key("p:heat"), "/repo")?;
                 tx.insert_task(&TaskRow {
                     repo: None,
                     base: None,
