@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1231 -->
+<!-- gear-plan project=gear base=1232 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -9,6 +9,8 @@ eta: 6h
 depart: now
 
 # Decisions
+- station M-8298: keep course | why: projected 384m is 24m over the 6h eta; T-625 is cancelled (the captain fixed it by hand in v0.6.90: the window comes from the CLI, nothing unknown compacts), which takes 25m off hull, and hull's T-604 boundary is decided; moving engine files between lanes would cost more than it saves
+- 2026-11-06 09:26 hand-fix: (v0.6.90, gate 63 s) a lane is compacted only at half a window GEAR knows: the config's, else the CLI's own (pi models.json, Codex rollout, OpenCode config, Claude [1m]); an unknown window or context keeps the session | why: the user: compacting at 9 % is never right, and it had to be fixed at once, not queued
 - station M-8289: keep course | why: projected 321m against the 6h eta; the lanes are even now (hull 255m, mast 209m)
 - station M-8284: keep course | why: projected 299m against the 6h eta; hull holds 239m of engine work and mast 65m: when mast's queue runs out, the engine tasks that touch no hull file in flight move to mast
 - 2026-11-06 07:58 confirmed: M6.3 departure, not departed -> departs now with the scope above (every proposed item but the graceful engine restart), eta 6h | why: the user agreed the scope after being told the plan would be written and the voyage would depart on that agreement
@@ -148,6 +150,7 @@ estimate: 40
 deps: -
 
 ## T-625 [must] lane=hull milestone=M6.3 required
+state: cancelled
 goal: A model with no `context_window_k` is not compacted before every packet (Lawrence M2, 2026-11-06: web was compacted at 9.6 % of 1M and console at 22 % of 500k, because crates/gear-engine/src/session.rs `context_large` returns true when the entry has no window). With no window, read it from the seat CLI's own model table when the profile has one (pi: the `contextWindow` of the model in pi's models file), else use a default of 200k; nothing unknown is ever "large" by itself: a window that cannot be read and a context the usage log cannot read (today `usage.is_none_or(...)` returns large) both mean keep the session; only a measured context at half the window compacts. Keep today's rule when both are known. The user (2026-11-06): a lane continuing related work keeps its session, an unrelated task starts a new one, and a compaction at 9 % of the window is never right.
 accept: Tests in session.rs `mod tests`: an entry with no window and a 30k context does not compact; a set window with an unreadable usage log does not compact; with no window and 120k it compacts (half of the 200k default); a set window keeps today's rule. Run only `make check CRATE=gear-engine TESTS='test(session::)'`; the merge gate runs `make gate`.
 estimate: 25
