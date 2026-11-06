@@ -341,7 +341,8 @@ fn inline_text(
 }
 
 /// A ring text too long for one prompt (T-631): cut at the last line break
-/// before [`INLINE_CUT_CHARS`], with the line that says where the rest is.
+/// before [`INLINE_CUT_CHARS`] (mid-line when that keeps less than half),
+/// with the line that says where the rest is.
 fn cut_inline(full: &str, command: &str, n: usize) -> String {
     let mut count = 0;
     let mut cut = 0;
@@ -354,7 +355,10 @@ fn cut_inline(full: &str, command: &str, n: usize) -> String {
         }
         count += 1;
     }
-    if cut == 0 {
+    // A first message whose first line is longer than the limit (a captain
+    // item that starts with the goal) left only the ring's header (Lawrence
+    // M-1846): a cut that keeps less than half the limit cuts mid-line.
+    if full[..cut].chars().count() < INLINE_CUT_CHARS / 2 {
         cut = full
             .char_indices()
             .nth(INLINE_CUT_CHARS)
@@ -651,6 +655,9 @@ mod tests {
         )]);
         assert!(!r.inline);
         assert!(r.text.chars().count() < 4_000, "{}", r.text.chars().count());
+        // A first line longer than the limit is cut mid-line, never down to
+        // the header alone (Lawrence M-1846).
+        assert!(r.text.contains(&"x".repeat(3_000)), "{}", r.text);
         assert!(
             r.text.ends_with(
                 "… cut here: run `gear --session s --pane w1:p1` to read all 1 item(s)."
