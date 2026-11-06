@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1237 -->
+<!-- gear-plan project=gear base=1239 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -9,6 +9,8 @@ eta: 6h
 depart: now
 
 # Decisions
+- station M-8342: move | why: hull holds about 360m (T-630 then 9 tasks) and mast 170m against 204m left; T-612 (30m) and T-629 (45m) move to mast and live in lane_nudge.rs, mast's file, so hull keeps F-3, T-630 and merge.rs; the eta stays and the gap is reported to the user with the third-lane offer
+- 2026-11-06 10:35 hand-fix: (v0.6.92) a commit that writes only the voyage's records merges with the reviewed work; T-604's report commit had refused its accepted merge | why: lanes write their report after the hand-in; remerge T-604
 - station M-8318: cut | why: projected 401m against the 6h eta, hull holds 390m and mast 235m; T-628 (a merge-failed item names its queued remerge, 20m) is outside the done line and goes to the M7 backlog; the merge worktrees and lost scan hull keeps are merge.rs work no other lane can take without a file move costing more than it saves; the 2026-11-06 hand-fix v0.6.91 (a landed task is never waited for; the board never forecasts a blocked job in hours) took no lane time
 - station M-8316: move | why: projected 452m against 360m, hull 345m and mast 123m; finished.rs, quiet.rs and lane_nudge.rs move to mast with T-610, T-618 and T-619 (100m), so hull keeps the files of F-3, T-630, merge and review; the eta stays and the rest is reported to the user
 - 2026-11-06 09:55 confirmed: lanes hull and mast owns, gear-engine whole -> hull all but finished.rs, quiet.rs, lane_nudge.rs, which go to mast | why: the user (2026-11-06, through Lawrence's captain, see T-623): a lane's paths are the captain's work, not staffing
@@ -88,9 +90,9 @@ accept: Tests in crates/gear-app/tests/it: a lane's home page with a captain rep
 estimate: 30
 deps: -
 
-## T-612 [must] lane=hull milestone=M6.3 required
-goal: A lane busy with no open attempt while its next task waits is freed (Prometheus T-778: a lane looped inside one turn retrying `gear send --task T-778 --attempt 1` for a task not yet delivered, so it never went idle and the urgent delivery waited; one Esc fixed it). crates/gear-engine (dispatch.rs or a new step beside lane_nudge.rs): a lane seat that is working with no open attempt for 3 minutes while a task is ready for it (delivery intended) gets one Esc (`send_keys` "esc") and the delivery goes on at its next idle; if it is still working with no attempt 3 minutes later, one Info item tells the captain. Never for a lane with an open attempt.
-accept: Tests in the module's `mod tests` with the fake Herdr: a working lane with no attempt and a ready task gets one Esc after 3 minutes and the item after 6; a lane with an open attempt gets nothing. Run only `make check CRATE=gear-engine TESTS='test(dispatch::)'` (or the new module's filter); the merge gate runs `make gate`.
+## T-612 [must] lane=mast milestone=M6.3 required
+goal: A lane busy with no open attempt while its next task waits is freed (Prometheus T-778: a lane looped inside one turn retrying `gear send --task T-778 --attempt 1` for a task not yet delivered, so it never went idle and the urgent delivery waited; one Esc fixed it). crates/gear-engine/src/lane_nudge.rs (the nudge step already runs each tick; read dispatch's intended delivery, do not edit dispatch.rs): a lane seat that is working with no open attempt for 3 minutes while a task is ready for it (delivery intended) gets one Esc (`send_keys` "esc") and the delivery goes on at its next idle; if it is still working with no attempt 3 minutes later, one Info item tells the captain. Never for a lane with an open attempt.
+accept: Tests in the module's `mod tests` with the fake Herdr: a working lane with no attempt and a ready task gets one Esc after 3 minutes and the item after 6; a lane with an open attempt gets nothing. Run only `make check CRATE=gear-engine TESTS='test(lane_nudge::)'`; the merge gate runs `make gate`.
 estimate: 30
 deps: -
 
@@ -186,8 +188,8 @@ accept: A test in merge.rs `mod tests`: a failed merge then a queued remerge upd
 estimate: 20
 deps: -
 
-## T-629 [must] lane=hull milestone=M6.3 required
-goal: A provider's content refusal is seen (Lawrence M2, 2026-11-06 09:26-09:31Z: DashScope's content review cut the web lane's output four times, "Output data may contain inappropriate content", because the zh-CN copy named a channel stratum; the lane went idle after each and 12 tasks waited; GEAR noticed nothing). crates/gear-engine (where an idle lane with an open attempt is read, beside lane_nudge.rs or quota.rs): when the seat's session log's last assistant record ended with an error whose text is a content refusal (pi: `stopReason` "error" and an `errorMessage` matching the refusal markers of the profile; add `refusal_markers` to the pi and opencode profiles with "inappropriate content", "content_filter", "data_inspection_failed"), and that happened twice in a row on one attempt, the engine moves the lane to the next model of its chain the way a quota stop does (restart path, the task continues) and opens one captain item naming the provider, the attempt and the marker; with no next model, the item says so and the lane is held.
-accept: Tests with a pi session fixture: two refusals in a row on one attempt switch the lane to the chain's next model and open one item; one refusal followed by a normal turn does nothing; no next model opens the item and holds the lane. Run only `make check CRATE=gear-engine TESTS='test(refusal)'`; the merge gate runs `make gate`.
+## T-629 [must] lane=mast milestone=M6.3 required
+goal: A provider's content refusal is seen (Lawrence M2, 2026-11-06 09:26-09:31Z: DashScope's content review cut the web lane's output four times, "Output data may contain inappropriate content", because the zh-CN copy named a channel stratum; the lane went idle after each and 12 tasks waited; GEAR noticed nothing). crates/gear-engine/src/lane_nudge.rs (where an idle lane with an open attempt is read; call the restart path quota uses, do not edit quota.rs or restart.rs): when the seat's session log's last assistant record ended with an error whose text is a content refusal (pi: `stopReason` "error" and an `errorMessage` matching the refusal markers of the profile; add `refusal_markers` to the pi and opencode profiles with "inappropriate content", "content_filter", "data_inspection_failed"), and that happened twice in a row on one attempt, the engine moves the lane to the next model of its chain the way a quota stop does (restart path, the task continues) and opens one captain item naming the provider, the attempt and the marker; with no next model, the item says so and the lane is held.
+accept: Tests with a pi session fixture: two refusals in a row on one attempt switch the lane to the chain's next model and open one item; one refusal followed by a normal turn does nothing; no next model opens the item and holds the lane. Name the tests `refusal_*` in lane_nudge.rs `mod tests`. Run only `make check CRATE=gear-engine TESTS='test(refusal)'`; the merge gate runs `make gate`.
 estimate: 45
 deps: -

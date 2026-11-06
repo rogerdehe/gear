@@ -468,6 +468,8 @@ pub fn merge_passed(
         // T-582: the feature branch is not a task branch to close.
         if feature_branch.is_some() {
             payload["keep_branch"] = serde_json::json!(true);
+            // What a member merge's subject looks like on the feature branch.
+            payload["merge_message"] = serde_json::json!(config.conventions.merge_message);
         }
         // T-405: the merge op of a mechanically settled attempt says so, so
         // the merge does not require a review branch that never existed.
@@ -3799,18 +3801,54 @@ fn prepare_merge(
     // reviewed work already on the branch. `--not <base>` leaves them out.
     if !has_review && !mechanical && task_tip.is_some() {
         let tip = task_tip.as_deref().unwrap_or_default();
-        let log = git(
-            dir,
-            &[
-                "log",
-                "--no-merges",
-                "--format=%H%x09%s",
-                &format!("{sha}..{tip}"),
-                "--not",
-                &base_ref,
-            ],
-        )
-        .map_err(|reason| {
+        // A feature's integration task: the members GEAR merged into the
+        // feature branch after the candidate bring their own checked work, and
+        // the full gate judges the whole branch (Lawrence M2: T-103 carried
+        // T-97's fixes into lawrence/feature/f-2, the review passed that tip,
+        // and the merge refused T-103's commit). What a member merge brought
+        // in is left out; a lane commit on the branch itself is still judged.
+        let mut members_in: Vec<String> = Vec::new();
+        if op
+            .payload
+            .get("keep_branch")
+            .and_then(|keep| keep.as_bool())
+            .unwrap_or(false)
+        {
+            let merge_message = op
+                .payload
+                .get("merge_message")
+                .and_then(|message| message.as_str())
+                .unwrap_or(gear_model::commit::MERGE_MESSAGE);
+            if let Ok(merges) = git(
+                dir,
+                &[
+                    "log",
+                    "--first-parent",
+                    "--merges",
+                    "--format=%H%x09%s",
+                    &format!("{sha}..{tip}"),
+                ],
+            ) {
+                for line in merges.lines() {
+                    if let Some((commit, subject)) = line.split_once('\t') {
+                        if member_of(subject, merge_message).is_some() {
+                            members_in.push(format!("{commit}^2"));
+                        }
+                    }
+                }
+            }
+        }
+        let range = format!("{sha}..{tip}");
+        let mut args: Vec<&str> = vec![
+            "log",
+            "--no-merges",
+            "--format=%H%x09%s",
+            &range,
+            "--not",
+            &base_ref,
+        ];
+        args.extend(members_in.iter().map(String::as_str));
+        let log = git(dir, &args).map_err(|reason| {
             Step::Failed(Failed::clear(format!(
                 "{task}: the commits of the task branch {task_ref} could not be read: {reason}"
             )))
@@ -14013,6 +14051,57 @@ gate = "{project_gate}"
 
         assert!(merged.is_ok(), "{merged:?}");
         assert!(scratch.dev_has_task_commit());
+    }
+
+    /// A feature's integration task merges the member work GEAR merged into
+    /// the feature branch after its candidate (Lawrence M2: T-103 carried
+    /// T-97's fixes); a lane's own commit on the branch is still refused.
+    #[test]
+    fn a_member_merged_after_the_candidate_merges_with_the_integration_task() {
+        let scratch = Scratch::new("task-branch-member-merge");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        sh(
+            &scratch.work,
+            "git switch -q -c heat/t6 heat/t5 && echo m > m6.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'fix the findings' \
+             && git switch -q heat/t5 \
+             && git -c user.name=a -c user.email=a@b merge -q --no-ff heat/t6 -m 'merge(T-6): origin/heat/t6' \
+             && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass'",
+        );
+        publish(&scratch.work, "heat/t5");
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+        let mut carrier = op(&candidate);
+        carrier.payload["keep_branch"] = serde_json::json!(true);
+
+        let merged = merge_one(&worktree, &repo("true"), &carrier);
+
+        assert!(merged.is_ok(), "{merged:?}");
+        assert!(scratch.dev_has_task_commit());
+
+        // The same commit made by the lane on the branch itself is refused.
+        let scratch = Scratch::new("task-branch-member-merge-lane");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo m > m6.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'fix the findings' \
+             && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass'",
+        );
+        publish(&scratch.work, "heat/t5");
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+        let mut carrier = op(&candidate);
+        carrier.payload["keep_branch"] = serde_json::json!(true);
+        assert!(merge_one(&worktree, &repo("true"), &carrier).is_err());
     }
 
     /// T-564: a lane commit pushed onto the task branch after the hand-in is
