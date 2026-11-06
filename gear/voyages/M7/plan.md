@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1251 -->
+<!-- gear-plan project=gear base=1252 -->
 # Goal
 Client fleets run smoothly: the merge, restart and message problems Lawrence met are gone, a new GEAR binary takes over every engine on the machine by itself with no merge cut, and a voyage takes GitHub issues by a label that names the project and the voyage. Each fix is released and live for every project on this machine.
 
