@@ -3,6 +3,7 @@
 //! missed checkpoints coalesce into one immutable snapshot per voyage/tick.
 
 use crate::draft::Draft;
+use gear_board::issues::IssueState;
 use gear_model::{ErrorCode, GearError, GearResult, MsgKind, MsgState, TaskState, Ts};
 use gear_store::{MessageRow, NewMessage, Tx};
 
@@ -182,6 +183,10 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
                     if open.len() == 1 { "it" } else { "them" },
                 )
             };
+            // T-648: the voyage's labeled issues, as the landing item lists
+            // them (done, deferred, unlabeled).
+            let issues = issue_line(tx, project, &report.milestone)?
+                .map_or(String::new(), |line| format!("{line}\n"));
             let message = tx.insert_message(&NewMessage {
                 meta: None,
                 project: project.into(), thread: format!("station:{}", report.milestone),
@@ -189,7 +194,7 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
                 recipient: captain.id.clone(), kind: MsgKind::System, urgent: true,
                 body: with_goal(tx, project, &report.milestone, format!(
                     "Voyage {} is ready to land: all {done} tasks are done and merged (elapsed {} / eta {}).{open}\n\
-1. Run `gear report voyage` and write the voyage report into # Decisions.\n\
+{issues}1. Run `gear report voyage` and write the voyage report into # Decisions.\n\
 2. Review it with the user first: the report, the ★ decisions (only those), the friction reports that led to a change. Write each correction as `- <date> user: <text>`.\n\
 3. When the user says land: `station <id>: land` (it retires every lane and releases every reviewer), then remove every worktree of the project and close its Herdr workspaces.\n\
 This item stays open until that line.",
@@ -432,6 +437,25 @@ fn require_land_ready(
             unmerged.join(", ")
         )));
     }
+    // T-648: a labeled issue still pending is not landed, and no confirmation
+    // overrides it: the voyage's issue list would land with work nobody
+    // planned or deferred.
+    let pending: Vec<i64> = gear_board::issues::issue_states(tx, project, milestone)?
+        .into_iter()
+        .filter(|(_, state)| *state == IssueState::Pending)
+        .map(|(number, _)| number)
+        .collect();
+    if !pending.is_empty() {
+        return Err(bad(format!(
+            "station {}: land is refused: labeled issue(s) {} are not planned or deferred; plan each as tasks with `issue: #n` or resolve its intake item to defer it",
+            message.id,
+            pending
+                .iter()
+                .map(|number| format!("#{number}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
     let checks = crate::goal::goal_check(tx, project, milestone, voyage.done.as_deref())?;
     let open: Vec<usize> = checks
         .iter()
@@ -511,6 +535,29 @@ pub fn unmerged_tasks(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult
         .filter(|(_, of)| of.as_deref() == Some(milestone))
         .map(|(task, _)| task)
         .collect())
+}
+
+/// T-648: the voyage's labeled issues as the landing item lists them —
+/// `issues: done #…; deferred #…; unlabeled #…` — or `None` when none of those
+/// states has an issue.
+fn issue_line(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<Option<String>> {
+    let states = gear_board::issues::issue_states(tx, project, milestone)?;
+    let mut parts: Vec<String> = Vec::new();
+    for (label, wanted) in [
+        ("done", IssueState::Done),
+        ("deferred", IssueState::Deferred),
+        ("unlabeled", IssueState::Unlabeled),
+    ] {
+        let numbers: Vec<String> = states
+            .iter()
+            .filter(|(_, state)| *state == wanted)
+            .map(|(number, _)| format!("#{number}"))
+            .collect();
+        if !numbers.is_empty() {
+            parts.push(format!("{label} {}", numbers.join(", ")));
+        }
+    }
+    Ok((!parts.is_empty()).then(|| format!("issues: {}", parts.join("; "))))
 }
 
 /// The tasks of the voyage cancelled, or moved out of it, since departure
