@@ -29,6 +29,13 @@ pub struct DoorbellItem {
     /// (T-454 v2): only the notice that closes a direction check under its
     /// reviewer, which ends that turn at once.
     pub cut: bool,
+    /// Who sent it (`MessageRow::sender`), for the inline text (T-631).
+    pub sender: String,
+    /// Its body, for the inline text (T-631).
+    pub body: String,
+    /// Closes only through `gear send --kind ack` (T-631): a ring holding one
+    /// keeps the one-line text, since the body alone cannot close it.
+    pub needs_ack: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +149,9 @@ pub struct Ring {
     /// its own entry (T-487 F2): the ids of two projects are never written
     /// into one list, where per-project ids like `M-1` would collide.
     pub seats: Vec<RingSeat>,
+    /// The full inline text went out (T-631): the op is confirmed at once and
+    /// its showing recorded, since the seat read the bodies in the prompt.
+    pub inline: bool,
 }
 
 /// The rings this tick sends: the inputs of seats that may be rung, grouped by
@@ -174,6 +184,8 @@ pub fn rings(
         let mut seats: Vec<RingSeat> = Vec::new();
         let mut lines: Vec<(bool, String)> = Vec::new();
         let mut all: Vec<DoorbellItem> = Vec::new();
+        let mut entries: Vec<(Option<String>, DoorbellItem)> = Vec::new();
+        let mut inline_ok = true;
         for input in &ringing {
             let named = named(input);
             let urgent = named.iter().filter(|item| item.urgent).count();
@@ -201,13 +213,36 @@ pub fn rings(
                 generation: input.generation,
                 covers: ids.iter().map(|id| (*id).to_string()).collect(),
             });
+            // T-631: only an idle seat that holds no slot and has no item
+            // that closes through `gear send --kind ack` gets the bodies as
+            // text; anything else keeps the one-line text.
+            inline_ok &=
+                input.idle && !input.slot_busy && !input.waiting.iter().any(|item| item.needs_ack);
+            let project = (ringing.len() > 1).then(|| input.project.clone());
+            for item in &named {
+                entries.push((project.clone(), item.clone()));
+            }
             all.extend(named);
         }
-        let text = if ringing.len() == 1 {
+        let command = &ringing[0].command;
+        let (text, inline) = if inline_ok {
+            let goals: Vec<Option<&str>> =
+                ringing.iter().map(|input| input.goal.as_deref()).collect();
+            let no_task = ringing.len() == 1 && ringing[0].no_task;
+            let full = inline_text(&entries, no_task, &goals, command);
+            if full.chars().count() > INLINE_MAX_CHARS {
+                (cut_inline(&full, command, entries.len()), false)
+            } else {
+                (full, true)
+            }
+        } else if ringing.len() == 1 {
             let input = ringing[0];
-            with_goal(
-                text(&all, input.no_task, &input.command),
-                input.goal.as_deref(),
+            (
+                with_goal(
+                    text(&all, input.no_task, &input.command),
+                    input.goal.as_deref(),
+                ),
+                false,
             )
         } else {
             // Urgent items first: a project with urgent items leads.
@@ -227,7 +262,6 @@ pub fn rings(
                 text.push_str(line);
                 text.push('\n');
             }
-            let command = &ringing[0].command;
             text.push_str(&format!("Run the command `{command}` (exactly this, nothing added) in your own shell; it shows only your items. An item of another project: `{command} reply <project>:<M-n>`."));
             for input in &ringing {
                 if let Some(goal) = &input.goal {
@@ -235,7 +269,7 @@ pub fn rings(
                     text.push_str(goal);
                 }
             }
-            text
+            (text, false)
         };
         rings.push(Ring {
             pane_id: pane.to_string(),
@@ -244,9 +278,93 @@ pub fn rings(
             generation: ringing[0].generation,
             text,
             seats,
+            inline,
         });
     }
     rings
+}
+
+/// The longest inline text (T-631): a longer ring is cut and waits for a
+/// view as before.
+const INLINE_MAX_CHARS: usize = 4000;
+
+/// Where a cut inline text stops: the last line break before this many chars.
+const INLINE_CUT_CHARS: usize = 3800;
+
+/// The inline text of a ring (T-631): the bodies themselves, one header per
+/// item. A joined ring (T-487) prefixes each header with its project, and its
+/// reply line names `<project>:<id>`.
+fn inline_text(
+    entries: &[(Option<String>, DoorbellItem)],
+    no_task: bool,
+    goals: &[Option<&str>],
+    command: &str,
+) -> String {
+    let joined = entries.iter().any(|(project, _)| project.is_some());
+    let mut text = format!("GEAR: {} message(s) for you.", entries.len());
+    for (project, item) in entries {
+        text.push_str("\n\n[");
+        if let Some(project) = project {
+            text.push_str(project);
+            text.push(':');
+        }
+        text.push_str(&item.id);
+        text.push_str(" from ");
+        text.push_str(&item.sender);
+        if item.urgent {
+            text.push_str(", urgent");
+        }
+        text.push_str("]\n");
+        text.push_str(&item.body);
+    }
+    text.push_str("\n\nReply with `");
+    text.push_str(command);
+    text.push_str(if joined {
+        " reply <project>:<id> -m \"<answer>\"`; "
+    } else {
+        " reply <id> -m \"<answer>\"`; "
+    });
+    text.push('`');
+    text.push_str(command);
+    text.push_str("` shows them again.");
+    if no_task {
+        text.push('\n');
+        text.push_str(
+            "You have no task now: answer these, then end your turn; do not continue earlier work.",
+        );
+    }
+    for goal in goals.iter().flatten() {
+        text.push('\n');
+        text.push_str(goal);
+    }
+    text
+}
+
+/// A ring text too long for one prompt (T-631): cut at the last line break
+/// before [`INLINE_CUT_CHARS`], with the line that says where the rest is.
+fn cut_inline(full: &str, command: &str, n: usize) -> String {
+    let mut count = 0;
+    let mut cut = 0;
+    for (index, ch) in full.char_indices() {
+        if count >= INLINE_CUT_CHARS {
+            break;
+        }
+        if ch == '\n' {
+            cut = index;
+        }
+        count += 1;
+    }
+    if cut == 0 {
+        cut = full
+            .char_indices()
+            .nth(INLINE_CUT_CHARS)
+            .map(|(index, _)| index)
+            .unwrap_or(full.len());
+    }
+    format!(
+        "{}\n… cut here: run `{command}` to read all {n} item(s).",
+        &full[..cut]
+    )
 }
 
 /// Must this message be typed into the pane even while the agent works? (T-130)
@@ -392,7 +510,7 @@ fn may_ring(input: &DoorbellInput, cooldown_s: i64, now: Ts) -> bool {
     match input.status {
         Some(gear_herdr::AgentStatus::Blocked) | None => return false,
         Some(gear_herdr::AgentStatus::Unknown) => {
-            return input.waiting.iter().any(|item| item.urgent && item.at_once)
+            return input.waiting.iter().any(|item| item.urgent && item.at_once);
         }
         _ => {}
     }
@@ -424,4 +542,162 @@ fn named(input: &DoorbellInput) -> Vec<DoorbellItem> {
         })
         .cloned()
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(id: &str, sender: &str, body: &str, urgent: bool) -> DoorbellItem {
+        DoorbellItem {
+            id: id.into(),
+            urgent,
+            at_once: urgent,
+            cut: false,
+            sender: sender.into(),
+            body: body.into(),
+            needs_ack: false,
+        }
+    }
+
+    fn input(seat: &str, waiting: Vec<DoorbellItem>) -> DoorbellInput {
+        DoorbellInput {
+            project: "p".into(),
+            seat: format!("p:{seat}"),
+            generation: 1,
+            pane_id: "w1:p1".into(),
+            idle: true,
+            status: Some(gear_herdr::AgentStatus::Idle),
+            slot_busy: false,
+            last_settled_at: None,
+            no_task: false,
+            waiting,
+            goal: None,
+            command: "gear --session s --pane w1:p1".into(),
+        }
+    }
+
+    fn ring(inputs: &[DoorbellInput]) -> Ring {
+        rings(inputs, &BTreeSet::new(), 0, 1_000)
+            .pop()
+            .expect("a ring")
+    }
+
+    #[test]
+    fn an_idle_seat_gets_the_bodies_as_text() {
+        // T-631: the seat reads the messages themselves, not a doorbell line.
+        let r = ring(&[input(
+            "captain",
+            vec![
+                item("M-1", "p:captain", "first body", false),
+                item("M-2", "p:captain", "second body", true),
+            ],
+        )]);
+        assert!(r.inline);
+        assert_eq!(
+            r.text,
+            "GEAR: 2 message(s) for you.\n\n[M-1 from p:captain]\nfirst body\n\n[M-2 from p:captain, urgent]\nsecond body\n\nReply with `gear --session s --pane w1:p1 reply <id> -m \"<answer>\"`; `gear --session s --pane w1:p1` shows them again."
+        );
+    }
+
+    #[test]
+    fn a_working_seat_keeps_the_one_line_text() {
+        // T-631: the at-once path is unchanged.
+        let mut working = input("lane", vec![item("M-4", "p:captain", "body", true)]);
+        working.idle = false;
+        working.status = Some(gear_herdr::AgentStatus::Working);
+        let r = ring(&[working]);
+        assert!(!r.inline);
+        assert_eq!(
+            r.text,
+            "GEAR: 1 item(s) waiting for you (1 urgent): M-4. Run the command `gear --session s --pane w1:p1` (exactly this, nothing added) in your own shell; it shows only your items."
+        );
+    }
+
+    #[test]
+    fn a_ring_with_a_needs_ack_item_keeps_the_one_line_text() {
+        // T-631: such an item closes only through `gear send --kind ack`.
+        let mut ack = item("M-5", "p:captain", "ack me", false);
+        ack.needs_ack = true;
+        let r = ring(&[input("captain", vec![ack])]);
+        assert!(!r.inline);
+        assert!(r.text.starts_with("GEAR: 1 item(s) waiting for you: M-5."));
+        assert!(!r.text.contains("ack me"));
+    }
+
+    #[test]
+    fn a_lane_with_no_task_gets_the_no_task_line() {
+        let mut lane = input("lane", vec![item("M-6", "p:captain", "body", false)]);
+        lane.no_task = true;
+        let r = ring(&[lane]);
+        assert!(r.inline);
+        assert!(
+            r.text.ends_with(
+                "You have no task now: answer these, then end your turn; do not continue earlier work."
+            ),
+            "{}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn a_long_ring_is_cut_and_not_inline() {
+        // T-631: over 4000 chars the text is cut before 3800 and the ring
+        // waits for a view as before.
+        let body = "x".repeat(6_000);
+        let r = ring(&[input(
+            "captain",
+            vec![item("M-7", "p:captain", &body, false)],
+        )]);
+        assert!(!r.inline);
+        assert!(r.text.chars().count() < 4_000, "{}", r.text.chars().count());
+        assert!(
+            r.text.ends_with(
+                "… cut here: run `gear --session s --pane w1:p1` to read all 1 item(s)."
+            ),
+            "{}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn a_joined_ring_prefixes_each_header_with_its_project() {
+        // T-487: one pane, two captain seats; T-631 gives it the same format.
+        let mut p = input("captain", vec![item("M-1", "p:captain", "p body", false)]);
+        let mut q = input("captain", vec![item("M-1", "q:captain", "q body", true)]);
+        q.project = "q".into();
+        q.seat = "q:captain".into();
+        p.pane_id = "w1:p1".into();
+        q.pane_id = "w1:p1".into();
+        let r = ring(&[p, q]);
+        assert!(r.inline);
+        assert!(
+            r.text.contains("[p:M-1 from p:captain]\np body"),
+            "{}",
+            r.text
+        );
+        assert!(
+            r.text.contains("[q:M-1 from q:captain, urgent]\nq body"),
+            "{}",
+            r.text
+        );
+        assert!(
+            r.text.contains("reply <project>:<id> -m \"<answer>\""),
+            "{}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn a_goal_line_follows_the_inline_text() {
+        let mut captain = input("captain", vec![item("M-8", "p:captain", "body", false)]);
+        captain.goal = Some("Your goal, voyage M1: done.".into());
+        let r = ring(&[captain]);
+        assert!(r.inline);
+        assert!(
+            r.text.ends_with("\nYour goal, voyage M1: done."),
+            "{}",
+            r.text
+        );
+    }
 }

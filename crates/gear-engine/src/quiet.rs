@@ -294,6 +294,12 @@ fn captain_told_key(seat: &str) -> String {
     format!("engine.quiet.captain_told.{seat}")
 }
 
+/// The land order the idle-voyage item was last rung for (T-634): the item is
+/// not repeated while that order stays open.
+fn sailing_land_key(project: &str, milestone: &str) -> String {
+    format!("sailing-land:{project}:{milestone}")
+}
+
 /// Whether the voyage has landed: its landing order was answered `land`.
 pub(crate) fn voyage_landed(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<bool> {
     let Some(id) = tx.get_meta(&format!("station:{project}:{milestone}:land"))? else {
@@ -392,6 +398,40 @@ pub fn captain_sailing(
             // an answer. A voyage with neither (an old one, landed before the
             // landing order existed) is finished and rings nobody (T-571).
             if left == 0 && !landing_open(tx, project, &milestone)? {
+                return Ok(());
+            }
+            // T-634: every task done and a land order open. The item rings once
+            // per open land order: while that order stays open it is not
+            // repeated, however long the captain waits for the user.
+            if left == 0 {
+                let Some(order) = tx.get_meta(&format!("station:{project}:{milestone}:land"))?
+                else {
+                    return Ok(());
+                };
+                let key = sailing_land_key(project, &milestone);
+                if tx.get_meta(&key)?.as_deref() == Some(order.as_str()) {
+                    return Ok(());
+                }
+                tx.insert_message(&NewMessage {
+                    meta: None,
+                    project: project.into(),
+                    thread: format!("sailing:{milestone}"),
+                    task: None,
+                    attempt: None,
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: seat.clone(),
+                    kind: MsgKind::System,
+                    urgent: true,
+                    body: format!(
+                        "Voyage {milestone}: every task is done and its land order {order} is open. Land it (`gear` shows the order); if the land is refused for a decision only the user can make, tell the user and wait: this item is not repeated while that order stays open."
+                    ),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: now,
+                })?;
+                tx.set_meta(&key, &order)?;
                 return Ok(());
             }
             if tx
@@ -1425,7 +1465,13 @@ mod tests {
         captain_sailing(&mut s, "p", &obs_all(&obs), T + 15 * 60).unwrap();
         let told = items(&mut s);
         assert_eq!(told.len(), 2, "a voyage not landed is not finished");
-        assert!(told[1].body.contains("not landed"), "{}", told[1].body);
+        assert!(
+            told[1]
+                .body
+                .contains("every task is done and its land order"),
+            "{}",
+            told[1].body
+        );
         resolve(&mut s, &told[1].id, T + 16 * 60);
         // A paused project is left alone.
         s.write(|tx| tx.set_meta(&gear_store::Tx::project_paused_key("p"), "paused"))
@@ -1439,6 +1485,176 @@ mod tests {
             .read(|tx| tx.get_meta(&captain_idle_key("p:captain")))
             .unwrap()
             .is_none());
+    }
+
+    // ---- T-634: the idle-voyage item rings once per open land order ------
+
+    /// A project with voyage M1 and one task in `task_state`; when `land`, an
+    /// open land order whose id is returned.
+    fn sailing_world(task_state: TaskState, land: bool) -> (Store, Option<String>) {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut order = None;
+        s.write(|tx| {
+            testing::seed_project(tx, "p", "sess", T)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, PANE, "opencode", T)?;
+            tx.upsert_voyage(&gear_store::VoyageRow {
+                project: "p".into(),
+                milestone: "M1".into(),
+                title: "v".into(),
+                done: Some("done".into()),
+                bar: Some("FASTEST".into()),
+                eta: Some("4h".into()),
+                departure: Some(T),
+                departure_tasks: Some(1),
+                departure_estimate_min: Some(30),
+                updated: T,
+            })?;
+            tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: "T-1".into(),
+                rank: 1,
+                state: task_state,
+                priority: "must".into(),
+                lane: Some("hull".into()),
+                milestone: Some("M1".into()),
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: Some(30),
+                issue: None,
+                updated: T,
+            })?;
+            if land {
+                let message = tx.insert_message(&NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: "station:M1".into(),
+                    task: None,
+                    attempt: None,
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::System,
+                    urgent: true,
+                    body: "ready to land".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: T,
+                })?;
+                tx.set_meta("station:p:M1:land", &message.id)?;
+                order = Some(message.id);
+            }
+            Ok(())
+        })
+        .unwrap();
+        (s, order)
+    }
+
+    fn idle_obs(s: &mut Store, seat: &str) -> SeatObs {
+        SeatObs {
+            seat: s.read(|tx| tx.get_seat(seat)).unwrap().unwrap(),
+            presence: Presence::Present,
+            status: Some(AgentStatus::Idle),
+            flags: Default::default(),
+            idle: true,
+            screen: None,
+            session: None,
+        }
+    }
+
+    fn sailing_items(s: &mut Store) -> Vec<gear_store::MessageRow> {
+        s.read(|tx| tx.thread_messages("p", "sailing:M1")).unwrap()
+    }
+
+    #[test]
+    fn an_idle_voyage_with_an_open_land_order_rings_once() {
+        let (mut s, order) = sailing_world(TaskState::Done, true);
+        let order = order.expect("a land order");
+        let all = vec![idle_obs(&mut s, "p:captain"), idle_obs(&mut s, "p:heat")];
+        captain_sailing(&mut s, "p", &all, T).unwrap();
+        captain_sailing(&mut s, "p", &all, T + 5 * 60).unwrap();
+        let items = sailing_items(&mut s);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(
+            items[0]
+                .body
+                .contains("every task is done and its land order"),
+            "{}",
+            items[0].body
+        );
+        assert!(items[0].body.contains(&order), "{}", items[0].body);
+        // Thirty more minutes idle: not repeated while that order stays open.
+        captain_sailing(&mut s, "p", &all, T + 35 * 60).unwrap();
+        assert_eq!(sailing_items(&mut s).len(), 1, "one item per land order");
+
+        // A new land order id rings once more.
+        let next = s
+            .write(|tx| {
+                let message = tx.insert_message(&NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: "station:M1".into(),
+                    task: None,
+                    attempt: None,
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::System,
+                    urgent: true,
+                    body: "ready to land again".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: T + 36 * 60,
+                })?;
+                tx.set_meta("station:p:M1:land", &message.id)?;
+                Ok(message.id)
+            })
+            .unwrap();
+        captain_sailing(&mut s, "p", &all, T + 36 * 60).unwrap();
+        let items = sailing_items(&mut s);
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert!(items[1].body.contains(&next), "{}", items[1].body);
+        captain_sailing(&mut s, "p", &all, T + 66 * 60).unwrap();
+        assert_eq!(sailing_items(&mut s).len(), 2, "once for the new order");
+    }
+
+    #[test]
+    fn a_voyage_with_tasks_left_repeats_after_captain_again() {
+        let (mut s, _) = sailing_world(TaskState::Ready, false);
+        let all = vec![idle_obs(&mut s, "p:captain"), idle_obs(&mut s, "p:heat")];
+        captain_sailing(&mut s, "p", &all, T).unwrap();
+        captain_sailing(&mut s, "p", &all, T + 5 * 60).unwrap();
+        let items = sailing_items(&mut s);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(items[0].body.contains("1 tasks left"), "{}", items[0].body);
+        // Resolved, still idle: again after `CAPTAIN_AGAIN`.
+        s.write(|tx| {
+            tx.update_message_state(
+                "p",
+                &items[0].id,
+                MsgState::Resolved,
+                None,
+                None,
+                None,
+                T + 6 * 60,
+            )
+        })
+        .unwrap();
+        captain_sailing(&mut s, "p", &all, T + 14 * 60).unwrap();
+        assert_eq!(sailing_items(&mut s).len(), 1, "not yet 10 minutes");
+        captain_sailing(&mut s, "p", &all, T + 16 * 60).unwrap();
+        assert_eq!(sailing_items(&mut s).len(), 2, "repeated after 10 minutes");
     }
 
     fn observation(s: &mut Store) -> SeatObs {
