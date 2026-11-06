@@ -18,6 +18,8 @@ use gear_model::state::require_transition;
 use gear_model::{AttemptState, GearResult, OpKind, OpState, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{BindingStatus, SeatRow, Store};
 
+use crate::EngineCfg;
+
 /// How long a reviewer just started is left alone by the "agent gone" check:
 /// its agent may not be reported by Herdr yet.
 const START_GRACE_S: i64 = 60;
@@ -1339,6 +1341,269 @@ fn remove_scratch(store: &mut Store, project: &str, seat: &SeatRow) {
         return;
     };
     let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// `- restart <reviewer>` (T-630): exit the reviewer's agent and start it
+/// again in the same pane and worktree, its seat and generation kept — the way
+/// a captain picks up a fixed account or a changed environment without losing
+/// the seat.
+///
+/// The plan's apply writes `engine.restart.<seat>`; this step carries it out
+/// across ticks, because an agent takes a moment to leave its pane. A working
+/// reviewer waits: the flag stays until its verdict put the seat back in
+/// `Standby` with no job, so the review in flight is never cut off.
+pub fn restart_reviewers(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
+    project: &str,
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    let mut restarted = Vec::new();
+    let seats = store.read(|tx| tx.seats_of_project(project))?;
+    for seat in seats {
+        if seat.role != SeatRole::Temp {
+            continue;
+        }
+        let flag = store
+            .read(|tx| tx.get_meta(&restart_key(&seat.id)))?
+            .filter(|value| !value.is_empty());
+        if flag.is_none() {
+            continue;
+        }
+        // A working reviewer restarts right after its verdict.
+        if seat.state == SeatState::Active && seat.task_id.is_some() {
+            continue;
+        }
+        if seat.state != SeatState::Standby {
+            continue;
+        }
+        let pending = store
+            .read(|tx| tx.get_meta(&crate::review::pending_review_key(&seat.id)))?
+            .filter(|task| !task.is_empty());
+        if pending.is_some() {
+            continue;
+        }
+        if restart_one(store, herdr, cfg, profiles, &seat, now)? {
+            restarted.push(seat.id.clone());
+        }
+    }
+    Ok(restarted)
+}
+
+/// The key the plan's `- restart <reviewer>` writes: the seat whose agent is
+/// to be exited and started again.
+fn restart_key(seat: &str) -> String {
+    format!("engine.restart.{seat}")
+}
+
+/// The phase of a restart across ticks: `exit` (the goodbye went out, the
+/// agent must be gone) or `start` (the pane is a shell again).
+fn restart_phase_key(seat: &str) -> String {
+    format!("engine.restart_phase.{seat}")
+}
+
+/// One reviewer's restart, one tick at a time. `true` when the new agent is up.
+fn restart_one(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
+    seat: &SeatRow,
+    now: Ts,
+) -> GearResult<bool> {
+    let pane = binding_pane(store, seat)
+        .map_err(|detail| gear_model::GearError::new(gear_model::ErrorCode::BadFormat, detail))?;
+    let Some(pane) = pane else {
+        // No pane to restart in: the request goes, the seat stays as it is.
+        store.write(|tx| tx.set_meta(&restart_key(&seat.id), ""))?;
+        return Ok(false);
+    };
+    let phase = store
+        .read(|tx| tx.get_meta(&restart_phase_key(&seat.id)))?
+        .unwrap_or_default();
+    match phase.as_str() {
+        "exit" => match herdr.agent_get(&pane) {
+            Ok(None) => {
+                store.write(|tx| tx.set_meta(&restart_phase_key(&seat.id), "start"))?;
+                Ok(false)
+            }
+            Ok(Some(_)) | Err(_) => Ok(false),
+        },
+        "start" => start_again(store, herdr, cfg, profiles, seat, &pane, now),
+        _ => {
+            // The agent goes first: the profile's own goodbye, aimed at its
+            // name (a pane whose agent is gone is a shell).
+            match herdr.agent_get(&pane) {
+                Ok(None) => {
+                    store.write(|tx| tx.set_meta(&restart_phase_key(&seat.id), "start"))?;
+                    Ok(false)
+                }
+                Ok(Some(_)) => {
+                    let profile = profiles.get(&seat.profile);
+                    crate::names::ensure(herdr, &pane, &crate::names::desired(seat));
+                    if let Some(profile) = profile {
+                        if let Some(command) = profile.exit_command.as_deref() {
+                            if let Some(name) = crate::names::live_name(herdr, &pane) {
+                                let _ = herdr.prompt(&name, command);
+                            }
+                        } else if !profile.exit_keys.is_empty() {
+                            let _ = herdr.send_keys(&pane, &profile.exit_keys);
+                        }
+                    }
+                    store.write(|tx| tx.set_meta(&restart_phase_key(&seat.id), "exit"))?;
+                    Ok(false)
+                }
+                Err(_) => Ok(false),
+            }
+        }
+    }
+}
+
+/// Start the reviewer's agent again in its pane, on the model and CLI it was
+/// started with (T-630). The seat and its generation stay: the binding, the
+/// environment and the recorded start are the same, so the next review finds
+/// the seat as it was.
+fn start_again(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
+    seat: &SeatRow,
+    pane: &str,
+    now: Ts,
+) -> GearResult<bool> {
+    // The CLI, the model and the chain entry's arguments the seat was started
+    // with (T-35): a restart keeps them.
+    let (cli, model, entry_args) = match recorded_review_entry(store, seat)? {
+        Some(entry) => entry,
+        None => (seat.profile.clone(), String::new(), Vec::new()),
+    };
+    let selected = profiles
+        .get(&seat.profile)
+        .filter(|profile| profile.kind == cli)
+        .map(|profile| (seat.profile.as_str(), profile))
+        .or_else(|| crate::restart::profile_for_kind(profiles, &cli));
+    let Some((profile_name, profile)) = selected else {
+        return needs_check(
+            store,
+            seat,
+            &format!("no profile drives the CLI {cli:?}"),
+            now,
+        );
+    };
+    if !profile.verified {
+        return needs_check(
+            store,
+            seat,
+            &format!("the profile {profile_name:?} is not verified"),
+            now,
+        );
+    }
+    let Some(path) = store
+        .read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(&seat.id)))?
+        .filter(|path| !path.is_empty())
+    else {
+        return needs_check(store, seat, "the seat's worktree path is unknown", now);
+    };
+    let mut args = profile.unattended_args.clone();
+    args.extend(crate::rules::arguments(
+        store,
+        &seat.project,
+        seat.role,
+        &seat.name,
+        &cfg.db_path,
+        profile,
+        false,
+    )?);
+    if !model.is_empty() {
+        if let Some(model_args) = crate::model::start_args(&cli, &model, &entry_args) {
+            args.extend(model_args);
+        }
+    }
+    if let Err(reason) = crate::trust::trust_worktree(&cli, &path, now) {
+        return needs_check(store, seat, &format!("trust: {reason}"), now);
+    }
+    let args = gear_herdr::render_args(&args, &path);
+    let label = crate::names::desired(seat);
+    match herdr.agent_start(&label, &cli, pane, &args) {
+        Outcome::Ok(_) => {
+            store.write(|tx| {
+                tx.set_meta(&restart_key(&seat.id), "")?;
+                tx.set_meta(&restart_phase_key(&seat.id), "")
+            })?;
+            Ok(true)
+        }
+        // The shell is still busy, or the old agent's name is not free yet:
+        // the next tick tries again.
+        Outcome::Refused { code, .. } if code == "agent_pane_busy" => Ok(false),
+        Outcome::Refused { code, .. } if code == "agent_name_taken" => Ok(false),
+        Outcome::Refused { code, message } => {
+            let tail = herdr.read_tail(pane, 16).unwrap_or_default();
+            let reason = match crate::start::cli_missing(&tail, &cli) {
+                Some(line) => crate::start::cli_missing_text(&cli, &line),
+                None => format!("agent_start refused ({code}): {message}"),
+            };
+            needs_check(store, seat, &reason, now)
+        }
+        Outcome::Uncertain { reason } => {
+            // The agent may be up: the next tick's `agent_get` decides, and a
+            // start is only sent again if the pane is still empty.
+            let _ = reason;
+            Ok(false)
+        }
+    }
+}
+
+/// The CLI, model and chain arguments recorded for the seat's last start
+/// (`engine.review_model_entry.<seat>`).
+fn recorded_review_entry(
+    store: &mut Store,
+    seat: &SeatRow,
+) -> GearResult<Option<(String, String, Vec<String>)>> {
+    let Some(raw) = store.read(|tx| tx.get_meta(&crate::review::review_model_key(&seat.id)))?
+    else {
+        return Ok(None);
+    };
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(None);
+    };
+    let Some(cli) = record.get("cli").and_then(|value| value.as_str()) else {
+        return Ok(None);
+    };
+    let model = record
+        .get("model")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let args = record
+        .get("args")
+        .and_then(|value| value.as_array())
+        .map(|args| {
+            args.iter()
+                .filter_map(|arg| arg.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Some((cli.to_string(), model, args)))
+}
+
+/// Park the seat for a human: the restart could not go on, and the flag goes
+/// so the engine does not try again every tick.
+fn needs_check(store: &mut Store, seat: &SeatRow, reason: &str, now: Ts) -> GearResult<bool> {
+    store.write(|tx| {
+        tx.set_meta(&restart_key(&seat.id), "")?;
+        tx.set_meta(&restart_phase_key(&seat.id), "")?;
+        require_transition(
+            SeatState::can_transition(SeatRole::Temp, seat.state, SeatState::NeedsCheck),
+            "seat",
+            seat.state.as_str(),
+            SeatState::NeedsCheck.as_str(),
+        )?;
+        tx.set_seat_state(&seat.id, SeatState::NeedsCheck, Some(reason), now)
+    })?;
+    Ok(false)
 }
 
 /// Release the reviewer seats that run **no reviewer** (B02-04).
@@ -4552,5 +4817,153 @@ profile = "codex"
                 .any(|decision| decision.what.contains("reviewers back to 4")),
             "the return is recorded: {decisions:?}"
         );
+    }
+
+    /// T-630: an idle reviewer's `- restart` exits its agent and starts it
+    /// again in the same pane and worktree, its seat and generation kept.
+    #[test]
+    fn restart_of_an_idle_reviewer_keeps_its_seat_and_pane() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut herdr = FakeHerdr::new();
+        let seat = store
+            .write(|tx| {
+                tx.insert_project(&ProjectRow {
+                    id: "p".into(),
+                    herdr_session: "sess".into(),
+                    config_toml: CONFIG.into(),
+                    config_version: 1,
+                    quota_lanes: 1,
+                    quota_temps: 2,
+                    quota_includes_captain: false,
+                    plan_version: 0,
+                    created: T0,
+                })?;
+                let seat = testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "review-1",
+                    SeatRole::Temp,
+                    "w2:p1",
+                    "codex",
+                    T0,
+                )?;
+                tx.set_seat_state(&seat.id, SeatState::Standby, Some("review done"), T0)?;
+                tx.set_meta(
+                    &crate::onboard::worktree_path_key("p:review-1"),
+                    "/fake-worktrees/p-review-1",
+                )?;
+                tx.set_meta(
+                    "engine.restart.p:review-1",
+                    &serde_json::json!({ "at": T0 }).to_string(),
+                )?;
+                Ok(seat)
+            })
+            .unwrap();
+        herdr.add_agent_named(
+            "w2:p1",
+            "codex",
+            gear_herdr::AgentStatus::Idle,
+            "p-review-1",
+        );
+        let cfg = review_cfg();
+
+        // Tick 1: the goodbye goes out, the agent is still there.
+        let first =
+            restart_reviewers(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T0 + 10).unwrap();
+        assert!(first.is_empty(), "{first:?}");
+        assert!(
+            herdr.calls.iter().any(|call| matches!(
+                call,
+                Call::Prompt { pane, text, .. } if pane == "w2:p1" && text == "/quit"
+            )),
+            "the goodbye went to the seat's pane"
+        );
+
+        // The agent leaves its pane.
+        herdr.add_shell("w2:p1");
+        let second =
+            restart_reviewers(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T0 + 20).unwrap();
+        assert!(second.is_empty(), "{second:?}");
+
+        // Tick 3: the agent starts again in the same pane.
+        let third =
+            restart_reviewers(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T0 + 30).unwrap();
+        assert_eq!(third, vec!["p:review-1".to_string()]);
+        let after = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(after.state, SeatState::Standby, "the seat stays warm");
+        assert_eq!(after.generation, seat.generation, "the generation is kept");
+        assert!(after.task_id.is_none(), "no job");
+        let start = herdr
+            .calls
+            .iter()
+            .find_map(|call| match call {
+                Call::AgentStart { pane, kind, .. } => Some((pane.clone(), kind.clone())),
+                _ => None,
+            })
+            .expect("the agent was started again");
+        assert_eq!(start, ("w2:p1".to_string(), "codex".to_string()));
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta("engine.restart.p:review-1"))
+                .unwrap()
+                .as_deref(),
+            Some(""),
+            "the request is done"
+        );
+    }
+
+    /// T-630: a working reviewer is not cut off: its restart waits for the
+    /// verdict, then runs.
+    #[test]
+    fn restart_of_a_working_reviewer_waits_for_its_verdict() {
+        let mut store = world(TaskState::Verifying, "w2:p1", "codex");
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named("w2:p1", "codex", gear_herdr::AgentStatus::Working, "p-r-1");
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    &crate::onboard::worktree_path_key("p:r-1"),
+                    "/fake-worktrees/p-r-1",
+                )?;
+                tx.set_meta(
+                    "engine.restart.p:r-1",
+                    &serde_json::json!({ "at": T0 }).to_string(),
+                )
+            })
+            .unwrap();
+        let cfg = review_cfg();
+
+        // The review is in flight: nothing happens.
+        let first =
+            restart_reviewers(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T0 + 10).unwrap();
+        assert!(first.is_empty(), "{first:?}");
+        assert!(herdr.calls.is_empty(), "nothing was sent to the seat");
+
+        // The verdict puts the seat back in Standby with no job.
+        store
+            .write(|tx| {
+                tx.clear_seat_task("p:r-1")?;
+                tx.set_seat_state("p:r-1", SeatState::Standby, Some("review done"), T0 + 20)
+            })
+            .unwrap();
+        let second =
+            restart_reviewers(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T0 + 30).unwrap();
+        assert!(second.is_empty(), "{second:?}");
+        assert!(
+            herdr.calls.iter().any(|call| matches!(
+                call,
+                Call::Prompt { pane, text, .. } if pane == "w2:p1" && text == "/quit"
+            )),
+            "the goodbye went out after the verdict"
+        );
+
+        herdr.add_shell("w2:p1");
+        restart_reviewers(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T0 + 40).unwrap();
+        let restarted =
+            restart_reviewers(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T0 + 50).unwrap();
+        assert_eq!(restarted, vec!["p:r-1".to_string()]);
+        let after = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(after.state, SeatState::Standby);
+        assert!(after.task_id.is_none());
     }
 }
