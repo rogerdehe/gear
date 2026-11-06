@@ -509,6 +509,18 @@ pub(crate) fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<Task
                 .is_none_or(|(repo, current)| repo == current)
         })
         .filter(|task| task.state == TaskState::Ready)
+        // A task of a voyage that has not departed waits for its `depart:`
+        // line: a captain registers the next voyage's tasks while lanes are
+        // still on the current one, and none of them starts before the user
+        // says depart. A task with no milestone is not held.
+        .filter(|task| match task.milestone.as_deref() {
+            None => true,
+            Some(milestone) => tx
+                .get_voyage(&seat.project, milestone)
+                .ok()
+                .flatten()
+                .is_some_and(|voyage| voyage.departure.is_some()),
+        })
         // T-505: a voyage audit is run by reviewers against the integration
         // branch and is never assigned to its lane.
         .filter(|task| {
@@ -1595,7 +1607,19 @@ mod tests {
                     task.rank = n + 1;
                     tx.insert_task(&task)?;
                 }
-                // The one task of the open voyage.
+                // The one task of the open voyage, which has departed.
+                tx.upsert_voyage(&gear_store::VoyageRow {
+                    project: "p".into(),
+                    milestone: "M2".into(),
+                    title: "open".into(),
+                    done: Some("x".into()),
+                    bar: Some("y".into()),
+                    eta: Some("4h".into()),
+                    departure: Some(NOW),
+                    departure_tasks: Some(1),
+                    departure_estimate_min: None,
+                    updated: NOW,
+                })?;
                 let mut ready = ready_task("T-500");
                 ready.milestone = Some("M2".into());
                 ready.rank = 501;
@@ -2125,6 +2149,60 @@ mod tests {
             vec!["T-1"],
             "the feature's integration task is not delivered"
         );
+    }
+
+    /// A task of a voyage that has not departed is never delivered, even to a
+    /// lane already sailing another voyage; it starts once the voyage departs.
+    #[test]
+    fn a_task_of_a_voyage_not_departed_is_not_ready() {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        let voyage = |departure: Option<Ts>| gear_store::VoyageRow {
+            project: "p".into(),
+            milestone: "M2".into(),
+            title: "next".into(),
+            done: Some("x".into()),
+            bar: Some("y".into()),
+            eta: Some("4h".into()),
+            departure,
+            departure_tasks: departure.map(|_| 1),
+            departure_estimate_min: None,
+            updated: NOW,
+        };
+        store
+            .write(|tx| {
+                let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+                project.config_toml = config_toml("trunk");
+                tx.update_project(&project)?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    SeatRole::Lane,
+                    "w1:p2",
+                    "opencode",
+                    NOW,
+                )?;
+                tx.upsert_voyage(&voyage(None))?;
+                tx.insert_task(&ready_task("T-1"))?;
+                let mut next = ready_task("T-2");
+                next.milestone = Some("M2".into());
+                tx.insert_task(&next)
+            })
+            .unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let ids = |store: &mut gear_store::Store| {
+            store
+                .read(|tx| ready_tasks_of(tx, &seat))
+                .unwrap()
+                .into_iter()
+                .map(|task| task.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&mut store), vec!["T-1"], "M2 has not departed");
+        store
+            .write(|tx| tx.upsert_voyage(&voyage(Some(NOW))))
+            .unwrap();
+        assert_eq!(ids(&mut store), vec!["T-1", "T-2"], "M2 departed");
     }
 
     // ----------------------------------------------------------------
