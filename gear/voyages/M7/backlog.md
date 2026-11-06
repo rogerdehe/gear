@@ -3,6 +3,7 @@
 Postponed from M6 (2026-11-01, landing): the items M6 did not close, as M6 recorded them.
 
 ## Candidates
+- **A merge-failed item names its queued remerge** (from M6.3 T-628, cut at station M-8318): while a remerge op of the task is Intended or Unknown, the merge-failed item says "remerge queued (O-n)" and offers no second remerge (Lawrence M-921, 2026-11-06).
 
 - Endless thinking — postponed from M5 (2026-10-28, user): pi has a `thinkingBudgets` setting and extension events with an abort signal, so an extension could stop a turn whose thinking passes N tokens; OpenCode has nothing. GEAR's own remedy would be an interrupt plus a new session. Decide only if a kept model shows it.
 - Machine health watch — postponed from M5 (2026-10-28, user): monitoring the machine may be another tool's job rather than GEAR's; this machine's development still needs it. The item as it stood in M5:
@@ -199,4 +200,3 @@ Postponed from M6 (2026-11-01, landing): the items M6 did not close, as M6 recor
 ## Moved to M6.3 (2026-11-06)
 - The agent switch (in place and new pane), the engine-failure item, gate headroom, T-572, the lane nudge and lane page, the busy lane with no attempt, `carried-by`, the respawned reviewer's pane, the GitHub issue close, the landed voyage's worktrees and the records after a landing: planned as T-603..T-620. Done before: one task branch name (T-602), the parallel check against a feature's base (T-596).
 - **Orphaned test binaries ran for two days (2026-11-06, F-338):** five `gear_engine-… --exact merge::tests::…` processes from the removed M6.2 worktree `gear-mast` (parent pid 1, about 12 % CPU each since 2026-11-04 06:40) skewed T-608's load measurements; killed by the captain. The health watch only sees processes under a live seat's pane. Wanted: the watch also names (and, for a worktree GEAR removed, ends) processes whose executable or cwd lies under a GEAR worktree that no seat holds; and find why those merge tests spin when their nextest parent dies.
-- **The board forecasts ~16675 h for a lane whose task waits on a cancelled task (Lawrence M2, 2026-11-06):** `ENDS ~16675h42m` per lane and "web will sit idle ~16671h06m … waits for T-72", while T-72 was cancelled (absorbed into T-71) and the queue's left_min reads 180 m. crates/gear-board/src/forecast.rs `ready`: a dependency nothing merges is given a sentinel time that is then printed as hours. A cancelled dependency is no wait (it is dropped as plan apply drops it for dispatch), and a dependency that truly never merges is shown as "blocked on T-n", never as a duration.

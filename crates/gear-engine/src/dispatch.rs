@@ -528,9 +528,10 @@ pub(crate) fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<Task
             {
                 return true;
             }
-            tx.attempts_of_task(&seat.project, &task.id)
-                .map(|attempts| !attempts.is_empty())
-                .unwrap_or(false)
+            // T-592: once it has an attempt, its rework is the lane's — only
+            // when every member is merged and none merged since the
+            // rejection (`feature::rework_is_the_lanes`).
+            crate::feature::rework_is_the_lanes(tx, &seat.project, task).unwrap_or(false)
         })
         .filter(|task| task.priority != "wont")
         // A dependency holds a task's first start only: once the lane has

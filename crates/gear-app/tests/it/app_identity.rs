@@ -8,7 +8,7 @@ use gear_app::Env;
 use gear_herdr::fake::FakeHerdr;
 use gear_herdr::AgentStatus;
 use gear_model::{ErrorCode, GearCtx, SeatRole, SeatState};
-use gear_store::{testing, BindingStatus, Store};
+use gear_store::{testing, BindingRow, BindingStatus, SeatRow, Store};
 
 const NOW: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
@@ -916,4 +916,123 @@ fn a_named_pane_wins_over_the_pane_the_process_runs_under() {
         resolved.ctx.map(|ctx| ctx.seat),
         Some("captain".to_string())
     );
+}
+
+// ------------------------------------------------- T-616: a respawned seat
+
+/// A lane `heat` respawned: generation 1 was on `w1:p9` (void now), generation
+/// 2 is on `LANE_PANE` (active).
+fn world_respawned() -> Store {
+    let mut s = Store::open_in_memory().unwrap();
+    s.write(|tx| {
+        testing::seed_project(tx, "p", "sess", NOW)?;
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "captain",
+            SeatRole::Captain,
+            CAP_PANE,
+            "codex",
+            NOW,
+        )?;
+        tx.insert_seat(&SeatRow {
+            id: "p:heat".into(),
+            project: "p".into(),
+            role: SeatRole::Lane,
+            name: "heat".into(),
+            profile: "opencode".into(),
+            generation: 2,
+            state: SeatState::Active,
+            state_since: NOW,
+            state_reason: None,
+            task_id: None,
+        })?;
+        tx.insert_binding(&BindingRow {
+            seat: "p:heat".into(),
+            generation: 1,
+            session: "sess".into(),
+            pane_id: "w1:p9".into(),
+            kind: "opencode".into(),
+            session_ref: None,
+            status: BindingStatus::Void,
+            handover_id: None,
+            created: NOW,
+        })?;
+        tx.insert_binding(&BindingRow {
+            seat: "p:heat".into(),
+            generation: 2,
+            session: "sess".into(),
+            pane_id: LANE_PANE.into(),
+            kind: "opencode".into(),
+            session_ref: None,
+            status: BindingStatus::Active,
+            handover_id: None,
+            created: NOW,
+        })?;
+        Ok(())
+    })
+    .unwrap();
+    s
+}
+
+/// T-616: a respawned seat's first call may carry the pane of a void binding
+/// (an inherited `HERDR_PANE_ID`, or a `--pane` from old text). When the
+/// caller really runs in the seat's active pane, it resolves to that binding
+/// and the call succeeds as the active generation.
+#[test]
+fn a_call_claiming_a_void_older_pane_from_the_active_pane_resolves() {
+    let mut s = world_respawned();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
+    // The old pane w1:p9 is gone: not in the fake.
+    let claimed = env(Some("heat"), 1, Some("w1:p9"), false);
+    let resolved =
+        gear_app::identity::resolve_env(&mut s, &claimed, &mut herdr, &LANE_CALLER).unwrap();
+    assert_eq!(
+        resolved.ctx,
+        Some(GearCtx {
+            project: "p".into(),
+            seat: "heat".into(),
+            generation: 2
+        }),
+        "the active generation"
+    );
+    assert_eq!(resolved.pane_id.as_deref(), Some(LANE_PANE));
+    let (ctx, seat) = s
+        .read(|tx| require_seat(tx, &resolved, Some(&fp(LANE_PANE, "opencode")), None, None))
+        .unwrap();
+    assert_eq!(ctx.generation, 2);
+    assert_eq!(seat.id, "p:heat");
+}
+
+/// T-616: the refusal for a truly foreign pane stays: the caller claims the
+/// seat's void older pane but runs in another seat's pane.
+#[test]
+fn a_call_claiming_a_void_older_pane_from_another_pane_is_refused() {
+    let mut s = world_respawned();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
+    herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
+    // The caller runs in the captain's pane, not the seat's active pane.
+    let claimed = env(Some("heat"), 1, Some("w1:p9"), false);
+    let resolved =
+        gear_app::identity::resolve_env(&mut s, &claimed, &mut herdr, &CAP_CALLER).unwrap();
+    assert_eq!(
+        resolved.pane_id.as_deref(),
+        Some("w1:p9"),
+        "the claim stays"
+    );
+    let error = gear_app::identity::prove_seat(
+        &mut s,
+        &claimed,
+        &mut herdr,
+        &CAP_CALLER,
+        &DaemonSessions::default(),
+        NOW,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotRegistered);
 }

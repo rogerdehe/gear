@@ -637,7 +637,7 @@ pub fn resolve_env(
     ancestors: &[u32],
 ) -> GearResult<Env> {
     if env.ctx.is_some() {
-        return Ok(env.clone());
+        return resolve_void_pane(store, env, herdr, ancestors);
     }
     let pane = caller_pane(herdr, ancestors, env.pane_id.as_deref());
     let Some(pane) = pane else {
@@ -665,6 +665,49 @@ pub fn resolve_env(
             generation: seat.generation,
         }),
         pane_id: Some(pane),
+        admin: env.admin,
+    })
+}
+
+/// T-616: a respawned seat's first call may carry the pane of a void binding
+/// — an inherited `HERDR_PANE_ID` in a process carried across the respawn, or
+/// a `--pane` given from old text in the resumed conversation. When the caller
+/// really runs in the seat's active pane, resolve to that binding (the active
+/// pane and the seat's generation); a caller in a truly foreign pane keeps its
+/// claim, and the refusal stays.
+fn resolve_void_pane(
+    store: &mut Store,
+    env: &Env,
+    herdr: &mut dyn HerdrRead,
+    ancestors: &[u32],
+) -> GearResult<Env> {
+    let (Some(ctx), Some(claimed)) = (env.ctx.as_ref(), env.pane_id.as_deref()) else {
+        return Ok(env.clone());
+    };
+    let seat_id = ctx.seat_id();
+    let Some(seat) = store.read(|tx| tx.get_seat(&seat_id))? else {
+        return Ok(env.clone());
+    };
+    // The claimed pane is a void binding of this seat: an older generation's
+    // pane, kept by an inherited variable or old text.
+    if !store.read(|tx| tx.void_binding_on_pane(&seat_id, claimed))? {
+        return Ok(env.clone());
+    }
+    // The seat's active binding is the pane the caller must be in.
+    let active = store.read(|tx| tx.get_binding(&seat_id, seat.generation))?;
+    let Some(active) = active.filter(|binding| binding.status == BindingStatus::Active) else {
+        return Ok(env.clone());
+    };
+    if real_pane(herdr, ancestors).as_deref() != Some(active.pane_id.as_str()) {
+        return Ok(env.clone());
+    }
+    Ok(Env {
+        ctx: Some(GearCtx {
+            project: ctx.project.clone(),
+            seat: ctx.seat.clone(),
+            generation: seat.generation,
+        }),
+        pane_id: Some(active.pane_id.clone()),
         admin: env.admin,
     })
 }

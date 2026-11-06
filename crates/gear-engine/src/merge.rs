@@ -3820,7 +3820,24 @@ fn prepare_merge(
             .filter(|line| !line.trim().is_empty())
             .filter_map(|line| {
                 let (commit, subject) = line.split_once('\t')?;
-                (!subject.starts_with(review_prefix)).then(|| format!("{commit} {subject}"))
+                if subject.starts_with(review_prefix) {
+                    return None;
+                }
+                // A commit that writes only the voyage's records (a lane's
+                // report after the hand-in, GEAR M6.3 T-604) is no change to
+                // the reviewed work: it merges with it, as T-573 lets a
+                // reports-only merge skip the gate.
+                let paths: Vec<String> = git(
+                    dir,
+                    &["diff-tree", "--no-commit-id", "--name-only", "-r", commit],
+                )
+                .ok()?
+                .lines()
+                .map(str::to_string)
+                .collect();
+                let project = op.project.as_str();
+                (!reports_only(&paths, &repo.voyage_dir, project))
+                    .then(|| format!("{commit} {subject}"))
             })
             .collect();
         if !foreign.is_empty() {
@@ -13969,6 +13986,33 @@ gate = "{project_gate}"
             "{:?}",
             scratch.origin_branches()
         );
+    }
+
+    /// A lane's report committed after the hand-in changes only the voyage's
+    /// records: it merges with the reviewed work (GEAR M6.3: T-604's report
+    /// commit refused an accepted merge).
+    #[test]
+    fn a_report_commit_after_the_candidate_merges_with_it() {
+        let scratch = Scratch::new("task-branch-report-commit");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass' \
+             && mkdir -p gear/p/voyages/M1/reports && echo w > gear/p/voyages/M1/reports/T-5.md \
+             && git add -A && git -c user.name=a -c user.email=a@b commit -qm 'T-5: report'",
+        );
+        publish(&scratch.work, "heat/t5");
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+
+        let merged = merge_one(&worktree, &repo_with_voyage_dir("true"), &op(&candidate));
+
+        assert!(merged.is_ok(), "{merged:?}");
+        assert!(scratch.dev_has_task_commit());
     }
 
     /// T-564: a lane commit pushed onto the task branch after the hand-in is
