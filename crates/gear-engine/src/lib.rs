@@ -140,6 +140,19 @@ impl Default for EngineCfg {
     }
 }
 
+/// Stop starting merge workers (T-632): a worker already running finishes and
+/// is collected, and every merge op that would have started stays in its state
+/// for the next engine. The engine that replaces this one starts them.
+pub fn drain(cfg: &EngineCfg) {
+    cfg.merges.drain();
+}
+
+/// Whether no merge worker and no bisect is running (T-632): the engine may be
+/// replaced without cutting a merge.
+pub fn merges_idle(cfg: &EngineCfg) -> bool {
+    cfg.merges.idle()
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TickReport {
     /// Projects whose observation failed this tick (nothing decided for them).
