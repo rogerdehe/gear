@@ -442,7 +442,16 @@ fn a_retry_that_fails_while_it_is_sent_opens_the_stall_item() {
     let observed = s
         .read(|tx| gear_engine::observe::reconcile(tx, &mut h, "p", &agents, &cfg.profiles))
         .unwrap();
-    gear_engine::lane_nudge::nudge_stopped_lanes(&mut s, &mut h, "p", &observed, T + 130).unwrap();
+    gear_engine::lane_nudge::nudge_stopped_lanes(
+        &mut s,
+        &mut h,
+        &cfg,
+        &cfg.profiles,
+        "p",
+        &observed,
+        T + 130,
+    )
+    .unwrap();
     h.add_shell(LANE);
     gear_engine::ops::execute_intended(&mut s, &mut h, "p", T + 130).unwrap();
     // The replacement agent is there before the next observation.
@@ -500,7 +509,16 @@ fn a_failed_retry_followed_by_a_check_in_does_not_open_a_stall() {
     let observed = s
         .read(|tx| gear_engine::observe::reconcile(tx, &mut h, "p", &agents, &cfg.profiles))
         .unwrap();
-    gear_engine::lane_nudge::nudge_stopped_lanes(&mut s, &mut h, "p", &observed, T + 130).unwrap();
+    gear_engine::lane_nudge::nudge_stopped_lanes(
+        &mut s,
+        &mut h,
+        &cfg,
+        &cfg.profiles,
+        "p",
+        &observed,
+        T + 130,
+    )
+    .unwrap();
     h.add_shell(LANE);
     gear_engine::ops::execute_intended(&mut s, &mut h, "p", T + 130).unwrap();
     h.add_agent(LANE, "opencode", AgentStatus::Idle);

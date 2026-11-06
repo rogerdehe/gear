@@ -914,8 +914,9 @@ pub fn tick(
             // 7c. a lane that stopped on a server error goes on by itself
             //     (T-206): its agent is idle with an attempt in flight.
             let step = std::time::Instant::now();
-            let (nudged_lanes, stuck_lanes) =
-                lane_nudge::nudge_stopped_lanes(store, herdr, &project, &observed, now)?;
+            let (nudged_lanes, stuck_lanes) = lane_nudge::nudge_stopped_lanes(
+                store, herdr, cfg, &profiles, &project, &observed, now,
+            )?;
             report.lane_nudged.extend(nudged_lanes);
             for seat in stuck_lanes {
                 report.flagged.push(seat);

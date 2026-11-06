@@ -790,7 +790,15 @@ fn in_progress(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<bool> {
     Ok(tx
         .attempts_of_task(project, task)?
         .iter()
-        .any(|attempt| attempt.state.occupies_seat()))
+        .any(|attempt| attempt.state.occupies_seat())
+        // A handed-in task a reviewer is working on moves the voyage (GEAR
+        // M6.3: this item rang every 10 minutes while review-9 reviewed
+        // T-629, the last task). A review nobody has taken still rings.
+        || tx.seats_of_project(project)?.iter().any(|seat| {
+            seat.role == gear_model::SeatRole::Temp
+                && seat.state == gear_model::SeatState::Active
+                && seat.task_id.as_deref() == Some(task)
+        }))
 }
 
 /// The lane and the state of a task as `gear_board::idle` says it:
