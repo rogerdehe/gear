@@ -12,15 +12,15 @@
 //!   then.
 //!
 //! How the model changes depends on the **CLI** the next entry names (T-35)
-//! and on whether GEAR drives that CLI's model picker (T-114):
+//! and on whether GEAR drives a protocol for that CLI's model (T-114, T-606):
 //!
-//! - the same CLI **with** a picker GEAR drives (OpenCode): the model changes
-//!   **in place** (T-33) — the picker, the variant dialog and the status bar;
-//!   the conversation stays.
-//! - another CLI, or a CLI without such a picker (pi): the agent is closed
-//!   and that CLI starts in the same pane and worktree ([`crate::restart`]) —
-//!   no session crosses a restart; the new agent starts from the git state and
-//!   the lane is told to continue.
+//! - the same CLI with a protocol GEAR drives: the model changes **in place**
+//!   (T-33) — OpenCode's session API and status bar, or pi's and Claude's
+//!   typed `/model <id>` and footer; the conversation stays.
+//! - another CLI, or a CLI without such a protocol (codex): the agent is
+//!   closed and that CLI starts in the same pane and worktree
+//!   ([`crate::restart`]) — no session crosses a restart; the new agent starts
+//!   from the git state and the lane is told to continue.
 //!
 //! The engine keeps the little state this needs in the store's `meta`
 //! (consecutive quota ticks, the lane's current model, the reset deadline, the
@@ -154,6 +154,8 @@ pub fn apply_quota_policy_with(
             if let Some(line) = resume_switch(
                 store,
                 herdr,
+                cfg,
+                profiles,
                 project,
                 &config,
                 seat,
@@ -709,13 +711,14 @@ fn return_from_fallback(
 /// Change the lane's model to `entry`'s.
 ///
 /// The model changes **in place** when the entry runs on the seat's own CLI
-/// **and** GEAR drives that CLI's model picker (T-33): no exit, no restart, the
-/// conversation stays. Today that is OpenCode only.
+/// **and** GEAR drives a protocol for that CLI's model (T-33, T-606): no exit,
+/// no restart, the conversation stays. Today that is OpenCode's session API,
+/// and pi's and Claude's typed `/model <id>`.
 ///
 /// Every other case is a **restart** (T-35, T-114): the agent is closed, the
 /// CLI of the entry starts in the same pane and worktree, and the lane
-/// continues its task. That is the case for another CLI, and for a CLI
-/// without a picker GEAR drives (pi): the model is given at the start, so the
+/// continues its task. That is the case for another CLI, and for a CLI without
+/// a protocol GEAR drives (codex): the model is given at the start, so the
 /// next model needs a new session.
 fn change_model(
     store: &mut Store,
@@ -747,9 +750,10 @@ fn change_model(
         (Some(target), Some(current)) => target == current,
         _ => true,
     };
-    // T-114: the in-place switch needs a model picker GEAR drives. A CLI
-    // without one (pi) is started again on the next model instead — the same
-    // pane and worktree, the lane's task delivered again in the new session.
+    // T-114: the in-place switch needs a protocol GEAR drives for that CLI
+    // (OpenCode's session API, pi's and Claude's `/model <id>`). A CLI without
+    // one (codex) is started again on the next model instead — the same pane
+    // and worktree, the lane's task delivered again in the new session.
     // A CLI that is not known at all keeps the old path, which flags the seat
     // with a reason.
     let in_place = match target_cli.as_deref() {
@@ -760,6 +764,8 @@ fn change_model(
         return start_switch(
             store,
             herdr,
+            cfg,
+            profiles,
             project,
             config,
             seat,
@@ -794,9 +800,12 @@ fn change_model(
 /// No labels for the model: the seat is flagged (`NeedsCheck`) and nothing is
 /// typed — a restart cannot carry the model through OpenCode's shared service
 /// (review F4).
+#[allow(clippy::too_many_arguments)]
 fn start_switch(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, Profile>,
     project: &str,
     config: &ProjectConfig,
     seat: &SeatRow,
@@ -815,15 +824,20 @@ fn start_switch(
     };
     let outcome =
         crate::switch::switch_model(store, herdr, &seat.id, profile, obs, labels, model, now)?;
-    settle_switch(store, project, seat, model, outcome, now)
+    settle_switch(
+        store, herdr, cfg, profiles, project, config, seat, profile, model, outcome, now,
+    )
 }
 
 /// Continue the switch a seat has on its way, whatever the screen says now
 /// (review F6): the plan carries the target, so a cleared quota line, an open
 /// dialog or an engine restart does not lose it.
+#[allow(clippy::too_many_arguments)]
 fn resume_switch(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, Profile>,
     project: &str,
     config: &ProjectConfig,
     seat: &SeatRow,
@@ -848,15 +862,24 @@ fn resume_switch(
     };
     let outcome =
         crate::switch::switch_model(store, herdr, &seat.id, profile, obs, &labels, &model, now)?;
-    settle_switch(store, project, seat, &model, outcome, now)
+    settle_switch(
+        store, herdr, cfg, profiles, project, config, seat, profile, &model, outcome, now,
+    )
 }
 
 /// What a switch step means for the lane: `Done`/`Already` finish it, `Waiting`
-/// is silence (the next tick continues), `Failed` flags the seat.
+/// is silence (the next tick continues), `Failed` flags the seat — except for
+/// pi and Claude, whose typed command falls back to the restart (T-606).
+#[allow(clippy::too_many_arguments)]
 fn settle_switch(
     store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, Profile>,
     project: &str,
+    config: &ProjectConfig,
     seat: &SeatRow,
+    profile: &Profile,
     model: &str,
     outcome: crate::switch::SwitchOutcome,
     now: Ts,
@@ -867,6 +890,23 @@ fn settle_switch(
         }
         crate::switch::SwitchOutcome::Waiting => Ok(None),
         crate::switch::SwitchOutcome::Failed => {
+            // T-606: a pi or Claude command that did not confirm falls back to
+            // today's restart — the same CLI, its session resumed, the model
+            // given at the start. OpenCode keeps flagging: a restart cannot
+            // carry a model through its shared service.
+            if crate::switch::switches_in_place(&profile.kind) && profile.kind != "opencode" {
+                let target = restart_target(store, config, seat, profile, model)?;
+                return crate::restart::advance(
+                    store,
+                    herdr,
+                    cfg,
+                    profiles,
+                    project,
+                    seat,
+                    Some(&target),
+                    now,
+                );
+            }
             let line = format!(
                 "{}: the model switch to {model} did not confirm twice — needs check",
                 seat.id
@@ -875,6 +915,31 @@ fn settle_switch(
             Ok(Some(line))
         }
     }
+}
+
+/// The restart target for a model a typed command could not put on (T-606):
+/// the seat's own CLI, the chain entry's arguments, the model given at the
+/// start.
+fn restart_target(
+    store: &mut Store,
+    config: &ProjectConfig,
+    seat: &SeatRow,
+    profile: &Profile,
+    model: &str,
+) -> GearResult<ModelEntry> {
+    let cli = crate::restart::current_cli(store, seat)?.unwrap_or_else(|| profile.kind.clone());
+    let chain = if seat.role == SeatRole::Temp {
+        crate::model::review_chain(config)
+    } else {
+        crate::model::role_chain(config, &seat.name)
+    };
+    let entry = chain.iter().find(|entry| entry.model() == model).copied();
+    Ok(ModelEntry::Entry(gear_app::config::ModelSpec {
+        model: model.to_string(),
+        cli: Some(cli),
+        args: entry.map(|entry| entry.args().to_vec()).unwrap_or_default(),
+        context_window_k: entry.and_then(|entry| entry.context_window_k()),
+    }))
 }
 
 /// A confirmed in-place switch (T-33): the new model, the reset quota counter,
