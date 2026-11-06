@@ -421,7 +421,7 @@ pub fn captain_sailing(
                 kind: MsgKind::System,
                 urgent: true,
                 body: format!(
-                    "Voyage {milestone} is not finished ({}), and you and every lane and reviewer have been idle for {} min. A voyage never stops until it has landed, unless it is paused: a station is a mark, never a stop, and what only the user can do (a real sign-in, test money, a browser) is listed for the landing while the voyage goes on. Run `gear`, keep every lane working (or land it when its goal is met), and resolve this item.",
+                    "Voyage {milestone} is not finished ({}), and you and every lane and reviewer have been idle for {} min. Nothing lets a voyage stop before it lands: GEAR asks you to finish the voyage, and nothing in it waits for the user to provide anything. A station is a mark, never a stop; what only the user can test is listed for the landing. The only reasons to stop are force majeure: the machine or GEAR is down, your own tokens are gone, or every lane is out of tokens or cannot start. Run `gear`, put every lane to work (or land the voyage when its goal is met), and resolve this item.",
                     if left == 0 { "every task done, not landed".to_string() } else { format!("{left} tasks left") },
                     (now - since) / 60
                 ),
@@ -1282,7 +1282,11 @@ mod tests {
         captain_sailing(&mut s, "p", &obs_all(&obs), T + 5 * 60).unwrap();
         let told = items(&mut s);
         assert_eq!(told.len(), 1);
-        assert!(told[0].body.contains("never stops"), "{}", told[0].body);
+        assert!(
+            told[0].body.contains("Nothing lets a voyage stop"),
+            "{}",
+            told[0].body
+        );
         assert!(told[0].urgent);
         let resolve = |s: &mut Store, id: &str, at: Ts| {
             s.write(|tx| tx.update_message_state("p", id, MsgState::Resolved, None, None, None, at))
