@@ -24,6 +24,7 @@ merge_method = "squash"        # with "pr": "squash" (default) or "merge"
 
 [github.issues]
 labels = ["gear"]              # which issues become tasks; empty = every open one
+voyage_label = "{project}/{milestone}"  # the label a departed voyage's issues carry; "" turns it off
 ```
 
 ## What the engine does, and when

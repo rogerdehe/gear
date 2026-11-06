@@ -12317,6 +12317,15 @@ gate = "{gate}"
         ) -> gear_forge::ForgeResult<()> {
             Ok(())
         }
+
+        fn create_label(
+            &self,
+            _repo: &str,
+            _name: &str,
+            _description: &str,
+        ) -> gear_forge::ForgeResult<()> {
+            Ok(())
+        }
     }
 
     /// One merge step and the wait for the worker it launched: the step that

@@ -13,3 +13,4 @@ mod time_contract;
 mod upgrade_contract;
 mod v6_contract;
 mod v7_contract;
+mod voyage_issues_contract;
