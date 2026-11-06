@@ -289,6 +289,13 @@ pub struct ProjectBoard {
     /// carries the new voyage's milestone, so the shown voyage counts it
     /// nowhere.
     pub moved_out: Vec<(String, String)>,
+    /// The labeled GitHub issues of the shown voyage (T-649), by state, in the
+    /// order the Now view lists them; empty when the voyage has none.
+    pub issues: Vec<(issues::IssueState, Vec<i64>)>,
+    /// The voyage label the issues block names (T-649): the project's
+    /// `[github.issues].voyage_label` with the project and milestone filled in;
+    /// `None` when the setting is off or the project has no `[github]`.
+    pub issue_label: Option<String>,
 }
 
 /// One voyage of the project, as the board names it (T-350).
@@ -1212,6 +1219,15 @@ pub fn project_for(
         }
         _ => Vec::new(),
     };
+    // T-649: the shown voyage's labeled issues, by state, and the label the
+    // block names.
+    let (issues, issue_label) = match shown.as_ref() {
+        Some(entry) => (
+            issue_rows(tx, project, &entry.milestone)?,
+            voyage_label_of(&row.config_toml, project, &entry.milestone),
+        ),
+        None => (Vec::new(), None),
+    };
     Ok(ProjectBoard {
         voyages,
         workload,
@@ -1248,7 +1264,62 @@ pub fn project_for(
         voyage_list,
         shown,
         moved_out,
+        issues,
+        issue_label,
     })
+}
+
+/// T-649: the shown voyage's labeled issues grouped by state, in the order the
+/// Now view lists them (pending, planned, in progress, awaiting verification,
+/// done, deferred, unlabeled). Empty when the voyage has no issue.
+fn issue_rows(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+) -> GearResult<Vec<(issues::IssueState, Vec<i64>)>> {
+    let states = issues::issue_states(tx, project, milestone)?;
+    let mut rows = Vec::new();
+    for state in [
+        issues::IssueState::Pending,
+        issues::IssueState::Planned,
+        issues::IssueState::InProgress,
+        issues::IssueState::Verifying,
+        issues::IssueState::Done,
+        issues::IssueState::Deferred,
+        issues::IssueState::Unlabeled,
+    ] {
+        let numbers: Vec<i64> = states
+            .iter()
+            .filter(|(_, found)| *found == state)
+            .map(|(number, _)| *number)
+            .collect();
+        if !numbers.is_empty() {
+            rows.push((state, numbers));
+        }
+    }
+    Ok(rows)
+}
+
+/// T-649: the label the issues block names — the project's
+/// `[github.issues].voyage_label` with `{project}` and `{milestone}` filled in,
+/// `{project}/{milestone}` when the setting is absent, and `None` when it is
+/// `""` (off) or the project has no `[github]`.
+fn voyage_label_of(config_toml: &str, project: &str, milestone: &str) -> Option<String> {
+    let config = config_toml.parse::<toml::Value>().ok()?;
+    let github = config.get("github")?;
+    let label = github
+        .get("issues")
+        .and_then(|issues| issues.get("voyage_label"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("{project}/{milestone}");
+    if label.is_empty() {
+        return None;
+    }
+    Some(
+        label
+            .replace("{project}", project)
+            .replace("{milestone}", milestone),
+    )
 }
 
 /// The captain's open item about a task whose review is in and waits for the

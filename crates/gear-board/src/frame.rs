@@ -2206,6 +2206,36 @@ fn view_now(
             row += 1;
         }
     }
+    // T-649: the voyage's labeled issues, one line per state that has any.
+    // Nothing when the voyage has none.
+    if !project.issues.is_empty() {
+        row += 1;
+        let heading = match project.issue_label.as_deref() {
+            Some(label) => format!("Issues ({label})"),
+            None => "Issues".to_string(),
+        };
+        canvas.put_styled(1, row, &heading, Style::bold());
+        row += 1;
+        for (state, numbers) in &project.issues {
+            let words = match state {
+                crate::issues::IssueState::Pending => "pending",
+                crate::issues::IssueState::Planned => "planned",
+                crate::issues::IssueState::InProgress => "in progress",
+                crate::issues::IssueState::Verifying => "awaiting verification",
+                crate::issues::IssueState::Done => "done",
+                crate::issues::IssueState::Deferred => "deferred",
+                crate::issues::IssueState::Unlabeled => "unlabeled",
+            };
+            let numbers: Vec<String> = numbers.iter().map(|number| format!("#{number}")).collect();
+            canvas.put_styled(
+                3,
+                row,
+                &format!("{words} {}", numbers.join(" ")),
+                Style::PLAIN,
+            );
+            row += 1;
+        }
+    }
     picks
 }
 
