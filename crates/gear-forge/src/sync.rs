@@ -23,12 +23,12 @@
 
 use std::collections::BTreeMap;
 
-use gear_model::{GearResult, MsgState, OpKind, OpState, Ts};
-use gear_store::{NewOp, OpRow, Store, Tx, VoyageRow};
+use gear_model::{GearResult, MsgKind, MsgState, OpKind, OpState, Ts};
+use gear_store::{NewMessage, NewOp, OpRow, Store, Tx, VoyageIssueRow, VoyageRow};
 use serde::Deserialize;
 
 use crate::marker;
-use crate::{Forge, ForgeResult, MergeMethod, PrRef};
+use crate::{Filter, Forge, ForgeResult, MergeMethod, PrRef};
 
 /// The most forge calls one project's sync makes in one tick (T-91): a backlog
 /// catches up over the next ticks instead of holding the tick for every call's
@@ -70,10 +70,26 @@ pub fn sync_with(
     now: Ts,
 ) -> GearResult<Vec<String>> {
     let facts = store.read(|tx| facts(tx, project))?;
-    // The voyage label (T-637): a departed voyage of a GitHub project gets its
-    // label, once, whether or not any of its tasks has an issue.
-    let label = store.read(|tx| label_plan(tx, project))?;
-    if facts.is_empty() && label.is_none() {
+    // The voyage label (T-637) and the intake of its labeled issues (T-638):
+    // both need the departed voyage of a GitHub project.
+    let voyage = store.read(|tx| voyage_of(tx, project))?;
+    let label = match &voyage {
+        Some((milestone, repo, label)) => {
+            let created = store.read(|tx| {
+                Ok(tx
+                    .get_meta(&format!("forge.label.{project}.{milestone}"))?
+                    .as_deref()
+                    == Some("created"))
+            })?;
+            if created {
+                None
+            } else {
+                Some((milestone.clone(), repo.clone(), label.clone()))
+            }
+        }
+        None => None,
+    };
+    if facts.is_empty() && label.is_none() && voyage.is_none() {
         return Ok(Vec::new());
     }
     let seat = forge_seat(project);
@@ -116,6 +132,19 @@ pub fn sync_with(
             }
             // A failure stands for this tick only: the next tick tries again.
             Outcome::Pending => {}
+        }
+    }
+    // The intake of the voyage's labeled issues (T-638): once the label is
+    // created, at most every INTAKE_EVERY_S.
+    if let Some((milestone, repo, label)) = &voyage {
+        let created = store.read(|tx| {
+            Ok(tx
+                .get_meta(&format!("forge.label.{project}.{milestone}"))?
+                .as_deref()
+                == Some("created"))
+        })?;
+        if created {
+            done.extend(intake(store, project, forge, milestone, repo, label, now)?);
         }
     }
     for fact in &facts {
@@ -913,10 +942,213 @@ fn facts(tx: &Tx<'_>, project: &str) -> GearResult<Vec<Fact>> {
     Ok(facts)
 }
 
-/// The label call of a departed voyage (T-637): the milestone, the repo and
-/// the label, when the project has a forge, the voyage departed and the label
-/// is not created yet.
-fn label_plan(tx: &Tx<'_>, project: &str) -> GearResult<Option<(String, String, String)>> {
+/// How often a project's labeled issues are read (T-638).
+const INTAKE_EVERY_S: Ts = 120;
+
+/// The most issues one poll reads (T-638): `gh` lists 30 by default, and a
+/// full page means the list may be partial.
+const INTAKE_LIMIT: u32 = 500;
+
+/// The hash of an issue's title and body (T-638): a change on GitHub is a
+/// different hash.
+fn body_hash(title: &str, body: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    title.hash(&mut hasher);
+    body.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// One urgent captain item about a voyage's issue (T-638).
+fn intake_item(
+    store: &mut Store,
+    project: &str,
+    milestone: &str,
+    number: i64,
+    body: &str,
+    now: Ts,
+) -> GearResult<()> {
+    store.write(|tx| {
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: project.to_string(),
+            thread: format!("intake:{milestone}:#{number}"),
+            task: None,
+            attempt: None,
+            sender: "engine".into(),
+            sender_gen: 0,
+            recipient: format!("{project}:captain"),
+            kind: MsgKind::System,
+            urgent: true,
+            body: body.to_string(),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })
+    })?;
+    Ok(())
+}
+
+/// Read the voyage's labeled issues and turn what changed into captain items
+/// (T-638): at most every [`INTAKE_EVERY_S`], and never from an error.
+fn intake(
+    store: &mut Store,
+    project: &str,
+    forge: &dyn Forge,
+    milestone: &str,
+    repo: &str,
+    label: &str,
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    let key = format!("forge.intake_at.{project}");
+    let last = store.read(|tx| tx.get_meta(&key))?;
+    if let Some(last) = last.as_deref().and_then(|value| value.parse::<Ts>().ok()) {
+        if now - last < INTAKE_EVERY_S {
+            return Ok(Vec::new());
+        }
+    }
+    let filter = Filter {
+        labels: vec![label.to_string()],
+        limit: INTAKE_LIMIT,
+    };
+    let listed = match forge.issues(repo, &filter) {
+        Ok(issues) => issues,
+        // An error changes nothing: it is never read as an empty list.
+        Err(_) => {
+            store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
+            return Ok(Vec::new());
+        }
+    };
+    store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
+    // A full page may be partial: nothing is marked unlabeled this poll.
+    let partial = listed.len() as u32 >= INTAKE_LIMIT;
+    let rows = store.read(|tx| tx.voyage_issues(project, milestone))?;
+    let mut done = Vec::new();
+    let mut seen: Vec<i64> = Vec::new();
+    for issue in &listed {
+        let Ok(number) = i64::try_from(issue.number) else {
+            continue;
+        };
+        seen.push(number);
+        let hash = body_hash(&issue.title, &issue.body);
+        let known = rows.iter().find(|row| row.number == number);
+        match known {
+            None => {
+                store.write(|tx| {
+                    tx.upsert_voyage_issue(&VoyageIssueRow {
+                        project: project.to_string(),
+                        number,
+                        milestone: milestone.to_string(),
+                        title: issue.title.clone(),
+                        body_hash: hash.clone(),
+                        labeled: 1,
+                        first_seen: now,
+                        last_seen: now,
+                    })
+                })?;
+                intake_item(
+                    store,
+                    project,
+                    milestone,
+                    number,
+                    &format!(
+                        "Issue #{number} \"{}\" was labeled {label}: plan it as task(s) with `issue: #{number}` and their contracts and deps, or resolve this item to defer it. It never moves the eta or the bar.",
+                        issue.title
+                    ),
+                    now,
+                )?;
+                done.push(format!("{project}:intake:{milestone}:#{number}"));
+                continue;
+            }
+            Some(row) if row.body_hash != hash => {
+                store.write(|tx| {
+                    tx.upsert_voyage_issue(&VoyageIssueRow {
+                        project: project.to_string(),
+                        number,
+                        milestone: milestone.to_string(),
+                        title: issue.title.clone(),
+                        body_hash: hash.clone(),
+                        labeled: 1,
+                        first_seen: row.first_seen,
+                        last_seen: now,
+                    })
+                })?;
+                intake_item(
+                    store,
+                    project,
+                    milestone,
+                    number,
+                    &format!("Issue #{number} changed on GitHub: check its tasks' contracts."),
+                    now,
+                )?;
+                done.push(format!("{project}:intake:{milestone}:#{number}"));
+                continue;
+            }
+            Some(row) if row.labeled == 0 => {
+                store.write(|tx| {
+                    tx.upsert_voyage_issue(&VoyageIssueRow {
+                        project: project.to_string(),
+                        number,
+                        milestone: milestone.to_string(),
+                        title: issue.title.clone(),
+                        body_hash: hash.clone(),
+                        labeled: 1,
+                        first_seen: row.first_seen,
+                        last_seen: now,
+                    })
+                })?;
+                intake_item(
+                    store,
+                    project,
+                    milestone,
+                    number,
+                    &format!("Issue #{number} carries {label} again."),
+                    now,
+                )?;
+                done.push(format!("{project}:intake:{milestone}:#{number}"));
+                continue;
+            }
+            Some(_) => {}
+        }
+    }
+    if !partial {
+        for row in &rows {
+            if row.labeled != 1 || seen.contains(&row.number) {
+                continue;
+            }
+            store.write(|tx| {
+                tx.upsert_voyage_issue(&VoyageIssueRow {
+                    project: project.to_string(),
+                    number: row.number,
+                    milestone: milestone.to_string(),
+                    title: row.title.clone(),
+                    body_hash: row.body_hash.clone(),
+                    labeled: 0,
+                    first_seen: row.first_seen,
+                    last_seen: now,
+                })
+            })?;
+            intake_item(
+                store,
+                project,
+                milestone,
+                row.number,
+                &format!(
+                    "Issue #{} no longer carries {label} (closed or unlabeled): its tasks keep running; cancel them in the plan if the user wants.",
+                    row.number
+                ),
+                now,
+            )?;
+            done.push(format!("{project}:intake:{milestone}:#{}", row.number));
+        }
+    }
+    Ok(done)
+}
+
+/// The departed voyage of a GitHub project (T-637/T-638): the milestone, the
+/// repo and the label its issues carry.
+fn voyage_of(tx: &Tx<'_>, project: &str) -> GearResult<Option<(String, String, String)>> {
     let Some(row) = tx.get_project(project)? else {
         return Ok(None);
     };
@@ -932,13 +1164,6 @@ fn label_plan(tx: &Tx<'_>, project: &str) -> GearResult<Option<(String, String, 
     let Some(label) = voyage_label(&github.voyage_label, project, &voyage.milestone) else {
         return Ok(None);
     };
-    let created = tx
-        .get_meta(&format!("forge.label.{project}.{}", voyage.milestone))?
-        .as_deref()
-        == Some("created");
-    if created {
-        return Ok(None);
-    }
     Ok(Some((voyage.milestone, github.repo, label)))
 }
 
@@ -1143,17 +1368,34 @@ mod tests {
     struct Recorder {
         labels: RefCell<Vec<String>>,
         fail_label: Cell<bool>,
+        issues: RefCell<Vec<Issue>>,
+        fail_issues: Cell<bool>,
+        issue_filters: RefCell<Vec<(Vec<String>, u32)>>,
     }
 
     impl Recorder {
         fn labels(&self) -> Vec<String> {
             self.labels.borrow().clone()
         }
+
+        fn set_issues(&self, issues: Vec<Issue>) {
+            *self.issues.borrow_mut() = issues;
+        }
+
+        fn issue_filters(&self) -> Vec<(Vec<String>, u32)> {
+            self.issue_filters.borrow().clone()
+        }
     }
 
     impl Forge for Recorder {
-        fn issues(&self, _repo: &str, _filter: &Filter) -> ForgeResult<Vec<Issue>> {
-            Ok(Vec::new())
+        fn issues(&self, _repo: &str, filter: &Filter) -> ForgeResult<Vec<Issue>> {
+            self.issue_filters
+                .borrow_mut()
+                .push((filter.labels.clone(), filter.limit));
+            if self.fail_issues.replace(false) {
+                return Err(crate::Error::Failed("the forge refused".to_string()));
+            }
+            Ok(self.issues.borrow().clone())
         }
 
         fn open_claim(
@@ -1375,5 +1617,158 @@ mod tests {
 
         assert!(done.is_empty(), "{done:?}");
         assert!(forge.labels().is_empty(), "{:?}", forge.labels());
+    }
+
+    fn labeled_voyage(store: &mut Store) {
+        departed(store, "M1", T0);
+        store
+            .write(|tx| tx.set_meta("forge.label.p.M1", "created"))
+            .expect("the label");
+    }
+
+    fn issue(number: u64, title: &str, body: &str) -> Issue {
+        Issue {
+            number,
+            title: title.to_string(),
+            body: body.to_string(),
+            labels: vec!["p/M1".to_string()],
+        }
+    }
+
+    fn items(store: &mut Store, thread: &str) -> Vec<gear_store::MessageRow> {
+        store
+            .read(|tx| tx.thread_messages("p", thread))
+            .expect("the items")
+    }
+
+    fn rows(store: &mut Store) -> Vec<VoyageIssueRow> {
+        store
+            .read(|tx| tx.voyage_issues("p", "M1"))
+            .expect("the rows")
+    }
+
+    /// T-638: a newly labeled issue makes one captain item, and the next poll
+    /// makes none.
+    #[test]
+    fn a_new_labeled_issue_makes_one_item() {
+        let mut store = world(&github_config(""));
+        labeled_voyage(&mut store);
+        let forge = Recorder::default();
+        forge.set_issues(vec![issue(12, "A bug", "the body")]);
+
+        let done = tick(&mut store, &forge, T0 + 1);
+
+        assert_eq!(done, vec!["p:intake:M1:#12"], "{done:?}");
+        assert_eq!(
+            forge.issue_filters(),
+            vec![(vec!["p/M1".to_string()], 500)],
+            "the label and the full page"
+        );
+        let told = items(&mut store, "intake:M1:#12");
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].urgent, "{:?}", told[0]);
+        assert_eq!(told[0].recipient, "p:captain");
+        assert!(
+            told[0]
+                .body
+                .contains("Issue #12 \"A bug\" was labeled p/M1"),
+            "{}",
+            told[0].body
+        );
+        assert!(told[0].body.contains("`issue: #12`"), "{}", told[0].body);
+        assert!(
+            told[0].body.contains("It never moves the eta or the bar."),
+            "{}",
+            told[0].body
+        );
+        let stored = rows(&mut store);
+        assert_eq!(stored.len(), 1, "{stored:?}");
+        assert_eq!(stored[0].labeled, 1);
+        assert_eq!(stored[0].body_hash, body_hash("A bug", "the body"));
+
+        let done = tick(&mut store, &forge, T0 + 200);
+
+        assert!(done.is_empty(), "{done:?}");
+        assert_eq!(items(&mut store, "intake:M1:#12").len(), 1, "once");
+    }
+
+    /// T-638: a changed body makes one changed item.
+    #[test]
+    fn a_changed_body_makes_one_changed_item() {
+        let mut store = world(&github_config(""));
+        labeled_voyage(&mut store);
+        let forge = Recorder::default();
+        forge.set_issues(vec![issue(12, "A bug", "one")]);
+        tick(&mut store, &forge, T0 + 1);
+
+        forge.set_issues(vec![issue(12, "A bug", "two")]);
+        let done = tick(&mut store, &forge, T0 + 200);
+
+        assert_eq!(done, vec!["p:intake:M1:#12"], "{done:?}");
+        let told = items(&mut store, "intake:M1:#12");
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert_eq!(
+            told[1].body,
+            "Issue #12 changed on GitHub: check its tasks' contracts."
+        );
+        assert_eq!(rows(&mut store)[0].body_hash, body_hash("A bug", "two"));
+    }
+
+    /// T-638: a vanished issue makes one item and sets labeled 0.
+    #[test]
+    fn a_vanished_issue_makes_one_item_and_sets_labeled_zero() {
+        let mut store = world(&github_config(""));
+        labeled_voyage(&mut store);
+        let forge = Recorder::default();
+        forge.set_issues(vec![issue(12, "A bug", "the body")]);
+        tick(&mut store, &forge, T0 + 1);
+
+        forge.set_issues(Vec::new());
+        let done = tick(&mut store, &forge, T0 + 200);
+
+        assert_eq!(done, vec!["p:intake:M1:#12"], "{done:?}");
+        let told = items(&mut store, "intake:M1:#12");
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert_eq!(
+            told[1].body,
+            "Issue #12 no longer carries p/M1 (closed or unlabeled): its tasks keep running; cancel them in the plan if the user wants."
+        );
+        assert_eq!(rows(&mut store)[0].labeled, 0);
+    }
+
+    /// T-638: a forge error makes no item and changes no row.
+    #[test]
+    fn a_forge_error_makes_no_item_and_changes_no_row() {
+        let mut store = world(&github_config(""));
+        labeled_voyage(&mut store);
+        let forge = Recorder::default();
+        forge.set_issues(vec![issue(12, "A bug", "the body")]);
+        forge.fail_issues.set(true);
+
+        let done = tick(&mut store, &forge, T0 + 1);
+
+        assert!(done.is_empty(), "{done:?}");
+        assert!(items(&mut store, "intake:M1:#12").is_empty());
+        assert!(rows(&mut store).is_empty(), "an error is not an empty list");
+
+        let done = tick(&mut store, &forge, T0 + 200);
+
+        assert_eq!(done, vec!["p:intake:M1:#12"], "{done:?}");
+        assert_eq!(rows(&mut store).len(), 1);
+    }
+
+    /// T-638: two polls within 120 s list once.
+    #[test]
+    fn two_polls_within_120_s_list_once() {
+        let mut store = world(&github_config(""));
+        labeled_voyage(&mut store);
+        let forge = Recorder::default();
+        forge.set_issues(vec![issue(12, "A bug", "the body")]);
+
+        tick(&mut store, &forge, T0 + 1);
+        tick(&mut store, &forge, T0 + 100);
+
+        assert_eq!(forge.issue_filters().len(), 1, "one list");
+        assert_eq!(items(&mut store, "intake:M1:#12").len(), 1);
     }
 }
