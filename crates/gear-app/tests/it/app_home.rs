@@ -1105,3 +1105,132 @@ fn a_finished_voyage_does_not_hide_another_that_still_runs() {
     );
     assert!(home.text.contains("SNAPSHOT"), "{}", home.text);
 }
+
+// ---------------------------------------------------------------- T-611
+
+/// An engine nudge to a lane (the `think-lane` / `quiet-lane` items): an
+/// Instruction from `engine`, Open, which the lane cannot resolve.
+fn engine_nudge(s: &mut Store, body: &str, created: Ts) -> String {
+    insert(
+        s,
+        "think-lane:p:heat",
+        "engine",
+        "p:heat",
+        MsgKind::Instruction,
+        MsgState::Open,
+        body,
+        created,
+    )
+}
+
+/// T-611: a lane may run neither `gear reply` nor `gear plan apply` (both are
+/// captain-only). Its page names only what it may run.
+#[test]
+fn a_lanes_page_names_no_captain_only_command() {
+    let mut s = world();
+    answer(&mut s, "Use v2", NOW);
+    engine_nudge(&mut s, "Your worktree has not changed for 15 min.", NOW + 1);
+
+    let home = home::build(
+        &mut s,
+        &seat_env("heat", LANE_PANE),
+        Some(&fp(LANE_PANE, "opencode")),
+        NOW + 2,
+    )
+    .unwrap();
+
+    assert!(
+        !home.text.contains("gear reply"),
+        "a lane cannot run gear reply: {}",
+        home.text
+    );
+    assert!(
+        !home.text.contains("gear plan apply"),
+        "a lane cannot run gear plan apply: {}",
+        home.text
+    );
+    // The captain reply is answerable: the page names the lane's own command.
+    assert!(
+        home.text
+            .contains("next: gear send --kind progress --reply-to M-1 \"<text>\""),
+        "{}",
+        home.text
+    );
+}
+
+/// T-611: an item a lane cannot close says who does, instead of a command.
+#[test]
+fn an_item_a_lane_cannot_close_says_who_does() {
+    let mut s = world();
+    engine_nudge(&mut s, "No push to heat/t1 for 28 min.", NOW);
+
+    let home = home::build(
+        &mut s,
+        &seat_env("heat", LANE_PANE),
+        Some(&fp(LANE_PANE, "opencode")),
+        NOW + 1,
+    )
+    .unwrap();
+
+    assert!(
+        home.text.contains("the captain or GEAR closes this"),
+        "{}",
+        home.text
+    );
+    assert!(!home.text.contains("gear reply"), "{}", home.text);
+}
+
+/// T-611: an Info item a lane has been shown is marked seen and is not shown
+/// again on its next `gear`.
+#[test]
+fn a_shown_info_item_is_not_shown_again_to_a_lane() {
+    let mut s = world();
+    answer(&mut s, "Use v2", NOW);
+
+    let first = home::build(
+        &mut s,
+        &seat_env("heat", LANE_PANE),
+        Some(&fp(LANE_PANE, "opencode")),
+        NOW + 1,
+    )
+    .unwrap();
+    assert!(first.text.contains("Use v2"), "{}", first.text);
+    assert_eq!(first.view.shown_msgs, vec!["M-1".to_string()]);
+    home::record_view(&mut s, &first.view).unwrap();
+
+    let second = home::build(
+        &mut s,
+        &seat_env("heat", LANE_PANE),
+        Some(&fp(LANE_PANE, "opencode")),
+        NOW + 2,
+    )
+    .unwrap();
+    assert!(
+        !second.text.contains("Use v2"),
+        "the shown Info item is not shown again: {}",
+        second.text
+    );
+    assert!(!second.text.contains("gear reply"), "{}", second.text);
+}
+
+/// T-611: the captain's page is unchanged — it still names `gear reply`.
+#[test]
+fn the_captains_page_still_names_gear_reply() {
+    let mut s = world();
+    ask(&mut s, "Schema v1 or v2?", NOW);
+
+    let home = home::build(
+        &mut s,
+        &seat_env("captain", CAP_PANE),
+        Some(&fp(CAP_PANE, "codex")),
+        NOW + 1,
+    )
+    .unwrap();
+
+    assert!(
+        home.text
+            .contains("next: gear reply M-1 --resolve -m \"<what was done>\""),
+        "{}",
+        home.text
+    );
+}
