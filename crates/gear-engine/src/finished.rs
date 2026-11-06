@@ -331,10 +331,19 @@ pub fn reclaim(
         }
         match herdr.worktree_remove(&workspace.id) {
             Outcome::Ok(()) => {}
-            Outcome::Refused { .. } | Outcome::Uncertain { .. } => left.push(format!(
-                "workspace {} ({}) (could not close)",
-                workspace.id, workspace.label
-            )),
+            Outcome::Refused { .. } | Outcome::Uncertain { .. } => {
+                // T-639: the worktree is already gone (the merge removed it, or
+                // the folder was deleted); the workspace itself still has to
+                // close, or it stays on the session for good (M-8482: w1KM
+                // gear-merge stayed).
+                match herdr.workspace_close(&workspace.id) {
+                    Outcome::Ok(()) => {}
+                    Outcome::Refused { .. } | Outcome::Uncertain { .. } => left.push(format!(
+                        "workspace {} ({}) (could not close)",
+                        workspace.id, workspace.label
+                    )),
+                }
+            }
         }
     }
     let changed = store.write(|tx| {
@@ -1801,5 +1810,53 @@ gate = "true"
         assert!(item.body.contains("branch p/hull/t10"), "{}", item.body);
         assert!(item.body.contains("extra commits"), "{}", item.body);
         assert!(!item.body.contains("branch p/hull/t9"), "{}", item.body);
+    }
+
+    /// A `herdr` on PATH whose `workspace list` names one workspace of the
+    /// project: the reclaim reads the real command, the fake answers the
+    /// remove and the close.
+    fn stub_workspace_list(dir: &Path, workspace: &str, label: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("herdr");
+        let json = format!(
+            r#"{{"result":{{"workspaces":[{{"workspace_id":"{workspace}","label":"{label}","agent_status":"unknown"}}]}}}}"#
+        );
+        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{json}'\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// T-639: a workspace whose worktree is already gone is closed with
+    /// `workspace_close`; the reclaim names nothing left (M-8482: w1KM
+    /// gear-merge stayed on the session).
+    #[test]
+    fn a_workspace_whose_worktree_is_gone_is_closed() {
+        let mut landed = Landed::new("workspace-gone");
+        // The fake knows no worktree of w1KM, so `worktree_remove` is refused;
+        // the pane under the workspace lets `workspace_close` succeed.
+        landed.herdr.add_shell("w1KM:p1");
+        let bin = landed.root.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        stub_workspace_list(&bin, "w1KM", "p-merge");
+        let old = std::env::var_os("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", bin.display(), old.to_string_lossy()),
+        );
+        let changed = landed.reclaim(NOW + 600);
+        std::env::set_var("PATH", old);
+
+        assert_eq!(changed, None, "nothing is left to name");
+        assert!(
+            landed.herdr.calls.iter().any(|call| matches!(
+                call,
+                Call::WorkspaceClose { workspace } if workspace == "w1KM"
+            )),
+            "the workspace is closed: {:?}",
+            landed.herdr.calls
+        );
+        assert!(
+            landed.items(RECLAIM_THREAD).is_empty(),
+            "the reclaim item names nothing left"
+        );
     }
 }
