@@ -1868,6 +1868,50 @@ fn a_voyage_stopped_by_a_task_in_review_names_the_tasks_that_wait_for_it() {
     }
 }
 
+/// A task a reviewer is working on moves the voyage: no stalled item while
+/// the last task is in review with its reviewer (GEAR M6.3: the item rang every
+/// 10 minutes while review-9 reviewed T-629).
+#[test]
+fn a_task_its_reviewer_works_on_is_not_a_stopped_voyage() {
+    let mut w = stalled_world();
+    w.store
+        .write(|tx| {
+            for id in ["T-1", "T-2", "T-3"] {
+                let mut task = tx.get_task("p", id)?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+            }
+            voyage_task(tx, "T-6", 6, "heat", TaskState::Verifying, vec![])?;
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-6".into(),
+                n: 1,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Submitted,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p9", "pi", T0)?;
+            tx.set_seat_task("p:review-1", "T-6")
+        })
+        .unwrap();
+
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 1).unwrap();
+
+    assert!(stalled_items(&mut w.store).is_empty());
+}
+
 /// A merge queued or running moves the voyage: its tasks wait for it, so no
 /// stalled item rings, and an open one closes (Prometheus 2026-11-05: eight
 /// items while T-748's merge ran).
