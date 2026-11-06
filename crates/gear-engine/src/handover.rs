@@ -12,8 +12,9 @@
 //! `<voyage_dir>/handovers/<seat>-<date>-<time>.md`. The engine writes part 1,
 //! keeps parts 2 and 3 as the outgoing agent left them, and commits the file
 //! on the seat's own branch (only that path, so the agent's other changes are
-//! not swept in). A git that cannot commit leaves the document untracked; the
-//! packet still points at it.
+//! not swept in). A git that cannot commit, or a worktree on another branch
+//! than the task's, leaves the document untracked; the packet still points at
+//! it.
 
 use gear_herdr::HerdrAct;
 use gear_model::{GearResult, SeatRole, Ts};
@@ -504,6 +505,16 @@ pub fn write_document(cfg: &EngineCfg, facts: &Facts, commit: bool) -> GearResul
     }
     if !commit {
         return Ok(());
+    }
+    // A worktree on another branch than the task's (a lane switched while it
+    // held one task's branch and the next round is another's): a commit there
+    // strands the document on that branch, and the lane's switch to its task
+    // branch removes it (Lawrence F-85, F-100). Left untracked, it survives
+    // the switch.
+    if let (Some(head), Some(branch)) = (facts.head.as_deref(), facts.branch.as_deref()) {
+        if head != branch {
+            return Ok(());
+        }
     }
     let relative = facts
         .doc
