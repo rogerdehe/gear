@@ -3363,7 +3363,7 @@ fn stage_worktree(
 
 /// The label of a repo's integration worktree: `<project>-merge` for the
 /// project root, `<project>-merge-<repo name>` for a child repo (T-53).
-fn merge_label(project: &str, repo: &Repo) -> String {
+pub(crate) fn merge_label(project: &str, repo: &Repo) -> String {
     if repo.name.is_empty() {
         format!("{project}-merge")
     } else {
@@ -5569,7 +5569,7 @@ fn failure_lines(text: &str, max: usize) -> Vec<String> {
 }
 
 /// Why a Herdr step did not succeed.
-fn step_failure<T>(step: &str, outcome: &Outcome<T>) -> String {
+pub(crate) fn step_failure<T>(step: &str, outcome: &Outcome<T>) -> String {
     match outcome {
         Outcome::Refused { code, message } => format!("{step}: refused ({code}): {message}"),
         Outcome::Uncertain { reason } => format!("{step}: uncertain: {reason}"),
