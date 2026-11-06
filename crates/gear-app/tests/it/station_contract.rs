@@ -859,3 +859,39 @@ fn a_kept_course_voyage_gets_a_new_landing_order_after_new_work() {
         .find(|id| item(&mut store, id).body.contains("ready to land"));
     assert!(again.is_some_and(|id| id != land), "a new landing order");
 }
+
+/// A landing order answered with `keep course` while no new work comes is
+/// still the way to land: a later `station <id>: land` takes the landing and
+/// retires the lanes, and a re-apply changes nothing (Carthage M1: the line
+/// was skipped as a past decision and the voyage never counted as landed).
+#[test]
+fn a_kept_course_landing_order_still_takes_the_landing() {
+    let mut store = world("8h", 6);
+    assert!(check(&mut store, 0).is_empty(), "watch the voyage first");
+    for n in 1..=6 {
+        finish(&mut store, n);
+    }
+    let land = check(&mut store, 7200)
+        .into_iter()
+        .find(|id| item(&mut store, id).body.contains("ready to land"))
+        .unwrap();
+    let keep = format!("- station {land}: keep course | why: the final candidate is read first");
+    apply(&mut store, &keep, "keep", T0 + 7201).unwrap();
+    assert_eq!(item(&mut store, &land).state, MsgState::Resolved);
+
+    let lines = format!(
+        "{keep}\n- done (1): met | evidence: all 6 tasks merged\n- station {land}: land | why: the user said land"
+    );
+    apply(&mut store, &lines, "land", T0 + 7202).unwrap();
+    let message = item(&mut store, &land);
+    assert_eq!(
+        message.result.as_deref(),
+        Some(format!("station {land}: land | why: the user said land").as_str())
+    );
+    assert_eq!(message.resolved, Some(T0 + 7202));
+    let lane = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+    assert_eq!(lane.state, gear_model::SeatState::Retiring, "{lane:?}");
+
+    apply(&mut store, &lines, "land-again", T0 + 7203).unwrap();
+    assert_eq!(item(&mut store, &land).resolved, Some(T0 + 7202));
+}

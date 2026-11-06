@@ -329,14 +329,19 @@ pub fn apply_decisions(tx: &Tx<'_>, project: &str, draft: &Draft, now: Ts) -> Ge
         if !is_station(&message) || message.recipient != captain.id {
             return Err(bad(format!("{id} is not this captain's station item")));
         }
-        if message.state == MsgState::Resolved {
+        // A past decision stays as it was, except a landing order answered
+        // `keep course` that is now answered `land`: that order is the only
+        // way to land the voyage, so the landing is taken (Carthage M1: the
+        // line was skipped silently and the voyage never counted as landed).
+        let lands = response == "land" || response.starts_with("land ");
+        if message.state == MsgState::Resolved && !(lands && relands(tx, project, &message)?) {
             continue;
-        } // retained historical decision
-          // T-461: a landing is the voyage's last act; it is refused while a
-          // done clause is open or the voyage was cut by more than a fifth,
-          // unless the user's word (a `confirmed:` line in this apply) names
-          // the open clauses or the cut.
-        if response == "land" || response.starts_with("land ") {
+        }
+        // T-461: a landing is the voyage's last act; it is refused while a
+        // done clause is open or the voyage was cut by more than a fifth,
+        // unless the user's word (a `confirmed:` line in this apply) names
+        // the open clauses or the cut.
+        if lands {
             require_land_ready(tx, project, &message, &confirmed, draft.confirmed)?;
         }
         tx.update_message_state(
@@ -350,6 +355,23 @@ pub fn apply_decisions(tx: &Tx<'_>, project: &str, draft: &Draft, now: Ts) -> Ge
         )?;
     }
     Ok(())
+}
+
+/// Whether `message` is its voyage's landing order, already answered without
+/// a landing: a `station <id>: land` line still lands the voyage through it.
+pub fn relands(tx: &Tx<'_>, project: &str, message: &MessageRow) -> GearResult<bool> {
+    if message.state != MsgState::Resolved || !is_station(message) {
+        return Ok(false);
+    }
+    let landed = message.result.as_deref().is_some_and(|result| {
+        result.split_once(':').is_some_and(|(_, action)| {
+            let action = action.trim();
+            action == "land" || action.starts_with("land ")
+        })
+    });
+    let milestone = message.thread.strip_prefix("station:").unwrap_or_default();
+    let order = tx.get_meta(&format!("station:{project}:{milestone}:land"))?;
+    Ok(!landed && order.as_deref() == Some(message.id.as_str()))
 }
 
 /// T-461: whether a landing may close the voyage. The goal check is the one
