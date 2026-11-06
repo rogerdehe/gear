@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1229 -->
+<!-- gear-plan project=gear base=1230 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -157,4 +157,16 @@ deps: -
 goal: `gear admin init` warns about a model with no `context_window_k` (same case). crates/gear-app/src/admin.rs (or kickoff.rs, where init prints the staffing): for every lane, review and captain model entry without `context_window_k`, print one warning line `model <id> has no context_window_k: GEAR assumes 200k (or the CLI's own table); set it to the model's window`. No refusal.
 accept: A test in crates/gear-cli/tests/it/admin_init_contract.rs: a config with a model lacking the window prints the warning and applies. Run only `make check CRATE=gear-cli TESTS='test(admin_init)'`; the merge gate runs `make gate`.
 estimate: 15
+deps: -
+
+## T-627 [must] lane=hull milestone=M6.3 required
+goal: A feature member's merge never waits behind a full gate (Lawrence M2, 2026-11-06 09:05: T-86 and T-87, members of F-4 merging into lawrence/feature/f-4 with a conflict check only, went Executing → Unknown "merge will retry from the remote" every tick for minutes, because they take the merge lock of the same merge worktree that T-79's 6-minute gate into lawrence/dev held). crates/gear-engine/src/merge.rs: a merge whose target is not the repo's integration branch (a feature member, `task_branch_override`/`base` naming the feature branch) runs in its own merge worktree per target branch (`<project>-merge-<feature>` through herdr, as the integration one is made) with its own lock, so it runs beside the integration train; the worktree is removed when the feature's integration task lands.
+accept: Tests in merge.rs `mod tests`: while an integration merge holds its worktree's lock, a feature member's merge runs and lands in the feature branch on the same tick; two members of one feature still take turns. Run only `make check CRATE=gear-engine TESTS='test(merge::) | test(feature::)'`; the merge gate runs `make gate`.
+estimate: 40
+deps: -
+
+## T-628 [should] lane=hull milestone=M6.3
+goal: A merge-failed item says when its remerge is queued (Lawrence, 2026-11-06: M-921 merge-failed:T-63 kept `next: remerge T-63` while O-760, the remerge, was Intended behind the running train; the captain's second remerge was refused and it asked why). crates/gear-engine/src/merge.rs: when a remerge op of the task is Intended or Unknown, the open merge-failed item's body ends with "remerge queued (O-n): it runs when the merge running into <branch> ends", and the hint offers no remerge; when the remerge starts, the item says it is running.
+accept: A test in merge.rs `mod tests`: a failed merge then a queued remerge updates the item's body with the queued line; the line is gone once the op runs. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
+estimate: 20
 deps: -
