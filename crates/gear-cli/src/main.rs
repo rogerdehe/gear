@@ -347,6 +347,9 @@ enum AdminOp {
     },
     /// Lift a hold (`admin stop --hold`) and start the background engine.
     Start,
+    /// Restart every engine on this machine now (T-647): each drains its
+    /// merges and execs the binary on disk under the same lock.
+    Restart,
     /// Every store on this machine and the projects in it (T-322): the shared
     /// store, one per Herdr session, and the registered ones. Read-only.
     Projects,
@@ -579,6 +582,9 @@ fn run(cli: Cli) -> GearResult<()> {
             op: AdminOp::Stop { hold },
         }) => cmd_admin_stop(hold),
         Some(Cmd::Admin { op: AdminOp::Start }) => cmd_admin_start(),
+        Some(Cmd::Admin {
+            op: AdminOp::Restart,
+        }) => cmd_admin_restart(),
         Some(Cmd::Admin {
             op: AdminOp::Projects,
         }) => cmd_admin_projects(cli.json),
@@ -3839,7 +3845,28 @@ fn cmd_run() -> GearResult<()> {
         env!("GEAR_BUILD_SHA"),
     );
     let _ = std::io::Write::write_fmt(&mut out, format_args!("{line}"));
-    run_engine(&mut store, &mut herdr, &cfg, &mut clock, None, &mut out)
+    let outcome = run_engine(&mut store, &mut herdr, &cfg, &mut clock, None, &mut out)?;
+    if outcome == EngineOutcome::Restart {
+        // T-647: exec the binary on disk with the same arguments. The engine
+        // lock file is opened close-on-exec (std opens files that way), so
+        // the new process takes it again under the same lock.
+        let exe = std::env::current_exe().unwrap_or_default();
+        let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        let _ = std::io::Write::write_fmt(
+            &mut out,
+            format_args!("engine restart: exec {}\n", exe.display()),
+        );
+        let _ = std::io::Write::flush(&mut out);
+        drop(store);
+        drop(herdr);
+        let error =
+            std::os::unix::process::CommandExt::exec(std::process::Command::new(&exe).args(&args));
+        // exec only returns when it failed: the next `gear` call starts an
+        // engine.
+        eprintln!("engine restart failed: {error}");
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 /// The engine's start line, with the build it runs, so the log says when a
@@ -3856,6 +3883,10 @@ fn engine_start_line(pid: u32, db: &std::path::Path, version: &str, build: &str)
 /// between ticks, never in the middle of one (T-265).
 static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Set by the SIGHUP handler: `gear admin restart` (or a replaced binary)
+/// asks the loop to drain its merges and exec the binary on disk (T-647).
+static RESTART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The SIGTERM handler itself: async-signal-safe, it only stores the flag.
 /// The loop then finishes the tick it is in — a merge gate may be running —
 /// and leaves, so `gear admin stop` never cuts a merge in half.
@@ -3863,14 +3894,24 @@ extern "C" fn on_sigterm(_signal: libc::c_int) {
     STOP.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// Let SIGTERM ask the engine loop to stop between ticks.
+/// The SIGHUP handler itself: async-signal-safe, it only stores the flag.
+extern "C" fn on_sighup(_signal: libc::c_int) {
+    RESTART.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Let SIGTERM ask the engine loop to stop between ticks, and SIGHUP ask it
+/// to drain and restart.
 fn install_stop_handler() {
-    // SAFETY: `on_sigterm` only stores into an atomic, which is
-    // async-signal-safe; `libc::signal` only installs it.
+    // SAFETY: the handlers only store into an atomic, which is
+    // async-signal-safe; `libc::signal` only installs them.
     unsafe {
         libc::signal(
             libc::SIGTERM,
             on_sigterm as extern "C" fn(libc::c_int) as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGHUP,
+            on_sighup as extern "C" fn(libc::c_int) as *const () as libc::sighandler_t,
         );
     }
 }
@@ -4283,6 +4324,45 @@ fn cmd_admin_start() -> GearResult<()> {
     Ok(())
 }
 
+/// `gear admin restart` (T-647): for every store on this machine, SIGHUP the
+/// engine that holds its lock. A free lock means no engine: its pid is stale
+/// and is never signalled.
+fn cmd_admin_restart() -> GearResult<()> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    for path in stores_in(home.as_deref()) {
+        let db = path.to_string_lossy();
+        match restart_store(&path) {
+            Some(pid) => println!("restarting {db} pid {pid}"),
+            None => println!("no engine"),
+        }
+    }
+    Ok(())
+}
+
+/// SIGHUP the engine holding the lock of the store at `store`; the pid when
+/// one was signalled. A lock nobody holds means no engine: its pid is stale
+/// and is never signalled.
+fn restart_store(store: &std::path::Path) -> Option<i32> {
+    let dir = store.parent()?;
+    let lock_path = dir.join("engine.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .ok()?;
+    match file.try_lock() {
+        // Free: no engine runs on this store.
+        Ok(()) => None,
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let text = std::fs::read_to_string(&lock_path).unwrap_or_default();
+            let pid: i32 = text.trim().parse().ok()?;
+            // SAFETY: plain kill(2) on a pid read from our own lock file.
+            (unsafe { libc::kill(pid, libc::SIGHUP) } == 0).then_some(pid)
+        }
+        Err(std::fs::TryLockError::Error(_)) => None,
+    }
+}
+
 /// What `gear admin stop` says before it signals the engine (T-298): the
 /// projects this store holds, because they all pause until it starts again.
 fn stop_notice(projects: &[String]) -> String {
@@ -4395,6 +4475,16 @@ fn take_engine_lock(dir: &std::path::Path) -> GearResult<std::fs::File> {
     }
 }
 
+/// How the engine loop ended (T-647): it leaves, or it leaves to exec the
+/// binary on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EngineOutcome {
+    /// The loop stops; the process exits.
+    Exit,
+    /// The merges drained: the process execs the binary on disk.
+    Restart,
+}
+
 /// The engine loop over an injected clock and a bounded number of ticks: the
 /// startup recovery, then `tick` every `cfg.tick_s` seconds (design/08).
 fn run_engine(
@@ -4404,7 +4494,7 @@ fn run_engine(
     clock: &mut dyn FnMut() -> i64,
     ticks: Option<u64>,
     out: &mut dyn std::io::Write,
-) -> GearResult<()> {
+) -> GearResult<EngineOutcome> {
     run_engine_with(
         store,
         herdr,
@@ -4414,6 +4504,7 @@ fn run_engine(
         out,
         &|| STOP.load(std::sync::atomic::Ordering::SeqCst),
         &mut gear_engine::tick,
+        &|cfg| gear_engine::merges_idle(cfg),
         &mut BinaryWatch::current(),
     )
 }
@@ -4424,8 +4515,14 @@ const BINARY_CHANGED: &str =
     "engine: the binary on disk changed since this engine started; restart it to run the new build";
 
 /// How long a replaced binary waits for its restart before the captains are
-/// told.
-const BINARY_CHANGED_GRACE: std::time::Duration = std::time::Duration::from_secs(600);
+/// told (T-647: an engine that drains and restarts itself is not news; only
+/// one still draining 30 min after the change is).
+const BINARY_CHANGED_GRACE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// How long a replaced binary must sit unchanged before the engine restarts
+/// into it (T-647): a build writes the file more than once, and the engine
+/// must exec a finished binary, not one half-written.
+const RESTART_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The engine's own binary on disk: a rebuild replaces it and the running
 /// engine keeps the old one, silently, for as long as it lives (T-398;
@@ -4476,6 +4573,21 @@ impl BinaryWatch {
         self.announced = true;
         true
     }
+
+    /// Whether the engine should exec the binary on disk (T-647): the file
+    /// changed since the start and has sat unchanged for [`RESTART_SETTLE`],
+    /// so a build that writes it more than once is not exec'd half-written.
+    fn restart_due(&mut self) -> bool {
+        let Some(now) = modified(&self.path) else {
+            return false;
+        };
+        if Some(now) == self.mtime_at_start {
+            return false;
+        }
+        std::time::SystemTime::now()
+            .duration_since(now)
+            .is_ok_and(|age| age >= RESTART_SETTLE)
+    }
 }
 
 /// The modification time of `path`, when it can be read.
@@ -4488,7 +4600,8 @@ fn modified(path: &std::path::Path) -> Option<std::time::SystemTime> {
 /// [`run_engine`] with the tick call injectable, so a test can drive the
 /// "a failing tick does not stop the loop" path — and `stop`, which the loop
 /// asks before each tick and once per second of the sleep between ticks — and
-/// `watch`, which says when the binary on disk is a newer build (T-398).
+/// `watch`, which says when the binary on disk is a newer build (T-398) — and
+/// `idle`, which says whether the merges have drained (T-647).
 fn run_engine_with(
     store: &mut gear_store::Store,
     herdr: &mut dyn gear_herdr::HerdrAct,
@@ -4503,8 +4616,9 @@ fn run_engine_with(
         &gear_engine::EngineCfg,
         i64,
     ) -> GearResult<gear_engine::TickReport>,
+    idle: &dyn Fn(&gear_engine::EngineCfg) -> bool,
     watch: &mut BinaryWatch,
-) -> GearResult<()> {
+) -> GearResult<EngineOutcome> {
     // Startup step 3: an op the previous process left Executing becomes
     // Unknown — nothing is re-sent.
     let started = clock();
@@ -4515,15 +4629,32 @@ fn run_engine_with(
     // about a replaced binary is answered by this start.
     settle_binary_changed(store, started)?;
     let mut done: u64 = 0;
+    // Set once the loop is draining for a stop or a restart (T-647).
+    let mut leaving: Option<EngineOutcome> = None;
     loop {
-        if ticks.is_some_and(|limit| done >= limit) {
-            break;
+        if leaving.is_none() {
+            if ticks.is_some_and(|limit| done >= limit) {
+                break;
+            }
+            // `gear admin stop` only asks the loop to leave between ticks, so
+            // the tick that is running — and a merge gate in it — always
+            // finishes (T-265). It drains first (T-647): a merge already
+            // running finishes, and no new one starts.
+            if stop() {
+                gear_engine::drain(cfg);
+                leaving = Some(EngineOutcome::Exit);
+            } else if RESTART.load(std::sync::atomic::Ordering::SeqCst) || watch.restart_due() {
+                gear_engine::drain(cfg);
+                writeln!(out, "engine draining for restart").map_err(write_error)?;
+                leaving = Some(EngineOutcome::Restart);
+            }
         }
-        // `gear admin stop` only asks the loop to leave between ticks, so the
-        // tick that is running — and a merge gate in it — always finishes
-        // (T-265).
-        if stop() {
-            break;
+        // The engine may be replaced only when no merge worker and no bisect
+        // is running: the loop keeps ticking until then (T-647).
+        if let Some(outcome) = leaving {
+            if idle(cfg) {
+                return Ok(outcome);
+            }
         }
         let now = clock();
         // T-398: a binary replaced on disk is told once, before the tick — a
@@ -4569,7 +4700,7 @@ fn run_engine_with(
             }
         }
     }
-    Ok(())
+    Ok(EngineOutcome::Exit)
 }
 
 /// An engine output line that could not be written is reported.
@@ -9484,12 +9615,19 @@ path="api"
             .unwrap();
 
         let mut clock = || T0;
+        let tick_calls = std::cell::Cell::new(0);
         let mut tick = |_: &mut Store,
                         _: &mut dyn gear_herdr::HerdrAct,
                         _: &gear_engine::EngineCfg,
-                        _: i64| Ok(gear_engine::TickReport::default());
+                        _: i64| {
+            tick_calls.set(tick_calls.get() + 1);
+            Ok(gear_engine::TickReport::default())
+        };
+        // The merge drains after the two ticks the announcement is checked
+        // over (T-647: the replaced binary is drained, then exec'd).
+        let idle = |_: &gear_engine::EngineCfg| tick_calls.get() >= 2;
         let mut out: Vec<u8> = Vec::new();
-        run_engine_with(
+        let outcome = run_engine_with(
             &mut store,
             &mut herdr,
             &gear_engine::EngineCfg::default(),
@@ -9498,9 +9636,11 @@ path="api"
             &mut out,
             &|| false,
             &mut tick,
+            &idle,
             &mut watch,
         )
         .unwrap();
+        assert_eq!(outcome, EngineOutcome::Restart);
 
         let text = String::from_utf8(out).unwrap();
         assert_eq!(
@@ -9525,6 +9665,7 @@ path="api"
             &mut Vec::new(),
             &|| false,
             &mut tick,
+            &|_| true,
             &mut watch,
         )
         .unwrap();
@@ -9569,6 +9710,7 @@ path="api"
             &mut out,
             &|| false,
             &mut failing,
+            &|_| true,
             &mut BinaryWatch::at_start(std::path::PathBuf::from("/nonexistent/gear")),
         )
         .unwrap();
@@ -9608,6 +9750,7 @@ path="api"
             &mut out,
             &|| stop.get(),
             &mut tick,
+            &|_| true,
             &mut BinaryWatch::at_start(std::path::PathBuf::from("/nonexistent/gear")),
         )
         .unwrap();
@@ -9646,6 +9789,7 @@ path="api"
             &mut out,
             &|| true,
             &mut tick,
+            &|_| true,
             &mut BinaryWatch::at_start(std::path::PathBuf::from("/nonexistent/gear")),
         )
         .unwrap();
@@ -9655,6 +9799,122 @@ path="api"
             0,
             "a stop before the first tick runs none"
         );
+    }
+
+    /// T-647: a binary replaced on disk drains the engine and returns
+    /// `Restart` only once the merges are idle; it keeps ticking until then.
+    #[test]
+    fn a_changed_binary_drains_the_engine_and_restarts_only_when_the_merges_are_idle() {
+        let (mut store, mut herdr) = world();
+        let dir = scratch("gear-restart");
+        let binary = dir.join("gear");
+        std::fs::write(&binary, b"the old build").unwrap();
+        let mut watch = BinaryWatch::at_start(binary.clone());
+        std::fs::write(&binary, b"the new build").unwrap();
+        // The build finished more than the settle time ago.
+        let later =
+            std::time::SystemTime::now() - RESTART_SETTLE - std::time::Duration::from_secs(1);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&binary)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+
+        let mut clock = || T0;
+        let tick_calls = std::cell::Cell::new(0);
+        let mut tick = |_: &mut Store,
+                        _: &mut dyn gear_herdr::HerdrAct,
+                        _: &gear_engine::EngineCfg,
+                        _: i64| {
+            tick_calls.set(tick_calls.get() + 1);
+            Ok(gear_engine::TickReport::default())
+        };
+        // A merge runs for the first two ticks, then it is idle.
+        let idle = |_: &gear_engine::EngineCfg| tick_calls.get() >= 2;
+        let mut out: Vec<u8> = Vec::new();
+        let outcome = run_engine_with(
+            &mut store,
+            &mut herdr,
+            &gear_engine::EngineCfg::default(),
+            &mut clock,
+            Some(2),
+            &mut out,
+            &|| false,
+            &mut tick,
+            &idle,
+            &mut watch,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, EngineOutcome::Restart);
+        assert_eq!(tick_calls.get(), 2, "it ticks until the merge is idle");
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("engine draining for restart"),
+            "the drain is logged: {text}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// T-647: a SIGTERM drains the same way and leaves only once the merges
+    /// are idle.
+    #[test]
+    fn a_sigterm_drains_the_engine_and_keeps_ticking_until_the_merges_are_idle() {
+        let (mut store, mut herdr) = world();
+        let mut clock = || T0;
+        let tick_calls = std::cell::Cell::new(0);
+        let mut tick = |_: &mut Store,
+                        _: &mut dyn gear_herdr::HerdrAct,
+                        _: &gear_engine::EngineCfg,
+                        _: i64| {
+            tick_calls.set(tick_calls.get() + 1);
+            Ok(gear_engine::TickReport::default())
+        };
+        let idle = |_: &gear_engine::EngineCfg| tick_calls.get() >= 2;
+        let mut out: Vec<u8> = Vec::new();
+        let outcome = run_engine_with(
+            &mut store,
+            &mut herdr,
+            &gear_engine::EngineCfg::default(),
+            &mut clock,
+            None,
+            &mut out,
+            &|| true,
+            &mut tick,
+            &idle,
+            &mut BinaryWatch::at_start(std::path::PathBuf::from("/nonexistent/gear")),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, EngineOutcome::Exit);
+        assert_eq!(tick_calls.get(), 2, "it ticks until the merge is idle");
+    }
+
+    /// T-647: `gear admin restart` SIGHUPs the engine that holds a store's
+    /// lock; a free lock is no engine and its pid is never signalled.
+    #[test]
+    fn admin_restart_sends_sighup_to_the_engine_holding_the_lock() {
+        let dir = scratch("gear-admin-restart");
+        let db = dir.join("gear.db");
+        std::fs::write(&db, b"").unwrap();
+        // A live process whose pid the lock names: the child `sleep`.
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let lock = take_engine_lock(&dir).unwrap();
+        std::fs::write(dir.join("engine.lock"), format!("{}\n", child.id())).unwrap();
+
+        assert_eq!(restart_store(&db), Some(child.id() as i32));
+        // SIGHUP ends the sleep: the engine was signalled.
+        let status = child.wait().unwrap();
+        assert!(!status.success(), "the sleep was signalled: {status:?}");
+
+        // The lock is free now: no engine, and the stale pid is not signalled.
+        drop(lock);
+        assert_eq!(restart_store(&db), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
