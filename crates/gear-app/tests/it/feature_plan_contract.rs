@@ -490,6 +490,79 @@ fn a_member_waits_for_an_unmerged_outside_dep_and_not_for_a_merged_one() {
     assert_eq!(task(&mut s, "T-2").deps, vec!["T-1".to_string()]);
 }
 
+/// T-624: a member whose block drops its outside dep releases every other
+/// member on the next apply: the spread is computed from the members' own
+/// deps, not from the stored deps of the previous apply.
+#[test]
+fn a_member_dropping_its_outside_dep_releases_every_other_member() {
+    let mut s = world();
+    run(
+        &mut s,
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=wire\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [should] lane=heat\nfeature: F-1\ngoal: B\naccept: b\nestimate: 30\ndeps: T-1\n\n## NEW [could] lane=heat\nfeature: F-1\ngoal: C\naccept: c\nestimate: 30\ndeps: -\n",
+        "r1",
+    )
+    .unwrap();
+    assert_eq!(task(&mut s, "T-2").deps, vec!["T-1".to_string()]);
+    assert_eq!(task(&mut s, "T-3").deps, vec!["T-1".to_string()]);
+
+    // T-2's block drops its outside dep: no member declares T-1 any more.
+    run_at(
+        &mut s,
+        "# Queue\n## T-2 [should] lane=heat\nfeature: F-1\ndeps: -\n\n## T-3 [could] lane=heat\nfeature: F-1\ndeps: -\n",
+        "r2",
+    )
+    .unwrap();
+    assert_eq!(
+        task(&mut s, "T-2").deps,
+        Vec::<String>::new(),
+        "the member that dropped the dep is released"
+    );
+    assert_eq!(
+        task(&mut s, "T-3").deps,
+        Vec::<String>::new(),
+        "every other member is released too"
+    );
+}
+
+/// T-624: a member's own `deps: -` is kept while another member still
+/// declares the outside dep, and the output names that member.
+#[test]
+fn a_member_keeps_its_own_deps_and_the_output_names_the_declaring_member() {
+    let mut s = world();
+    let result = run(
+        &mut s,
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=wire\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [should] lane=heat\nfeature: F-1\ngoal: B\naccept: b\nestimate: 30\ndeps: T-1\n\n## NEW [could] lane=heat\nfeature: F-1\ngoal: C\naccept: c\nestimate: 30\ndeps: -\n",
+        "r1",
+    )
+    .unwrap();
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|line| line == "T-3 waits on T-1 (F-1: T-2 needs it)"),
+        "{:?}",
+        result.warnings
+    );
+    assert_eq!(task(&mut s, "T-3").deps, vec!["T-1".to_string()]);
+}
+
+/// T-624: `plan show` keeps the spread out of `deps:` and prints it on its
+/// own line.
+#[test]
+fn plan_show_keeps_the_spread_out_of_deps() {
+    let mut s = world();
+    run(
+        &mut s,
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=wire\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [should] lane=heat\nfeature: F-1\ngoal: B\naccept: b\nestimate: 30\ndeps: T-1\n\n## NEW [could] lane=heat\nfeature: F-1\ngoal: C\naccept: c\nestimate: 30\ndeps: -\n",
+        "r1",
+    )
+    .unwrap();
+    let out = s.read(|tx| gear_app::plan::show(tx, "p", "T-3")).unwrap();
+    assert!(out.contains("deps: -\n"), "{out}");
+    assert!(!out.contains("deps: T-1"), "{out}");
+    assert!(out.contains("waits (feature F-1): T-1"), "{out}");
+}
+
 /// A later apply adds a member: the carrier's deps stay equal to the members,
 /// and it keeps the issue.
 #[test]
