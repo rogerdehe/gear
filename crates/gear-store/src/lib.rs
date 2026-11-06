@@ -1419,6 +1419,22 @@ impl<'s> Tx<'s> {
         Ok(row)
     }
 
+    /// Whether `pane_id` was a void binding of `seat_id` at any generation
+    /// (T-616): a respawned seat's old pane, kept by an inherited variable or
+    /// old text. One query, not one per generation.
+    pub fn void_binding_on_pane(&self, seat_id: &str, pane_id: &str) -> GearResult<bool> {
+        let found: Option<i64> = self
+            .tx
+            .query_row(
+                "SELECT 1 FROM bindings WHERE seat=?1 AND pane_id=?2 AND status='void' LIMIT 1",
+                params![seat_id, pane_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(found.is_some())
+    }
+
     /// The seats whose binding at their current generation is active on
     /// `pane_id` (any project of this store): a pane that holds one is in use
     /// and is never closed for another seat (Prometheus, 2026-11-05: the
