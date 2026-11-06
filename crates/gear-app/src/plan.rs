@@ -3857,22 +3857,26 @@ fn remerge(
     Ok(None)
 }
 
-/// Resolve the task's open `merge-lost:<task>` items with `result`.
+/// Resolve the task's open `merge-lost:<task>` and `merge-failed:<task>`
+/// items with `result` (T-642: a queued remerge answers the failed-merge item
+/// too, so it does not stay open beside its retry).
 fn close_lost(tx: &Tx<'_>, project: &str, task: &str, result: &str, now: Ts) -> GearResult<()> {
-    for message in tx.thread_messages(project, &format!("merge-lost:{task}"))? {
-        if matches!(
-            message.state,
-            gear_model::MsgState::Open | gear_model::MsgState::Waiting
-        ) {
-            tx.update_message_state(
-                project,
-                &message.id,
-                gear_model::MsgState::Resolved,
-                Some(result),
-                None,
-                None,
-                now,
-            )?;
+    for thread in [format!("merge-lost:{task}"), format!("merge-failed:{task}")] {
+        for message in tx.thread_messages(project, &thread)? {
+            if matches!(
+                message.state,
+                gear_model::MsgState::Open | gear_model::MsgState::Waiting
+            ) {
+                tx.update_message_state(
+                    project,
+                    &message.id,
+                    gear_model::MsgState::Resolved,
+                    Some(result),
+                    None,
+                    None,
+                    now,
+                )?;
+            }
         }
     }
     Ok(())
