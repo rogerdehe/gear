@@ -149,17 +149,46 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
                 format!("{}–{} done", (previous + 1) * 3, groups * 3)
             });
         }
-        // Every task of a watched voyage is done: the voyage must be landed by
-        // the captain (report, freeze, ask about the lanes). Nothing else
-        // would ever ring for it — M2 sat finished for 36 h (L-78).
-        if left == 0 && done > 0 && tx.get_meta(&format!("{key}:land"))?.is_none() {
+        // Every task of a watched voyage is done and on the integration
+        // branch: the voyage must be landed by the captain (report, freeze,
+        // ask about the lanes). Nothing else would ever ring for it — M2 sat
+        // finished for 36 h (L-78). Accepted work still waiting for its merge
+        // is not landed (Lawrence M2: M-1439 rang while T-124 was accepted and
+        // its merge then failed), so the item waits for the landing's own rule.
+        if left == 0
+            && done > 0
+            && tx.get_meta(&format!("{key}:land"))?.is_none()
+            && unmerged_tasks(tx, project, &report.milestone)?.is_empty()
+        {
+            let voyage = tx.get_voyage(project, &report.milestone)?;
+            let open: Vec<String> = crate::goal::goal_check(
+                tx,
+                project,
+                &report.milestone,
+                voyage.as_ref().and_then(|v| v.done.as_deref()),
+            )?
+            .into_iter()
+            .filter(|check| !check.met)
+            .map(|check| format!("({})", check.n))
+            .collect();
+            let open = if open.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\nGoal clause{} {} not met yet: no merged task carries {}; meet {} before step 3, or confirm with the user.",
+                    if open.len() == 1 { "" } else { "s" },
+                    open.join(", "),
+                    if open.len() == 1 { "it" } else { "them" },
+                    if open.len() == 1 { "it" } else { "them" },
+                )
+            };
             let message = tx.insert_message(&NewMessage {
                 meta: None,
                 project: project.into(), thread: format!("station:{}", report.milestone),
                 task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
                 recipient: captain.id.clone(), kind: MsgKind::System, urgent: true,
                 body: with_goal(tx, project, &report.milestone, format!(
-                    "Voyage {} is ready to land: all {done} tasks are done (elapsed {} / eta {}).\n\
+                    "Voyage {} is ready to land: all {done} tasks are done and merged (elapsed {} / eta {}).{open}\n\
 1. Run `gear report voyage` and write the voyage report into # Decisions.\n\
 2. Review it with the user first: the report, the ★ decisions (only those), the friction reports that led to a change. Write each correction as `- <date> user: <text>`.\n\
 3. When the user says land: `station <id>: land` (it retires every lane and releases every reviewer), then remove every worktree of the project and close its Herdr workspaces.\n\

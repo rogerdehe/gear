@@ -310,7 +310,7 @@ fn each_third_completion_is_a_station_including_the_final_task() {
             .lines()
             .nth(1)
             .unwrap()
-            .starts_with("Voyage M2 is ready to land: all 6 tasks are done"),
+            .starts_with("Voyage M2 is ready to land: all 6 tasks are done and merged"),
         "{land_body}"
     );
     assert!(
@@ -796,20 +796,29 @@ fn a_landing_needs_every_accepted_task_merged_and_retires_the_lanes() {
     for n in 1..=5 {
         finish(&mut store, n);
     }
-    // T-6's accepted work never reached the integration branch.
+    // T-6's accepted work never reached the integration branch: no landing
+    // order yet (Lawrence M2: M-1439 rang while T-124 still waited to merge).
     finish_with(&mut store, 6, false);
-    let land = check(&mut store, 7200)
-        .into_iter()
-        .find(|id| item(&mut store, id).body.contains("ready to land"))
-        .unwrap();
-    let lines = format!("- done (1): met | evidence: all 6 tasks merged\n- station {land}: land");
-    let error = apply(&mut store, &lines, "land-unmerged", T0 + 7201).unwrap_err();
-    assert!(error.detail.contains("T-6"), "{}", error.detail);
+    assert!(
+        !check(&mut store, 7200)
+            .iter()
+            .any(|id| item(&mut store, id).body.contains("ready to land")),
+        "accepted but unmerged work is not ready to land"
+    );
 
     store
         .write(|tx| tx.set_attempt_time("p", "T-6", 1, AttemptStep::Merged, T0 + 7201))
         .unwrap();
-    apply(&mut store, &lines, "land-merged", T0 + 7202).unwrap();
+    let land = check(&mut store, 7202)
+        .into_iter()
+        .find(|id| item(&mut store, id).body.contains("ready to land"))
+        .unwrap();
+    // A done clause no task carries is named: every task merged is not the
+    // goal met.
+    let body = item(&mut store, &land).body;
+    assert!(body.contains("Goal clause (1) not met yet"), "{body}");
+    let lines = format!("- done (1): met | evidence: all 6 tasks merged\n- station {land}: land");
+    apply(&mut store, &lines, "land-merged", T0 + 7203).unwrap();
     assert_eq!(item(&mut store, &land).state, MsgState::Resolved);
     let lane = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
     assert_eq!(lane.state, gear_model::SeatState::Retiring, "{lane:?}");
