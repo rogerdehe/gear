@@ -2268,10 +2268,15 @@ fn idle_reason_text(project: &ProjectBoard, lane: &LaneBoard, landed: bool) -> (
     }
     // The next task of the lane: the first one in the plan's order whose
     // dependencies are all merged — the rule the engine dispatches by (T-562).
+    // A cancelled task keeps the stage of a task never started, but it is not
+    // work.
     let mut waiting: Vec<&TaskBoard> = lane
         .tasks
         .iter()
-        .filter(|task| matches!(task.stage, graph::Stage::Deps | graph::Stage::Queued))
+        .filter(|task| {
+            task.state != gear_model::TaskState::Cancelled
+                && matches!(task.stage, graph::Stage::Deps | graph::Stage::Queued)
+        })
         .collect();
     waiting.sort_by(|left, right| {
         left.rank
