@@ -78,6 +78,29 @@ pub fn start_features(
         }
         Ok(ids)
     })?;
+    // A feature whose integration task is done (landed) has no conflict left
+    // to settle (Lawrence M2: M-1165 stayed open after F-4 landed).
+    let landed: Vec<String> = store.read(|tx| {
+        let prefix = format!("feature_carrier:{project}:");
+        let mut out = Vec::new();
+        for key in tx.meta_keys_with_prefix(&prefix)? {
+            let Some(carrier) = tx.get_meta(&key)? else {
+                continue;
+            };
+            if tx
+                .get_task(project, &carrier)?
+                .is_some_and(|task| task.state == TaskState::Done)
+            {
+                if let Some(feature) = key.strip_prefix(&prefix) {
+                    out.push(feature.to_string());
+                }
+            }
+        }
+        Ok(out)
+    })?;
+    for feature in landed {
+        close_refresh_items(store, project, &feature, "the feature landed", now)?;
+    }
     for task in tasks {
         match hand_in(store, herdr, cfg, tips, config, project, &task, now) {
             Ok(Some(attempt)) => {
@@ -269,6 +292,18 @@ fn hand_in(
         },
         now,
     )?;
+    // The feature branch takes the integration branch now: an open conflict
+    // item of the feature has done its work (Lawrence M2: M-1079 stayed open
+    // after F-1 merged clean).
+    if !matches!(refresh, Refresh::Wait) {
+        close_refresh_items(
+            store,
+            project,
+            &feature,
+            "the feature branch takes the integration branch now",
+            now,
+        )?;
+    }
     let (candidate, report) = match refresh {
         Refresh::NotNeeded => {
             let report = format!("the feature branch {} at {candidate}", job.branch);
@@ -495,6 +530,35 @@ fn refresh(
         &tip,
     ]);
     Ok(Refresh::Refreshed { tip, subject })
+}
+
+/// Resolve the open conflict items of `feature` (thread
+/// `feature-refresh:<feature>`): a reply cannot settle them, so GEAR closes
+/// them once the conflict is gone.
+fn close_refresh_items(
+    store: &mut Store,
+    project: &str,
+    feature: &str,
+    why: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let thread = format!("feature-refresh:{feature}");
+    store.write(|tx| {
+        for item in tx.thread_messages(project, &thread)? {
+            if matches!(item.state, MsgState::Open | MsgState::Waiting) {
+                tx.update_message_state(
+                    project,
+                    &item.id,
+                    MsgState::Resolved,
+                    Some(why),
+                    None,
+                    None,
+                    now,
+                )?;
+            }
+        }
+        Ok(())
+    })
 }
 
 /// One captain item on thread `feature-refresh:<feature>` (T-597): the feature
@@ -979,7 +1043,13 @@ mod tests {
             handed.candidate.as_deref(),
             Some(remote_tip(bare.path()).as_str())
         );
-        assert_eq!(refresh_items(&mut store).len(), 1, "no second item");
+        let items = refresh_items(&mut store);
+        assert_eq!(items.len(), 1, "no second item");
+        assert_eq!(
+            items[0].state,
+            MsgState::Resolved,
+            "the conflict is gone, so its item closes"
+        );
     }
 
     /// T-597: a feature branch that already holds the integration branch is
