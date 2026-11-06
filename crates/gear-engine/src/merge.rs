@@ -170,6 +170,11 @@ impl MergeWorkers {
 struct Worker {
     op: OpRow,
     finished: Arc<Mutex<Option<Finished>>>,
+    /// The worktrees it merges in: a merge of another branch whose worktree is
+    /// one of these waits, queued, instead of failing on the lock (Lawrence
+    /// M2: F-5's waiting T-94 took the one merge worktree every tick and the
+    /// members of F-4 and F-1 only ever saw "merge will retry").
+    paths: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -661,6 +666,7 @@ pub fn merge_passed(
             if members.len() > 1 {
                 match integration_worktree(store, herdr, &repo, project, &config, &cfg.merges, now)
                 {
+                    Ok(worktree) if worktree_in_use(&workers, &worktree.path) => continue,
                     Ok(worktree) => {
                         // T-566: a merge of this project starts: the wait's
                         // item has done its work.
@@ -754,6 +760,9 @@ pub fn merge_passed(
         let worktree =
             match integration_worktree(store, herdr, &repo, project, &config, &cfg.merges, now) {
                 Ok(worktree) => {
+                    if worktree_in_use(&workers, &worktree.path) {
+                        continue;
+                    }
                     // T-566: the merge starts, so whatever held it is gone.
                     close_merge_waits(store, project, now)?;
                     worktree
@@ -793,6 +802,7 @@ pub fn merge_passed(
         let finished = Arc::new(Mutex::new(None));
         let output = finished.clone();
         let job = op.clone();
+        let worker_path = worktree.path.clone();
         let repo = repo.clone();
         // The remote is the project's own (T-262), resolved from the config
         // this tick already holds.
@@ -848,7 +858,14 @@ pub fn merge_passed(
             });
         match spawned {
             Ok(_) => {
-                workers.insert(key, Worker { op, finished });
+                workers.insert(
+                    key,
+                    Worker {
+                        op,
+                        finished,
+                        paths: vec![worker_path],
+                    },
+                );
             }
             Err(error) => fail_merge(
                 store,
@@ -985,6 +1002,14 @@ fn settle_report(
     Ok(merged)
 }
 
+/// Whether a running merge worker holds the worktree at `path`: a merge
+/// launched there now would only find the lock taken.
+fn worktree_in_use(workers: &BTreeMap<String, Worker>, path: &str) -> bool {
+    workers
+        .values()
+        .any(|worker| worker.paths.iter().any(|held| held == path))
+}
+
 /// Whether a queued merge joins the train of `key`.
 enum Member {
     Joins,
@@ -1049,6 +1074,10 @@ fn launch_train(
     workers: &mut BTreeMap<String, Worker>,
     now: Ts,
 ) -> GearResult<()> {
+    let paths: Vec<String> = worktrees
+        .iter()
+        .map(|worktree| worktree.path.clone())
+        .collect();
     let mut members = Vec::new();
     for op in &train {
         let task = op.task.clone().unwrap_or_default();
@@ -1111,7 +1140,14 @@ fn launch_train(
     let head = train[0].clone();
     match spawned {
         Ok(_) => {
-            workers.insert(key.to_string(), Worker { op: head, finished });
+            workers.insert(
+                key.to_string(),
+                Worker {
+                    op: head,
+                    finished,
+                    paths,
+                },
+            );
         }
         Err(error) => {
             for op in &train {
@@ -1144,6 +1180,7 @@ fn launch_batch(
     workers: &mut BTreeMap<String, Worker>,
     now: Ts,
 ) -> GearResult<()> {
+    let paths = vec![worktree.path.clone()];
     let mut members = Vec::new();
     for op in &batch {
         let task = op.task.clone().unwrap_or_default();
@@ -1217,7 +1254,14 @@ fn launch_batch(
     let head = batch[0].clone();
     match spawned {
         Ok(_) => {
-            workers.insert(key.to_string(), Worker { op: head, finished });
+            workers.insert(
+                key.to_string(),
+                Worker {
+                    op: head,
+                    finished,
+                    paths,
+                },
+            );
         }
         Err(error) => {
             for op in &batch {
@@ -12832,6 +12876,7 @@ gate = "{project_gate}"
             Worker {
                 op: other,
                 finished,
+                paths: Vec::new(),
             },
         );
         merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
