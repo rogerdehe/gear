@@ -2248,6 +2248,7 @@ fn feature_work(
             })
             .cloned()
             .collect();
+        let had_carrier = stored.is_some();
         let (carrier, new_carrier, touch_carrier) = match (stored, open.is_empty()) {
             (stored, true) => (stored.unwrap_or_default(), false, false),
             (Some(carrier), false)
@@ -2259,6 +2260,7 @@ fn feature_work(
             }
             (_, false) => (tx.next_id(project, 'T')?, true, true),
         };
+        let fresh_over_landed = new_carrier && had_carrier;
         let (repo, base, gate, integration) = match stored_config {
             Some(config) => {
                 let repo = config.repo_of_lane(&lane);
@@ -2279,7 +2281,17 @@ fn feature_work(
             new_carrier,
             touch_carrier,
             members: members.clone(),
-            deps: open,
+            // Every member that is not cancelled, done ones included: a done
+            // member may not be merged into the feature branch yet, and the
+            // hand-in waits for each one's merge (Lawrence M2: T-94 was done,
+            // not merged, and an apply left it out of T-100's deps, so T-100
+            // was handed in without it). A fresh carrier over a landed feature
+            // takes only the open members: the others landed with the old one.
+            deps: if fresh_over_landed {
+                open
+            } else {
+                members.clone()
+            },
             goals,
             lane,
             milestone,

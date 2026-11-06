@@ -747,3 +747,34 @@ fn a_member_added_after_the_feature_landed_gets_a_new_carrier() {
         "the new member works on the feature's branch"
     );
 }
+
+/// A done member that is not merged into the feature branch stays one of the
+/// carrier's deps when the plan is applied again (Lawrence M2: T-94 was done,
+/// an apply moved it to another lane and dropped it from T-100's deps, and
+/// T-100 was handed in without it).
+#[test]
+fn a_done_member_stays_a_dep_of_its_carrier_on_a_later_apply() {
+    let mut s = world();
+    run(
+        &mut s,
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\nfeature: F-1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n## NEW [must] lane=heat\nfeature: F-1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n",
+        "r1",
+    )
+    .unwrap();
+    let carrier = s
+        .read(|tx| tx.feature_carrier("p", "F-1"))
+        .unwrap()
+        .expect("the feature has an integration task");
+    land(&mut s, &["T-1"]);
+    run_at(
+        &mut s,
+        "# Queue\n## T-1 [must] lane=wire\nfeature: F-1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
+        "r2",
+    )
+    .unwrap();
+    assert_eq!(
+        task(&mut s, &carrier).deps,
+        vec!["T-1".to_string(), "T-2".to_string()],
+        "the done member is still waited for"
+    );
+}
