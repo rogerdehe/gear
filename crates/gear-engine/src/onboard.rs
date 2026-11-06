@@ -480,6 +480,82 @@ fn git(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// T-622: a project's integration branch lives for one voyage. Every lane,
+/// review and merge worktree is cut from `<remote>/<integration>`, and a
+/// landing's reclaim deletes the branch once it is on the release branch, so
+/// the next voyage must cut it again. Called before a worktree is created:
+/// when the remote has no `<integration>` after a fetch, push
+/// `<remote>/<release>` to `refs/heads/<integration>` once, fetch again, and
+/// tell the captain in one Info item. An integration branch equal to the
+/// release branch is never created.
+pub(crate) fn ensure_integration(
+    store: &mut Store,
+    project: &str,
+    config: &gear_app::config::ProjectConfig,
+    repo: &gear_app::config::Repo,
+    now: Ts,
+) -> Result<(), String> {
+    let remote = &config.conventions.remote;
+    let integration = repo.integration.as_str();
+    let release = repo.release.as_str();
+    if integration == release {
+        return Ok(());
+    }
+    let dir = std::path::Path::new(&repo.path);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    // The fetch the worktree is cut from; a failed fetch leaves the local
+    // refs as they are.
+    let _ = git(dir, &["fetch", remote]);
+    let reference = format!("refs/remotes/{remote}/{integration}");
+    if git(dir, &["rev-parse", "--verify", "--quiet", &reference]).is_ok() {
+        return Ok(());
+    }
+    let release_ref = format!("refs/remotes/{remote}/{release}");
+    let Ok(sha) = git(dir, &["rev-parse", "--verify", "--quiet", &release_ref]) else {
+        // Nothing to cut from: the worktree step names the missing branch.
+        return Ok(());
+    };
+    let sha = sha.trim().to_string();
+    git(
+        dir,
+        &["push", remote, &format!("{sha}:refs/heads/{integration}")],
+    )
+    .map_err(|reason| format!("cut {integration} from {release}: {reason}"))?;
+    git(dir, &["fetch", remote]).map_err(|reason| format!("git fetch {remote}: {reason}"))?;
+    let body = format!("{integration} was missing; cut from {release} at {sha}");
+    store
+        .write(|tx| {
+            let captain = tx.captain_of(project)?.ok_or_else(|| {
+                GearError::new(
+                    ErrorCode::NoTarget,
+                    format!("project {project} has no captain"),
+                )
+            })?;
+            tx.insert_message(&gear_store::NewMessage {
+                meta: None,
+                project: project.to_string(),
+                thread: format!("integration:{project}"),
+                task: None,
+                attempt: None,
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: captain.id,
+                kind: gear_model::MsgKind::System,
+                urgent: false,
+                body,
+                reply_to: None,
+                needs_ack: false,
+                state: gear_model::MsgState::Info,
+                created: now,
+            })?;
+            Ok(())
+        })
+        .map_err(|error| error.detail)?;
+    Ok(())
+}
+
 fn git_config(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -910,16 +986,20 @@ fn onboard_seat(
     };
     let created = match opened {
         Outcome::Ok(worktree) => worktree,
-        Outcome::Refused { code, .. } if code == "worktree_not_found" => match herdr
-            .worktree_create(
+        Outcome::Refused { code, .. } if code == "worktree_not_found" => {
+            // T-622: the integration branch a landing's reclaim deleted is cut
+            // again from the release branch before the first worktree.
+            ensure_integration(store, &seat.project, config, &repo, now)?;
+            match herdr.worktree_create(
                 &worktree.repo,
                 &worktree.branch,
                 &worktree.base,
                 &worktree.label,
             ) {
-            Outcome::Ok(worktree) => worktree,
-            other => return Err(step_failure("worktree_create", &other)),
-        },
+                Outcome::Ok(worktree) => worktree,
+                other => return Err(step_failure("worktree_create", &other)),
+            }
+        }
         other => return Err(step_failure("worktree_open", &other)),
     };
     // T-253: the worktree must belong to the lane's repo. Herdr places
@@ -2995,6 +3075,116 @@ profile = "opencode"
             messages[0].body.contains("3 changed paths"),
             "the item names the path count: {}",
             messages[0].body
+        );
+    }
+
+    /// T-622: a missing integration branch is cut from the release branch
+    /// before the first lane worktree, and one Info item names the release sha.
+    #[test]
+    fn a_missing_integration_branch_is_cut_from_release_before_the_first_lane_worktree() {
+        let root = crate::testtmp::temp("gear-onboard-t622-cut");
+        let origin = root.join("origin.git");
+        let work = root.join("work");
+        sh(&root, "git init -q --bare origin.git");
+        sh(&root, "git init -q -b main work");
+        std::fs::write(work.join("a.txt"), "one\n").unwrap();
+        sh(
+            &work,
+            "git add -A && git -c user.email=a@b -c user.name=a commit -qm main",
+        );
+        sh(
+            &work,
+            &format!("git remote add origin {}", origin.display()),
+        );
+        sh(&work, "git push -q origin main");
+        let main_sha = sh(&work, "git rev-parse main");
+        let mut store = world(&t503_config(&work));
+        store
+            .write(|tx| {
+                tx.insert_seat(&SeatRow {
+                    id: "toy:captain".into(),
+                    project: "toy".into(),
+                    role: SeatRole::Captain,
+                    name: "captain".into(),
+                    profile: "claude".into(),
+                    generation: 0,
+                    state: SeatState::Active,
+                    state_since: T0,
+                    state_reason: None,
+                    task_id: None,
+                })
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w1:p2");
+
+        assert_eq!(
+            onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
+            ["toy:heat"]
+        );
+
+        let cut = sh(&work, "git ls-remote --heads origin dev");
+        assert_eq!(
+            cut.split_whitespace().next(),
+            Some(main_sha.as_str()),
+            "dev is cut from main: {cut}"
+        );
+        let items = store
+            .read(|tx| tx.thread_messages("toy", "integration:toy"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].state, gear_model::MsgState::Info, "{items:?}");
+        assert!(
+            items[0]
+                .body
+                .contains(&format!("dev was missing; cut from main at {main_sha}")),
+            "the item names the sha: {}",
+            items[0].body
+        );
+    }
+
+    /// T-622: an integration branch that is there is left as it is, with no
+    /// item.
+    #[test]
+    fn a_present_integration_branch_is_untouched() {
+        let (repo, _worktree) = t503_repo("gear-onboard-t622-present");
+        let before = sh(&repo, "git ls-remote --heads origin dev");
+        let mut store = world(&t503_config(&repo));
+        store
+            .write(|tx| {
+                tx.insert_seat(&SeatRow {
+                    id: "toy:captain".into(),
+                    project: "toy".into(),
+                    role: SeatRole::Captain,
+                    name: "captain".into(),
+                    profile: "claude".into(),
+                    generation: 0,
+                    state: SeatState::Active,
+                    state_since: T0,
+                    state_reason: None,
+                    task_id: None,
+                })
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w1:p2");
+
+        assert_eq!(
+            onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
+            ["toy:heat"]
+        );
+
+        assert_eq!(
+            sh(&repo, "git ls-remote --heads origin dev"),
+            before,
+            "the integration branch is untouched"
+        );
+        assert!(
+            store
+                .read(|tx| tx.thread_messages("toy", "integration:toy"))
+                .unwrap()
+                .is_empty(),
+            "a present branch needs no item"
         );
     }
 

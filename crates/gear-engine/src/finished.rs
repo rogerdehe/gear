@@ -276,6 +276,11 @@ pub fn reclaim(
         // cuts it again from the release branch).
         let keep = [repo.release.as_str(), config.conventions.staging.as_str()];
         for branch in project_branches(&repo.path, &config.conventions.remote, project) {
+            // T-622: the integration branch is handled below: it is deleted
+            // only when its tip is on the release branch.
+            if branch.name == repo.integration {
+                continue;
+            }
             if keep.contains(&branch.name.as_str()) {
                 continue;
             }
@@ -287,6 +292,30 @@ pub fn reclaim(
                 }
             } else {
                 left.push(format!("branch {} (extra commits)", branch.name));
+            }
+        }
+        // T-622: the integration branch lives for one voyage. It is deleted
+        // only when its tip is on the release branch (everything it holds is
+        // released); otherwise it holds unreleased work and stays, named. An
+        // integration branch equal to the release branch is never deleted.
+        if repo.integration != repo.release {
+            if let Some(tip) =
+                remote_branch_tip(&repo.path, &config.conventions.remote, &repo.integration)
+            {
+                if branch_on_release(&repo.path, &config, &tip, &repo.release) {
+                    if let Err(reason) = delete_remote_branch(
+                        &repo.path,
+                        &config.conventions.remote,
+                        &repo.integration,
+                    ) {
+                        left.push(format!("branch {} ({reason})", repo.integration));
+                    }
+                } else {
+                    left.push(format!(
+                        "branch {} (not on {})",
+                        repo.integration, repo.release
+                    ));
+                }
             }
         }
     }
@@ -438,9 +467,6 @@ fn merge_records(
     now: Ts,
 ) -> GearResult<Option<&'static str>> {
     let key = records_key(project, milestone);
-    if store.read(|tx| tx.get_meta(&key))?.is_some() {
-        return Ok(None);
-    }
     let repo = config.root_repo();
     let branch = gear_model::branch::expand_seat(
         &config.conventions.seat_branch,
@@ -451,7 +477,6 @@ fn merge_records(
     // A branch git would read as an option is never asked of it: a project
     // that names its seat branches that way has no records step.
     if branch == repo.integration || branch.starts_with('-') {
-        store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
         return Ok(None);
     }
     let dir = PathBuf::from(&repo.path);
@@ -471,25 +496,46 @@ fn merge_records(
     {
         return Ok(None);
     }
+    let theirs = format!("{}/{}", config.conventions.remote, branch);
+    // T-619: the branch may appear again after the landing (a records apply
+    // rewrote the plan). The meta remembers the tip it merged, so a new tip
+    // is merged again and the same tip is left alone.
+    let tip = merge::git(
+        &dir,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/{theirs}"),
+        ],
+    )
+    .ok()
+    .map(|tip| tip.trim().to_string());
+    if let Some(tip) = &tip {
+        if store.read(|tx| tx.get_meta(&key))?.as_deref() == Some(tip.as_str()) {
+            return Ok(None);
+        }
+    }
     let step = records_step(
         store, herdr, project, config, &repo, milestone, &branch, now,
     )?;
     match step {
         Recorded::Merged => {
-            store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
+            let tip = tip.expect("a merged branch has a tip");
+            store.write(|tx| tx.set_meta(&key, &tip))?;
             let reason = format!("the captain's records are merged into {}", repo.integration);
             let _ = resolve_records(store, project, milestone, &reason, now)?;
             Ok(Some("merged"))
         }
         Recorded::Empty => {
-            store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
+            let tip = tip.expect("a branch with nothing new has a tip");
+            store.write(|tx| tx.set_meta(&key, &tip))?;
             let reason = format!(
                 "the captain's branch {branch} held nothing the integration branch does not have"
             );
             resolve_records(store, project, milestone, &reason, now)
         }
         Recorded::Missing => {
-            store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
             let reason = format!("there is no branch {branch} on the remote");
             resolve_records(store, project, milestone, &reason, now)
         }
@@ -556,6 +602,23 @@ fn records_step(
     {
         Ok(worktree) => worktree,
         Err(reason) => return Ok(Recorded::Failed(reason)),
+    };
+    // T-619: the reclaim may have removed the merge worktree (T-618). Herdr
+    // still names it, so drop it and open it again the same way.
+    let worktree = if Path::new(&worktree.path).exists() {
+        worktree
+    } else {
+        let _ = herdr.worktree_remove(&worktree.workspace_id);
+        let label = merge::merge_label(project, repo);
+        match herdr.worktree_create(&repo.path, &worktree.branch, &repo.integration, &label) {
+            Outcome::Ok(worktree) => worktree,
+            other => {
+                return Ok(Recorded::Failed(merge::step_failure(
+                    "worktree_create",
+                    &other,
+                )))
+            }
+        }
     };
     let work = Path::new(&worktree.path);
     // The merge queue shares this worktree: its lock keeps the two apart. A
@@ -788,6 +851,43 @@ fn branch_on_integration(repo: &str, config: &ProjectConfig, tip: &str) -> bool 
     .is_ok()
 }
 
+/// The tip of a branch on the remote, if it is there (T-622).
+fn remote_branch_tip(repo: &str, remote: &str, branch: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args([
+            "ls-remote",
+            "--heads",
+            remote,
+            &format!("refs/heads/{branch}"),
+        ])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().next())
+        .map(str::to_string)
+}
+
+/// Whether the branch's tip is on the release branch (T-622).
+fn branch_on_release(repo: &str, config: &ProjectConfig, tip: &str, release: &str) -> bool {
+    let remote = &config.conventions.remote;
+    merge::git(
+        Path::new(repo),
+        &[
+            "merge-base",
+            "--is-ancestor",
+            tip,
+            &format!("{remote}/{release}"),
+        ],
+    )
+    .is_ok()
+}
+
 /// Delete a branch on the remote.
 fn delete_remote_branch(repo: &str, remote: &str, branch: &str) -> Result<(), String> {
     merge::git(Path::new(repo), &["push", remote, "--delete", branch])?;
@@ -869,6 +969,7 @@ fn project_branches(repo: &str, remote: &str, project: &str) -> Vec<ProjectBranc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gear_herdr::fake::Call;
     use gear_model::{AttemptState, SeatRole, TaskState};
     use gear_store::{testing, AttemptRow, AttemptStep, NewMessage, TaskRow, VoyageRow};
     use std::process::Command;
@@ -971,6 +1072,10 @@ gate = "true"
                 &format!("git remote add origin {}", origin.display()),
             );
             sh(&work, "git push -q origin HEAD:refs/heads/dev");
+            // T-622: the release branch, at the integration branch's tip: the
+            // landing's reclaim deletes the integration branch once it is on
+            // release.
+            sh(&work, "git push -q origin HEAD:refs/heads/main");
             // The captain's seat branch: pushed at the landing's branch point.
             sh(
                 &work,
@@ -1171,6 +1276,18 @@ gate = "true"
             reclaim(&mut self.store, &mut self.herdr, "p", now).unwrap()
         }
 
+        /// The records step alone, without the reclaim's worktree removal.
+        fn merge_records(&mut self, now: Ts) -> Option<&'static str> {
+            let config = self
+                .store
+                .read(|tx| {
+                    let row = tx.get_project("p")?.unwrap();
+                    Ok(gear_app::config::parse_row(&row).unwrap())
+                })
+                .unwrap();
+            merge_records(&mut self.store, &mut self.herdr, "p", &config, "M1", now).unwrap()
+        }
+
         /// The subjects on the integration branch, newest first.
         fn dev_log(&self) -> String {
             sh(
@@ -1215,6 +1332,10 @@ gate = "true"
     fn a_landing_merges_the_captains_records_and_deletes_the_branch() {
         let mut landed = Landed::new("merged");
         landed.records("voyages/M1/report.md", "the voyage report");
+        let tip = sh(
+            &landed.root.path(),
+            &format!("git -C {} rev-parse {CAP}", landed.origin.display()),
+        );
 
         let changed = landed.reclaim(NOW + 600);
 
@@ -1240,8 +1361,8 @@ gate = "true"
         assert!(!landed.local_branch(CAP), "and locally");
         assert_eq!(
             landed.meta(&records_key("p", "M1")).as_deref(),
-            Some((NOW + 600).to_string().as_str()),
-            "the landing's records step is done"
+            Some(tip.trim()),
+            "the landing's records step remembers the tip it merged"
         );
         assert!(
             landed.items(&records_thread("M1")).is_empty(),
@@ -1325,6 +1446,10 @@ gate = "true"
     fn a_records_branch_already_on_the_integration_branch_is_only_deleted() {
         let mut landed = Landed::new("empty");
         landed.records("voyages/M1/report.md", "the voyage report");
+        let tip = sh(
+            &landed.root.path(),
+            &format!("git -C {} rev-parse {CAP}", landed.origin.display()),
+        );
         // The captain's commit reaches dev some other way (a fast-forward).
         sh(
             &landed.work,
@@ -1346,7 +1471,7 @@ gate = "true"
         );
         assert_eq!(
             landed.meta(&records_key("p", "M1")).as_deref(),
-            Some((NOW + 600).to_string().as_str())
+            Some(tip.trim())
         );
     }
 
@@ -1398,6 +1523,73 @@ gate = "true"
         assert_eq!(landed.reclaim(NOW + 2 * RECLAIM_EVERY_S), None);
         assert_eq!(landed.dev_log(), after, "no second merge commit");
         assert_eq!(landed.origin_branches(), branches);
+    }
+
+    /// T-619: a records commit pushed after the landing is merged on a later
+    /// scan and the branch deleted; no new commit, nothing happens. The merge
+    /// worktree is left in place (the records step alone, not the reclaim).
+    #[test]
+    fn a_new_records_commit_after_the_landing_is_merged_on_a_later_scan() {
+        let mut landed = Landed::new("again");
+        landed.records("voyages/M1/report.md", "the voyage report");
+        let first_tip = sh(
+            &landed.root.path(),
+            &format!("git -C {} rev-parse {CAP}", landed.origin.display()),
+        );
+        assert!(landed.merge_records(NOW + 600).is_some());
+        assert_eq!(
+            landed.meta(&records_key("p", "M1")).as_deref(),
+            Some(first_tip.trim())
+        );
+        // A records apply after the landing rewrites the plan on the captain's
+        // branch: a new commit appears on the remote.
+        sh(
+            &landed.work,
+            &format!(
+                "git checkout -q -b {CAP} dev && echo more > more.txt && git add more.txt && \
+                 git commit -q -m 'more records' && git push -q origin {CAP} && git checkout -q dev"
+            ),
+        );
+        let second_tip = sh(
+            &landed.root.path(),
+            &format!("git -C {} rev-parse {CAP}", landed.origin.display()),
+        );
+        assert!(landed.merge_records(NOW + 900).is_some());
+        assert!(
+            landed.dev_log().contains("more records"),
+            "{}",
+            landed.dev_log()
+        );
+        assert_eq!(
+            landed.meta(&records_key("p", "M1")).as_deref(),
+            Some(second_tip.trim())
+        );
+        assert!(!landed.origin_branches().contains(CAP));
+        // No new commit: nothing happens.
+        let after = landed.dev_log();
+        assert_eq!(landed.merge_records(NOW + 1200), None);
+        assert_eq!(landed.dev_log(), after, "no third merge commit");
+    }
+
+    /// T-619: a merge worktree the reclaim removed (T-618) is dropped from
+    /// Herdr and opened again the same way before the records merge.
+    #[test]
+    fn a_removed_merge_worktree_is_reopened_before_the_records_merge() {
+        let mut landed = Landed::new("reopen");
+        landed.records("voyages/M1/report.md", "the voyage report");
+        // The reclaim removed the merge worktree: its directory is gone.
+        std::fs::remove_dir_all(landed.root.path().join("merge")).unwrap();
+        landed.merge_records(NOW + 600);
+        let calls = landed.herdr.calls.clone();
+        let removed = calls.iter().position(
+            |call| matches!(call, Call::WorktreeRemove { workspace } if workspace == "wt-p-merge-M1"),
+        );
+        let created = calls.iter().position(
+            |call| matches!(call, Call::WorktreeCreate { branch, .. } if branch == "p/merge/M1"),
+        );
+        assert!(removed.is_some(), "{calls:?}");
+        assert!(created.is_some(), "{calls:?}");
+        assert!(removed < created, "remove before create: {calls:?}");
     }
 
     /// T-595: a voyage whose every task is Done but whose accepted work has not
@@ -1470,6 +1662,48 @@ gate = "true"
             .expect("the reclaim names the dirty worktree");
         assert!(item.body.contains("worktree"), "{}", item.body);
         assert!(item.body.contains("uncommitted changes"), "{}", item.body);
+    }
+
+    /// T-622: the integration branch is deleted when its tip is on the release
+    /// branch (everything it holds is released), and kept when it holds
+    /// unreleased work.
+    #[test]
+    fn the_reclaim_deletes_an_integration_branch_on_release_and_keeps_one_with_unreleased_work() {
+        // Everything on dev is on main: the branch goes.
+        let mut landed = Landed::new("integration-on-release");
+        sh(&landed.work, "git push -q origin dev:refs/heads/main");
+        landed.reclaim(NOW + 600);
+        let branches = landed.origin_branches();
+        assert!(
+            !branches.lines().any(|branch| branch == "dev"),
+            "the integration branch on release is deleted: {branches}"
+        );
+
+        // A commit on dev that main does not have: the branch holds
+        // unreleased work and stays, named.
+        let mut landed = Landed::new("integration-extra");
+        sh(&landed.work, "git push -q origin dev:refs/heads/main");
+        sh(
+            &landed.work,
+            "echo extra > extra.txt && git add extra.txt && \
+             git commit -q -m extra && git push -q origin dev",
+        );
+        landed.reclaim(NOW + 600);
+        let branches = landed.origin_branches();
+        assert!(
+            branches.lines().any(|branch| branch == "dev"),
+            "the integration branch with unreleased work is kept: {branches}"
+        );
+        let item = landed
+            .items(RECLAIM_THREAD)
+            .into_iter()
+            .next()
+            .expect("the reclaim names the integration branch");
+        assert!(
+            item.body.contains("branch dev (not on main)"),
+            "{}",
+            item.body
+        );
     }
 
     /// T-618: a branch whose tip is on the integration branch is deleted on

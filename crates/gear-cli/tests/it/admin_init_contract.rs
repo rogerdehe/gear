@@ -58,6 +58,45 @@ fn init(home: &Path, db: &Path, config: &Path, ctx: Option<&str>, admin: bool) -
     cmd.output().expect("run gear")
 }
 
+/// `gear admin init --confirmed <config>`: the same as [`init`], with the
+/// user's confirmation of a staffing change (T-401, T-623).
+fn init_confirmed(
+    home: &Path,
+    db: &Path,
+    config: &Path,
+    ctx: Option<&str>,
+    admin: bool,
+    confirmed: bool,
+) -> Output {
+    if !home.join(".gear-test-skills").exists() {
+        for agent in gear_app::skill::SkillAgent::ALL {
+            gear_app::skill::install(*agent, home).expect("install the skill");
+        }
+        std::fs::write(home.join(".gear-test-skills"), "").expect("the marker");
+    }
+    let mut args = vec!["admin", "init"];
+    if confirmed {
+        args.push("--confirmed");
+    }
+    args.push(config.to_str().expect("a utf-8 path"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_gear"));
+    cmd.args(args)
+        .env("HOME", home)
+        .env("GEAR_DB", db)
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_SOCKET_PATH");
+    if admin {
+        cmd.env("GEAR_ADMIN", "1");
+    } else {
+        cmd.env_remove("GEAR_ADMIN");
+    }
+    match ctx {
+        Some(ctx) => cmd.env("GEAR_CTX", ctx),
+        None => cmd.env_remove("GEAR_CTX"),
+    };
+    cmd.output().expect("run gear")
+}
+
 fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr.clone()).into_owned()
 }
@@ -1581,6 +1620,115 @@ fn check_reports_a_staffing_change_of_a_departed_voyage() {
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(headline(&o), "config ok: project p, 1 lanes, 3 reviewers");
     assert_eq!(config_version(&db), 1, "a check writes nothing");
+}
+
+/// T-623: a lane's paths and words are the captain's, not staffing. Mid-voyage,
+/// a change of a lane's owns and charter applies without --confirmed and is
+/// printed under "changed (captain's)"; a change of a lane's model or of
+/// quota.lanes is still STAFF_LOCKED.
+#[test]
+fn a_lanes_paths_and_words_apply_without_confirmation() {
+    const T0: i64 = 1_800_000_000;
+    let dir = scratch("captain-changes");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let db = dir.join("gear.db");
+    // The registered project: voyage M1 departed, one task still open.
+    {
+        let mut store = Store::open(&db).expect("the store");
+        store
+            .write(|tx| {
+                tx.insert_project(&gear_store::ProjectRow {
+                    id: "p".to_string(),
+                    herdr_session: "sess".to_string(),
+                    config_toml: staffing_config(&repo, 6),
+                    config_version: 1,
+                    quota_lanes: 3,
+                    quota_temps: 6,
+                    quota_includes_captain: false,
+                    plan_version: 1,
+                    created: T0,
+                })?;
+                tx.upsert_voyage(&gear_store::VoyageRow {
+                    project: "p".to_string(),
+                    milestone: "M1".to_string(),
+                    title: "the M1 station".to_string(),
+                    done: Some("users install it".to_string()),
+                    bar: Some("STABLE".to_string()),
+                    eta: Some("8h".to_string()),
+                    departure: Some(T0),
+                    departure_tasks: Some(1),
+                    departure_estimate_min: Some(30),
+                    updated: T0,
+                })?;
+                tx.insert_task(&gear_store::TaskRow {
+                    project: "p".to_string(),
+                    id: "T-1".to_string(),
+                    rank: 0,
+                    state: gear_model::TaskState::Ready,
+                    priority: "must".to_string(),
+                    lane: Some("heat".to_string()),
+                    milestone: Some("M1".to_string()),
+                    required: true,
+                    contract_version: 1,
+                    deps: Vec::new(),
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(30),
+                    issue: None,
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    updated: T0,
+                })
+            })
+            .expect("the world");
+    }
+
+    // The captain adds files to the lane's owns and fixes its charter.
+    let changed = dir.join("gear.toml");
+    std::fs::write(
+        &changed,
+        staffing_config(&repo, 6).replace(
+            "owns = [\"src/\"]",
+            "owns = [\"src/\", \"docs/\"]\ncharter = \"read the docs first\"",
+        ),
+    )
+    .expect("the config");
+    let o = init_confirmed(&dir, &db, &changed, None, true, false);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.contains("changed (captain's):"), "{out}");
+    assert!(out.contains("lanes.heat.owns"), "{out}");
+    assert!(out.contains("lanes.heat.charter"), "{out}");
+    assert_eq!(config_version(&db), 2, "the change applied");
+
+    // A change of the lane's model is still staffing.
+    let model = dir.join("gear.toml");
+    std::fs::write(
+        &model,
+        staffing_config(&repo, 6).replace("gpt-6.1-sol", "gpt-6.1-mini"),
+    )
+    .expect("the config");
+    let o = init_confirmed(&dir, &db, &model, None, true, false);
+    assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
+    assert!(stderr(&o).contains("STAFF_LOCKED"), "{}", stderr(&o));
+    assert_eq!(config_version(&db), 2, "the refusal wrote nothing");
+
+    // A change of quota.lanes is still staffing.
+    let quota = dir.join("gear.toml");
+    std::fs::write(
+        &quota,
+        staffing_config(&repo, 6).replace("lanes = 3", "lanes = 4"),
+    )
+    .expect("the config");
+    let o = init_confirmed(&dir, &db, &quota, None, true, false);
+    assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
+    assert!(stderr(&o).contains("STAFF_LOCKED"), "{}", stderr(&o));
+    assert_eq!(config_version(&db), 2, "the refusal wrote nothing");
 }
 
 /// T-401: the flag is `--confirmed` — the user asked for the change and
