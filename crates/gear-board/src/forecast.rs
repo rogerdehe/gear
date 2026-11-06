@@ -148,6 +148,14 @@ pub fn forecast(jobs: &[Job], lanes: &[String], review_merge_min: i64) -> Vec<La
                     {
                         blocked.push((job.id.clone(), dep.clone()));
                     }
+                    // A job that can never start takes no time of the lane and
+                    // is no wait: it is named as blocked, never as a duration
+                    // (Lawrence M2: `ENDS ~16675h`). The jobs after it, and
+                    // the jobs that wait for it, see it never merge.
+                    if ready >= NO_DEP {
+                        merged.insert(job.id.clone(), NO_DEP);
+                        continue;
+                    }
                     if ready > free {
                         if let Some(blocker) = blocker {
                             waits.push((ready - free, blocker));
@@ -370,8 +378,13 @@ mod tests {
             deps: vec!["T-404".to_string()],
         }];
         let ends = forecast(&jobs, &["hull".to_string()], REVIEW_MERGE_MIN);
-        assert_eq!(ends[0].waits, vec![(NO_DEP, "T-404".to_string())]);
-        assert_eq!(ends[0].end_min, NO_DEP + 10 + REVIEW_MERGE_MIN);
+        // Named as blocked, never a wait or an end a million minutes out.
+        assert!(ends[0].waits.is_empty(), "{:?}", ends[0].waits);
+        assert_eq!(
+            ends[0].blocked,
+            vec![("T-1".to_string(), "T-404".to_string())]
+        );
+        assert_eq!(ends[0].end_min, 0);
     }
 
     /// T-567: the lane says which job can never start and what holds it, so
@@ -410,8 +423,9 @@ mod tests {
             "{:?}",
             hull.blocked
         );
-        // The lane's end is past NO_DEP: no forecast at all.
-        assert!(hull.end_min >= NO_DEP, "{}", hull.end_min);
+        // The blocked jobs take none of the lane's time: no end past NO_DEP.
+        assert!(hull.end_min < NO_DEP, "{}", hull.end_min);
+        assert!(hull.waits.iter().all(|(gap, _)| *gap < NO_DEP));
         // The other lanes are forecast as before, and no blocked job.
         assert!(lane(&ends, "mast").blocked.is_empty());
         assert!(lane(&ends, "keel").blocked.is_empty());

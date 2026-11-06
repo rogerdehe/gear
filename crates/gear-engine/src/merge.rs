@@ -2723,6 +2723,19 @@ fn other_candidates(
                     continue;
                 }
             }
+            // A task whose merge landed on the integration branch is not a
+            // task to wait for: a candidate that carries it merges its commits
+            // with it. A feature branch cut before it landed never receives it
+            // any other way (Lawrence M2: T-65 waited for the merged T-63 on
+            // lawrence/feature/f-1 forever). A member of a feature landed only
+            // on its feature's branch, so it is still waited for.
+            if last_merge
+                .get(&row.id)
+                .is_some_and(|(_, _, state)| *state == OpState::Confirmed)
+                && tx.task_feature(project, &row.id)?.is_none()
+            {
+                continue;
+            }
             let attempts = tx.attempts_of_task(project, &row.id)?;
             let Some(latest) = attempts.last() else {
                 continue;
@@ -7438,6 +7451,49 @@ mod tests {
         assert!(
             !carried(&mut store),
             "its merge failed: the carrier lands it"
+        );
+    }
+
+    /// A task whose merge landed is never waited for: a feature branch cut
+    /// before it landed does not have it, and nothing else brings it there
+    /// (Lawrence M2: T-65 waited for the merged T-63 on its feature branch).
+    /// A landed feature member is on its feature's branch only: still waited
+    /// for by a task outside the feature.
+    #[test]
+    fn a_task_whose_merge_landed_is_not_waited_for() {
+        let mut store = pair_world("aaa1111", "bbb2222");
+        pass(&mut store, "T-1", "aaa1111", 1);
+        let carried = |store: &mut Store| {
+            other_candidates(store, "p", "T-2")
+                .unwrap()
+                .into_iter()
+                .any(|(task, _, _)| task == "T-1")
+        };
+        store
+            .write(|tx| {
+                let op = tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({}),
+                    created: 2,
+                })?;
+                tx.set_op_state("p", &op.id, OpState::Executing, None, 2)?;
+                tx.set_op_state("p", &op.id, OpState::Confirmed, Some("merged"), 3)
+            })
+            .unwrap();
+        assert!(!carried(&mut store), "its merge landed");
+        store
+            .write(|tx| tx.set_task_feature("p", "T-1", "F-1"))
+            .unwrap();
+        assert!(
+            carried(&mut store),
+            "a member landed on its feature's branch only"
         );
     }
 
