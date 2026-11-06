@@ -33,7 +33,10 @@ pub enum Phase {
     Stop,
     /// The exit keys were sent (or may have been): the agent must be gone.
     Exit,
-    /// The agent is gone: the new CLI is started in the same pane.
+    /// T-604: the old agent keeps its pane; a new pane is split for the next
+    /// CLI.
+    Split,
+    /// The agent is gone (or the new pane is ready): the new CLI is started.
     Start,
     /// The new agent is up: the model, the seat and the Continue are booked.
     Finish,
@@ -44,6 +47,7 @@ impl Phase {
         match self {
             Phase::Stop => "stop",
             Phase::Exit => "exit",
+            Phase::Split => "split",
             Phase::Start => "start",
             Phase::Finish => "finish",
         }
@@ -53,6 +57,7 @@ impl Phase {
         match text {
             "stop" => Some(Phase::Stop),
             "exit" => Some(Phase::Exit),
+            "split" => Some(Phase::Split),
             "start" => Some(Phase::Start),
             "finish" => Some(Phase::Finish),
             _ => None,
@@ -71,6 +76,14 @@ pub struct Plan {
     pub args: Vec<String>,
     /// The generation the new agent gets; 0 while it is not reserved.
     pub generation: i64,
+    /// T-604: the pane split for the next CLI when it differs from the current
+    /// one. Stored before the split's next step, so an engine restart never
+    /// splits twice.
+    pub new_pane: Option<String>,
+    /// T-604: the generation and profile the old agent keeps while a split
+    /// start is under way; a failed start restores them.
+    pub old_generation: i64,
+    pub old_profile: Option<String>,
     pub phase: Phase,
     /// How many ticks the current phase has waited.
     pub waited: i64,
@@ -147,6 +160,18 @@ pub fn pending(store: &mut Store, seat_id: &str) -> GearResult<Option<Plan>> {
             .get("generation")
             .and_then(|value| value.as_i64())
             .unwrap_or(0),
+        new_pane: record
+            .get("new_pane")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        old_generation: record
+            .get("old_generation")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        old_profile: record
+            .get("old_profile")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         phase,
         old_cli: text("old_cli"),
         resume: record
@@ -343,6 +368,9 @@ pub(crate) fn advance_when(
                 cli: cli.to_string(),
                 args: entry.args().to_vec(),
                 generation: 0,
+                new_pane: None,
+                old_generation: seat.generation,
+                old_profile: Some(seat.profile.clone()),
                 phase: Phase::Stop,
                 waited: 0,
                 at: now,
@@ -396,6 +424,7 @@ pub(crate) fn advance_when(
         let moves_on = match plan.phase {
             Phase::Stop => stop(store, herdr, cfg, profiles, seat, &mut plan, now)?,
             Phase::Exit => exit(store, herdr, seat, &mut plan, now)?,
+            Phase::Split => split(store, herdr, seat, &mut plan, now)?,
             Phase::Start => start(store, herdr, cfg, profiles, seat, &mut plan, now)?,
             Phase::Finish => {
                 let finished = finish(store, herdr, profiles, project, seat, &plan, now)?;
@@ -499,9 +528,14 @@ fn stop(
         }
         Ok(None) => {
             // The agent is already gone: the handover facts are still the
-            // worktree's, and the next CLI may start.
+            // worktree's, and the next CLI may start. T-604: a CLI change still
+            // gets its own pane.
             finish_handover(store, herdr, cfg, seat, plan, now)?;
-            plan.phase = Phase::Start;
+            plan.phase = if plan.old_cli != plan.cli {
+                Phase::Split
+            } else {
+                Phase::Start
+            };
             plan.waited = 0;
             plan.at = now;
             set_pending(store, &seat.id, plan)?;
@@ -510,6 +544,7 @@ fn stop(
         Err(error) => {
             return wait(
                 store,
+                herdr,
                 seat,
                 plan,
                 now,
@@ -521,6 +556,17 @@ fn stop(
     // The handover is written from the worktree as the outgoing agent leaves
     // it (T-465): after the wrap-up grace, before the exit keys.
     finish_handover(store, herdr, cfg, seat, plan, now)?;
+
+    // T-604: a CLI change keeps the old agent in its pane and the seat on it;
+    // the next CLI gets a pane of its own. The old agent is exited only after
+    // the new one is up (T-605), so no exit keys go here.
+    if plan.old_cli != plan.cli {
+        plan.phase = Phase::Split;
+        plan.waited = 0;
+        plan.at = now;
+        set_pending(store, &seat.id, plan)?;
+        return Ok(true);
+    }
 
     // The seat leaves the states a doorbell may reach **before** its agent
     // goes: a seat whose agent is gone reaches the captain (L-56), and a
@@ -578,6 +624,7 @@ fn stop(
             // Nothing was executed: the next tick tries again.
             return wait(
                 store,
+                herdr,
                 seat,
                 plan,
                 now,
@@ -707,16 +754,145 @@ fn exit(
         }
         Ok(Some(_)) => {
             // The old agent is still there: the next tick looks again.
-            wait(store, seat, plan, now, "the agent is still in the pane")
+            wait(
+                store,
+                herdr,
+                seat,
+                plan,
+                now,
+                "the agent is still in the pane",
+            )
         }
         Err(error) => wait(
             store,
+            herdr,
             seat,
             plan,
             now,
             &format!("the pane could not be read: {}", error.0),
         ),
     }
+}
+
+/// T-604: the old agent keeps its pane; a new pane is split for the next CLI
+/// in the seat's worktree. The new pane's id is stored in the plan before the
+/// next step, so an engine restart never splits twice.
+fn split(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &SeatRow,
+    plan: &mut Plan,
+    now: Ts,
+) -> GearResult<bool> {
+    if plan.new_pane.is_some() {
+        // Already split (an engine restart between Split and Start): the
+        // stored pane is the one to start in.
+        plan.phase = Phase::Start;
+        plan.waited = 0;
+        plan.at = now;
+        set_pending(store, &seat.id, plan)?;
+        return Ok(true);
+    }
+    let Some(pane) = pane_of(store, seat)? else {
+        flag(store, seat, "the seat has no pane to split", now)?;
+        clear_pending(store, &seat.id)?;
+        return Ok(false);
+    };
+    let Some(worktree) = worktree_path(store, seat)? else {
+        flag(
+            store,
+            seat,
+            "the seat has no worktree to split its pane in — needs check",
+            now,
+        )?;
+        clear_pending(store, &seat.id)?;
+        return Ok(false);
+    };
+    match herdr.pane_split(&pane, "right", &worktree) {
+        Outcome::Ok(new_pane) => {
+            plan.new_pane = Some(new_pane);
+            plan.phase = Phase::Start;
+            plan.waited = 0;
+            plan.at = now;
+            set_pending(store, &seat.id, plan)?;
+            Ok(true)
+        }
+        Outcome::Refused { code, message } => {
+            flag(
+                store,
+                seat,
+                &format!("the pane could not be split ({code}): {message} — needs check"),
+                now,
+            )?;
+            clear_pending(store, &seat.id)?;
+            Ok(false)
+        }
+        Outcome::Uncertain { reason } => wait(
+            store,
+            herdr,
+            seat,
+            plan,
+            now,
+            &format!("pane_split uncertain: {reason}"),
+        ),
+    }
+}
+
+/// T-604: undo the reservation of a split start that cannot go on. The old
+/// binding is Active again, the seat runs its old generation and profile, and
+/// the attempt is back on it: the old agent keeps its pane and the seat.
+fn restore_old_binding(store: &mut Store, seat: &SeatRow, plan: &Plan, now: Ts) -> GearResult<()> {
+    if plan.generation == 0 {
+        return Ok(());
+    }
+    let old_generation = if plan.old_generation > 0 {
+        plan.old_generation
+    } else {
+        plan.generation - 1
+    };
+    store.write(|tx| {
+        tx.set_meta(&env_key(&seat.id, plan.generation), "")?;
+        tx.set_binding_status(&seat.id, plan.generation, BindingStatus::Void)?;
+        tx.set_binding_status(&seat.id, old_generation, BindingStatus::Active)?;
+        tx.set_seat_generation(&seat.id, old_generation)?;
+        if let Some(profile) = plan.old_profile.as_deref() {
+            tx.set_seat_profile(&seat.id, profile)?;
+        }
+        tx.set_seat_state(
+            &seat.id,
+            SeatState::Active,
+            Some("the old agent continues"),
+            now,
+        )?;
+        gear_app::tasks::carry_attempt_generation(
+            tx,
+            &seat.id,
+            plan.generation,
+            old_generation,
+            now,
+        )?;
+        Ok(())
+    })
+}
+
+/// T-604: a start that cannot go on. A split pane is closed again and its
+/// environment line forgotten; the old agent keeps its pane, its binding and
+/// the seat. The seat is flagged for a human.
+fn fail_start(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &SeatRow,
+    plan: &Plan,
+    reason: &str,
+    now: Ts,
+) -> GearResult<bool> {
+    if let Some(pane) = plan.new_pane.clone() {
+        let _ = herdr.pane_close(&pane);
+        restore_old_binding(store, seat, plan, now)?;
+    }
+    flag(store, seat, reason, now)?;
+    clear_pending(store, &seat.id)?;
+    Ok(false)
 }
 
 /// The agent is gone: the next CLI is started in the same pane.
@@ -729,10 +905,23 @@ fn start(
     plan: &mut Plan,
     now: Ts,
 ) -> GearResult<bool> {
-    let Some(pane) = pane_of(store, seat)? else {
-        flag(store, seat, "the seat has no pane to restart in", now)?;
-        clear_pending(store, &seat.id)?;
-        return Ok(false);
+    // T-604: a CLI change starts in the pane split for it; the old agent keeps
+    // the seat's pane and binding until the new agent is up (T-605).
+    let split = plan.new_pane.is_some();
+    let pane = if split {
+        plan.new_pane.clone()
+    } else {
+        pane_of(store, seat)?
+    };
+    let Some(pane) = pane else {
+        return fail_start(
+            store,
+            herdr,
+            seat,
+            plan,
+            "the seat has no pane to restart in",
+            now,
+        );
     };
     let selected = plan
         .profile_name
@@ -745,24 +934,24 @@ fn start(
         })
         .or_else(|| profile_for_kind(profiles, &plan.cli));
     let Some((profile_name, profile)) = selected else {
-        flag(
+        return fail_start(
             store,
+            herdr,
             seat,
+            plan,
             &format!("no profile drives the CLI {:?} — needs check", plan.cli),
             now,
-        )?;
-        clear_pending(store, &seat.id)?;
-        return Ok(false);
+        );
     };
     if !profile.verified {
-        flag(
+        return fail_start(
             store,
+            herdr,
             seat,
+            plan,
             &format!("the profile {profile_name:?} is not verified — needs check"),
             now,
-        )?;
-        clear_pending(store, &seat.id)?;
-        return Ok(false);
+        );
     }
 
     // The start may have happened before the engine died: the pane already
@@ -776,19 +965,20 @@ fn start(
             return Ok(true);
         }
         Ok(Some(_)) => {
-            flag(
+            return fail_start(
                 store,
+                herdr,
                 seat,
+                plan,
                 "another agent holds the pane — needs check",
                 now,
-            )?;
-            clear_pending(store, &seat.id)?;
-            return Ok(false);
+            );
         }
         Ok(None) => {}
         Err(error) => {
             return wait(
                 store,
+                herdr,
                 seat,
                 plan,
                 now,
@@ -799,7 +989,7 @@ fn start(
 
     // 1. the generation is reserved and the seat leaves `Active`, in one
     //    transaction: the old binding is void, the new one is pending in the
-    //    same pane with the new CLI.
+    //    pane the new CLI starts in (the split pane for a CLI change, T-604).
     if plan.generation == 0 {
         let generation = reserve(store, seat, &pane, plan, profile_name, now)?;
         plan.generation = generation;
@@ -821,7 +1011,14 @@ fn start(
         worktree.as_deref(),
     );
     if !env_ready(store, herdr, &seat.id, &pane, &env, plan.generation)? {
-        return wait(store, seat, plan, now, "the environment line was refused");
+        return wait(
+            store,
+            herdr,
+            seat,
+            plan,
+            now,
+            "the environment line was refused",
+        );
     }
 
     // 3. the agent itself: the profile's unattended args, then the model's
@@ -845,14 +1042,14 @@ fn start(
         // The model gate must address the resumed session even before finish.
         store.write(|tx| tx.set_binding_session_ref(&seat.id, plan.generation, session))?;
         let Some(resume_args) = profile.resume_args.as_ref() else {
-            flag(
+            return fail_start(
                 store,
+                herdr,
                 seat,
+                plan,
                 &format!("the profile {profile_name:?} cannot resume its open session"),
                 now,
-            )?;
-            clear_pending(store, &seat.id)?;
-            return Ok(false);
+            );
         };
         args.extend(
             resume_args
@@ -860,15 +1057,29 @@ fn start(
                 .map(|arg| arg.replace("{session}", session)),
         );
     }
-    let name = format!("{}-{}", seat.project, seat.name);
+    // T-604: the old agent still carries the seat's name (Herdr names are
+    // unique), so the new one gets a temporary name until T-605 moves the
+    // seat's name to it.
+    let name = if split {
+        // The generation keeps the temporary name unique across restarts: the
+        // old agent keeps the seat's name until T-605 moves it.
+        format!("{}-{}-new{}", seat.project, seat.name, plan.generation)
+    } else {
+        format!("{}-{}", seat.project, seat.name)
+    };
     // A grok worktree is trusted before its agent starts: grok asks on the
     // first start, while Herdr reports the agent idle, and the prompt would
     // be lost (T-32).
     if let Some(path) = worktree_path(store, seat)? {
         if let Err(reason) = crate::trust::trust_worktree(&plan.cli, &path, now) {
-            flag(store, seat, &format!("trust: {reason} — needs check"), now)?;
-            clear_pending(store, &seat.id)?;
-            return Ok(false);
+            return fail_start(
+                store,
+                herdr,
+                seat,
+                plan,
+                &format!("trust: {reason} — needs check"),
+                now,
+            );
         }
     }
     if plan.cli == "opencode" && !plan.model.is_empty() && plan.resume.is_none() {
@@ -890,9 +1101,7 @@ fn start(
             ) {
                 Ok(session_args) => args.extend(session_args),
                 Err(reason) => {
-                    flag(store, seat, &reason, now)?;
-                    clear_pending(store, &seat.id)?;
-                    return Ok(false);
+                    return fail_start(store, herdr, seat, plan, &reason, now);
                 }
             }
         }
@@ -921,11 +1130,18 @@ fn start(
         }
         Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
             // The shell is still busy: the next tick tries again.
-            wait(store, seat, plan, now, "the pane is still busy")
+            wait(store, herdr, seat, plan, now, "the pane is still busy")
         }
         Outcome::Refused { code, .. } if code == "agent_name_taken" => {
             // The old agent's name is not free yet: the next tick tries again.
-            wait(store, seat, plan, now, "the agent name is still taken")
+            wait(
+                store,
+                herdr,
+                seat,
+                plan,
+                now,
+                "the agent name is still taken",
+            )
         }
         Outcome::Refused { code, message } => {
             // A CLI that is not installed says so on the pane (T-286): the
@@ -935,9 +1151,7 @@ fn start(
                 Some(line) => crate::start::cli_missing_text(&plan.cli, &line),
                 None => format!("agent_start refused ({code}): {message} — needs check"),
             };
-            flag(store, seat, &reason, now)?;
-            clear_pending(store, &seat.id)?;
-            Ok(false)
+            fail_start(store, herdr, seat, plan, &reason, now)
         }
         Outcome::Uncertain { reason } => {
             // A missing CLI is certain even when the start is not: waiting
@@ -945,19 +1159,20 @@ fn start(
             // and its plan cleared like a refusal (T-286).
             let tail = herdr.read_tail(&pane, 16).unwrap_or_default();
             if let Some(line) = crate::start::cli_missing(&tail, &plan.cli) {
-                flag(
+                return fail_start(
                     store,
+                    herdr,
                     seat,
+                    plan,
                     &crate::start::cli_missing_text(&plan.cli, &line),
                     now,
-                )?;
-                clear_pending(store, &seat.id)?;
-                return Ok(false);
+                );
             }
             // The agent may be up: the next tick looks at the pane and finds
             // it (or sends the start again only if the pane is still empty).
             wait(
                 store,
+                herdr,
                 seat,
                 plan,
                 now,
@@ -969,6 +1184,10 @@ fn start(
 
 /// The new agent is up: the model, the seat and the Continue are booked, in
 /// one transaction. An engine restart sees either none of it or all of it.
+///
+/// T-604: a CLI change that started in a split pane only records the new
+/// agent's model here; the seat, its name, the Continue and the old pane are
+/// the next task's Finish (T-605), so the plan stays pending.
 fn finish(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -1010,7 +1229,11 @@ fn finish(
     // What the seat carries on with: a lane its Continue line, a reviewer its
     // review packet again (T-115).
     let (text, open) = crate::quota::resume_delivery(store, project, seat)?;
-    let observed_session = pane_of(store, seat)?
+    // T-604: the new agent's pane is the binding at the plan's generation —
+    // the split pane for a CLI change, not the seat's old pane.
+    let observed_session = store
+        .read(|tx| tx.get_binding(&seat.id, plan.generation))?
+        .map(|binding| binding.pane_id)
         .and_then(|pane| herdr.agent_get(&pane).ok().flatten())
         .and_then(|info| info.agent_session.map(|s| s.value));
     store.write(|tx| {
@@ -1330,6 +1553,7 @@ fn env_ready(
 /// A phase that waits too long flags the seat for a human.
 fn wait(
     store: &mut Store,
+    herdr: &mut dyn HerdrAct,
     seat: &SeatRow,
     plan: &mut Plan,
     now: Ts,
@@ -1337,6 +1561,12 @@ fn wait(
 ) -> GearResult<bool> {
     plan.waited += 1;
     if plan.waited > MAX_WAIT {
+        // T-604: a split pane that never came up is closed again; the old
+        // agent keeps its pane, its binding and the seat.
+        if let Some(pane) = plan.new_pane.clone() {
+            let _ = herdr.pane_close(&pane);
+            restore_old_binding(store, seat, plan, now)?;
+        }
         flag(
             store,
             seat,
@@ -1375,6 +1605,9 @@ fn set_pending(store: &mut Store, seat_id: &str, plan: &Plan) -> GearResult<()> 
         "cli": plan.cli,
         "args": plan.args,
         "generation": plan.generation,
+        "new_pane": plan.new_pane,
+        "old_generation": plan.old_generation,
+        "old_profile": plan.old_profile,
         "waited": plan.waited,
         "at": plan.at,
         "started": plan.started,
@@ -1577,6 +1810,7 @@ pub(crate) fn reconcile_config(
 mod config_change_tests {
     use super::*;
     use gear_herdr::fake::{Call, FakeHerdr};
+    use gear_herdr::HerdrRead;
     use gear_model::{AttemptState, SeatRole, TaskState};
     use gear_store::{testing, ContractRow, NewRound, RoundKey, TaskRow};
     const T: i64 = 1_800_000_000;
@@ -1734,6 +1968,15 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
         advance(store, herdr, cfg, &cfg.profiles, "p", &seat, None, now).unwrap();
     }
+
+    /// The `/quit` commands sent to the seat's pane (pi's exit command).
+    fn quit_prompts(herdr: &FakeHerdr) -> usize {
+        herdr
+            .prompts_to(PANE)
+            .iter()
+            .filter(|text| **text == "/quit")
+            .count()
+    }
     #[test]
     fn config_kind_change_waits_for_busy_agent_then_starts_fresh_in_same_worktree() {
         let dir = tempfile::tempdir().unwrap();
@@ -1768,12 +2011,8 @@ lanes = [{{model="{model}", cli="{kind}"}}]
             .any(|c| matches!(c, Call::SendKeys { .. } | Call::AgentStart { .. })));
         herdr.set_status(PANE, AgentStatus::Idle);
         advance_pending(&mut store, &mut herdr, &cfg, T + 46);
-        assert!(herdr
-            .calls
-            .iter()
-            .any(|c| matches!(c,Call::Prompt {pane,text,..} if pane==PANE && text=="/quit")));
-        herdr.exit_agent(PANE);
-        advance_pending(&mut store, &mut herdr, &cfg, T + 47);
+        // T-604: the old agent is not exited; a new pane is split for codex
+        // and the new agent starts there. The old agent keeps its pane.
         let start = herdr
             .calls
             .iter()
@@ -1785,16 +2024,27 @@ lanes = [{{model="{model}", cli="{kind}"}}]
                     args,
                 } = c
                 {
-                    Some((name, kind, pane, args))
+                    Some((name.clone(), kind.clone(), pane.clone(), args.clone()))
                 } else {
                     None
                 }
             })
             .unwrap();
-        assert_eq!(
-            (start.0.as_str(), start.1.as_str(), start.2.as_str()),
-            ("p-heat", "codex", PANE)
+        let new_pane = start.2.clone();
+        assert_eq!(start.1, "codex");
+        assert_ne!(new_pane, PANE, "the old agent keeps its pane");
+        assert!(
+            herdr.agent_get(PANE).unwrap().is_some(),
+            "the old agent is still there"
         );
+        assert!(
+            herdr
+                .agent_get(&new_pane)
+                .unwrap()
+                .is_some_and(|info| info.agent.as_deref() == Some("codex")),
+            "the new CLI is up in the split pane"
+        );
+        assert_eq!(quit_prompts(&herdr), 0, "the old agent is not exited");
         assert!(start
             .3
             .iter()
@@ -1816,6 +2066,7 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Active);
         assert_eq!(seat.generation, 2);
+        assert_eq!(seat.profile, "custom-codex");
         let round = store
             .read(|tx| tx.open_round_of_seat("p:heat"))
             .unwrap()
@@ -1836,7 +2087,200 @@ lanes = [{{model="{model}", cli="{kind}"}}]
                 .as_deref(),
             Some("fresh")
         );
+        assert!(
+            pending(&mut store, "p:heat").unwrap().is_none(),
+            "the plan is cleared"
+        );
     }
+
+    /// T-604: a CLI change waits for the wrap-up, splits one pane in the seat's
+    /// worktree and starts the new CLI there while the old agent keeps its pane.
+    #[test]
+    fn a_cli_change_splits_once_and_starts_the_new_cli_in_the_new_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap(), false);
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        change(&mut store, "codex", "new-model");
+        herdr.set_status(PANE, AgentStatus::Working);
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
+        // The wrap-up is waited for: no split while the agent works.
+        advance_pending(&mut store, &mut herdr, &cfg, T + 2);
+        assert!(
+            !herdr
+                .calls
+                .iter()
+                .any(|c| matches!(c, Call::PaneSplit { .. })),
+            "no split while the agent works: {:?}",
+            herdr.calls
+        );
+        herdr.set_status(PANE, AgentStatus::Idle);
+        advance_pending(&mut store, &mut herdr, &cfg, T + 3);
+        let splits: Vec<_> = herdr
+            .calls
+            .iter()
+            .filter_map(|c| {
+                if let Call::PaneSplit {
+                    pane,
+                    direction,
+                    cwd,
+                } = c
+                {
+                    Some((pane.clone(), direction.clone(), cwd.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(splits.len(), 1, "one split: {:?}", herdr.calls);
+        assert_eq!(splits[0].0, PANE);
+        assert_eq!(splits[0].1, "right");
+        assert_eq!(splits[0].2, dir.path().to_str().unwrap());
+        let start = herdr
+            .calls
+            .iter()
+            .find_map(|c| {
+                if let Call::AgentStart { kind, pane, .. } = c {
+                    Some((kind.clone(), pane.clone()))
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert_eq!(start.0, "codex");
+        let new_pane = start.1.clone();
+        assert_ne!(new_pane, PANE);
+        // The seat is rebound to the new pane at a new generation, the model
+        // is recorded and the Continue is delivered there; the old agent keeps
+        // its pane (T-605 exits it).
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active);
+        assert_eq!(seat.generation, 2);
+        assert_eq!(seat.profile, "codex");
+        let binding = store
+            .read(|tx| tx.get_binding("p:heat", 2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.kind, "codex");
+        assert_eq!(binding.pane_id, new_pane);
+        assert_eq!(binding.status, BindingStatus::Active);
+        let old = store
+            .read(|tx| tx.get_binding("p:heat", 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.status, BindingStatus::Void);
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&model_meta_key("p:heat")))
+                .unwrap()
+                .as_deref(),
+            Some("new-model")
+        );
+        assert!(
+            pending(&mut store, "p:heat").unwrap().is_none(),
+            "the plan is cleared"
+        );
+        assert!(
+            herdr.agent_get(PANE).unwrap().is_some(),
+            "the old agent keeps its pane"
+        );
+        assert_eq!(quit_prompts(&herdr), 0, "the old agent is not exited");
+        let deliveries = store
+            .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Deliver))
+            .unwrap();
+        assert!(
+            deliveries.iter().any(|op| op.payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Continue T-1"))),
+            "the Continue is delivered: {deliveries:?}"
+        );
+    }
+
+    /// T-604: an engine restart between Split and Start finds the new pane in
+    /// the plan and neither splits again nor starts a second agent.
+    #[test]
+    fn an_engine_restart_between_split_and_start_neither_splits_nor_starts_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap(), false);
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        change(&mut store, "codex", "new-model");
+        // The start is refused once, so the plan stops between Split and Start.
+        herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
+        let plan = pending(&mut store, "p:heat").unwrap().unwrap();
+        assert_eq!(plan.phase, Phase::Start, "{plan:?}");
+        assert!(plan.new_pane.is_some(), "{plan:?}");
+        assert_eq!(
+            herdr
+                .calls
+                .iter()
+                .filter(|c| matches!(c, Call::PaneSplit { .. }))
+                .count(),
+            1
+        );
+        // The engine restarts: the durable plan resumes at Start.
+        advance_pending(&mut store, &mut herdr, &cfg, T + 2);
+        assert_eq!(
+            herdr
+                .calls
+                .iter()
+                .filter(|c| matches!(c, Call::PaneSplit { .. }))
+                .count(),
+            1,
+            "never splits twice: {:?}",
+            herdr.calls
+        );
+        assert_eq!(
+            herdr.started_agents.len(),
+            1,
+            "one agent started: {:?}",
+            herdr.calls
+        );
+        // The plan is cleared: no further tick starts another agent.
+        assert!(pending(&mut store, "p:heat").unwrap().is_none());
+    }
+
+    /// T-604: a start that fails closes the new pane, clears the plan and flags
+    /// the seat; the old agent stays bound and working.
+    #[test]
+    fn a_failed_start_closes_the_new_pane_and_leaves_the_old_binding_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap(), false);
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        change(&mut store, "codex", "new-model");
+        herdr.refuse_starts = Some(("boom".into(), 1));
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
+        assert!(
+            pending(&mut store, "p:heat").unwrap().is_none(),
+            "the plan is cleared"
+        );
+        let closed: Vec<_> = herdr
+            .calls
+            .iter()
+            .filter_map(|c| {
+                if let Call::PaneClose { pane } = c {
+                    Some(pane.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(closed.len(), 1, "the new pane is closed: {:?}", herdr.calls);
+        assert_ne!(closed[0], PANE);
+        let binding = store
+            .read(|tx| tx.get_binding("p:heat", 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.status, BindingStatus::Active);
+        assert_eq!(binding.pane_id, PANE);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(seat.generation, 1);
+        assert_eq!(seat.state, SeatState::NeedsCheck);
+        assert!(
+            herdr.agent_get(PANE).unwrap().is_some(),
+            "the old agent is still there"
+        );
+    }
+
     /// T-420: a restart's agent gets the seat's own scratch directory as
     /// `TMPDIR`, as a lane's first start does.
     #[test]
@@ -1932,7 +2376,11 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         )));
         crate::switch::clear_pending(&mut store, "p:heat").unwrap();
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 2).unwrap();
-        assert!(pending(&mut store, "p:heat").unwrap().is_some());
+        // T-604: the restart completes in the tick that finds the switch gone.
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(seat.profile, "codex");
+        assert_eq!(seat.generation, 2);
+        assert!(pending(&mut store, "p:heat").unwrap().is_none());
     }
     /// T-447, the M5.3 departure: a lane onboarding starts on its chain's head
     /// records the fingerprint in the same write that records its model, so
@@ -2123,10 +2571,11 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         );
     }
     #[test]
-    fn re_init_to_another_cli_with_an_open_attempt_restarts_on_the_new_model_and_continues() {
-        // T-400: a re-init that changes the lane's model and its CLI while its
-        // attempt is Started restarts the lane on the new model and hands the
-        // attempt back with its Continue line.
+    fn re_init_to_another_cli_with_an_open_attempt_starts_the_new_cli_in_a_new_pane() {
+        // T-400, T-604: a re-init that changes the lane's model and its CLI
+        // while its attempt is Started splits a pane and starts the new CLI
+        // there, on the new model; the old agent keeps the seat until the next
+        // task's Finish (T-605) delivers the Continue.
         let dir = tempfile::tempdir().unwrap();
         let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap(), false);
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
@@ -2140,25 +2589,27 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         );
         change(&mut store, "codex", "new-model");
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
-        advance_pending(&mut store, &mut herdr, &cfg, T + 2);
-        assert!(herdr
-            .calls
-            .iter()
-            .any(|c| matches!(c,Call::Prompt {text,..} if text=="/quit")));
-        herdr.exit_agent(PANE);
-        advance_pending(&mut store, &mut herdr, &cfg, T + 3);
-        let (kind, args) = herdr
+        assert_eq!(quit_prompts(&herdr), 0, "the old agent is not exited");
+        assert!(
+            herdr.agent_get(PANE).unwrap().is_some(),
+            "the old agent is still there"
+        );
+        let (kind, pane, args) = herdr
             .calls
             .iter()
             .find_map(|c| {
-                if let Call::AgentStart { kind, args, .. } = c {
-                    Some((kind, args))
+                if let Call::AgentStart {
+                    kind, pane, args, ..
+                } = c
+                {
+                    Some((kind.clone(), pane.clone(), args.clone()))
                 } else {
                     None
                 }
             })
             .unwrap();
         assert_eq!(kind, "codex");
+        assert_ne!(pane, PANE);
         assert!(
             args.windows(2).any(|w| w == ["-m", "new-model"]),
             "{args:?}"
@@ -2170,6 +2621,20 @@ lanes = [{{model="{model}", cli="{kind}"}}]
                 .as_deref(),
             Some("new-model")
         );
+        // The seat is rebound to the new pane at a new generation and the
+        // Continue is delivered there; the old agent keeps its pane (T-605
+        // exits it).
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active);
+        assert_eq!(seat.generation, 2);
+        assert_eq!(seat.profile, "codex");
+        let binding = store
+            .read(|tx| tx.get_binding("p:heat", 2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.pane_id, pane);
+        assert_eq!(binding.status, BindingStatus::Active);
+        assert!(pending(&mut store, "p:heat").unwrap().is_none());
         let ops = store
             .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Deliver))
             .unwrap();
@@ -2192,6 +2657,9 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         // T-606: a pi model change alone is switched in place now; a CLI
         // change keeps the restart path this test drives.
         change(&mut store, "codex", "new-model");
+        // A working agent holds the plan in Stop, so the hold below finds it
+        // unfinished (T-604: an idle one would split and start in one tick).
+        herdr.set_status(PANE, AgentStatus::Working);
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
         assert!(pending(&mut store, "p:heat").unwrap().is_some());
         assert!(store
@@ -2277,8 +2745,12 @@ lanes = [{{model="{model}", cli="{kind}"}}]
             tx.update_project(&p)
         }).unwrap();
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
-        assert!(pending(&mut store, "p:heat").unwrap().is_some(),
-            "explicit pi-to-codex config change must schedule a restart, even when pi remains a fallback");
+        // T-604: the explicit pi-to-codex change is applied, even when pi
+        // remains a fallback.
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(seat.profile, "codex");
+        assert_eq!(seat.generation, 2);
+        assert!(pending(&mut store, "p:heat").unwrap().is_none());
     }
     #[test]
     fn a_lane_on_a_later_chain_entry_is_left_to_the_quota_step() {
@@ -2612,6 +3084,9 @@ lanes = [{{model="{model}", cli="{kind}"}}]
             cli: "opencode".into(),
             args: vec![],
             generation: 0,
+            new_pane: None,
+            old_generation: 1,
+            old_profile: Some("opencode".into()),
             phase: Phase::Start,
             waited: 0,
             old_cli: "opencode".into(),
@@ -2748,6 +3223,9 @@ lanes = [{{model="{model}", cli="{kind}"}}]
             cli: "codex".into(),
             args: vec![],
             generation: 0,
+            new_pane: None,
+            old_generation: 1,
+            old_profile: Some("pi".into()),
             phase: Phase::Start,
             waited: 0,
             old_cli: "pi".into(),
@@ -2808,7 +3286,8 @@ lanes = [{{model="{model}", cli="{kind}"}}]
 mod tests {
     use super::*;
     use gear_app::config::{ModelEntry, ModelSpec};
-    use gear_herdr::fake::FakeHerdr;
+    use gear_herdr::fake::{Call, FakeHerdr};
+    use gear_herdr::HerdrRead;
     use gear_model::{SeatRole, TaskState};
     use gear_store::{testing, ContractRow, TaskRow};
 
@@ -2930,54 +3409,59 @@ lanes = ["minimax-cn/MiniMax-M3.1-Flash", {model="gpt-6.1-sol", cli="claude"}]
         advance(store, herdr, cfg, &cfg.profiles, "p", &seat, target, now)
     }
 
-    /// Onboarding may set the restarted agent's seat `Active` on the plan's
-    /// generation before the finish phase: the finish accepts it, books the
-    /// model and the Continue, and clears the plan.
+    /// T-604: a CLI change splits a pane for the new CLI and starts it there;
+    /// the seat is rebound to that pane at a new generation, the model is
+    /// recorded and the Continue is delivered there. The old agent keeps its
+    /// pane (T-605 exits it).
     #[test]
-    fn finish_accepts_a_seat_onboarding_made_active_on_the_plans_generation() {
+    fn a_cli_change_starts_the_new_cli_in_a_split_pane() {
+        let dir = tempfile::tempdir().unwrap();
         let (mut store, mut herdr, cfg) = world();
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    &crate::onboard::worktree_path_key("p:heat"),
+                    dir.path().to_str().unwrap(),
+                )
+            })
+            .unwrap();
         let target = ModelEntry::Entry(ModelSpec {
             model: "gpt-6.1-sol".into(),
             cli: Some("claude".into()),
             args: vec![],
             context_window_k: None,
         });
-        // The plan begins: the old agent is asked to exit.
-        assert_eq!(
-            step(&mut store, &mut herdr, &cfg, Some(&target), T + 10).unwrap(),
-            None
-        );
-        assert!(pending(&mut store, "p:heat").unwrap().is_some());
-
-        // The old agent is gone; the start is refused once, so the generation
-        // is reserved and the seat waits in `Starting` before the finish.
-        herdr.exit_agent(PANE);
-        herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
-        assert_eq!(
-            step(&mut store, &mut herdr, &cfg, None, T + 11).unwrap(),
-            None
-        );
-        let seat = lane_seat(&mut store);
-        assert_eq!(seat.state, SeatState::Starting, "{:?}", seat.state_reason);
-        let plan = pending(&mut store, "p:heat").unwrap().unwrap();
-        assert_eq!(plan.phase, Phase::Start);
-        assert_eq!(seat.generation, plan.generation);
-        assert_eq!(plan.generation, 2);
-
-        // Onboarding made the new agent's seat Active on the plan's generation
-        // before the finish phase.
-        store
-            .write(|tx| tx.set_seat_state("p:heat", SeatState::Active, Some("onboarded"), T + 12))
-            .unwrap();
-
-        let line = step(&mut store, &mut herdr, &cfg, None, T + 13)
+        // The old agent is idle: the stop writes the handover, splits a pane
+        // and starts the new CLI there.
+        let line = step(&mut store, &mut herdr, &cfg, Some(&target), T + 10)
             .unwrap()
-            .expect("a seat already Active on the plan's generation finishes the restart");
+            .expect("the restart finishes");
         assert!(line.contains("restarted on claude (gpt-6.1-sol)"), "{line}");
+        let start = herdr
+            .calls
+            .iter()
+            .find_map(|c| {
+                if let Call::AgentStart { kind, pane, .. } = c {
+                    Some((kind.clone(), pane.clone()))
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert_eq!(start.0, "claude");
+        let new_pane = start.1;
+        assert_ne!(new_pane, PANE);
         assert_eq!(
-            pending(&mut store, "p:heat").unwrap(),
-            None,
-            "the plan is cleared"
+            herdr
+                .agent_get(&new_pane)
+                .unwrap()
+                .and_then(|info| info.agent),
+            Some("claude".into()),
+            "the new CLI is up in the split pane"
+        );
+        assert!(
+            herdr.agent_get(PANE).unwrap().is_some(),
+            "the old agent is still there"
         );
         assert_eq!(
             store
@@ -2989,15 +3473,23 @@ lanes = ["minimax-cn/MiniMax-M3.1-Flash", {model="gpt-6.1-sol", cli="claude"}]
         );
         let seat = lane_seat(&mut store);
         assert_eq!(seat.state, SeatState::Active);
-        assert_eq!(seat.generation, plan.generation);
+        assert_eq!(seat.generation, 2);
+        let binding = store
+            .read(|tx| tx.get_binding("p:heat", 2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.pane_id, new_pane);
+        assert_eq!(binding.status, BindingStatus::Active);
+        assert!(pending(&mut store, "p:heat").unwrap().is_none());
         let ops = store
             .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Deliver))
             .unwrap();
-        assert_eq!(ops.len(), 1, "one Continue for the open attempt: {ops:?}");
-        assert_eq!(ops[0].task.as_deref(), Some("T-1"));
-        assert_eq!(ops[0].attempt, Some(1));
-        assert_eq!(ops[0].generation, plan.generation);
-        assert_eq!(ops[0].state, OpState::Intended);
+        assert!(
+            ops.iter().any(|op| op.payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Continue T-1"))),
+            "the Continue is delivered: {ops:?}"
+        );
     }
 }
 
@@ -3010,6 +3502,7 @@ mod handover_tests {
     //! included.
     use super::*;
     use gear_herdr::fake::FakeHerdr;
+    use gear_herdr::HerdrRead;
     use gear_model::{SeatRole, TaskState};
     use gear_store::{testing, ContractRow, NewRound, RoundKey, TaskRow};
 
@@ -3178,6 +3671,7 @@ switch_grace_min = 10
         advance(store, herdr, cfg, &cfg.profiles, "p", &seat, None, now).unwrap();
     }
 
+    /// The `/quit` commands sent to the seat's pane (pi's exit command).
     fn quit_prompts(herdr: &FakeHerdr) -> usize {
         herdr
             .prompts_to(PANE)
@@ -3187,7 +3681,7 @@ switch_grace_min = 10
     }
 
     #[test]
-    fn an_at_once_switch_waits_the_grace_period_then_exits_even_while_working() {
+    fn an_at_once_switch_waits_the_grace_period_then_splits_even_while_working() {
         let dir = dirty_worktree();
         let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap());
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
@@ -3211,7 +3705,8 @@ switch_grace_min = 10
         assert_eq!(quit_prompts(&herdr), 0, "no exit during the wrap-up");
 
         // A model that thinks for hours must not hold the switch: while the
-        // grace runs the agent is left alone, at its end it is exited anyway.
+        // grace runs the agent is left alone, at its end the switch goes on.
+        // T-604: the old agent is not exited; a pane is split for the new CLI.
         herdr.set_status(PANE, AgentStatus::Working);
         let wrap_at = plan.wrap_at;
         advance_pending(&mut store, &mut herdr, &cfg, wrap_at + 1);
@@ -3219,52 +3714,64 @@ switch_grace_min = 10
         advance_pending(&mut store, &mut herdr, &cfg, wrap_at + GRACE - 1);
         assert_eq!(quit_prompts(&herdr), 0, "still inside the grace period");
         advance_pending(&mut store, &mut herdr, &cfg, wrap_at + GRACE);
-        assert_eq!(quit_prompts(&herdr), 1, "the exit went out after the grace");
-        let plan = pending(&mut store, "p:heat").unwrap().unwrap();
-        assert_eq!(plan.phase, Phase::Exit, "{plan:?}");
+        assert_eq!(quit_prompts(&herdr), 0, "the old agent is not exited");
+        assert!(
+            pending(&mut store, "p:heat").unwrap().is_none(),
+            "the restart finished"
+        );
+        assert_eq!(herdr.started_agents.len(), 1, "{:?}", herdr.calls);
+        assert!(
+            herdr.agent_get(PANE).unwrap().is_some(),
+            "the old agent keeps its pane"
+        );
     }
 
     #[test]
-    fn the_incoming_packet_starts_with_the_handover_of_a_dirty_tree() {
+    fn the_handover_block_of_a_dirty_tree_is_stored_for_the_incoming_generation() {
         let dir = dirty_worktree();
         let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap());
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
         change_to_codex(&mut store);
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
         herdr.set_status(PANE, AgentStatus::Working);
-        // Idle after the wrap-up: the exit goes now, the new agent starts and
-        // the packet is rendered for it.
+        // Idle after the wrap-up: the pane is split, the new agent starts there
+        // and the packet is rendered for it. T-604: the old agent stays.
         herdr.set_status(PANE, AgentStatus::Idle);
         advance_pending(&mut store, &mut herdr, &cfg, T + 2);
-        herdr.exit_agent(PANE);
-        advance_pending(&mut store, &mut herdr, &cfg, T + 3);
-        assert!(pending(&mut store, "p:heat").unwrap().is_none());
-
-        let packet = store
-            .read(|tx| gear_app::plan::render_task_packet(tx, "p", "T-1"))
-            .unwrap();
         assert!(
-            packet.starts_with("## Handover — you take over another agent's work"),
-            "{packet}"
+            pending(&mut store, "p:heat").unwrap().is_none(),
+            "the restart finished"
         );
-        assert!(packet.contains("old-session"), "{packet}");
+        assert!(
+            herdr.agent_get(PANE).unwrap().is_some(),
+            "the old agent keeps its pane"
+        );
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(seat.generation, 2, "the seat is rebound to the new pane");
+
+        // T-604: the block is stored for the generation the new agent will run
+        // on; the packet that carries it is the next task's Finish (T-605).
+        let block = crate::handover::stored_block(&mut store, "p:heat", 2, "T-1", 1)
+            .unwrap()
+            .expect("the handover block for the incoming generation");
+        assert!(
+            block.starts_with("## Handover — you take over another agent's work"),
+            "{block}"
+        );
+        assert!(block.contains("old-session"), "{block}");
         // T-513: the handover names the branch of the task the lane holds, and
         // says which branch the worktree is on when the two differ.
-        assert!(packet.contains("Branch: heat/t1"), "{packet}");
+        assert!(block.contains("Branch: heat/t1"), "{block}");
         assert!(
-            packet.contains(
+            block.contains(
                 "The worktree is on work; this task's branch is heat/t1: switch to it before you go on."
             ),
-            "{packet}"
+            "{block}"
         );
-        assert!(packet.contains("Uncommitted changes: src/a.rs"), "{packet}");
-        assert!(packet.contains("Untracked files: new.txt"), "{packet}");
-        assert!(packet.contains("handovers/heat-"), "{packet}");
-        assert!(packet.contains("Then the task packet:"), "{packet}");
-        // The task packet follows the handover.
-        let handover = packet.find("## Handover").unwrap();
-        let task = packet.find("# T-1 — goal").unwrap();
-        assert!(handover < task, "{packet}");
+        assert!(block.contains("Uncommitted changes: src/a.rs"), "{block}");
+        assert!(block.contains("Untracked files: new.txt"), "{block}");
+        assert!(block.contains("handovers/heat-"), "{block}");
+        assert!(block.contains("Then the task packet:"), "{block}");
         // The document holds part 1 and leaves parts 2 and 3 to the agent.
         let doc = pending_doc(&mut store);
         let text = std::fs::read_to_string(&doc).unwrap();
@@ -3483,6 +3990,15 @@ bar = "New Provider"
                 _ => None,
             })
             .collect()
+    }
+
+    /// The `/quit` commands sent to the seat's pane (pi's exit command).
+    fn quit_prompts(herdr: &FakeHerdr) -> usize {
+        herdr
+            .prompts_to(PANE)
+            .iter()
+            .filter(|text| **text == "/quit")
+            .count()
     }
 
     /// T-531: no `/model`/`/models` text reaches the pane.
