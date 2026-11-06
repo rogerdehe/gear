@@ -2280,6 +2280,21 @@ fn last_job_recorded(store: &mut Store, project: &str, seat: &SeatRow) -> GearRe
                         .is_none_or(|state| state != "running" && state != "starting")
             }));
         }
+        // A feature member's stage check ends with its marker (Lawrence M2:
+        // review-3's stage check of T-66 was done, T-66 was accepted at
+        // hand-in with no review verdict, and the seat stayed "busy", so the
+        // feature's integration task T-96 was never reviewed).
+        let stage_done = tx
+            .stage_check(project, &task, attempt)?
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .is_some_and(|marker| {
+                marker["state"]
+                    .as_str()
+                    .is_some_and(|state| state != "running" && state != "starting")
+            });
+        if stage_done {
+            return Ok(true);
+        }
         // A verdict on that attempt ends the job, whoever recorded it: a
         // direction check whose round was never written, or a review another
         // seat finished, must not hold this seat forever.
