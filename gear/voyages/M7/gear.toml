@@ -22,8 +22,8 @@ profile = "claude"
 # M7: two lanes (hull also owns gear-forge this voyage, for the issue-intake members); M6.2: on DeepSeek V4.1 Flash via TokenRhythm (user, 2026-11-01: replaces the self-hosted hk-dgx-1 after its key was revoked), thinking high, 600K context.
 [[lanes]]
 name = "hull"
-duty = "M7 engine, forge, model and usage: crates/gear-engine, gear-forge, gear-model, gear-usage"
-owns = ["crates/gear-engine/", "crates/gear-forge/", "crates/gear-model/", "crates/gear-usage/"]
+duty = "M7 engine (but finished.rs, mast's since 2026-11-06 19:20), forge, model and usage: crates/gear-engine, gear-forge, gear-model, gear-usage"
+owns = ["crates/gear-engine/Cargo.toml", "crates/gear-engine/examples/", "crates/gear-engine/tests/", "crates/gear-engine/src/attention.rs", "crates/gear-engine/src/audit.rs", "crates/gear-engine/src/blocked.rs", "crates/gear-engine/src/busy.rs", "crates/gear-engine/src/captain_quota.rs", "crates/gear-engine/src/composer.rs", "crates/gear-engine/src/delivery.rs", "crates/gear-engine/src/dialog.rs", "crates/gear-engine/src/dispatch.rs", "crates/gear-engine/src/doorbell.rs", "crates/gear-engine/src/failure.rs", "crates/gear-engine/src/feature.rs", "crates/gear-engine/src/feed.rs", "crates/gear-engine/src/friction.rs", "crates/gear-engine/src/guardrails.rs", "crates/gear-engine/src/handover.rs", "crates/gear-engine/src/health.rs", "crates/gear-engine/src/hours.rs", "crates/gear-engine/src/lane_nudge.rs", "crates/gear-engine/src/lib.rs", "crates/gear-engine/src/merge.rs", "crates/gear-engine/src/model.rs", "crates/gear-engine/src/names.rs", "crates/gear-engine/src/observe.rs", "crates/gear-engine/src/onboard.rs", "crates/gear-engine/src/opencode.rs", "crates/gear-engine/src/ops.rs", "crates/gear-engine/src/overrun.rs", "crates/gear-engine/src/panes.rs", "crates/gear-engine/src/parallel.rs", "crates/gear-engine/src/quiet.rs", "crates/gear-engine/src/quota.rs", "crates/gear-engine/src/rebind.rs", "crates/gear-engine/src/release.rs", "crates/gear-engine/src/restart.rs", "crates/gear-engine/src/review.rs", "crates/gear-engine/src/rounds.rs", "crates/gear-engine/src/rules.rs", "crates/gear-engine/src/session.rs", "crates/gear-engine/src/session_runner.rs", "crates/gear-engine/src/silent.rs", "crates/gear-engine/src/stall.rs", "crates/gear-engine/src/start.rs", "crates/gear-engine/src/switch.rs", "crates/gear-engine/src/tailed.rs", "crates/gear-engine/src/testtmp.rs", "crates/gear-engine/src/trust.rs", "crates/gear-engine/src/waits.rs", "crates/gear-forge/", "crates/gear-model/", "crates/gear-usage/"]
 charter = """You run on a flash model. Implement the packet exactly as written, in the files it names; never design, widen or reinterpret it. When the packet is unclear, contradicts the code, or cannot be done as written, ask the captain with `gear send --kind question` and give a default, instead of guessing."""
 kind = "pi"
 profile = "pi"
@@ -33,8 +33,8 @@ models = [
 
 [[lanes]]
 name = "mast"
-duty = "M7 app, store, board, CLI, herdr, skills, docs and build files: everything outside hull's crates"
-owns = ["crates/gear-app/", "crates/gear-store/", "crates/gear-cli/", "crates/gear-herdr/", "crates/gear-board/", "skills/", "Makefile", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml", "Cargo.lock"]
+duty = "M7 engine reclaim (finished.rs), app, store, board, CLI, herdr, skills, docs and build files: everything outside hull's crates"
+owns = ["crates/gear-engine/src/finished.rs", "crates/gear-app/", "crates/gear-store/", "crates/gear-cli/", "crates/gear-herdr/", "crates/gear-board/", "skills/", "Makefile", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml", "Cargo.lock"]
 charter = """You run on a flash model. Implement the packet exactly as written, in the files it names; never design, widen or reinterpret it. When the packet is unclear, contradicts the code, or cannot be done as written, ask the captain with `gear send --kind question` and give a default, instead of guessing."""
 kind = "pi"
 profile = "pi"
