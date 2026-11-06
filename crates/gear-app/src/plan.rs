@@ -5229,7 +5229,25 @@ fn departure_from_history(
     milestone: &str,
 ) -> GearResult<Option<(Ts, i64, Option<i64>)>> {
     let newest = tx.plan_version(project)?;
-    for version in 1..=newest {
+    let oldest = tx.oldest_plan_version(project)?.unwrap_or(1);
+    // T-646: the store keeps only the newest plan versions. When the oldest
+    // stored draft already carries the milestone's tasks, the voyage's first
+    // draft is gone: no departure or estimate is recovered rather than a
+    // wrong one.
+    if oldest > 1 {
+        if let Some(plan) = tx.get_plan(project, oldest)? {
+            if let Ok(draft) = crate::draft::parse(&plan.draft) {
+                if draft
+                    .queue
+                    .iter()
+                    .any(|item| item.milestone.as_deref() == Some(milestone))
+                {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    for version in oldest..=newest {
         let Some(plan) = tx.get_plan(project, version)? else {
             continue;
         };

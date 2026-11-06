@@ -1397,6 +1397,65 @@ fn historical_departure_scope_uses_the_original_plan() {
     assert_eq!(reports[0].departure_scope_min, Some(60));
 }
 
+/// T-646: a voyage whose first draft was pruned recovers no estimate. The
+/// oldest stored draft already carries its tasks, so the departure scope is
+/// unknown rather than wrong.
+#[test]
+fn a_voyage_whose_first_draft_was_pruned_recovers_no_departure_estimate() {
+    let mut old = world();
+    lift_the_cap(&mut old, 300);
+    run(&mut old, &plan(0, FULL), "r1", NOW).unwrap();
+    let (tasks, contracts, mut voyage) = old
+        .read(|tx| {
+            let tasks = tx.tasks_of_project("p")?;
+            let contracts = tasks
+                .iter()
+                .map(|t| tx.get_contract("p", &t.id, 1).map(|c| c.unwrap()))
+                .collect::<gear_model::GearResult<Vec<_>>>()?;
+            Ok((tasks, contracts, tx.get_voyage("p", "M1")?.unwrap()))
+        })
+        .unwrap();
+    assert_eq!(voyage.departure, Some(NOW));
+    // The estimate was never recorded, as for a voyage that departed before
+    // the store kept one.
+    voyage.departure_estimate_min = None;
+    let mut s = world();
+    lift_the_cap(&mut s, 300);
+    s.write(|tx| {
+        for task in &tasks {
+            tx.insert_task(task)?;
+        }
+        for contract in &contracts {
+            tx.insert_contract(contract)?;
+        }
+        tx.upsert_voyage(&voyage)?;
+        // Plans 1..=25, each already carrying M1's tasks: the store keeps
+        // only the newest 20, so the first draft is pruned.
+        for version in 1..=25 {
+            tx.insert_plan(&gear_store::PlanRow {
+                project: "p".into(),
+                version,
+                draft: plan(version - 1, FULL),
+                applied: NOW + version,
+                by_seat: Some("p:captain".into()),
+                by_gen: Some(1),
+            })?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(s.read(|tx| tx.oldest_plan_version("p")).unwrap(), Some(6));
+
+    let edit = "<!-- gear-plan project=p base=25 -->\n# Queue\n## T-1 [must] lane=heat milestone=M1\nestimate: 300\n";
+    run(&mut s, edit, "r2", NOW + 60).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(voyage.departure, Some(NOW), "the departure stands");
+    assert_eq!(
+        voyage.departure_estimate_min, None,
+        "the first draft is gone: no estimate is recovered"
+    );
+}
+
 /// T-239: a milestone emptied of its tasks keeps no departure, so a reused id
 /// starts its clock when its new tasks come — and its departure scope is those
 /// new tasks' estimates, not the earlier voyage's plan.
