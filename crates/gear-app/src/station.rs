@@ -494,15 +494,35 @@ fn cut_tasks(
 ) -> GearResult<Vec<String>> {
     let mut cut: Vec<String> = Vec::new();
     let tasks = tx.tasks_of_project(project)?;
+    // A task the captain cancelled because a hand-fix delivered its work is
+    // delivered, not cut: its `hand-fix:` line names it (GEAR M6.3: T-625, the
+    // compaction fix the user wanted at once, shipped by hand in v0.6.90 and
+    // counted as a cut that held the landing at 21%).
+    let decisions = tx.decisions_of(project, milestone)?;
+    let hand_fixed = |id: &str| {
+        decisions.iter().any(|decision| {
+            decision.kind == "hand-fix"
+                && format!(
+                    "{} {}",
+                    decision.what,
+                    decision.why.as_deref().unwrap_or("")
+                )
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                .any(|word| word == id)
+        })
+    };
     for task in &tasks {
-        if task.milestone.as_deref() == Some(milestone) && task.state == TaskState::Cancelled {
+        if task.milestone.as_deref() == Some(milestone)
+            && task.state == TaskState::Cancelled
+            && !hand_fixed(&task.id)
+        {
             cut.push(task.id.clone());
         }
     }
     let since = departure
         .map(crate::decision::apply_time)
         .unwrap_or_default();
-    for decision in tx.decisions_of(project, milestone)? {
+    for decision in &decisions {
         if decision.kind != "move" || decision.at < since {
             continue;
         }

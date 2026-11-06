@@ -1591,3 +1591,33 @@ fn a_member_of_a_landed_feature_reads_on_the_integration_branch() {
         .unwrap();
     assert_eq!(integration(&mut store), "p/feature/f-1");
 }
+
+/// A goal with line breaks is one row on the board (Lawrence M2: a feature's
+/// integration task, "Integrate feature F-1:" then the members' goals, broke
+/// the Tasks view's columns).
+#[test]
+fn a_goal_with_line_breaks_is_one_row() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            let mut contract = tx.get_contract("p", "T-135", 1)?.unwrap();
+            contract.version = 2;
+            contract.goal = "Integrate feature F-1:\nThe admin image builds\n  admin-web".into();
+            tx.insert_contract(&contract)?;
+            let mut task = tx.get_task("p", "T-135")?.unwrap();
+            task.contract_version = 2;
+            tx.update_task(&task)
+        })
+        .unwrap();
+    let title = store
+        .read(|tx| tasks(tx, "p", T0 + 86_400))
+        .unwrap()
+        .into_iter()
+        .find(|task| task.id == "T-135")
+        .unwrap()
+        .title;
+    assert_eq!(
+        title,
+        "Integrate feature F-1: The admin image builds admin-web"
+    );
+}

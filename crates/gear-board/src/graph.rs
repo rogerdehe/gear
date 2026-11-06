@@ -289,9 +289,10 @@ fn tasks_of(
             continue;
         }
         let history = History::of(tx, project, &row.id)?;
+        // One line: every view prints the title in a row of its own.
         let title = tx
             .get_contract(project, &row.id, row.contract_version)?
-            .map(|contract| contract.goal)
+            .map(|contract| one_line(&contract.goal))
             .unwrap_or_default();
         let (actual, finished) = actual_of(&history, now);
         // A member of a feature that landed is on the integration branch: it
@@ -1434,7 +1435,15 @@ fn clock(until: Ts) -> String {
 
 /// The first `max` characters of a text.
 fn cut(text: &str, max: usize) -> String {
-    text.chars().take(max).collect()
+    one_line(text).chars().take(max).collect()
+}
+
+/// A text on one row: a goal with line breaks (a feature's integration task:
+/// "Integrate feature F-1:" then the members' goals) printed as is pushed its
+/// second line to the left edge and broke the columns (Lawrence M2 board,
+/// T-96, T-107, T-98). Runs of whitespace become one space.
+pub(crate) fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// One line of the graph: characters at fixed columns, each in its style.
