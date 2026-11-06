@@ -313,6 +313,13 @@ impl GithubSection {
         Some(Github {
             repo,
             issues_labels: self.issues.labels.clone(),
+            // T-643: the voyage label is `{project}/{milestone}` unless the
+            // setting names another one; `""` turns it off.
+            voyage_label: self
+                .issues
+                .voyage_label
+                .clone()
+                .unwrap_or_else(|| "{project}/{milestone}".to_string()),
             merge: self.merge,
             merge_method: self.merge_method,
         })
@@ -325,6 +332,10 @@ impl GithubSection {
 #[serde(deny_unknown_fields, default)]
 pub struct IssuesSection {
     pub labels: Vec<String>,
+    /// The GitHub label a departed voyage's issues carry (T-643):
+    /// `{project}/{milestone}` by default; `""` turns it off. A non-empty
+    /// label must name `{milestone}`.
+    pub voyage_label: Option<String>,
 }
 
 /// How an accepted task reaches the integration branch (T-79).
@@ -373,8 +384,25 @@ pub struct Github {
     pub repo: String,
     /// Only issues with these labels; empty = all open issues.
     pub issues_labels: Vec<String>,
+    /// The voyage label template (T-643); empty = off.
+    pub voyage_label: String,
     pub merge: MergeMode,
     pub merge_method: MergeMethod,
+}
+
+/// The GitHub label a departed voyage's issues carry (T-643): the configured
+/// template with `{project}` and `{milestone}` filled in. `None` when the
+/// setting is off (`""`).
+pub fn voyage_label(github: &Github, project: &str, milestone: &str) -> Option<String> {
+    if github.voyage_label.is_empty() {
+        return None;
+    }
+    Some(
+        github
+            .voyage_label
+            .replace("{project}", project)
+            .replace("{milestone}", milestone),
+    )
 }
 
 /// A repo of the project, resolved (T-52): the project root or one of the
@@ -2340,6 +2368,18 @@ fn github_issues(section: &GithubSection, field: &str, issues: &mut Vec<ConfigIs
             ));
         }
     }
+    // T-643: a voyage label names the milestone, or it cannot tell two
+    // voyages apart. Empty is off, not an error.
+    if let Some(label) = &section.issues.voyage_label {
+        if !label.is_empty() && !label.contains("{milestone}") {
+            issues.push(issue(
+                &format!("{field}.issues.voyage_label"),
+                format!(
+                    "the voyage label {label:?} must contain `{{milestone}}` (it names the voyage's milestone), or be \"\" to turn it off"
+                ),
+            ));
+        }
+    }
 }
 
 /// `owner/name`: one slash, both sides non-empty, no whitespace and no URL
@@ -2971,6 +3011,61 @@ gate = "make test"
             r.stale_worktrees[1].contains("keel/t1") && r.stale_worktrees[1].contains("left alone"),
             "{:?}",
             r.stale_worktrees
+        );
+    }
+
+    // ---- T-643: the voyage label setting --------------------------------
+
+    fn github_config(issues: &str) -> String {
+        format!(
+            "{}\n[github]\nrepo = \"o/r\"\n\n[github.issues]\n{issues}",
+            harbor_config(std::path::Path::new("/repo"), None)
+        )
+    }
+
+    #[test]
+    fn the_voyage_label_defaults_to_project_slash_milestone() {
+        let cfg = parse(&github_config("")).unwrap();
+        assert_eq!(validate(&cfg), vec![], "the default is valid");
+        let github = cfg.root_repo().github.expect("the project's mode");
+        assert_eq!(
+            voyage_label(&github, "carthage", "M2").as_deref(),
+            Some("carthage/M2")
+        );
+    }
+
+    #[test]
+    fn an_empty_voyage_label_turns_it_off() {
+        let cfg = parse(&github_config("voyage_label = \"\"\n")).unwrap();
+        assert_eq!(validate(&cfg), vec![], "off is valid");
+        let github = cfg.root_repo().github.expect("the project's mode");
+        assert_eq!(voyage_label(&github, "carthage", "M2"), None);
+    }
+
+    #[test]
+    fn a_voyage_label_without_the_milestone_is_refused() {
+        let cfg = parse(&github_config("voyage_label = \"x\"\n")).unwrap();
+        let issues = validate(&cfg);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].field, "github.issues.voyage_label");
+        assert!(
+            issues[0].problem.contains("{milestone}"),
+            "{}",
+            issues[0].problem
+        );
+    }
+
+    #[test]
+    fn a_named_voyage_label_fills_in_the_project_and_milestone() {
+        let cfg = parse(&github_config(
+            "voyage_label = \"voyage/{project}/{milestone}\"\n",
+        ))
+        .unwrap();
+        assert_eq!(validate(&cfg), vec![], "it names the milestone");
+        let github = cfg.root_repo().github.expect("the project's mode");
+        assert_eq!(
+            voyage_label(&github, "carthage", "M2").as_deref(),
+            Some("voyage/carthage/M2")
         );
     }
 }
