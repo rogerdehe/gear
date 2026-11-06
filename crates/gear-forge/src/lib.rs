@@ -199,6 +199,10 @@ pub trait Forge {
 
     /// Close an issue, with one closing comment.
     fn close_issue(&self, repo: &str, number: u64, comment: &str) -> ForgeResult<()>;
+
+    /// Create a label of `repo`, or update it when it exists (T-636): the
+    /// call is idempotent, so a retry after an outage is safe.
+    fn create_label(&self, repo: &str, name: &str, description: &str) -> ForgeResult<()>;
 }
 
 /// The commit `gh` names: an object `{"oid": "…"}`. An answer that is a
