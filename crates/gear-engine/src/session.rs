@@ -595,8 +595,12 @@ fn context_large(
             tx.get_binding(&seat.id, seat.generation)?,
         ))
     })?;
+    // Nothing unknown is large (the user, 2026-11-06: Lawrence's lanes were
+    // compacted at 9 % of a 1M window because the model named no window). A
+    // lane continuing related work keeps its session; only a measured context
+    // at half a known window compacts.
     let Some(config) = project.and_then(|p| gear_app::config::parse(&p.config_toml).ok()) else {
-        return Ok(true);
+        return Ok(false);
     };
     let entries = match seat.role {
         gear_model::SeatRole::Lane => config
@@ -612,11 +616,8 @@ fn context_large(
         Some(model) => entries.iter().find(|entry| entry.model() == model),
         None => entries.first(),
     };
-    let Some(window) = entry.and_then(|e| e.context_window_k()).filter(|w| *w > 0) else {
-        return Ok(true);
-    };
     let profiles = gear_app::config::profile_table(&cfg.profiles, &config)?;
-    let usage = binding
+    let log = binding
         .as_ref()
         .and_then(|binding| {
             profiles
@@ -624,9 +625,25 @@ fn context_large(
                 .or_else(|| profiles.values().find(|p| p.kind == binding.kind))
         })
         .and_then(|p| p.usage_log.as_deref())
-        .and_then(gear_usage::UsageLog::from_name)
-        .and_then(|log| session.and_then(|session| gear_usage::last_context(log, session)));
-    Ok(usage.is_none_or(|tokens| (tokens as u128) * 2 >= (window as u128) * 1000))
+        .and_then(gear_usage::UsageLog::from_name);
+    // The window: the config's, else the one the CLI itself knows (pi's
+    // models.json, Codex's rollout, OpenCode's config, Claude's model name).
+    let window = entry
+        .and_then(|e| e.context_window_k())
+        .filter(|k| *k > 0)
+        .map(|k| (k as i64) * 1000)
+        .or_else(|| {
+            let id = entry
+                .map(|e| e.model().to_string())
+                .or_else(|| model.clone())?;
+            gear_usage::context_window(log?, session, &id)
+        });
+    let Some(window) = window else {
+        return Ok(false);
+    };
+    let usage =
+        log.and_then(|log| session.and_then(|session| gear_usage::last_context(log, session)));
+    Ok(usage.is_some_and(|tokens| (tokens as i128) * 2 >= window as i128))
 }
 
 /// The facts of a lane round (design §3.3).
@@ -2061,7 +2078,19 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
         assert!(!context_large(&mut store, &config, &seat, path.to_str()).unwrap());
         write(35000);
         assert!(context_large(&mut store, &config, &seat, path.to_str()).unwrap());
-        assert!(context_large(&mut store, &config, &seat, None).unwrap());
+        // A context that cannot be read is not large: the session is kept.
+        assert!(!context_large(&mut store, &config, &seat, None).unwrap());
+        // A model that names no window is not large either, however long
+        // its session (Lawrence M2: compacted at 9 % of 1M).
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = project.config_toml.replace(", context_window_k = 100", "");
+                tx.update_project(&project)
+            })
+            .unwrap();
+        write(900000);
+        assert!(!context_large(&mut store, &config, &seat, path.to_str()).unwrap());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1224 -->
+<!-- gear-plan project=gear base=1231 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -9,6 +9,8 @@ eta: 6h
 depart: now
 
 # Decisions
+- station M-8289: keep course | why: projected 321m against the 6h eta; the lanes are even now (hull 255m, mast 209m)
+- station M-8284: keep course | why: projected 299m against the 6h eta; hull holds 239m of engine work and mast 65m: when mast's queue runs out, the engine tasks that touch no hull file in flight move to mast
 - 2026-11-06 07:58 confirmed: M6.3 departure, not departed -> departs now with the scope above (every proposed item but the graceful engine restart), eta 6h | why: the user agreed the scope after being told the plan would be written and the voyage would depart on that agreement
 - 2026-11-06 user: M6.3 takes every item proposed for it except the graceful engine restart, which stays in M7
 - 2026-11-06 scope: F-3 (one way to switch a seat's agent) is GEAR's third feature: its four members merge into gear/feature/f-3 and reach dev once | why: the user's design; the switch touches herdr, the restart state machine and the in-place switch together
@@ -131,4 +133,40 @@ deps: -
 goal: A project's integration branch lives for one voyage: a landing's reclaim deletes it once it is on the release branch, and the next departure cuts it again (Carthage M1: carthage/dev was removed at the reclaim, and nothing would recreate it: every lane, review and merge worktree is created from `origin/<integration>`). crates/gear-engine: before the first worktree of a voyage is created (onboard.rs, review.rs and merge.rs call `worktree_create(..., &repo.integration, ...)`), when `refs/remotes/<remote>/<integration>` is missing after the fetch, push `<remote>/<release>` to `refs/heads/<integration>` once, fetch again and tell the captain in one Info item ("<integration> was missing; cut from <release> at <sha>"). An integration branch equal to the release branch is never created or deleted. In crates/gear-engine/src/finished.rs `reclaim`, the integration branch is named only when its tip is on the release branch (otherwise it holds unreleased work: it is named with "not on <release>" and kept).
 accept: Tests with a temp repo: a missing integration branch is cut from release before the first lane worktree and the item names the sha; a present one is untouched; the reclaim names an integration branch whose tip is on release and keeps one with extra commits. Run only `make check CRATE=gear-engine TESTS='test(onboard::) | test(finished::)'`; the merge gate runs `make gate`.
 estimate: 45
+deps: -
+
+## T-623 [must] lane=mast milestone=M6.3 required
+goal: A lane's paths and words are the captain's, not staffing (Lawrence M2, 2026-11-06: adding 15 files to a lane's `owns` and fixing a command in a charter were refused with STAFF_LOCKED until the user confirmed; the user: that is the captain's work). crates/gear-app/src/admin.rs `staffing_changed`: compare `[quota]`, `[models]`, the set of lanes with each lane's name, kind, profile and models, and `[temps]` kind and profile; a change only to a lane's `duty`, `owns`, `not` or `charter`, or to `[temps].charter`, is not a staffing change and applies without `--confirmed`. `staffing_changes` keeps listing every difference, and the apply output prints those non-staffing lines under "changed (captain's)". Today's ownership checks (overlap between lanes, open tasks' paths) still run on the new owns.
+accept: Tests in crates/gear-cli/tests/it/admin_init_contract.rs: mid-voyage, a change of a lane's owns and charter applies without --confirmed and is printed; a change of a lane's model or of quota.lanes is still STAFF_LOCKED. Run only `make check CRATE=gear-cli TESTS='test(admin_init)'`; the merge gate runs `make gate`.
+estimate: 30
+deps: -
+
+## T-624 [must] lane=mast milestone=M6.3 required
+goal: A feature's spread deps are kept apart from a member's own (Lawrence M2, 2026-11-06: T-86's block said `deps: -` and the apply kept T-63, T-79 and T-80; they were F-4's outside wait, written by T-587 into every member's stored deps, so every later apply read them back as the member's own and the captain could neither release a member nor cancel a task the feature waits on). crates/gear-app/src/plan.rs, rule (3) of the feature deps: record the spread per feature in meta (`feature_wait:{project}:{feature}`, the outside deps and the member that declares each); at the start of each apply, strip the previously recorded spread from every member's stored deps before the graph is read, then compute the spread again from the members' own deps and store it again; the apply prints one line per member that waits on work it did not name: `T-86 waits on T-63 (F-4: T-89 needs it)`. `gear plan show T-n` prints the spread on its own line (`waits (feature F-4): T-63, T-79, T-80`), not in `deps:`.
+accept: Tests in crates/gear-app/tests/it/feature_plan_contract.rs: a member whose block drops its outside dep releases every other member on the next apply; a member's own `deps: -` is kept while another member still declares the outside dep, and the output names that member; `plan show` keeps the spread out of `deps:`. Run only `make check CRATE=gear-app TESTS='test(feature)'`; the merge gate runs `make gate`.
+estimate: 40
+deps: -
+
+## T-625 [must] lane=hull milestone=M6.3 required
+goal: A model with no `context_window_k` is not compacted before every packet (Lawrence M2, 2026-11-06: web was compacted at 9.6 % of 1M and console at 22 % of 500k, because crates/gear-engine/src/session.rs `context_large` returns true when the entry has no window). With no window, read it from the seat CLI's own model table when the profile has one (pi: the `contextWindow` of the model in pi's models file), else use a default of 200k; nothing unknown is ever "large" by itself: a window that cannot be read and a context the usage log cannot read (today `usage.is_none_or(...)` returns large) both mean keep the session; only a measured context at half the window compacts. Keep today's rule when both are known. The user (2026-11-06): a lane continuing related work keeps its session, an unrelated task starts a new one, and a compaction at 9 % of the window is never right.
+accept: Tests in session.rs `mod tests`: an entry with no window and a 30k context does not compact; a set window with an unreadable usage log does not compact; with no window and 120k it compacts (half of the 200k default); a set window keeps today's rule. Run only `make check CRATE=gear-engine TESTS='test(session::)'`; the merge gate runs `make gate`.
+estimate: 25
+deps: -
+
+## T-626 [should] lane=mast milestone=M6.3
+goal: `gear admin init` warns about a model with no `context_window_k` (same case). crates/gear-app/src/admin.rs (or kickoff.rs, where init prints the staffing): for every lane, review and captain model entry without `context_window_k`, print one warning line `model <id> has no context_window_k: GEAR assumes 200k (or the CLI's own table); set it to the model's window`. No refusal.
+accept: A test in crates/gear-cli/tests/it/admin_init_contract.rs: a config with a model lacking the window prints the warning and applies. Run only `make check CRATE=gear-cli TESTS='test(admin_init)'`; the merge gate runs `make gate`.
+estimate: 15
+deps: -
+
+## T-627 [must] lane=hull milestone=M6.3 required
+goal: A feature member's merge never waits behind a full gate (Lawrence M2, 2026-11-06 09:05: T-86 and T-87, members of F-4 merging into lawrence/feature/f-4 with a conflict check only, went Executing → Unknown "merge will retry from the remote" every tick for minutes, because they take the merge lock of the same merge worktree that T-79's 6-minute gate into lawrence/dev held). crates/gear-engine/src/merge.rs: a merge whose target is not the repo's integration branch (a feature member, `task_branch_override`/`base` naming the feature branch) runs in its own merge worktree per target branch (`<project>-merge-<feature>` through herdr, as the integration one is made) with its own lock, so it runs beside the integration train; the worktree is removed when the feature's integration task lands.
+accept: Tests in merge.rs `mod tests`: while an integration merge holds its worktree's lock, a feature member's merge runs and lands in the feature branch on the same tick; two members of one feature still take turns. Run only `make check CRATE=gear-engine TESTS='test(merge::) | test(feature::)'`; the merge gate runs `make gate`.
+estimate: 40
+deps: -
+
+## T-628 [should] lane=hull milestone=M6.3
+goal: A merge-failed item says when its remerge is queued (Lawrence, 2026-11-06: M-921 merge-failed:T-63 kept `next: remerge T-63` while O-760, the remerge, was Intended behind the running train; the captain's second remerge was refused and it asked why). crates/gear-engine/src/merge.rs: when a remerge op of the task is Intended or Unknown, the open merge-failed item's body ends with "remerge queued (O-n): it runs when the merge running into <branch> ends", and the hint offers no remerge; when the remerge starts, the item says it is running.
+accept: A test in merge.rs `mod tests`: a failed merge then a queued remerge updates the item's body with the queued line; the line is gone once the op runs. Run only `make check CRATE=gear-engine TESTS='test(merge::)'`; the merge gate runs `make gate`.
+estimate: 20
 deps: -
