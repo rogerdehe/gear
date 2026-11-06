@@ -281,16 +281,44 @@ fn think_notify(
 /// A 15-minute think clock (M4.1): a working lane whose session file grows
 /// while its worktree does not change is asked to stop thinking. The
 /// fingerprint and its clock are persisted per seat across engine restarts.
-/// How long the captain sits idle in a sailing voyage before GEAR reminds it,
-/// and how long before it reminds it again.
-const CAPTAIN_IDLE: i64 = 15 * 60;
-const CAPTAIN_AGAIN: i64 = 30 * 60;
+/// How long the whole fleet (captain, lanes, reviewers, no merge running)
+/// sits idle in an unfinished voyage before GEAR reminds the captain, and how
+/// long before it reminds it again.
+const CAPTAIN_IDLE: i64 = 5 * 60;
+const CAPTAIN_AGAIN: i64 = 10 * 60;
 
 fn captain_idle_key(seat: &str) -> String {
     format!("engine.quiet.captain_idle.{seat}")
 }
 fn captain_told_key(seat: &str) -> String {
     format!("engine.quiet.captain_told.{seat}")
+}
+
+/// Whether the voyage has landed: its landing order was answered `land`.
+fn voyage_landed(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<bool> {
+    let Some(id) = tx.get_meta(&format!("station:{project}:{milestone}:land"))? else {
+        return Ok(false);
+    };
+    Ok(tx.get_message(project, &id)?.is_some_and(|message| {
+        message.state == MsgState::Resolved
+            && message.result.as_deref().is_some_and(|result| {
+                result.split_once(':').is_some_and(|(_, action)| {
+                    let action = action.trim();
+                    action == "land" || action.starts_with("land ")
+                })
+            })
+    }))
+}
+
+/// Whether the voyage's landing order is open: every task is done and the
+/// captain has not landed it yet.
+fn landing_open(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<bool> {
+    let Some(id) = tx.get_meta(&format!("station:{project}:{milestone}:land"))? else {
+        return Ok(false);
+    };
+    Ok(tx
+        .get_message(project, &id)?
+        .is_some_and(|message| message.state == MsgState::Open))
 }
 
 /// A voyage never stops on its own (the user, 2026-11-05: Carthage's captain
@@ -304,6 +332,23 @@ pub fn captain_sailing(
     observed: &[SeatObs],
     now: Ts,
 ) -> GearResult<()> {
+    // The user, 2026-11-05: an idle captain alone is no problem while its
+    // lanes work; the captain AND every lane and reviewer idle is.
+    let crew_busy = observed.iter().any(|o| {
+        o.seat.project == project
+            && o.seat.role != SeatRole::Captain
+            && o.presence == Presence::Present
+            && !o.idle
+    });
+    let merging = store.read(|tx| {
+        Ok(!tx
+            .ops_of_kind_in_states(
+                project,
+                gear_model::OpKind::Merge,
+                &[gear_model::OpState::Executing],
+            )?
+            .is_empty())
+    })?;
     for obs in observed.iter().filter(|o| {
         o.seat.project == project
             && o.seat.role == SeatRole::Captain
@@ -311,7 +356,7 @@ pub fn captain_sailing(
     }) {
         let seat = obs.seat.id.clone();
         store.write(|tx| {
-            if !obs.idle {
+            if !obs.idle || crew_busy || merging {
                 tx.delete_meta(&captain_idle_key(&seat))?;
                 return Ok(());
             }
@@ -328,8 +373,14 @@ pub fn captain_sailing(
             if now - since < CAPTAIN_IDLE {
                 return Ok(());
             }
+            // The user, 2026-11-05: a voyage that is not finished, by however
+            // little, never lets its captain stop, unless it is paused. A
+            // voyage is finished when it has landed.
+            if tx.project_paused(project)?.is_some() {
+                return Ok(());
+            }
             let milestone = gear_app::plan::current_voyage(tx, project)?;
-            if milestone.is_empty() {
+            if milestone.is_empty() || voyage_landed(tx, project, &milestone)? {
                 return Ok(());
             }
             let left = tx
@@ -337,7 +388,10 @@ pub fn captain_sailing(
                 .into_iter()
                 .filter(|task| task.milestone.as_deref() == Some(milestone.as_str()))
                 .count();
-            if left == 0 {
+            // Every task done: unfinished while its landing order waits for
+            // an answer. A voyage with neither (an old one, landed before the
+            // landing order existed) is finished and rings nobody (T-571).
+            if left == 0 && !landing_open(tx, project, &milestone)? {
                 return Ok(());
             }
             if tx
@@ -367,7 +421,8 @@ pub fn captain_sailing(
                 kind: MsgKind::System,
                 urgent: true,
                 body: format!(
-                    "Voyage {milestone} is sailing ({left} tasks left) and you have been idle for {} min. A voyage never stops on its own: a station is a mark to measure against, never a stop, and what only the user can do (a real sign-in, test money, a browser) is listed for the landing while the voyage goes on. Run `gear`, keep every lane working, and resolve this item.",
+                    "Voyage {milestone} is not finished ({}), and you and every lane and reviewer have been idle for {} min. A voyage never stops until it has landed, unless it is paused: a station is a mark, never a stop, and what only the user can do (a real sign-in, test money, a browser) is listed for the landing while the voyage goes on. Run `gear`, keep every lane working (or land it when its goal is met), and resolve this item.",
+                    if left == 0 { "every task done, not landed".to_string() } else { format!("{left} tasks left") },
                     (now - since) / 60
                 ),
                 reply_to: None,
@@ -1196,34 +1251,85 @@ mod tests {
         };
         let items = |s: &mut Store| s.read(|tx| tx.thread_messages("p", "sailing:M1")).unwrap();
         let obs = captain(&mut s, true);
-        captain_sailing(&mut s, "p", &[obs.clone()], T).unwrap();
-        captain_sailing(&mut s, "p", &[obs.clone()], T + 14 * 60).unwrap();
-        assert!(items(&mut s).is_empty(), "not yet 15 minutes idle");
-        captain_sailing(&mut s, "p", &[obs.clone()], T + 15 * 60).unwrap();
+        // A lane at work: an idle captain is no problem.
+        s.write(|tx| {
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, PANE, "opencode", T)
+        })
+        .unwrap();
+        let lane = |s: &mut Store, idle: bool| SeatObs {
+            seat: s.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap(),
+            presence: Presence::Present,
+            status: Some(if idle {
+                AgentStatus::Idle
+            } else {
+                AgentStatus::Working
+            }),
+            flags: Default::default(),
+            idle,
+            screen: None,
+            session: None,
+        };
+        let working = lane(&mut s, false);
+        captain_sailing(&mut s, "p", &[obs.clone(), working.clone()], T).unwrap();
+        captain_sailing(&mut s, "p", &[obs.clone(), working], T + 20 * 60).unwrap();
+        assert!(items(&mut s).is_empty(), "a working lane: no reminder");
+        // The whole fleet idle: told after 5 minutes.
+        let still = lane(&mut s, true);
+        let obs_all = |o: &SeatObs| vec![o.clone(), still.clone()];
+        captain_sailing(&mut s, "p", &obs_all(&obs), T).unwrap();
+        captain_sailing(&mut s, "p", &obs_all(&obs), T + 4 * 60).unwrap();
+        assert!(items(&mut s).is_empty(), "not yet 5 minutes idle");
+        captain_sailing(&mut s, "p", &obs_all(&obs), T + 5 * 60).unwrap();
         let told = items(&mut s);
         assert_eq!(told.len(), 1);
         assert!(told[0].body.contains("never stops"), "{}", told[0].body);
         assert!(told[0].urgent);
-        // Resolved, still idle: not again before 30 minutes.
+        let resolve = |s: &mut Store, id: &str, at: Ts| {
+            s.write(|tx| tx.update_message_state("p", id, MsgState::Resolved, None, None, None, at))
+                .unwrap()
+        };
+        // Resolved, still idle: not again before 10 minutes.
+        resolve(&mut s, &told[0].id, T + 4 * 60);
+        captain_sailing(&mut s, "p", &obs_all(&obs), T + 12 * 60).unwrap();
+        assert_eq!(items(&mut s).len(), 1, "once per 10 minutes");
+        // Every task done and its landing order open: not finished.
         s.write(|tx| {
-            tx.update_message_state(
-                "p",
-                &told[0].id,
-                MsgState::Resolved,
-                None,
-                None,
-                None,
-                T + 16 * 60,
-            )
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.state = TaskState::Done;
+            tx.update_task(&task)?;
+            let land = tx.insert_message(&NewMessage {
+                meta: None,
+                project: "p".into(),
+                thread: "station:M1".into(),
+                task: None,
+                attempt: None,
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: "p:captain".into(),
+                kind: MsgKind::System,
+                urgent: true,
+                body: "ready to land".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: T,
+            })?;
+            tx.set_meta("station:p:M1:land", &land.id)
         })
         .unwrap();
-        captain_sailing(&mut s, "p", &[obs.clone()], T + 40 * 60).unwrap();
-        assert_eq!(items(&mut s).len(), 1, "once per 30 minutes");
-        captain_sailing(&mut s, "p", &[obs.clone()], T + 46 * 60).unwrap();
-        assert_eq!(items(&mut s).len(), 2, "again after 30 minutes");
+        captain_sailing(&mut s, "p", &obs_all(&obs), T + 15 * 60).unwrap();
+        let told = items(&mut s);
+        assert_eq!(told.len(), 2, "a voyage not landed is not finished");
+        assert!(told[1].body.contains("not landed"), "{}", told[1].body);
+        resolve(&mut s, &told[1].id, T + 16 * 60);
+        // A paused project is left alone.
+        s.write(|tx| tx.set_meta(&gear_store::Tx::project_paused_key("p"), "paused"))
+            .unwrap();
+        captain_sailing(&mut s, "p", &obs_all(&obs), T + 30 * 60).unwrap();
+        assert_eq!(items(&mut s).len(), 2, "paused");
         // A working captain resets the clock.
         let busy = captain(&mut s, false);
-        captain_sailing(&mut s, "p", &[busy], T + 47 * 60).unwrap();
+        captain_sailing(&mut s, "p", &[busy], T + 31 * 60).unwrap();
         assert!(s
             .read(|tx| tx.get_meta(&captain_idle_key("p:captain")))
             .unwrap()
