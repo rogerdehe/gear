@@ -496,6 +496,106 @@ pub fn thinks(store: &mut Store, project: &str, observed: &[SeatObs], now: Ts) -
     Ok(())
 }
 
+/// T-610: an engine nudge to a lane closes itself. A lane may not resolve an
+/// engine item and the captain may not either, so the engine resolves its own:
+/// the no-push nudge when the attempt it names has been handed in, has a newer
+/// attempt, or its task is terminal, and the captain's "no word" item when the
+/// lane's hand-in answered it. A nudge for a still-open attempt stays.
+pub fn resolve_nudges(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
+    for message in tx.messages_in_threads_starting(project, "quiet-lane:")? {
+        if !matches!(message.state, MsgState::Open | MsgState::Waiting) {
+            continue;
+        }
+        let (Some(task), Some(attempt)) = (message.task.as_deref(), message.attempt) else {
+            continue;
+        };
+        let Some(reason) = attempt_closed(tx, project, task, attempt)? else {
+            continue;
+        };
+        tx.update_message_state(
+            project,
+            &message.id,
+            MsgState::Resolved,
+            Some(&reason),
+            None,
+            None,
+            now,
+        )?;
+    }
+    for message in tx.messages_in_threads_starting(project, "quiet:")? {
+        if !matches!(message.state, MsgState::Open | MsgState::Waiting) {
+            continue;
+        }
+        let (Some(task), Some(attempt)) = (message.task.as_deref(), message.attempt) else {
+            continue;
+        };
+        let Some(lane) = message.thread.strip_prefix("quiet:") else {
+            continue;
+        };
+        // The lane's hand-in answered it: a result from the lane after the
+        // item was opened.
+        let answered = tx
+            .messages_from_since(project, lane, message.created)?
+            .into_iter()
+            .any(|m| {
+                m.kind == MsgKind::Result
+                    && m.task.as_deref() == Some(task)
+                    && m.attempt == Some(attempt)
+            });
+        if !answered {
+            continue;
+        }
+        tx.update_message_state(
+            project,
+            &message.id,
+            MsgState::Resolved,
+            Some("the lane handed in: its result answered the question"),
+            None,
+            None,
+            now,
+        )?;
+    }
+    Ok(())
+}
+
+/// The reason an attempt is closed, if it is: handed in (Submitted, Accepted,
+/// Rejected), a newer attempt exists, or its task is terminal.
+pub(crate) fn attempt_closed(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    attempt: i64,
+) -> GearResult<Option<String>> {
+    if let Some(row) = tx.get_task(project, task)? {
+        if row.state.is_terminal() {
+            return Ok(Some(format!(
+                "{task} is {}: the nudge is moot",
+                row.state.as_str()
+            )));
+        }
+    }
+    if tx
+        .attempts_of_task(project, task)?
+        .iter()
+        .any(|a| a.n > attempt)
+    {
+        return Ok(Some(format!(
+            "{task} has a newer attempt: the nudge is moot"
+        )));
+    }
+    if let Some(row) = tx.get_attempt(project, task, attempt)? {
+        if matches!(
+            row.state,
+            AttemptState::Submitted | AttemptState::Accepted | AttemptState::Rejected
+        ) {
+            return Ok(Some(format!(
+                "{task} attempt {attempt} was handed in: the nudge is moot"
+            )));
+        }
+    }
+    Ok(None)
+}
+
 /// The no-push clock, persisted per seat across engine restarts: a lane that
 /// has not pushed for `[conventions] push_interval_min` (20) is asked to tell
 /// the captain why within `push_reply_min` (10). Its answer goes to the
@@ -512,6 +612,7 @@ pub fn tick(
     let interval = i64::from(conventions.push_interval_min.max(1)) * 60;
     let reply = i64::from(conventions.push_reply_min.max(1)) * 60;
     let captain = tx.captain_of(project)?.map(|seat| seat.id);
+    resolve_nudges(tx, project, now)?;
     for seat in tx.seats_of_project(project)? {
         let Some(attempt) = eligible(tx, &seat)? else {
             // A hold is not the lane's own time: while a lane seat is not
@@ -1648,5 +1749,120 @@ mod tests {
         think(&mut t, T + 960);
         assert!(messages(&mut t.s, "think-lane:p:heat").is_empty());
         assert!(messages(&mut t.s, "think:p:heat").is_empty());
+    }
+
+    /// T-610: the no-push nudge closes itself when the attempt it names was
+    /// handed in; a nudge for a still-open attempt stays.
+    #[test]
+    fn a_no_push_nudge_closes_on_the_hand_in_of_its_attempt() {
+        let dir = repo_with_commit();
+        let mut s = world(dir.path().to_str().unwrap());
+        s.write(|tx| tick(tx, "p", T + 1201)).unwrap();
+        assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 1);
+        // The lane hands in: the attempt is Submitted.
+        s.write(|tx| {
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+            attempt.state = AttemptState::Submitted;
+            tx.update_attempt(&attempt)
+        })
+        .unwrap();
+        s.write(|tx| tick(tx, "p", T + 1300)).unwrap();
+        let lane = messages(&mut s, "quiet-lane:p:heat");
+        assert_eq!(lane.len(), 1);
+        assert_eq!(lane[0].state, MsgState::Resolved);
+        assert!(
+            lane[0]
+                .result
+                .as_deref()
+                .is_some_and(|r| r.contains("was handed in")),
+            "{:?}",
+            lane[0].result
+        );
+    }
+
+    /// T-610: a nudge for a still-open attempt stays open.
+    #[test]
+    fn a_no_push_nudge_for_a_still_open_attempt_stays() {
+        let dir = repo_with_commit();
+        let mut s = world(dir.path().to_str().unwrap());
+        s.write(|tx| tick(tx, "p", T + 1201)).unwrap();
+        s.write(|tx| tick(tx, "p", T + 1300)).unwrap();
+        let lane = messages(&mut s, "quiet-lane:p:heat");
+        assert_eq!(lane.len(), 1);
+        assert_eq!(lane[0].state, MsgState::Open);
+        assert_eq!(lane[0].result, None);
+    }
+
+    /// T-610: the no-push nudge closes when its task is cancelled.
+    #[test]
+    fn a_no_push_nudge_closes_on_a_cancel_of_its_task() {
+        let dir = repo_with_commit();
+        let mut s = world(dir.path().to_str().unwrap());
+        s.write(|tx| tick(tx, "p", T + 1201)).unwrap();
+        s.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.state = TaskState::Cancelled;
+            tx.update_task(&task)
+        })
+        .unwrap();
+        s.write(|tx| tick(tx, "p", T + 1300)).unwrap();
+        let lane = messages(&mut s, "quiet-lane:p:heat");
+        assert_eq!(lane.len(), 1);
+        assert_eq!(lane[0].state, MsgState::Resolved);
+        assert!(
+            lane[0]
+                .result
+                .as_deref()
+                .is_some_and(|r| r.contains("is cancelled")),
+            "{:?}",
+            lane[0].result
+        );
+    }
+
+    /// T-610: the captain's "no word" item closes when the lane's hand-in
+    /// answered it.
+    #[test]
+    fn the_captains_no_word_item_closes_when_the_lane_hands_in() {
+        let dir = repo_with_commit();
+        let mut s = world(dir.path().to_str().unwrap());
+        s.write(|tx| tick(tx, "p", T + 1201)).unwrap();
+        rang(&mut s, T + 1201);
+        s.write(|tx| tick(tx, "p", T + 1201 + 600)).unwrap();
+        assert_eq!(messages(&mut s, "quiet:p:heat").len(), 1);
+        assert_eq!(messages(&mut s, "quiet:p:heat")[0].state, MsgState::Open);
+        // The lane hands in: a result from the lane after the item.
+        s.write(|tx| {
+            tx.insert_message(&NewMessage {
+                project: "p".into(),
+                thread: "T-1:1".into(),
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                sender: "p:heat".into(),
+                sender_gen: 1,
+                recipient: "p:captain".into(),
+                kind: MsgKind::Result,
+                urgent: false,
+                body: "done".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Info,
+                created: T + 1201 + 700,
+                meta: None,
+            })
+            .map(|_| ())
+        })
+        .unwrap();
+        s.write(|tx| tick(tx, "p", T + 1201 + 710)).unwrap();
+        let captain = messages(&mut s, "quiet:p:heat");
+        assert_eq!(captain.len(), 1);
+        assert_eq!(captain[0].state, MsgState::Resolved);
+        assert!(
+            captain[0]
+                .result
+                .as_deref()
+                .is_some_and(|r| r.contains("handed in")),
+            "{:?}",
+            captain[0].result
+        );
     }
 }
