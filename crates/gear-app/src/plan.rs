@@ -435,9 +435,31 @@ fn apply_queue(
         &new_ids,
         stored_config.as_ref(),
     )?;
+    // T-624: strip the spread the previous apply recorded from the members'
+    // stored deps, so the graph reads the members' own deps. The spread is
+    // computed again below from those and stored again.
+    let mut previous: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for feature in features.marks.values() {
+        let held = feature_wait(tx, project, feature)?;
+        if !held.is_empty() {
+            previous.insert(feature.clone(), held);
+        }
+    }
+    let stripped = |id: &str, deps: &[String]| -> Vec<String> {
+        let Some(feature) = features.mark(id) else {
+            return deps.to_vec();
+        };
+        let Some(held) = previous.get(feature) else {
+            return deps.to_vec();
+        };
+        deps.iter()
+            .filter(|dep| !held.contains_key(*dep))
+            .cloned()
+            .collect()
+    };
     let mut graph: BTreeMap<String, Vec<String>> = existing
         .iter()
-        .map(|(id, task)| (id.clone(), task.deps.clone()))
+        .map(|(id, task)| (id.clone(), stripped(id, &task.deps)))
         .collect();
     for (index, item) in draft.queue.iter().enumerate() {
         match &item.id {
@@ -800,7 +822,10 @@ fn apply_queue(
     // holds it. The wait becomes a dep of every member; a merged one is
     // ignored, its work is already there.
     let merged: BTreeSet<String> = tx.merged_done_tasks(project)?.into_iter().collect();
-    let mut outside: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // T-624: the spread per feature, with the member that declares each
+    // outside dep, so the next apply can strip it and read the members' own
+    // deps again.
+    let mut outside: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for work in &features.works {
         for member in &work.members {
             for dep in graph.get(member).map(Vec::as_slice).unwrap_or_default() {
@@ -808,9 +833,25 @@ fn apply_queue(
                     continue;
                 }
                 let held = outside.entry(work.feature.clone()).or_default();
-                if !held.contains(dep) {
-                    held.push(dep.clone());
+                held.entry(dep.clone()).or_insert_with(|| member.clone());
+            }
+        }
+    }
+    for work in &features.works {
+        let held = outside.get(&work.feature).cloned().unwrap_or_default();
+        let value = serde_json::to_string(&held).map_err(|e| bad(0, e))?;
+        tx.set_meta(&feature_wait_key(project, &work.feature), &value)?;
+        // One line per member that waits on work it did not name.
+        for member in &work.members {
+            let own = graph.get(member).map(Vec::as_slice).unwrap_or_default();
+            for (dep, declaring) in &held {
+                if declaring == member || own.contains(dep) {
+                    continue;
                 }
+                warnings.push(format!(
+                    "{member} waits on {dep} ({}: {declaring} needs it)",
+                    work.feature
+                ));
             }
         }
     }
@@ -820,7 +861,7 @@ fn apply_queue(
         };
         for member in &work.members {
             let deps = graph.entry(member.clone()).or_default();
-            for dep in held {
+            for dep in held.keys() {
                 if !deps.contains(dep) {
                     deps.push(dep.clone());
                 }
@@ -1390,6 +1431,9 @@ fn apply_queue(
         rank += 1;
         task.rank = rank;
         task.updated = now;
+        // T-624: an unmentioned member keeps the spread the apply computed,
+        // not the one the previous apply left in its stored deps.
+        task.deps = graph.get(&task.id).cloned().unwrap_or_default();
         tx.update_task(&task)?;
         not_mentioned.push(task.id);
     }
@@ -3871,6 +3915,25 @@ fn contract_body(item: &QueueItem) -> String {
 /// the same task, so the captain can copy it into the plan file as it is.
 ///
 /// Read-only: nothing is written.
+/// T-624: the meta key of a feature's spread: the outside deps its members
+/// wait on, with the member that declares each.
+pub fn feature_wait_key(project: &str, feature: &str) -> String {
+    format!("feature_wait:{project}:{feature}")
+}
+
+/// T-624: the spread a feature's members wait on, as the last apply recorded
+/// it: outside dep → the member that declares it.
+pub fn feature_wait(
+    tx: &Tx<'_>,
+    project: &str,
+    feature: &str,
+) -> GearResult<BTreeMap<String, String>> {
+    let Some(raw) = tx.get_meta(&feature_wait_key(project, feature))? else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(serde_json::from_str(&raw).unwrap_or_default())
+}
+
 pub fn show(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<String> {
     let row = tx.get_task(project, task)?.ok_or_else(|| {
         GearError::new(
@@ -3917,14 +3980,36 @@ pub fn show(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<String> {
     if let Some(minutes) = row.estimate_min {
         text.push_str(&format!("estimate: {minutes}\n"));
     }
+    // T-624: the spread a feature's members wait on is printed on its own
+    // line, not in `deps:`.
+    let feature = tx.task_feature(project, task)?;
+    let spread = match &feature {
+        Some(feature) => feature_wait(tx, project, feature)?,
+        None => BTreeMap::new(),
+    };
+    let own_deps: Vec<&String> = row
+        .deps
+        .iter()
+        .filter(|dep| !spread.contains_key(*dep))
+        .collect();
     text.push_str(&format!(
         "deps: {}\n",
-        if row.deps.is_empty() {
+        if own_deps.is_empty() {
             "-".to_string()
         } else {
-            row.deps.join(", ")
+            own_deps
+                .iter()
+                .map(|dep| dep.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         }
     ));
+    if let Some(feature) = &feature {
+        if !spread.is_empty() {
+            let deps: Vec<&str> = spread.keys().map(String::as_str).collect();
+            text.push_str(&format!("waits (feature {feature}): {}\n", deps.join(", ")));
+        }
+    }
     if let Some(followup) = row.followup_of.as_deref() {
         text.push_str(&format!("followup-of: {followup}\n"));
     }
@@ -3943,7 +4028,7 @@ pub fn show(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<String> {
     }
     // The `feature:` of a task (M6.2): the feature whose branch its work
     // merges into.
-    if let Some(feature) = tx.task_feature(project, task)? {
+    if let Some(feature) = &feature {
         text.push_str(&format!("feature: {feature}\n"));
     }
     // The `audit:` mark of a task (T-505): a voyage audit, run by reviewers.
