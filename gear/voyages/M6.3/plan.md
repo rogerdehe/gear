@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1240 -->
+<!-- gear-plan project=gear base=1241 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
