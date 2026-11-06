@@ -59,6 +59,7 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -111,6 +112,10 @@ pub struct MergeWorkers {
     /// searches its members in a worktree of its own, and the tick appends the
     /// line it finds to the merge-failed item. No merge waits for one.
     bisects: Arc<Mutex<BTreeMap<String, BisectWorker>>>,
+    /// Set when the engine is being replaced (T-632): no new worker starts, a
+    /// running one finishes and is collected, and the ops that would have
+    /// started stay in their state for the next engine.
+    draining: Arc<AtomicBool>,
 }
 
 impl MergeWorkers {
@@ -163,6 +168,34 @@ impl MergeWorkers {
                 })
             })
             .unwrap_or(false)
+    }
+
+    /// Stop starting merge workers (T-632): a worker already running finishes
+    /// and is collected, and every op that would have started stays in its
+    /// state for the next engine.
+    pub fn drain(&self) {
+        self.draining.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the merge step must start nothing (T-632).
+    pub fn draining(&self) -> bool {
+        self.draining.load(Ordering::SeqCst)
+    }
+
+    /// Whether no merge worker and no bisect is running (T-632): the engine may
+    /// be replaced without cutting a merge.
+    pub fn idle(&self) -> bool {
+        let workers_idle = self.workers.lock().map(|w| w.is_empty()).unwrap_or(false);
+        let bisects_idle = self
+            .bisects
+            .lock()
+            .map(|bisects| {
+                bisects
+                    .values()
+                    .all(|worker| worker.done.lock().unwrap().is_some())
+            })
+            .unwrap_or(false);
+        workers_idle && bisects_idle
     }
 }
 
@@ -603,6 +636,11 @@ pub fn merge_passed(
     for (position, op) in ready.iter().enumerate() {
         if taken.contains(&op.id) {
             continue;
+        }
+        // T-632: the engine is being replaced. No worker starts, and this op
+        // stays in its state for the next engine.
+        if cfg.merges.draining() {
+            return Ok(merged);
         }
         let op = op.clone();
         let task = op.task.clone().unwrap_or_default();
@@ -1136,6 +1174,10 @@ fn launch_train(
     workers: &mut BTreeMap<String, Worker>,
     now: Ts,
 ) -> GearResult<()> {
+    // T-632: no worker starts while draining; its ops stay Intended.
+    if cfg.merges.draining() {
+        return Ok(());
+    }
     let paths: Vec<String> = worktrees
         .iter()
         .map(|worktree| worktree.path.clone())
@@ -1243,6 +1285,10 @@ fn launch_batch(
     workers: &mut BTreeMap<String, Worker>,
     now: Ts,
 ) -> GearResult<()> {
+    // T-632: no worker starts while draining; its ops stay Intended.
+    if cfg.merges.draining() {
+        return Ok(());
+    }
     let paths = vec![worktree.path.clone()];
     let mut members = Vec::new();
     for op in &batch {
@@ -2151,6 +2197,10 @@ fn start_bisects(
     config: &ProjectConfig,
     now: Ts,
 ) -> GearResult<()> {
+    // T-632: no bisect starts while draining; its request stays pending.
+    if cfg.merges.draining() {
+        return Ok(());
+    }
     let pending: Vec<(String, String)> = store.read(|tx| {
         let mut pending = Vec::new();
         for key in tx.meta_keys_with_prefix(&bisect_prefix(project))? {
@@ -16629,5 +16679,42 @@ gate = "{project_gate}"
         let item = open_failed_item(&mut store, "T-9");
         let expected = format!("bisect: the gate turns red at merge(T-2) {tip}");
         assert!(item.contains(&expected), "{item:?} lacks {expected:?}");
+    }
+
+    // ---- T-632: the merge workers can drain ------------------------------
+
+    #[test]
+    fn draining_starts_no_worker_and_leaves_the_op_intended() {
+        let scratch = Scratch::new("drain-start");
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, "true");
+        cfg.merges.drain();
+
+        let merged = merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+
+        assert!(merged.is_empty());
+        assert_eq!(
+            op_state(&mut store, "O-1"),
+            Some(OpState::Intended),
+            "the op stays for the next engine"
+        );
+        assert!(!cfg.merges.running("p"), "no worker started");
+        assert!(cfg.merges.idle());
+    }
+
+    #[test]
+    fn a_worker_started_before_drain_finishes_and_is_collected() {
+        let scratch = Scratch::new("drain-collect");
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, "true");
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        assert!(cfg.merges.running("p"), "the worker started");
+        cfg.merges.drain();
+        assert!(!cfg.merges.idle(), "a worker is still running");
+
+        // The worker finishes; the next step collects it even while draining.
+        let merged = wait_merge(&mut store, &mut herdr, &cfg);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(op_state(&mut store, "O-1"), Some(OpState::Confirmed));
+        assert!(cfg.merges.idle(), "nothing runs any more");
     }
 }
