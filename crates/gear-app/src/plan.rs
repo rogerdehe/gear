@@ -3827,7 +3827,7 @@ fn remerge(
     if mechanical {
         payload["mechanical"] = serde_json::json!(true);
     }
-    tx.insert_op(&gear_store::NewOp {
+    let op = tx.insert_op(&gear_store::NewOp {
         project: project.to_string(),
         seat: if lane.is_empty() {
             format!("{project}:captain")
@@ -3843,7 +3843,39 @@ fn remerge(
         payload,
         created: now,
     })?;
+    // The lost-merge item says nothing will merge the work; now something
+    // will (Lawrence M-1549 stayed open with its remerge queued, and neither a
+    // second remerge nor a reply could close it). A failed merge of the
+    // retry opens its own item.
+    close_lost(
+        tx,
+        project,
+        task_id,
+        &format!("remerge queued ({})", op.id),
+        now,
+    )?;
     Ok(None)
+}
+
+/// Resolve the task's open `merge-lost:<task>` items with `result`.
+fn close_lost(tx: &Tx<'_>, project: &str, task: &str, result: &str, now: Ts) -> GearResult<()> {
+    for message in tx.thread_messages(project, &format!("merge-lost:{task}"))? {
+        if matches!(
+            message.state,
+            gear_model::MsgState::Open | gear_model::MsgState::Waiting
+        ) {
+            tx.update_message_state(
+                project,
+                &message.id,
+                gear_model::MsgState::Resolved,
+                Some(result),
+                None,
+                None,
+                now,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// T-405: whether the task's accepted attempt was settled by the engine as
