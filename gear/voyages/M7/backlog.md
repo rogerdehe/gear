@@ -3,6 +3,7 @@
 Postponed from M6 (2026-11-01, landing): the items M6 did not close, as M6 recorded them.
 
 ## Candidates
+- **The reclaim could not close the merge worktree's Herdr workspace** (GEAR M6.3 landing, M-8482: w1KM gear-merge, one idle shell, its worktree already removed; `herdr workspace close w1KM` by hand worked). Find what the reclaim's close call is refused with and close it the same way.
 - **The sailing nag rings while a refused landing waits for the user's confirmation** (GEAR M6.3, 2026-11-06: M-8480, M-8481 every few minutes after `station M-8478: land` was refused for 4/19 cancellations). While a land order is refused for a user decision, the idle-voyage item says so once and stays quiet.
 - **`gear admin init` warns about a model with no `context_window_k`** (from M6.3 T-626, cut at station M-8433): since v0.6.90 the CLI's own window is read, so the warning names only a model whose window neither the config nor the CLI gives.
 - **The lost scan names a carrier that landed without the carried work** (from M6.3 T-615, cut at station M-8413): a task carried by T-m whose T-m merged a candidate without the carried task's accepted candidate gets the merge-lost item, naming the carrier.
