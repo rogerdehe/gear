@@ -1401,7 +1401,22 @@ fn waits_cleared(store: &mut Store, project: &str, ready: Vec<OpRow>) -> GearRes
             if let Some(list) = waits_for(&op) {
                 let mut all_landed = true;
                 for task in list.split(',').map(str::trim).filter(|t| !t.is_empty()) {
-                    let landed = gear_app::tasks::merged_at(tx, project, task)?.is_some()
+                    // A member of a feature landed only on its feature's
+                    // branch until the feature's integration task merges, as
+                    // the merge's own wait counts it (Lawrence M2: T-94 waits
+                    // for F-3's members; counting their merge into
+                    // lawrence/feature/f-3 put T-94 first on every tick, where
+                    // it held the merge worktree and waited again).
+                    let on_branch = match tx.task_feature(project, task)? {
+                        Some(feature) => match tx.feature_carrier(project, &feature)? {
+                            Some(carrier) => {
+                                gear_app::tasks::merged_at(tx, project, &carrier)?.is_some()
+                            }
+                            None => false,
+                        },
+                        None => gear_app::tasks::merged_at(tx, project, task)?.is_some(),
+                    };
+                    let landed = on_branch
                         || tx
                             .get_task(project, task)?
                             .is_some_and(|row| row.state == TaskState::Cancelled);
