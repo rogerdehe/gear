@@ -3,6 +3,7 @@
 Postponed from M6 (2026-11-01, landing): the items M6 did not close, as M6 recorded them.
 
 ## Candidates
+- **The lost scan names a carrier that landed without the carried work** (from M6.3 T-615, cut at station M-8413): a task carried by T-m whose T-m merged a candidate without the carried task's accepted candidate gets the merge-lost item, naming the carrier.
 - **GEAR's F-3 reached its integration review with no member light check run** (M6.3 F-341, T-621's reviewer): T-603, T-604 and T-606 merged into gear/feature/f-3 without the stage checks the feature design runs per member; find why they were skipped (members settled before the feature reviewer existed?).
 - **A member added to fix a red feature gate opens a new integration task** (Lawrence M2, 2026-11-06: T-96 passed review, went red at the full gate, the captain added member T-106, and the apply made T-107 the F-1 carrier with T-96 waiting on it, so the fix costs a second integration review). A feature whose carrier is accepted and whose merge failed keeps that carrier: the new member merges into the feature branch and the carrier is remerged at the new tip (v0.6.93 takes member merges), with no new task.
 - **A merge-failed item names its queued remerge** (from M6.3 T-628, cut at station M-8318): while a remerge op of the task is Intended or Unknown, the merge-failed item says "remerge queued (O-n)" and offers no second remerge (Lawrence M-921, 2026-11-06).
