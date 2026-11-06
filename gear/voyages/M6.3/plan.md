@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1235 -->
+<!-- gear-plan project=gear base=1236 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -9,6 +9,8 @@ eta: 6h
 depart: now
 
 # Decisions
+- station M-8316: move | why: projected 452m against 360m, hull 345m and mast 123m; finished.rs, quiet.rs and lane_nudge.rs move to mast with T-610, T-618 and T-619 (100m), so hull keeps the files of F-3, T-630, merge and review; the eta stays and the rest is reported to the user
+- 2026-11-06 09:55 confirmed: lanes hull and mast owns, gear-engine whole -> hull all but finished.rs, quiet.rs, lane_nudge.rs, which go to mast | why: the user (2026-11-06, through Lawrence's captain, see T-623): a lane's paths are the captain's work, not staffing
 - 2026-11-06 09:45 note: the GEAR captain told Lawrence's captain to release its idle DashScope reviewers so they restart; release ends a seat and GEAR starts reviewers only on demand, so two stayed down against the user's resident reviewers | why: logged as the cause of T-630; a reviewer is never released to restart it
 - station M-8298: keep course | why: projected 384m is 24m over the 6h eta; T-625 is cancelled (the captain fixed it by hand in v0.6.90: the window comes from the CLI, nothing unknown compacts), which takes 25m off hull, and hull's T-604 boundary is decided; moving engine files between lanes would cost more than it saves
 - 2026-11-06 09:26 hand-fix: (v0.6.90, gate 63 s) a lane is compacted only at half a window GEAR knows: the config's, else the CLI's own (pi models.json, Codex rollout, OpenCode config, Claude [1m]); an unknown window or context keeps the session | why: the user: compacting at 9 % is never right, and it had to be fixed at once, not queued
@@ -73,7 +75,7 @@ accept: Tests in merge.rs `mod tests`: two red rounds with the same refusal and 
 estimate: 40
 deps: -
 
-## T-610 [must] lane=hull milestone=M6.3 required
+## T-610 [must] lane=mast milestone=M6.3 required
 goal: A nudge to a lane closes itself (M-8211: hull got "No push to … for 20 min" after it had handed T-601 in; a lane may not resolve it and the captain may not either, so it stayed open). crates/gear-engine/src/quiet.rs (the no-push nudge) and crates/gear-engine/src/lane_nudge.rs: each tick, resolve an open engine nudge to a lane when the attempt it names has been handed in, has a newer attempt, or its task is terminal, with the reason as the result. Same for the "tell the captain why" follow-up item on the captain's side when the lane's hand-in answered it.
 accept: Tests in quiet.rs and lane_nudge.rs `mod tests`: a no-push nudge closes on the hand-in of its attempt and on a cancel of its task; a nudge for a still-open attempt stays. Run only `make check CRATE=gear-engine TESTS='test(quiet::) | test(lane_nudge::)'`; the merge gate runs `make gate`.
 estimate: 25
@@ -121,13 +123,13 @@ accept: Tests in crates/gear-forge: an issue with two tasks stays open after the
 estimate: 35
 deps: -
 
-## T-618 [must] lane=hull milestone=M6.3 required
+## T-618 [must] lane=mast milestone=M6.3 required
 goal: A landed voyage's worktrees are removed by GEAR (Prometheus had 16 worktrees in its sidebar, 6 leftovers; Carthage M1's landing named 17 things to remove by hand). crates/gear-engine/src/finished.rs `reclaim`: for each worktree it names, remove it itself (`git worktree remove`) when it is clean (`git status --porcelain` empty) and its branch has nothing the remote does not have; delete a remote branch of the project whose tip is on the integration branch; close a Herdr workspace of the project whose panes hold no agent. Name to the captain only what it could not remove (dirty, unpushed, holding an agent), with the reason per entry. Never touch the main checkout or a worktree of another project.
 accept: Tests in finished.rs `mod tests` with a temp repo: a clean pushed worktree is removed and not named; a dirty one is named with "uncommitted changes" and kept; a branch on the integration branch is deleted on the remote, one with extra commits is named. Run only `make check CRATE=gear-engine TESTS='test(finished::)'`; the merge gate runs `make gate`.
 estimate: 50
 deps: -
 
-## T-619 [must] lane=hull milestone=M6.3 required
+## T-619 [must] lane=mast milestone=M6.3 required
 goal: Records written after a landing reach the integration branch with no gate (Carthage M1: the plan file rewritten by an apply after the landing went through a full 6-minute CI run, because the records step runs once per landing). crates/gear-engine/src/finished.rs `merge_records`: while the landed voyage is within the reclaim window, a seat branch `{seat_branch}` of the landed voyage that appears again on the remote with commits the integration branch lacks is merged the same way (records merge, no gate, branch deleted); the once-per-landing meta becomes the tip it merged, so a new tip merges again.
 accept: Tests in finished.rs `mod tests`: after the first records merge, a new commit pushed to the captain's branch is merged on a later scan and the branch deleted; no new commit, nothing happens. Run only `make check CRATE=gear-engine TESTS='test(finished::)'`; the merge gate runs `make gate`.
 estimate: 25
