@@ -614,11 +614,14 @@ fn scan(input: &Input) -> Result<Findings, String> {
         let base_tip = if base == input.integration {
             integration.clone()
         } else {
-            // The base's tip: the local ref, else the remote's. A branch
-            // neither names is the integration branch it will be cut from: a
-            // feature's branch starts life there (T-580).
-            tips.revision(&format!("refs/heads/{base}"))
-                .or_else(|| tips.revision(&format!("refs/remotes/{}/{base}", input.remote)))
+            // The base's tip: the remote's, else the local ref. Members merge
+            // into the feature branch on the remote; a local branch of that
+            // name in the main checkout is left at the cut and goes stale
+            // (M6.3: T-604 was paired with T-603, whose merge it held). A
+            // branch neither names is the integration branch it will be cut
+            // from: a feature's branch starts life there (T-580).
+            tips.revision(&format!("refs/remotes/{}/{base}", input.remote))
+                .or_else(|| tips.revision(&format!("refs/heads/{base}")))
                 .unwrap_or_else(|| integration.clone())
         };
         // A task whose candidate is already in the branch it merges into has
@@ -1457,6 +1460,42 @@ profile = "codex"
         assert_eq!(
             found.pairs["tasks:T-1:T-2"].files,
             vec![SRC.to_string()],
+            "read against the remote's feature branch: {found:?}"
+        );
+    }
+
+    /// A local feature branch left at the cut does not hide the remote's
+    /// merges: a member cut after another member merged is read against the
+    /// remote's feature branch, and the two make no pair (M6.3: T-604 was
+    /// paired with T-603, whose merge it held, because the main checkout's
+    /// `gear/feature/f-3` still pointed at the cut).
+    #[test]
+    fn a_stale_local_feature_branch_does_not_pair_a_member_with_a_merged_one() {
+        let path = feature_repo("gear-parallel-feature-stale");
+        let cut = sh(&path, &["rev-parse", FEATURE]);
+        member(&path, "heat/t1", FEATURE, SRC, "one");
+        merge_into_feature(&path, "heat/t1");
+        let merged = sh(&path, &["rev-parse", FEATURE]);
+        // The merge reached the remote; the local branch stays at the cut.
+        sh(
+            &path,
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{FEATURE}"),
+                &merged,
+            ],
+        );
+        sh(
+            &path,
+            &["update-ref", &format!("refs/heads/{FEATURE}"), &cut],
+        );
+        sh(&path, &["switch", "-q", "dev"]);
+        member(&path, "steady/t2", &merged, "other.rs", "two");
+
+        let mut store = store_on_base(&path, Some(FEATURE));
+        let found = scanned(&mut store, T0);
+        assert!(
+            !found.pairs.contains_key("tasks:T-1:T-2"),
             "read against the remote's feature branch: {found:?}"
         );
     }
