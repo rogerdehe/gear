@@ -12,15 +12,15 @@
 //!   then.
 //!
 //! How the model changes depends on the **CLI** the next entry names (T-35)
-//! and on whether GEAR drives that CLI's model picker (T-114):
+//! and on whether GEAR drives a protocol for that CLI's model (T-114, T-606):
 //!
-//! - the same CLI **with** a picker GEAR drives (OpenCode): the model changes
-//!   **in place** (T-33) — the picker, the variant dialog and the status bar;
-//!   the conversation stays.
-//! - another CLI, or a CLI without such a picker (pi): the agent is closed
-//!   and that CLI starts in the same pane and worktree ([`crate::restart`]) —
-//!   no session crosses a restart; the new agent starts from the git state and
-//!   the lane is told to continue.
+//! - the same CLI with a protocol GEAR drives: the model changes **in place**
+//!   (T-33) — OpenCode's session API and status bar, or pi's and Claude's
+//!   typed `/model <id>` and footer; the conversation stays.
+//! - another CLI, or a CLI without such a protocol (codex): the agent is
+//!   closed and that CLI starts in the same pane and worktree
+//!   ([`crate::restart`]) — no session crosses a restart; the new agent starts
+//!   from the git state and the lane is told to continue.
 //!
 //! The engine keeps the little state this needs in the store's `meta`
 //! (consecutive quota ticks, the lane's current model, the reset deadline, the
@@ -154,6 +154,8 @@ pub fn apply_quota_policy_with(
             if let Some(line) = resume_switch(
                 store,
                 herdr,
+                cfg,
+                profiles,
                 project,
                 &config,
                 seat,
@@ -709,13 +711,14 @@ fn return_from_fallback(
 /// Change the lane's model to `entry`'s.
 ///
 /// The model changes **in place** when the entry runs on the seat's own CLI
-/// **and** GEAR drives that CLI's model picker (T-33): no exit, no restart, the
-/// conversation stays. Today that is OpenCode only.
+/// **and** GEAR drives a protocol for that CLI's model (T-33, T-606): no exit,
+/// no restart, the conversation stays. Today that is OpenCode's session API,
+/// and pi's and Claude's typed `/model <id>`.
 ///
 /// Every other case is a **restart** (T-35, T-114): the agent is closed, the
 /// CLI of the entry starts in the same pane and worktree, and the lane
-/// continues its task. That is the case for another CLI, and for a CLI
-/// without a picker GEAR drives (pi): the model is given at the start, so the
+/// continues its task. That is the case for another CLI, and for a CLI without
+/// a protocol GEAR drives (codex): the model is given at the start, so the
 /// next model needs a new session.
 fn change_model(
     store: &mut Store,
@@ -747,9 +750,10 @@ fn change_model(
         (Some(target), Some(current)) => target == current,
         _ => true,
     };
-    // T-114: the in-place switch needs a model picker GEAR drives. A CLI
-    // without one (pi) is started again on the next model instead — the same
-    // pane and worktree, the lane's task delivered again in the new session.
+    // T-114: the in-place switch needs a protocol GEAR drives for that CLI
+    // (OpenCode's session API, pi's and Claude's `/model <id>`). A CLI without
+    // one (codex) is started again on the next model instead — the same pane
+    // and worktree, the lane's task delivered again in the new session.
     // A CLI that is not known at all keeps the old path, which flags the seat
     // with a reason.
     let in_place = match target_cli.as_deref() {
@@ -760,6 +764,8 @@ fn change_model(
         return start_switch(
             store,
             herdr,
+            cfg,
+            profiles,
             project,
             config,
             seat,
@@ -769,6 +775,7 @@ fn change_model(
             now,
         );
     }
+    let _ = (cfg, profiles);
     let target = ModelEntry::Entry(gear_app::config::ModelSpec {
         model: entry.model().to_string(),
         cli: target_cli,
@@ -794,9 +801,12 @@ fn change_model(
 /// No labels for the model: the seat is flagged (`NeedsCheck`) and nothing is
 /// typed — a restart cannot carry the model through OpenCode's shared service
 /// (review F4).
+#[allow(clippy::too_many_arguments)]
 fn start_switch(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, Profile>,
     project: &str,
     config: &ProjectConfig,
     seat: &SeatRow,
@@ -806,6 +816,24 @@ fn start_switch(
     now: Ts,
 ) -> GearResult<Option<String>> {
     let Some(labels) = config.models.switch.get(model) else {
+        // T-606: a pi or Claude seat is switched by typing `/model <id>`, but
+        // its footer confirmation needs a bar label. Without one the restart
+        // carries the model instead (it is given at the start); OpenCode
+        // cannot be restarted onto a model through its shared service, so it
+        // is flagged.
+        if crate::switch::switches_in_place(&profile.kind) && profile.kind != "opencode" {
+            let target = restart_target(store, config, seat, profile, model)?;
+            return crate::restart::advance(
+                store,
+                herdr,
+                cfg,
+                profiles,
+                project,
+                seat,
+                Some(&target),
+                now,
+            );
+        }
         let line = format!(
             "{}: no [models.switch.\"{model}\"] labels (picker, bar) — needs check, not restarted",
             seat.id
@@ -815,15 +843,20 @@ fn start_switch(
     };
     let outcome =
         crate::switch::switch_model(store, herdr, &seat.id, profile, obs, labels, model, now)?;
-    settle_switch(store, project, seat, model, outcome, now)
+    settle_switch(
+        store, herdr, cfg, profiles, project, config, seat, profile, model, outcome, now,
+    )
 }
 
 /// Continue the switch a seat has on its way, whatever the screen says now
 /// (review F6): the plan carries the target, so a cleared quota line, an open
 /// dialog or an engine restart does not lose it.
+#[allow(clippy::too_many_arguments)]
 fn resume_switch(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, Profile>,
     project: &str,
     config: &ProjectConfig,
     seat: &SeatRow,
@@ -848,15 +881,24 @@ fn resume_switch(
     };
     let outcome =
         crate::switch::switch_model(store, herdr, &seat.id, profile, obs, &labels, &model, now)?;
-    settle_switch(store, project, seat, &model, outcome, now)
+    settle_switch(
+        store, herdr, cfg, profiles, project, config, seat, profile, &model, outcome, now,
+    )
 }
 
 /// What a switch step means for the lane: `Done`/`Already` finish it, `Waiting`
-/// is silence (the next tick continues), `Failed` flags the seat.
+/// is silence (the next tick continues), `Failed` flags the seat — except for
+/// pi and Claude, whose typed command falls back to the restart (T-606).
+#[allow(clippy::too_many_arguments)]
 fn settle_switch(
     store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, Profile>,
     project: &str,
+    config: &ProjectConfig,
     seat: &SeatRow,
+    profile: &Profile,
     model: &str,
     outcome: crate::switch::SwitchOutcome,
     now: Ts,
@@ -867,6 +909,23 @@ fn settle_switch(
         }
         crate::switch::SwitchOutcome::Waiting => Ok(None),
         crate::switch::SwitchOutcome::Failed => {
+            // T-606: a pi or Claude command that did not confirm falls back to
+            // today's restart — the same CLI, its session resumed, the model
+            // given at the start. OpenCode keeps flagging: a restart cannot
+            // carry a model through its shared service.
+            if crate::switch::switches_in_place(&profile.kind) && profile.kind != "opencode" {
+                let target = restart_target(store, config, seat, profile, model)?;
+                return crate::restart::advance(
+                    store,
+                    herdr,
+                    cfg,
+                    profiles,
+                    project,
+                    seat,
+                    Some(&target),
+                    now,
+                );
+            }
             let line = format!(
                 "{}: the model switch to {model} did not confirm twice — needs check",
                 seat.id
@@ -875,6 +934,31 @@ fn settle_switch(
             Ok(Some(line))
         }
     }
+}
+
+/// The restart target for a model a typed command could not put on (T-606):
+/// the seat's own CLI, the chain entry's arguments, the model given at the
+/// start.
+fn restart_target(
+    store: &mut Store,
+    config: &ProjectConfig,
+    seat: &SeatRow,
+    profile: &Profile,
+    model: &str,
+) -> GearResult<ModelEntry> {
+    let cli = crate::restart::current_cli(store, seat)?.unwrap_or_else(|| profile.kind.clone());
+    let chain = if seat.role == SeatRole::Temp {
+        crate::model::review_chain(config)
+    } else {
+        crate::model::role_chain(config, &seat.name)
+    };
+    let entry = chain.iter().find(|entry| entry.model() == model).copied();
+    Ok(ModelEntry::Entry(gear_app::config::ModelSpec {
+        model: model.to_string(),
+        cli: Some(cli),
+        args: entry.map(|entry| entry.args().to_vec()).unwrap_or_default(),
+        context_window_k: entry.and_then(|entry| entry.context_window_k()),
+    }))
 }
 
 /// A confirmed in-place switch (T-33): the new model, the reset quota counter,
@@ -2436,6 +2520,7 @@ mod tests {
     use super::*;
     use crate::observe::Presence;
     use gear_herdr::fake::{Call, FakeHerdr, Inject};
+    use gear_herdr::HerdrRead;
     use gear_model::{OpState, TaskState};
     use gear_store::{testing, ContractRow, ProjectRow, TaskRow};
     use std::collections::BTreeSet;
@@ -2529,6 +2614,8 @@ quota_reset_h = {reset_h}
                     T0,
                 )?;
                 tx.set_binding_session_ref("p:heat", 1, "ses_lane")?;
+                // T-604: a CLI change splits a pane in the seat's worktree.
+                tx.set_meta(&crate::onboard::worktree_path_key("p:heat"), "/repo")?;
                 tx.insert_task(&TaskRow {
                     repo: None,
                     base: None,
@@ -2711,6 +2798,24 @@ quota_reset_h = {reset_h}
                 _ => None,
             })
             .collect()
+    }
+
+    /// T-605: the pane of the agent the running restart replaces — the one
+    /// that exits before the restart's Close phase closes it.
+    fn old_pane(store: &mut Store) -> String {
+        let plan = crate::restart::pending(store, "p:heat")
+            .unwrap()
+            .expect("a restart plan");
+        let generation = if plan.old_generation > 0 {
+            plan.old_generation
+        } else {
+            plan.generation.saturating_sub(1)
+        };
+        store
+            .read(|tx| tx.get_binding("p:heat", generation))
+            .unwrap()
+            .unwrap()
+            .pane_id
     }
 
     fn deliveries(store: &mut Store) -> Vec<String> {
@@ -3356,9 +3461,10 @@ quota_reset_h = {reset_h}
         assert_eq!(lane_seat(&mut store).state, SeatState::Active);
     }
 
-    /// T-35: the next model of the chain runs on **another CLI** — the agent
-    /// is closed, that CLI starts in the same pane and worktree with the
-    /// arguments of its chain entry, and the lane gets one Continue.
+    /// T-35, T-604: the next model of the chain runs on **another CLI** — a
+    /// pane is split for it, that CLI starts there with the arguments of its
+    /// chain entry, the seat is rebound to the new pane and the lane gets one
+    /// Continue. The old agent keeps its pane (T-605 exits it).
     #[test]
     fn a_quota_stop_restarts_the_lane_on_another_cli() {
         let mut store = world(&config(
@@ -3369,45 +3475,26 @@ quota_reset_h = {reset_h}
 
         // Tick 1: one quota screen is not enough (`confirm_rounds` is 2).
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
-        // Tick 2: the limit is confirmed — the restart begins: the opencode
-        // agent is closed, and nothing else happens yet.
+        // Tick 2: the limit is confirmed — the restart runs: a pane is split,
+        // codex starts there and the seat is rebound.
         let report = tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        // T-605: the seat is rebound and the Continue is on its way; the old
+        // agent is told to quit and its pane is closed last.
         assert!(report.events.is_empty(), "{:?}", report.events);
         assert_eq!(
             exits(&herdr),
             vec![vec!["ctrl+c".to_string()]],
-            "the agent is closed once: {:?}",
-            herdr.calls
+            "the old agent is told to quit"
         );
-        assert!(agent_starts(&herdr).is_empty(), "nothing started yet");
-        assert!(
-            deliveries(&mut store).is_empty(),
-            "no continue before the agent is up"
-        );
-
-        // The agent leaves: the pane is a shell again.
-        herdr.exit_agent(PANE);
-
-        // A tick while the agent is still there waits — the exit keys are
-        // never sent twice (a second ctrl+c would land in the shell).
-        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
-        let report = tick_quota(&mut store, &mut herdr, true, T0 + 25);
-        assert!(report.events.is_empty(), "{:?}", report.events);
-        assert_eq!(
-            exits(&herdr),
-            vec![vec!["ctrl+c".to_string()]],
-            "the exit keys went once: {:?}",
-            herdr.calls
-        );
-        herdr.exit_agent(PANE);
-
-        // Tick 3: codex starts in the same pane, and the lane continues.
-        let report = tick_quota(&mut store, &mut herdr, true, T0 + 30);
-        assert_eq!(report.events.len(), 1, "{:?}", report.events);
         let starts = agent_starts(&herdr);
         assert_eq!(starts.len(), 1, "{starts:?}");
         assert_eq!(starts[0].0, "codex", "the CLI of the chain entry");
-        assert_eq!(starts[0].1, PANE, "the same pane");
+        let new_pane = starts[0].1.clone();
+        assert_ne!(new_pane, PANE, "the old agent keeps its pane");
+        assert!(
+            herdr.agent_get(PANE).unwrap().is_some(),
+            "the old agent is still there"
+        );
         assert_eq!(
             starts[0].2,
             vec![
@@ -3415,7 +3502,7 @@ quota_reset_h = {reset_h}
                 "-c".to_string(),
                 "check_for_update_on_startup=false".to_string(),
                 // T-76: the folder the agent runs in (the lane's repo here:
-                // the seat's worktree is not recorded in this fixture).
+                // the seat's worktree is the repo in this fixture).
                 "-c".to_string(),
                 "projects={\"/repo\"={trust_level=\"trusted\"}}".to_string(),
                 // T-457: a resume runs in the seat's own directory.
@@ -3450,7 +3537,7 @@ quota_reset_h = {reset_h}
             Some("gpt-6.1-sol")
         );
         // The seat is back: it runs the new CLI, in a new generation, in the
-        // same pane.
+        // split pane.
         let seat = lane_seat(&mut store);
         assert_eq!(seat.state, SeatState::Active, "{:?}", seat.state_reason);
         assert_eq!(seat.generation, 2);
@@ -3460,12 +3547,37 @@ quota_reset_h = {reset_h}
             .unwrap()
             .unwrap();
         assert_eq!(binding.kind, "codex");
-        assert_eq!(binding.pane_id, PANE);
+        assert_eq!(binding.pane_id, new_pane);
         let old = store
             .read(|tx| tx.get_binding("p:heat", 1))
             .unwrap()
             .unwrap();
         assert_eq!(old.status, gear_store::BindingStatus::Void);
+
+        // The old agent leaves: its pane is closed last and the restart ends.
+        let old = old_pane(&mut store);
+        herdr.exit_agent(&old);
+        let report = tick_quota(&mut store, &mut herdr, false, T0 + 30);
+        assert_eq!(report.events.len(), 1, "{:?}", report.events);
+        assert!(
+            report.events[0].contains("restarted on codex"),
+            "{:?}",
+            report.events
+        );
+        assert!(
+            herdr
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::PaneClose { pane } if pane == &old)),
+            "the old pane is closed last: {:?}",
+            herdr.calls
+        );
+        assert!(
+            crate::restart::pending(&mut store, "p:heat")
+                .unwrap()
+                .is_none(),
+            "the plan is cleared"
+        );
 
         // More quota ticks add no second Continue.
         tick_quota(&mut store, &mut herdr, false, T0 + 40);
@@ -3490,20 +3602,28 @@ quota_reset_h = {reset_h}
         ));
         let mut herdr = herdr_with_quota();
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
-        tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        herdr.exit_agent(PANE);
-        // The shell is still busy, so the start waits (the environment line
-        // has run and is not sent again).
+        // The start is refused once, so the plan stops between Split and Start
+        // (the environment line has run and is not sent again).
         herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
-        tick_quota(&mut store, &mut herdr, false, T0 + 30);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
         assert_eq!(lane_seat(&mut store).state, SeatState::Starting);
+        let plan = crate::restart::pending(&mut store, "p:heat")
+            .unwrap()
+            .unwrap();
+        let new_pane = plan.new_pane.clone().expect("the split pane");
 
-        herdr.set_screen(PANE, "zsh: command not found: codex");
+        herdr.set_screen(&new_pane, "zsh: command not found: codex");
         herdr.inject_next = Some(Inject::Uncertain);
-        tick_quota(&mut store, &mut herdr, false, T0 + 40);
+        tick_quota(&mut store, &mut herdr, false, T0 + 30);
 
         let seat = lane_seat(&mut store);
-        assert_eq!(seat.state, SeatState::NeedsCheck, "{:?}", seat.state_reason);
+        assert_eq!(
+            seat.state,
+            SeatState::NeedsCheck,
+            "{:?} {:?}",
+            seat.state_reason,
+            herdr.calls
+        );
         let reason = seat.state_reason.unwrap_or_default();
         assert!(
             reason.contains("the codex CLI is not installed or not on PATH"),
@@ -3512,7 +3632,7 @@ quota_reset_h = {reset_h}
         assert_eq!(crate::restart::pending(&mut store, "p:heat").unwrap(), None);
         assert_eq!(agent_starts(&herdr).len(), 2, "{:?}", agent_starts(&herdr));
 
-        tick_quota(&mut store, &mut herdr, false, T0 + 50);
+        tick_quota(&mut store, &mut herdr, false, T0 + 40);
         assert_eq!(
             agent_starts(&herdr).len(),
             2,
@@ -3533,12 +3653,16 @@ quota_reset_h = {reset_h}
         ));
         let mut herdr = herdr_with_quota();
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
-        // The limit is confirmed: the restart begins (the agent is closed).
+        // The limit is confirmed: the restart begins. The start is refused
+        // once, so the plan stops between Split and Start.
+        herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        assert!(agent_starts(&herdr).is_empty(), "nothing started yet");
-        herdr.exit_agent(PANE);
+        let plan = crate::restart::pending(&mut store, "p:heat")
+            .unwrap()
+            .unwrap();
+        let new_pane = plan.new_pane.clone().expect("the split pane");
         // The shell has no codex on PATH when the start comes.
-        herdr.set_screen(PANE, "zsh: command not found: codex");
+        herdr.set_screen(&new_pane, "zsh: command not found: codex");
         herdr.refuse_starts = Some(("agent_start_timeout".into(), 1));
 
         tick_quota(&mut store, &mut herdr, false, T0 + 30);
@@ -3557,8 +3681,8 @@ quota_reset_h = {reset_h}
         );
         assert_eq!(
             agent_starts(&herdr).len(),
-            1,
-            "one attempt: {:?}",
+            2,
+            "two attempts: {:?}",
             agent_starts(&herdr)
         );
 
@@ -3566,8 +3690,8 @@ quota_reset_h = {reset_h}
         tick_quota(&mut store, &mut herdr, false, T0 + 40);
         assert_eq!(
             agent_starts(&herdr).len(),
-            1,
-            "no second agent_start: {:?}",
+            2,
+            "no third agent_start: {:?}",
             herdr.calls
         );
         assert_eq!(lane_seat(&mut store).state, SeatState::NeedsCheck);
@@ -3591,7 +3715,22 @@ quota_reset_h = {reset_h}
             .is_some());
         herdr.set_status(PANE, gear_herdr::AgentStatus::Idle);
         tick_quota(&mut store, &mut herdr, false, T0 + 30);
-        assert_eq!(exits(&herdr).len(), 1);
+        assert_eq!(exits(&herdr).len(), 1, "the old agent is told to quit");
+        assert_eq!(agent_starts(&herdr).len(), 1);
+        let plan = crate::restart::pending(&mut store, "p:heat")
+            .unwrap()
+            .expect("the plan waits for the old pane's close");
+        assert_eq!(plan.phase, crate::restart::Phase::Close, "{plan:?}");
+        // The old agent leaves: the restart ends.
+        let old = old_pane(&mut store);
+        herdr.exit_agent(&old);
+        tick_quota(&mut store, &mut herdr, false, T0 + 40);
+        assert!(
+            crate::restart::pending(&mut store, "p:heat")
+                .unwrap()
+                .is_none(),
+            "the restart finished"
+        );
     }
 
     #[test]
@@ -3620,18 +3759,30 @@ quota_reset_h = {reset_h}
             .unwrap();
         let mut herdr = herdr_with_quota();
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
-        tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        herdr.exit_agent(PANE);
+        // The start is refused once, so the plan stops between Split and Start.
         herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
-        tick_quota(&mut store, &mut herdr, false, T0 + 30);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
         assert_eq!(lane_seat(&mut store).state, SeatState::Starting);
         assert!(deliveries(&mut store).is_empty());
         // A later tick resumes the durable plan with the same generation.
-        tick_quota(&mut store, &mut herdr, false, T0 + 40);
+        tick_quota(&mut store, &mut herdr, false, T0 + 30);
         assert_eq!(lane_seat(&mut store).generation, 2);
         assert_eq!(lane_seat(&mut store).state, SeatState::Active);
         assert_eq!(deliveries(&mut store).len(), 1);
-        assert_eq!(exits(&herdr).len(), 1);
+        assert_eq!(exits(&herdr).len(), 1, "the old agent is told to quit");
+        let plan = crate::restart::pending(&mut store, "p:heat")
+            .unwrap()
+            .expect("the plan waits for the old pane's close");
+        assert_eq!(plan.phase, crate::restart::Phase::Close, "{plan:?}");
+        let old = old_pane(&mut store);
+        herdr.exit_agent(&old);
+        tick_quota(&mut store, &mut herdr, false, T0 + 40);
+        assert!(
+            crate::restart::pending(&mut store, "p:heat")
+                .unwrap()
+                .is_none(),
+            "the restart finished"
+        );
         assert_eq!(
             store
                 .read(|tx| tx.get_op("p", "O-1"))
@@ -3658,15 +3809,17 @@ quota_reset_h = {reset_h}
         let mut herdr = herdr_with_quota();
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        herdr.exit_agent(PANE);
+        // T-605: the old agent leaves; its pane is closed last.
+        let old = old_pane(&mut store);
+        herdr.exit_agent(&old);
         tick_quota(&mut store, &mut herdr, false, T0 + 30);
         // Exhaust the fallback and wait for the configured reset.
         tick_quota(&mut store, &mut herdr, true, T0 + 40);
         tick_quota(&mut store, &mut herdr, true, T0 + 50);
         assert_eq!(lane_seat(&mut store).state, SeatState::Parked);
         let reset = T0 + 50 + 5 * 3600;
-        tick_quota(&mut store, &mut herdr, false, reset);
-        herdr.exit_agent(PANE);
+        // T-604: the restart starts at the reset tick (the old agent is idle),
+        // so its screen and the service's answers are set before it.
         herdr.start_screen = Some("Build auto · wrong-model · high".into());
         // The restart starts OpenCode through the service: its session is made
         // before the TUI, so the model gate has one to switch (T-531).
@@ -3685,6 +3838,10 @@ quota_reset_h = {reset_h}
             Ok(catalogue("minimax-cn", "MiniMax-M3.1-Flash")),
             Ok(session_on("minimax-cn", "MiniMax-M3.1-Flash")),
         ]);
+        tick_quota(&mut store, &mut herdr, false, reset);
+        // T-605: the pane the restart replaces is the seat's current one.
+        let old = old_pane(&mut store);
+        herdr.exit_agent(&old);
         tick_quota(&mut store, &mut herdr, false, reset + 10);
         assert_eq!(agent_starts(&herdr).last().unwrap().0, "opencode");
         assert!(
@@ -3697,7 +3854,9 @@ quota_reset_h = {reset_h}
                 .unwrap()
                 .is_empty()
         );
-        herdr.set_screen(PANE, "Build auto · MiniMax-M3.1-Flash MiniMax · high");
+        // T-604: the model gate reads the new agent's pane (the split pane).
+        let new_pane = agent_starts(&herdr).last().unwrap().1.clone();
+        herdr.set_screen(&new_pane, "Build auto · MiniMax-M3.1-Flash MiniMax · high");
         // T-531: the gate reads the catalogue and the session; no key.
         queue_confirm(&mut herdr, "minimax-cn", "MiniMax-M3.1-Flash");
         tick_quota(&mut store, &mut herdr, false, reset + 20);
@@ -3708,7 +3867,14 @@ quota_reset_h = {reset_h}
             "no model text typed: {:?}",
             texts(&herdr)
         );
-        assert_eq!(lane_seat(&mut store).state, SeatState::Active);
+        let seat = lane_seat(&mut store);
+        assert_eq!(
+            seat.state,
+            SeatState::Active,
+            "{:?} {:?}",
+            seat.state_reason,
+            herdr.calls
+        );
         assert_eq!(lane_seat(&mut store).generation, 3);
         assert_eq!(
             deliveries(&mut store).len(),
@@ -3927,7 +4093,8 @@ quota_reset_h = {reset_h}
             "fallback",
         ));
         let mut herdr = herdr_with_quota();
-        // The old agent never exits, so the replacement cannot start.
+        // The new pane never takes the agent, so the restart cannot finish.
+        herdr.refuse_starts = Some(("agent_pane_busy".into(), 100));
         for tick in 0..40 {
             tick_quota(&mut store, &mut herdr, true, T0 + 10 + tick);
         }
@@ -3935,6 +4102,14 @@ quota_reset_h = {reset_h}
         assert!(crate::restart::pending(&mut store, "p:heat")
             .unwrap()
             .is_none());
+        // T-604: the old agent keeps its binding and its pane.
+        let binding = store
+            .read(|tx| tx.get_binding("p:heat", 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.status, gear_store::BindingStatus::Active);
+        assert_eq!(binding.pane_id, PANE);
+        assert_eq!(lane_seat(&mut store).generation, 1);
         let told = captain_messages(&mut store);
         assert_eq!(told.len(), 1, "{told:?}");
         assert!(
@@ -4061,7 +4236,9 @@ quota_reset_h = {reset_h}
         let mut herdr = herdr_with_quota();
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        herdr.exit_agent(PANE);
+        // T-605: the old agent leaves; its pane is closed last.
+        let old = old_pane(&mut store);
+        herdr.exit_agent(&old);
         tick_quota(&mut store, &mut herdr, false, T0 + 30);
         // The chain is exhausted: the lane parks until the reset.
         tick_quota(&mut store, &mut herdr, true, T0 + 40);
@@ -4072,12 +4249,19 @@ quota_reset_h = {reset_h}
         // on OpenCode, whose labels this config does not have.
         let reset = T0 + 50 + 5 * 3600;
         tick_quota(&mut store, &mut herdr, false, reset);
-        herdr.exit_agent(PANE);
+        // T-605: the model gate fails here (no labels), so the plan is cleared
+        // and the old agent keeps its pane; the seat waits for a human.
         herdr.start_screen = Some("Build auto · minimax-cn/MiniMax-M3.1-Flash · high".into());
         tick_quota(&mut store, &mut herdr, false, reset + 10);
 
         let seat = lane_seat(&mut store);
-        assert_eq!(seat.state, SeatState::NeedsCheck, "{:?}", seat.state_reason);
+        assert_eq!(
+            seat.state,
+            SeatState::NeedsCheck,
+            "{:?} {:?}",
+            seat.state_reason,
+            herdr.calls
+        );
         let open = store
             .read(|tx| tx.actionable_for("p", "p:captain", reset + 20))
             .unwrap();
@@ -5506,7 +5690,9 @@ quota_reset_h = 5
             T0 + 10,
         )
         .unwrap();
-        // The limit is confirmed for heat: its restart onto codex begins.
+        // The limit is confirmed for heat: its restart onto codex begins. The
+        // start is refused once, so the plan stops between Split and Start.
+        herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
         apply_quota_policy(
             &mut store,
             &mut herdr,

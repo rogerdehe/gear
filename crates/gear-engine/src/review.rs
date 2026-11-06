@@ -4331,6 +4331,9 @@ pub fn close_gone_seats(
     now: Ts,
 ) -> GearResult<Vec<String>> {
     let mut closed = Vec::new();
+    // T-605: the old pane of a seat's own CLI switch belongs to the switch; it
+    // is closed by the restart's Close phase, never as a stray here.
+    let switching = crate::names::switching_old_panes(store, project);
     for seat in store.read(|tx| tx.seats_of_project(project))? {
         if !matches!(seat.state, SeatState::Retired | SeatState::Released) {
             continue;
@@ -4347,6 +4350,9 @@ pub fn close_gone_seats(
             .map(|(pane, _)| pane.clone())
             .collect();
         for pane in panes {
+            if switching.iter().any(|old| old == &pane) {
+                continue;
+            }
             // A pane that is already gone is fine; nothing here may fail the
             // tick for the other seats.
             if let Outcome::Ok(()) = crate::panes::close_seat_pane(store, herdr, &pane, &seat.id)? {

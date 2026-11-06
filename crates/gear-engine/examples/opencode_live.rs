@@ -263,6 +263,9 @@ impl HerdrAct for NoKeys {
     fn pane_close(&mut self, pane: &str) -> Outcome<()> {
         self.0.pane_close(pane)
     }
+    fn pane_split(&mut self, pane: &str, direction: &str, cwd: &str) -> Outcome<String> {
+        self.0.pane_split(pane, direction, cwd)
+    }
     fn set_title(&mut self, pane: &str, title: &str) -> Outcome<()> {
         self.0.set_title(pane, title)
     }
