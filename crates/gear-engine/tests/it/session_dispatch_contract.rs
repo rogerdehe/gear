@@ -432,10 +432,10 @@ fn recovering_existing_round_consumes_fresh_marker_before_unrelated_task() {
     advance(&mut s, &mut h, &c, 5);
     let a = s.read(|tx| tx.get_attempt("p", "T-2", 1)).unwrap().unwrap();
     // T-481: T-2 carries no `fresh:` mark, so the lane keeps the conversation
-    // its earlier round made (compacted, since no usage is recorded) — the
-    // fresh marker was spent on the recovery of T-1's round and does not leak
-    // into the next task.
-    assert_eq!(a.session_action.as_deref(), Some("compact"));
+    // its earlier round made (kept as it is: no usage is recorded, and nothing
+    // unknown is large) — the fresh marker was spent on the recovery of T-1's
+    // round and does not leak into the next task.
+    assert_eq!(a.session_action.as_deref(), Some("keep"));
     assert!(
         !h.calls
             .iter()

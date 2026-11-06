@@ -386,7 +386,16 @@ fn pending_overrun_does_not_escalate_while_task_is_waiting() {
         .read(|tx| tx.thread_messages("p", "overrun:T-1:dev"))
         .unwrap()
         .is_empty());
-    assert!(h.prompts_to(LANE).is_empty(), "{:?}", h.calls);
+    // No overrun reaches the lane while T-1 waits. The lane is free to take
+    // its next task (T-2): a session with no usage is kept, not compacted
+    // first, so that delivery goes out at once.
+    assert!(
+        !h.prompts_to(LANE)
+            .iter()
+            .any(|text| text.contains("T-1") || text.to_lowercase().contains("overrun")),
+        "{:?}",
+        h.calls
+    );
 }
 
 #[test]

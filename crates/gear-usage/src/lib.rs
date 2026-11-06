@@ -121,6 +121,101 @@ pub fn last_context_in(log: UsageLog, session_ref: &str, home: &Path) -> Option<
     }
 }
 
+/// The context window, in tokens, of the model a seat runs, read from the CLI
+/// itself (the user, 2026-11-06: pi's own footer shows `17.0%/500k`; GEAR
+/// reads what the agent knows instead of assuming). `model` is the model id
+/// GEAR started the CLI with; `session_ref` the seat's session. None when the
+/// CLI keeps no window GEAR can read.
+///
+/// - pi: `~/.pi/agent/models.json`, `providers.<provider>.models[id].contextWindow`
+///   (`model` is `<provider>/<id>`; a bare id is looked up in every provider);
+/// - Codex: the rollout's last `model_context_window`;
+/// - OpenCode: `~/.config/opencode/opencode.json`,
+///   `provider.<provider>.models.<id>.limit.context`;
+/// - Claude: 1M for a model named with `[1m]`, else 200k;
+/// - agy: none.
+pub fn context_window(log: UsageLog, session_ref: Option<&str>, model: &str) -> Option<i64> {
+    context_window_in(log, session_ref, model, &home())
+}
+
+/// The same, with the home folder the files live in.
+pub fn context_window_in(
+    log: UsageLog,
+    session_ref: Option<&str>,
+    model: &str,
+    home: &Path,
+) -> Option<i64> {
+    let window = match log {
+        UsageLog::PiJsonl => pi_window(model, home),
+        UsageLog::CodexRollout => codex_window(session_ref?, home),
+        UsageLog::OpencodeDb => opencode_window(model, home),
+        UsageLog::ClaudeJsonl => Some(if model.to_ascii_lowercase().contains("[1m]") {
+            1_000_000
+        } else {
+            200_000
+        }),
+        UsageLog::AgyJsonl => None,
+    };
+    window.filter(|tokens| *tokens > 0)
+}
+
+fn pi_window(model: &str, home: &Path) -> Option<i64> {
+    let text = std::fs::read_to_string(home.join(".pi/agent/models.json")).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let providers = value.get("providers")?.as_object()?;
+    let (provider, id) = match model.split_once('/') {
+        Some((provider, id)) => (Some(provider), id),
+        None => (None, model),
+    };
+    providers
+        .iter()
+        .filter(|(name, _)| provider.is_none_or(|p| p == name.as_str()))
+        .filter_map(|(_, entry)| entry.get("models")?.as_array())
+        .flatten()
+        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(id))
+        .and_then(|entry| entry.get("contextWindow")?.as_i64())
+}
+
+fn codex_window(thread: &str, home: &Path) -> Option<i64> {
+    let path = codex_rollout_path(home, thread)?;
+    let lines = read_lines(&path)?;
+    let mut window = None;
+    for line in lines {
+        if !line.contains("model_context_window") {
+            continue;
+        }
+        let Some(value) = parse(&line) else { continue };
+        if let Some(found) = find_key(&value, "model_context_window").and_then(Value::as_i64) {
+            window = Some(found);
+        }
+    }
+    window
+}
+
+fn find_key<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    match value {
+        Value::Object(map) => map
+            .get(key)
+            .or_else(|| map.values().find_map(|inner| find_key(inner, key))),
+        Value::Array(items) => items.iter().find_map(|inner| find_key(inner, key)),
+        _ => None,
+    }
+}
+
+fn opencode_window(model: &str, home: &Path) -> Option<i64> {
+    let text = std::fs::read_to_string(home.join(".config/opencode/opencode.json")).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let (provider, id) = model.split_once('/')?;
+    value
+        .get("provider")?
+        .get(provider)?
+        .get("models")?
+        .get(id)?
+        .get("limit")?
+        .get("context")?
+        .as_i64()
+}
+
 // ---------------------------------------------------------------- the logs
 
 /// pi: the session file, one JSON object per line. A record is a message of
