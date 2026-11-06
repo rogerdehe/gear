@@ -494,3 +494,37 @@ fn a_landing_after_a_cut_over_a_fifth_is_refused_until_the_user_names_the_cut() 
         gear_model::MsgState::Resolved
     );
 }
+
+/// A task cancelled because the captain's hand-fix delivered it is no cut: its
+/// `hand-fix:` line names it (GEAR M6.3: T-625, shipped by hand in v0.6.90,
+/// held the landing at 4 of 19).
+#[test]
+fn a_task_a_hand_fix_delivered_is_no_cut() {
+    let mut s = world();
+    ten_tasks(&mut s);
+    watch(&mut s);
+    let mut cancel = String::from("# Queue\n");
+    for n in 1..=3 {
+        cancel.push_str(&format!(
+            "## T-{n} [must] lane=heat milestone=M1\ngoal: task {n}\naccept: works\nestimate: 10\ndeps: -\nstate: cancelled\n"
+        ));
+    }
+    run(&mut s, &plan_with(1, &cancel), "r2", NOW + 60, false).unwrap();
+    done_tasks(&mut s, &["T-4", "T-5", "T-6", "T-7", "T-8", "T-9", "T-10"]);
+    let land = land_item(&mut s);
+    // T-1's work was a hand-fix: two cuts of ten remain, no confirmation.
+    let landing = format!(
+        "# Decisions\n\
+         - 2026-10-27 11:00 hand-fix: the captain shipped T-1's change by hand | why: the user wanted it at once\n\
+         - done (1): met | evidence: the remaining tasks merged\n\
+         - station {land}: land\n"
+    );
+    run(&mut s, &plan_with(2, &landing), "r3", NOW + 700, false).unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_message("p", &land))
+            .unwrap()
+            .unwrap()
+            .state,
+        gear_model::MsgState::Resolved
+    );
+}
