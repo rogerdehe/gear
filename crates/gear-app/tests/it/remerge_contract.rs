@@ -773,3 +773,37 @@ fn a_remerge_queues_the_first_merge_of_a_task_that_is_no_longer_carried() {
     run(&mut s, "# Staff\n- remerge T-1\n", "v4", T0 + 30).unwrap();
     assert_eq!(queued_merge(&mut s).payload["candidate"], "c1");
 }
+
+/// T-614: a block of an existing task that no longer has a `carried-by:` line
+/// clears the mark (as `carried-by: -` does), the apply says so, and the
+/// task's accepted work queues its first merge.
+#[test]
+fn dropping_the_carried_by_line_clears_the_mark_and_queues_the_merge() {
+    let mut s = world(None);
+    accepted_task(&mut s);
+    s.write(|tx| tx.set_task_carried_by("p", "T-1", "q:T-9"))
+        .unwrap();
+    let applied = run(
+        &mut s,
+        "# Queue\n## T-1 [must] lane=heat\ndeps: -\n",
+        "v3",
+        T0 + 20,
+    )
+    .unwrap();
+    assert_eq!(
+        s.read(|tx| tx.task_carried_by("p", "T-1")).unwrap(),
+        None,
+        "the block no longer names it: the mark is cleared"
+    );
+    assert!(
+        applied
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("`carried-by` cleared")),
+        "the apply says so: {:?}",
+        applied.warnings
+    );
+    // The accepted work queues its first merge now that nothing carries it.
+    run(&mut s, "# Staff\n- remerge T-1\n", "v4", T0 + 30).unwrap();
+    assert_eq!(queued_merge(&mut s).payload["candidate"], "c1");
+}

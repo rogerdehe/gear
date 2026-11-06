@@ -211,8 +211,8 @@ fn world() -> Store {
     store
 }
 
-/// The task's first attempt, delivered at `T0 + 1`.
-fn deliver(store: &mut Store) {
+/// A task's first attempt, delivered at `T0 + 1`.
+fn deliver_task(store: &mut Store, task: &str) {
     store
         .write(|tx| {
             tx.insert_attempt(&AttemptRow {
@@ -221,7 +221,7 @@ fn deliver(store: &mut Store) {
                 session_action: None,
                 sent_at: None,
                 project: "p".into(),
-                task: "T-1".into(),
+                task: task.into(),
                 n: 1,
                 seat: "p:heat".into(),
                 generation: 1,
@@ -235,50 +235,53 @@ fn deliver(store: &mut Store) {
                 started: T0,
                 updated: T0,
             })?;
-            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Delivered, T0 + 1)
+            tx.set_attempt_time("p", task, 1, AttemptStep::Delivered, T0 + 1)
         })
         .expect("the delivery");
 }
 
-fn hand_in(store: &mut Store, candidate: &str) {
+fn hand_in_task(store: &mut Store, task: &str, candidate: &str) {
     store
         .write(|tx| {
-            let mut attempt = tx.get_attempt("p", "T-1", 1)?.expect("the attempt");
+            let mut attempt = tx.get_attempt("p", task, 1)?.expect("the attempt");
             attempt.state = AttemptState::Submitted;
             attempt.candidate = Some(candidate.to_string());
             tx.update_attempt(&attempt)?;
-            tx.set_attempt_time("p", "T-1", 1, AttemptStep::HandedIn, T0 + 60)
+            tx.set_attempt_time("p", task, 1, AttemptStep::HandedIn, T0 + 60)
         })
         .expect("the hand-in");
 }
 
-fn verdict(store: &mut Store, passed: bool, findings: &str) {
+fn verdict_task(store: &mut Store, task: &str, passed: bool, findings: &str) {
     store
         .write(|tx| {
             tx.insert_review_verdict(&ReviewVerdictRow {
                 project: "p".into(),
-                task: "T-1".into(),
+                task: task.into(),
                 attempt: 1,
                 passed,
                 findings: findings.to_string(),
                 by_seat: "p:review-1".into(),
                 created: T0 + 120,
             })?;
-            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Verdict, T0 + 120)
+            tx.set_attempt_time("p", task, 1, AttemptStep::Verdict, T0 + 120)
         })
         .expect("the verdict");
 }
 
-fn merged(store: &mut Store, line: &str) {
+fn merged_task(store: &mut Store, task: &str, line: &str) {
     store
         .write(|tx| {
-            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Merged, T0 + 180)?;
+            let mut row = tx.get_task("p", task)?.expect("the task");
+            row.state = TaskState::Done;
+            tx.update_task(&row)?;
+            tx.set_attempt_time("p", task, 1, AttemptStep::Merged, T0 + 180)?;
             let op = tx.insert_op(&NewOp {
                 project: "p".into(),
                 seat: "p:heat".into(),
                 generation: 1,
                 kind: OpKind::Merge,
-                task: Some("T-1".into()),
+                task: Some(task.into()),
                 attempt: Some(1),
                 ref_msg: None,
                 plan_version: None,
@@ -288,6 +291,22 @@ fn merged(store: &mut Store, line: &str) {
             tx.set_op_state("p", &op.id, OpState::Confirmed, Some(line), T0 + 180)
         })
         .expect("the merge");
+}
+
+fn deliver(store: &mut Store) {
+    deliver_task(store, "T-1");
+}
+
+fn hand_in(store: &mut Store, candidate: &str) {
+    hand_in_task(store, "T-1", candidate);
+}
+
+fn verdict(store: &mut Store, passed: bool, findings: &str) {
+    verdict_task(store, "T-1", passed, findings);
+}
+
+fn merged(store: &mut Store, line: &str) {
+    merged_task(store, "T-1", line);
 }
 
 /// Run one engine tick's sync.
@@ -1196,6 +1215,59 @@ fn an_issue_with_another_unlanded_task_stays_open() {
     assert!(
         !calls.iter().any(|call| call.starts_with("close ")),
         "T-2 has not landed: {calls:?}"
+    );
+}
+
+/// T-617: an issue with two tasks stays open after the first lands and closes
+/// after the second; the first claim says `Part of #n`, the last `Closes #n`.
+#[test]
+fn an_issue_with_two_tasks_closes_only_when_the_last_lands() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            let mut other = tx.get_task("p", "T-1")?.unwrap();
+            other.id = "T-2".into();
+            other.state = TaskState::Ready;
+            tx.insert_task(&other)
+        })
+        .unwrap();
+    // The first task lands: the issue stays open, and its claim says Part of.
+    deliver_task(&mut store, "T-1");
+    hand_in_task(&mut store, "T-1", "abc1234");
+    verdict_task(&mut store, "T-1", true, "");
+    merged_task(&mut store, "T-1", "merged T-1 into dev: def5678");
+    let forge = Fake::up();
+    tick(&mut store, &forge, 200);
+    let calls = forge.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.starts_with("claim") && call.contains("Part of #12")),
+        "the first claim says Part of: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| call.starts_with("close ")),
+        "T-2 is still open: {calls:?}"
+    );
+    // The second task lands: the issue closes, and its claim says Closes.
+    deliver_task(&mut store, "T-2");
+    hand_in_task(&mut store, "T-2", "def5678");
+    verdict_task(&mut store, "T-2", true, "");
+    merged_task(&mut store, "T-2", "merged T-2 into dev: 1234567");
+    let forge = Fake::up();
+    tick(&mut store, &forge, 300);
+    let calls = forge.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.starts_with("claim") && call.contains("Closes #12")),
+        "the last claim says Closes: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.starts_with("close owner/name#12")),
+        "the issue closes: {calls:?}"
     );
 }
 

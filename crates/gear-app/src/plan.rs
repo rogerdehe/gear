@@ -672,19 +672,17 @@ fn apply_queue(
             }
             // A carrier that is done and merged lands nothing more: the mark
             // would keep this task's work off the integration branch for good
-            // (Prometheus T-779). A mark the task already has is left alone.
+            // (Prometheus T-779). Refused even when the task already has the
+            // mark: the captain must drop the line (T-614).
             let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, by);
-            let already = tx.task_carried_by(project, &id)?.as_deref() == Some(by);
             let landed = tx
                 .get_task(carrier_project, carrier)?
                 .is_some_and(|task| task.state == TaskState::Done)
                 && crate::tasks::merged_at(tx, carrier_project, carrier)?.is_some();
-            if landed && !already {
+            if landed {
                 return Err(bad(
                     item.line,
-                    format!(
-                        "{id}: `carried-by` {by} has already merged, so it cannot carry {id}'s work: leave the field out (or `carried-by: -`) and {id} merges on its own"
-                    ),
+                    format!("{by} has merged: its merge cannot carry {id}'s work; drop the line"),
                 ));
             }
         }
@@ -1107,8 +1105,19 @@ fn apply_queue(
                 if let Some(model) = &item.review_model {
                     tx.set_task_review_model(project, id, model)?;
                 }
-                if let Some(by) = &item.carried_by {
-                    tx.set_task_carried_by(project, id, by)?;
+                // The `carried-by:` mark (T-614): a block that names one sets
+                // it; a block that no longer has the line clears it (as
+                // `carried-by: -` does), so a dropped mark cannot keep the
+                // task's work off the integration branch.
+                let had = tx.task_carried_by(project, id)?;
+                let want = item.carried_by.as_deref().unwrap_or("");
+                if had.as_deref().unwrap_or("") != want {
+                    tx.set_task_carried_by(project, id, want)?;
+                    if want.is_empty() && had.is_some() {
+                        warnings.push(format!(
+                            "{id}: `carried-by` cleared (the block no longer names it)"
+                        ));
+                    }
                 }
                 // The `audit:` mark of a task (T-505): a block that names the
                 // field sets it; a block without it keeps the mark.
@@ -1589,6 +1598,22 @@ fn apply_queue(
             )?;
             continue;
         }
+        if let StaffItem::Restart { name, .. } = item {
+            restart_reviewer(tx, project, name, staff_line(item), now)?;
+            staffed.push(format!("restart {name}"));
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
+            continue;
+        }
         if let StaffItem::Raise {
             role,
             to,
@@ -1676,6 +1701,7 @@ fn apply_queue(
             StaffItem::MergeFirst { .. } => unreachable!("merge-first is applied above"),
             StaffItem::Retry { .. } => unreachable!("retry is applied above"),
             StaffItem::Release { .. } => unreachable!("release is applied above"),
+            StaffItem::Restart { .. } => unreachable!("restart is applied above"),
             StaffItem::Rebind { .. } => unreachable!("rebind is applied above"),
             StaffItem::RebindCancel { .. } => unreachable!("rebind is applied above"),
             StaffItem::Drop { .. } => unreachable!("drop is applied after the voyages"),
@@ -2741,6 +2767,7 @@ pub fn staff_line(item: &StaffItem) -> usize {
         | StaffItem::Retire { line, .. }
         | StaffItem::Retry { line, .. }
         | StaffItem::Release { line, .. }
+        | StaffItem::Restart { line, .. }
         | StaffItem::Remerge { line, .. }
         | StaffItem::MergeFirst { line, .. }
         | StaffItem::Rebind { line, .. }
@@ -3431,6 +3458,62 @@ fn release_reviewer(
         SeatState::Releasing,
         Some("released by the captain: it was idle"),
         now,
+    )?;
+    Ok(())
+}
+
+/// `- restart <reviewer>` (T-630): the reviewer's agent is exited and started
+/// again in the same pane and worktree, its seat and generation kept — the
+/// way a captain picks up a fixed account or a changed environment without
+/// losing the seat.
+///
+/// An **idle** reviewer (Standby, no job) restarts at once. A **working** one
+/// restarts right after its verdict: the flag stays until the engine sees the
+/// seat back in Standby with no job, so the review in flight is never cut off.
+/// Any other state is refused with the reason.
+///
+/// The line only records the request; the engine's `restart_reviewers` step
+/// (release.rs) carries it out, across ticks, because an agent takes a moment
+/// to leave its pane.
+fn restart_reviewer(
+    tx: &Tx<'_>,
+    project: &str,
+    name: &str,
+    line: usize,
+    now: Ts,
+) -> GearResult<()> {
+    let seat_id = format!("{project}:{name}");
+    let seat = tx
+        .get_seat(&seat_id)?
+        .ok_or_else(|| bad(line, format!("no seat {seat_id} in this project")))?;
+    if seat.role != SeatRole::Temp {
+        return Err(bad(
+            line,
+            format!(
+                "seat {seat_id} is a {} seat, `restart` names a reviewer",
+                seat.role.as_str()
+            ),
+        ));
+    }
+    let pending = tx
+        .get_meta(&format!("engine.review_pending.{seat_id}"))?
+        .filter(|task| !task.is_empty());
+    let idle = seat.state == SeatState::Standby && pending.is_none();
+    let working = seat.state == SeatState::Active && seat.task_id.is_some();
+    if !idle && !working {
+        return Err(GearError::new(
+            ErrorCode::BadTransition,
+            format!(
+                "seat {seat_id} is {}: only an idle reviewer (Standby, no job) or one working on a review is restarted",
+                seat.state.as_str()
+            ),
+        ));
+    }
+    // The engine's restart step reads this flag; it waits for a working
+    // reviewer's verdict before it acts.
+    tx.set_meta(
+        &format!("engine.restart.{seat_id}"),
+        &serde_json::json!({ "at": now }).to_string(),
     )?;
     Ok(())
 }
@@ -5706,6 +5789,7 @@ fn staff_text(item: &StaffItem) -> String {
         StaffItem::Retire { lane, .. } => format!("retire {lane}"),
         StaffItem::Retry { lane, .. } => format!("retry {lane}"),
         StaffItem::Release { name, .. } => format!("release {name}"),
+        StaffItem::Restart { name, .. } => format!("restart {name}"),
         StaffItem::Remerge { task, .. } => format!("remerge {task}"),
         StaffItem::MergeFirst { task, .. } => format!("merge-first {task}"),
         StaffItem::Rebind {

@@ -15,7 +15,7 @@
 
 use crate::merge;
 use gear_app::config::{ProjectConfig, Repo};
-use gear_herdr::HerdrAct;
+use gear_herdr::{HerdrAct, Outcome};
 use gear_model::{GearResult, MsgKind, MsgState, Ts};
 use gear_store::{Store, Tx};
 use std::collections::BTreeSet;
@@ -262,14 +262,52 @@ pub fn reclaim(
         if !seen.insert(repo.path.clone()) {
             continue;
         }
-        left.extend(project_worktrees(&repo.path, project));
-        left.extend(project_branches(
-            &repo.path,
-            &config.conventions.remote,
-            project,
-        ));
+        // T-618: remove each worktree of the project that is clean and whose
+        // branch has nothing the remote does not have; name the others with
+        // the reason.
+        for worktree in project_worktrees(&repo.path, project) {
+            match remove_worktree(&repo.path, &worktree) {
+                Ok(()) => {}
+                Err(reason) => left.push(format!("worktree {} ({reason})", worktree.path)),
+            }
+        }
+        // The release and staging branches outlive every voyage; the
+        // integration branch is the voyage's and goes with it (a departure
+        // cuts it again from the release branch).
+        let keep = [repo.release.as_str(), config.conventions.staging.as_str()];
+        for branch in project_branches(&repo.path, &config.conventions.remote, project) {
+            if keep.contains(&branch.name.as_str()) {
+                continue;
+            }
+            if branch_on_integration(&repo.path, &config, &branch.tip) {
+                if let Err(reason) =
+                    delete_remote_branch(&repo.path, &config.conventions.remote, &branch.name)
+                {
+                    left.push(format!("branch {} ({reason})", branch.name));
+                }
+            } else {
+                left.push(format!("branch {} (extra commits)", branch.name));
+            }
+        }
     }
-    left.extend(project_workspaces(project));
+    // T-618: close each Herdr workspace of the project whose panes hold no
+    // agent; name the others.
+    for workspace in project_workspaces(project) {
+        if workspace.holds_agent {
+            left.push(format!(
+                "workspace {} ({}) (holding an agent)",
+                workspace.id, workspace.label
+            ));
+            continue;
+        }
+        match herdr.worktree_remove(&workspace.id) {
+            Outcome::Ok(()) => {}
+            Outcome::Refused { .. } | Outcome::Uncertain { .. } => left.push(format!(
+                "workspace {} ({}) (could not close)",
+                workspace.id, workspace.label
+            )),
+        }
+    }
     let changed = store.write(|tx| {
         if left.is_empty() {
             if let Some(item) = &open {
@@ -287,7 +325,7 @@ pub fn reclaim(
             return Ok(None);
         }
         let body = format!(
-            "The voyage landed, but {} worktree(s), branch(es) or Herdr workspace(s) of {project} are left: {}. A landed voyage keeps none: merge what is not on the integration branch, then remove each worktree with `git worktree remove`, delete each branch on the remote, and close each workspace with `herdr workspace close <id>`.",
+            "The voyage landed. GEAR removed what it could; {} worktree(s), branch(es) or Herdr workspace(s) of {project} are left: {}. A landed voyage keeps none: merge what is not on the integration branch, then remove each worktree with `git worktree remove`, delete each branch on the remote, and close each workspace with `herdr workspace close <id>`.",
             left.len(),
             left.join(", ")
         );
@@ -440,7 +478,8 @@ fn merge_records(
         Recorded::Merged => {
             store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
             let reason = format!("the captain's records are merged into {}", repo.integration);
-            resolve_records(store, project, milestone, &reason, now)
+            let _ = resolve_records(store, project, milestone, &reason, now)?;
+            Ok(Some("merged"))
         }
         Recorded::Empty => {
             store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
@@ -655,10 +694,30 @@ fn resolve_records(
     Ok(Some("closed"))
 }
 
+/// A worktree of the project: its path and its branch (None when detached).
+struct ProjectWorktree {
+    path: String,
+    branch: Option<String>,
+}
+
+/// A remote branch of the project: its name and its tip.
+struct ProjectBranch {
+    name: String,
+    tip: String,
+}
+
+/// A Herdr workspace of the project: its id, its label and whether its panes
+/// hold an agent.
+struct ProjectWorkspace {
+    id: String,
+    label: String,
+    holds_agent: bool,
+}
+
 /// The worktrees of `repo` that belong to `project`: a path whose last part
 /// starts with `<project>-`, or a branch under `<project>/`. The main
 /// checkout is never one.
-fn project_worktrees(repo: &str, project: &str) -> Vec<String> {
+fn project_worktrees(repo: &str, project: &str) -> Vec<ProjectWorktree> {
     let Ok(out) = std::process::Command::new("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo)
@@ -694,16 +753,52 @@ fn project_worktrees(repo: &str, project: &str) -> Vec<String> {
                 .as_deref()
                 .is_some_and(|branch| branch.starts_with(&format!("{project}/")));
         if ours {
-            found.push(path);
+            found.push(ProjectWorktree { path, branch });
         }
     }
     found
 }
 
+/// T-618: remove a worktree of the project when it is clean (`git status
+/// --porcelain` empty) and its branch has nothing the remote does not have.
+/// Returns the reason it was kept.
+fn remove_worktree(repo: &str, worktree: &ProjectWorktree) -> Result<(), String> {
+    let dir = Path::new(&worktree.path);
+    let status = merge::git(dir, &["status", "--porcelain"])?;
+    if !status.trim().is_empty() {
+        return Err("uncommitted changes".to_string());
+    }
+    let rev = worktree.branch.as_deref().unwrap_or("HEAD");
+    let count = merge::git(dir, &["rev-list", "--count", rev, "--not", "--remotes"])?;
+    if count.trim() != "0" {
+        return Err("unpushed commits".to_string());
+    }
+    merge::git(Path::new(repo), &["worktree", "remove", &worktree.path])?;
+    Ok(())
+}
+
+/// Whether the branch's tip is on the integration branch.
+fn branch_on_integration(repo: &str, config: &ProjectConfig, tip: &str) -> bool {
+    let remote = &config.conventions.remote;
+    let integration = format!("{remote}/{}", config.conventions.integration);
+    merge::git(
+        Path::new(repo),
+        &["merge-base", "--is-ancestor", tip, &integration],
+    )
+    .is_ok()
+}
+
+/// Delete a branch on the remote.
+fn delete_remote_branch(repo: &str, remote: &str, branch: &str) -> Result<(), String> {
+    merge::git(Path::new(repo), &["push", remote, "--delete", branch])?;
+    Ok(())
+}
+
 /// The Herdr workspaces of the engine's session labelled `<project>-…`: the
 /// homes GEAR opened for the project's seats (`prometheus-captain` stayed open
-/// on a deleted folder after M4 landed). Named as `workspace <id> (<label>)`.
-fn project_workspaces(project: &str) -> Vec<String> {
+/// on a deleted folder after M4 landed). The agent status says whether the
+/// workspace holds an agent.
+fn project_workspaces(project: &str) -> Vec<ProjectWorkspace> {
     let Ok(out) = std::process::Command::new("herdr")
         .args(["workspace", "list"])
         .output()
@@ -721,18 +816,26 @@ fn project_workspaces(project: &str) -> Vec<String> {
                 .filter_map(|workspace| {
                     let label = workspace["label"].as_str()?;
                     let id = workspace["workspace_id"].as_str()?;
-                    label
-                        .starts_with(&prefix)
-                        .then(|| format!("workspace {id} ({label})"))
+                    if !label.starts_with(&prefix) {
+                        return None;
+                    }
+                    let holds_agent = workspace["agent_status"]
+                        .as_str()
+                        .is_some_and(|status| status != "unknown");
+                    Some(ProjectWorkspace {
+                        id: id.to_string(),
+                        label: label.to_string(),
+                        holds_agent,
+                    })
                 })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-/// The project's branches on the remote (`<project>/…`), named as
-/// `branch <name>`: a landed voyage keeps none, the captain's home included.
-fn project_branches(repo: &str, remote: &str, project: &str) -> Vec<String> {
+/// The project's branches on the remote (`<project>/…`), named with their tip:
+/// a landed voyage keeps none, the captain's home included.
+fn project_branches(repo: &str, remote: &str, project: &str) -> Vec<ProjectBranch> {
     let Ok(out) = std::process::Command::new("git")
         .args([
             "ls-remote",
@@ -750,9 +853,16 @@ fn project_branches(repo: &str, remote: &str, project: &str) -> Vec<String> {
     }
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter_map(|line| line.split_whitespace().nth(1))
-        .filter_map(|reference| reference.strip_prefix("refs/heads/"))
-        .map(|name| format!("branch {name}"))
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let tip = parts.next()?;
+            let reference = parts.next()?;
+            let name = reference.strip_prefix("refs/heads/")?;
+            Some(ProjectBranch {
+                name: name.to_string(),
+                tip: tip.to_string(),
+            })
+        })
         .collect()
 }
 
@@ -1139,6 +1249,45 @@ gate = "true"
         );
     }
 
+    /// The project's release branch is never named as a leftover of a landed
+    /// voyage; a voyage's own branch still is.
+    #[test]
+    fn the_reclaim_never_names_the_projects_release_branch() {
+        let mut landed = Landed::new("long-lived");
+        landed
+            .store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = project.config_toml.replace(
+                    "integration = \"dev\"\n",
+                    "integration = \"dev\"\nrelease = \"p/main\"\n",
+                );
+                tx.update_project(&project)
+            })
+            .unwrap();
+        sh(
+            &landed.root.path(),
+            &format!("git -C {} branch p/main dev", landed.origin.display()),
+        );
+        // p/hull/t9 has an extra commit: not on the integration branch, so it
+        // is named (T-618).
+        sh(
+            &landed.work,
+            "git checkout -q -b p/hull/t9 dev && echo extra > extra.txt && git add extra.txt && \
+             git commit -q -m extra && git push -q origin p/hull/t9 && git checkout -q dev",
+        );
+
+        landed.reclaim(NOW + 600);
+
+        let item = landed
+            .items(RECLAIM_THREAD)
+            .into_iter()
+            .next()
+            .expect("the reclaim names what is left");
+        assert!(item.body.contains("branch p/hull/t9"), "{}", item.body);
+        assert!(!item.body.contains("branch p/main"), "{}", item.body);
+    }
+
     /// T-585: a conflicting branch opens one item on thread `records:M1`,
     /// naming the branch and the git error, and nothing is deleted.
     #[test]
@@ -1288,5 +1437,72 @@ gate = "true"
             Some(reason("M1").as_str()),
             "{items:?}"
         );
+    }
+
+    /// T-618: a clean worktree whose branch is on the remote is removed by
+    /// GEAR and not named.
+    #[test]
+    fn a_clean_pushed_worktree_is_removed_and_not_named() {
+        let mut landed = Landed::new("clean");
+        let merge = landed.root.path().join("merge");
+        assert!(merge.exists(), "the merge worktree is there");
+        landed.reclaim(NOW + 600);
+        assert!(!merge.exists(), "the clean pushed worktree is removed");
+        let items = landed.items(RECLAIM_THREAD);
+        assert!(
+            items.iter().all(|item| !item.body.contains("worktree")),
+            "the removed worktree is not named: {items:?}"
+        );
+    }
+
+    /// T-618: a dirty worktree is named with "uncommitted changes" and kept.
+    #[test]
+    fn a_dirty_worktree_is_named_with_uncommitted_changes_and_kept() {
+        let mut landed = Landed::new("dirty");
+        let merge = landed.root.path().join("merge");
+        std::fs::write(merge.join("dirty.txt"), "x").unwrap();
+        landed.reclaim(NOW + 600);
+        assert!(merge.exists(), "the dirty worktree is kept");
+        let item = landed
+            .items(RECLAIM_THREAD)
+            .into_iter()
+            .next()
+            .expect("the reclaim names the dirty worktree");
+        assert!(item.body.contains("worktree"), "{}", item.body);
+        assert!(item.body.contains("uncommitted changes"), "{}", item.body);
+    }
+
+    /// T-618: a branch whose tip is on the integration branch is deleted on
+    /// the remote; one with extra commits is named.
+    #[test]
+    fn a_branch_on_the_integration_branch_is_deleted_and_one_with_extra_commits_is_named() {
+        let mut landed = Landed::new("branches");
+        sh(
+            &landed.root.path(),
+            &format!("git -C {} branch p/hull/t9 dev", landed.origin.display()),
+        );
+        sh(
+            &landed.work,
+            "git checkout -q -b p/hull/t10 dev && echo extra > extra.txt && git add extra.txt && \
+             git commit -q -m extra && git push -q origin p/hull/t10 && git checkout -q dev",
+        );
+        landed.reclaim(NOW + 600);
+        let branches = landed.origin_branches();
+        assert!(
+            !branches.contains("p/hull/t9"),
+            "the branch on dev is deleted: {branches}"
+        );
+        assert!(
+            branches.contains("p/hull/t10"),
+            "the branch with extra commits is kept: {branches}"
+        );
+        let item = landed
+            .items(RECLAIM_THREAD)
+            .into_iter()
+            .next()
+            .expect("the reclaim names the extra branch");
+        assert!(item.body.contains("branch p/hull/t10"), "{}", item.body);
+        assert!(item.body.contains("extra commits"), "{}", item.body);
+        assert!(!item.body.contains("branch p/hull/t9"), "{}", item.body);
     }
 }

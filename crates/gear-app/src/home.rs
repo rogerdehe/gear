@@ -244,7 +244,7 @@ pub fn build_with_agents(
         // The command that helps the seat move on.
         lines.push(String::new());
         let first = shown_msgs.first().map(|id| (id.as_str(), id.as_str()));
-        lines.push(next_command(tx, &ctx.project, first)?);
+        lines.push(next_command(tx, &ctx.project, first, seat.role)?);
 
         let view = ViewRecord {
             project: ctx.project.clone(),
@@ -461,7 +461,12 @@ fn multi_page(
     lines.push(match &first {
         Some((project, id)) => {
             let shown = format!("{project}:{id}");
-            next_command(tx, project, Some((id.as_str(), shown.as_str())))?
+            next_command(
+                tx,
+                project,
+                Some((id.as_str(), shown.as_str())),
+                SeatRole::Captain,
+            )?
         }
         None => "next: gear".to_string(),
     });
@@ -471,11 +476,38 @@ fn multi_page(
 /// The command that helps the seat move on (design/13). `first` is the first
 /// shown message: its bare id for the lookup, and the id the page printed
 /// (qualified when the captain holds several projects).
-fn next_command(tx: &Tx<'_>, project: &str, first: Option<(&str, &str)>) -> GearResult<String> {
+///
+/// A lane or reviewer may run neither `gear reply` nor `gear plan apply`
+/// (both are captain-only, design/07): its page names only what it may run
+/// (T-611). A captain reply or instruction it can answer with `gear send
+/// --reply-to`; an item it cannot close (an engine nudge, a station, a
+/// verdict item) says who does.
+fn next_command(
+    tx: &Tx<'_>,
+    project: &str,
+    first: Option<(&str, &str)>,
+    role: SeatRole,
+) -> GearResult<String> {
     let Some((bare, shown)) = first else {
         return Ok("next: gear".to_string());
     };
-    match tx.get_message(project, bare)? {
+    let message = tx.get_message(project, bare)?;
+    if role != SeatRole::Captain {
+        let cannot_close = match &message {
+            Some(message) => {
+                crate::station::is_station(message)
+                    || message.sender == "engine"
+                    || crate::tasks::verdict_hint(tx, project, message)?.is_some()
+            }
+            None => true,
+        };
+        return Ok(if cannot_close {
+            "the captain or GEAR closes this".to_string()
+        } else {
+            format!("next: gear send --kind progress --reply-to {shown} \"<text>\"")
+        });
+    }
+    match message {
         Some(message) if crate::station::is_station(&message) => {
             let milestone = message.thread.trim_start_matches("station:");
             // The voyage's plan file, where the project keeps it

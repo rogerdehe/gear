@@ -254,11 +254,7 @@ fn carried_by_is_stored_shown_cleared_and_checked() {
     assert!(shown.contains("carried-by: T-2"), "{shown}");
 
     run_at(&mut s, "# Queue\n## T-1 [must] lane=heat\ndeps: -\n", "r3").unwrap();
-    assert_eq!(
-        by(&mut s).as_deref(),
-        Some("T-2"),
-        "a block without it keeps it"
-    );
+    assert_eq!(by(&mut s), None, "a block without it clears it (T-614)");
 
     run_at(
         &mut s,
@@ -287,7 +283,7 @@ fn carried_by_is_stored_shown_cleared_and_checked() {
     }
 
     // A carrier that is done and merged lands nothing more (Prometheus T-779):
-    // a new mark naming it is refused; a mark the task already has stays.
+    // the mark is refused even when the task already has it (T-614).
     run_at(
         &mut s,
         "# Queue\n## T-1 [must] lane=heat\ncarried-by: T-2\ndeps: -\n",
@@ -302,12 +298,19 @@ fn carried_by_is_stored_shown_cleared_and_checked() {
         tx.update_task(&task)
     })
     .unwrap();
-    run_at(
+    let error = run_at(
         &mut s,
         "# Queue\n## T-1 [must] lane=heat\ncarried-by: T-2\ndeps: -\n",
         "r8",
     )
-    .expect("a mark the task already has stays");
+    .unwrap_err();
+    assert!(
+        error
+            .detail
+            .contains("T-2 has merged: its merge cannot carry T-1's work; drop the line"),
+        "{}",
+        error.detail
+    );
     run_at(
         &mut s,
         "# Queue\n## T-1 [must] lane=heat\ncarried-by: -\ndeps: -\n",
@@ -320,9 +323,5 @@ fn carried_by_is_stored_shown_cleared_and_checked() {
         "r10",
     )
     .unwrap_err();
-    assert!(
-        error.detail.contains("has already merged"),
-        "{}",
-        error.detail
-    );
+    assert!(error.detail.contains("has merged"), "{}", error.detail);
 }

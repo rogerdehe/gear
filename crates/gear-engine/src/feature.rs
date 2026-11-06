@@ -93,6 +93,37 @@ pub fn start_features(
     Ok(report)
 }
 
+/// Whether the next step of an integration task that already has an attempt
+/// is its lane's rework (T-592): the last attempt is closed (a failed review,
+/// or an accepted one whose full gate failed and was reopened), every member
+/// is merged into the feature branch, and none merged after that attempt. A
+/// member merged since is how the captain chose to fix it (Lawrence M2: T-103
+/// carries T-97's findings), so the engine hands the branch in instead.
+/// Dispatch and the hand-in read the same answer, so the lane and the engine
+/// never both act (Lawrence M2: the reviewer's own commit moved the branch and
+/// the engine handed T-97 in again while its rework waited for web).
+pub(crate) fn rework_is_the_lanes(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    row: &TaskRow,
+) -> GearResult<bool> {
+    let attempts = tx.attempts_of_task(project, &row.id)?;
+    let Some(last) = attempts.iter().max_by_key(|attempt| attempt.n) else {
+        return Ok(false);
+    };
+    if !matches!(last.state, AttemptState::Rejected | AttemptState::Accepted) {
+        return Ok(false);
+    }
+    for dep in &row.deps {
+        match gear_app::tasks::merged_at(tx, project, dep)? {
+            None => return Ok(false),
+            Some(at) if at > last.updated => return Ok(false),
+            Some(_) => {}
+        }
+    }
+    Ok(true)
+}
+
 /// What the step needs to hand one integration task in.
 struct Job {
     row: TaskRow,
@@ -209,6 +240,14 @@ fn hand_in(
         .iter()
         .any(|attempt| attempt.state.occupies_seat())
     {
+        return Ok(None);
+    }
+    // A rejected attempt with its rework still to do is the lane's, whatever
+    // moved the branch since (Lawrence M2: the reviewer's own commit moved
+    // lawrence/feature/f-2, and the engine handed T-97 in again while web was
+    // busy, so web never got the rework and the reviewer re-read unchanged
+    // code).
+    if store.read(|tx| rework_is_the_lanes(tx, project, &job.row))? {
         return Ok(None);
     }
     // T-597: the feature branch catches up with the integration branch before
@@ -966,6 +1005,68 @@ mod tests {
         );
         assert_eq!(remote_tip(bare.path()), candidate, "nothing was pushed");
         assert!(refresh_items(&mut store).is_empty());
+    }
+
+    /// A rejected integration task whose rework is still to do is the lane's,
+    /// even when its branch moved since (Lawrence M2: the reviewer's own commit
+    /// moved the feature branch and T-97 was handed in again unchanged).
+    #[test]
+    fn a_rework_still_to_do_is_never_handed_in_by_the_engine() {
+        let (_bare, work) = fixture();
+        let old = tip(work.path());
+        let (mut store, cfg) = world(work.path(), &["T-1", "T-2"], Some(&old));
+        store
+            .write(|tx| {
+                let mut row = tx.get_task("p", "T-9")?.unwrap();
+                row.rework_note = Some("Fix in one round: F1".into());
+                tx.update_task(&row)
+            })
+            .unwrap();
+        sh(
+            work.path(),
+            "git checkout -q p/feature/f-1 && echo review > r.txt && git add -A && \
+             git -c user.email=a@b -c user.name=a commit -qm review && \
+             git push -q origin p/feature/f-1 && git checkout -q dev",
+        );
+        let report = step(&mut store, &cfg, &mut FakeHerdr::new());
+        assert!(report.handed_in.is_empty(), "{:?}", report.handed_in);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let ready = store
+            .read(|tx| crate::dispatch::ready_tasks_of(tx, &seat))
+            .unwrap();
+        assert!(
+            ready.iter().any(|task| task.id == "T-9"),
+            "the rework is the lane's to take"
+        );
+    }
+
+    /// A member merged after the rejection carries the fix (Lawrence M2: T-103
+    /// for T-97): the engine hands the moved branch in, and the lane is not
+    /// given the rework too.
+    #[test]
+    fn a_member_merged_after_the_rejection_hands_the_branch_in() {
+        let (_bare, work) = fixture();
+        let old = tip(work.path());
+        let (mut store, cfg) = world(work.path(), &["T-1"], Some(&old));
+        store
+            .write(|tx| tx.set_attempt_time("p", "T-2", 1, AttemptStep::Merged, NOW + 5))
+            .unwrap();
+        sh(
+            work.path(),
+            "git checkout -q p/feature/f-1 && echo fix > fix.txt && git add -A && \
+             git -c user.email=a@b -c user.name=a commit -qm 'merge(T-2): fix' && \
+             git push -q origin p/feature/f-1 && git checkout -q dev",
+        );
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let ready = store
+            .read(|tx| crate::dispatch::ready_tasks_of(tx, &seat))
+            .unwrap();
+        assert!(
+            ready.iter().all(|task| task.id != "T-9"),
+            "the lane is not given the rework"
+        );
+        let report = step(&mut store, &cfg, &mut FakeHerdr::new());
+        assert_eq!(report.handed_in, vec!["p:T-9/2".to_string()]);
     }
 
     /// T-592: the rework of an integration task is the owner lane's — an attempt

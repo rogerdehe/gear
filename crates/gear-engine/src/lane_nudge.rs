@@ -10,8 +10,9 @@
 //! (the reviewer's rule), and a lane that waits for its provider is not stuck
 //! (T-75).
 
-use gear_model::{AttemptState, GearResult, OpKind, SeatRole, SeatState, Ts};
-use gear_store::{NewOp, Store, Tx};
+use gear_herdr::{AgentStatus, HerdrAct, Outcome};
+use gear_model::{AttemptState, GearResult, MsgKind, MsgState, OpKind, SeatRole, SeatState, Ts};
+use gear_store::{NewMessage, NewOp, Store, Tx};
 
 use crate::observe::SeatObs;
 
@@ -34,6 +35,201 @@ fn idle_key(seat: &str, task: &str, attempt: i64) -> String {
     format!("engine.lanenudge.{seat}.{task}.{attempt}")
 }
 
+/// T-610: an engine nudge to a lane closes itself. The stopped-lane nudge is
+/// a delivery op; a lane may not resolve it and the captain may not either, so
+/// the engine voids it with the reason when the attempt it names has been
+/// handed in, has a newer attempt, or its task is terminal. A nudge for a
+/// still-open attempt stays.
+pub fn resolve_nudges(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
+    let open = store.read(|tx| {
+        tx.ops_of_kind_in_states(
+            project,
+            OpKind::Deliver,
+            &[
+                gear_model::OpState::Intended,
+                gear_model::OpState::Executing,
+                gear_model::OpState::Submitted,
+                gear_model::OpState::Unknown,
+            ],
+        )
+    })?;
+    for op in open {
+        if op.payload.get("nudge").is_none() {
+            continue;
+        }
+        let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
+            continue;
+        };
+        let reason = store.read(|tx| crate::quiet::attempt_closed(tx, project, task, attempt))?;
+        let Some(reason) = reason else {
+            continue;
+        };
+        store.write(|tx| {
+            tx.set_op_state(
+                project,
+                &op.id,
+                gear_model::OpState::Void,
+                Some(&reason),
+                now,
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// How long a lane may be working with no open attempt while its next task
+/// waits before it is freed with one Esc (T-612).
+const BUSY_BEFORE_ESC_S: i64 = 180;
+
+/// How long after the Esc the lane may still be busy before the captain is
+/// told (T-612).
+const BUSY_BEFORE_TOLD_S: i64 = 180;
+
+fn busy_key(seat: &str) -> String {
+    format!("engine.lanenudge.busy.{seat}")
+}
+fn busy_esc_key(seat: &str) -> String {
+    format!("engine.lanenudge.busy.esc.{seat}")
+}
+fn busy_told_key(seat: &str) -> String {
+    format!("engine.lanenudge.busy.told.{seat}")
+}
+
+/// T-612: a lane that is working with no open attempt while a task is ready
+/// for it (a delivery is intended) is freed with one Esc after 3 minutes; if
+/// it is still working with no attempt 3 minutes later, one Info item tells
+/// the captain. Never for a lane with an open attempt.
+pub fn free_busy_lanes(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    observed: &[SeatObs],
+    now: Ts,
+) -> GearResult<(Vec<String>, Vec<String>)> {
+    let mut freed = Vec::new();
+    let mut told = Vec::new();
+    for obs in observed {
+        let seat = &obs.seat;
+        if seat.role != SeatRole::Lane || seat.project != project {
+            continue;
+        }
+        if !matches!(
+            seat.state,
+            SeatState::Active | SeatState::Standby | SeatState::Retiring
+        ) {
+            clear_busy(store, &seat.id)?;
+            continue;
+        }
+        // A lane that is not working is not busy.
+        if obs.status != Some(AgentStatus::Working) {
+            clear_busy(store, &seat.id)?;
+            continue;
+        }
+        let view = store.read(|tx| crate::dispatch::lane_view(tx, seat, Some(obs.clone()), now))?;
+        // Never for a lane with an attempt it is working: Started or Stopped.
+        // A Delivered attempt is the delivery that waits (T-612 F1): the lane
+        // is not working on it yet, so it does not block the Esc.
+        if view.attempt.as_ref().is_some_and(|attempt| {
+            matches!(attempt.state, AttemptState::Started | AttemptState::Stopped)
+        }) {
+            clear_busy(store, &seat.id)?;
+            continue;
+        }
+        // A task must be ready for it and a delivery intended.
+        let delivery_intended = store.read(|tx| {
+            Ok(tx
+                .slot_ops(&seat.id)?
+                .iter()
+                .any(|op| op.kind == OpKind::Deliver))
+        })?;
+        if view.ready_tasks.is_empty() || !delivery_intended {
+            clear_busy(store, &seat.id)?;
+            continue;
+        }
+        // The first tick the condition holds is kept.
+        let since = store
+            .read(|tx| tx.get_meta(&busy_key(&seat.id)))?
+            .and_then(|s| s.trim().parse::<Ts>().ok());
+        let Some(since) = since else {
+            store.write(|tx| tx.set_meta(&busy_key(&seat.id), &now.to_string()))?;
+            continue;
+        };
+        if now - since < BUSY_BEFORE_ESC_S {
+            continue;
+        }
+        let esc = store
+            .read(|tx| tx.get_meta(&busy_esc_key(&seat.id)))?
+            .is_some_and(|v| !v.is_empty());
+        if !esc {
+            let pane = store.read(|tx| {
+                Ok(tx
+                    .get_binding(&seat.id, seat.generation)?
+                    .map(|binding| binding.pane_id))
+            })?;
+            let Some(pane) = pane else {
+                continue;
+            };
+            if matches!(
+                herdr.send_keys(&pane, &["esc".into()]),
+                Outcome::Refused { .. }
+            ) {
+                continue;
+            }
+            store.write(|tx| tx.set_meta(&busy_esc_key(&seat.id), "1"))?;
+            freed.push(seat.id.clone());
+            continue;
+        }
+        if now - since < BUSY_BEFORE_ESC_S + BUSY_BEFORE_TOLD_S {
+            continue;
+        }
+        let told_mark = store
+            .read(|tx| tx.get_meta(&busy_told_key(&seat.id)))?
+            .is_some_and(|v| !v.is_empty());
+        if told_mark {
+            continue;
+        }
+        let Some(captain) = store.read(|tx| tx.captain_of(project))? else {
+            continue;
+        };
+        let task = view.ready_tasks.first().map(|task| task.id.clone());
+        store.write(|tx| {
+            tx.insert_message(&NewMessage {
+                project: project.to_string(),
+                thread: format!("busy-lane:{}", seat.id),
+                task: task.clone(),
+                attempt: None,
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: captain.id.clone(),
+                kind: MsgKind::System,
+                urgent: false,
+                body: format!(
+                    "lane {}: working with no open attempt for {} min while {} waits; one Esc did not free it. Look at its pane.",
+                    seat.name,
+                    now.saturating_sub(since) / 60,
+                    task.as_deref().unwrap_or("its next task"),
+                ),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Info,
+                created: now,
+                meta: None,
+            })?;
+            tx.set_meta(&busy_told_key(&seat.id), "1")
+        })?;
+        told.push(seat.id.clone());
+    }
+    Ok((freed, told))
+}
+
+fn clear_busy(store: &mut Store, seat: &str) -> GearResult<()> {
+    store.write(|tx| {
+        tx.set_meta(&busy_key(seat), "")?;
+        tx.set_meta(&busy_esc_key(seat), "")?;
+        tx.set_meta(&busy_told_key(seat), "")
+    })
+}
+
 /// Tell the lanes that stopped to go on.
 ///
 /// A lane seat (role `Lane`) with an attempt in flight, that is neither
@@ -48,12 +244,17 @@ fn idle_key(seat: &str, task: &str, attempt: i64) -> String {
 /// hears about it once, on the lane's stall thread.
 pub fn nudge_stopped_lanes(
     store: &mut Store,
+    herdr: &mut dyn HerdrAct,
     project: &str,
     observed: &[SeatObs],
     now: Ts,
 ) -> GearResult<(Vec<String>, Vec<String>)> {
+    resolve_nudges(store, project, now)?;
     let mut nudged = Vec::new();
     let mut flagged = Vec::new();
+    let (freed, told) = free_busy_lanes(store, herdr, project, observed, now)?;
+    nudged.extend(freed);
+    flagged.extend(told);
     for obs in observed {
         let seat = &obs.seat;
         if seat.role != SeatRole::Lane {
@@ -359,4 +560,430 @@ pub fn nudges_of(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearResul
         .iter()
         .filter(|op| op.payload.get("nudge").is_some())
         .count() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::observe::Presence;
+    use gear_herdr::fake::{Call, FakeHerdr};
+    use gear_model::{MsgKind, MsgState, TaskState};
+    use gear_store::{testing, AttemptStep, ContractRow, NewMessage, TaskRow};
+
+    const T: i64 = 1_800_000_000;
+    const PANE: &str = "w1:p2";
+
+    fn world() -> Store {
+        let mut s = Store::open_in_memory().unwrap();
+        s.write(|tx| {
+            testing::seed_project(tx, "p", "sess", T)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, PANE, "pi", T)?;
+            tx.insert_task(&TaskRow {
+                project: "p".into(),
+                id: "T-1".into(),
+                rank: 1,
+                state: TaskState::Ready,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: None,
+                issue: None,
+                updated: T,
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+            })?;
+            tx.insert_contract(&ContractRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                version: 1,
+                goal: "g".into(),
+                accept: "a".into(),
+                evidence_files: vec![],
+                evidence_due_min: None,
+                body: String::new(),
+                created: T,
+                mechanical: None,
+            })?;
+            gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T)?;
+            gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T)?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T)?;
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    fn nudge(s: &mut Store, at: i64) -> String {
+        s.write(|tx| {
+            let op = tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: OpKind::Deliver,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({ "text": "continue", "nudge": 1 }),
+                created: at,
+            })?;
+            Ok(op.id)
+        })
+        .unwrap()
+    }
+
+    fn state(s: &mut Store, id: &str) -> gear_model::OpState {
+        s.read(|tx| {
+            Ok(tx
+                .ops_of_seat_kind("p:heat", OpKind::Deliver)?
+                .into_iter()
+                .find(|op| op.id == id)
+                .unwrap()
+                .state)
+        })
+        .unwrap()
+    }
+
+    /// T-610: the stopped-lane nudge closes itself when the attempt it names
+    /// was handed in; a nudge for a still-open attempt stays.
+    #[test]
+    fn a_stopped_lane_nudge_closes_on_the_hand_in_of_its_attempt() {
+        let mut s = world();
+        let id = nudge(&mut s, T + 100);
+        resolve_nudges(&mut s, "p", T + 200).unwrap();
+        assert_eq!(state(&mut s, &id), gear_model::OpState::Intended);
+        s.write(|tx| {
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+            attempt.state = AttemptState::Submitted;
+            tx.update_attempt(&attempt)
+        })
+        .unwrap();
+        resolve_nudges(&mut s, "p", T + 300).unwrap();
+        assert_eq!(state(&mut s, &id), gear_model::OpState::Void);
+        let result = s
+            .read(|tx| {
+                Ok(tx
+                    .ops_of_seat_kind("p:heat", OpKind::Deliver)?
+                    .into_iter()
+                    .find(|op| op.id == id)
+                    .unwrap()
+                    .result)
+            })
+            .unwrap();
+        assert!(
+            result
+                .as_deref()
+                .is_some_and(|r| r.contains("was handed in")),
+            "{result:?}"
+        );
+    }
+
+    /// T-610: a nudge for a still-open attempt stays.
+    #[test]
+    fn a_stopped_lane_nudge_for_a_still_open_attempt_stays() {
+        let mut s = world();
+        let id = nudge(&mut s, T + 100);
+        resolve_nudges(&mut s, "p", T + 200).unwrap();
+        assert_eq!(state(&mut s, &id), gear_model::OpState::Intended);
+    }
+
+    /// T-610: the stopped-lane nudge closes when its task is cancelled.
+    #[test]
+    fn a_stopped_lane_nudge_closes_on_a_cancel_of_its_task() {
+        let mut s = world();
+        let id = nudge(&mut s, T + 100);
+        s.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.state = TaskState::Cancelled;
+            tx.update_task(&task)
+        })
+        .unwrap();
+        resolve_nudges(&mut s, "p", T + 200).unwrap();
+        assert_eq!(state(&mut s, &id), gear_model::OpState::Void);
+    }
+
+    /// T-610: the stopped-lane nudge closes when a newer attempt exists.
+    #[test]
+    fn a_stopped_lane_nudge_closes_on_a_newer_attempt() {
+        let mut s = world();
+        let id = nudge(&mut s, T + 100);
+        s.write(|tx| {
+            tx.insert_attempt(&gear_store::AttemptRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 2,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Started,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T + 150,
+                updated: T + 150,
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+            })
+        })
+        .unwrap();
+        resolve_nudges(&mut s, "p", T + 200).unwrap();
+        assert_eq!(state(&mut s, &id), gear_model::OpState::Void);
+    }
+
+    /// The lane's hand-in answered the captain's item: the item closes.
+    #[test]
+    fn the_captains_item_closes_when_the_lane_hands_in() {
+        let mut s = world();
+        let item = s
+            .write(|tx| {
+                tx.insert_message(&NewMessage {
+                    project: "p".into(),
+                    thread: "quiet:p:heat".into(),
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::System,
+                    urgent: true,
+                    body: "no word".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: T + 100,
+                    meta: None,
+                })
+            })
+            .unwrap();
+        s.write(|tx| {
+            tx.insert_message(&NewMessage {
+                project: "p".into(),
+                thread: "T-1:1".into(),
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                sender: "p:heat".into(),
+                sender_gen: 1,
+                recipient: "p:captain".into(),
+                kind: MsgKind::Result,
+                urgent: false,
+                body: "done".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Info,
+                created: T + 150,
+                meta: None,
+            })
+            .map(|_| ())
+        })
+        .unwrap();
+        // The quiet module owns the captain item; the lane nudge's own
+        // resolution is the op. Here the quiet item is resolved by the same
+        // rule, so call the quiet resolver.
+        s.write(|tx| crate::quiet::resolve_nudges(tx, "p", T + 200))
+            .unwrap();
+        let item = s
+            .read(|tx| tx.thread_messages("p", "quiet:p:heat"))
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == item.id)
+            .unwrap();
+        assert_eq!(item.state, MsgState::Resolved);
+    }
+
+    /// A lane with a Ready task and no attempt: the world for T-612.
+    fn world_ready() -> Store {
+        let mut s = Store::open_in_memory().unwrap();
+        s.write(|tx| {
+            testing::seed_project(tx, "p", "sess", T)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, PANE, "pi", T)?;
+            tx.insert_task(&TaskRow {
+                project: "p".into(),
+                id: "T-1".into(),
+                rank: 1,
+                state: TaskState::Ready,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: None,
+                issue: None,
+                updated: T,
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+            })?;
+            tx.insert_contract(&ContractRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                version: 1,
+                goal: "g".into(),
+                accept: "a".into(),
+                evidence_files: vec![],
+                evidence_due_min: None,
+                body: String::new(),
+                created: T,
+                mechanical: None,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    /// A delivery intended for the lane, as `intend_dispatch` writes it: the
+    /// `Delivered` attempt first (the delivery that waits), then the Deliver
+    /// op that names it.
+    fn intended(s: &mut Store, at: i64) {
+        s.write(|tx| {
+            let attempt = gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, at)?;
+            tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: OpKind::Deliver,
+                task: Some("T-1".into()),
+                attempt: Some(attempt.n),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({ "text": "packet" }),
+                created: at,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn observation(s: &mut Store, working: bool) -> SeatObs {
+        SeatObs {
+            seat: s.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap(),
+            presence: Presence::Present,
+            status: Some(if working {
+                AgentStatus::Working
+            } else {
+                AgentStatus::Idle
+            }),
+            flags: Default::default(),
+            idle: !working,
+            screen: None,
+            session: None,
+        }
+    }
+
+    /// T-612: a working lane whose delivery waits (a `Delivered` attempt, the
+    /// state `intend_dispatch` writes) and a ready task gets one Esc after 3
+    /// minutes and the captain's item after 6.
+    #[test]
+    fn a_busy_lane_with_a_waiting_delivery_is_freed_with_one_esc() {
+        let mut s = world_ready();
+        intended(&mut s, T);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "pi", AgentStatus::Working);
+        let o = observation(&mut s, true);
+        // The first tick sets the busy mark: no Esc yet.
+        free_busy_lanes(&mut s, &mut herdr, "p", &[o.clone()], T).unwrap();
+        assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
+        // 3 minutes later: one Esc.
+        let (freed, told) =
+            free_busy_lanes(&mut s, &mut herdr, "p", &[o.clone()], T + 180).unwrap();
+        assert_eq!(freed, vec!["p:heat".to_string()]);
+        assert!(told.is_empty());
+        assert!(
+            herdr.calls.iter().any(|call| matches!(
+                call,
+                Call::SendKeys { pane, keys } if pane == PANE && keys == &["esc".to_string()]
+            )),
+            "{:?}",
+            herdr.calls
+        );
+        // 3 minutes later: one Info item to the captain.
+        let (freed, told) =
+            free_busy_lanes(&mut s, &mut herdr, "p", &[o.clone()], T + 360).unwrap();
+        assert!(freed.is_empty());
+        assert_eq!(told, vec!["p:heat".to_string()]);
+        let items = s
+            .read(|tx| tx.thread_messages("p", "busy-lane:p:heat"))
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, MsgKind::System);
+        assert_eq!(items[0].state, MsgState::Info);
+        assert_eq!(items[0].recipient, "p:captain");
+        assert!(
+            items[0].body.contains("one Esc did not free it"),
+            "{}",
+            items[0].body
+        );
+        // No more items.
+        free_busy_lanes(&mut s, &mut herdr, "p", &[o.clone()], T + 500).unwrap();
+        assert_eq!(
+            s.read(|tx| tx.thread_messages("p", "busy-lane:p:heat"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// T-612: a lane with an open attempt gets nothing.
+    #[test]
+    fn a_busy_lane_with_an_open_attempt_gets_nothing() {
+        let mut s = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "pi", AgentStatus::Working);
+        let o = observation(&mut s, true);
+        free_busy_lanes(&mut s, &mut herdr, "p", &[o.clone()], T).unwrap();
+        free_busy_lanes(&mut s, &mut herdr, "p", &[o.clone()], T + 180).unwrap();
+        free_busy_lanes(&mut s, &mut herdr, "p", &[o.clone()], T + 360).unwrap();
+        assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
+        assert!(s
+            .read(|tx| tx.thread_messages("p", "busy-lane:p:heat"))
+            .unwrap()
+            .is_empty());
+    }
+
+    /// T-612: a lane that is idle, or has no ready task, is not busy.
+    #[test]
+    fn an_idle_lane_or_a_lane_with_no_ready_task_is_not_busy() {
+        let mut s = world_ready();
+        intended(&mut s, T);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "pi", AgentStatus::Idle);
+        let idle = observation(&mut s, false);
+        free_busy_lanes(&mut s, &mut herdr, "p", &[idle.clone()], T).unwrap();
+        free_busy_lanes(&mut s, &mut herdr, "p", &[idle.clone()], T + 180).unwrap();
+        assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
+        // A working lane with no ready task: no Esc.
+        let mut s = world_ready();
+        intended(&mut s, T);
+        s.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.state = TaskState::Running;
+            tx.update_task(&task)
+        })
+        .unwrap();
+        let working = observation(&mut s, true);
+        free_busy_lanes(&mut s, &mut herdr, "p", &[working.clone()], T).unwrap();
+        free_busy_lanes(&mut s, &mut herdr, "p", &[working.clone()], T + 180).unwrap();
+        assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
+    }
 }
