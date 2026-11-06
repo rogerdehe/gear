@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1239 -->
+<!-- gear-plan project=gear base=1240 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 6h
 depart: now
 
 # Decisions
+- station M-8349: keep course | why: the queue holds hull 235m (T-605 then 6 tasks) and mast 245m (T-618 then 7) against 180m left; the lanes are even after M-8342, so a move gains nothing; the gap needs a third lane, which is the user's word and was offered
 - station M-8342: move | why: hull holds about 360m (T-630 then 9 tasks) and mast 170m against 204m left; T-612 (30m) and T-629 (45m) move to mast and live in lane_nudge.rs, mast's file, so hull keeps F-3, T-630 and merge.rs; the eta stays and the gap is reported to the user with the third-lane offer
 - 2026-11-06 10:35 hand-fix: (v0.6.92) a commit that writes only the voyage's records merges with the reviewed work; T-604's report commit had refused its accepted merge | why: lanes write their report after the hand-in; remerge T-604
 - station M-8318: cut | why: projected 401m against the 6h eta, hull holds 390m and mast 235m; T-628 (a merge-failed item names its queued remerge, 20m) is outside the done line and goes to the M7 backlog; the merge worktrees and lost scan hull keeps are merge.rs work no other lane can take without a file move costing more than it saves; the 2026-11-06 hand-fix v0.6.91 (a landed task is never waited for; the board never forecasts a blocked job in hours) took no lane time
