@@ -87,6 +87,10 @@ pub enum Call {
     WorktreeRemove {
         workspace: String,
     },
+    /// Herdr `workspace.close` (T-640): the workspace closed.
+    WorkspaceClose {
+        workspace: String,
+    },
 }
 
 /// What the next side-effecting call (of any kind) should return.
@@ -943,6 +947,43 @@ impl HerdrAct for FakeHerdr {
             },
         )
     }
+
+    fn workspace_close(&mut self, workspace_id: &str) -> Outcome<()> {
+        let ws = workspace_id.to_string();
+        self.act(
+            Call::WorkspaceClose {
+                workspace: ws.clone(),
+            },
+            move |s| {
+                let prefix = format!("{ws}:");
+                let panes: Vec<String> = s
+                    .panes
+                    .keys()
+                    .filter(|id| id.starts_with(&prefix))
+                    .cloned()
+                    .collect();
+                let branches: Vec<String> = s
+                    .worktrees
+                    .iter()
+                    .filter(|(_, v)| v.0.as_deref() == Some(&ws))
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                if panes.is_empty() && branches.is_empty() {
+                    return Outcome::Refused {
+                        code: "workspace_not_found".into(),
+                        message: "no workspace".into(),
+                    };
+                }
+                for pane in panes {
+                    s.panes.remove(&pane);
+                }
+                for branch in branches {
+                    s.worktrees.remove(&branch);
+                }
+                Outcome::Ok(())
+            },
+        )
+    }
 }
 
 #[cfg(test)]
@@ -994,6 +1035,31 @@ mod tests {
         assert!(h.worktree_branches().is_empty());
         assert!(matches!(
             h.worktree_open("/repo", "data/t1-store", "x"),
+            Outcome::Refused { .. }
+        ));
+    }
+
+    #[test]
+    fn workspace_close_removes_the_workspace_and_records_the_call() {
+        let mut h = FakeHerdr::new();
+        let Outcome::Ok(w) = h.worktree_create("/repo", "data/t1-store", "dev", "gear-data") else {
+            panic!("a fresh worktree opens");
+        };
+        assert_eq!(h.workspace_close(&w.workspace_id), Outcome::Ok(()));
+        assert_eq!(
+            h.calls.last(),
+            Some(&Call::WorkspaceClose {
+                workspace: w.workspace_id.clone()
+            })
+        );
+        assert!(
+            !h.panes().unwrap().contains(&w.pane_id),
+            "the workspace's pane is gone"
+        );
+        assert!(h.worktree_branches().is_empty(), "its worktree is gone");
+        // Closing it again is refused: no workspace of that id is left.
+        assert!(matches!(
+            h.workspace_close(&w.workspace_id),
             Outcome::Refused { .. }
         ));
     }

@@ -626,8 +626,15 @@ fn a_remerge_of_a_candidate_not_on_the_integration_branch_queues_the_op() {
     let items = merge_failed_items(&mut s);
     assert_eq!(
         items[0].state,
-        MsgState::Open,
-        "the engine's retry answers it"
+        MsgState::Resolved,
+        "the queued remerge answers it (T-642)"
+    );
+    assert!(
+        items[0]
+            .result
+            .as_deref()
+            .is_some_and(|r| r.starts_with("remerge queued (O-")),
+        "{items:?}"
     );
 }
 
@@ -651,6 +658,35 @@ fn a_queued_remerge_closes_the_lost_merge_item() {
             .is_some_and(|r| r.starts_with("remerge queued (O-")),
         "{item:?}"
     );
+}
+
+/// Lawrence M-921: a queued remerge closes the failed-merge item too, open or
+/// waiting, with the same result; a failed retry opens its own item.
+#[test]
+fn a_queued_remerge_closes_the_merge_failed_item() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (work, candidate) = repo(scratch.path(), false);
+    let mut s = world_at(Some(&work), Some("review/t{n}"));
+    accepted_task_on(&mut s, &candidate);
+    let open = open_failed_item(&mut s);
+    let waiting = open_item(&mut s, "merge-failed:T-1");
+    s.write(|tx| {
+        tx.update_message_state("p", &waiting, MsgState::Waiting, None, None, None, T0 + 12)
+    })
+    .unwrap();
+
+    run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap();
+
+    for id in [&open, &waiting] {
+        let item = s.read(|tx| tx.get_message("p", id)).unwrap().unwrap();
+        assert_eq!(item.state, MsgState::Resolved, "{item:?}");
+        assert!(
+            item.result
+                .as_deref()
+                .is_some_and(|r| r.starts_with("remerge queued (O-")),
+            "{item:?}"
+        );
+    }
 }
 
 /// A voided merge merged nothing: the accepted attempt is queued again.
