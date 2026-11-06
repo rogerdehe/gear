@@ -2295,12 +2295,25 @@ fn feature_work(
         let had_carrier = stored.is_some();
         // A carrier still open is kept up to date even when every member is
         // done (Lawrence M2: T-93 and T-94 had both passed review, so T-100's
-        // deps were never rebuilt and kept missing T-94).
-        let carrier_open = stored.as_ref().is_some_and(|carrier| {
-            existing
-                .get(carrier)
-                .is_some_and(|task| !task.state.is_terminal())
-        });
+        // deps were never rebuilt and kept missing T-94). A carrier that is
+        // Done but never merged is kept too (T-644, Lawrence M2: T-96 passed
+        // review, went red at the full gate, and a member added to fix it
+        // minted a new carrier instead of touching T-96).
+        let carrier_unmerged_done = match stored.as_ref() {
+            Some(carrier) => {
+                existing
+                    .get(carrier)
+                    .is_some_and(|task| task.state == TaskState::Done)
+                    && crate::tasks::merged_at(tx, project, carrier)?.is_none()
+            }
+            None => false,
+        };
+        let carrier_open = carrier_unmerged_done
+            || stored.as_ref().is_some_and(|carrier| {
+                existing
+                    .get(carrier)
+                    .is_some_and(|task| !task.state.is_terminal())
+            });
         let (carrier, new_carrier, touch_carrier) = match (stored, open.is_empty()) {
             (Some(carrier), _) if carrier_open => (carrier, false, true),
             (stored, true) => (stored.unwrap_or_default(), false, false),

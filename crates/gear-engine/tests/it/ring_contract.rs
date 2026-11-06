@@ -89,14 +89,9 @@ fn two_projects_sharing_a_pane_get_one_ring_naming_both() {
     let text = prompts[0];
     assert!(text.contains(&p_item) && text.contains(&q_item), "{text}");
     assert!(
-        text.contains("p:") && text.contains("q:"),
-        "each line names its project: {text}"
+        text.contains("[p:M-1 from p:captain]") && text.contains("[q:M-1 from q:captain, urgent]"),
+        "each header names its project: {text}"
     );
-    // Urgent first: q's line leads. (Message ids are per project, so both
-    // items are M-1; the project lines tell them apart.)
-    let q_at = text.find("- q:").unwrap();
-    let p_at = text.find("- p:").unwrap();
-    assert!(q_at < p_at, "the urgent project leads: {text}");
     // One op per seat: the ring's own (typed once) and q's (covered, not typed).
     let p_ops = doorbells(&mut w, "p", "captain");
     let q_ops = doorbells(&mut w, "q", "captain");
@@ -175,13 +170,17 @@ fn a_project_off_hours_adds_nothing_while_the_other_rings() {
         "the working project still rings: {prompts:?}"
     );
     assert!(
-        prompts[0].starts_with("GEAR: 1 item(s) waiting for you: "),
+        prompts[0].starts_with("GEAR: 1 message(s) for you."),
         "one item, the working project's: {}",
         prompts[0]
     );
-    assert!(prompts[0].contains(&p_item), "{}", prompts[0]);
     assert!(
-        !prompts[0].contains("- q:"),
+        prompts[0].contains(&format!("[{} from p:captain]", p_item)),
+        "{}",
+        prompts[0]
+    );
+    assert!(
+        !prompts[0].contains("q:"),
         "the resting project adds nothing: {}",
         prompts[0]
     );
@@ -220,13 +219,17 @@ fn a_single_project_rings_as_today() {
     let prompts = w.herdr.prompts_to(CAP_PANE);
     assert_eq!(prompts.len(), 1);
     assert!(
-        prompts[0].starts_with("GEAR: 1 item(s) waiting for you (1 urgent): "),
+        prompts[0].starts_with("GEAR: 1 message(s) for you."),
         "{}",
         prompts[0]
     );
-    assert!(prompts[0].contains(&item), "{}", prompts[0]);
     assert!(
-        prompts[0].contains("Run the command `gear --session "),
+        prompts[0].contains(&format!("[{} from p:captain, urgent]", item)),
+        "{}",
+        prompts[0]
+    );
+    assert!(
+        prompts[0].contains("Reply with `gear --session "),
         "{}",
         prompts[0]
     );
