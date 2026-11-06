@@ -6072,6 +6072,32 @@ fn task_branches(
     Ok(found)
 }
 
+/// The command that lists the task branches on the remote (T-633): the
+/// task-branch template up to its first `{` is the prefix, or the whole remote
+/// list when the template starts with a placeholder.
+fn branch_list_command(template: &str, remote: &str) -> String {
+    match template.split_once('{') {
+        Some(("", _)) => "git branch -r".to_string(),
+        Some((prefix, _)) => format!("git branch -r --list '{remote}/{prefix}*'"),
+        None => format!("git branch -r --list '{remote}/{template}*'"),
+    }
+}
+
+/// Append at most ten lines of a section, then the line that names the rest
+/// (T-633). The section header already carries the full count.
+fn push_section(body: &mut String, lines: &[String], command: &str) {
+    const SECTION_LINES: usize = 10;
+    for line in lines.iter().take(SECTION_LINES) {
+        body.push_str(&format!("- {line}\n"));
+    }
+    if lines.len() > SECTION_LINES {
+        body.push_str(&format!(
+            "- … and {} more: `{command}`\n",
+            lines.len() - SECTION_LINES
+        ));
+    }
+}
+
 /// Delete the branches of cancelled tasks and name the branches older than
 /// the project's limit, in one item to the captain.
 fn sweep_in(
@@ -6204,15 +6230,14 @@ fn sweep_in(
                 .lines()
                 .filter(|line| !line.trim().is_empty())
                 .collect();
+            // T-633: the line names the count and the newest commit only, so
+            // a branch with many commits does not grow the item.
             left.push(format!(
-                "{} ({}, done, commits not on {integration}: {})",
+                "{} ({}, done, {} commit(s) not on {integration}, newest: {})",
                 branch.name,
                 branch.task,
-                if commits.is_empty() {
-                    "none readable".to_string()
-                } else {
-                    commits.join("; ")
-                }
+                commits.len(),
+                commits.first().copied().unwrap_or("none readable")
             ));
             continue;
         }
@@ -6240,6 +6265,9 @@ fn sweep_in(
     if deleted.is_empty() && old.is_empty() && crowded.is_empty() && left.is_empty() {
         return Ok(());
     }
+    // T-633: every section lists at most ten lines, then the command that
+    // shows the rest; the header keeps the full count.
+    let branch_list = branch_list_command(&config.conventions.task_branch, remote.name);
     let mut body = String::new();
     if !crowded.is_empty() {
         body.push_str(&format!(
@@ -6248,9 +6276,7 @@ fn sweep_in(
             config.lanes.len().max(1),
             config.conventions.branch_max_per_lane.max(1)
         ));
-        for line in &crowded {
-            body.push_str(&format!("- {line}\n"));
-        }
+        push_section(&mut body, &crowded, &branch_list);
     }
     if !old.is_empty() {
         body.push_str(&format!(
@@ -6258,18 +6284,14 @@ fn sweep_in(
             old.len(),
             limit / 60
         ));
-        for line in &old {
-            body.push_str(&format!("- {line}\n"));
-        }
+        push_section(&mut body, &old, &branch_list);
     }
     if !left.is_empty() {
         body.push_str(&format!(
             "{} branch(es) of done tasks still hold commits the {integration} branch does not have (the task is done, so nothing will merge them): merge or restore them by hand, or delete the branch if the commits write only reports.\n",
             left.len()
         ));
-        for line in &left {
-            body.push_str(&format!("- {line}\n"));
-        }
+        push_section(&mut body, &left, &branch_list);
     }
     if !deleted.is_empty() {
         body.push_str(&format!(
@@ -6278,9 +6300,7 @@ fn sweep_in(
             remote.name,
             remote.name
         ));
-        for line in &deleted {
-            body.push_str(&format!("- {line}\n"));
-        }
+        push_section(&mut body, &deleted, &branch_list);
     }
     let urgent = !old.is_empty() || !crowded.is_empty();
     store.write(|tx| {
@@ -16629,5 +16649,182 @@ gate = "{project_gate}"
         let item = open_failed_item(&mut store, "T-9");
         let expected = format!("bisect: the gate turns red at merge(T-2) {tip}");
         assert!(item.contains(&expected), "{item:?} lacks {expected:?}");
+    }
+
+    // ---- T-633: the branch item stays short ------------------------------
+
+    #[test]
+    fn the_branch_list_command_names_the_task_prefix() {
+        assert_eq!(
+            branch_list_command("{lane}/t{n}", "origin"),
+            "git branch -r"
+        );
+        assert_eq!(
+            branch_list_command("heat/t{n}", "origin"),
+            "git branch -r --list 'origin/heat/t*'"
+        );
+        assert_eq!(
+            branch_list_command("heat/t", "origin"),
+            "git branch -r --list 'origin/heat/t*'"
+        );
+    }
+
+    #[test]
+    fn a_sweep_over_many_left_branches_stays_short() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(
+            root.path(),
+            &format!("git init -q --bare {}", origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git init -q -b dev {}", work.display()),
+        );
+        sh(
+            &work,
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base",
+        );
+        sh(
+            &work,
+            &format!("git remote add origin {}", origin.display()),
+        );
+        sh(&work, "git push -q origin HEAD:refs/heads/dev");
+        // Thirty commits the integration branch does not have, and 25 done
+        // tasks whose branches all point at that tip.
+        sh(&work, "git switch -q -c work");
+        for i in 0..30 {
+            sh(
+                &work,
+                &format!(
+                    "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m 'work {i}'"
+                ),
+            );
+        }
+        let tip = sh(&work, "git rev-parse HEAD").trim().to_string();
+        for n in 1..=25 {
+            sh(
+                &work,
+                &format!("git push -q origin {tip}:refs/heads/heat/t{n}"),
+            );
+        }
+        let mut store = Store::open_in_memory().unwrap();
+        let config_text = format!(
+            "{}\ntask_branch = \"heat/t{{n}}\"\n",
+            config_text_in("true", &work)
+        );
+        store
+            .write(|tx| {
+                tx.insert_project(&gear_store::ProjectRow {
+                    id: "p".into(),
+                    herdr_session: "sess".into(),
+                    config_toml: config_text.clone(),
+                    config_version: 1,
+                    quota_lanes: 1,
+                    quota_temps: 0,
+                    quota_includes_captain: false,
+                    plan_version: 0,
+                    created: 0,
+                })?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    gear_model::SeatRole::Lane,
+                    "w1:p1",
+                    "opencode",
+                    0,
+                )?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "captain",
+                    gear_model::SeatRole::Captain,
+                    "w9:p1",
+                    "claude",
+                    0,
+                )?;
+                for n in 1..=25 {
+                    tx.insert_task(&gear_store::TaskRow {
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
+                        project: "p".into(),
+                        id: format!("T-{n}"),
+                        rank: n,
+                        state: TaskState::Done,
+                        priority: "must".into(),
+                        lane: Some("heat".into()),
+                        milestone: None,
+                        required: false,
+                        contract_version: 1,
+                        deps: vec![],
+                        followup_of: None,
+                        wait_on: None,
+                        wait_cond: None,
+                        rework_note: None,
+                        estimate_min: None,
+                        issue: None,
+                        updated: 0,
+                    })?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let config = gear_app::config::parse(&config_text).unwrap();
+        let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
+        let repo = config.repo_of_task(&tasks[0]);
+        let now = 3 * 3600;
+        let heads = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        let found = task_branches(&mut store, "p", &config, &tasks, &repo, &heads).unwrap();
+        let remote = Target {
+            name: "origin",
+            runner: &GitRemote,
+        };
+        let dev = git(&work, &["rev-parse", "dev"]).unwrap();
+        sweep_in(
+            &mut store,
+            "p",
+            &config,
+            &work,
+            remote,
+            found,
+            now,
+            "dev",
+            Some(dev.trim()),
+        )
+        .unwrap();
+
+        let items = store
+            .read(|tx| tx.actionable_for("p", "p:captain", now))
+            .unwrap();
+        assert_eq!(items.len(), 1, "{:?}", items);
+        let body = &items[0].body;
+        assert!(
+            body.chars().count() < 4000,
+            "the item stays short: {} chars",
+            body.chars().count()
+        );
+        let lines: Vec<&str> = body
+            .lines()
+            .filter(|line| line.starts_with("- heat/t"))
+            .collect();
+        assert_eq!(lines.len(), 10, "ten lines: {body}");
+        for line in &lines {
+            assert!(
+                line.contains("30 commit(s) not on dev, newest: "),
+                "each names its count and newest commit: {line}"
+            );
+        }
+        assert!(
+            body.contains("- … and 15 more: `git branch -r --list 'origin/heat/t*'`"),
+            "the rest is named: {body}"
+        );
+        assert!(
+            body.contains("25 branch(es) of done tasks"),
+            "the header keeps the full count: {body}"
+        );
     }
 }
