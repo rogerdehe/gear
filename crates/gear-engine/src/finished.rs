@@ -398,7 +398,18 @@ pub fn reclaim(
 fn landed_voyage(store: &mut Store, project: &str, now: Ts) -> GearResult<Option<String>> {
     store.read(|tx| {
         let sweep = Sweep::read(tx, project)?;
-        if sweep.any_open {
+        // Only work in progress holds a reclaim: a voyage with a task that is
+        // not finished. Accepted work of an old voyage that never got a merge
+        // time (GEAR M1-M3: 34 tasks from before merges were timed) does not:
+        // it kept M6.3's landing from being reclaimed at all. The landing
+        // itself already refused while its own voyage had unmerged work, and
+        // the reclaim deletes only branches that are on the integration
+        // branch and worktrees that are clean and pushed.
+        let in_progress = tx
+            .tasks_live_of_project(project)?
+            .iter()
+            .any(|task| !task.state.is_terminal());
+        if in_progress {
             return Ok(None);
         }
         let Some((land, milestone)) = sweep
@@ -1368,6 +1379,58 @@ gate = "true"
             landed.items(&records_thread("M1")).is_empty(),
             "nothing to tell the captain"
         );
+    }
+
+    /// Accepted work of an old voyage that never got a merge time does not
+    /// hold the reclaim of a landing (GEAR M6.3: 34 tasks of M1-M3 from before
+    /// merges were timed kept the reclaim from ever running).
+    #[test]
+    fn an_old_voyages_untimed_work_does_not_hold_the_reclaim() {
+        let mut landed = Landed::new("old-untimed");
+        landed
+            .store
+            .write(|tx| {
+                let mut voyage = tx.get_voyage("p", "M1")?.unwrap();
+                voyage.milestone = "M0".into();
+                tx.upsert_voyage(&voyage)?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.id = "T-0".into();
+                task.milestone = Some("M0".into());
+                tx.insert_task(&task)?;
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-0".into(),
+                    n: 1,
+                    seat: "p:hull".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: gear_model::AttemptState::Accepted,
+                    candidate: Some("abc1234".into()),
+                    report: None,
+                    safe_point: None,
+                    started: NOW - 86_400,
+                    updated: NOW - 86_400,
+                })
+            })
+            .unwrap();
+        assert!(
+            landed
+                .store
+                .read(|tx| tx.unmerged_done_tasks("p"))
+                .unwrap()
+                .iter()
+                .any(|(task, _)| task == "T-0"),
+            "the old task is accepted and has no merge time"
+        );
+        landed.records("voyages/M1/report.md", "the voyage report");
+
+        assert!(landed.reclaim(NOW + 600).is_some(), "the reclaim ran");
     }
 
     /// The project's release branch is never named as a leftover of a landed
