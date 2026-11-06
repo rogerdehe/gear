@@ -121,6 +121,75 @@ pub fn last_context_in(log: UsageLog, session_ref: &str, home: &Path) -> Option<
     }
 }
 
+/// T-629: the error texts of the last two assistant records of the session,
+/// oldest first. None when the log cannot be read; an entry is None when that
+/// record ended normally. A provider's content refusal is such an error: pi
+/// writes `stopReason` `error` and the refusal in `errorMessage`.
+pub fn last_assistant_errors(log: UsageLog, session_ref: &str) -> Option<Vec<Option<String>>> {
+    last_assistant_errors_in(log, session_ref, &home())
+}
+
+/// The same, with the home folder the logs live in.
+pub fn last_assistant_errors_in(
+    log: UsageLog,
+    session_ref: &str,
+    home: &Path,
+) -> Option<Vec<Option<String>>> {
+    let mut errors: Vec<Option<String>> = Vec::new();
+    match log {
+        UsageLog::PiJsonl => {
+            let path = PathBuf::from(session_ref);
+            for line in read_lines(&path)? {
+                let Some(value) = parse(&line) else { continue };
+                if value.get("type").and_then(Value::as_str) != Some("message") {
+                    continue;
+                }
+                let Some(message) = value.get("message") else {
+                    continue;
+                };
+                if message.get("role").and_then(Value::as_str) != Some("assistant") {
+                    continue;
+                }
+                let error = if message.get("stopReason").and_then(Value::as_str) == Some("error") {
+                    message
+                        .get("errorMessage")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                } else {
+                    None
+                };
+                errors.push(error);
+                if errors.len() > 2 {
+                    errors.remove(0);
+                }
+            }
+        }
+        UsageLog::OpencodeDb => {
+            for (data, _) in opencode_messages(home, session_ref)? {
+                if data.get("role").and_then(Value::as_str) != Some("assistant") {
+                    continue;
+                }
+                let error = data
+                    .get("error")
+                    .and_then(|error| {
+                        error
+                            .get("data")
+                            .and_then(|data| data.get("message"))
+                            .and_then(Value::as_str)
+                            .or_else(|| error.as_str())
+                    })
+                    .map(str::to_string);
+                errors.push(error);
+                if errors.len() > 2 {
+                    errors.remove(0);
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(errors)
+}
+
 /// The context window, in tokens, of the model a seat runs, read from the CLI
 /// itself (the user, 2026-11-06: pi's own footer shows `17.0%/500k`; GEAR
 /// reads what the agent knows instead of assuming). `model` is the model id

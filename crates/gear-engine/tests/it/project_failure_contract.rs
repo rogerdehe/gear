@@ -42,6 +42,7 @@ fn profile(kind: &str) -> gear_herdr::Profile {
         compact: String::new(),
         usage_log: None,
         error_markers: Vec::new(),
+        refusal_markers: vec![],
         dialogs: Vec::new(),
         busy_markers: vec!["esc interrupt".into()],
         ratelimit_markers: Vec::new(),

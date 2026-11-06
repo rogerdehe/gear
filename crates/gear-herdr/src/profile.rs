@@ -61,6 +61,10 @@ pub struct Profile {
     /// 6): the agent cannot go on, and the engine reads the quota source to
     /// tell a spent quota from a provider error (§9.2).
     pub error_markers: Vec<String>,
+    /// T-629: the texts of a provider's content refusal in the session log
+    /// (`errorMessage` of a pi record whose `stopReason` is `error`). A lane
+    /// that is refused twice in a row on one attempt moves to its next model.
+    pub refusal_markers: Vec<String>,
     /// The startup dialogs this CLI opens (T-457). A dialog's screen is read
     /// as `Blocked` — Herdr still reports the agent done/idle — and the
     /// profile's answer keys take it. Empty for the kinds whose dialogs are
@@ -329,6 +333,8 @@ pub struct ProfilePatch {
     /// The signs on screen that the provider answered with an error (§12
     /// item 6).
     pub error_markers: Option<Vec<String>>,
+    /// T-629: the texts of a provider's content refusal.
+    pub refusal_markers: Option<Vec<String>>,
     /// The slash command that starts a new session (§2).
     pub new_session: Option<String>,
     /// The slash command that compacts the session (§2); empty = none.
@@ -385,6 +391,9 @@ impl Profile {
         }
         if let Some(markers) = &patch.error_markers {
             profile.error_markers = markers.clone();
+        }
+        if let Some(markers) = &patch.refusal_markers {
+            profile.refusal_markers = markers.clone();
         }
         if let Some(command) = &patch.new_session {
             profile.new_session = command.clone();
@@ -487,6 +496,11 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             backoff_markers: vec!["Retrying in ".into(), "Retry due ·".into()],
             blocked_markers: vec![],
             error_markers: vec![],
+            refusal_markers: vec![
+                "inappropriate content".into(),
+                "content_filter".into(),
+                "data_inspection_failed".into(),
+            ],
             dialogs: vec![],
             new_session: "/new".into(),
             compact: "/compact".into(),
@@ -516,6 +530,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             backoff_markers: vec![],
             blocked_markers: vec![],
             error_markers: vec![],
+            refusal_markers: vec![],
             dialogs: vec![],
             new_session: "/clear".into(),
             compact: "/compact".into(),
@@ -592,6 +607,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             backoff_markers: vec!["Reconnecting...".into()],
             blocked_markers: vec![],
             error_markers: vec![],
+            refusal_markers: vec![],
             // T-457: Codex 0.165's startup screens (the screens captured in
             // M5, gear/voyages/M6/backlog.md). `/new` asks
             // `Where should the new conversation run?` with
@@ -677,6 +693,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             backoff_markers: vec![],
             blocked_markers: vec![],
             error_markers: vec![],
+            refusal_markers: vec![],
             dialogs: vec![],
             new_session: String::new(),
             compact: String::new(),
@@ -742,6 +759,11 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             // provider error, not a spent quota: §9.2 reads the quota source
             // to tell the two apart.
             error_markers: vec!["overloaded_error".into(), "Retry failed after".into()],
+            refusal_markers: vec![
+                "inappropriate content".into(),
+                "content_filter".into(),
+                "data_inspection_failed".into(),
+            ],
             dialogs: vec![],
             new_session: "/new".into(),
             compact: "/compact".into(),
@@ -804,6 +826,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             backoff_markers: vec!["Retrying (".into()],
             blocked_markers: vec![],
             error_markers: vec!["overloaded_error".into(), "Retry failed after".into()],
+            refusal_markers: vec![],
             dialogs: vec![],
             new_session: "/new".into(),
             compact: "/compact".into(),
@@ -854,6 +877,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             backoff_markers: vec![", retrying in ".into()],
             blocked_markers: vec![],
             error_markers: vec![],
+            refusal_markers: vec![],
             dialogs: vec![Dialog {
                 markers: vec!["Do you trust the contents of this project?".into()],
                 keys: vec!["enter".into()],
