@@ -23,8 +23,8 @@
 
 use std::collections::BTreeMap;
 
-use gear_model::{GearResult, OpKind, OpState, Ts};
-use gear_store::{NewOp, OpRow, Store, Tx};
+use gear_model::{GearResult, MsgState, OpKind, OpState, Ts};
+use gear_store::{NewOp, OpRow, Store, Tx, VoyageRow};
 use serde::Deserialize;
 
 use crate::marker;
@@ -70,7 +70,10 @@ pub fn sync_with(
     now: Ts,
 ) -> GearResult<Vec<String>> {
     let facts = store.read(|tx| facts(tx, project))?;
-    if facts.is_empty() {
+    // The voyage label (T-637): a departed voyage of a GitHub project gets its
+    // label, once, whether or not any of its tasks has an issue.
+    let label = store.read(|tx| label_plan(tx, project))?;
+    if facts.is_empty() && label.is_none() {
         return Ok(Vec::new());
     }
     let seat = forge_seat(project);
@@ -87,6 +90,34 @@ pub fn sync_with(
     }
     let mut done = Vec::new();
     let mut budget = MAX_CALLS_PER_TICK;
+    if let Some((milestone, repo, label)) = label {
+        let call = Call {
+            key: format!("label:{milestone}"),
+            task: milestone.clone(),
+            attempt: None,
+            what: What::Label {
+                repo,
+                name: label,
+                description: format!("GEAR voyage {milestone} of {project}"),
+            },
+        };
+        match run_call(store, project, forge, &call, &mut ops, &mut budget, now)? {
+            Outcome::Done(_) => {
+                store.write(|tx| {
+                    tx.set_meta(&format!("forge.label.{project}.{milestone}"), "created")
+                })?;
+                done.push(format!("{project}:label:{milestone}"));
+            }
+            // Confirmed on an earlier tick: the meta may still be missing.
+            Outcome::Already => {
+                store.write(|tx| {
+                    tx.set_meta(&format!("forge.label.{project}.{milestone}"), "created")
+                })?;
+            }
+            // A failure stands for this tick only: the next tick tries again.
+            Outcome::Pending => {}
+        }
+    }
     for fact in &facts {
         done.extend(run_task(
             store,
@@ -176,6 +207,12 @@ enum What {
         issue: u64,
         comment: String,
     },
+    /// The label of a departed voyage (T-637).
+    Label {
+        repo: String,
+        name: String,
+        description: String,
+    },
 }
 
 impl What {
@@ -184,6 +221,7 @@ impl What {
             What::Claim { .. } => "claim",
             What::Comment { .. } => "comment",
             What::Close { .. } => "close",
+            What::Label { .. } => "label",
         }
     }
 }
@@ -763,6 +801,13 @@ fn act(forge: &dyn Forge, what: &What) -> ForgeResult<String> {
         } => forge
             .close_issue(repo, *issue, comment)
             .map(|_| String::new()),
+        What::Label {
+            repo,
+            name,
+            description,
+        } => forge
+            .create_label(repo, name, description)
+            .map(|_| String::new()),
     }
 }
 
@@ -868,6 +913,63 @@ fn facts(tx: &Tx<'_>, project: &str) -> GearResult<Vec<Fact>> {
     Ok(facts)
 }
 
+/// The label call of a departed voyage (T-637): the milestone, the repo and
+/// the label, when the project has a forge, the voyage departed and the label
+/// is not created yet.
+fn label_plan(tx: &Tx<'_>, project: &str) -> GearResult<Option<(String, String, String)>> {
+    let Some(row) = tx.get_project(project)? else {
+        return Ok(None);
+    };
+    let Ok(config) = parse_config(&row.config_toml) else {
+        return Ok(None);
+    };
+    let Some(github) = config.project_github() else {
+        return Ok(None);
+    };
+    let Some(voyage) = departure_voyage(tx, project)? else {
+        return Ok(None);
+    };
+    let Some(label) = voyage_label(&github.voyage_label, project, &voyage.milestone) else {
+        return Ok(None);
+    };
+    let created = tx
+        .get_meta(&format!("forge.label.{project}.{}", voyage.milestone))?
+        .as_deref()
+        == Some("created");
+    if created {
+        return Ok(None);
+    }
+    Ok(Some((voyage.milestone, github.repo, label)))
+}
+
+/// The voyage a GitHub project's label is for (T-637): the project's voyage
+/// with the latest departure, unless its landing order is Resolved (landed).
+fn departure_voyage(tx: &Tx<'_>, project: &str) -> GearResult<Option<VoyageRow>> {
+    let mut voyages: Vec<VoyageRow> = tx
+        .voyages_of_project(project)?
+        .into_iter()
+        .filter(|voyage| voyage.departure.is_some())
+        .collect();
+    voyages.sort_by_key(|voyage| voyage.departure);
+    let Some(voyage) = voyages.pop() else {
+        return Ok(None);
+    };
+    if voyage_landed(tx, project, &voyage.milestone)? {
+        return Ok(None);
+    }
+    Ok(Some(voyage))
+}
+
+/// Whether the voyage's landing order was answered: its message is Resolved.
+fn voyage_landed(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<bool> {
+    let Some(id) = tx.get_meta(&format!("station:{project}:{milestone}:land"))? else {
+        return Ok(false);
+    };
+    Ok(tx
+        .get_message(project, &id)?
+        .is_some_and(|message| message.state == MsgState::Resolved))
+}
+
 /// The first words of a goal, for a pull request's title.
 fn first_words(goal: &str) -> String {
     const MAX: usize = 60;
@@ -906,6 +1008,8 @@ struct Github {
     /// `merge = "pr"`: a task lands through its pull request. Anything else
     /// (`push`, the default) opens none.
     pr: bool,
+    /// The voyage label template (T-643); empty = off.
+    voyage_label: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -935,6 +1039,17 @@ struct GithubSection {
     repo: Option<String>,
     #[serde(default)]
     merge: Option<String>,
+    #[serde(default)]
+    issues: Option<IssuesSection>,
+}
+
+/// `[github.issues]`: the labels of a project's issues (T-643).
+#[derive(Debug, Default, Deserialize)]
+struct IssuesSection {
+    /// The label a departed voyage's issues carry (T-643):
+    /// `{project}/{milestone}` by default; `""` turns it off.
+    #[serde(default)]
+    voyage_label: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -969,19 +1084,296 @@ impl Config {
                 Some(section) => (section.github.as_ref(), section.integration.clone()),
                 None => (self.github.as_ref(), None),
             };
-        let github = github.and_then(|section| {
-            Some(Github {
-                repo: section.repo.clone()?,
-                pr: section.merge.as_deref() == Some("pr"),
-            })
-        })?;
+        let github = github.and_then(github_of)?;
         let integration = integration
             .or_else(|| self.conventions.integration.clone())
             .unwrap_or_else(|| "dev".to_string());
         Some((github, integration))
     }
+
+    /// The GitHub mode of the project root (T-637): `None` when the project
+    /// has no forge.
+    fn project_github(&self) -> Option<Github> {
+        github_of(self.github.as_ref()?)
+    }
+}
+
+/// The resolved GitHub mode of one `[github]` section (T-643): the repo, the
+/// merge mode and the voyage label template.
+fn github_of(section: &GithubSection) -> Option<Github> {
+    Some(Github {
+        repo: section.repo.clone()?,
+        pr: section.merge.as_deref() == Some("pr"),
+        voyage_label: section
+            .issues
+            .as_ref()
+            .and_then(|issues| issues.voyage_label.clone())
+            .unwrap_or_else(|| "{project}/{milestone}".to_string()),
+    })
+}
+
+/// The GitHub label a departed voyage's issues carry (T-643): the template
+/// with `{project}` and `{milestone}` filled in. `None` when it is off (`""`).
+fn voyage_label(template: &str, project: &str, milestone: &str) -> Option<String> {
+    if template.is_empty() {
+        return None;
+    }
+    Some(
+        template
+            .replace("{project}", project)
+            .replace("{milestone}", milestone),
+    )
 }
 
 fn parse_config(text: &str) -> Result<Config, toml::de::Error> {
     toml::from_str::<Config>(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    use crate::{Filter, Issue, MergeResult, PrRef, PrState};
+
+    const T0: Ts = 1_800_000_000;
+
+    /// A forge that records the label calls it is given, and can refuse one.
+    #[derive(Default)]
+    struct Recorder {
+        labels: RefCell<Vec<String>>,
+        fail_label: Cell<bool>,
+    }
+
+    impl Recorder {
+        fn labels(&self) -> Vec<String> {
+            self.labels.borrow().clone()
+        }
+    }
+
+    impl Forge for Recorder {
+        fn issues(&self, _repo: &str, _filter: &Filter) -> ForgeResult<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn open_claim(
+            &self,
+            repo: &str,
+            _branch: &str,
+            _base: &str,
+            _title: &str,
+            _body: &str,
+        ) -> ForgeResult<PrRef> {
+            Ok(PrRef::none(repo))
+        }
+
+        fn comment(&self, _pr: &PrRef, _body: &str) -> ForgeResult<()> {
+            Ok(())
+        }
+
+        fn merge(
+            &self,
+            _pr: &PrRef,
+            _method: MergeMethod,
+            _head: &str,
+        ) -> ForgeResult<MergeResult> {
+            Ok(MergeResult {
+                merged: false,
+                message: String::new(),
+            })
+        }
+
+        fn pr_state(&self, _pr: &PrRef) -> ForgeResult<PrState> {
+            Ok(PrState::default())
+        }
+
+        fn pr_by_head(&self, _repo: &str, _branch: &str) -> ForgeResult<Option<PrRef>> {
+            Ok(None)
+        }
+
+        fn close_issue(&self, _repo: &str, _number: u64, _comment: &str) -> ForgeResult<()> {
+            Ok(())
+        }
+
+        fn create_label(&self, repo: &str, name: &str, description: &str) -> ForgeResult<()> {
+            if self.fail_label.replace(false) {
+                return Err(crate::Error::Failed("the forge refused".to_string()));
+            }
+            self.labels
+                .borrow_mut()
+                .push(format!("label {repo} {name} | {description}"));
+            Ok(())
+        }
+    }
+
+    /// A store with project `p` in GitHub mode and the config given.
+    fn world(config: &str) -> Store {
+        let mut store = Store::open_in_memory().expect("the store");
+        store
+            .write(|tx| {
+                gear_store::testing::seed_project(tx, "p", "sess", T0)?;
+                let mut project = tx.get_project("p")?.expect("the project");
+                project.config_toml = config.to_string();
+                tx.update_project(&project)
+            })
+            .expect("the world");
+        store
+    }
+
+    fn github_config(issues: &str) -> String {
+        format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/tmp/gear-forge-fixture\"\n\
+             \n[github]\nrepo = \"owner/name\"\n{issues}"
+        )
+    }
+
+    fn departed(store: &mut Store, milestone: &str, departure: Ts) {
+        store
+            .write(|tx| tx.set_voyage_departure("p", milestone, departure, 1, departure))
+            .expect("the departure");
+    }
+
+    fn tick(store: &mut Store, forge: &Recorder, at: Ts) -> Vec<String> {
+        sync_with(store, "p", forge, at).expect("the sync never fails on a forge error")
+    }
+
+    fn label_meta(store: &mut Store, milestone: &str) -> Option<String> {
+        store
+            .read(|tx| tx.get_meta(&format!("forge.label.p.{milestone}")))
+            .expect("the meta")
+    }
+
+    /// T-637: a departed voyage of a GitHub project gets its label once.
+    #[test]
+    fn a_departed_voyage_gets_its_label_once() {
+        let mut store = world(&github_config(""));
+        departed(&mut store, "M1", T0);
+        let forge = Recorder::default();
+
+        let done = tick(&mut store, &forge, T0 + 1);
+
+        assert_eq!(done, vec!["p:label:M1"], "{done:?}");
+        assert_eq!(
+            forge.labels(),
+            vec!["label owner/name p/M1 | GEAR voyage M1 of p"]
+        );
+        assert_eq!(label_meta(&mut store, "M1").as_deref(), Some("created"));
+
+        let done = tick(&mut store, &forge, T0 + 2);
+
+        assert!(done.is_empty(), "{done:?}");
+        assert_eq!(forge.labels().len(), 1, "the label is created once");
+    }
+
+    /// T-637: a voyage that has not departed gets no label.
+    #[test]
+    fn an_undeparted_voyage_gets_no_label() {
+        let mut store = world(&github_config(""));
+        store
+            .write(|tx| {
+                tx.upsert_voyage(&VoyageRow {
+                    project: "p".into(),
+                    milestone: "M1".into(),
+                    title: String::new(),
+                    done: None,
+                    bar: None,
+                    eta: None,
+                    departure: None,
+                    departure_tasks: None,
+                    departure_estimate_min: None,
+                    updated: T0,
+                })
+            })
+            .expect("the voyage");
+        let forge = Recorder::default();
+
+        let done = tick(&mut store, &forge, T0 + 1);
+
+        assert!(done.is_empty(), "{done:?}");
+        assert!(forge.labels().is_empty(), "{:?}", forge.labels());
+        assert_eq!(label_meta(&mut store, "M1"), None);
+    }
+
+    /// T-637: `voyage_label = ""` turns the label off.
+    #[test]
+    fn an_empty_voyage_label_gets_no_label() {
+        let mut store = world(&github_config("[github.issues]\nvoyage_label = \"\"\n"));
+        departed(&mut store, "M1", T0);
+        let forge = Recorder::default();
+
+        let done = tick(&mut store, &forge, T0 + 1);
+
+        assert!(done.is_empty(), "{done:?}");
+        assert!(forge.labels().is_empty(), "{:?}", forge.labels());
+        assert_eq!(label_meta(&mut store, "M1"), None);
+    }
+
+    /// T-637: a failed label call is retried on a later tick.
+    #[test]
+    fn a_failed_label_call_is_retried() {
+        let mut store = world(&github_config(""));
+        departed(&mut store, "M1", T0);
+        let forge = Recorder::default();
+        forge.fail_label.set(true);
+
+        let done = tick(&mut store, &forge, T0 + 1);
+
+        assert!(done.is_empty(), "{done:?}");
+        assert!(forge.labels().is_empty(), "{:?}", forge.labels());
+        assert_eq!(label_meta(&mut store, "M1"), None);
+
+        let done = tick(&mut store, &forge, T0 + 2);
+
+        assert_eq!(done, vec!["p:label:M1"], "{done:?}");
+        assert_eq!(
+            forge.labels(),
+            vec!["label owner/name p/M1 | GEAR voyage M1 of p"]
+        );
+        assert_eq!(label_meta(&mut store, "M1").as_deref(), Some("created"));
+    }
+
+    /// T-637: the voyage is the latest departure, and a landed one gets none.
+    #[test]
+    fn a_landed_voyage_gets_no_label() {
+        let mut store = world(&github_config(""));
+        departed(&mut store, "M1", T0);
+        departed(&mut store, "M2", T0 + 10);
+        store
+            .write(|tx| {
+                let land = tx.insert_message(&gear_store::NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: "station:M2".into(),
+                    task: None,
+                    attempt: None,
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: gear_model::MsgKind::System,
+                    urgent: true,
+                    body: "land M2".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: gear_model::MsgState::Open,
+                    created: T0 + 20,
+                })?;
+                tx.set_meta("station:p:M2:land", &land.id)?;
+                tx.update_message_state(
+                    "p",
+                    &land.id,
+                    gear_model::MsgState::Resolved,
+                    Some("landed"),
+                    None,
+                    None,
+                    T0 + 30,
+                )
+            })
+            .expect("the land");
+        let forge = Recorder::default();
+
+        let done = tick(&mut store, &forge, T0 + 40);
+
+        assert!(done.is_empty(), "{done:?}");
+        assert!(forge.labels().is_empty(), "{:?}", forge.labels());
+    }
 }
