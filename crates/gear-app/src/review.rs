@@ -196,6 +196,19 @@ pub fn headline(review: &Review) -> String {
     )
 }
 
+/// The path a reviewer handed in, when [`findings_text`] reads a file: the
+/// trimmed argument, for the message that names where the full review is
+/// (T-641). Anything that is findings text itself is `None`.
+pub fn findings_path(arg: &str) -> Option<String> {
+    let trimmed = arg.trim();
+    if trimmed.is_empty() || trimmed.contains('\n') || trimmed.contains('\r') {
+        return None;
+    }
+    std::path::Path::new(trimmed)
+        .is_file()
+        .then(|| trimmed.to_string())
+}
+
 /// The findings a reviewer hands in: a path to a file in the reviewer's
 /// working directory is read (T-21), anything else is the findings text.
 ///

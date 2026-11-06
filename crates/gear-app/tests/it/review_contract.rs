@@ -146,7 +146,12 @@ fn a_temp_review_is_stored_and_reaches_the_captain() {
         (message.kind, message.state),
         (MsgKind::Review, MsgState::Info)
     );
-    assert!(message.body.contains("pass") && message.body.contains("P1: the row drifts right"));
+    assert!(message.body.contains("pass") && message.body.contains("blocking: none"));
+    assert!(
+        message.body.contains("findings: `gear --show T-1`"),
+        "{}",
+        message.body
+    );
     let home = home::build(
         &mut s,
         &env("captain", CAP_PANE),
@@ -193,6 +198,96 @@ fn a_fail_verdict_is_stored_as_a_fail() {
         .read(|tx| tx.actionable_for("p", "p:captain", T0 + 6))
         .unwrap();
     assert!(inbox[0].body.contains("fail"), "{}", inbox[0].body);
+}
+
+#[test]
+fn a_fail_review_names_the_blocking_titles_and_the_full_review_path() {
+    let mut s = world();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("T-1-review.md");
+    let findings =
+        "F1 — the store forgets the verdict\nF2 — a note\nF3 [major] the reclaim leaks\n";
+    std::fs::write(&file, findings).unwrap();
+    let mut args = review(Outcome::Fail, file.to_str().unwrap(), "r1");
+    args.blocking = Some("F1,F3".into());
+    let sent = mail::send(
+        &mut s,
+        &env("r-1", TEMP_PANE),
+        Some(&fp(TEMP_PANE, "opencode")),
+        &args,
+        T0 + 5,
+    )
+    .unwrap();
+    let message = s
+        .read(|tx| tx.get_message("p", &sent.msg_id))
+        .unwrap()
+        .unwrap();
+    assert!(message.body.len() < 1000, "{}", message.body);
+    assert!(
+        message
+            .body
+            .contains("blocking: F1 — the store forgets the verdict"),
+        "{}",
+        message.body
+    );
+    assert!(
+        message
+            .body
+            .contains("blocking: F3 [major] the reclaim leaks"),
+        "{}",
+        message.body
+    );
+    assert!(
+        message
+            .body
+            .contains(&format!("full review: {}", file.display())),
+        "{}",
+        message.body
+    );
+    assert!(
+        message.body.contains("findings: `gear --show T-1`"),
+        "{}",
+        message.body
+    );
+    assert!(
+        !message.body.contains("F2 — a note"),
+        "the whole review is not the message: {}",
+        message.body
+    );
+    // The verdict row keeps the whole findings: the rework lane reads them.
+    let record = s
+        .read(|tx| tx.get_review_verdict("p", "T-1", 1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.findings, findings);
+}
+
+#[test]
+fn a_pass_review_without_blocking_says_blocking_none() {
+    let mut s = world();
+    let sent = mail::send(
+        &mut s,
+        &env("r-1", TEMP_PANE),
+        Some(&fp(TEMP_PANE, "opencode")),
+        &review(Outcome::Pass, "P1: the row drifts right", "r1"),
+        T0 + 5,
+    )
+    .unwrap();
+    let message = s
+        .read(|tx| tx.get_message("p", &sent.msg_id))
+        .unwrap()
+        .unwrap();
+    assert!(message.body.contains("blocking: none"), "{}", message.body);
+    assert!(
+        !message.body.contains("full review:"),
+        "no path was handed in: {}",
+        message.body
+    );
+    assert!(
+        message.body.contains("findings: `gear --show T-1`"),
+        "{}",
+        message.body
+    );
 }
 
 #[test]
