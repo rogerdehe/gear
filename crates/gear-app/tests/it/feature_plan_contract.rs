@@ -782,7 +782,8 @@ fn a_member_added_after_the_feature_landed_gets_a_new_carrier() {
         .read(|tx| tx.feature_carrier("p", "F-1"))
         .unwrap()
         .expect("the feature has an integration task");
-    land(&mut s, &["T-1", &landed_carrier]);
+    land(&mut s, &["T-1"]);
+    merge(&mut s, &landed_carrier);
 
     let later = run_at(
         &mut s,
@@ -818,6 +819,62 @@ fn a_member_added_after_the_feature_landed_gets_a_new_carrier() {
         task(&mut s, &member).base.as_deref(),
         Some("p/feature/f-1"),
         "the new member works on the feature's branch"
+    );
+}
+
+/// T-644: a carrier that is Done but never merged (it went red at the full
+/// gate) is kept when a member is added to fix it: no new carrier is minted,
+/// and the carrier waits for the new member.
+#[test]
+fn a_member_added_to_a_red_unmerged_carrier_keeps_it() {
+    let mut s = world();
+    run(
+        &mut s,
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\nfeature: F-1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
+        "r1",
+    )
+    .unwrap();
+    let carrier = s
+        .read(|tx| tx.feature_carrier("p", "F-1"))
+        .unwrap()
+        .expect("the feature has an integration task");
+    // Done, but its merge never landed: the full gate went red.
+    land(&mut s, &["T-1", &carrier]);
+
+    let later = run_at(
+        &mut s,
+        "# Queue\n## NEW [should] lane=wire\nfeature: F-1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n",
+        "r2",
+    )
+    .unwrap();
+    let member = later.created[0].clone();
+    assert_eq!(
+        later.created.len(),
+        1,
+        "no carrier is minted: {:?}",
+        later.created
+    );
+    assert_eq!(
+        s.read(|tx| tx.feature_carrier("p", "F-1"))
+            .unwrap()
+            .as_deref(),
+        Some(carrier.as_str()),
+        "the red carrier is kept"
+    );
+    assert_eq!(
+        task(&mut s, &carrier).deps,
+        vec!["T-1".to_string(), member.clone()],
+        "the carrier waits for the fix"
+    );
+    assert_eq!(
+        task(&mut s, &carrier).state,
+        TaskState::Done,
+        "the carrier is touched, not reopened"
+    );
+    assert_eq!(
+        task(&mut s, &member).base.as_deref(),
+        Some("p/feature/f-1"),
+        "the fix works on the feature's branch"
     );
 }
 
