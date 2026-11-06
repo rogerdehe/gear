@@ -453,3 +453,26 @@ fn a_long_lane_name_never_moves_the_text_columns() {
     let heading = line_with(&cost, "lane / task");
     assert_eq!(column(heading, "est"), column(long, "30m"), "{cost}");
 }
+
+/// A cancelled task is not the lane's next task (Lawrence M2, 2026-11-06: the
+/// web lane read "next T-69 is ready but not delivered" for a cancelled T-69,
+/// while the engine, rightly, never dispatched it).
+#[test]
+fn a_cancelled_task_is_not_the_lanes_next_task() {
+    let mut store = world();
+    store
+        .write(|tx| tx.insert_task(&task("T-3", "hull", TaskState::Cancelled, 20)))
+        .unwrap();
+    let board = gear_board::build(
+        &mut store,
+        &Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
+        now_seconds(),
+    )
+    .unwrap();
+    let now = frame(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
+    assert!(!now.contains("next T-3"), "{now}");
+    assert!(now.contains("nothing left planned for this lane"), "{now}");
+}
