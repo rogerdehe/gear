@@ -2800,6 +2800,24 @@ quota_reset_h = {reset_h}
             .collect()
     }
 
+    /// T-605: the pane of the agent the running restart replaces — the one
+    /// that exits before the restart's Close phase closes it.
+    fn old_pane(store: &mut Store) -> String {
+        let plan = crate::restart::pending(store, "p:heat")
+            .unwrap()
+            .expect("a restart plan");
+        let generation = if plan.old_generation > 0 {
+            plan.old_generation
+        } else {
+            plan.generation.saturating_sub(1)
+        };
+        store
+            .read(|tx| tx.get_binding("p:heat", generation))
+            .unwrap()
+            .unwrap()
+            .pane_id
+    }
+
     fn deliveries(store: &mut Store) -> Vec<String> {
         store
             .read(|tx| tx.ops_in_state("p", OpState::Intended))
@@ -3460,8 +3478,14 @@ quota_reset_h = {reset_h}
         // Tick 2: the limit is confirmed — the restart runs: a pane is split,
         // codex starts there and the seat is rebound.
         let report = tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        assert_eq!(report.events.len(), 1, "{:?}", report.events);
-        assert_eq!(exits(&herdr), Vec::<Vec<String>>::new(), "no exit keys");
+        // T-605: the seat is rebound and the Continue is on its way; the old
+        // agent is told to quit and its pane is closed last.
+        assert!(report.events.is_empty(), "{:?}", report.events);
+        assert_eq!(
+            exits(&herdr),
+            vec![vec!["ctrl+c".to_string()]],
+            "the old agent is told to quit"
+        );
         let starts = agent_starts(&herdr);
         assert_eq!(starts.len(), 1, "{starts:?}");
         assert_eq!(starts[0].0, "codex", "the CLI of the chain entry");
@@ -3529,6 +3553,31 @@ quota_reset_h = {reset_h}
             .unwrap()
             .unwrap();
         assert_eq!(old.status, gear_store::BindingStatus::Void);
+
+        // The old agent leaves: its pane is closed last and the restart ends.
+        let old = old_pane(&mut store);
+        herdr.exit_agent(&old);
+        let report = tick_quota(&mut store, &mut herdr, false, T0 + 30);
+        assert_eq!(report.events.len(), 1, "{:?}", report.events);
+        assert!(
+            report.events[0].contains("restarted on codex"),
+            "{:?}",
+            report.events
+        );
+        assert!(
+            herdr
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::PaneClose { pane } if pane == &old)),
+            "the old pane is closed last: {:?}",
+            herdr.calls
+        );
+        assert!(
+            crate::restart::pending(&mut store, "p:heat")
+                .unwrap()
+                .is_none(),
+            "the plan is cleared"
+        );
 
         // More quota ticks add no second Continue.
         tick_quota(&mut store, &mut herdr, false, T0 + 40);
@@ -3666,8 +3715,16 @@ quota_reset_h = {reset_h}
             .is_some());
         herdr.set_status(PANE, gear_herdr::AgentStatus::Idle);
         tick_quota(&mut store, &mut herdr, false, T0 + 30);
-        assert_eq!(exits(&herdr).len(), 0, "the old agent is not exited");
+        assert_eq!(exits(&herdr).len(), 1, "the old agent is told to quit");
         assert_eq!(agent_starts(&herdr).len(), 1);
+        let plan = crate::restart::pending(&mut store, "p:heat")
+            .unwrap()
+            .expect("the plan waits for the old pane's close");
+        assert_eq!(plan.phase, crate::restart::Phase::Close, "{plan:?}");
+        // The old agent leaves: the restart ends.
+        let old = old_pane(&mut store);
+        herdr.exit_agent(&old);
+        tick_quota(&mut store, &mut herdr, false, T0 + 40);
         assert!(
             crate::restart::pending(&mut store, "p:heat")
                 .unwrap()
@@ -3712,7 +3769,20 @@ quota_reset_h = {reset_h}
         assert_eq!(lane_seat(&mut store).generation, 2);
         assert_eq!(lane_seat(&mut store).state, SeatState::Active);
         assert_eq!(deliveries(&mut store).len(), 1);
-        assert_eq!(exits(&herdr).len(), 0, "the old agent is not exited");
+        assert_eq!(exits(&herdr).len(), 1, "the old agent is told to quit");
+        let plan = crate::restart::pending(&mut store, "p:heat")
+            .unwrap()
+            .expect("the plan waits for the old pane's close");
+        assert_eq!(plan.phase, crate::restart::Phase::Close, "{plan:?}");
+        let old = old_pane(&mut store);
+        herdr.exit_agent(&old);
+        tick_quota(&mut store, &mut herdr, false, T0 + 40);
+        assert!(
+            crate::restart::pending(&mut store, "p:heat")
+                .unwrap()
+                .is_none(),
+            "the restart finished"
+        );
         assert_eq!(
             store
                 .read(|tx| tx.get_op("p", "O-1"))
@@ -3739,7 +3809,9 @@ quota_reset_h = {reset_h}
         let mut herdr = herdr_with_quota();
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        herdr.exit_agent(PANE);
+        // T-605: the old agent leaves; its pane is closed last.
+        let old = old_pane(&mut store);
+        herdr.exit_agent(&old);
         tick_quota(&mut store, &mut herdr, false, T0 + 30);
         // Exhaust the fallback and wait for the configured reset.
         tick_quota(&mut store, &mut herdr, true, T0 + 40);
@@ -3767,7 +3839,9 @@ quota_reset_h = {reset_h}
             Ok(session_on("minimax-cn", "MiniMax-M3.1-Flash")),
         ]);
         tick_quota(&mut store, &mut herdr, false, reset);
-        herdr.exit_agent(PANE);
+        // T-605: the pane the restart replaces is the seat's current one.
+        let old = old_pane(&mut store);
+        herdr.exit_agent(&old);
         tick_quota(&mut store, &mut herdr, false, reset + 10);
         assert_eq!(agent_starts(&herdr).last().unwrap().0, "opencode");
         assert!(
@@ -4162,7 +4236,9 @@ quota_reset_h = {reset_h}
         let mut herdr = herdr_with_quota();
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        herdr.exit_agent(PANE);
+        // T-605: the old agent leaves; its pane is closed last.
+        let old = old_pane(&mut store);
+        herdr.exit_agent(&old);
         tick_quota(&mut store, &mut herdr, false, T0 + 30);
         // The chain is exhausted: the lane parks until the reset.
         tick_quota(&mut store, &mut herdr, true, T0 + 40);
@@ -4173,7 +4249,8 @@ quota_reset_h = {reset_h}
         // on OpenCode, whose labels this config does not have.
         let reset = T0 + 50 + 5 * 3600;
         tick_quota(&mut store, &mut herdr, false, reset);
-        herdr.exit_agent(PANE);
+        // T-605: the model gate fails here (no labels), so the plan is cleared
+        // and the old agent keeps its pane; the seat waits for a human.
         herdr.start_screen = Some("Build auto · minimax-cn/MiniMax-M3.1-Flash · high".into());
         tick_quota(&mut store, &mut herdr, false, reset + 10);
 
