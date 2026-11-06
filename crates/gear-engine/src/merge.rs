@@ -9953,7 +9953,7 @@ mod tests {
         let trio = Trio::new("batch-repeat");
         let worktree = trio.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let heads = trio.heads();
         let mut store = trio_world(&heads["heat/t1"], &heads["heat/t2"], &heads["heat/t3"]);
         // The gate's own tally, and a refusal that names no member: whatever
@@ -10015,9 +10015,9 @@ mod tests {
             "what the captain can do: {}",
             items[0].body
         );
-        // Every member is back in the queue (`Unknown`: it runs again).
+        // Every member is back in the queue (T-576: `Intended`, queued again).
         for id in ["O-1", "O-2", "O-3"] {
-            assert_eq!(op_state(&mut store, id), Some(OpState::Unknown), "{id}");
+            assert_eq!(op_state(&mut store, id), Some(OpState::Intended), "{id}");
         }
         // The line waits: two rounds ran, and no gate runs after them.
         let runs = fs::read_to_string(&ran).unwrap_or_default();
@@ -10067,7 +10067,7 @@ mod tests {
         let pair = Pair::new("batch-red-green", false);
         let worktree = pair.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let mut store = pair_world(&pair.a, &pair.b);
         // Red with both members (a.txt is T-1's work), green for T-2 alone.
         batch_of_two(&mut store, "test ! -f a.txt");
@@ -10100,7 +10100,7 @@ mod tests {
         let trio = Trio::new("batch-different");
         let worktree = trio.merge_worktree();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        herdr.add_worktree("p/merge/home", &worktree.path, &worktree.pane_id);
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
         let heads = trio.heads();
         let mut store = trio_world(&heads["heat/t1"], &heads["heat/t2"], &heads["heat/t3"]);
         // Three members refuse for T-3's file, two for no file: different
