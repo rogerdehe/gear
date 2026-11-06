@@ -147,6 +147,14 @@ impl Forge for Fake {
             .push(format!("close {repo}#{number} | {comment}"));
         Ok(())
     }
+
+    fn create_label(&self, repo: &str, name: &str, description: &str) -> ForgeResult<()> {
+        self.reachable("label")?;
+        self.calls
+            .borrow_mut()
+            .push(format!("label {repo} {name} | {description}"));
+        Ok(())
+    }
 }
 
 /// A config with project `p` in GitHub mode, landing through pull requests.

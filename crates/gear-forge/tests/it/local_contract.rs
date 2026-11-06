@@ -29,6 +29,9 @@ fn a_local_forge_opens_nothing_and_says_so() {
     forge
         .close_issue("owner/name", 12, "nothing to close")
         .expect("nothing to close");
+    forge
+        .create_label("owner/name", "p/milestone", "nothing to label")
+        .expect("nothing to label");
 }
 
 #[test]

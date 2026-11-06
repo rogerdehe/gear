@@ -61,4 +61,9 @@ impl Forge for Local {
     fn close_issue(&self, _repo: &str, _number: u64, _comment: &str) -> ForgeResult<()> {
         Ok(())
     }
+
+    /// A project without a forge has no labels to keep.
+    fn create_label(&self, _repo: &str, _name: &str, _description: &str) -> ForgeResult<()> {
+        Ok(())
+    }
 }

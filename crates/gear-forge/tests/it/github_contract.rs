@@ -441,6 +441,43 @@ fn close_issue_comments_and_closes() {
 }
 
 #[test]
+fn create_label_creates_or_updates_a_label() {
+    let (dir, forge) = forge_with("label", None);
+    forge
+        .create_label("owner/name", "p/milestone", "the voyage's label")
+        .expect("the label");
+    assert_eq!(
+        argv(&dir),
+        vec![
+            "label",
+            "create",
+            "p/milestone",
+            "--repo",
+            "owner/name",
+            "--description",
+            "the voyage's label",
+            "--color",
+            "0E8A16",
+            "--force",
+        ]
+    );
+}
+
+#[test]
+fn a_failing_label_create_is_a_typed_error() {
+    let (dir, forge) = forge_with("label-failed", None);
+    error_for(&dir, "label-create", "HTTP 403: Forbidden\n");
+    code_for(&dir, "label-create", 1);
+    match forge.create_label("owner/name", "p/milestone", "x") {
+        Err(Error::Failed(said)) => {
+            assert!(said.contains("HTTP 403"), "{said}");
+            assert!(said.contains("label create"), "{said}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_closed_pull_request_is_never_asked_about() {
     // Local's ref has no number: nothing to comment on, nothing to merge —
     // and no call is made at all.
