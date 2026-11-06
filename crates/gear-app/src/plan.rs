@@ -2249,15 +2249,17 @@ fn feature_work(
             .cloned()
             .collect();
         let had_carrier = stored.is_some();
+        // A carrier still open is kept up to date even when every member is
+        // done (Lawrence M2: T-93 and T-94 had both passed review, so T-100's
+        // deps were never rebuilt and kept missing T-94).
+        let carrier_open = stored.as_ref().is_some_and(|carrier| {
+            existing
+                .get(carrier)
+                .is_some_and(|task| !task.state.is_terminal())
+        });
         let (carrier, new_carrier, touch_carrier) = match (stored, open.is_empty()) {
+            (Some(carrier), _) if carrier_open => (carrier, false, true),
             (stored, true) => (stored.unwrap_or_default(), false, false),
-            (Some(carrier), false)
-                if existing
-                    .get(&carrier)
-                    .is_some_and(|task| !task.state.is_terminal()) =>
-            {
-                (carrier, false, true)
-            }
             (_, false) => (tx.next_id(project, 'T')?, true, true),
         };
         let fresh_over_landed = new_carrier && had_carrier;
