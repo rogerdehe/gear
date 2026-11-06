@@ -78,7 +78,7 @@ pub fn start_features(
         }
         Ok(ids)
     })?;
-    // A feature whose integration task is done (landed) has no conflict left
+    // A feature whose integration task merged (landed) has no conflict left
     // to settle (Lawrence M2: M-1165 stayed open after F-4 landed).
     let landed: Vec<String> = store.read(|tx| {
         let prefix = format!("feature_carrier:{project}:");
@@ -87,10 +87,9 @@ pub fn start_features(
             let Some(carrier) = tx.get_meta(&key)? else {
                 continue;
             };
-            if tx
-                .get_task(project, &carrier)?
-                .is_some_and(|task| task.state == TaskState::Done)
-            {
+            // Merged, not only done: a done carrier whose merge failed has
+            // not landed (Lawrence M2: T-107 was done and unmerged).
+            if gear_app::tasks::merged_at(tx, project, &carrier)?.is_some() {
                 if let Some(feature) = key.strip_prefix(&prefix) {
                     out.push(feature.to_string());
                 }
