@@ -26,6 +26,12 @@ pub struct InitResult {
     /// another branch is left alone and named. Nothing is removed.
     #[serde(default)]
     pub stale_worktrees: Vec<String>,
+    /// T-623: the captain's own fields that differ — a lane's `duty`, `owns`,
+    /// `not`, `charter` or `repo`, the reviewers' `charter`, or the lane order.
+    /// These are the captain's work, not staffing, so they apply without the
+    /// user's confirmation; the CLI prints them under "changed (captain's)".
+    #[serde(default)]
+    pub captain_changes: Vec<String>,
 }
 
 /// The seat that may register a project: the user's own shell (no ctx), or
@@ -720,6 +726,8 @@ fn register(
         seats,
         // A first registration changes no `seat_branch`: there is no old one.
         stale_worktrees: Vec::new(),
+        // A first registration has no stored config to differ from.
+        captain_changes: Vec::new(),
     })
 }
 
@@ -954,12 +962,14 @@ fn re_register(
     // the goal (T-331). A change to it needs the user's confirmation
     // (`--confirmed`, T-401) — GEAR stores no words of theirs — and the
     // refusal writes nothing.
-    let (staff_changes, staff_changed) = match config::parse(&project.config_toml) {
-        Ok(stored) => (
-            staffing_changes(&stored, config),
-            staffing_changed(&stored, config),
-        ),
-        Err(_) => (Vec::new(), false),
+    let (staff_changes, staff_changed, captain_changes) = match config::parse(&project.config_toml)
+    {
+        Ok(stored) => {
+            let changes = staffing_changes(&stored, config);
+            let captain = captain_changes(&changes);
+            (changes, staffing_changed(&stored, config), captain)
+        }
+        Err(_) => (Vec::new(), false, Vec::new()),
     };
     let locked_voyage = if !staff_changed {
         None
@@ -1098,6 +1108,8 @@ fn re_register(
         // T-559: the seat-branch move happens after this transaction commits
         // (`init_with_home` fills the lines in), since it runs git.
         stale_worktrees: Vec::new(),
+        // T-623: the captain's own fields, printed under "changed (captain's)".
+        captain_changes,
     })
 }
 
@@ -1128,10 +1140,36 @@ pub fn staffing_voyage(tx: &Tx<'_>, project: &str) -> GearResult<Option<String>>
 /// [`staffing_changes`] explains a difference field by field; it never decides
 /// whether there is one.
 pub fn staffing_changed(old: &config::ProjectConfig, new: &config::ProjectConfig) -> bool {
-    old.quota != new.quota
-        || old.lanes != new.lanes
-        || old.temps != new.temps
-        || old.models != new.models
+    if old.quota != new.quota || old.models != new.models {
+        return true;
+    }
+    // T-623: the lanes, with each lane's name, kind, profile and models. A
+    // lane's duty, owns, not, charter or repo is the captain's work, not
+    // staffing; the lane order stays staffing (it is the board's order).
+    let staff =
+        |lanes: &[config::LaneSection]| -> Vec<(String, String, String, Vec<config::ModelEntry>)> {
+            lanes
+                .iter()
+                .map(|lane| {
+                    (
+                        lane.name.clone(),
+                        lane.kind.clone(),
+                        lane.profile.clone(),
+                        lane.models.clone(),
+                    )
+                })
+                .collect()
+        };
+    if staff(&old.lanes) != staff(&new.lanes) {
+        return true;
+    }
+    // [temps] kind and profile; its charter is the captain's.
+    let temps = |temps: &Option<config::TempsSection>| -> Option<(String, String)> {
+        temps
+            .as_ref()
+            .map(|temps| (temps.kind.clone(), temps.profile.clone()))
+    };
+    temps(&old.temps) != temps(&new.temps)
 }
 
 /// The staff fields that differ between the stored config and the new one
@@ -1227,6 +1265,13 @@ pub fn staffing_changes(old: &config::ProjectConfig, new: &config::ProjectConfig
                         b.repo.as_deref().unwrap_or("none"),
                     ));
                 }
+                if a.charter != b.charter {
+                    changes.push(changed_field(
+                        &format!("{key}.charter"),
+                        &charter_text(&a.charter),
+                        &charter_text(&b.charter),
+                    ));
+                }
             }
             (Some(a), None) => changes.push(changed_field(&key, &lane_text(a), "none")),
             (None, Some(b)) => changes.push(changed_field(&key, "none", &lane_text(b))),
@@ -1253,6 +1298,13 @@ pub fn staffing_changes(old: &config::ProjectConfig, new: &config::ProjectConfig
             }
             if a.profile != b.profile {
                 changes.push(changed_field("temps.profile", &a.profile, &b.profile));
+            }
+            if a.charter != b.charter {
+                changes.push(changed_field(
+                    "temps.charter",
+                    &charter_text(&a.charter),
+                    &charter_text(&b.charter),
+                ));
             }
         }
         (None, Some(b)) => changes.push(changed_field("temps", "none", &temps_text(b))),
@@ -1312,6 +1364,35 @@ pub fn staffing_changes(old: &config::ProjectConfig, new: &config::ProjectConfig
     }
 
     changes
+}
+
+/// A lane's or the reviewers' charter as one value: its text on one line,
+/// `none` when absent.
+fn charter_text(charter: &Option<String>) -> String {
+    match charter {
+        Some(text) => text.replace('\n', " ").trim().to_string(),
+        None => "none".to_string(),
+    }
+}
+
+/// T-623: the captain's own fields that differ between the stored config and
+/// the new one — a lane's `duty`, `owns`, `not`, `charter` or `repo`, the
+/// reviewers' `charter`, or the lane order. They are the captain's work, not
+/// staffing, so they apply without the user's confirmation; the apply prints
+/// them under "changed (captain's)".
+pub fn captain_changes(changes: &[String]) -> Vec<String> {
+    changes
+        .iter()
+        .filter(|line| {
+            let key = line.split_once(": ").map(|(key, _)| key).unwrap_or("");
+            key.ends_with(".duty")
+                || key.ends_with(".owns")
+                || key.ends_with(".not")
+                || key.ends_with(".charter")
+                || key.ends_with(".repo")
+        })
+        .cloned()
+        .collect()
 }
 
 /// The refusal a staffing change of a departed voyage gets without the user's
