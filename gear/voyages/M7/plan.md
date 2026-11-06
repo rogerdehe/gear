@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1260 -->
+<!-- gear-plan project=gear base=1261 -->
 # Goal
 Client fleets run smoothly: the merge, restart and message problems Lawrence met are gone, a new GEAR binary takes over every engine on the machine by itself with no merge cut, and a voyage takes GitHub issues by a label that names the project and the voyage. Each fix is released and live for every project on this machine.
 
@@ -9,6 +9,14 @@ eta: 8h
 depart: now
 
 # Decisions
+- station M-8640: land | why: every M7 task is merged on dev (T-651 last, 20:03Z); the six done clauses are met below; released as v0.6.112 and live in both engines
+- done (1): met | evidence: T-631 merged and live since v0.6.111: the captain's stations M-8607 and later arrived as text in the prompt (header, body, reply line); a working seat keeps the doorbell (T-631 tests); T-641 (v0.6.110): review M-8620 carried the verdict, the blocking title, the path and `gear --show T-651`
+- done (2): met | evidence: T-632 and T-647 merged (v0.6.111); at the v0.6.112 install (20:05Z) both engines logged `engine draining for restart`; the orch engine exec'd the new binary at once under the same pid 98047, and the selyra engine waited 58 s for Lawrence's running merges, started none, then exec'd at 20:06:38 under the same pid 98044; `gear admin restart` is covered by T-647's tests
+- done (3): met | evidence: T-633 (at most 10 lines per section and a command for the rest) and T-646 (last 20 plan versions; gear's store holds versions 1240-1259 after the first apply) merged, live since v0.6.111; both stores backed up before
+- done (4): met | evidence: T-644 (carrier kept), T-642 (queued remerge closes merge-failed, v0.6.110), T-635 (carrier named in merge-lost), T-639 (reclaim closes the workspace, v0.6.112), T-634 (idle-voyage item once per land order) merged
+- done (5): met | evidence: F-4 merged with T-651 (full review, full gate): label at departure (T-637), intake items (T-638), store and states (T-645), land refusal (T-648), board block (T-649), setting (T-643), create_label (T-636); proven by tests: no project on this machine runs GitHub mode yet, so the first live run is Carthage's next voyage
+- done (6): met | evidence: v0.6.110, v0.6.111, v0.6.112 released, installed on this machine, skills reinstalled; both engines on 0.6.112; Lawrence's captain told after each release (Carthage's and Prometheus's captains are not running)
+- 2026-11-06 20:10 note: voyage report: 21 of 21 tasks merged in 2h06m against the 8h eta, no goal change, nothing cut; one rework (T-651: gear-engine's FakeForge lacked create_label); slowest T-640 (46m on a 15m estimate: a test pattern the packet named did not exist); cost $2.26; lessons in gear/voyages/M7/lessons.md; found and fixed mid-voyage: an earlier landing's reclaim swept M7 (v0.6.112), Lawrence's handover documents lost on a branch switch (v0.6.110) | why: the landing record
 - 2026-11-06 rework: T-651 attempt 1 failed review: gear-engine's FakeForge lacks the new `Forge::create_label`, so the workspace does not build | why: the F-4 packets missed the trait's implementors (the T-640 lesson again); mast reworks with the exact method
 - station M-8607: keep course | why: 18 done, 3 left (75m), projected 123m from departure; hull 24m (T-637, T-638), mast T-639 then T-651 when hull's F-4 members merge
 - station M-8591: keep course | why: 15 done, 6 left, projected 143m from departure; mast just took T-639 from hull (T-650, T-639, then T-651 after hull's F-4 members), hull holds T-636 to T-638 in gear-forge
