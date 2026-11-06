@@ -1,4 +1,4 @@
-# GEAR's own project config for voyage M7, copied from gear/voyages/M6.2/gear.toml: lanes on DeepSeek V4.1 Flash via TokenRhythm, reviewers on DeepSeek V4 Pro 0813 via DashScope (user, 2026-11-05).
+# GEAR's own project config for voyage M7, copied from gear/voyages/M6.2/gear.toml: lanes on the self-hosted DeepSeek Flash (HK DGX 1), reviewers on DeepSeek V4 Pro 0813 via DashScope (user, 2026-11-05).
 # Registered with: GEAR_ADMIN=1 gear admin init gear/voyages/M6.2/gear.toml
 
 [project]
@@ -28,7 +28,7 @@ charter = """You run on a flash model. Implement the packet exactly as written, 
 kind = "pi"
 profile = "pi"
 models = [
-  { model = "tokenrhythm/deepseek-v4.1-flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 600 },
+  { model = "hk-dgx-1/DeepSeek-V4.1-Flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 500 },
 ]
 
 [[lanes]]
@@ -39,7 +39,7 @@ charter = """You run on a flash model. Implement the packet exactly as written, 
 kind = "pi"
 profile = "pi"
 models = [
-  { model = "tokenrhythm/deepseek-v4.1-flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 600 },
+  { model = "hk-dgx-1/DeepSeek-V4.1-Flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 500 },
 ]
 
 # GEAR lanes run pi without pi-lens (uninstalled 2026-10-28).
@@ -53,7 +53,7 @@ profile = "pi"
 
 [models]
 lanes = [
-  { model = "tokenrhythm/deepseek-v4.1-flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 600 },
+  { model = "hk-dgx-1/DeepSeek-V4.1-Flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 500 },
 ]
 # The reviewer never runs the model it reviews.
 review = [
