@@ -6558,6 +6558,9 @@ struct Lost {
     merged: bool,
     /// A merge op of the task is queued, running or being recovered.
     in_flight: bool,
+    /// The carrier whose merge landed without this task's candidate (T-615):
+    /// the item names it and the way out.
+    carried: Option<(String, Ts)>,
 }
 
 /// Is the task's voyage open (T-408)? A voyage is its milestone, and it is open
@@ -7067,8 +7070,11 @@ fn tell_captain_lost(
 ) -> GearResult<()> {
     // One scan of the ops and one of the tasks per tick, like the merge keys of
     // the queue step: a project with no lost task pays two reads.
-    let (lost, carried_active) = store.read(|tx| {
+    let (lost, carried_active, landed_carried) = store.read(|tx| {
         let mut carried_active: Vec<(String, String)> = Vec::new();
+        // T-615: carried tasks whose candidate is inside the carrier's merged
+        // candidate: their work landed with that merge.
+        let mut landed_carried: Vec<(String, i64, Ts)> = Vec::new();
         let mut in_flight = std::collections::HashSet::new();
         for state in [
             OpState::Intended,
@@ -7137,12 +7143,34 @@ fn tell_captain_lost(
                                 | TaskState::Waiting
                         )
                     });
-                if gear_app::tasks::merged_at(tx, carrier_project, carrier)?.is_none()
+                let carrier_merged_at = gear_app::tasks::merged_at(tx, carrier_project, carrier)?;
+                if carrier_merged_at.is_none()
                     && carrier_active
                     && now - accepted_at < LAND_WITHIN_S
                 {
                     carried_active.push((task.id.clone(), by.clone()));
                     continue;
+                }
+                // T-615: the carrier has merged. Its merged candidate is the
+                // one the carried work had to be inside; when it is, the work
+                // landed with that merge, and when it is not, the work is lost
+                // and the item names the carrier and the way out.
+                if let Some(merged_at) = carrier_merged_at {
+                    let carrier_candidate = tx
+                        .attempts_of_task(carrier_project, carrier)?
+                        .into_iter()
+                        .last()
+                        .and_then(|attempt| attempt.candidate);
+                    let repo = config.repo_of_task(task);
+                    if carrier_candidate
+                        .as_deref()
+                        .is_some_and(|carrier_candidate| {
+                            is_ancestor(Path::new(&repo.path), &candidate, carrier_candidate)
+                        })
+                    {
+                        landed_carried.push((task.id.clone(), latest.n, merged_at));
+                        continue;
+                    }
                 }
             }
             // The old filters of T-397 say only whether a **new** item is
@@ -7179,6 +7207,15 @@ fn tell_captain_lost(
             // against even when its lane moves (design, `repo_of_task`), and
             // merge execution asks the same question (see `repo_of_op`).
             let repo = config.repo_of_task(task);
+            // T-615: the carrier whose merge did not contain this candidate.
+            let carried = match tx.task_carried_by(project, &task.id)? {
+                Some(by) => {
+                    let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, &by);
+                    gear_app::tasks::merged_at(tx, carrier_project, carrier)?
+                        .map(|merged_at| (by, merged_at))
+                }
+                None => None,
+            };
             lost.push(Lost {
                 task: task.id.clone(),
                 attempt: latest.n,
@@ -7192,9 +7229,10 @@ fn tell_captain_lost(
                 settled: merged || in_flight,
                 merged,
                 in_flight,
+                carried,
             });
         }
-        Ok((lost, carried_active))
+        Ok((lost, carried_active, landed_carried))
     })?;
     // A lost item about a task whose carrier is active again is answered.
     for (task, by) in carried_active {
@@ -7214,6 +7252,30 @@ fn tell_captain_lost(
             )?;
         }
     }
+    // T-615: a carried candidate inside the carrier's merged candidate landed
+    // with that merge: the attempt takes the merge time, and an item still
+    // open about it is answered.
+    for (task, attempt, merged_at) in landed_carried {
+        let open = store.read(|tx| {
+            Ok(tx
+                .thread_messages(project, &lost_thread(&task))?
+                .into_iter()
+                .any(|message| message.state == MsgState::Open))
+        })?;
+        store.write(|tx| {
+            if tx.attempt_times(project, &task, attempt)?.merged.is_none() {
+                tx.set_attempt_time(project, &task, attempt, AttemptStep::Merged, merged_at)?;
+                tx.set_meta(
+                    &merge_lost_landed_key(project, &task, attempt),
+                    &merged_at.to_string(),
+                )?;
+            }
+            Ok(())
+        })?;
+        if open {
+            resolve_lost_with(store, project, &task, LOST_LANDED, now)?;
+        }
+    }
     for Lost {
         task,
         attempt,
@@ -7225,6 +7287,7 @@ fn tell_captain_lost(
         settled,
         merged,
         in_flight,
+        carried,
     } in lost
     {
         // The work landed (its own merge, or another task's that carried it):
@@ -7319,10 +7382,17 @@ fn tell_captain_lost(
             })?;
             continue;
         }
-        let body = format!(
-            "{task} attempt {attempt} was accepted but is not merged and nothing will merge it: \
-             `- remerge {task}` under `# Staff` retries it"
-        );
+        // T-615: a carrier that landed without this work is named, with the
+        // way out: clear the mark and remerge the task alone.
+        let body = match &carried {
+            Some((by, _)) => format!(
+                "{task} attempt {attempt} was accepted but is not merged: its carrier {by} landed without its work. Set `carried-by: -` on {task} and `- remerge {task}` under `# Staff` retries it"
+            ),
+            None => format!(
+                "{task} attempt {attempt} was accepted but is not merged and nothing will merge it: \
+                 `- remerge {task}` under `# Staff` retries it"
+            ),
+        };
         store.write(|tx| {
             let captain = tx.captain_of(project)?.ok_or_else(|| {
                 GearError::new(
@@ -8773,6 +8843,120 @@ mod tests {
             .read(|tx| tx.ops_of_kind_in_states("p", OpKind::Merge, &[]))
             .unwrap();
         assert_eq!(merges.len(), 1, "{merges:?}");
+    }
+
+    /// A done task `task` whose attempt was accepted with `candidate` and
+    /// marked `carried-by: by` (T-615).
+    fn accepted_carried(
+        tx: &gear_store::Tx<'_>,
+        task: &str,
+        candidate: &str,
+        by: &str,
+    ) -> GearResult<()> {
+        gear_app::tasks::start_attempt(tx, "p", task, "p:heat", 1, 0)?;
+        gear_app::tasks::on_delivery_confirmed(tx, "p", task, 1, 0)?;
+        gear_app::tasks::submit_result(tx, "p", task, 1, 1, candidate, "report", 0)?;
+        let mut attempt = tx.get_attempt("p", task, 1)?.unwrap();
+        attempt.state = gear_model::AttemptState::Accepted;
+        tx.update_attempt(&attempt)?;
+        let mut row = tx.get_task("p", task)?.unwrap();
+        row.state = TaskState::Done;
+        tx.update_task(&row)?;
+        tx.set_task_carried_by("p", task, by)
+    }
+
+    /// T-615 (M6.3): a carried task whose carrier merged a candidate that does
+    /// not contain its own accepted candidate is lost work: the merge-lost item
+    /// names the carrier and the way out. A carried candidate inside the
+    /// carrier's merged candidate landed with that merge: no item.
+    #[test]
+    fn a_carried_task_whose_carrier_landed_without_it_is_named_lost() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(
+            root.path(),
+            &format!("git init -q --bare {}", origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git init -q -b dev {}", work.display()),
+        );
+        sh(
+            &work,
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base",
+        );
+        let base = sh(&work, "git rev-parse HEAD").trim().to_string();
+        sh(
+            &work,
+            &format!("git remote add origin {}", origin.display()),
+        );
+        // The carried work, not on dev.
+        sh(&work, "git switch -q -c heat/t5");
+        sh(
+            &work,
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m carried",
+        );
+        let carried = sh(&work, "git rev-parse HEAD").trim().to_string();
+        // The carrier's work, on dev.
+        sh(&work, "git switch -q dev");
+        sh(
+            &work,
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m carrier",
+        );
+        let carrier = sh(&work, "git rev-parse HEAD").trim().to_string();
+        sh(&work, "git push -q origin dev");
+        sh(&work, "git fetch -q origin");
+
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &work);
+                tx.update_project(&project)?;
+                // T-5: its candidate is not inside the carrier's.
+                accepted_carried(tx, "T-5", &carried, "T-9")?;
+                // T-6: its candidate is inside the carrier's.
+                let mut row = tx.get_task("p", "T-5")?.unwrap();
+                row.id = "T-6".into();
+                row.rank = 6;
+                row.state = TaskState::Ready;
+                tx.insert_task(&row)?;
+                accepted_carried(tx, "T-6", &base, "T-9")?;
+                // T-9: done, its merge landed with `carrier`.
+                let mut row = tx.get_task("p", "T-5")?.unwrap();
+                row.id = "T-9".into();
+                row.rank = 9;
+                row.state = TaskState::Ready;
+                tx.insert_task(&row)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-9", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-9", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-9", 1, 1, &carrier, "report", 0)?;
+                tx.set_attempt_time("p", "T-9", 1, AttemptStep::Merged, 10)?;
+                let mut row = tx.get_task("p", "T-9")?.unwrap();
+                row.state = TaskState::Done;
+                tx.update_task(&row)?;
+                Ok(())
+            })
+            .unwrap();
+        let config = gear_app::config::parse(&config_text_in("true", &work)).unwrap();
+
+        tell_captain_lost(&mut store, "p", &config, 20).unwrap();
+
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(items[0].body.contains("T-9"), "{}", items[0].body);
+        assert!(items[0].body.contains("carried-by: -"), "{}", items[0].body);
+        assert!(items[0].body.contains("- remerge T-5"), "{}", items[0].body);
+        let none = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-6"))
+            .unwrap();
+        assert!(
+            none.is_empty(),
+            "its candidate is inside the carrier's: {none:?}"
+        );
     }
 
     /// A merge queued before the task was marked `carried-by` is closed, not
