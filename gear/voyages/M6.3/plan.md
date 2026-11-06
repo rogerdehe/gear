@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1230 -->
+<!-- gear-plan project=gear base=1231 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -148,8 +148,8 @@ estimate: 40
 deps: -
 
 ## T-625 [must] lane=hull milestone=M6.3 required
-goal: A model with no `context_window_k` is not compacted before every packet (Lawrence M2, 2026-11-06: web was compacted at 9.6 % of 1M and console at 22 % of 500k, because crates/gear-engine/src/session.rs `context_large` returns true when the entry has no window). With no window, read it from the seat CLI's own model table when the profile has one (pi: the `contextWindow` of the model in pi's models file), else use a default of 200k; a window that cannot be read is never "large" by itself: only a measured context at half the window compacts. Keep today's rule when a window is set.
-accept: Tests in session.rs `mod tests`: an entry with no window and a 30k context does not compact; with no window and 120k it compacts (half of the 200k default); a set window keeps today's rule. Run only `make check CRATE=gear-engine TESTS='test(session::)'`; the merge gate runs `make gate`.
+goal: A model with no `context_window_k` is not compacted before every packet (Lawrence M2, 2026-11-06: web was compacted at 9.6 % of 1M and console at 22 % of 500k, because crates/gear-engine/src/session.rs `context_large` returns true when the entry has no window). With no window, read it from the seat CLI's own model table when the profile has one (pi: the `contextWindow` of the model in pi's models file), else use a default of 200k; nothing unknown is ever "large" by itself: a window that cannot be read and a context the usage log cannot read (today `usage.is_none_or(...)` returns large) both mean keep the session; only a measured context at half the window compacts. Keep today's rule when both are known. The user (2026-11-06): a lane continuing related work keeps its session, an unrelated task starts a new one, and a compaction at 9 % of the window is never right.
+accept: Tests in session.rs `mod tests`: an entry with no window and a 30k context does not compact; a set window with an unreadable usage log does not compact; with no window and 120k it compacts (half of the 200k default); a set window keeps today's rule. Run only `make check CRATE=gear-engine TESTS='test(session::)'`; the merge gate runs `make gate`.
 estimate: 25
 deps: -
 
