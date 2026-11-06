@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1250 -->
+<!-- gear-plan project=gear base=1251 -->
 # Goal
 Client fleets run smoothly: the merge, restart and message problems Lawrence met are gone, a new GEAR binary takes over every engine on the machine by itself with no merge cut, and a voyage takes GitHub issues by a label that names the project and the voyage. Each fix is released and live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 8h
 depart: now
 
 # Decisions
+- 2026-11-06 hand-fix: T-640's merge gate failed: the gear-engine example opencode_live implements HerdrAct and lacked the new workspace_close; the captain added the forwarding method on mast/t640 (hull's file, three lines) and remerges | why: the packet missed that a new trait method needs every implementor, the example included
 - station M-8521: keep course | why: 41m in, 3 done (T-640, T-641, T-642 class: small mast tasks); 18 tasks (505m) against 439m left, both lanes working and 2 reviews running; the pace is measured on cold builds under load and is rechecked at the next station
 - 2026-11-06 18:40 confirmed: M7 departure, not departed -> departs now with the scope above, eta 8h | why: the user agreed the M7 goal and scope and said to start M7 at once
 - 2026-11-06 scope: the shared-integration-branch item is already shipped (v0.6.68: a second project on a repo gets `<project>/dev`, and a shared branch is refused); it leaves the M7 list | why: `admin::with_own_integration` and `branch_clash` do both
