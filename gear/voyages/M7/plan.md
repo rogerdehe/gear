@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1253 -->
+<!-- gear-plan project=gear base=1254 -->
 # Goal
 Client fleets run smoothly: the merge, restart and message problems Lawrence met are gone, a new GEAR binary takes over every engine on the machine by itself with no merge cut, and a voyage takes GitHub issues by a label that names the project and the voyage. Each fix is released and live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 8h
 depart: now
 
 # Decisions
+- station M-8555: keep course | why: 60m in, 8 done, 13 left (335m by estimate), projected 157m from departure; hull 97m vs mast 55m, but hull's rest is gear-engine and gear-forge work outside mast's paths, so a move would cost an owns change for about 20m
 - station M-8540: keep course | why: 6 done, 15 left (400m) against 430m, projected 179m from departure; hull holds 129m and mast 78m, close enough that a move costs more than it saves
 - 2026-11-06 hand-fix: T-640's merge gate failed: the gear-engine example opencode_live implements HerdrAct and lacked the new workspace_close; the captain added the forwarding method on mast/t640 (hull's file, three lines) and remerges | why: the packet missed that a new trait method needs every implementor, the example included
 - station M-8521: keep course | why: 41m in, 3 done (T-640, T-641, T-642 class: small mast tasks); 18 tasks (505m) against 439m left, both lanes working and 2 reviews running; the pace is measured on cold builds under load and is rechecked at the next station
