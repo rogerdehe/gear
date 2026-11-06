@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1225 -->
+<!-- gear-plan project=gear base=1226 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -137,4 +137,10 @@ deps: -
 goal: A lane's paths and words are the captain's, not staffing (Lawrence M2, 2026-11-06: adding 15 files to a lane's `owns` and fixing a command in a charter were refused with STAFF_LOCKED until the user confirmed; the user: that is the captain's work). crates/gear-app/src/admin.rs `staffing_changed`: compare `[quota]`, `[models]`, the set of lanes with each lane's name, kind, profile and models, and `[temps]` kind and profile; a change only to a lane's `duty`, `owns`, `not` or `charter`, or to `[temps].charter`, is not a staffing change and applies without `--confirmed`. `staffing_changes` keeps listing every difference, and the apply output prints those non-staffing lines under "changed (captain's)". Today's ownership checks (overlap between lanes, open tasks' paths) still run on the new owns.
 accept: Tests in crates/gear-cli/tests/it/admin_init_contract.rs: mid-voyage, a change of a lane's owns and charter applies without --confirmed and is printed; a change of a lane's model or of quota.lanes is still STAFF_LOCKED. Run only `make check CRATE=gear-cli TESTS='test(admin_init)'`; the merge gate runs `make gate`.
 estimate: 30
+deps: -
+
+## T-624 [must] lane=mast milestone=M6.3 required
+goal: A feature's spread deps are kept apart from a member's own (Lawrence M2, 2026-11-06: T-86's block said `deps: -` and the apply kept T-63, T-79 and T-80; they were F-4's outside wait, written by T-587 into every member's stored deps, so every later apply read them back as the member's own and the captain could neither release a member nor cancel a task the feature waits on). crates/gear-app/src/plan.rs, rule (3) of the feature deps: record the spread per feature in meta (`feature_wait:{project}:{feature}`, the outside deps and the member that declares each); at the start of each apply, strip the previously recorded spread from every member's stored deps before the graph is read, then compute the spread again from the members' own deps and store it again; the apply prints one line per member that waits on work it did not name: `T-86 waits on T-63 (F-4: T-89 needs it)`. `gear plan show T-n` prints the spread on its own line (`waits (feature F-4): T-63, T-79, T-80`), not in `deps:`.
+accept: Tests in crates/gear-app/tests/it/feature_plan_contract.rs: a member whose block drops its outside dep releases every other member on the next apply; a member's own `deps: -` is kept while another member still declares the outside dep, and the output names that member; `plan show` keeps the spread out of `deps:`. Run only `make check CRATE=gear-app TESTS='test(feature)'`; the merge gate runs `make gate`.
+estimate: 40
 deps: -
