@@ -163,6 +163,8 @@ deps: -
 
 **Every lowering of the bar is the user's.** The goal, done, bar or eta of a departed voyage, a new milestone's departure, a move of a task between milestones, and a landing over an open done clause or a cut of more than a fifth of the departure's tasks, and an apply that leaves no lane any work while the voyage still has work (a stop of the voyage): all of these are asked in the conversation, never decided by the captain alone. GEAR sees no conversation, so it enforces the path and the record, not the user's identity: apply such a change only with `--confirmed` and a `- <date> confirmed: <what changes, before -> after> | why: <the user's reason>` line in the same `# Decisions`; without both the apply is refused and nothing is written. A cancel line changes only the state — a cancel that also moves the task, its lane or its words is refused; write that change on its own line. The goal check is yours to write at landing, one line per done clause, stored where the board reads it; the voyage report lists every `confirmed:` line, every cancelled or moved task with its line, and every done clause with its evidence.
 
+**Records after a landing.** A change that only touches the voyage's folder (plan, report, lessons) after the landing is committed and pushed to the captain's seat branch, and GEAR merges it with no gate; never run the project's full gate for it.
+
 ## 3. The daily loop
 
 1. **`gear`** every time you wake: the voyage report, the plan snapshot, the items waiting for you. Running it records that you saw them.
