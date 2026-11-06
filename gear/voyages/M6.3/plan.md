@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1233 -->
+<!-- gear-plan project=gear base=1234 -->
 # Goal
 The fleet runs without a hand to steady it: switching a seat's agent works one way for every seat, the engine tells the captain when it fails, the merge gate keeps its headroom, and the friction that stopped lanes and client fleets on 2026-11-05 and 06 is gone. Each fix is released and live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 6h
 depart: now
 
 # Decisions
+- 2026-11-06 09:45 note: the GEAR captain told Lawrence's captain to release its idle DashScope reviewers so they restart; release ends a seat and GEAR starts reviewers only on demand, so two stayed down against the user's resident reviewers | why: logged as the cause of T-630; a reviewer is never released to restart it
 - station M-8298: keep course | why: projected 384m is 24m over the 6h eta; T-625 is cancelled (the captain fixed it by hand in v0.6.90: the window comes from the CLI, nothing unknown compacts), which takes 25m off hull, and hull's T-604 boundary is decided; moving engine files between lanes would cost more than it saves
 - 2026-11-06 09:26 hand-fix: (v0.6.90, gate 63 s) a lane is compacted only at half a window GEAR knows: the config's, else the CLI's own (pi models.json, Codex rollout, OpenCode config, Claude [1m]); an unknown window or context keeps the session | why: the user: compacting at 9 % is never right, and it had to be fixed at once, not queued
 - station M-8289: keep course | why: projected 321m against the 6h eta; the lanes are even now (hull 255m, mast 209m)
@@ -178,4 +179,11 @@ deps: -
 goal: A provider's content refusal is seen (Lawrence M2, 2026-11-06 09:26-09:31Z: DashScope's content review cut the web lane's output four times, "Output data may contain inappropriate content", because the zh-CN copy named a channel stratum; the lane went idle after each and 12 tasks waited; GEAR noticed nothing). crates/gear-engine (where an idle lane with an open attempt is read, beside lane_nudge.rs or quota.rs): when the seat's session log's last assistant record ended with an error whose text is a content refusal (pi: `stopReason` "error" and an `errorMessage` matching the refusal markers of the profile; add `refusal_markers` to the pi and opencode profiles with "inappropriate content", "content_filter", "data_inspection_failed"), and that happened twice in a row on one attempt, the engine moves the lane to the next model of its chain the way a quota stop does (restart path, the task continues) and opens one captain item naming the provider, the attempt and the marker; with no next model, the item says so and the lane is held.
 accept: Tests with a pi session fixture: two refusals in a row on one attempt switch the lane to the chain's next model and open one item; one refusal followed by a normal turn does nothing; no next model opens the item and holds the lane. Run only `make check CRATE=gear-engine TESTS='test(refusal)'`; the merge gate runs `make gate`.
 estimate: 45
+deps: -
+
+## T-630 [now] lane=hull milestone=M6.3 required
+fresh: reviewer seats, unrelated to F-3
+goal: Reviewers stay at their quota, and a reviewer restarts without losing its seat (Lawrence M2, 2026-11-06 09:37Z: to pick up a fixed DashScope account, the captain released its three idle reviewers on the GEAR captain's word; GEAR starts a reviewer only when a review is due, so two stayed down and the user saw one reviewer where three are resident by default). crates/gear-engine/src/review.rs and release.rs: (1) while the project's current voyage has open tasks and is not landed, the engine keeps `[quota] temps` reviewer seats up: when fewer seats occupy the quota than it allows and no review waits for a seat, it starts one reviewer a tick in `Standby` (its seat worktree on its seat branch, no job; `start_reviewer`'s pane, env and agent-start steps without the job's branch and packet), so the next review finds a warm seat; (2) `- restart review-n` under `# Staff` (crates/gear-app draft and plan, with the engine step in release.rs): an idle reviewer's agent is exited and started again in the same pane and worktree, seat and generation kept (a working one restarts right after its verdict); `- release` keeps its meaning. The skill's staff list in skills/gear/references/course.md names `- restart`.
+accept: Tests in review.rs and release.rs `mod tests` with the fake Herdr: a voyage with work and two of three seats up starts the third in Standby, one a tick; a landed voyage starts none; `- restart review-1` on an idle reviewer exits and starts its agent in the same pane with the seat still Standby, and on a working one waits for the verdict. Run only `make check CRATE=gear-engine TESTS='test(review::) | test(release::)'`; the merge gate runs `make gate`.
+estimate: 60
 deps: -
