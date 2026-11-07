@@ -96,3 +96,53 @@ fn an_agy_conversation_that_was_never_written_is_unknown() {
     assert!(usage_in(UsageLog::AgyJsonl, "no-such-id", T0, T1, home.path()).is_none());
     assert!(usage_in(UsageLog::AgyJsonl, "", T0, T1, home.path()).is_none());
 }
+
+/// T-662 F2: a model record without `input_tokens` still counts its output and
+/// cache tokens.
+#[test]
+fn a_model_record_without_input_tokens_still_counts() {
+    let home = tempfile::tempdir().unwrap();
+    let id = session(
+        home.path(),
+        "partial",
+        "{\"source\":\"MODEL\",\"created_at\":\"2026-10-31T12:10:00Z\",\"input_tokens\":100,\"output_tokens\":10}\n\
+         {\"source\":\"MODEL\",\"created_at\":\"2026-10-31T12:20:00Z\",\"output_tokens\":7,\"cache_read_tokens\":5}\n",
+    );
+    let usage = usage_in(UsageLog::AgyJsonl, &id, T0, T1, home.path()).unwrap();
+    assert_eq!(usage.records, 2, "{usage:?}");
+    assert_eq!(usage.input, 100, "{usage:?}");
+    assert_eq!(usage.output, 17, "{usage:?}");
+    assert_eq!(usage.cache_read, 5, "{usage:?}");
+    let records = usage_records_in(UsageLog::AgyJsonl, &id, T0, T1, home.path()).unwrap();
+    assert_eq!(records.len(), 2, "{records:?}");
+}
+
+/// T-662 F3: a transcript in which no model record carries a count is unknown,
+/// not zero.
+#[test]
+fn a_transcript_without_counts_is_unknown() {
+    let home = tempfile::tempdir().unwrap();
+    let id = session(
+        home.path(),
+        "uncounted",
+        "{\"source\":\"MODEL\",\"created_at\":\"2026-10-31T12:10:00Z\"}\n\
+         {\"source\":\"MODEL\",\"created_at\":\"2026-10-31T12:20:00Z\"}\n\
+         {\"source\":\"USER_EXPLICIT\",\"created_at\":\"2026-10-31T12:30:00Z\",\"input_tokens\":3}\n",
+    );
+    assert!(usage_in(UsageLog::AgyJsonl, &id, T0, T1, home.path()).is_none());
+    assert!(usage_records_in(UsageLog::AgyJsonl, &id, T0, T1, home.path()).is_none());
+}
+
+/// T-662: a transcript with counts but none in the window stays known, with
+/// zero totals.
+#[test]
+fn a_transcript_with_counts_outside_the_window_reads_zero() {
+    let home = tempfile::tempdir().unwrap();
+    let id = session(
+        home.path(),
+        "outside",
+        "{\"source\":\"MODEL\",\"created_at\":\"2026-10-31T11:00:00Z\",\"input_tokens\":50,\"output_tokens\":5}\n",
+    );
+    let usage = usage_in(UsageLog::AgyJsonl, &id, T0, T1, home.path()).unwrap();
+    assert_eq!(usage.records, 0, "{usage:?}");
+}
