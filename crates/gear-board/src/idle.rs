@@ -270,7 +270,7 @@ pub fn helping(tx: &Tx<'_>, project: &str, seat: &SeatRow, now: Ts) -> GearResul
         .filter(|message| message.sender == captain.id)
         .collect();
     instructions.sort_by(|a, b| (b.created, &b.id).cmp(&(a.created, &a.id)));
-    let spans = work_spans(tx, project, seat)?;
+    let spans = work_spans(tx, project, seat, now)?;
     for instruction in instructions {
         if has_reply(tx, project, &seat.id, &instruction)? {
             continue;
@@ -300,11 +300,21 @@ pub fn helping(tx: &Tx<'_>, project: &str, seat: &SeatRow, now: Ts) -> GearResul
 /// lane's tasks by this seat, from its start to the earliest of its hand-in,
 /// merge and settle (the end of the work; a closed attempt's row time stands
 /// in when no step wrote one).
-fn work_spans(tx: &Tx<'_>, project: &str, seat: &SeatRow) -> GearResult<Vec<(Ts, Ts)>> {
+fn work_spans(tx: &Tx<'_>, project: &str, seat: &SeatRow, now: Ts) -> GearResult<Vec<(Ts, Ts)>> {
     let mut spans = Vec::new();
     // T-529: the live tasks — a landed voyage's tasks are history, and this
     // runs for every lane on every tick.
-    for task in tx.tasks_live_of_project(project)? {
+    // and the tasks finished within HELP_LIMIT_S: the last task of a landed
+    // voyage still bounds the instructions sent while it ran.
+    let mut tasks = tx.tasks_live_of_project(project)?;
+    let mut seen: std::collections::BTreeSet<String> =
+        tasks.iter().map(|task| task.id.clone()).collect();
+    for task in tx.tasks_finished_since(project, now - HELP_LIMIT_S)? {
+        if seen.insert(task.id.clone()) {
+            tasks.push(task);
+        }
+    }
+    for task in tasks {
         if task.lane.as_deref() != Some(seat.name.as_str()) {
             continue;
         }
@@ -314,17 +324,13 @@ fn work_spans(tx: &Tx<'_>, project: &str, seat: &SeatRow) -> GearResult<Vec<(Ts,
             }
             let times = tx.attempt_times(project, &task.id, attempt.n)?;
             let start = times.started.unwrap_or(attempt.started);
-            let end = [
-                times.handed_in,
-                times.merged,
-                times.settled,
+            let end = [times.handed_in, times.merged, times.settled]
+                .into_iter()
+                .flatten()
+                .min()
                 // A closed attempt has its end in the row when no step wrote
                 // it (an abandoned attempt).
-                attempt.state.is_terminal().then_some(attempt.updated),
-            ]
-            .into_iter()
-            .flatten()
-            .min();
+                .or_else(|| attempt.state.is_terminal().then_some(attempt.updated));
             if let Some(end) = end {
                 spans.push((start, end));
             }

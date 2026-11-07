@@ -175,6 +175,44 @@ fn the_live_tasks_are_the_open_work_and_no_finished_voyage() {
     );
 }
 
+/// T-680: the tasks finished within a window are the landed voyages' history
+/// plus the finished tasks outside a voyage, and never the open work.
+#[test]
+fn the_finished_since_tasks_include_a_landed_voyage() {
+    let (_dir, path) = temp_db("finished");
+    let mut store = a_project_of_six_voyages(&path);
+    let finished: Vec<String> = store
+        .read(|tx| tx.tasks_finished_since(PROJECT, i64::MIN))
+        .unwrap()
+        .into_iter()
+        .map(|task| task.id)
+        .collect();
+    assert_eq!(
+        finished.len(),
+        203,
+        "the landed voyages and the finished tasks"
+    );
+    assert!(
+        finished.iter().any(|id| id == "T-0000"),
+        "a landed voyage's task is history, not live"
+    );
+    assert!(
+        !finished.iter().any(|id| id == "T-93"),
+        "Ready is not finished"
+    );
+    assert!(
+        !finished.iter().any(|id| id == "T-100"),
+        "Running is not finished"
+    );
+    assert!(
+        store
+            .read(|tx| tx.tasks_finished_since(PROJECT, i64::MAX))
+            .unwrap()
+            .is_empty(),
+        "nothing changed after the far future"
+    );
+}
+
 /// A finished voyage's tasks are read only where a report asks for them: the
 /// hint of a voyage whose tasks are all done takes no row.
 #[test]
