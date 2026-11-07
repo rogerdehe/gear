@@ -1643,7 +1643,7 @@ fn apply_queue(
             continue;
         }
         if let StaffItem::Restart { name, .. } = item {
-            restart_reviewer(tx, project, name, staff_line(item), now)?;
+            restart_seat(tx, project, name, staff_line(item), now)?;
             staffed.push(format!("restart {name}"));
             record_gear_decision(
                 tx,
@@ -3533,52 +3533,61 @@ fn release_reviewer(
     Ok(())
 }
 
-/// `- restart <reviewer>` (T-630): the reviewer's agent is exited and started
-/// again in the same pane and worktree, its seat and generation kept — the
-/// way a captain picks up a fixed account or a changed environment without
-/// losing the seat.
+/// `- restart <lane|reviewer>` (T-630, T-669): the seat's agent is exited
+/// and started again in the same pane and worktree, its seat and generation
+/// kept — the way a captain picks up a fixed account or a changed environment
+/// without losing the seat.
+///
+/// A **lane** restarts at once: it is told to wrap up and commit, and after
+/// `[timing].switch_grace_min` its agent restarts on the same model, resuming
+/// its session. Only an active lane is restarted.
 ///
 /// An **idle** reviewer (Standby, no job) restarts at once. A **working** one
 /// restarts right after its verdict: the flag stays until the engine sees the
 /// seat back in Standby with no job, so the review in flight is never cut off.
 /// Any other state is refused with the reason.
 ///
-/// The line only records the request; the engine's `restart_reviewers` step
-/// (release.rs) carries it out, across ticks, because an agent takes a moment
-/// to leave its pane.
-fn restart_reviewer(
-    tx: &Tx<'_>,
-    project: &str,
-    name: &str,
-    line: usize,
-    now: Ts,
-) -> GearResult<()> {
+/// The line only records the request; the engine's restart step carries it
+/// out, across ticks, because an agent takes a moment to leave its pane.
+fn restart_seat(tx: &Tx<'_>, project: &str, name: &str, line: usize, now: Ts) -> GearResult<()> {
     let seat_id = format!("{project}:{name}");
     let seat = tx
         .get_seat(&seat_id)?
         .ok_or_else(|| bad(line, format!("no seat {seat_id} in this project")))?;
-    if seat.role != SeatRole::Temp {
-        return Err(bad(
-            line,
-            format!(
-                "seat {seat_id} is a {} seat, `restart` names a reviewer",
-                seat.role.as_str()
-            ),
-        ));
-    }
-    let pending = tx
-        .get_meta(&format!("engine.review_pending.{seat_id}"))?
-        .filter(|task| !task.is_empty());
-    let idle = seat.state == SeatState::Standby && pending.is_none();
-    let working = seat.state == SeatState::Active && seat.task_id.is_some();
-    if !idle && !working {
-        return Err(GearError::new(
-            ErrorCode::BadTransition,
-            format!(
-                "seat {seat_id} is {}: only an idle reviewer (Standby, no job) or one working on a review is restarted",
-                seat.state.as_str()
-            ),
-        ));
+    match seat.role {
+        SeatRole::Captain => {
+            return Err(GearError::new(
+                ErrorCode::BadTransition,
+                format!("seat {seat_id} is a captain seat, `restart` names a lane or a reviewer"),
+            ));
+        }
+        SeatRole::Lane => {
+            if seat.state != SeatState::Active {
+                return Err(GearError::new(
+                    ErrorCode::BadTransition,
+                    format!(
+                        "seat {seat_id} is {}: only an active lane is restarted",
+                        seat.state.as_str()
+                    ),
+                ));
+            }
+        }
+        SeatRole::Temp => {
+            let pending = tx
+                .get_meta(&format!("engine.review_pending.{seat_id}"))?
+                .filter(|task| !task.is_empty());
+            let idle = seat.state == SeatState::Standby && pending.is_none();
+            let working = seat.state == SeatState::Active && seat.task_id.is_some();
+            if !idle && !working {
+                return Err(GearError::new(
+                    ErrorCode::BadTransition,
+                    format!(
+                        "seat {seat_id} is {}: only an idle reviewer (Standby, no job) or one working on a review is restarted",
+                        seat.state.as_str()
+                    ),
+                ));
+            }
+        }
     }
     // The engine's restart step reads this flag; it waits for a working
     // reviewer's verdict before it acts.
