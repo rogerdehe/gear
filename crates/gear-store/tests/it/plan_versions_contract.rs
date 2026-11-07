@@ -45,3 +45,37 @@ fn only_the_newest_plan_versions_are_kept() {
     assert_eq!(s.read(|tx| tx.oldest_plan_version("q")).unwrap(), Some(1));
     assert_eq!(s.read(|tx| tx.oldest_plan_version("r")).unwrap(), None);
 }
+
+#[test]
+fn every_project_is_pruned_on_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prune.db");
+    Store::open(&path).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for version in 1..=30 {
+            conn.execute(
+                "INSERT INTO plans (project, version, draft, applied, by_seat, by_gen)
+                 VALUES ('q', ?1, ?2, ?3, 'q:captain', 1)",
+                rusqlite::params![version, format!("draft {version}"), NOW + version],
+            )
+            .unwrap();
+        }
+        for version in 1..=5 {
+            conn.execute(
+                "INSERT INTO plans (project, version, draft, applied, by_seat, by_gen)
+                 VALUES ('r', ?1, ?2, ?3, 'r:captain', 1)",
+                rusqlite::params![version, format!("draft {version}"), NOW + version],
+            )
+            .unwrap();
+        }
+    }
+    let mut s = Store::open(&path).unwrap();
+    assert_eq!(s.write(|tx| tx.prune_plan_versions()).unwrap(), 10);
+    assert_eq!(s.read(|tx| tx.oldest_plan_version("q")).unwrap(), Some(11));
+    assert_eq!(s.read(|tx| tx.plan_version("q")).unwrap(), 30);
+    assert!(s.read(|tx| tx.get_plan("q", 10)).unwrap().is_none());
+    assert!(s.read(|tx| tx.get_plan("q", 11)).unwrap().is_some());
+    assert_eq!(s.read(|tx| tx.oldest_plan_version("r")).unwrap(), Some(1));
+    assert_eq!(s.write(|tx| tx.prune_plan_versions()).unwrap(), 0);
+}
