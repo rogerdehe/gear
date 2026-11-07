@@ -1772,7 +1772,10 @@ pub fn reply(
                 if !handlable(&message, args.mode) {
                     return Err(GearError::new(
                         ErrorCode::BadTransition,
-                        format!("message {id} is {}, it cannot be handled again", message.state.as_str()),
+                        format!(
+                            "message {id} is {}, it cannot be handled again",
+                            message.state.as_str()
+                        ),
                     ));
                 }
                 // A station item is settled by a plan `# Decisions` line, not
@@ -1781,10 +1784,14 @@ pub fn reply(
                 if crate::station::is_station(&message)
                     && !matches!(args.mode, ReplyMode::Note | ReplyMode::Wait)
                 {
-                    return Err(GearError::new(ErrorCode::BadFormat, format!(
-                        "station {} needs a plan # Decisions line: station {}: keep course|time-box|cut|move",
-                        message.id, message.id,
-                    )));
+                    let actions = crate::station::actions_of(tx, &ctx.project, &message)?;
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
+                        format!(
+                            "station {} needs a plan # Decisions line: station {}: {actions}",
+                            message.id, message.id,
+                        ),
+                    ));
                 }
                 // A review fail (or a failed merge) is settled where it can
                 // be: by a plan line — a `# Verdicts` line, or a `# Staff`
@@ -1845,7 +1852,9 @@ pub fn reply(
                 // and the wait fields it had; resolve and wait set their own
                 // (T-103).
                 let (wait_on, wait_until) = match args.mode {
-                    ReplyMode::Note | ReplyMode::Reopen => (original.wait_on.clone(), original.wait_until),
+                    ReplyMode::Note | ReplyMode::Reopen => {
+                        (original.wait_on.clone(), original.wait_until)
+                    }
                     _ => (args.wait_on.clone(), args.wait_until),
                 };
                 tx.update_message_state(
@@ -1936,14 +1945,24 @@ pub fn reply(
             RequestOutcome::Executed(value) => (value, false),
             RequestOutcome::Replayed(value) => (value, true),
         };
-        let handled: Vec<(String, String)> =
-            serde_json::from_value(value["handled"].clone()).map_err(|e| {
-                GearError::new(ErrorCode::BadFormat, format!("stored reply result is broken: {e}"))
+        let handled: Vec<(String, String)> = serde_json::from_value(value["handled"].clone())
+            .map_err(|e| {
+                GearError::new(
+                    ErrorCode::BadFormat,
+                    format!("stored reply result is broken: {e}"),
+                )
             })?;
         let replies: Vec<String> =
             serde_json::from_value(value["replies"].clone()).map_err(|e| {
-                GearError::new(ErrorCode::BadFormat, format!("stored reply result is broken: {e}"))
+                GearError::new(
+                    ErrorCode::BadFormat,
+                    format!("stored reply result is broken: {e}"),
+                )
             })?;
-        Ok(ReplyResult { handled, replies, replayed })
+        Ok(ReplyResult {
+            handled,
+            replies,
+            replayed,
+        })
     })
 }

@@ -1026,3 +1026,48 @@ fn a_deferred_labeled_issue_lands_and_is_listed() {
     .unwrap();
     assert_eq!(item(&mut store, &land).state, MsgState::Resolved);
 }
+
+/// T-667: the landing order's next hint offers `land`, not the checkpoint's
+/// actions: the captain answers it with a `land` line.
+#[test]
+fn the_landing_order_offers_land() {
+    let mut store = world("8h", 6);
+    assert!(check(&mut store, 0).is_empty(), "watch the voyage first");
+    for n in 1..=6 {
+        finish(&mut store, n);
+    }
+    let land = check(&mut store, 7200)
+        .into_iter()
+        .find(|id| item(&mut store, id).body.contains("ready to land"))
+        .unwrap();
+    let message = item(&mut store, &land);
+    assert_eq!(
+        store
+            .read(|tx| station::actions_of(tx, "p", &message))
+            .unwrap(),
+        "land"
+    );
+    let (env, fp) = captain();
+    let page = home::build(&mut store, &env, Some(&fp), T0 + 7201).unwrap();
+    assert!(
+        page.text.contains(&format!("station {land}: land)")),
+        "{}",
+        page.text
+    );
+    assert!(
+        !page.text.contains(&format!("station {land}: keep course")),
+        "{}",
+        page.text
+    );
+    let error = reply(
+        &mut store,
+        vec![land.clone()],
+        mail::ReplyMode::Resolve,
+        "land-resolve",
+    )
+    .unwrap_err();
+    assert!(
+        error.detail.contains(&format!("station {land}: land")),
+        "{error:?}"
+    );
+}
