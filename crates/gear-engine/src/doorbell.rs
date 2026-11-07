@@ -334,10 +334,28 @@ fn inline_text(
         );
     }
     for goal in goals.iter().flatten() {
+        // T-653: a captain item built with the goal already starts with it;
+        // the ring does not show the same line twice.
+        if entries
+            .iter()
+            .any(|(_, item)| item.body.starts_with(goal_prefix(goal)))
+        {
+            continue;
+        }
         text.push('\n');
         text.push_str(goal);
     }
     text
+}
+
+/// T-653: the part of a goal line that names it — up to and including its first
+/// `:` (`Your goal, voyage M1:`), the whole line when it has none. The rest of
+/// the line (the course) may differ from the copy an item carries.
+fn goal_prefix(goal: &str) -> &str {
+    match goal.find(':') {
+        Some(index) => &goal[..=index],
+        None => goal,
+    }
 }
 
 /// A ring text too long for one prompt (T-631): cut at the last line break
@@ -690,6 +708,51 @@ mod tests {
         );
         assert!(
             r.text.contains("reply <project>:<id> -m \"<answer>\""),
+            "{}",
+            r.text
+        );
+    }
+
+    /// T-653: the item already starts with the goal line, so the ring does not
+    /// repeat it — the course in the item may differ from the goal's.
+    #[test]
+    fn an_inline_ring_does_not_repeat_a_goal_its_item_starts_with() {
+        let mut captain = input(
+            "captain",
+            vec![item(
+                "M-8",
+                "p:captain",
+                "Your goal, voyage M1: done: x · bar: y · 2 tasks left. Judge every decision against it.\ntoday",
+                false,
+            )],
+        );
+        captain.goal = Some(
+            "Your goal, voyage M1: done: x · bar: y · 1 task left. Judge every decision against it."
+                .into(),
+        );
+        let r = ring(&[captain]);
+        assert!(r.inline);
+        assert_eq!(
+            r.text.matches("Your goal, voyage M1:").count(),
+            1,
+            "{}",
+            r.text
+        );
+        assert!(r.text.ends_with("` shows them again."), "{}", r.text);
+    }
+
+    /// T-653: a goal of another voyage is not the item's, so it is shown.
+    #[test]
+    fn an_inline_ring_keeps_a_goal_of_another_voyage() {
+        let mut captain = input(
+            "captain",
+            vec![item("M-8", "p:captain", "Your goal, voyage M0: old", false)],
+        );
+        captain.goal = Some("Your goal, voyage M1: done.".into());
+        let r = ring(&[captain]);
+        assert!(r.inline);
+        assert!(
+            r.text.ends_with("\nYour goal, voyage M1: done."),
             "{}",
             r.text
         );
