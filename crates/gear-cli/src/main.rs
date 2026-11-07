@@ -50,6 +50,11 @@ enum Cmd {
         #[command(subcommand)]
         op: PlanOp,
     },
+    /// Captain: file an issue on the project's forge (the engine files it).
+    Issue {
+        #[command(subcommand)]
+        op: IssueOp,
+    },
     /// User: the read-only plan board (PRD §15).
     Board {
         /// Draw the open tasks as a dependency tree.
@@ -246,6 +251,21 @@ enum PlanOp {
         #[arg(long, value_name = "LABEL")]
         label: Vec<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum IssueOp {
+    /// Record an issue request: the engine files it on the project's forge.
+    File {
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        body: String,
+        #[arg(long = "label")]
+        labels: Vec<String>,
+    },
+    /// Show one issue request and the number the engine filed it as.
+    Show { id: u64 },
 }
 
 #[derive(Subcommand, Debug)]
@@ -553,6 +573,14 @@ fn run(cli: Cli) -> GearResult<()> {
             PlanOp::Check {} => cmd_plan_check(cli.json),
             PlanOp::ImportIssues { path, label } => cmd_import_issues(path, label, cli.json),
         },
+        Some(Cmd::Issue { op }) => match op {
+            IssueOp::File {
+                title,
+                body,
+                labels,
+            } => cmd_issue_file(title, body, labels, cli.json),
+            IssueOp::Show { id } => cmd_issue_show(id, cli.json),
+        },
         Some(Cmd::Board { deps, project }) => cmd_board(deps, project.as_deref(), cli.json),
         Some(Cmd::Queue { json }) => cmd_queue(json),
         Some(Cmd::Report { op }) => match op {
@@ -682,6 +710,7 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
         | Some(Cmd::Plan {
             op: PlanOp::ImportIssues { .. },
         })
+        | Some(Cmd::Issue { .. })
         | Some(Cmd::Captain { .. }) => false,
         Some(_) => true,
     }
@@ -3004,6 +3033,173 @@ fn cmd_import_issues(
         }
     }
     Ok(())
+}
+
+/// `gear issue file`: record an issue request for the engine to file (T-683).
+///
+/// The CLI never runs `gh`: the engine is the only GitHub writer. The request
+/// is one entry of `forge.issue_requests.<project>`, written in one
+/// transaction, and the engine fills its number in on its next tick.
+fn cmd_issue_file(title: String, body: String, labels: Vec<String>, json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let (id, repo) = run_issue_file(&mut store, &env, &title, &body, &labels)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({ "id": id, "repo": repo }))
+                .map_err(json_error)?
+        );
+    } else {
+        println!(
+            "issue request {id} recorded: the engine files it on {repo} and records its number; `gear issue show {id}` shows it."
+        );
+    }
+    Ok(())
+}
+
+/// `gear issue file` body, over injected state.
+fn run_issue_file(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    title: &str,
+    body: &str,
+    labels: &[String],
+) -> GearResult<(u64, String)> {
+    let project = store.read(|tx| {
+        let ctx = env.ctx.as_ref().ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                "no GEAR_CTX in the environment: `gear issue file` runs in the captain's pane",
+            )
+        })?;
+        let seat = tx.get_seat(&ctx.seat_id())?.ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                format!("seat {} is not registered", ctx.seat_id()),
+            )
+        })?;
+        if seat.role != gear_model::SeatRole::Captain {
+            return Err(GearError::new(
+                gear_model::ErrorCode::Forbidden,
+                format!(
+                    "seat {} has role {}: `gear issue file` is the captain's",
+                    seat.id,
+                    seat.role.as_str()
+                ),
+            ));
+        }
+        Ok(ctx.project.clone())
+    })?;
+    let config = gear_app::config::latest(store, &project)?;
+    let Some(github) = config
+        .github
+        .as_ref()
+        .and_then(|section| section.resolved())
+    else {
+        return Err(GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!(
+                "project {project} is not in GitHub mode: `[github]` with a `repo` is what its issues come from"
+            ),
+        ));
+    };
+    let repo = github.repo.clone();
+    let key = format!("forge.issue_requests.{project}");
+    let id = store.write(|tx| {
+        let mut requests: Vec<serde_json::Value> = match tx.get_meta(&key)? {
+            None => Vec::new(),
+            Some(raw) => serde_json::from_str(&raw).map_err(|_| {
+                GearError::new(
+                    gear_model::ErrorCode::BadFormat,
+                    format!("the issue requests of {project} do not parse"),
+                )
+            })?,
+        };
+        let id = requests
+            .iter()
+            .filter_map(|request| request.get("id").and_then(serde_json::Value::as_u64))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        requests.push(serde_json::json!({
+            "id": id,
+            "title": title,
+            "body": body,
+            "labels": labels,
+            "number": serde_json::Value::Null,
+        }));
+        let text = serde_json::to_string(&requests).map_err(json_error)?;
+        tx.set_meta(&key, &text)?;
+        Ok(id)
+    })?;
+    Ok((id, repo))
+}
+
+/// `gear issue show <id>`: one request and the number the engine filed it as.
+fn cmd_issue_show(id: u64, json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let line = run_issue_show(&mut store, &env, id)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({ "id": id, "line": line }))
+                .map_err(json_error)?
+        );
+    } else {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// `gear issue show` body: captain or any registered seat of the project,
+/// read-only.
+fn run_issue_show(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    id: u64,
+) -> GearResult<String> {
+    let project = store.read(|tx| {
+        let ctx = env.ctx.as_ref().ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                "no GEAR_CTX in the environment: `gear issue show` runs in a seat of the project",
+            )
+        })?;
+        tx.get_seat(&ctx.seat_id())?.ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                format!("seat {} is not registered", ctx.seat_id()),
+            )
+        })?;
+        Ok(ctx.project.clone())
+    })?;
+    let key = format!("forge.issue_requests.{project}");
+    let requests: Vec<serde_json::Value> = store.read(|tx| match tx.get_meta(&key)? {
+        None => Ok(Vec::new()),
+        Some(raw) => serde_json::from_str(&raw).map_err(|_| {
+            GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!("the issue requests of {project} do not parse"),
+            )
+        }),
+    })?;
+    let request = requests
+        .iter()
+        .find(|request| request.get("id").and_then(serde_json::Value::as_u64) == Some(id))
+        .ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NoTarget,
+                format!("no issue request {id} in project {project}"),
+            )
+        })?;
+    Ok(
+        match request.get("number").and_then(serde_json::Value::as_u64) {
+            Some(number) => format!("issue request {id}: filed as #{number}"),
+            None => format!("issue request {id}: waiting for the engine"),
+        },
+    )
 }
 
 /// `gear plan import-issues` body, over injected state.
