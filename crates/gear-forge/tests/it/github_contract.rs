@@ -196,6 +196,66 @@ fn ready_pr(dir: &Path) {
 }
 
 #[test]
+fn create_issue_files_an_issue_and_reads_its_number() {
+    let (dir, forge) = forge_with("issue", None);
+    answer_for(
+        &dir,
+        "issue-create",
+        "https://github.com/owner/name/issues/42\n",
+    );
+    let number = forge
+        .create_issue(
+            "owner/name",
+            "A bug",
+            "steps",
+            &["bug".into(), "gear".into()],
+        )
+        .expect("the issue is filed");
+    assert_eq!(number, 42);
+    assert_eq!(
+        argv(&dir),
+        vec![
+            "issue",
+            "create",
+            "--repo",
+            "owner/name",
+            "--title",
+            "A bug",
+            "--body",
+            "steps",
+            "--label",
+            "bug",
+            "--label",
+            "gear"
+        ]
+    );
+}
+
+#[test]
+fn a_failing_issue_create_is_a_typed_error() {
+    let (dir, forge) = forge_with("issue-fail", None);
+    error_for(&dir, "issue-create", "HTTP 403: Forbidden\n");
+    code_for(&dir, "issue-create", 1);
+    match forge.create_issue("owner/name", "A bug", "steps", &[]) {
+        Err(Error::Failed(said)) => {
+            assert!(said.contains("HTTP 403"), "{said}");
+            assert!(said.contains("issue create"), "{said}");
+        }
+        other => panic!("a typed failure: {other:?}"),
+    }
+}
+
+#[test]
+fn an_issue_create_without_a_url_is_unreadable() {
+    let (dir, forge) = forge_with("issue-unreadable", None);
+    answer_for(&dir, "issue-create", "ok\n");
+    match forge.create_issue("owner/name", "A bug", "steps", &[]) {
+        Err(Error::Unreadable(_)) => {}
+        other => panic!("an unreadable answer: {other:?}"),
+    }
+}
+
+#[test]
 fn issues_asks_for_json_and_reads_the_labels() {
     let (dir, forge) = forge_with("issues", None);
     answer(

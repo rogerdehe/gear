@@ -203,6 +203,16 @@ pub trait Forge {
     /// Create a label of `repo`, or update it when it exists (T-636): the
     /// call is idempotent, so a retry after an outage is safe.
     fn create_label(&self, repo: &str, name: &str, description: &str) -> ForgeResult<()>;
+
+    /// File a new issue on `repo` with its labels; returns its number (the
+    /// engine is the only caller: it files a captain's request once).
+    fn create_issue(
+        &self,
+        repo: &str,
+        title: &str,
+        body: &str,
+        labels: &[String],
+    ) -> ForgeResult<u64>;
 }
 
 /// The commit `gh` names: an object `{"oid": "…"}`. An answer that is a
