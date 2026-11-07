@@ -100,9 +100,12 @@ pub enum StaffItem {
     /// or Queued (its agent is gone, the engine onboards it again) (T-133).
     /// `- release review-1`: a reviewer seat in Standby is released (T-140).
     Release { line: usize, name: String },
-    /// `- restart review-1`: an idle reviewer's agent is exited and started
-    /// again in the same pane and worktree, its seat and generation kept; a
-    /// working reviewer restarts right after its verdict (T-630).
+    /// `- restart heat`: a lane's agent is told to wrap up and commit, and
+    /// after `[timing].switch_grace_min` it restarts on the same model,
+    /// resuming its session; `- restart review-1`: an idle reviewer's agent is
+    /// exited and started again in the same pane and worktree, its seat and
+    /// generation kept; a working reviewer restarts right after its verdict
+    /// (T-630, T-669).
     Restart { line: usize, name: String },
     /// `- rebind heat repo=backend owns=[src/, tests/]`.
     Rebind {
@@ -967,9 +970,9 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
         "restart" => {
             let name = tokens
                 .next()
-                .ok_or_else(|| bad(line, "`restart` needs a reviewer"))?;
+                .ok_or_else(|| bad(line, "`restart` needs a lane or a reviewer"))?;
             if tokens.next().is_some() {
-                return Err(bad(line, "`restart` takes only a reviewer"));
+                return Err(bad(line, "`restart` takes only a lane or a reviewer"));
             }
             Ok(StaffItem::Restart { line, name: name.to_string() })
         }
