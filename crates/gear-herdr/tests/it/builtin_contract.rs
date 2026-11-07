@@ -24,6 +24,23 @@ fn opencode_is_built_in_and_verified() {
     assert!(classify_screen(&p, "   ■■⬝⬝ esc interrupt").is_empty());
 }
 
+/// T-679: opencode's markers are anchored to the line shape the CLI draws, so
+/// the same text inside tool output — a grep of GEAR's source, a quoted test
+/// line — raises no quota stop.
+#[test]
+fn opencode_markers_inside_tool_output_do_not_match() {
+    let opencode = builtin("opencode").expect("opencode is built in");
+    for line in [
+        "                \"Session failed\".into(),",
+        " crates/gear-engine/src/quota.rs:2532: const QUOTA_SCREEN: &str = \"  Error: Token Plan ... (2056)\";",
+        "    // ⚠ Retrying in 3s",
+        "  └ \"Free usage limit reached\"",
+    ] {
+        let flags = classify_screen(&opencode, line);
+        assert!(flags.is_empty(), "{line:?} raised {flags:?}");
+    }
+}
+
 #[test]
 fn grok_is_built_in_and_verified() {
     // T-32: the facts of `gear --skill agent:grok`.
