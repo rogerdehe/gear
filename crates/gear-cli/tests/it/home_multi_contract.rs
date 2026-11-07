@@ -32,6 +32,7 @@ fn gear(home: &Path, db: &Path, ctx: &str, args: &[&str]) -> Output {
         .env_remove("HERDR_PANE_ID")
         .env_remove("HERDR_SOCKET_PATH")
         .env_remove("GEAR_ADMIN")
+        .env_remove("CODEX_HOME")
         .output()
         .expect("run gear")
 }
@@ -237,6 +238,41 @@ fn friction_close_takes_a_qualified_report_id() {
         "{:?}",
         closed[0].outcome
     );
+
+    std::fs::remove_dir_all(&home).ok();
+}
+
+/// T-681: the captain's page names an installed skill copy older than the
+/// binary, and says nothing about a current one.
+#[test]
+fn the_captains_page_names_a_stale_skill_copy() {
+    let home = crate::scratch::home("home-skill-copy");
+    let db = home.join("gear.db");
+    let _store = world(&db);
+    let dir = home.join(".pi/agent/skills/gear");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "---\nname: gear\n---\n").unwrap();
+    std::fs::write(dir.join(".gear-version"), "0.0.1\n").unwrap();
+
+    let out = gear(&home, &db, "a:captain:1", &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains(&format!(
+            "skill copy for pi is from 0.0.1, gear is {}: run gear admin install-skill --agent pi",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "{text}"
+    );
+
+    std::fs::write(
+        dir.join(".gear-version"),
+        format!("{}\n", env!("CARGO_PKG_VERSION")),
+    )
+    .unwrap();
+    let out = gear(&home, &db, "a:captain:1", &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!stdout(&out).contains("skill copy for"), "{}", stdout(&out));
 
     std::fs::remove_dir_all(&home).ok();
 }
