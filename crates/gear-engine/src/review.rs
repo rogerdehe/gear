@@ -1651,11 +1651,7 @@ fn start_stage_checks(
                     }
                     // A seat another feature already reviews on is not taken.
                     let chosen = match free_seat(store, herdr, project, &check.task, &kind)? {
-                        Some(seat)
-                            if store
-                                .read(|tx| tx.feature_seat(project, &seat.id))?
-                                .is_none() =>
-                        {
+                        Some(seat) if !seat_held_by_live_feature(store, project, &seat.id)? => {
                             Some(seat)
                         }
                         _ => None,
@@ -2080,30 +2076,42 @@ fn carrier_feature(store: &mut Store, project: &str, task: &str) -> GearResult<O
 /// so it sees the members and the findings their light checks left — else the
 /// reviewer would judge work it never saw a note about.
 fn feature_review_section(store: &mut Store, project: &str, feature: &str) -> GearResult<String> {
-    let mut members: Vec<(String, String, Option<(i64, Vec<String>)>)> = store.read(|tx| {
-        let mut members = Vec::new();
-        for row in tx.tasks_of_project(project)? {
-            if tx.task_feature(project, &row.id)?.as_deref() != Some(feature) {
-                continue;
+    let mut members: Vec<(String, String, Option<(i64, Vec<String>)>, bool)> =
+        store.read(|tx| {
+            let mut members = Vec::new();
+            for row in tx.tasks_of_project(project)? {
+                if tx.task_feature(project, &row.id)?.as_deref() != Some(feature) {
+                    continue;
+                }
+                // The carrier is the task this packet is for; a cancelled member is
+                // no part of the branch.
+                if tx.feature_carrier(project, feature)?.as_deref() == Some(row.id.as_str()) {
+                    continue;
+                }
+                if row.state == TaskState::Cancelled {
+                    continue;
+                }
+                let goal = tx
+                    .get_contract(project, &row.id, row.contract_version)?
+                    .map(|contract| contract.goal)
+                    .unwrap_or_default();
+                let check = light_check_findings(tx, project, feature, &row.id)?;
+                // T-652: an accepted member whose last attempt carries no finished
+                // light check marker got none — the packet says to review it in full.
+                let unchecked = match tx.attempts_of_task(project, &row.id)?.into_iter().last() {
+                    Some(attempt) if attempt.state == AttemptState::Accepted => tx
+                        .stage_check(project, &row.id, attempt.n)?
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                        .is_none_or(|marker| marker["state"] != "done"),
+                    _ => false,
+                };
+                members.push((row.id.clone(), goal, check, unchecked));
             }
-            // The carrier is the task this packet is for; a cancelled member is
-            // no part of the branch.
-            if tx.feature_carrier(project, feature)?.as_deref() == Some(row.id.as_str()) {
-                continue;
-            }
-            if row.state == TaskState::Cancelled {
-                continue;
-            }
-            let goal = tx
-                .get_contract(project, &row.id, row.contract_version)?
-                .map(|contract| contract.goal)
-                .unwrap_or_default();
-            let check = light_check_findings(tx, project, feature, &row.id)?;
-            members.push((row.id.clone(), goal, check));
-        }
-        members.sort_by_key(|(id, _, _)| id.trim_start_matches("T-").parse::<i64>().unwrap_or(0));
-        Ok(members)
-    })?;
+            members.sort_by_key(|(id, _, _, _)| {
+                id.trim_start_matches("T-").parse::<i64>().unwrap_or(0)
+            });
+            Ok(members)
+        })?;
     if members.is_empty() {
         return Ok(String::new());
     }
@@ -2113,8 +2121,12 @@ fn feature_review_section(store: &mut Store, project: &str, feature: &str) -> Ge
          branch; a fail names every finding, the owner lane fixes them in one rework.\n\
          Each member, with the goal it was judged by and what its light check found:\n"
     );
-    for (task, goal, check) in members.drain(..) {
+    let mut unchecked: Vec<String> = Vec::new();
+    for (task, goal, check, member_unchecked) in members.drain(..) {
         section.push_str(&format!("- {task} — {goal}\n"));
+        if member_unchecked {
+            unchecked.push(task.clone());
+        }
         match check {
             Some((attempt, findings)) if !findings.is_empty() => {
                 section.push_str(&format!("  light check (attempt {attempt}):\n"));
@@ -2127,6 +2139,12 @@ fn feature_review_section(store: &mut Store, project: &str, feature: &str) -> Ge
             )),
             None => section.push_str("  light check: none ran\n"),
         }
+    }
+    if !unchecked.is_empty() {
+        section.push_str(&format!(
+            "Members without a light check: {}: review their changes in full.\n",
+            unchecked.join(", ")
+        ));
     }
     Ok(section)
 }
@@ -2193,6 +2211,25 @@ fn light_check_findings(
         checked = Some((attempt.n, findings));
     }
     Ok(checked)
+}
+
+/// T-652: whether a seat's `feature_seat` stamp belongs to a feature still
+/// live — one whose carrier has not finished. A stamp left by a feature whose
+/// integration task is done (or whose carrier row is gone) is history: the seat
+/// is free for another feature's first light check.
+fn seat_held_by_live_feature(store: &mut Store, project: &str, seat: &str) -> GearResult<bool> {
+    store.read(|tx| {
+        let Some(feature) = tx.feature_seat(project, seat)? else {
+            return Ok(false);
+        };
+        let Some(carrier) = tx.feature_carrier(project, &feature)? else {
+            return Ok(true);
+        };
+        Ok(match tx.get_task(project, &carrier)? {
+            Some(task) => !task.state.is_terminal(),
+            None => false,
+        })
+    })
 }
 
 /// T-590: the seat recorded as a feature's reviewer, while it still exists and
@@ -15358,7 +15395,12 @@ profile = "opencode"
     /// accepted at hand-in (stage 2 settles them without a blocking review),
     /// and the feature's integration task T-9.
     fn feature_world() -> Store {
-        let mut store = world(CONFIG);
+        feature_world_with(CONFIG)
+    }
+
+    /// T-652: the same feature world on another config.
+    fn feature_world_with(config: &str) -> Store {
+        let mut store = world(config);
         store
             .write(|tx| {
                 // T-2: the second member, handed in.
@@ -15820,6 +15862,157 @@ profile = "opencode"
         assert!(
             packet.contains("T-2 — the second goal\n  light check (attempt 1):\n  ok"),
             "the second member's goal and check are listed: {packet}"
+        );
+        assert!(
+            !packet.contains("Members without a light check"),
+            "{packet}"
+        );
+    }
+
+    /// T-652: the seats carry the stamp of a feature whose integration task is
+    /// done: that stamp is history, so the first light check of a live feature
+    /// still takes one of them.
+    #[test]
+    fn a_stale_feature_stamp_does_not_keep_a_seat_from_a_light_check() {
+        let mut store = feature_world_with(CONFIG_TWO_SLOTS);
+        let mut herdr = FakeHerdr::new();
+        store
+            .write(|tx| {
+                for (name, pane) in [("review-1", "wt8:p1"), ("review-2", "wt7:p1")] {
+                    let seat = testing::seed_temp_seat(tx, "p", name, "T-8", pane, "codex", T0)?;
+                    tx.set_seat_task(&seat.id, "")?;
+                    tx.set_meta(&pending_review_key(&seat.id), "")?;
+                    tx.set_seat_state(&seat.id, SeatState::Standby, None, T0)?;
+                    // A warm seat starts from its own checkout.
+                    tx.set_meta(&path_key(&seat.id), &format!("/fake-{name}"))?;
+                    tx.set_meta(&repo_key(&seat.id), "/repo")?;
+                }
+                // T-8: the finished integration task of the older feature F-0.
+                let mut carrier = tx.get_task("p", "T-9")?.unwrap();
+                carrier.id = "T-8".into();
+                carrier.rank = 8;
+                carrier.state = TaskState::Done;
+                tx.insert_task(&carrier)?;
+                tx.set_feature_carrier("p", "F-0", "T-8")?;
+                tx.set_feature_seat("p", "p:review-1", "F-0")?;
+                tx.set_feature_seat("p", "p:review-2", "F-0")
+            })
+            .unwrap();
+        herdr.add_agent("wt8:p1", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("wt7:p1", "codex", gear_herdr::AgentStatus::Idle);
+
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        // A warm seat opens its new conversation over two ticks; the second
+        // tick records the job as running.
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 16,
+        )
+        .unwrap();
+        let job = stage_job(&mut store, "T-1").expect("the light check started");
+        assert_eq!(job["state"], "running", "{job}");
+        let seat = job["seat"].as_str().unwrap().to_string();
+        assert!(
+            seat == "p:review-1" || seat == "p:review-2",
+            "a free seat took the check: {seat}"
+        );
+        assert_eq!(
+            store.read(|tx| tx.feature_seat("p", &seat)).unwrap(),
+            Some("F-1".into()),
+            "the stale stamp was overwritten"
+        );
+    }
+
+    /// T-652: a stamp of a feature whose integration task still runs is live:
+    /// the seat is not taken for another feature's light check.
+    #[test]
+    fn a_seat_stamped_by_a_live_feature_is_not_taken_for_another() {
+        let mut store = feature_world_with(CONFIG_TWO_SLOTS);
+        let mut herdr = FakeHerdr::new();
+        store
+            .write(|tx| {
+                for (name, pane) in [("review-1", "wt8:p1"), ("review-2", "wt7:p1")] {
+                    let seat = testing::seed_temp_seat(tx, "p", name, "T-8", pane, "codex", T0)?;
+                    tx.set_seat_task(&seat.id, "")?;
+                    tx.set_meta(&pending_review_key(&seat.id), "")?;
+                    tx.set_seat_state(&seat.id, SeatState::Standby, None, T0)?;
+                }
+                let mut carrier = tx.get_task("p", "T-9")?.unwrap();
+                carrier.id = "T-8".into();
+                carrier.rank = 8;
+                carrier.state = TaskState::Ready;
+                tx.insert_task(&carrier)?;
+                tx.set_feature_carrier("p", "F-0", "T-8")?;
+                tx.set_feature_seat("p", "p:review-1", "F-0")?;
+                tx.set_feature_seat("p", "p:review-2", "F-0")
+            })
+            .unwrap();
+        herdr.add_agent("wt8:p1", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("wt7:p1", "codex", gear_herdr::AgentStatus::Idle);
+
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        assert!(
+            stage_job(&mut store, "T-1").is_none(),
+            "no seat was taken from a live feature"
+        );
+    }
+
+    /// T-652: the carrier's packet names the members whose light check never
+    /// ran, so the reviewer judges their changes in full.
+    #[test]
+    fn the_carrier_packet_names_members_without_a_light_check() {
+        let mut store = feature_world();
+        store
+            .write(|tx| {
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-9".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Submitted,
+                    candidate: Some("featuretip".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0 + 3,
+                    updated: T0 + 3,
+                })
+            })
+            .unwrap();
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let packet =
+            review_packet_for(&mut store, &config, "T-9", 1, "featuretip", WORKTREE).unwrap();
+        assert!(
+            packet
+                .contains("Members without a light check: T-1, T-2: review their changes in full."),
+            "{packet}"
         );
     }
 
