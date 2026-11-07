@@ -967,3 +967,45 @@ fn a_rebind_without_repo_means_the_root() {
     )
     .is_err());
 }
+
+/// T-673: one rebind that cannot apply yet does not hold the others: it waits
+/// with its reason recorded, and the next tick leaves that reason alone.
+#[test]
+fn a_blocked_rebind_does_not_hold_the_others() {
+    let mut s = world_with_two_pending_attempts();
+    s.write(|tx| {
+        tx.set_meta(
+            &gear_app::plan::rebind_pending_key("p:heat"),
+            r#"{"repo":"engine","owns":["src/"]}"#,
+        )?;
+        tx.set_meta(
+            &gear_app::plan::rebind_pending_key("p:wire"),
+            r#"{"repo":"engine","owns":["src/wire/"]}"#,
+        )?;
+        for task in ["T-1", "T-2"] {
+            let mut attempt = tx.get_attempt("p", task, 1)?.unwrap();
+            attempt.state = AttemptState::Accepted;
+            tx.update_attempt(&attempt)?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let changed = gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap();
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    let waiting = ["p:heat", "p:wire"]
+        .into_iter()
+        .find(|seat| {
+            s.read(|tx| tx.get_meta(&gear_app::plan::rebind_pending_key(seat)))
+                .unwrap()
+                .is_some_and(|v| !v.is_empty())
+        })
+        .expect("one rebind still waits");
+    let key = format!("lane-rebind-waiting:{waiting}");
+    let reason = s.read(|tx| tx.get_meta(&key)).unwrap().unwrap();
+    assert!(reason.contains("overlaps"), "{reason}");
+    assert_eq!(
+        gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap(),
+        Vec::<String>::new()
+    );
+    assert_eq!(s.read(|tx| tx.get_meta(&key)).unwrap().unwrap(), reason);
+}

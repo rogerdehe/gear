@@ -2929,6 +2929,8 @@ fn cancel_rebind(tx: &Tx<'_>, project: &str, lane: &str, line: usize) -> GearRes
     let key = rebind_pending_key(&seat_id);
     if tx.get_meta(&key)?.is_some_and(|v| !v.is_empty()) {
         tx.set_meta(&key, "")?;
+        // T-673: the waiting reason belongs to the request it was recorded for.
+        tx.set_meta(&format!("lane-rebind-waiting:{seat_id}"), "")?;
         Ok(format!("rebind {lane}: the pending rebind is withdrawn"))
     } else {
         Ok(format!("rebind {lane}: nothing pending to withdraw"))
@@ -3144,30 +3146,56 @@ fn apply_rebind(
 }
 
 /// Finish recorded requests after their last non-terminal attempt settles.
+///
+/// Each lane's request is applied in its own transaction (T-673): one that
+/// cannot apply yet — its paths overlap a lane that still owns them — records
+/// why under `lane-rebind-waiting:<seat id>` and waits for a later tick, while
+/// the other lanes' requests land.
 pub fn reconcile_rebinds(store: &mut Store, project: &str) -> GearResult<Vec<String>> {
-    store.write(|tx| {
-        let mut changed = Vec::new();
-        for seat in tx
+    let seats: Vec<gear_store::SeatRow> = store.read(|tx| {
+        Ok(tx
             .seats_of_project(project)?
             .into_iter()
-            .filter(|s| s.role == SeatRole::Lane)
-        {
+            .filter(|seat| seat.role == SeatRole::Lane)
+            .collect())
+    })?;
+    let mut changed = Vec::new();
+    for seat in seats {
+        let applied = store.write(|tx| {
             let Some(raw) = tx
                 .get_meta(&rebind_pending_key(&seat.id))?
                 .filter(|v| !v.is_empty())
             else {
-                continue;
+                return Ok(false);
             };
             if !tx.open_attempts_of_seat(&seat.id)?.is_empty() {
-                continue;
+                return Ok(false);
             }
             let request: RebindRequest = serde_json::from_str(&raw)
                 .map_err(|e| bad(0, format!("invalid pending rebind: {e}")))?;
             apply_rebind(tx, project, &seat.name, &seat.id, &request)?;
-            changed.push(seat.name);
+            Ok(true)
+        });
+        match applied {
+            Ok(true) => {
+                changed.push(seat.name.clone());
+                store.write(|tx| tx.set_meta(&format!("lane-rebind-waiting:{}", seat.id), ""))?;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                // This seat's write rolled back alone: the others go on. The
+                // reason is recorded once, not on every tick.
+                let key = format!("lane-rebind-waiting:{}", seat.id);
+                store.write(|tx| {
+                    if tx.get_meta(&key)?.as_deref() != Some(error.detail.as_str()) {
+                        tx.set_meta(&key, &error.detail)?;
+                    }
+                    Ok(())
+                })?;
+            }
         }
-        Ok(changed)
-    })
+    }
+    Ok(changed)
 }
 
 /// `- retry <lane>` (T-82): a lane the engine parked in NeedsCheck, or lost
