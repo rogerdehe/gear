@@ -7,6 +7,7 @@ mod fixtures_contract;
 mod home_multi_contract;
 mod import_issues_contract;
 mod install_skill_contract;
+mod issue_file_contract;
 mod offline_contract;
 mod plan_check_contract;
 mod projects_contract;
