@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1275 -->
+<!-- gear-plan project=gear base=1276 -->
 # Goal
 GEAR's features are stable: every reasonable item left in the backlog is done or decided, the surfaces agree on when a voyage is finished, and the result ships as v0.7.0, live for every project on this machine.
 
