@@ -57,6 +57,13 @@ fn seat_stop_key(seat: &str) -> String {
 fn machine_alert_key(project: &str) -> String {
     format!("engine.health.machine.{project}.alert")
 }
+/// T-658: the thread and key of the item naming orphaned processes.
+fn orphans_thread(project: &str) -> String {
+    format!("health:orphans:{project}")
+}
+fn orphans_alert_key(project: &str) -> String {
+    format!("engine.health.orphans.{project}.alert")
+}
 fn cpu_key(seat: &str) -> String {
     format!("engine.health.cpu.{seat}")
 }
@@ -427,6 +434,11 @@ pub fn check(
         }
     };
 
+    // T-658: parentless processes left in a GEAR worktree that no live seat
+    // holds reach the captain as one item; the watch never touches them.
+    let live = live_worktrees(store, project)?;
+    orphans_item(store, project, &reading.orphans, &live, now, &mut watch)?;
+
     // Each seat's CPU use over the interval: the sample carries cumulative
     // seconds, so the previous sample's total is the baseline.
     let interval = last.map(|last| (now - last).max(1)).unwrap_or(0);
@@ -723,6 +735,139 @@ fn resolve_machine_item(
         }
     }
     store.write(|tx| tx.set_meta(&key, ""))?;
+    Ok(())
+}
+
+/// T-658: the worktree paths of the project's live seats (Active, Standby or
+/// Retiring): the paths their worktrees and review checkouts record.
+fn live_worktrees(store: &mut Store, project: &str) -> GearResult<Vec<String>> {
+    let mut live = Vec::new();
+    for seat in store.read(|tx| tx.seats_of_project(project))? {
+        if !matches!(
+            seat.state,
+            SeatState::Active | SeatState::Standby | SeatState::Retiring
+        ) {
+            continue;
+        }
+        let mut push = |value: Option<String>| {
+            if let Some(value) = value.filter(|value| !value.is_empty()) {
+                live.push(value);
+            }
+        };
+        push(store.read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(&seat.id)))?);
+        for key in store.read(|tx| {
+            tx.meta_keys_with_prefix(&format!("engine.worktree_path_repo.{}:", seat.id))
+        })? {
+            push(store.read(|tx| tx.get_meta(&key))?);
+        }
+        push(store.read(|tx| tx.get_meta(&format!("engine.review_path.{}", seat.id)))?);
+        for key in store
+            .read(|tx| tx.meta_keys_with_prefix(&format!("engine.review_path.{}.", seat.id)))?
+        {
+            push(store.read(|tx| tx.get_meta(&key))?);
+        }
+    }
+    Ok(live)
+}
+
+/// T-658: one item names the parentless processes left in GEAR worktrees that
+/// no live seat holds. It only informs: nothing is stopped, no key is sent.
+fn orphans_item(
+    store: &mut Store,
+    project: &str,
+    orphans: &[Orphan],
+    live: &[String],
+    now: Ts,
+    watch: &mut Watch,
+) -> GearResult<()> {
+    let mut reported: Vec<&Orphan> = orphans
+        .iter()
+        .filter(|orphan| {
+            !live
+                .iter()
+                .any(|path| orphan.cwd == *path || orphan.cwd.starts_with(&format!("{path}/")))
+        })
+        .collect();
+    let key = orphans_alert_key(project);
+    if reported.is_empty() {
+        let id = store
+            .read(|tx| tx.get_meta(&key))?
+            .filter(|value| !value.is_empty());
+        let Some(id) = id else {
+            return Ok(());
+        };
+        if let Some(item) = store.read(|tx| tx.get_message(project, &id))? {
+            if matches!(item.state, MsgState::Open | MsgState::Waiting) {
+                store.write(|tx| {
+                    tx.update_message_state(
+                        project,
+                        &id,
+                        MsgState::Resolved,
+                        Some("no orphaned process is left"),
+                        None,
+                        None,
+                        now,
+                    )
+                })?;
+                watch.items.push("orphans:resolved".into());
+            }
+        }
+        store.write(|tx| tx.set_meta(&key, ""))?;
+        return Ok(());
+    }
+    reported.sort_by_key(|orphan| orphan.pid);
+    let lines: Vec<String> = reported
+        .iter()
+        .map(|orphan| {
+            let hours = (orphan.age_s / 3600.0).floor() as u64;
+            let minutes = ((orphan.age_s % 3600.0) / 60.0).floor() as u64;
+            format!(
+                "  pid {}, {:.0}% of one core, running {}h{:02}m, {}, in {}",
+                orphan.pid, orphan.cpu_pct, hours, minutes, orphan.command, orphan.cwd
+            )
+        })
+        .collect();
+    let body = format!(
+        "the health watch found {} process(es) left in GEAR worktrees that no live seat holds; their parent is gone (parent pid 1). Nothing was stopped: check each one and stop the leftovers yourself.\n{}",
+        reported.len(),
+        lines.join("\n")
+    );
+    let existing = store
+        .read(|tx| tx.get_meta(&key))?
+        .filter(|value| !value.is_empty());
+    if let Some(id) = existing {
+        if let Some(item) = store.read(|tx| tx.get_message(project, &id))? {
+            if matches!(item.state, MsgState::Open | MsgState::Waiting) && item.body != body {
+                store.write(|tx| tx.update_message_body(project, &id, &body))?;
+                watch.items.push("orphans:updated".into());
+            }
+        }
+        return Ok(());
+    }
+    let Some(captain) = store.read(|tx| tx.captain_of(project))? else {
+        return Ok(());
+    };
+    let message = store.write(|tx| {
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: project.into(),
+            thread: orphans_thread(project),
+            task: None,
+            attempt: None,
+            sender: "engine".into(),
+            sender_gen: 0,
+            recipient: captain.id,
+            kind: MsgKind::System,
+            urgent: false,
+            body,
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })
+    })?;
+    store.write(|tx| tx.set_meta(&key, &message.id))?;
+    watch.items.push("orphans:opened".into());
     Ok(())
 }
 
