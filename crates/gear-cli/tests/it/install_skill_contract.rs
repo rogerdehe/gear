@@ -100,6 +100,15 @@ fn the_skill_is_written_for_every_agent() {
             assert!(out.contains(&path.display().to_string()), "{agent}: {out}");
         }
 
+        // T-681: the copy carries the version that wrote it.
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".gear-version"))
+                .unwrap()
+                .trim(),
+            env!("CARGO_PKG_VERSION"),
+            "{agent}"
+        );
+
         std::fs::remove_dir_all(&home).ok();
     }
 }

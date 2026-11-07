@@ -1770,7 +1770,29 @@ fn cmd_home(show: Option<&str>, json: bool) -> GearResult<()> {
         now_ts(),
         json,
         &mut std::io::stdout(),
-    )
+    )?;
+    // T-681: a captain's page names every installed skill copy older than this
+    // binary, so a stale copy is fixed rather than silently used.
+    if !json {
+        if let Some(ctx) = &env.ctx {
+            if ctx.seat == "captain" {
+                if let Some(home) = std::env::var_os("HOME") {
+                    let home = std::path::PathBuf::from(home);
+                    let codex_home = std::env::var_os("CODEX_HOME")
+                        .filter(|value| !value.is_empty())
+                        .map(std::path::PathBuf::from);
+                    for line in gear_app::skill::stale_copies(
+                        &home,
+                        codex_home.as_deref(),
+                        env!("CARGO_PKG_VERSION"),
+                    ) {
+                        println!("{line}");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The Herdr door and the caller's env for a command that proves a seat: a
