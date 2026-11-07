@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1272 -->
+<!-- gear-plan project=gear base=1273 -->
 # Goal
 GEAR's features are stable: every reasonable item left in the backlog is done or decided, the surfaces agree on when a voyage is finished, and the result ships as v0.7.0, live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 4h
 depart: now
 
 # Decisions
+- station M-8832: keep course | why: 27 done at 55m, projected 68m from departure against the 4h eta; the rest is in review or running, T-683 waits for T-664's review
 - station M-8811: keep course | why: 24 done at 48m, projected 66m from departure against the 4h eta; hull 14m (with T-680) and mast 18m are balanced after the move
 - 2026-11-07 02:00 staff: T-680 moves from mast to hull | why: hull runs dry after T-665 while mast holds T-679 to T-683; T-680 touches only gear-board and gear-store, which no other open mast task touches, so both crates move with it to hull's owns
 - station M-8785: keep course | why: 21 done at 42m, projected 74m from departure against the 4h eta; hull 14m, mast 32m in gear-app, gear-herdr and board files outside hull's crates
