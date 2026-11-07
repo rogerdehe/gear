@@ -255,6 +255,8 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// asks which working directory to use (answer Enter: the current one, and
 /// `-c tui.resume_cwd="current"` keeps that dialog from showing); those
 /// screens read as Blocked although Herdr reports done/idle;
+/// the writer-lock screen "This conversation is open in another app" reads as
+/// Blocked and is never answered;
 /// session_ref true (Herdr reports the session uuid); resume
 /// `["resume", "{session}"]`; exit by the typed `/quit` command
 /// (`exit_command`, no keys — §12 item 4); new session `/new`; compact
@@ -636,7 +638,13 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             quota_bar: None,
             auth_markers: vec![],
             backoff_markers: vec!["Reconnecting...".into()],
-            blocked_markers: vec![],
+            // The writer lock (M5, 2026-10-29): a seat that resumes a
+            // conversation another Codex process holds sees "This conversation
+            // is open in another app" (r retry / f fork). Herdr reports it
+            // idle; read it as Blocked so the captain's item quotes it. It is
+            // not a Dialog: retry or fork is the captain's call, so no key is
+            // sent.
+            blocked_markers: vec!["This conversation is open in another app".into()],
             error_markers: vec![],
             refusal_markers: vec![],
             // T-457: Codex 0.165's startup screens (the screens captured in
