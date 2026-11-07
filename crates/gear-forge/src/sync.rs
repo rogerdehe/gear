@@ -1371,6 +1371,8 @@ mod tests {
         issues: RefCell<Vec<Issue>>,
         fail_issues: Cell<bool>,
         issue_filters: RefCell<Vec<(Vec<String>, u32)>>,
+        filed: RefCell<Vec<String>>,
+        fail_issue: Cell<bool>,
     }
 
     impl Recorder {
@@ -1445,6 +1447,23 @@ mod tests {
                 .borrow_mut()
                 .push(format!("label {repo} {name} | {description}"));
             Ok(())
+        }
+
+        fn create_issue(
+            &self,
+            repo: &str,
+            title: &str,
+            body: &str,
+            labels: &[String],
+        ) -> ForgeResult<u64> {
+            if self.fail_issue.replace(false) {
+                return Err(crate::Error::Failed("the forge refused".to_string()));
+            }
+            self.filed.borrow_mut().push(format!(
+                "issue {repo} {title} | {body} | {}",
+                labels.join(",")
+            ));
+            Ok(42)
         }
     }
 

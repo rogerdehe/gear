@@ -12425,6 +12425,16 @@ gate = "{gate}"
         ) -> gear_forge::ForgeResult<()> {
             Ok(())
         }
+
+        fn create_issue(
+            &self,
+            _repo: &str,
+            _title: &str,
+            _body: &str,
+            _labels: &[String],
+        ) -> gear_forge::ForgeResult<u64> {
+            Ok(0)
+        }
     }
 
     /// One merge step and the wait for the worker it launched: the step that
