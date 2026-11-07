@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1270 -->
+<!-- gear-plan project=gear base=1271 -->
 # Goal
 GEAR's features are stable: every reasonable item left in the backlog is done or decided, the surfaces agree on when a voyage is finished, and the result ships as v0.7.0, live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 4h
 depart: now
 
 # Decisions
+- 2026-11-07 02:00 staff: T-680 moves from mast to hull | why: hull runs dry after T-665 while mast holds T-679 to T-683; T-680 touches only gear-board and gear-store, which no other open mast task touches, so both crates move with it to hull's owns
 - station M-8785: keep course | why: 21 done at 42m, projected 74m from departure against the 4h eta; hull 14m, mast 32m in gear-app, gear-herdr and board files outside hull's crates
 - station M-8760: keep course | why: 18 done at 37m, projected 75m from departure against the 4h eta; mast 38m vs hull 22m, mast's rest outside hull's crates
 - station M-8745: keep course | why: 15 done at 33m, projected 75m from departure against the 4h eta; mast 42m vs hull 27m, and mast's rest lies outside hull's crates
@@ -196,7 +197,7 @@ accept: In crates/gear-herdr/tests/it/builtin_contract.rs, next to `opencode_is_
 estimate: 20
 deps: -
 
-## T-680 [must] lane=mast milestone=M7.1 required
+## T-680 [must] lane=hull milestone=M7.1 required
 goal: The board's idle view keeps the work span of a task finished in the last HELP_LIMIT_S, so a captain instruction sent while the lane worked a voyage's final task does not read as "helping" after the voyage lands (T-463). (1) crates/gear-store/src/lib.rs, next to `tasks_live_of_project` (about line 2421): add `pub fn tasks_finished_since(&self, project: &str, since: Ts) -> GearResult<Vec<TaskRow>>` with doc `/// The project's finished tasks (done, failed, cancelled) whose row changed at or after \`since\`: a landed voyage's last tasks, which \`tasks_live_of_project\` no longer returns.`, written like `tasks_of_project` (about line 2378) with `task_select(" WHERE project=?1 AND state IN ('done', 'failed', 'cancelled') AND updated >= ?2 ORDER BY rank, id")` and `params![project, since]` (use whatever name `Ts`/`i64` the file already uses for times). (2) crates/gear-board/src/idle.rs `work_spans` (about line 303): add a `now: Ts` parameter; read `tx.tasks_live_of_project(project)?`, then append every task of `tx.tasks_finished_since(project, now - HELP_LIMIT_S)?` whose id is not already in the list (a `BTreeSet<String>` of seen ids); the loop body stays as it is. Extend the T-529 comment with: `// and the tasks finished within HELP_LIMIT_S: the last task of a landed voyage still bounds the instructions sent while it ran.` The only caller, `helping` (about line 273), passes its `now`.
 accept: In crates/gear-board/tests/it/idle_contract.rs add `an_instruction_sent_during_the_last_task_of_a_landed_voyage_is_no_help`, built like `an_instruction_sent_during_an_attempt_handed_in_later_is_no_help` (same file): `world_with_captain()`, `task_on(&mut store, "T-2", LANE, 1, TaskState::Done)` (milestone None, so it is not a live task), `attempt(&mut store, "T-2", 1, AttemptState::Accepted)`, attempt times Started T0, HandedIn T0 + 120, Merged T0 + 150, an Instruction from "p:captain" with task Some("T-2") at T0 + 60; assert `help_of(&mut store, T0 + 200) == None`. The existing `an_instruction_sent_after_the_hand_in_is_still_help_after_settle_and_merge` must still pass unchanged (its span now is read and ends at the hand-in). In crates/gear-store/tests/it/live_work_contract.rs add `the_finished_since_tasks_include_a_landed_voyage`: in the store of `a_project_of_six_voyages(&path)` (built like `the_live_tasks_are_the_open_work_and_no_finished_voyage`), `tasks_finished_since(PROJECT, i64::MIN)` returns 203 ids (200 of the landed voyages M0-M4 plus T-90, T-91, T-92), contains `T-0000` (a landed voyage's task, which `tasks_live_of_project` does not return), and does not contain `T-93` (Ready) or `T-100` (Running); `tasks_finished_since(PROJECT, i64::MAX)` is empty. Run only `make check CRATE=gear-board TESTS='test(idle)'` and `make check CRATE=gear-store TESTS='test(live_work)'`; the merge gate runs `make gate`.
 estimate: 35
