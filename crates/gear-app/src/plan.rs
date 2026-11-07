@@ -1316,7 +1316,7 @@ fn apply_queue(
                                     sender_gen: by_gen,
                                     recipient: old_seat,
                                     kind: MsgKind::Instruction,
-                                    urgent: false,
+                                    urgent: true,
                                     body: format!(
                                         "{id} moved to lane {new_lane}; stop work on it, nothing to hand in"
                                     ),
@@ -5676,7 +5676,7 @@ fn cancel_task(
             sender_gen: by_gen,
             recipient: lane_seat,
             kind: MsgKind::Instruction,
-            urgent: false,
+            urgent: true,
             body: format!(
                 "{} is cancelled; stop work on it, nothing to hand in",
                 task.id
