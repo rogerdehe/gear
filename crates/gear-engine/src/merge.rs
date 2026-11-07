@@ -6431,6 +6431,39 @@ fn tell_captain_waiting(
         .filter(|(_, passed)| !passed)
         .map(|(task, _)| task.clone())
         .collect();
+    // T-660: a blocked task whose own merge failed cannot land by itself; the
+    // notice names the way out.
+    let failed: Vec<String> = store.read(|tx| {
+        // The state of each task's latest merge op (by creation, then number).
+        let mut last_merge: std::collections::BTreeMap<String, (Ts, u64, OpState)> =
+            std::collections::BTreeMap::new();
+        for op in tx.ops_of_kind_in_states(project, OpKind::Merge, &[])? {
+            let Some(of) = op.task.clone() else {
+                continue;
+            };
+            let number = op
+                .id
+                .strip_prefix("O-")
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap_or(0);
+            let entry = (op.created, number, op.state);
+            if last_merge
+                .get(&of)
+                .is_none_or(|seen| (seen.0, seen.1) < (entry.0, entry.1))
+            {
+                last_merge.insert(of, entry);
+            }
+        }
+        Ok(blocked
+            .iter()
+            .filter(|(task, _)| {
+                last_merge
+                    .get(task)
+                    .is_some_and(|(_, _, state)| *state == OpState::Failed)
+            })
+            .map(|(task, _)| task.clone())
+            .collect::<Vec<String>>())
+    })?;
     let body = format!(
         "the merge of {task} waits for {}: their candidate is in {task}'s commits \
          and is not on the integration branch yet",
@@ -6438,7 +6471,7 @@ fn tell_captain_waiting(
     );
     // The line names the tasks that have not passed: that is the captain's
     // business. The others only wait for their own merge.
-    let body = if unpassed.is_empty() {
+    let mut body = if unpassed.is_empty() {
         body
     } else {
         format!(
@@ -6451,6 +6484,11 @@ fn tell_captain_waiting(
             }
         )
     };
+    for x in &failed {
+        body.push_str(&format!(
+            "\n{x}'s own merge failed; it cannot land by itself: cancel it (its work lands with {task}) or set `carried-by: {task}` on {x}."
+        ));
+    }
     store.write(|tx| {
         let captain = tx.captain_of(project)?.ok_or_else(|| {
             GearError::new(
@@ -6470,9 +6508,10 @@ fn tell_captain_waiting(
             }
             return Ok(());
         }
-        // Every task it waits for has passed: the wait is only about their own
-        // merge, which is a moment. The captain has nothing to do.
-        if unpassed.is_empty() {
+        // Every task it waits for has passed and none of their own merges
+        // failed: the wait is only about their own merge, which is a moment.
+        // The captain has nothing to do.
+        if unpassed.is_empty() && failed.is_empty() {
             return Ok(());
         }
         // And once per attempt: the captain was told about this wait already
@@ -8507,6 +8546,66 @@ mod tests {
             .read(|tx| tx.thread_messages("p", "merge-wait:T-5"))
             .unwrap();
         assert_eq!(items.len(), 2, "the next attempt has no item: {items:?}");
+    }
+
+    /// T-660: a blocked task whose own merge failed cannot land by itself; the
+    /// wait notice names the two ways out.
+    #[test]
+    fn the_merge_waits_notice_names_the_way_out_of_a_failed_carried_merge() {
+        let mut store = world(TaskState::Verifying);
+        let waiting = op("abc1234"); // T-5, attempt 1
+        let blocked = vec![("T-1".to_string(), false)];
+        store
+            .write(|tx| {
+                let op = tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({}),
+                    created: 2,
+                })?;
+                tx.set_op_state("p", &op.id, OpState::Executing, None, 2)?;
+                tx.set_op_state("p", &op.id, OpState::Failed, Some("gate failed"), 3)
+            })
+            .unwrap();
+
+        tell_captain_waiting(&mut store, "p", &waiting, &blocked, 10).unwrap();
+        let inbox = store
+            .read(|tx| tx.actionable_for("p", "p:captain", 11))
+            .unwrap();
+        assert_eq!(inbox.len(), 1, "{inbox:?}");
+        assert!(
+            inbox[0].body.contains(
+                "T-1's own merge failed; it cannot land by itself: cancel it (its work lands with T-5) or set `carried-by: T-5` on T-1."
+            ),
+            "{}",
+            inbox[0].body
+        );
+    }
+
+    /// T-660: without a failed merge of a blocked task, the notice names no way
+    /// out.
+    #[test]
+    fn the_merge_waits_notice_names_no_way_out_without_a_failed_merge() {
+        let mut store = world(TaskState::Verifying);
+        let waiting = op("abc1234"); // T-5, attempt 1
+        let blocked = vec![("T-1".to_string(), false)];
+
+        tell_captain_waiting(&mut store, "p", &waiting, &blocked, 10).unwrap();
+        let inbox = store
+            .read(|tx| tx.actionable_for("p", "p:captain", 11))
+            .unwrap();
+        assert_eq!(inbox.len(), 1, "{inbox:?}");
+        assert!(
+            !inbox[0].body.contains("own merge failed"),
+            "{}",
+            inbox[0].body
+        );
     }
 
     /// T-62: a task that is not built on another task's branch is not held.
