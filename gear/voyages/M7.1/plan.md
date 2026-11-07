@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1277 -->
+<!-- gear-plan project=gear base=1278 -->
 # Goal
 GEAR's features are stable: every reasonable item left in the backlog is done or decided, the surfaces agree on when a voyage is finished, and the result ships as v0.7.0, live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 4h
 depart: now
 
 # Decisions
+- 2026-11-07 rework: T-678 attempt 1 failed review: its named acceptance test was not written | why: the markers are anchored correctly; the test proving tool output does not match is the deliverable's evidence
 - 2026-11-07 rework: T-683 attempt 1 failed review: the acceptance's test module was not written (the lane read the accept as empty) | why: the implementation is right; mast adds the three named tests
 - 2026-11-07 hand-fix: T-680's branch rebuilt as its approved candidate plus report and review commit; b33ee221 (pushed after the pass, from my late answer to M-8836) dropped | why: the reviewed candidate's span rule (steps first, the row time as fallback) matches its comment and passed review; remerge T-680
 - station M-8845: keep course | why: 28 done at 60m, projected 72m from departure against the 4h eta; 4 left (T-680 hull, T-679, T-682, T-683 mast)
