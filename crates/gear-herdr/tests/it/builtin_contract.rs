@@ -145,6 +145,23 @@ fn a_low_codex_limit_is_not_a_quota_stop() {
     }
 }
 
+/// T-678: codex's markers are anchored to the line shape the CLI draws, so the
+/// same text inside tool output — a grep of GEAR's source, a quoted test line —
+/// raises no quota stop or back-off.
+#[test]
+fn codex_markers_inside_tool_output_do_not_match() {
+    let codex = builtin("codex").expect("codex is built in");
+    for line in [
+        "    // `Reconnecting... {retry}/{max_retries}`",
+        "  └ crates/gear-engine/src/quota.rs:2917: let screen = \"Usage limit reached\";",
+        "    \"You've hit your usage limit.\",",
+        "quota_markers: vec![\"Usage limit reached\".into()],",
+    ] {
+        let flags = classify_screen(&codex, line);
+        assert!(flags.is_empty(), "{line:?} raised {flags:?}");
+    }
+}
+
 /// T-284: a server-side stop is not a quota and not a login. The reviewer of
 /// T-242 sat idle on exactly this screen, and a nudge fixes it (it is a
 /// retry, not a spent plan): the screen flags must not stop the nudge.

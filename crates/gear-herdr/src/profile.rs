@@ -244,8 +244,11 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// confirm 2 rounds; unattended `--auto`; session_ref false; resume
 /// `["-s", "{session}"]`; exit `["ctrl+c"]`; new session `/new`; compact
 /// `/compact`; usage log `opencode-db`; verified.
-/// codex: quota `Usage limit reached` and the
-/// other spent-limit texts of codex 0.164.0 (T-115) — the "only N% left"
+/// codex: quota `^Usage limit reached`, `^You've reached your usage limit`,
+/// `^You*hit your usage limit`, `^Your included usage is exhausted`,
+/// `^You've reached your workspace credit limit`, `^Your workspace is out of
+/// credits` and `^You hit your spend cap` — the other spent-limit texts of
+/// codex 0.164.0 (T-115); the "only N% left"
 /// warning is not one of them; no rate-limit/auth markers yet; tail 16
 /// lines, confirm 2
 /// rounds; unattended `--dangerously-bypass-approvals-and-sandbox` and
@@ -627,17 +630,17 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             busy_markers: vec!["esc to interrupt".into()],
             ratelimit_markers: vec![],
             quota_markers: vec![
-                "Usage limit reached".into(),
-                "You've reached your usage limit".into(),
-                "hit your usage limit".into(),
-                "Your included usage is exhausted".into(),
-                "You've reached your workspace credit limit".into(),
-                "Your workspace is out of credits".into(),
-                "You hit your spend cap".into(),
+                "^Usage limit reached".into(),
+                "^You've reached your usage limit".into(),
+                "^You*hit your usage limit".into(),
+                "^Your included usage is exhausted".into(),
+                "^You've reached your workspace credit limit".into(),
+                "^Your workspace is out of credits".into(),
+                "^You hit your spend cap".into(),
             ],
             quota_bar: None,
             auth_markers: vec![],
-            backoff_markers: vec!["Reconnecting...".into()],
+            backoff_markers: vec!["^Reconnecting...".into()],
             // The writer lock (M5, 2026-10-29): a seat that resumes a
             // conversation another Codex process holds sees "This conversation
             // is open in another app" (r retry / f fork). Herdr reports it
@@ -1191,7 +1194,7 @@ mod tests {
         }
         assert_eq!(
             builtin("codex").unwrap().backoff_markers,
-            vec!["Reconnecting...".to_string()]
+            vec!["^Reconnecting...".to_string()]
         );
     }
 
