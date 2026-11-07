@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1265 -->
+<!-- gear-plan project=gear base=1266 -->
 # Goal
 GEAR's features are stable: every reasonable item left in the backlog is done or decided, the surfaces agree on when a voyage is finished, and the result ships as v0.7.0, live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 4h
 depart: now
 
 # Decisions
+- 2026-11-07 verdict: T-670 attempt 1 passes over review F1 | why: the contract's "the `ended` time is computed as today" means as it is computed now (the last merge); the reviewer read it as the current time, which would make a landed voyage's time grow forever; every other point and every acceptance test passed
 - station M-8707: keep course | why: 9 done at 24m, projected 102m from departure against the 4h eta; mast 78m vs hull 45m, but mast's rest is gear-app, gear-herdr and board work outside hull's crates, so a move would need an owns change for about 15m
 - station M-8686: keep course | why: 6 done at 18m, projected 98m from departure against the 4h eta; hull 80m, mast 60m, close enough that no move pays
 - station M-8672: keep course | why: 3 done at 15m, projected 108m from departure against the 4h eta; hull 93m and mast 90m are balanced
