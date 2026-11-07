@@ -1434,6 +1434,11 @@ fn cmd_admin_init(
         for line in seat_lines(&parsed) {
             println!("{line}");
         }
+        // T-672: a model whose context window nobody knows is never compacted;
+        // name it and the setting that fixes it.
+        for line in &r.window_warnings {
+            println!("warning: {line}");
+        }
     }
     Ok(())
 }
