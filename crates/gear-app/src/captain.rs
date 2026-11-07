@@ -1528,6 +1528,9 @@ fn needs_of(
             message.id
         ));
     }
+    if let Some(command) = crate::friction::close_hint(tx, project, message)? {
+        return Ok(command);
+    }
     if message.needs_ack {
         return Ok(format!("gear send --kind ack --reply-to {}", message.id));
     }
