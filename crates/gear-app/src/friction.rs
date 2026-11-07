@@ -8,8 +8,35 @@
 
 use crate::identity::{require_seat, Fingerprint};
 use crate::Env;
-use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, Ts};
-use gear_store::{FrictionRow, Store};
+use gear_model::{ErrorCode, GearError, GearResult, MsgState, SeatRole, SeatState, Ts};
+use gear_store::{FrictionRow, MessageRow, Store, Tx};
+
+/// The command that closes the engine's friction item: its oldest open report
+/// (T-668). `None` for every other message, and for the friction item when no
+/// report is open — the engine closes it itself on its next tick.
+pub fn close_hint(tx: &Tx<'_>, project: &str, message: &MessageRow) -> GearResult<Option<String>> {
+    if message.thread != "friction"
+        || message.sender != "engine"
+        || !matches!(message.state, MsgState::Open | MsgState::Waiting)
+    {
+        return Ok(None);
+    }
+    let reports = tx.open_frictions(project)?;
+    let oldest = reports.into_iter().min_by_key(|row| {
+        let number = row
+            .id
+            .strip_prefix("F-")
+            .and_then(|n| n.parse::<i64>().ok())
+            .unwrap_or(0);
+        (row.created, number)
+    });
+    Ok(oldest.map(|row| {
+        format!(
+            "gear friction close {} -m \"lesson|fixed|not worth it (...)\"",
+            row.id
+        )
+    }))
+}
 
 /// The outcomes a closed report may carry (design §6.4): fixed (what),
 /// lesson (which), not worth it (why).
