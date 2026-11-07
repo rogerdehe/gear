@@ -391,6 +391,18 @@ pub fn apply_decisions(tx: &Tx<'_>, project: &str, draft: &Draft, now: Ts) -> Ge
     Ok(())
 }
 
+/// The actions a station item offers: a landing order is answered `land`,
+/// every other checkpoint `keep course|time-box|cut|move`.
+pub fn actions_of(tx: &Tx<'_>, project: &str, message: &MessageRow) -> GearResult<&'static str> {
+    let milestone = message.thread.trim_start_matches("station:");
+    let order = tx.get_meta(&format!("station:{project}:{milestone}:land"))?;
+    Ok(if order.as_deref() == Some(message.id.as_str()) {
+        "land"
+    } else {
+        "keep course|time-box|cut|move"
+    })
+}
+
 /// Whether `message` is its voyage's landing order, already answered without
 /// a landing: a `station <id>: land` line still lands the voyage through it.
 pub fn relands(tx: &Tx<'_>, project: &str, message: &MessageRow) -> GearResult<bool> {

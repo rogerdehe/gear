@@ -514,8 +514,9 @@ fn next_command(
             // (T-257): `gear/voyages/<M>/plan.md` by default.
             let voyage_dir = crate::tasks::conventions_of(tx, project).voyage_dir;
             let plan = gear_model::layout::plan_file(&voyage_dir, project, milestone);
+            let actions = crate::station::actions_of(tx, project, &message)?;
             Ok(format!(
-                "next: gear plan apply {plan} (# Decisions: station {shown}: keep course|time-box|cut|move)"
+                "next: gear plan apply {plan} (# Decisions: station {shown}: {actions})"
             ))
         }
         // A review fail (or a failed merge) is settled where it can be:
