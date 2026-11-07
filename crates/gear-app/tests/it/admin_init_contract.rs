@@ -1061,3 +1061,37 @@ fn a_second_project_on_one_repo_gets_its_own_integration_branch_by_default() {
     let again = [others[0].clone(), ("beta".to_string(), beta.clone())];
     assert_eq!(gear_app::admin::with_own_integration(&beta, &again), None);
 }
+
+/// T-672: a model whose context window nobody knows — no `context_window_k`
+/// and a CLI that does not report one — is warned about, once per model, and
+/// never refused.
+#[test]
+fn a_model_without_a_known_window_is_warned() {
+    let mut s = Store::open_in_memory().unwrap();
+    let home = home_with_skills();
+    std::fs::create_dir_all(home.path().join(".pi/agent")).unwrap();
+    std::fs::write(
+        home.path().join(".pi/agent/models.json"),
+        r#"{"providers":{"prov":{"models":[{"id":"known","contextWindow":128000}]}}}"#,
+    )
+    .unwrap();
+    let config = format!(
+        "{CONFIG}\n[models]\nlanes = [{{ model = \"prov/known\", cli = \"pi\" }}, {{ model = \"prov/unknown\", cli = \"pi\" }}, {{ model = \"prov/sized\", cli = \"pi\", context_window_k = 200 }}]\n"
+    );
+    let r = init_with_home(&mut s, &admin(), &config, Some(home.path()), false, T0).unwrap();
+    assert_eq!(
+        r.window_warnings,
+        vec![
+            "model prov/unknown has no context_window_k and pi does not report its window: GEAR will not compact its sessions; set context_window_k"
+        ]
+    );
+}
+
+/// T-672: a config with no model chain has no model to warn about.
+#[test]
+fn no_model_chain_no_window_warning() {
+    let mut s = Store::open_in_memory().unwrap();
+    let home = home_with_skills();
+    let r = init_with_home(&mut s, &admin(), CONFIG, Some(home.path()), false, T0).unwrap();
+    assert!(r.window_warnings.is_empty(), "{:?}", r.window_warnings);
+}
