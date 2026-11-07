@@ -804,6 +804,34 @@ fn an_instruction_sent_during_an_attempt_handed_in_later_is_no_help() {
 }
 
 #[test]
+fn an_instruction_sent_during_the_last_task_of_a_landed_voyage_is_no_help() {
+    // T-680: the task is done and has no milestone, so it is not live; its
+    // work span still bounds an instruction sent while the lane worked it.
+    let mut store = world_with_captain();
+    task_on(&mut store, "T-2", LANE, 1, TaskState::Done);
+    attempt(&mut store, "T-2", 1, AttemptState::Accepted);
+    store
+        .write(|tx| {
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::Started, T0)?;
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::HandedIn, T0 + 120)?;
+            tx.set_attempt_time("p", "T-2", 1, gear_store::AttemptStep::Merged, T0 + 150)?;
+            Ok(())
+        })
+        .unwrap();
+    message(
+        &mut store,
+        MsgKind::Instruction,
+        "p:captain",
+        Some("T-2"),
+        "Read the log of T-2 and send mast the failing line please",
+        None,
+        T0 + 60,
+    );
+
+    assert_eq!(help_of(&mut store, T0 + 200), None);
+}
+
+#[test]
 fn an_instruction_sent_before_the_attempt_started_is_still_help() {
     // The lane held no attempt when the instruction came: it still has to
     // answer it until the reply or the limit.

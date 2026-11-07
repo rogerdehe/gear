@@ -2423,6 +2423,26 @@ impl<'s> Tx<'s> {
         Ok(tasks)
     }
 
+    /// The project's finished tasks (done, failed, cancelled) whose row changed
+    /// at or after `since`: a landed voyage's last tasks, which
+    /// `tasks_live_of_project` no longer returns.
+    pub fn tasks_finished_since(&self, project: &str, since: Ts) -> GearResult<Vec<TaskRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(&task_select(
+                " WHERE project=?1 AND state IN ('done', 'failed', 'cancelled') AND updated >= ?2 ORDER BY rank, id",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, since], task_from_row)
+            .map_err(map_sqlite)?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row.map_err(map_sqlite)?);
+        }
+        Ok(tasks)
+    }
+
     /// The project's live tasks, in rank then id order (T-529): the ones that
     /// are not terminal, and the ones of a voyage that still has a task that is
     /// not — a finished voyage's tasks are history, not work.
