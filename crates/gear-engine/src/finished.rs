@@ -16,7 +16,7 @@
 use crate::merge;
 use gear_app::config::{ProjectConfig, Repo};
 use gear_herdr::{HerdrAct, Outcome};
-use gear_model::{GearResult, MsgKind, MsgState, Ts};
+use gear_model::{GearResult, MsgKind, MsgState, TaskState, Ts};
 use gear_store::{Store, Tx};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -221,7 +221,9 @@ const RECLAIM_WITHIN_S: i64 = 24 * 3600;
 /// integration branch (T-585), then every worktree of the project's
 /// repositories (its path named `<project>-…` or its branch `<project>/…`) is
 /// named to the captain in one item, until none is left. Read every
-/// `RECLAIM_EVERY_S`.
+/// `RECLAIM_EVERY_S`. A cancelled task's branch is deleted after its tip is
+/// recorded on thread `landing:<milestone>` as
+/// `T-<n> cancelled: <branch> at <sha>`, so its work stays recoverable.
 pub fn reclaim(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -271,6 +273,98 @@ pub fn reclaim(
                 Err(reason) => left.push(format!("worktree {} ({reason})", worktree.path)),
             }
         }
+        // T-655: a cancelled task's branch is deleted after its tip is
+        // recorded on thread `landing:<milestone>` as
+        // `T-<n> cancelled: <branch> at <sha>`, so its work stays recoverable.
+        // A branch a live task shares (a feature branch) keeps today's rule.
+        let mut handled: BTreeSet<String> = BTreeSet::new();
+        let cancelled: Vec<(String, String)> = store.read(|tx| {
+            let mut live = BTreeSet::new();
+            let mut cancelled = Vec::new();
+            for task in tx.tasks_of_project(project)? {
+                let Some(lane) = task.lane.as_deref() else {
+                    continue;
+                };
+                let branch = gear_app::base::task_branch_of(
+                    tx,
+                    &config.conventions,
+                    project,
+                    lane,
+                    &task.id,
+                )?;
+                if task.state == TaskState::Cancelled {
+                    if task.milestone.as_deref() != Some(milestone.as_str()) {
+                        continue;
+                    }
+                    if task.repo.as_deref().unwrap_or("") != repo.name {
+                        continue;
+                    }
+                    cancelled.push((task.id.clone(), branch));
+                } else {
+                    live.insert(branch);
+                }
+            }
+            Ok(cancelled
+                .into_iter()
+                .filter(|(_, branch)| !live.contains(branch))
+                .collect::<Vec<_>>())
+        })?;
+        for (task, branch) in cancelled {
+            if branch == repo.integration
+                || branch == repo.release
+                || branch == config.conventions.staging
+            {
+                continue;
+            }
+            let Some(sha) = remote_branch_tip(&repo.path, &config.conventions.remote, &branch)
+            else {
+                continue; // already gone
+            };
+            let line = format!("{task} cancelled: {branch} at {sha}");
+            let thread = format!("landing:{milestone}");
+            let recorded = store.write(|tx| {
+                if tx
+                    .thread_messages(project, &thread)?
+                    .iter()
+                    .any(|message| message.body == line)
+                {
+                    return Ok(true);
+                }
+                let Some(captain) = tx.captain_of(project)? else {
+                    return Ok(false);
+                };
+                tx.insert_message(&gear_store::NewMessage {
+                    meta: None,
+                    project: project.to_string(),
+                    thread: thread.clone(),
+                    task: Some(task.clone()),
+                    attempt: None,
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: captain.id,
+                    kind: gear_model::MsgKind::System,
+                    urgent: false,
+                    body: line.clone(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Resolved,
+                    created: now,
+                })?;
+                Ok(true)
+            })?;
+            if !recorded {
+                left.push(format!(
+                    "branch {branch} (cancelled {task}, not recorded: no captain)"
+                ));
+                continue;
+            }
+            if let Err(reason) =
+                delete_remote_branch(&repo.path, &config.conventions.remote, &branch)
+            {
+                left.push(format!("branch {branch} ({reason})"));
+            }
+            handled.insert(branch);
+        }
         // The release and staging branches outlive every voyage; the
         // integration branch is the voyage's and goes with it (a departure
         // cuts it again from the release branch).
@@ -282,6 +376,10 @@ pub fn reclaim(
                 continue;
             }
             if keep.contains(&branch.name.as_str()) {
+                continue;
+            }
+            // T-655: a cancelled task's branch was handled above.
+            if handled.contains(&branch.name) {
                 continue;
             }
             if branch_on_integration(&repo.path, &config, &branch.tip) {
@@ -1853,6 +1951,91 @@ gate = "true"
         assert!(item.body.contains("branch p/hull/t10"), "{}", item.body);
         assert!(item.body.contains("extra commits"), "{}", item.body);
         assert!(!item.body.contains("branch p/hull/t9"), "{}", item.body);
+    }
+
+    /// T-655: a cancelled task's branch is recorded on the landing's thread
+    /// with its tip, then deleted; a second reclaim records nothing again.
+    #[test]
+    fn a_cancelled_tasks_branch_is_recorded_then_deleted() {
+        let mut landed = Landed::new("cancelled");
+        sh(
+            &landed.work,
+            "git checkout -q -b hull/t10 dev && echo extra > extra.txt && git add extra.txt && \
+             git commit -q -m extra && git push -q origin hull/t10 && git checkout -q dev",
+        );
+        let sha = sh(&landed.work, "git rev-parse hull/t10")
+            .trim()
+            .to_string();
+        landed
+            .store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.id = "T-10".into();
+                task.rank = 10;
+                task.state = TaskState::Cancelled;
+                task.lane = Some("hull".into());
+                task.milestone = Some("M1".into());
+                tx.insert_task(&task)
+            })
+            .unwrap();
+
+        landed.reclaim(NOW + 600);
+
+        let branches = landed.origin_branches();
+        assert!(
+            !branches.contains("hull/t10"),
+            "the cancelled task's branch is deleted: {branches}"
+        );
+        let items = landed.items("landing:M1");
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].state, MsgState::Resolved);
+        assert_eq!(items[0].body, format!("T-10 cancelled: hull/t10 at {sha}"));
+        assert!(
+            landed
+                .items(RECLAIM_THREAD)
+                .iter()
+                .all(|item| !item.body.contains("hull/t10")),
+            "the reclaim names nothing about it"
+        );
+
+        landed.reclaim(NOW + 1200);
+        assert_eq!(landed.items("landing:M1").len(), 1, "no second record");
+    }
+
+    /// T-655: a done task's branch keeps today's rule: extra commits keep it
+    /// on the remote, and nothing is recorded on the landing's thread.
+    #[test]
+    fn a_done_tasks_branch_with_extra_commits_is_still_named() {
+        let mut landed = Landed::new("done-branch");
+        sh(
+            &landed.work,
+            "git checkout -q -b hull/t10 dev && echo extra > extra.txt && git add extra.txt && \
+             git commit -q -m extra && git push -q origin hull/t10 && git checkout -q dev",
+        );
+        landed
+            .store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.id = "T-10".into();
+                task.rank = 10;
+                task.state = TaskState::Done;
+                task.lane = Some("hull".into());
+                task.milestone = Some("M1".into());
+                tx.insert_task(&task)
+            })
+            .unwrap();
+
+        landed.reclaim(NOW + 600);
+
+        assert!(
+            landed.origin_branches().contains("hull/t10"),
+            "the done task's branch with extra commits stays: {}",
+            landed.origin_branches()
+        );
+        assert!(
+            landed.items("landing:M1").is_empty(),
+            "nothing is recorded for a done task"
+        );
     }
 
     /// A `herdr` on PATH whose `workspace list` names one workspace of the
