@@ -12,9 +12,13 @@
 //! told to do something it may not do. The profile carries the two deny
 //! lines as markers; the engine reads them off the screen and tells the
 //! captain once per spell, with the screen lines that say it.
+//!
+//! The refusal is judged only on the screen of an agent that stopped (idle,
+//! done or blocked): a working agent goes on after a refusal, and its screen
+//! neither opens nor closes the item.
 
 use crate::observe::{Presence, SeatObs};
-use gear_herdr::ScreenFlag;
+use gear_herdr::{AgentStatus, ScreenFlag};
 use gear_model::{GearResult, MsgKind, MsgState, SeatRole, SeatState, Ts};
 use gear_store::{NewMessage, Tx};
 
@@ -30,10 +34,11 @@ fn key(seat: &str) -> String {
 /// Ring the captain for every lane or reviewer seat whose screen shows a
 /// guardrails refusal. Returns the seat ids that were rung.
 ///
-/// One item per spell: the item is raised when the refusal first shows and
-/// is resolved when a later screen read shows no refusal any more. A screen
-/// that was not read (the agent works) changes nothing — a fact that was not
-/// looked at is not a fact that went away.
+/// One item per spell: the item is raised when the refusal first shows on the
+/// screen of an agent that stopped, and is resolved when a later screen read
+/// of a stopped agent shows no refusal any more. A working agent's screen
+/// neither opens nor closes the item: it goes on after a refusal, and a
+/// refusal that scrolls in and out of its tail rings at most once.
 pub fn check(tx: &Tx<'_>, project: &str, observed: &[SeatObs], now: Ts) -> GearResult<Vec<String>> {
     let mut rung = Vec::new();
     for obs in observed
@@ -44,16 +49,21 @@ pub fn check(tx: &Tx<'_>, project: &str, observed: &[SeatObs], now: Ts) -> GearR
             continue;
         };
         let key = key(&seat.id);
-        let refused = obs.presence == Presence::Present
+        let stopped = matches!(
+            obs.status,
+            Some(AgentStatus::Idle | AgentStatus::Done | AgentStatus::Blocked)
+        );
+        let refused = stopped
+            && obs.presence == Presence::Present
             && obs.flags.contains(&ScreenFlag::Blocked)
             && matches!(
                 seat.state,
                 SeatState::Active | SeatState::Standby | SeatState::Retiring
             );
         if !refused {
-            // The screen was read and shows no refusal (or the seat is gone):
-            // the spell is over.
-            if obs.screen.is_some() {
+            // The screen of a stopped agent was read and shows no refusal (or
+            // the seat is gone): the spell is over.
+            if obs.screen.is_some() && stopped {
                 recover(tx, project, &key, now)?;
             }
             continue;

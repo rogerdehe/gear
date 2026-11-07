@@ -651,3 +651,41 @@ fn the_facts_are_short_and_name_the_plan_state() {
     );
     assert!(text.contains("no v* tags"), "{text}");
 }
+
+/// T-667: a landing order's next command names the item id, not the
+/// milestone: a decision line takes `station M-<n>`.
+#[test]
+fn a_landing_order_needs_land_by_its_id() {
+    let root = crate::scratch::temp("captain-handover-landing");
+    let mut s = world(&root);
+    let id = s
+        .write(|tx| {
+            let message = tx.insert_message(&NewMessage {
+                meta: None,
+                project: "p".into(),
+                thread: "station:M6".into(),
+                task: None,
+                attempt: None,
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: "p:captain".into(),
+                kind: MsgKind::System,
+                urgent: true,
+                body: "Voyage M6 is ready to land.".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: NOW,
+            })?;
+            tx.set_meta("station:p:M6:land", &message.id)?;
+            Ok(message.id)
+        })
+        .unwrap();
+    let facts = handover_facts(&mut s, &bare(), &root, &engine(), NOW).unwrap();
+    assert!(
+        facts.text.contains(&format!("station {id}: land)")),
+        "{}",
+        facts.text
+    );
+    assert!(!facts.text.contains("station M6:"), "{}", facts.text);
+}

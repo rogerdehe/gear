@@ -1051,3 +1051,58 @@ fn a_raise_below_the_configured_count_is_refused() {
         .unwrap()
         .is_none());
 }
+
+/// T-669: `- restart <lane>` records the restart request for an active lane,
+/// as it does for a reviewer; any other lane state is refused.
+#[test]
+fn restart_records_a_lanes_request() {
+    // `run_at` applies against the plan version the store holds: the second
+    // apply must reach the seat check, not a stale-version refusal.
+    fn run_at(
+        s: &mut Store,
+        staff: &str,
+        rid: &str,
+    ) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+        let base = s.read(|tx| tx.plan_version("p")).unwrap();
+        let text = format!("<!-- gear-plan project=p base={base} -->\n# Staff\n{staff}");
+        let env = Env {
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "captain".into(),
+                generation: 1,
+            }),
+            pane_id: Some(CAP.into()),
+            admin: false,
+        };
+        let fp = Fingerprint {
+            pane_id: CAP.into(),
+            kind: Some("codex".into()),
+            session_ref: None,
+        };
+        apply(
+            s,
+            &env,
+            Some(&fp),
+            None,
+            &parse(&text).unwrap(),
+            &text,
+            rid,
+            T0 + 10,
+        )
+    }
+
+    let mut s = world();
+    run_at(&mut s, "- restart heat\n", "restart").unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_meta("engine.restart.p:heat")).unwrap(),
+        Some("{\"at\":1800000010}".to_string())
+    );
+    s.write(|tx| tx.set_seat_state("p:wire", SeatState::Held, Some("held"), T0))
+        .unwrap();
+    let error = run_at(&mut s, "- restart wire\n", "restart-held").unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadTransition, "{error:?}");
+    assert_eq!(
+        s.read(|tx| tx.get_meta("engine.restart.p:wire")).unwrap(),
+        None
+    );
+}

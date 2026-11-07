@@ -66,4 +66,15 @@ impl Forge for Local {
     fn create_label(&self, _repo: &str, _name: &str, _description: &str) -> ForgeResult<()> {
         Ok(())
     }
+
+    /// A project without a forge files nothing: 0 is no issue.
+    fn create_issue(
+        &self,
+        _repo: &str,
+        _title: &str,
+        _body: &str,
+        _labels: &[String],
+    ) -> ForgeResult<u64> {
+        Ok(0)
+    }
 }

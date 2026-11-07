@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 
 use gear_model::{GearResult, MsgKind, MsgState, OpKind, OpState, Ts};
 use gear_store::{NewMessage, NewOp, OpRow, Store, Tx, VoyageIssueRow, VoyageRow};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::marker;
 use crate::{Filter, Forge, ForgeResult, MergeMethod, PrRef};
@@ -89,7 +89,25 @@ pub fn sync_with(
         }
         None => None,
     };
-    if facts.is_empty() && label.is_none() && voyage.is_none() {
+    // T-664: the captain's issue requests, and the repo of the project root's
+    // `[github]`. A project without GitHub mode files nothing.
+    let (issue_repo, mut requests): (Option<String>, Vec<IssueRequest>) = store.read(|tx| {
+        let Some(row) = tx.get_project(project)? else {
+            return Ok((None, Vec::new()));
+        };
+        let Ok(config) = parse_config(&row.config_toml) else {
+            return Ok((None, Vec::new()));
+        };
+        let Some(github) = config.project_github() else {
+            return Ok((None, Vec::new()));
+        };
+        let requests = tx
+            .get_meta(&format!("forge.issue_requests.{project}"))?
+            .and_then(|raw| serde_json::from_str::<Vec<IssueRequest>>(&raw).ok())
+            .unwrap_or_default();
+        Ok((Some(github.repo), requests))
+    })?;
+    if facts.is_empty() && label.is_none() && voyage.is_none() && requests.is_empty() {
         return Ok(Vec::new());
     }
     let seat = forge_seat(project);
@@ -134,6 +152,48 @@ pub fn sync_with(
             Outcome::Pending => {}
         }
     }
+    // T-664: a captain's issue request is filed once, and its number recorded
+    // in the same key. A failed call is retried on the next tick; an unknown
+    // outcome is never repeated.
+    if let Some(repo) = issue_repo {
+        requests.sort_by_key(|request| request.id);
+        for request in requests.iter().filter(|request| request.number.is_none()) {
+            let call = Call {
+                key: format!("issue:{}", request.id),
+                task: format!("issue:{}", request.id),
+                attempt: None,
+                what: What::Issue {
+                    repo: repo.clone(),
+                    title: request.title.clone(),
+                    body: request.body.clone(),
+                    labels: request.labels.clone(),
+                },
+            };
+            match run_call(store, project, forge, &call, &mut ops, &mut budget, now)? {
+                Outcome::Done(result) => {
+                    if let Ok(number) = result.parse::<u64>() {
+                        record_issue_number(store, project, request.id, number)?;
+                        done.push(format!("{project}:issue:{}", request.id));
+                    }
+                }
+                // Confirmed on an earlier tick: the number is in the op's
+                // result, and the key may still lack it.
+                Outcome::Already => {
+                    let number = ops.get(&call.key).and_then(|ops| {
+                        ops.iter()
+                            .rev()
+                            .find(|op| op.state == OpState::Confirmed)
+                            .and_then(|op| op.result.as_deref())
+                            .and_then(|result| result.parse::<u64>().ok())
+                    });
+                    if let Some(number) = number {
+                        record_issue_number(store, project, request.id, number)?;
+                    }
+                }
+                Outcome::Pending => {}
+            }
+        }
+    }
     // The intake of the voyage's labeled issues (T-638): once the label is
     // created, at most every INTAKE_EVERY_S.
     if let Some((milestone, repo, label)) = &voyage {
@@ -160,6 +220,29 @@ pub fn sync_with(
         )?);
     }
     Ok(done)
+}
+
+/// T-664: record the number of a filed issue request in the project's one
+/// request key, in one write.
+fn record_issue_number(store: &mut Store, project: &str, id: u64, number: u64) -> GearResult<()> {
+    store.write(|tx| {
+        let key = format!("forge.issue_requests.{project}");
+        let Some(raw) = tx.get_meta(&key)? else {
+            return Ok(());
+        };
+        let Ok(mut requests) = serde_json::from_str::<Vec<IssueRequest>>(&raw) else {
+            return Ok(());
+        };
+        for request in &mut requests {
+            if request.id == id {
+                request.number = Some(number);
+            }
+        }
+        let text = serde_json::to_string(&requests).map_err(|e| {
+            gear_model::GearError::new(gear_model::ErrorCode::BadFormat, e.to_string())
+        })?;
+        tx.set_meta(&key, &text)
+    })
 }
 
 /// The pseudo-seat a project's forge ops belong to: the engine acts for the
@@ -242,6 +325,13 @@ enum What {
         name: String,
         description: String,
     },
+    /// A captain's issue request (T-664).
+    Issue {
+        repo: String,
+        title: String,
+        body: String,
+        labels: Vec<String>,
+    },
 }
 
 impl What {
@@ -251,8 +341,22 @@ impl What {
             What::Comment { .. } => "comment",
             What::Close { .. } => "close",
             What::Label { .. } => "label",
+            What::Issue { .. } => "issue",
         }
     }
+}
+
+/// A captain's issue request (T-664), as `gear issue file` writes it into
+/// `forge.issue_requests.<project>`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct IssueRequest {
+    id: u64,
+    title: String,
+    body: String,
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default)]
+    number: Option<u64>,
 }
 
 /// One task's calls: the claim first, then what the store says happened.
@@ -837,6 +941,14 @@ fn act(forge: &dyn Forge, what: &What) -> ForgeResult<String> {
         } => forge
             .create_label(repo, name, description)
             .map(|_| String::new()),
+        What::Issue {
+            repo,
+            title,
+            body,
+            labels,
+        } => forge
+            .create_issue(repo, title, body, labels)
+            .map(|number| number.to_string()),
     }
 }
 
@@ -1371,6 +1483,8 @@ mod tests {
         issues: RefCell<Vec<Issue>>,
         fail_issues: Cell<bool>,
         issue_filters: RefCell<Vec<(Vec<String>, u32)>>,
+        filed: RefCell<Vec<String>>,
+        fail_issue: Cell<bool>,
     }
 
     impl Recorder {
@@ -1445,6 +1559,23 @@ mod tests {
                 .borrow_mut()
                 .push(format!("label {repo} {name} | {description}"));
             Ok(())
+        }
+
+        fn create_issue(
+            &self,
+            repo: &str,
+            title: &str,
+            body: &str,
+            labels: &[String],
+        ) -> ForgeResult<u64> {
+            if self.fail_issue.replace(false) {
+                return Err(crate::Error::Failed("the forge refused".to_string()));
+            }
+            self.filed.borrow_mut().push(format!(
+                "issue {repo} {title} | {body} | {}",
+                labels.join(",")
+            ));
+            Ok(42)
         }
     }
 
@@ -1770,5 +1901,89 @@ mod tests {
 
         assert_eq!(forge.issue_filters().len(), 1, "one list");
         assert_eq!(items(&mut store, "intake:M1:#12").len(), 1);
+    }
+
+    fn request_meta(store: &mut Store) -> String {
+        store
+            .read(|tx| tx.get_meta("forge.issue_requests.p"))
+            .expect("the meta")
+            .expect("the key")
+    }
+
+    fn request_number(store: &mut Store) -> Option<u64> {
+        let raw = request_meta(store);
+        let requests: Vec<serde_json::Value> = serde_json::from_str(&raw).expect("the requests");
+        requests[0]["number"].as_u64()
+    }
+
+    /// T-664: a captain's issue request is filed once and its number recorded.
+    #[test]
+    fn an_issue_request_is_filed_once_and_its_number_recorded() {
+        let mut store = world(&github_config(""));
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    "forge.issue_requests.p",
+                    r#"[{"id":1,"title":"A bug","body":"steps","labels":["bug"],"number":null}]"#,
+                )
+            })
+            .expect("the request");
+        let forge = Recorder::default();
+
+        let done = tick(&mut store, &forge, T0 + 1);
+
+        assert_eq!(done, vec!["p:issue:1"], "{done:?}");
+        assert_eq!(
+            forge.filed.borrow().clone(),
+            vec!["issue owner/name A bug | steps | bug"]
+        );
+        assert_eq!(request_number(&mut store), Some(42));
+
+        let done = tick(&mut store, &forge, T0 + 2);
+        assert!(done.is_empty(), "{done:?}");
+        assert_eq!(forge.filed.borrow().len(), 1, "filed once");
+    }
+
+    /// T-664: a failed issue call is retried on the next tick.
+    #[test]
+    fn a_failed_issue_request_is_retried() {
+        let mut store = world(&github_config(""));
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    "forge.issue_requests.p",
+                    r#"[{"id":1,"title":"A bug","body":"steps","labels":["bug"],"number":null}]"#,
+                )
+            })
+            .expect("the request");
+        let forge = Recorder::default();
+        forge.fail_issue.set(true);
+
+        let done = tick(&mut store, &forge, T0 + 1);
+        assert!(done.is_empty(), "{done:?}");
+        assert_eq!(request_number(&mut store), None);
+
+        let done = tick(&mut store, &forge, T0 + 2);
+        assert_eq!(done, vec!["p:issue:1"], "{done:?}");
+        assert_eq!(request_number(&mut store), Some(42));
+    }
+
+    /// T-664: a project without GitHub mode files nothing.
+    #[test]
+    fn a_project_without_github_files_no_request() {
+        let mut store = world(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/tmp/gear-forge-fixture\"\n",
+        );
+        let raw = r#"[{"id":1,"title":"A bug","body":"steps","labels":["bug"],"number":null}]"#;
+        store
+            .write(|tx| tx.set_meta("forge.issue_requests.p", raw))
+            .expect("the request");
+        let forge = Recorder::default();
+
+        let done = tick(&mut store, &forge, T0 + 1);
+
+        assert!(done.is_empty(), "{done:?}");
+        assert!(forge.filed.borrow().is_empty());
+        assert_eq!(request_meta(&mut store), raw);
     }
 }

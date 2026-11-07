@@ -1522,10 +1522,14 @@ fn needs_of(
     plan_path: &str,
 ) -> GearResult<String> {
     if crate::station::is_station(message) {
-        let milestone = message.thread.trim_start_matches("station:");
+        let actions = crate::station::actions_of(tx, project, message)?;
         return Ok(format!(
-            "gear plan apply {plan_path} (# Decisions: station {milestone}: keep course|time-box|cut|move)"
+            "gear plan apply {plan_path} (# Decisions: station {}: {actions})",
+            message.id
         ));
+    }
+    if let Some(command) = crate::friction::close_hint(tx, project, message)? {
+        return Ok(command);
     }
     if message.needs_ack {
         return Ok(format!("gear send --kind ack --reply-to {}", message.id));

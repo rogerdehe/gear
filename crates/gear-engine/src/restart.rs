@@ -20,7 +20,7 @@
 use gear_app::config::ModelEntry;
 use gear_herdr::{AgentStatus, HerdrAct, Outcome, Profile};
 use gear_model::state::require_transition;
-use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, SeatState, Ts};
+use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, SeatState, Ts};
 use gear_store::{BindingRow, BindingStatus, SeatRow, Store};
 
 use crate::model::{model_meta_key, model_start, start_args};
@@ -306,6 +306,75 @@ pub(crate) fn advance(
     )
 }
 
+/// T-665: carry out the captain's `- restart <lane>` requests through the
+/// at-once restart path, on the lane's current model. A lane that is not
+/// `Active` keeps its flag for a later tick; the plan continues on later ticks
+/// through the pending-plan step.
+pub fn restart_lanes(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, Profile>,
+    project: &str,
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    let mut restarted = Vec::new();
+    for seat in store.read(|tx| tx.seats_of_project(project))? {
+        if seat.role != SeatRole::Lane || seat.state != SeatState::Active {
+            continue;
+        }
+        let flag = store
+            .read(|tx| tx.get_meta(&format!("engine.restart.{}", seat.id)))?
+            .filter(|value| !value.is_empty());
+        if flag.is_none() {
+            continue;
+        }
+        if pending(store, &seat.id)?.is_some() || crate::switch::pending(store, &seat.id)?.is_some()
+        {
+            continue;
+        }
+        let Some(cli) = current_cli(store, &seat)? else {
+            continue;
+        };
+        let config = gear_app::config::latest(store, project)?;
+        let chain = crate::model::role_chain(&config, &seat.name);
+        let model = store
+            .read(|tx| tx.get_meta(&model_meta_key(&seat.id)))?
+            .filter(|value| !value.is_empty())
+            .or_else(|| chain.first().map(|entry| entry.model().to_string()));
+        let Some(model) = model else {
+            continue;
+        };
+        let args = chain
+            .iter()
+            .find(|entry| entry.model() == model)
+            .map(|entry| entry.args().to_vec())
+            .unwrap_or_default();
+        let target = ModelEntry::Entry(gear_app::config::ModelSpec {
+            model,
+            cli: Some(cli),
+            args,
+            context_window_k: None,
+        });
+        // The flag and the plan share the key: consume the flag before the
+        // plan is written, so the plan is not wiped.
+        store.write(|tx| tx.set_meta(&format!("engine.restart.{}", seat.id), ""))?;
+        advance_when(
+            store,
+            herdr,
+            cfg,
+            profiles,
+            project,
+            &seat,
+            Some(&target),
+            When::AtOnce,
+            now,
+        )?;
+        restarted.push(seat.id.clone());
+    }
+    Ok(restarted)
+}
+
 /// [`advance`] with the switch's timing: an at-once switch tells the outgoing
 /// agent to wrap up and commit, waits `[timing].switch_grace_min` (default 10
 /// minutes), then exits it whether or not it handed in (T-465).
@@ -321,7 +390,23 @@ pub(crate) fn advance_when(
     now: Ts,
 ) -> GearResult<Option<String>> {
     let mut plan = match pending(store, &seat.id)? {
-        Some(plan) => plan,
+        Some(mut plan) => {
+            // T-661: a later `[timing] switch_at_once = true` speeds up a
+            // switch that is still waiting to stop. It is never downgraded: an
+            // at-once plan stays at-once, and a plan past `Phase::Stop` is
+            // left alone.
+            if plan.phase == Phase::Stop && !plan.at_once {
+                let at_once = gear_app::config::latest(store, project)
+                    .ok()
+                    .is_some_and(|config| config.timing.switch_at_once);
+                if at_once {
+                    plan.at_once = true;
+                    plan.grace_s = grace_seconds(store, project, When::AtOnce);
+                    set_pending(store, &seat.id, &plan)?;
+                }
+            }
+            plan
+        }
         None => {
             let entry = entry.ok_or_else(|| {
                 GearError::new(
@@ -4155,6 +4240,131 @@ switch_grace_min = 10
             pending(&mut store, "p:heat").unwrap().is_none(),
             "the restart finished"
         );
+    }
+
+    /// T-661: a later `[timing] switch_at_once = true` speeds up a switch that
+    /// is still waiting to stop.
+    #[test]
+    fn a_pending_switch_becomes_at_once_when_the_config_asks_for_it() {
+        let dir = dirty_worktree();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap());
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        herdr.set_status(PANE, AgentStatus::Working);
+        // The switch is made with `switch_at_once = false`: it waits for the
+        // next safe point.
+        store
+            .write(|tx| {
+                let mut p = tx.get_project("p")?.unwrap();
+                p.config_toml = config("codex", "new-model")
+                    .replace("switch_at_once = true", "switch_at_once = false");
+                p.config_version += 1;
+                tx.update_project(&p)
+            })
+            .unwrap();
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
+        let plan = pending(&mut store, "p:heat").unwrap().unwrap();
+        assert!(!plan.at_once, "{plan:?}");
+        assert_eq!(plan.phase, Phase::Stop, "{plan:?}");
+        assert!(
+            !herdr
+                .prompts_to(PANE)
+                .iter()
+                .any(|text| text.starts_with("Wrap up and commit now")),
+            "no wrap-up yet: {:?}",
+            herdr.calls
+        );
+
+        // The config asks for at-once now: the pending switch speeds up.
+        store
+            .write(|tx| {
+                let mut p = tx.get_project("p")?.unwrap();
+                p.config_toml = config("codex", "new-model");
+                p.config_version += 1;
+                tx.update_project(&p)
+            })
+            .unwrap();
+        advance_pending(&mut store, &mut herdr, &cfg, T + 2);
+        let plan = pending(&mut store, "p:heat").unwrap().unwrap();
+        assert!(plan.at_once, "{plan:?}");
+        assert_eq!(plan.grace_s, GRACE, "{plan:?}");
+        assert_eq!(
+            herdr
+                .prompts_to(PANE)
+                .iter()
+                .filter(|text| text.starts_with("Wrap up and commit now"))
+                .count(),
+            1,
+            "the wrap-up is sent once: {:?}",
+            herdr.calls
+        );
+    }
+
+    /// T-665: a lane the captain asked to restart wraps up at once, then
+    /// resumes on the same model.
+    #[test]
+    fn a_requested_lane_restart_wraps_up_then_resumes_the_same_model() {
+        let dir = dirty_worktree();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap());
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        store
+            .write(|tx| tx.set_meta("engine.restart.p:heat", "{\"at\":1800000000}"))
+            .unwrap();
+
+        let restarted =
+            restart_lanes(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
+        assert_eq!(restarted, vec!["p:heat".to_string()]);
+        let plan = pending(&mut store, "p:heat").unwrap().unwrap();
+        assert!(plan.at_once, "{plan:?}");
+        assert_eq!(plan.cli, "pi", "{plan:?}");
+        assert_eq!(plan.model, "old-model", "{plan:?}");
+        assert_eq!(plan.grace_s, GRACE, "{plan:?}");
+        assert!(
+            herdr
+                .prompts_to(PANE)
+                .iter()
+                .any(|text| text.starts_with("Wrap up and commit now")),
+            "the wrap-up is sent: {:?}",
+            herdr.calls
+        );
+        // The flag and the plan share the key: it now holds the plan.
+        assert!(
+            store
+                .read(|tx| tx.get_meta("engine.restart.p:heat"))
+                .unwrap()
+                .is_some_and(|raw| !raw.is_empty()),
+            "the plan is in the key"
+        );
+
+        let restarted =
+            restart_lanes(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 2).unwrap();
+        assert!(restarted.is_empty(), "{restarted:?}");
+
+        let wrap_at = plan.wrap_at;
+        advance_pending(&mut store, &mut herdr, &cfg, wrap_at + GRACE);
+        assert_eq!(quit_prompts(&herdr), 1, "the old agent is told to quit");
+    }
+
+    /// T-661: an at-once switch is never downgraded by a later config.
+    #[test]
+    fn a_pending_at_once_switch_is_never_downgraded() {
+        let dir = dirty_worktree();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap());
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        change_to_codex(&mut store);
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
+        store
+            .write(|tx| {
+                let mut p = tx.get_project("p")?.unwrap();
+                p.config_toml = config("codex", "new-model")
+                    .replace("switch_at_once = true", "switch_at_once = false");
+                p.config_version += 1;
+                tx.update_project(&p)
+            })
+            .unwrap();
+        herdr.set_status(PANE, AgentStatus::Working);
+        advance_pending(&mut store, &mut herdr, &cfg, T + 2);
+        let plan = pending(&mut store, "p:heat").unwrap().unwrap();
+        assert!(plan.at_once, "{plan:?}");
     }
 
     #[test]

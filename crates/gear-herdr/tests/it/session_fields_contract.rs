@@ -138,8 +138,12 @@ fn the_pi_profile_knows_the_provider_error() {
     // with `Error: Retry failed after 3 attempts: 529`. That is a provider
     // error, not a spent quota.
     let pi = builtin("pi").unwrap();
-    assert!(pi.error_markers.contains(&"overloaded_error".to_string()));
-    assert!(pi.error_markers.contains(&"Retry failed after".to_string()));
+    assert!(pi
+        .error_markers
+        .contains(&"^Error: *overloaded_error".to_string()));
+    assert!(pi
+        .error_markers
+        .contains(&"^Error: Retry failed after".to_string()));
     let overload = "Error: 529 {\"error\":{\"message\":\"overloaded_error\"}}";
     assert!(classify_screen(&pi, overload).contains(&ScreenFlag::Error));
     // It is not a spent quota: §9.2 reads the source to tell the two apart.
