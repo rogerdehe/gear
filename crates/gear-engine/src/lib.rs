@@ -990,6 +990,11 @@ pub fn tick(
             report.restarted.extend(release::restart_reviewers(
                 store, herdr, cfg, &profiles, &project, now,
             )?);
+            // T-665: a lane the captain asked to restart goes through the
+            // at-once path on its current model.
+            report.restarted.extend(restart::restart_lanes(
+                store, herdr, cfg, &profiles, &project, now,
+            )?);
             note_slow(report, "restart reviewers", step);
 
             // 8a. retire: a Retiring lane that is idle at a safe point says
