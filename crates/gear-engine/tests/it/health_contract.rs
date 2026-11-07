@@ -454,3 +454,88 @@ fn an_exit_that_was_not_delivered_is_said_in_the_item() {
     let seat = w.store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
     assert_eq!(seat.state, SeatState::NeedsCheck, "it is parked either way");
 }
+
+/// T-658: parentless processes left in a GEAR worktree that no live seat holds
+/// reach the captain as one item; the watch never touches them.
+#[test]
+fn orphans_in_gear_worktrees_open_one_item_and_are_never_touched() {
+    let orphan = |pid: u32, cwd: &str, age_s: f64| health::Orphan {
+        pid,
+        cpu_pct: 12.0,
+        age_s,
+        command: "cargo build".into(),
+        cwd: cwd.into(),
+    };
+    let mut w = world(vec![
+        Reading {
+            machine: fine_machine(),
+            orphans: vec![
+                orphan(700, "/wt/repo/p-old/target", 7380.0),
+                orphan(701, "/wt/repo/p-heat", 60.0),
+            ],
+            ..Default::default()
+        },
+        Reading {
+            machine: fine_machine(),
+            orphans: vec![
+                orphan(700, "/wt/repo/p-old/target", 7380.0),
+                orphan(701, "/wt/repo/p-heat", 60.0),
+            ],
+            ..Default::default()
+        },
+        Reading {
+            machine: fine_machine(),
+            ..Default::default()
+        },
+    ]);
+    w.store
+        .write(|tx| tx.set_meta("engine.worktree_path.p:heat", "/wt/repo/p-heat"))
+        .unwrap();
+
+    let report = run(&mut w, 0);
+    let messages = items(&mut w, "health:orphans:p");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert_eq!(messages[0].state, MsgState::Open);
+    assert!(messages[0].body.contains("pid 700"), "{}", messages[0].body);
+    assert!(
+        messages[0].body.contains("running 2h03m"),
+        "{}",
+        messages[0].body
+    );
+    assert!(
+        messages[0].body.contains("/wt/repo/p-old/target"),
+        "{}",
+        messages[0].body
+    );
+    assert!(
+        !messages[0].body.contains("pid 701"),
+        "{}",
+        messages[0].body
+    );
+    assert!(
+        report.health.iter().any(|line| line == "orphans:opened"),
+        "{:?}",
+        report.health
+    );
+    assert!(
+        !w.herdr
+            .calls
+            .iter()
+            .any(|call| matches!(call, Call::SendKeys { .. })),
+        "the watch sends no keys: {:?}",
+        w.herdr.calls
+    );
+
+    // The same orphans again: one item, unchanged.
+    let body = messages[0].body.clone();
+    run(&mut w, 60);
+    let messages = items(&mut w, "health:orphans:p");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert_eq!(messages[0].body, body);
+
+    // No orphan left: the item is resolved.
+    run(&mut w, 120);
+    let messages = items(&mut w, "health:orphans:p");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert_eq!(messages[0].state, MsgState::Resolved);
+}
