@@ -1786,6 +1786,16 @@ pub fn reply(
                         message.id, message.id,
                     )));
                 }
+                // The engine's friction item closes itself when its reports
+                // are closed (T-668); a note and a wait stay allowed.
+                if args.mode == ReplyMode::Resolve {
+                    if let Some(command) = crate::friction::close_hint(tx, &ctx.project, &message)? {
+                        return Err(GearError::new(ErrorCode::BadFormat, format!(
+                            "message {} closes itself when its friction reports are closed: next: {command}",
+                            message.id
+                        )));
+                    }
+                }
                 // A review fail (or a failed merge) is settled where it can
                 // be: by a plan line — a `# Verdicts` line, or a `# Staff`
                 // `- remerge T-<n>` line for a failed merge (B5). Resolving it

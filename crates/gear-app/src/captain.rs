@@ -1527,6 +1527,9 @@ fn needs_of(
             "gear plan apply {plan_path} (# Decisions: station {milestone}: keep course|time-box|cut|move)"
         ));
     }
+    if let Some(command) = crate::friction::close_hint(tx, project, message)? {
+        return Ok(command);
+    }
     if message.needs_ack {
         return Ok(format!("gear send --kind ack --reply-to {}", message.id));
     }

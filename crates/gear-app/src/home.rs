@@ -520,11 +520,16 @@ fn next_command(
         }
         // A review fail (or a failed merge) is settled where it can be:
         // by a `# Verdicts` line, not by a reply (T-90).
-        Some(message) => match crate::tasks::verdict_hint(tx, project, &message)? {
-            Some(hint) => Ok(format!("next: {}", verdict_command(&hint))),
-            None => Ok(format!(
-                "next: gear reply {shown} --resolve -m \"<what was done>\""
-            )),
+        Some(message) => match crate::friction::close_hint(tx, project, &message)? {
+            // The engine's friction item closes when its reports are closed
+            // (T-668).
+            Some(command) => Ok(format!("next: {command}")),
+            None => match crate::tasks::verdict_hint(tx, project, &message)? {
+                Some(hint) => Ok(format!("next: {}", verdict_command(&hint))),
+                None => Ok(format!(
+                    "next: gear reply {shown} --resolve -m \"<what was done>\""
+                )),
+            },
         },
         None => Ok(format!(
             "next: gear reply {shown} --resolve -m \"<what was done>\""
