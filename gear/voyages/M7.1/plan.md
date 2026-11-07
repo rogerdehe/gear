@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1280 -->
+<!-- gear-plan project=gear base=1281 -->
 # Goal
 GEAR's features are stable: every reasonable item left in the backlog is done or decided, the surfaces agree on when a voyage is finished, and the result ships as v0.7.0, live for every project on this machine.
 
@@ -9,6 +9,14 @@ eta: 4h
 depart: now
 
 # Decisions
+- station M-8885: land | why: all 32 M7.1 tasks are merged on dev (T-679 last); the six done clauses are met below; released as v0.7.0, live in both engines
+- done (1): met | evidence: T-653 (inline ring carries the goal once), T-667 (land order hint offers land), T-668 (friction hint names gear friction close, resolve refused), T-670 (board landed only after `land`) merged; full gate 2783 tests pass
+- done (2): met | evidence: T-652 merged: stale feature stamps no longer keep a seat from a light check; the carrier packet names unchecked members (T-652 tests)
+- done (3): met | evidence: T-656/T-666 merged and live: at the v0.7.0 start the selyra engine pruned carthage 142 -> 20 and prometheus 1429 -> 20 plan versions; T-655 (cancelled branches recorded then deleted), T-657/T-658 (orphans reported, never killed), T-681 (skill copies stamped: ~/.claude and ~/.pi copies read 0.7.0) merged
+- done (4): met | evidence: T-669/T-665 (- restart <lane>), T-673/T-674 (rebind per transaction, repo=.), T-671 (urgent move/cancel), T-675 (hand-in outside owns flagged), T-660 (merge wait names the way out), T-661 (switch_at_once upgrade), T-672 (init window warning), T-663/T-664/T-683 (gear issue file) merged
+- done (5): met | evidence: T-676 (Codex writer-lock blocked), T-677/T-678/T-679 (anchored markers for pi, Codex, OpenCode), T-654 (guardrail rings when stopped), T-680 (idle view span), T-662 (agy unknown), T-659 (health cost test) merged
+- done (6): met | evidence: v0.7.0 tagged and released (notes cover M7 and M7.1), installed, skills reinstalled for claude, codex, pi, opencode, grok, agy and codex-home; both engines started 0.7.0 at 02:57Z by themselves; Lawrence's captain told
+- 2026-11-07 03:00 note: voyage report: 32 of 32 tasks merged in about 100m against the 4h eta, no goal change, nothing cut; reworks: T-683 and T-678 (acceptance tests not written), T-670's fail overturned (misread contract); two staff moves to keep hull busy (T-680 with gear-board/gear-store, gear-cli); no separate audit slices were planned: each clause rests on its tasks' reviews and the full gate; lessons in gear/voyages/M7.1/lessons.md | why: the landing record
 - station M-8872: keep course | why: 30 done at 82m, projected 90m from departure against the 4h eta; hull idle, so T-683's rework moves to hull (below)
 - 2026-11-07 02:45 staff: crates/gear-cli moves to hull with T-683 | why: hull was idle; T-683's rework had already passed when the move applied, so only the owns change remains; mast holds T-679 and T-678's rework, both in gear-herdr
 - 2026-11-07 rework: T-678 attempt 1 failed review: its named acceptance test was not written | why: the markers are anchored correctly; the test proving tool output does not match is the deliverable's evidence
