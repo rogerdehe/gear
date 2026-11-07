@@ -32,6 +32,7 @@ fn a_local_forge_opens_nothing_and_says_so() {
     forge
         .create_label("owner/name", "p/milestone", "nothing to label")
         .expect("nothing to label");
+    assert_eq!(forge.create_issue("owner/name", "t", "b", &[]).unwrap(), 0);
 }
 
 #[test]
