@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1263 -->
+<!-- gear-plan project=gear base=1264 -->
 # Goal
 GEAR's features are stable: every reasonable item left in the backlog is done or decided, the surfaces agree on when a voyage is finished, and the result ships as v0.7.0, live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 4h
 depart: now
 
 # Decisions
+- station M-8686: keep course | why: 6 done at 18m, projected 98m from departure against the 4h eta; hull 80m, mast 60m, close enough that no move pays
 - station M-8672: keep course | why: 3 done at 15m, projected 108m from departure against the 4h eta; hull 93m and mast 90m are balanced
 - 2026-11-07 01:15 confirmed: M7.1 departure, not departed -> departs now with the scope above, eta 4h | why: the user asked for one voyage that clears every reasonable backlog item, drops what is not GEAR's job, and ships v0.7.0 to make the features stable
 - 2026-11-07 scope: the M7 backlog was checked item by item against the code at v0.6.114; about forty items were already fixed (most in v0.6.0-v0.6.2, M6.1-M7) and leave the backlog | why: each was confirmed in the code or a release note
