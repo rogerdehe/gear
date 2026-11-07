@@ -1,6 +1,6 @@
 //! Contract for gear_herdr::builtin (T-56).
 
-use gear_herdr::{builtin, classify_screen, ScreenFlag};
+use gear_herdr::{builtin, classify_screen, Profile, ScreenFlag};
 
 #[test]
 fn opencode_is_built_in_and_verified() {
@@ -262,4 +262,45 @@ fn the_pi_guardrails_refusals_are_recognised() {
     .contains(&ScreenFlag::Blocked));
     // Ordinary output is not a refusal.
     assert!(!classify_screen(&p, " Took 0.0s\n done-sleeping").contains(&ScreenFlag::Blocked));
+}
+
+/// T-677: pi's markers are anchored to the line shape the CLI draws, so the
+/// same text inside tool output — a grep of GEAR's source, a quoted test line —
+/// raises no flag.
+#[test]
+fn pi_markers_inside_tool_output_do_not_match() {
+    let pi = builtin("pi").unwrap();
+    for line in [
+        " crates/gear-herdr/src/profile.rs:723:                \"is blocked (outside working directory)\".into(),",
+        "   /// and `Access to <path> is blocked (outside working directory).`",
+        "            backoff_markers: vec![\"Retrying (\".into()],",
+        " $ rg -n 'Retrying \\(\' crates",
+        " const QUOTA_SCREEN: &str = \"429: {\\\"type\\\":\\\"insufficient_quota\\\"}\";",
+        " - auth `No API key found for`",
+        "     assert!(pi.error_markers.contains(&\"Retry failed after\".to_string()));",
+        "   println!(\"Command auto-denied: x\");",
+    ] {
+        assert!(
+            classify_screen(&pi, line).is_empty(),
+            "{line:?} raised {:?}",
+            classify_screen(&pi, line)
+        );
+    }
+}
+
+/// T-677: an unanchored marker still matches anywhere; an anchored one only
+/// at the line's shape.
+#[test]
+fn an_unanchored_marker_still_matches_anywhere() {
+    let anywhere = Profile {
+        blocked_markers: vec!["denied by policy".into()],
+        ..Profile::for_new()
+    };
+    assert!(classify_screen(&anywhere, "x: \"denied by policy\"").contains(&ScreenFlag::Blocked));
+    let anchored = Profile {
+        blocked_markers: vec!["^denied by policy".into()],
+        ..Profile::for_new()
+    };
+    assert!(!classify_screen(&anchored, "x: \"denied by policy\"").contains(&ScreenFlag::Blocked));
+    assert!(classify_screen(&anchored, "  ⚠ denied by policy now").contains(&ScreenFlag::Blocked));
 }

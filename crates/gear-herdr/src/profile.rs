@@ -42,6 +42,11 @@ pub struct Profile {
     /// Kept so that an old config still loads; it decides nothing any more
     /// (§10.2: whether an agent is busy is Herdr's state, never the screen).
     pub busy_markers: Vec<String>,
+    /// A marker matches a line as a literal substring, unless it starts with
+    /// `^`: then it is anchored to the line's shape — the line, after its
+    /// leading frame and spinner glyphs, must start with the text after `^`,
+    /// and a `*` in the marker splits head and tail (the rest after the head
+    /// must contain the tail).
     pub ratelimit_markers: Vec<String>,
     pub quota_markers: Vec<String>,
     /// Footer-only captain quota detection. Conversation markers never apply.
@@ -109,7 +114,11 @@ pub struct Profile {
 }
 
 /// Flags present in the last `profile.tail_lines` lines of `tail`.
-/// Matching is literal substring per line (no regex). Pure function.
+/// A marker matches a line as a literal substring, unless it starts with `^`:
+/// then it is anchored to the line's shape — the line, after its leading frame
+/// and spinner glyphs, must start with the text after `^`, and a `*` in the
+/// marker splits head and tail (the rest after the head must contain the tail).
+/// Pure function.
 ///
 /// Only the tail window is inspected: an error that scrolled out of it is not
 /// a current fact. Empty markers are ignored (they would match every line).
@@ -192,7 +201,7 @@ pub fn validate_template(profile: &Profile, template: &str) -> Result<(), String
             if marker.is_empty() {
                 continue;
             }
-            if template.contains(marker.as_str()) {
+            if template.lines().any(|line| marker_matches(marker, line)) {
                 return Err(format!(
                     "template must not contain the {kind} marker: {marker}"
                 ));
@@ -202,11 +211,29 @@ pub fn validate_template(profile: &Profile, template: &str) -> Result<(), String
     Ok(())
 }
 
-/// Literal substring match of `line` against a marker list.
+/// Whether `marker` matches `line`: a literal substring, unless the marker
+/// starts with `^`, which anchors it to the line's shape (its leading frame
+/// and spinner glyphs stripped; a `*` splits head and tail).
+fn marker_matches(marker: &str, line: &str) -> bool {
+    if marker.is_empty() {
+        return false;
+    }
+    let Some(anchored) = marker.strip_prefix('^') else {
+        return line.contains(marker);
+    };
+    let text = line
+        .trim_start_matches(|c: char| c.is_whitespace() || (!c.is_ascii() && !c.is_alphanumeric()));
+    match anchored.split_once('*') {
+        Some((head, tail)) => text
+            .strip_prefix(head)
+            .is_some_and(|rest| rest.contains(tail)),
+        None => text.starts_with(anchored),
+    }
+}
+
+/// Whether any marker of the list matches `line`.
 fn matches_any(markers: &[String], line: &str) -> bool {
-    markers
-        .iter()
-        .any(|m| !m.is_empty() && line.contains(m.as_str()))
+    markers.iter().any(|m| marker_matches(m, line))
 }
 
 /// Built-in profile for an agent kind, from the verified facts in
@@ -238,11 +265,15 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// true; resume `["-r", "{session}"]`; exit by the `/exit` command
 /// (`exit_command`, no keys). The session fields are empty: grok is not one
 /// of the kinds of §2 and its live checks were never run (M4).
-/// pi: quota `insufficient_quota`;
-/// rate limit `rate_limit_error`; auth `No API key found for`; back-off
-/// `Retrying (`; provider error `overloaded_error` and `Retry failed after`
-/// (§12 item 6); guardrails `Command auto-denied:` and
-/// `is blocked (outside working directory)`; unattended `--approve`;
+/// pi: quota `^Error: *insufficient_quota`, `^429: *insufficient_quota`,
+/// `^Error: *exceeded your current quota` and `^429: *exceeded your current
+/// quota`; rate limit `^Error: *rate_limit_error`, `^429: *rate_limit_error`,
+/// `^Error: *Rate limit reached`, `^429: *Rate limit reached`, `^Error: 429:`
+/// and `^429:`; auth `^Error: No API key found for`; back-off `^Retrying (`;
+/// provider error `^Error: *overloaded_error` and `^Error: Retry failed after`
+/// (§12 item 6); guardrails `^Command auto-denied:` and
+/// `^Access to *is blocked (outside working directory)`; unattended
+/// `--approve`;
 /// session_ref true (Herdr reports the session file); resume
 /// `["--session", "{session}"]`; exit by the `/quit` command
 /// (`exit_command`, no keys); new session `/new`; compact `/compact`;
@@ -746,27 +777,35 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             kind: "pi".into(),
             busy_markers: vec![" Working".into()],
             ratelimit_markers: vec![
-                "rate_limit_error".into(),
-                "Rate limit reached".into(),
-                "429:".into(),
+                "^Error: *rate_limit_error".into(),
+                "^429: *rate_limit_error".into(),
+                "^Error: *Rate limit reached".into(),
+                "^429: *Rate limit reached".into(),
+                "^Error: 429:".into(),
+                "^429:".into(),
             ],
             quota_markers: vec![
-                "insufficient_quota".into(),
-                "exceeded your current quota".into(),
+                "^Error: *insufficient_quota".into(),
+                "^429: *insufficient_quota".into(),
+                "^Error: *exceeded your current quota".into(),
+                "^429: *exceeded your current quota".into(),
             ],
             quota_bar: None,
-            auth_markers: vec!["No API key found for".into()],
-            backoff_markers: vec!["Retrying (".into()],
+            auth_markers: vec!["^Error: No API key found for".into()],
+            backoff_markers: vec!["^Retrying (".into()],
             blocked_markers: vec![
-                "Command auto-denied:".into(),
-                "is blocked (outside working directory)".into(),
+                "^Command auto-denied:".into(),
+                "^Access to *is blocked (outside working directory)".into(),
             ],
             // M4 §12 item 6: the provider answered with an overload error
             // (`529 … overloaded_error`) and pi gave up after three tries
             // (`Error: Retry failed after 3 attempts: 529`). That is a
             // provider error, not a spent quota: §9.2 reads the quota source
             // to tell the two apart.
-            error_markers: vec!["overloaded_error".into(), "Retry failed after".into()],
+            error_markers: vec![
+                "^Error: *overloaded_error".into(),
+                "^Error: Retry failed after".into(),
+            ],
             refusal_markers: vec![
                 "inappropriate content".into(),
                 "content_filter".into(),
