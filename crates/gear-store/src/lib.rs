@@ -2282,6 +2282,19 @@ impl<'s> Tx<'s> {
         Ok(())
     }
 
+    /// T-646 follow-up: keep the newest `PLAN_VERSIONS_KEPT` versions of every
+    /// project in the store; returns how many rows were deleted. The engine
+    /// calls it once a day.
+    pub fn prune_plan_versions(&self) -> GearResult<usize> {
+        self.tx
+            .execute(
+                "DELETE FROM plans WHERE version <= (SELECT MAX(p2.version) FROM plans p2
+                 WHERE p2.project = plans.project) - ?1",
+                params![PLAN_VERSIONS_KEPT],
+            )
+            .map_err(map_sqlite)
+    }
+
     /// The oldest stored plan version of the project; `None` when it has none
     /// (T-646: the history may be pruned).
     pub fn oldest_plan_version(&self, project: &str) -> GearResult<Option<i64>> {
