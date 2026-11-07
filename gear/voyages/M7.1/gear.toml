@@ -22,8 +22,8 @@ profile = "claude"
 # M7.1: two lanes; hull owns all of gear-engine again (finished.rs included) with forge, model and usage; M6.2: on DeepSeek V4.1 Flash via TokenRhythm (user, 2026-11-01: replaces the self-hosted hk-dgx-1 after its key was revoked), thinking high, 600K context.
 [[lanes]]
 name = "hull"
-duty = "M7.1 engine, forge, model and usage, and since 2026-11-07 02:00 board and store: crates/gear-engine, gear-forge, gear-model, gear-usage, gear-board, gear-store"
-owns = ["crates/gear-engine/", "crates/gear-forge/", "crates/gear-model/", "crates/gear-usage/", "crates/gear-board/", "crates/gear-store/"]
+duty = "M7.1 engine, forge, model and usage, and since 2026-11-07 02:00 board and store, since 02:45 CLI: crates/gear-engine, gear-forge, gear-model, gear-usage, gear-board, gear-store, gear-cli"
+owns = ["crates/gear-engine/", "crates/gear-forge/", "crates/gear-model/", "crates/gear-usage/", "crates/gear-board/", "crates/gear-store/", "crates/gear-cli/"]
 charter = """You run on a flash model. Implement the packet exactly as written, in the files it names; never design, widen or reinterpret it. When the packet is unclear, contradicts the code, or cannot be done as written, ask the captain with `gear send --kind question` and give a default, instead of guessing."""
 kind = "pi"
 profile = "pi"
@@ -33,8 +33,8 @@ models = [
 
 [[lanes]]
 name = "mast"
-duty = "M7.1 app, CLI, herdr, skills, docs and build files: everything outside hull's crates"
-owns = ["crates/gear-app/", "crates/gear-cli/", "crates/gear-herdr/", "skills/", "Makefile", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml", "Cargo.lock"]
+duty = "M7.1 app, herdr, skills, docs and build files: everything outside hull's crates"
+owns = ["crates/gear-app/", "crates/gear-herdr/", "skills/", "Makefile", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml", "Cargo.lock"]
 charter = """You run on a flash model. Implement the packet exactly as written, in the files it names; never design, widen or reinterpret it. When the packet is unclear, contradicts the code, or cannot be done as written, ask the captain with `gear send --kind question` and give a default, instead of guessing."""
 kind = "pi"
 profile = "pi"

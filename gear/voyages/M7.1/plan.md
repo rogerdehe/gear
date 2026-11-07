@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1278 -->
+<!-- gear-plan project=gear base=1280 -->
 # Goal
 GEAR's features are stable: every reasonable item left in the backlog is done or decided, the surfaces agree on when a voyage is finished, and the result ships as v0.7.0, live for every project on this machine.
 
@@ -9,6 +9,8 @@ eta: 4h
 depart: now
 
 # Decisions
+- station M-8872: keep course | why: 30 done at 82m, projected 90m from departure against the 4h eta; hull idle, so T-683's rework moves to hull (below)
+- 2026-11-07 02:45 staff: crates/gear-cli moves to hull with T-683 | why: hull was idle; T-683's rework had already passed when the move applied, so only the owns change remains; mast holds T-679 and T-678's rework, both in gear-herdr
 - 2026-11-07 rework: T-678 attempt 1 failed review: its named acceptance test was not written | why: the markers are anchored correctly; the test proving tool output does not match is the deliverable's evidence
 - 2026-11-07 rework: T-683 attempt 1 failed review: the acceptance's test module was not written (the lane read the accept as empty) | why: the implementation is right; mast adds the three named tests
 - 2026-11-07 hand-fix: T-680's branch rebuilt as its approved candidate plus report and review commit; b33ee221 (pushed after the pass, from my late answer to M-8836) dropped | why: the reviewed candidate's span rule (steps first, the row time as fallback) matches its comment and passed review; remerge T-680
@@ -221,7 +223,7 @@ accept: The bullet exists once in skills/gear/references/rules/lane.md. The char
 estimate: 10
 deps: -
 
-## T-683 [should] lane=mast milestone=M7.1 required
+## T-683 [should] lane=hull milestone=M7.1 required
 goal: The captain files a bug issue through the engine: `gear issue file --title <t> --body <b> [--label <l>]...` and `gear issue show <id>`. crates/gear-cli/src/main.rs: `Cmd` (~41) gets `/// Captain: file an issue on the project's forge (the engine files it).` `Issue { #[command(subcommand)] op: IssueOp }`; `enum IssueOp { File { #[arg(long)] title: String, #[arg(long)] body: String, #[arg(long = "label")] labels: Vec<String> }, Show { id: u64 } }`; dispatch in `run` (~530) like the `Cmd::Plan` arms. `fn run_issue_file(store, env, title, body, labels) -> GearResult<(u64, String)>`: the caller check and GitHub-mode check exactly as `run_import_issues` (~3008-3046) does, with the command name `gear issue file`; then in ONE `store.write`: read meta `forge.issue_requests.{project}` (absent → `[]`; a value that does not parse → BadFormat error `the issue requests of {project} do not parse`), `id` = highest id + 1 (1 when empty), push `{"id":id,"title":title,"body":body,"labels":labels,"number":null}`, write it back; return (id, repo). Prints `issue request {id} recorded: the engine files it on {repo} and records its number; \`gear issue show {id}\` shows it.` (`--json`: `{"id":id,"repo":repo}`). `gear issue show <id>` (captain or any registered seat of the project, read-only): `issue request {id}: filed as #{number}` or `issue request {id}: waiting for the engine`; an id not in the array → NoTarget `no issue request {id} in project {project}`. The CLI never runs `gh`; the engine (T-664) is the only GitHub writer. Write any text that spells a `gh` write command with the edit tool, never a shell heredoc.
 accept: new crates/gear-cli/tests/it/issue_file_contract.rs (add `mod issue_file_contract;` to crates/gear-cli/tests/it/main.rs), built like crates/gear-cli/tests/it/import_issues_contract.rs (`store_with_plan`-style GitHub world, `Command::new(env!("CARGO_BIN_EXE_gear"))` with `GEAR_DB`, `GEAR_CTX=p:captain:1`, `HOME`): `a_captain_files_an_issue_request`: `gear issue file --title "A bug" --body "steps" --label bug` succeeds, stdout contains `issue request 1 recorded`, the store's `forge.issue_requests.p` holds one request with id 1, the label and `number` null; a second call gives id 2. `show_reads_the_number_once_filed`: set the key with `"number":42` → `gear issue show 1` prints `issue request 1: filed as #42`; `gear issue show 9` fails with `no issue request 9`. `a_project_without_github_refuses`: without `[github]` the command fails with `not in GitHub mode` and writes no key. Run only `make check CRATE=gear-cli TESTS='test(issue_file)'`; the merge gate runs `make gate`.
 estimate: 45
