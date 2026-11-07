@@ -176,6 +176,9 @@ fn send_inner(
     // The hand-in gate (T-19) runs before the transaction: a candidate that
     // does not contain the current integration branch is refused and nothing —
     // no message, no attempt change — is stored.
+    // T-675: a hand-in whose diff leaves the lane's files is flagged in the
+    // result's body, never refused.
+    let mut outside: Option<String> = None;
     if args.kind == MsgKind::Result && !direction {
         if let Some(gate) = &args.base {
             let candidate = args.candidate.as_deref().ok_or_else(|| {
@@ -237,6 +240,36 @@ fn send_inner(
                             &branch,
                             candidate,
                         )?;
+                        // T-675: the files the candidate changes that the
+                        // lane does not own are named to the captain. No
+                        // config, no `owns`, or a git that cannot tell → no
+                        // line.
+                        if let Ok(config) = crate::config::latest(store, &ctx.project) {
+                            if let Some(configured) = config.lanes.iter().find(|l| l.name == lane) {
+                                if !configured.owns.is_empty() {
+                                    let base = format!(
+                                        "refs/remotes/{}/{}",
+                                        conventions.remote, gate.integration
+                                    );
+                                    if let Some(files) =
+                                        crate::base::changed_files(&gate.worktree, &base, candidate)
+                                    {
+                                        let paths: Vec<String> = files
+                                            .into_iter()
+                                            .filter(|file| {
+                                                !crate::config::owns_path(&configured.owns, file)
+                                            })
+                                            .collect();
+                                        if !paths.is_empty() {
+                                            outside = Some(format!(
+                                                "outside lane {lane}'s files: {}",
+                                                paths.join(", ")
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -563,10 +596,16 @@ fn send_inner(
             // The body of a review is the verdict, the blocking findings by
             // title and where the full review is (T-641): the captain reads
             // the item, the rework lane reads the findings in the store.
-            let body = match &review {
+            let mut body = match &review {
                 Some(review) => review_body(review, handed_path.as_deref()),
                 None => args.body.clone(),
             };
+            // T-675: the captain reads what left the lane's files.
+            if args.kind == MsgKind::Result {
+                if let Some(line) = &outside {
+                    body = format!("{body}\n{line}");
+                }
+            }
 
             // A result submits the attempt before the message is stored; an
             // error here aborts the whole send, so nothing is kept.

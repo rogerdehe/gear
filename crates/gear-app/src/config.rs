@@ -2692,6 +2692,21 @@ fn paths_overlap(a: &str, b: &str) -> bool {
     false
 }
 
+/// Whether a lane's `owns` covers `path` (T-675): an entry that is the path
+/// itself, a directory entry (ending in `/`) that the path is under, or a path
+/// that starts with `<entry>/`.
+pub fn owns_path(owns: &[String], path: &str) -> bool {
+    owns.iter().any(|entry| {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return false;
+        }
+        entry == path
+            || (entry.ends_with('/') && path.starts_with(entry))
+            || path.starts_with(&format!("{entry}/"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2704,6 +2719,16 @@ mod tests {
         for bad in ["", "Heat", "9harbor", "a b", "a_b", "-a", "heat!"] {
             assert!(!is_name(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn owns_path_matches_on_a_boundary() {
+        let dir = vec!["src/heat/".to_string()];
+        assert!(owns_path(&dir, "src/heat/a.rs"));
+        let bare = vec!["src/heat".to_string()];
+        assert!(owns_path(&bare, "src/heat/a.rs"));
+        assert!(owns_path(&bare, "src/heat"));
+        assert!(!owns_path(&bare, "src/heatx.rs"));
     }
 
     #[test]
