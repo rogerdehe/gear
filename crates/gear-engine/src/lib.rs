@@ -263,6 +263,9 @@ pub struct TickReport {
     /// `project:task: CODE: detail` of the feature integration tasks that could
     /// not be handed in this tick; reported, never fatal.
     pub feature_failed: Vec<String>,
+    /// Old plan versions the daily prune deleted, or why it failed (T-646
+    /// follow-up).
+    pub plans: Vec<String>,
     /// The rounds that ended or learned a session this tick (design §4.1).
     pub rounds: crate::rounds::RoundReport,
     /// The steps of this tick that took over 200 ms, as `<step>: <ms> ms`
@@ -295,6 +298,29 @@ fn note_failed(
 /// The time past which a tick step is named in [`TickReport::slow`] (T-386).
 const SLOW_STEP_MS: u128 = 200;
 
+/// How often the engine prunes old plan versions of every project (T-646
+/// follow-up): once a day, captain running or not.
+const PLAN_PRUNE_EVERY_S: Ts = 24 * 3600;
+/// The meta key that says when the plans were last pruned.
+const PLAN_PRUNE_KEY: &str = "engine.plans_pruned";
+
+/// Prune old plan versions of every project, once a day (T-646 follow-up).
+/// The key is absent on the first tick of the first engine that runs this
+/// build, so it prunes at once (start), then every 24 h.
+pub fn prune_plans(store: &mut Store, now: Ts) -> GearResult<Option<usize>> {
+    let last = store
+        .read(|tx| tx.get_meta(PLAN_PRUNE_KEY))?
+        .and_then(|value| value.parse::<Ts>().ok());
+    if last.is_some_and(|last| 0 <= now - last && now - last < PLAN_PRUNE_EVERY_S) {
+        return Ok(None);
+    }
+    store.write(|tx| {
+        let n = tx.prune_plan_versions()?;
+        tx.set_meta(PLAN_PRUNE_KEY, &now.to_string())?;
+        Ok(Some(n))
+    })
+}
+
 /// Name a tick step that took longer than the budget (T-386):
 /// `<step>: <ms> ms`, printed with the rest of the report.
 fn note_slow(report: &mut TickReport, step: &str, started: std::time::Instant) {
@@ -317,6 +343,21 @@ pub fn tick(
     // return), so a spell is counted once per tick.
     let mut failed: std::collections::BTreeMap<String, gear_model::GearError> =
         std::collections::BTreeMap::new();
+
+    // T-646 follow-up: old plan versions of every project are pruned once a
+    // day, captain running or not. A failure is reported and the tick goes on.
+    let step = std::time::Instant::now();
+    match prune_plans(store, now) {
+        Ok(Some(n)) if n > 0 => report
+            .plans
+            .push(format!("{n} old plan version(s) deleted")),
+        Ok(_) => {}
+        Err(error) => report.plans.push(format!(
+            "plan prune failed: {}: {}",
+            error.code, error.detail
+        )),
+    }
+    note_slow(&mut report, "plan prune", step);
 
     // Settle recorded lane rebinds before onboarding or dispatch sees config.
     // T-243: a project whose step fails is reported and the other projects go
@@ -2010,6 +2051,39 @@ review=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high
                 items[0].body
             );
         }
+    }
+}
+
+/// T-646 follow-up: the daily prune of old plan versions.
+#[cfg(test)]
+mod plan_prune_tests {
+    use super::*;
+    use gear_herdr::fake::FakeHerdr;
+
+    const T0: Ts = 1_900_000_000;
+
+    #[test]
+    fn prune_runs_at_start_and_then_once_a_day() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert_eq!(prune_plans(&mut store, T0).unwrap(), Some(0));
+        assert_eq!(
+            store.read(|tx| tx.get_meta(PLAN_PRUNE_KEY)).unwrap(),
+            Some(T0.to_string())
+        );
+        assert_eq!(prune_plans(&mut store, T0 + 3600).unwrap(), None);
+        assert_eq!(prune_plans(&mut store, T0 + 24 * 3600).unwrap(), Some(0));
+    }
+
+    #[test]
+    fn the_tick_reports_nothing_when_nothing_is_pruned() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut herdr = FakeHerdr::new();
+        let report = tick(&mut store, &mut herdr, &EngineCfg::default(), T0).unwrap();
+        assert!(report.plans.is_empty(), "{:?}", report.plans);
+        assert_eq!(
+            store.read(|tx| tx.get_meta(PLAN_PRUNE_KEY)).unwrap(),
+            Some(T0.to_string())
+        );
     }
 }
 
