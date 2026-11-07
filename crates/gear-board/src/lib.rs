@@ -2062,14 +2062,9 @@ fn voyage_entries(tx: &Tx<'_>, project: &str, tasks: &[TaskRow]) -> GearResult<V
                 .iter()
                 .filter(|task| task.milestone.as_deref() == Some(voyage.milestone.as_str()))
         };
-        // Sailing while some task of it is not settled: a done, failed or
-        // cancelled task is no work left.
-        let sailing = of_voyage().any(|task| {
-            !matches!(
-                task.state,
-                TaskState::Done | TaskState::Failed | TaskState::Cancelled
-            )
-        });
+        // Sailing until it is landed: every task terminal, its work merged and
+        // its land order answered `land` (T-670).
+        let sailing = !crate::stations::voyage_landed(tx, project, &voyage.milestone)?;
         // A landed voyage ended at the last merge of its tasks.
         let mut ended: Option<Ts> = None;
         if !sailing {
