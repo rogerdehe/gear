@@ -151,6 +151,28 @@ pub fn task_branch_of(
 /// fixed it by hand. The branch is fetched first, so the check is about the
 /// remote as it is now. `remote` is the project's `[conventions].remote`
 /// (T-257): `origin` unless the project names its own.
+/// The files a candidate changes against `base` (T-675): the non-empty lines
+/// of `git diff --name-only <base>...<candidate>`, `None` when git cannot tell
+/// (no repo, an unknown commit).
+pub fn changed_files(worktree: &Path, base: &str, candidate: &str) -> Option<Vec<String>> {
+    let output = Command::new("git")
+        .args(["diff", "--name-only", &format!("{base}...{candidate}")])
+        .current_dir(worktree)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    Some(
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
 pub fn require_pushed(
     worktree: &Path,
     remote: &str,
