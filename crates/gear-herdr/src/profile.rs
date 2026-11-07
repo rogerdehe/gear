@@ -239,8 +239,9 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// Built-in profile for an agent kind, from the verified facts in
 /// `gear --skill agent:<kind>` (design/04, /16). Only kinds with a verified SOP
 /// are built in: today `opencode`, `claude`, `codex`, `grok` and `pi` —
-/// opencode: quota `Session failed`, `Token Plan`, `(2056)`,
-/// `Free usage limit reached`; no rate-limit/auth markers yet; tail 16 lines,
+/// opencode: quota `^Session failed`, `^Error: *Token Plan`, `^Error: *(2056)`,
+/// `^Free usage limit reached`; back-off `^Retrying in ` and `^Retry due ·`;
+/// no rate-limit/auth markers yet; tail 16 lines,
 /// confirm 2 rounds; unattended `--auto`; session_ref false; resume
 /// `["-s", "{session}"]`; exit `["ctrl+c"]`; new session `/new`; compact
 /// `/compact`; usage log `opencode-db`; verified.
@@ -521,15 +522,15 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             busy_markers: vec!["esc interrupt".into()],
             ratelimit_markers: vec![],
             quota_markers: vec![
-                "Session failed".into(),
-                "Token Plan".into(),
-                "(2056)".into(),
-                "Free usage limit reached".into(),
+                "^Session failed".into(),
+                "^Error: *Token Plan".into(),
+                "^Error: *(2056)".into(),
+                "^Free usage limit reached".into(),
             ],
             quota_bar: None,
             auth_markers: vec![],
             // The retry line of a provider error: `⚠ Retrying in 3s · attempt 4 · Resource exhausted`, then `⚠ Retry due · attempt 5 · …`.
-            backoff_markers: vec!["Retrying in ".into(), "Retry due ·".into()],
+            backoff_markers: vec!["^Retrying in ".into(), "^Retry due ·".into()],
             blocked_markers: vec![],
             error_markers: vec![],
             refusal_markers: vec![
