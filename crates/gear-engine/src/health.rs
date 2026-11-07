@@ -94,6 +94,17 @@ pub struct Proc {
     pub command: String,
 }
 
+/// A process whose parent is gone (ppid 1) and whose cwd lies under a GEAR
+/// worktree root (T-657): named to the captain, never touched.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Orphan {
+    pub pid: u32,
+    pub cpu_pct: f64,
+    pub age_s: f64,
+    pub command: String,
+    pub cwd: String,
+}
+
 /// One sample of the machine and the fleet.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Reading {
@@ -102,6 +113,9 @@ pub struct Reading {
     pub seats: BTreeMap<String, SeatProcs>,
     /// The top processes outside the fleet, worst first.
     pub top: Vec<Proc>,
+    /// Processes whose parent is gone (ppid 1) and whose cwd lies under a GEAR
+    /// worktree root; never touched.
+    pub orphans: Vec<Orphan>,
 }
 
 /// Where a seat's processes start: Herdr's pane process info.
@@ -125,6 +139,7 @@ pub trait Read: Send + Sync + std::fmt::Debug {
         &self,
         panes: &BTreeMap<String, PaneProcs>,
         volumes: &[String],
+        roots: &[String],
     ) -> GearResult<Reading>;
 }
 
@@ -207,6 +222,53 @@ fn volumes_of(store: &mut Store, cfg: &crate::EngineCfg, project: &str) -> Vec<S
     volumes.sort();
     volumes.dedup();
     volumes
+}
+
+/// T-657: the worktree roots of `project` — the parent directories of the
+/// paths its seats' worktrees and review checkouts record. A value equal to a
+/// repo path is skipped (a review seat may record the repo itself), and so are
+/// `/` and empty parents. Sorted and deduped.
+fn worktree_roots(store: &mut Store, project: &str) -> GearResult<Vec<String>> {
+    let repo_paths: Vec<String> = store.read(|tx| {
+        let Some(row) = tx.get_project(project)? else {
+            return Ok(Vec::new());
+        };
+        Ok(gear_app::config::parse_row(&row)
+            .map(|config| {
+                config
+                    .repos()
+                    .into_iter()
+                    .map(|repo| repo.path)
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default())
+    })?;
+    let mut roots: Vec<String> = Vec::new();
+    for prefix in [
+        format!("engine.worktree_path.{project}:"),
+        format!("engine.worktree_path_repo.{project}:"),
+        format!("engine.review_path.{project}:"),
+    ] {
+        for key in store.read(|tx| tx.meta_keys_with_prefix(&prefix))? {
+            let Some(value) = store.read(|tx| tx.get_meta(&key))? else {
+                continue;
+            };
+            if value.is_empty() || repo_paths.iter().any(|path| path == &value) {
+                continue;
+            }
+            let Some(parent) = std::path::Path::new(&value).parent() else {
+                continue;
+            };
+            let parent = parent.to_string_lossy().into_owned();
+            if parent.is_empty() || parent == "/" {
+                continue;
+            }
+            roots.push(parent);
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
 }
 
 /// Whether the machine is short from this sample, and why.
@@ -349,7 +411,10 @@ pub fn check(
         );
     }
     let volumes = volumes_of(store, cfg, project);
-    let reading = match cfg.health.sample(&panes, &volumes) {
+    // T-657: the worktree roots this project's seats work under, so a
+    // parentless process left there is named.
+    let roots = worktree_roots(store, project)?;
+    let reading = match cfg.health.sample(&panes, &volumes, &roots) {
         Ok(reading) => reading,
         Err(error) => {
             // The watch is blind this minute, not quiet: the failure reaches
@@ -722,6 +787,7 @@ impl Read for SystemRead {
         &self,
         panes: &BTreeMap<String, PaneProcs>,
         volumes: &[String],
+        roots: &[String],
     ) -> GearResult<Reading> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -752,6 +818,9 @@ impl Read for SystemRead {
             .flat_map(|pane| seat_tree(&table, pane))
             .map(|index| table[index].pid)
             .collect();
+        // T-657: processes left parentless under a GEAR worktree root. One
+        // syscall per ppid-1 process, and none when no root is known.
+        reading.orphans = orphans_in(&table, &fleet, roots, &cwd_of);
         // The top processes outside the fleet, by the CPU they used since the
         // last sample (or the ps reading on the first one).
         let (previous, previous_at) = {
@@ -805,6 +874,7 @@ impl Read for Silent {
         &self,
         _panes: &BTreeMap<String, PaneProcs>,
         _volumes: &[String],
+        _roots: &[String],
     ) -> GearResult<Reading> {
         Ok(Reading::default())
     }
@@ -821,6 +891,8 @@ pub struct PsProc {
     /// The `ps` %cpu reading (the first sample's fallback for the top list).
     cpu_pct: f64,
     rss_kb: u64,
+    /// How long the process has run, in seconds (`ps` etime).
+    age_s: f64,
     command: String,
 }
 
@@ -861,17 +933,20 @@ fn seat_tree(table: &[PsProc], pane: &PaneProcs) -> Vec<usize> {
 }
 
 fn system_ps() -> Option<Vec<PsProc>> {
-    let text = run("ps", &["-axo", "pid=,ppid=,pgid=,pcpu=,rss=,time=,comm="])?;
+    let text = run(
+        "ps",
+        &["-axo", "pid=,ppid=,pgid=,pcpu=,rss=,time=,etime=,comm="],
+    )?;
     Some(parse_ps(&text))
 }
 
-/// Parse `ps -axo pid=,ppid=,pgid=,pcpu=,rss=,time=,comm=`. One line per
-/// process; a line that does not parse is skipped.
+/// Parse `ps -axo pid=,ppid=,pgid=,pcpu=,rss=,time=,etime=,comm=`. One line
+/// per process; a line that does not parse is skipped.
 pub fn parse_ps(text: &str) -> Vec<PsProc> {
     let mut out = Vec::new();
     for line in text.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 7 {
+        if fields.len() < 8 {
             continue;
         }
         let (Ok(pid), Ok(ppid), Ok(pgid), Ok(cpu_pct), Ok(rss_kb)) = (
@@ -886,8 +961,12 @@ pub fn parse_ps(text: &str) -> Vec<PsProc> {
         let Some(cpu_s) = parse_cpu_time(fields[5]) else {
             continue;
         };
+        // etime has the same `[[DD-]HH:]MM:SS` shape as `time`.
+        let Some(age_s) = parse_cpu_time(fields[6]) else {
+            continue;
+        };
         // `comm` may hold spaces: it is the rest of the line.
-        let command = fields[6..].join(" ");
+        let command = fields[7..].join(" ");
         out.push(PsProc {
             pid,
             ppid,
@@ -895,10 +974,85 @@ pub fn parse_ps(text: &str) -> Vec<PsProc> {
             cpu_s,
             cpu_pct,
             rss_kb,
+            age_s,
             command,
         });
     }
     out
+}
+
+/// T-657: the processes whose parent is gone (ppid 1) and whose cwd lies under
+/// one of the GEAR worktree roots. Pure: `cwd_of` is the only reader, and it is
+/// not called when no root is known.
+pub fn orphans_in(
+    table: &[PsProc],
+    fleet: &BTreeSet<u32>,
+    roots: &[String],
+    cwd_of: &dyn Fn(u32) -> Option<String>,
+) -> Vec<Orphan> {
+    let mut orphans = Vec::new();
+    if roots.is_empty() {
+        return orphans;
+    }
+    for proc in table {
+        if proc.ppid != 1 || fleet.contains(&proc.pid) {
+            continue;
+        }
+        let Some(cwd) = cwd_of(proc.pid) else {
+            continue;
+        };
+        let cwd = cwd.strip_suffix(" (deleted)").unwrap_or(&cwd).to_string();
+        let under = roots
+            .iter()
+            .any(|root| cwd == *root || cwd.starts_with(&format!("{root}/")));
+        if !under {
+            continue;
+        }
+        orphans.push(Orphan {
+            pid: proc.pid,
+            cpu_pct: proc.cpu_pct,
+            age_s: proc.age_s,
+            command: proc.command.clone(),
+            cwd,
+        });
+    }
+    orphans
+}
+
+/// The current directory of a process, read without a child process (T-657).
+fn cwd_of(pid: u32) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as i32;
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid as i32,
+                libc::PROC_PIDVNODEPATHINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
+            )
+        };
+        if read <= 0 {
+            return None;
+        }
+        let path = unsafe {
+            std::ffi::CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr() as *const libc::c_char)
+        };
+        return path.to_str().ok().map(str::to_string);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return std::fs::read_link(format!("/proc/{pid}/cwd"))
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
 }
 
 /// A `ps` CPU time as seconds: macOS `MM:SS.ss` (minutes unbounded), Linux
@@ -1069,9 +1223,9 @@ mod tests {
     #[test]
     fn ps_lines_are_parsed_with_their_cpu_time() {
         let table = parse_ps(
-            "  501     1   501   2.5  10240 1:05.70 /usr/bin/thing --flag\n\
+            "  501     1   501   2.5  10240 1:05.70 1-02:03:04 /usr/bin/thing --flag\n\
              bad line\n\
-             700   501   501  10.0  4096 0:03.42 /bin/sh -c build",
+             700   501   501  10.0  4096 0:03.42 05:00 /bin/sh -c build",
         );
         assert_eq!(table.len(), 2);
         assert_eq!(table[0].pid, 501);
@@ -1079,8 +1233,51 @@ mod tests {
         assert_eq!(table[0].pgid, 501);
         assert_eq!(table[0].cpu_s, 65.7);
         assert_eq!(table[0].rss_kb, 10240);
+        assert_eq!(table[0].age_s, 93784.0);
         assert_eq!(table[0].command, "/usr/bin/thing --flag");
         assert_eq!(table[1].cpu_s, 3.42);
+        assert_eq!(table[1].age_s, 300.0);
+        assert_eq!(table[1].command, "/bin/sh -c build");
+    }
+
+    #[test]
+    fn orphans_are_parent_less_processes_under_a_root() {
+        let table = parse_ps(
+            "  700     1   700   1.5  1024 0:01.00 01:00 /bin/sh -c old\n\
+             701     1   701   2.5  1024 0:01.00 01:00 /bin/sh -c elsewhere\n\
+             702   500   702   3.5  1024 0:01.00 01:00 /bin/sh -c child\n\
+             703     1   703   4.5  1024 0:01.00 01:00 /bin/sh -c fleet\n\
+             704     1   704   5.5  1024 0:01.00 01:00 /bin/sh -c gone",
+        );
+        let fleet: BTreeSet<u32> = [703].into_iter().collect();
+        let cwds: BTreeMap<u32, String> = [
+            (700, "/wt/repo/p-old/target".to_string()),
+            (701, "/elsewhere".to_string()),
+            (702, "/wt/repo/p-new".to_string()),
+            (703, "/wt/repo/p-fleet".to_string()),
+            (704, "/wt/repo/p-gone (deleted)".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let roots = vec!["/wt/repo".to_string()];
+        let orphans = orphans_in(&table, &fleet, &roots, &|pid| cwds.get(&pid).cloned());
+        assert_eq!(
+            orphans.iter().map(|orphan| orphan.pid).collect::<Vec<_>>(),
+            vec![700, 704]
+        );
+        assert_eq!(orphans[1].cwd, "/wt/repo/p-gone");
+        assert_eq!(orphans[0].cpu_pct, 1.5);
+        assert_eq!(orphans[0].age_s, 60.0);
+        assert_eq!(orphans[0].command, "/bin/sh -c old");
+
+        // No root: the cwd is never read.
+        let calls = std::cell::Cell::new(0);
+        let none = orphans_in(&table, &fleet, &[], &|pid| {
+            calls.set(calls.get() + 1);
+            cwds.get(&pid).cloned()
+        });
+        assert!(none.is_empty());
+        assert_eq!(calls.get(), 0);
     }
 
     #[test]
@@ -1120,6 +1317,7 @@ mod tests {
                 cpu_s: 1.0,
                 cpu_pct: 1.0,
                 rss_kb: 1000,
+                age_s: 0.0,
                 command: "shell".into(),
             },
             PsProc {
@@ -1129,6 +1327,7 @@ mod tests {
                 cpu_s: 20.0,
                 cpu_pct: 20.0,
                 rss_kb: 2000,
+                age_s: 0.0,
                 command: "child".into(),
             },
             PsProc {
@@ -1138,6 +1337,7 @@ mod tests {
                 cpu_s: 30.0,
                 cpu_pct: 30.0,
                 rss_kb: 3000,
+                age_s: 0.0,
                 command: "grandchild".into(),
             },
             PsProc {
@@ -1147,6 +1347,7 @@ mod tests {
                 cpu_s: 5.0,
                 cpu_pct: 5.0,
                 rss_kb: 500,
+                age_s: 0.0,
                 command: "other".into(),
             },
         ];

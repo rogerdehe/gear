@@ -45,6 +45,7 @@ impl health::Read for FakeRead {
         &self,
         _panes: &BTreeMap<String, PaneProcs>,
         _volumes: &[String],
+        _roots: &[String],
     ) -> gear_model::GearResult<Reading> {
         self.samples.fetch_add(1, Ordering::Relaxed);
         if self.fail.load(Ordering::Relaxed) {
@@ -132,6 +133,7 @@ fn readings(machine: Machine, lane_cpu_s: f64, lane_rss_kb: u64, top: Vec<Proc>)
                 },
             )]),
             top: top.clone(),
+            ..Default::default()
         })
         .collect()
 }
@@ -167,6 +169,7 @@ fn a_seat_over_the_safe_line_is_stopped_and_the_captain_told() {
                 },
             )]),
             top: vec![],
+            ..Default::default()
         });
     }
     for minute in 0..=8 {
@@ -385,7 +388,7 @@ fn the_watch_costs_under_one_percent_of_one_core() {
     )]);
     let read = health::SystemRead::new();
     let before = cpu_ms();
-    let reading = read.sample(&panes, &volumes).expect("a real sample");
+    let reading = read.sample(&panes, &volumes, &[]).expect("a real sample");
     let used = cpu_ms() - before;
     assert!(reading.machine.cores > 0, "{:?}", reading.machine);
     assert!(!reading.machine.disk.is_empty(), "{:?}", reading.machine);
