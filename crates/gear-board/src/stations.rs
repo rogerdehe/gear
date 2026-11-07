@@ -211,6 +211,43 @@ fn left_in_voyage(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<usi
     Ok(left)
 }
 
+/// Whether the voyage is landed (T-670): every task of it is terminal, no Done
+/// task of it is unmerged, and its land order — when the store has one — was
+/// answered `land`. A voyage from before land orders existed has none, and is
+/// landed as soon as its work is in.
+pub fn voyage_landed(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<bool> {
+    let unfinished = tx
+        .tasks_of_project(project)?
+        .iter()
+        .any(|task| task.milestone.as_deref() == Some(milestone) && !task.state.is_terminal());
+    if unfinished {
+        return Ok(false);
+    }
+    if tx
+        .unmerged_done_tasks(project)?
+        .iter()
+        .any(|(_, of)| of.as_deref() == Some(milestone))
+    {
+        return Ok(false);
+    }
+    // The land order is the voyage's last instruction: it is answered `land`
+    // or not (a `superseded by` result, or none at all, is not a landing).
+    let Some(land) = tx.get_meta(&format!("station:{project}:{milestone}:land"))? else {
+        return Ok(true);
+    };
+    let Some(message) = tx.get_message(project, &land)? else {
+        return Ok(false);
+    };
+    let Some(result) = message.result.as_deref() else {
+        return Ok(false);
+    };
+    let prefix = format!("station {}: land", message.id);
+    let Some(rest) = result.strip_prefix(&prefix) else {
+        return Ok(false);
+    };
+    Ok(rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
 /// Whether the voyage still has a task that is not terminal (T-529), an open
 /// land order, or a Done
 /// task whose accepted work is not on the integration branch (T-595): a
@@ -218,26 +255,5 @@ fn left_in_voyage(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<usi
 /// it. It reads the store's `unmerged_done_tasks`, the same rule as the engine's
 /// sweep and the landing's refusal, so the board and the reclaim agree.
 pub fn voyage_open(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<bool> {
-    let unfinished = tx
-        .tasks_of_project(project)?
-        .iter()
-        .any(|task| task.milestone.as_deref() == Some(milestone) && !task.state.is_terminal());
-    if unfinished {
-        return Ok(true);
-    }
-    // Every task merged, but the land order still waits for its answer: the
-    // voyage is not finished, and the captain's page must show that order
-    // (Lawrence M2, M-1846: the home page was empty while the doorbell rang).
-    if let Some(land) = tx.get_meta(&format!("station:{project}:{milestone}:land"))? {
-        if tx
-            .get_message(project, &land)?
-            .is_some_and(|message| message.state == gear_model::MsgState::Open)
-        {
-            return Ok(true);
-        }
-    }
-    Ok(tx
-        .unmerged_done_tasks(project)?
-        .iter()
-        .any(|(_, of)| of.as_deref() == Some(milestone)))
+    Ok(!voyage_landed(tx, project, milestone)?)
 }

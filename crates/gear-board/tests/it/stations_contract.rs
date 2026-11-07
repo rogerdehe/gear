@@ -7,7 +7,7 @@
 //! `task-station:<project>:<task>`.
 
 use gear_board::stations::{
-    course, goal_text, progress, voyage_open, StationProgress, StationState,
+    course, goal_text, progress, voyage_landed, voyage_open, StationProgress, StationState,
 };
 use gear_model::{AttemptState, SeatRole, TaskState};
 use gear_store::{testing, AttemptRow, AttemptStep, Store, TaskRow, VoyageRow};
@@ -319,7 +319,7 @@ fn a_voyage_with_a_done_task_not_yet_merged_is_open() {
                 "p",
                 &land,
                 gear_model::MsgState::Resolved,
-                Some("station: land"),
+                Some(&format!("station {land}: land")),
                 None,
                 None,
                 NOW + 1,
@@ -405,4 +405,128 @@ fn the_golden_fixture_carries_the_prototypes_stations() {
             ("S3", "goal lock + v0.5.0", StationState::Next),
         ]
     );
+}
+
+/// Every task of M5 terminal and merged: the voyage's work is in.
+fn landed_world() -> Store {
+    let mut store = world();
+    store
+        .write(|tx| {
+            for id in ["T-4", "T-5"] {
+                let mut task = tx.get_task("p", id)?.expect("a task");
+                task.state = TaskState::Done;
+                task.updated = NOW;
+                tx.update_task(&task)?;
+            }
+            attempt(tx, "T-4", NOW - 1_800, NOW - 1_200)?;
+            attempt(tx, "T-5", NOW - 1_200, NOW - 600)
+        })
+        .unwrap();
+    store
+}
+
+/// The voyage's land order, optionally answered with `result`.
+fn land_order(store: &mut Store, result: Option<&str>) -> String {
+    store
+        .write(|tx| {
+            let land = tx
+                .insert_message(&gear_store::NewMessage {
+                    project: "p".into(),
+                    thread: "station:M5".into(),
+                    task: None,
+                    attempt: None,
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: gear_model::MsgKind::System,
+                    urgent: true,
+                    body: "Voyage M5 is ready to land".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: gear_model::MsgState::Open,
+                    created: NOW,
+                    meta: None,
+                })?
+                .id;
+            tx.set_meta("station:p:M5:land", &land)?;
+            if let Some(result) = result {
+                tx.update_message_state(
+                    "p",
+                    &land,
+                    gear_model::MsgState::Resolved,
+                    Some(result),
+                    None,
+                    None,
+                    NOW + 1,
+                )?;
+            }
+            Ok(land)
+        })
+        .unwrap()
+}
+
+/// T-670: a land order answered `superseded by` is not a landing: the voyage
+/// still sails and stays open.
+#[test]
+fn a_superseded_land_order_is_not_a_landing() {
+    let mut store = landed_world();
+    land_order(&mut store, Some("superseded by M-9"));
+    assert!(store.read(|tx| voyage_open(tx, "p", "M5")).unwrap());
+    assert!(!store.read(|tx| voyage_landed(tx, "p", "M5")).unwrap());
+}
+
+/// T-670: the land order answered `station <id>: land` is the landing.
+#[test]
+fn a_land_order_answered_land_is_a_landing() {
+    let mut store = landed_world();
+    let land = land_order(&mut store, None);
+    let result = format!("station {land}: land");
+    store
+        .write(|tx| {
+            tx.update_message_state(
+                "p",
+                &land,
+                gear_model::MsgState::Resolved,
+                Some(&result),
+                None,
+                None,
+                NOW + 1,
+            )
+        })
+        .unwrap();
+    assert!(store.read(|tx| voyage_landed(tx, "p", "M5")).unwrap());
+    assert!(!store.read(|tx| voyage_open(tx, "p", "M5")).unwrap());
+}
+
+/// T-670: a voyage from before land orders existed is landed once its work is
+/// in.
+#[test]
+fn a_voyage_without_a_land_order_is_landed() {
+    let mut store = landed_world();
+    assert!(store.read(|tx| voyage_landed(tx, "p", "M5")).unwrap());
+    assert!(!store.read(|tx| voyage_open(tx, "p", "M5")).unwrap());
+}
+
+/// T-670: the board does not call a voyage landed while its land order is
+/// unanswered.
+#[test]
+fn the_board_keeps_a_voyage_with_a_superseded_land_order_sailing() {
+    let mut store = landed_world();
+    land_order(&mut store, Some("superseded by M-9"));
+    let board = gear_board::build(
+        &mut store,
+        &gear_board::Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
+        NOW + 60,
+    )
+    .unwrap();
+    let project = &board.projects[0];
+    let entry = project
+        .voyage_list
+        .iter()
+        .find(|entry| entry.milestone == "M5")
+        .expect("the voyage is listed");
+    assert!(entry.sailing, "{entry:?}");
 }
