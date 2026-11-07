@@ -987,16 +987,33 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
                 }
                 return Ok(StaffItem::RebindCancel { line, lane: lane.into() });
             }
-            let repo = tokens.next().and_then(|s| s.strip_prefix("repo="))
-                .filter(|s| !s.is_empty()).ok_or_else(|| bad(line, "`rebind` needs `repo=<name>`"))?;
-            let remaining = tokens.collect::<Vec<_>>().join(" ");
+            let mut rest: Vec<&str> = tokens.collect();
+            // `repo=.` (or no `repo=` at all) names the project root (T-674).
+            let repo = match rest.first().and_then(|token| token.strip_prefix("repo=")) {
+                Some(value) => {
+                    let value = value.to_string();
+                    rest.remove(0);
+                    match value.as_str() {
+                        "." => String::new(),
+                        "" => {
+                            return Err(bad(
+                                line,
+                                "`rebind` needs `repo=<name>`, or `repo=.` for the project root",
+                            ))
+                        }
+                        name => name.to_string(),
+                    }
+                }
+                None => String::new(),
+            };
+            let remaining = rest.join(" ");
             let list = remaining.strip_prefix("owns=[").and_then(|s| s.strip_suffix(']'))
                 .ok_or_else(|| bad(line, "`rebind` needs `owns=[<path>, ...]`"))?;
             let owns: Vec<String> = list.split(',').map(|s| s.trim().to_string()).collect();
             if owns.iter().any(|s| s.is_empty() || s.chars().any(char::is_whitespace) || s.contains(['[', ']'])) {
                 return Err(bad(line, "`rebind` needs a nonempty comma-separated list of paths"));
             }
-            Ok(StaffItem::Rebind { line, lane: lane.into(), repo: repo.into(), owns })
+            Ok(StaffItem::Rebind { line, lane: lane.into(), repo, owns })
         }
         "remerge" => {
             let task = tokens

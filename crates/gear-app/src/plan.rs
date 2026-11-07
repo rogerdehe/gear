@@ -340,13 +340,16 @@ fn apply_queue(
             let message = if waiting.is_empty() {
                 let mut text = format!("rebind {lane}: {preview}: applied");
                 // The undo is the rebind line back to the old binding; a lane
-                // in the project root has none (a repo is named, not "root").
-                if !old_repo.is_empty() {
-                    text.push_str(&format!(
-                        " (to undo: - rebind {lane} repo={old_repo} owns=[{}])",
-                        old_owns.join(", ")
-                    ));
-                }
+                // in the project root names it `repo=.` (T-674).
+                let old = if old_repo.is_empty() {
+                    ".".to_string()
+                } else {
+                    old_repo.clone()
+                };
+                text.push_str(&format!(
+                    " (to undo: - rebind {lane} repo={old} owns=[{}])",
+                    old_owns.join(", ")
+                ));
                 text
             } else {
                 format!(
@@ -2893,8 +2896,13 @@ fn rebind_preview(
     } else {
         old_repo
     };
+    let new = if new_repo.is_empty() {
+        "root"
+    } else {
+        new_repo
+    };
     format!(
-        "repo {old} → {new_repo}, owns [{}] → [{}]",
+        "repo {old} → {new}, owns [{}] → [{}]",
         old_owns.join(", "),
         new_owns.join(", ")
     )
@@ -2938,7 +2946,9 @@ fn rebind_config(
         .get_project(project)?
         .ok_or_else(|| bad(line, "project not found"))?;
     let current = crate::config::parse(&row.config_toml)?;
-    if !current.repos.iter().any(|r| r.name == request.repo) {
+    // The project root is the empty repo name (T-674): it is no `[[repos]]`
+    // entry, and the lane's `repo` key is absent.
+    if !request.repo.is_empty() && !current.repos.iter().any(|r| r.name == request.repo) {
         return Err(bad(line, format!("unknown repo {:?}", request.repo)));
     }
     let mut value: toml::Value = row
@@ -2954,7 +2964,11 @@ fn rebind_config(
         .find(|l| l.get("name").and_then(toml::Value::as_str) == Some(lane))
         .and_then(toml::Value::as_table_mut)
         .ok_or_else(|| bad(line, format!("lane {lane:?} is not configured")))?;
-    entry.insert("repo".into(), toml::Value::String(request.repo.clone()));
+    if request.repo.is_empty() {
+        entry.remove("repo");
+    } else {
+        entry.insert("repo".into(), toml::Value::String(request.repo.clone()));
+    }
     entry.insert(
         "owns".into(),
         toml::Value::Array(
@@ -3039,7 +3053,11 @@ fn request_rebind(
                     format!("pending lane {:?} is not configured", other.name),
                 )
             })?;
-        target.repo = Some(pending.repo);
+        target.repo = if pending.repo.is_empty() {
+            None
+        } else {
+            Some(pending.repo)
+        };
         target.owns = pending.owns;
     }
     let target = projected
@@ -3047,7 +3065,11 @@ fn request_rebind(
         .iter_mut()
         .find(|l| l.name == lane)
         .ok_or_else(|| bad(line, format!("lane {lane:?} is not configured")))?;
-    target.repo = Some(request.repo.clone());
+    target.repo = if request.repo.is_empty() {
+        None
+    } else {
+        Some(request.repo.clone())
+    };
     target.owns = request.owns.clone();
     if let Some(issue) = crate::config::validate(&projected)
         .into_iter()
@@ -5969,7 +5991,10 @@ fn staff_text(item: &StaffItem) -> String {
         StaffItem::MergeFirst { task, .. } => format!("merge-first {task}"),
         StaffItem::Rebind {
             lane, repo, owns, ..
-        } => format!("rebind {lane} repo={repo} owns=[{}]", owns.join(", ")),
+        } => {
+            let repo = if repo.is_empty() { "." } else { repo.as_str() };
+            format!("rebind {lane} repo={repo} owns=[{}]", owns.join(", "))
+        }
         StaffItem::RebindCancel { lane, .. } => format!("rebind {lane} cancel"),
         StaffItem::Drop { milestone, .. } => format!("drop {milestone}"),
         StaffItem::Raise {
