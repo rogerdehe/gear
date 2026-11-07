@@ -340,13 +340,16 @@ fn apply_queue(
             let message = if waiting.is_empty() {
                 let mut text = format!("rebind {lane}: {preview}: applied");
                 // The undo is the rebind line back to the old binding; a lane
-                // in the project root has none (a repo is named, not "root").
-                if !old_repo.is_empty() {
-                    text.push_str(&format!(
-                        " (to undo: - rebind {lane} repo={old_repo} owns=[{}])",
-                        old_owns.join(", ")
-                    ));
-                }
+                // in the project root names it `repo=.` (T-674).
+                let old = if old_repo.is_empty() {
+                    ".".to_string()
+                } else {
+                    old_repo.clone()
+                };
+                text.push_str(&format!(
+                    " (to undo: - rebind {lane} repo={old} owns=[{}])",
+                    old_owns.join(", ")
+                ));
                 text
             } else {
                 format!(
@@ -1316,7 +1319,7 @@ fn apply_queue(
                                     sender_gen: by_gen,
                                     recipient: old_seat,
                                     kind: MsgKind::Instruction,
-                                    urgent: false,
+                                    urgent: true,
                                     body: format!(
                                         "{id} moved to lane {new_lane}; stop work on it, nothing to hand in"
                                     ),
@@ -1643,7 +1646,7 @@ fn apply_queue(
             continue;
         }
         if let StaffItem::Restart { name, .. } = item {
-            restart_reviewer(tx, project, name, staff_line(item), now)?;
+            restart_seat(tx, project, name, staff_line(item), now)?;
             staffed.push(format!("restart {name}"));
             record_gear_decision(
                 tx,
@@ -2893,8 +2896,13 @@ fn rebind_preview(
     } else {
         old_repo
     };
+    let new = if new_repo.is_empty() {
+        "root"
+    } else {
+        new_repo
+    };
     format!(
-        "repo {old} → {new_repo}, owns [{}] → [{}]",
+        "repo {old} → {new}, owns [{}] → [{}]",
         old_owns.join(", "),
         new_owns.join(", ")
     )
@@ -2921,6 +2929,8 @@ fn cancel_rebind(tx: &Tx<'_>, project: &str, lane: &str, line: usize) -> GearRes
     let key = rebind_pending_key(&seat_id);
     if tx.get_meta(&key)?.is_some_and(|v| !v.is_empty()) {
         tx.set_meta(&key, "")?;
+        // T-673: the waiting reason belongs to the request it was recorded for.
+        tx.set_meta(&format!("lane-rebind-waiting:{seat_id}"), "")?;
         Ok(format!("rebind {lane}: the pending rebind is withdrawn"))
     } else {
         Ok(format!("rebind {lane}: nothing pending to withdraw"))
@@ -2938,7 +2948,9 @@ fn rebind_config(
         .get_project(project)?
         .ok_or_else(|| bad(line, "project not found"))?;
     let current = crate::config::parse(&row.config_toml)?;
-    if !current.repos.iter().any(|r| r.name == request.repo) {
+    // The project root is the empty repo name (T-674): it is no `[[repos]]`
+    // entry, and the lane's `repo` key is absent.
+    if !request.repo.is_empty() && !current.repos.iter().any(|r| r.name == request.repo) {
         return Err(bad(line, format!("unknown repo {:?}", request.repo)));
     }
     let mut value: toml::Value = row
@@ -2954,7 +2966,11 @@ fn rebind_config(
         .find(|l| l.get("name").and_then(toml::Value::as_str) == Some(lane))
         .and_then(toml::Value::as_table_mut)
         .ok_or_else(|| bad(line, format!("lane {lane:?} is not configured")))?;
-    entry.insert("repo".into(), toml::Value::String(request.repo.clone()));
+    if request.repo.is_empty() {
+        entry.remove("repo");
+    } else {
+        entry.insert("repo".into(), toml::Value::String(request.repo.clone()));
+    }
     entry.insert(
         "owns".into(),
         toml::Value::Array(
@@ -3039,7 +3055,11 @@ fn request_rebind(
                     format!("pending lane {:?} is not configured", other.name),
                 )
             })?;
-        target.repo = Some(pending.repo);
+        target.repo = if pending.repo.is_empty() {
+            None
+        } else {
+            Some(pending.repo)
+        };
         target.owns = pending.owns;
     }
     let target = projected
@@ -3047,7 +3067,11 @@ fn request_rebind(
         .iter_mut()
         .find(|l| l.name == lane)
         .ok_or_else(|| bad(line, format!("lane {lane:?} is not configured")))?;
-    target.repo = Some(request.repo.clone());
+    target.repo = if request.repo.is_empty() {
+        None
+    } else {
+        Some(request.repo.clone())
+    };
     target.owns = request.owns.clone();
     if let Some(issue) = crate::config::validate(&projected)
         .into_iter()
@@ -3122,30 +3146,56 @@ fn apply_rebind(
 }
 
 /// Finish recorded requests after their last non-terminal attempt settles.
+///
+/// Each lane's request is applied in its own transaction (T-673): one that
+/// cannot apply yet — its paths overlap a lane that still owns them — records
+/// why under `lane-rebind-waiting:<seat id>` and waits for a later tick, while
+/// the other lanes' requests land.
 pub fn reconcile_rebinds(store: &mut Store, project: &str) -> GearResult<Vec<String>> {
-    store.write(|tx| {
-        let mut changed = Vec::new();
-        for seat in tx
+    let seats: Vec<gear_store::SeatRow> = store.read(|tx| {
+        Ok(tx
             .seats_of_project(project)?
             .into_iter()
-            .filter(|s| s.role == SeatRole::Lane)
-        {
+            .filter(|seat| seat.role == SeatRole::Lane)
+            .collect())
+    })?;
+    let mut changed = Vec::new();
+    for seat in seats {
+        let applied = store.write(|tx| {
             let Some(raw) = tx
                 .get_meta(&rebind_pending_key(&seat.id))?
                 .filter(|v| !v.is_empty())
             else {
-                continue;
+                return Ok(false);
             };
             if !tx.open_attempts_of_seat(&seat.id)?.is_empty() {
-                continue;
+                return Ok(false);
             }
             let request: RebindRequest = serde_json::from_str(&raw)
                 .map_err(|e| bad(0, format!("invalid pending rebind: {e}")))?;
             apply_rebind(tx, project, &seat.name, &seat.id, &request)?;
-            changed.push(seat.name);
+            Ok(true)
+        });
+        match applied {
+            Ok(true) => {
+                changed.push(seat.name.clone());
+                store.write(|tx| tx.set_meta(&format!("lane-rebind-waiting:{}", seat.id), ""))?;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                // This seat's write rolled back alone: the others go on. The
+                // reason is recorded once, not on every tick.
+                let key = format!("lane-rebind-waiting:{}", seat.id);
+                store.write(|tx| {
+                    if tx.get_meta(&key)?.as_deref() != Some(error.detail.as_str()) {
+                        tx.set_meta(&key, &error.detail)?;
+                    }
+                    Ok(())
+                })?;
+            }
         }
-        Ok(changed)
-    })
+    }
+    Ok(changed)
 }
 
 /// `- retry <lane>` (T-82): a lane the engine parked in NeedsCheck, or lost
@@ -3533,52 +3583,61 @@ fn release_reviewer(
     Ok(())
 }
 
-/// `- restart <reviewer>` (T-630): the reviewer's agent is exited and started
-/// again in the same pane and worktree, its seat and generation kept — the
-/// way a captain picks up a fixed account or a changed environment without
-/// losing the seat.
+/// `- restart <lane|reviewer>` (T-630, T-669): the seat's agent is exited
+/// and started again in the same pane and worktree, its seat and generation
+/// kept — the way a captain picks up a fixed account or a changed environment
+/// without losing the seat.
+///
+/// A **lane** restarts at once: it is told to wrap up and commit, and after
+/// `[timing].switch_grace_min` its agent restarts on the same model, resuming
+/// its session. Only an active lane is restarted.
 ///
 /// An **idle** reviewer (Standby, no job) restarts at once. A **working** one
 /// restarts right after its verdict: the flag stays until the engine sees the
 /// seat back in Standby with no job, so the review in flight is never cut off.
 /// Any other state is refused with the reason.
 ///
-/// The line only records the request; the engine's `restart_reviewers` step
-/// (release.rs) carries it out, across ticks, because an agent takes a moment
-/// to leave its pane.
-fn restart_reviewer(
-    tx: &Tx<'_>,
-    project: &str,
-    name: &str,
-    line: usize,
-    now: Ts,
-) -> GearResult<()> {
+/// The line only records the request; the engine's restart step carries it
+/// out, across ticks, because an agent takes a moment to leave its pane.
+fn restart_seat(tx: &Tx<'_>, project: &str, name: &str, line: usize, now: Ts) -> GearResult<()> {
     let seat_id = format!("{project}:{name}");
     let seat = tx
         .get_seat(&seat_id)?
         .ok_or_else(|| bad(line, format!("no seat {seat_id} in this project")))?;
-    if seat.role != SeatRole::Temp {
-        return Err(bad(
-            line,
-            format!(
-                "seat {seat_id} is a {} seat, `restart` names a reviewer",
-                seat.role.as_str()
-            ),
-        ));
-    }
-    let pending = tx
-        .get_meta(&format!("engine.review_pending.{seat_id}"))?
-        .filter(|task| !task.is_empty());
-    let idle = seat.state == SeatState::Standby && pending.is_none();
-    let working = seat.state == SeatState::Active && seat.task_id.is_some();
-    if !idle && !working {
-        return Err(GearError::new(
-            ErrorCode::BadTransition,
-            format!(
-                "seat {seat_id} is {}: only an idle reviewer (Standby, no job) or one working on a review is restarted",
-                seat.state.as_str()
-            ),
-        ));
+    match seat.role {
+        SeatRole::Captain => {
+            return Err(GearError::new(
+                ErrorCode::BadTransition,
+                format!("seat {seat_id} is a captain seat, `restart` names a lane or a reviewer"),
+            ));
+        }
+        SeatRole::Lane => {
+            if seat.state != SeatState::Active {
+                return Err(GearError::new(
+                    ErrorCode::BadTransition,
+                    format!(
+                        "seat {seat_id} is {}: only an active lane is restarted",
+                        seat.state.as_str()
+                    ),
+                ));
+            }
+        }
+        SeatRole::Temp => {
+            let pending = tx
+                .get_meta(&format!("engine.review_pending.{seat_id}"))?
+                .filter(|task| !task.is_empty());
+            let idle = seat.state == SeatState::Standby && pending.is_none();
+            let working = seat.state == SeatState::Active && seat.task_id.is_some();
+            if !idle && !working {
+                return Err(GearError::new(
+                    ErrorCode::BadTransition,
+                    format!(
+                        "seat {seat_id} is {}: only an idle reviewer (Standby, no job) or one working on a review is restarted",
+                        seat.state.as_str()
+                    ),
+                ));
+            }
+        }
     }
     // The engine's restart step reads this flag; it waits for a working
     // reviewer's verdict before it acts.
@@ -5667,7 +5726,7 @@ fn cancel_task(
             sender_gen: by_gen,
             recipient: lane_seat,
             kind: MsgKind::Instruction,
-            urgent: false,
+            urgent: true,
             body: format!(
                 "{} is cancelled; stop work on it, nothing to hand in",
                 task.id
@@ -5960,7 +6019,10 @@ fn staff_text(item: &StaffItem) -> String {
         StaffItem::MergeFirst { task, .. } => format!("merge-first {task}"),
         StaffItem::Rebind {
             lane, repo, owns, ..
-        } => format!("rebind {lane} repo={repo} owns=[{}]", owns.join(", ")),
+        } => {
+            let repo = if repo.is_empty() { "." } else { repo.as_str() };
+            format!("rebind {lane} repo={repo} owns=[{}]", owns.join(", "))
+        }
         StaffItem::RebindCancel { lane, .. } => format!("rebind {lane} cancel"),
         StaffItem::Drop { milestone, .. } => format!("drop {milestone}"),
         StaffItem::Raise {

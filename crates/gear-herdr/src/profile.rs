@@ -42,6 +42,11 @@ pub struct Profile {
     /// Kept so that an old config still loads; it decides nothing any more
     /// (§10.2: whether an agent is busy is Herdr's state, never the screen).
     pub busy_markers: Vec<String>,
+    /// A marker matches a line as a literal substring, unless it starts with
+    /// `^`: then it is anchored to the line's shape — the line, after its
+    /// leading frame and spinner glyphs, must start with the text after `^`,
+    /// and a `*` in the marker splits head and tail (the rest after the head
+    /// must contain the tail).
     pub ratelimit_markers: Vec<String>,
     pub quota_markers: Vec<String>,
     /// Footer-only captain quota detection. Conversation markers never apply.
@@ -109,7 +114,11 @@ pub struct Profile {
 }
 
 /// Flags present in the last `profile.tail_lines` lines of `tail`.
-/// Matching is literal substring per line (no regex). Pure function.
+/// A marker matches a line as a literal substring, unless it starts with `^`:
+/// then it is anchored to the line's shape — the line, after its leading frame
+/// and spinner glyphs, must start with the text after `^`, and a `*` in the
+/// marker splits head and tail (the rest after the head must contain the tail).
+/// Pure function.
 ///
 /// Only the tail window is inspected: an error that scrolled out of it is not
 /// a current fact. Empty markers are ignored (they would match every line).
@@ -192,7 +201,7 @@ pub fn validate_template(profile: &Profile, template: &str) -> Result<(), String
             if marker.is_empty() {
                 continue;
             }
-            if template.contains(marker.as_str()) {
+            if template.lines().any(|line| marker_matches(marker, line)) {
                 return Err(format!(
                     "template must not contain the {kind} marker: {marker}"
                 ));
@@ -202,23 +211,45 @@ pub fn validate_template(profile: &Profile, template: &str) -> Result<(), String
     Ok(())
 }
 
-/// Literal substring match of `line` against a marker list.
+/// Whether `marker` matches `line`: a literal substring, unless the marker
+/// starts with `^`, which anchors it to the line's shape (its leading frame
+/// and spinner glyphs stripped; a `*` splits head and tail).
+fn marker_matches(marker: &str, line: &str) -> bool {
+    if marker.is_empty() {
+        return false;
+    }
+    let Some(anchored) = marker.strip_prefix('^') else {
+        return line.contains(marker);
+    };
+    let text = line
+        .trim_start_matches(|c: char| c.is_whitespace() || (!c.is_ascii() && !c.is_alphanumeric()));
+    match anchored.split_once('*') {
+        Some((head, tail)) => text
+            .strip_prefix(head)
+            .is_some_and(|rest| rest.contains(tail)),
+        None => text.starts_with(anchored),
+    }
+}
+
+/// Whether any marker of the list matches `line`.
 fn matches_any(markers: &[String], line: &str) -> bool {
-    markers
-        .iter()
-        .any(|m| !m.is_empty() && line.contains(m.as_str()))
+    markers.iter().any(|m| marker_matches(m, line))
 }
 
 /// Built-in profile for an agent kind, from the verified facts in
 /// `gear --skill agent:<kind>` (design/04, /16). Only kinds with a verified SOP
 /// are built in: today `opencode`, `claude`, `codex`, `grok` and `pi` —
-/// opencode: quota `Session failed`, `Token Plan`, `(2056)`,
-/// `Free usage limit reached`; no rate-limit/auth markers yet; tail 16 lines,
+/// opencode: quota `^Session failed`, `^Error: *Token Plan`, `^Error: *(2056)`,
+/// `^Free usage limit reached`; back-off `^Retrying in ` and `^Retry due ·`;
+/// no rate-limit/auth markers yet; tail 16 lines,
 /// confirm 2 rounds; unattended `--auto`; session_ref false; resume
 /// `["-s", "{session}"]`; exit `["ctrl+c"]`; new session `/new`; compact
 /// `/compact`; usage log `opencode-db`; verified.
-/// codex: quota `Usage limit reached` and the
-/// other spent-limit texts of codex 0.164.0 (T-115) — the "only N% left"
+/// codex: quota `^Usage limit reached`, `^You've reached your usage limit`,
+/// `^You*hit your usage limit`, `^Your included usage is exhausted`,
+/// `^You've reached your workspace credit limit`, `^Your workspace is out of
+/// credits` and `^You hit your spend cap` — the other spent-limit texts of
+/// codex 0.164.0 (T-115); the "only N% left"
 /// warning is not one of them; no rate-limit/auth markers yet; tail 16
 /// lines, confirm 2
 /// rounds; unattended `--dangerously-bypass-approvals-and-sandbox` and
@@ -228,6 +259,8 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// asks which working directory to use (answer Enter: the current one, and
 /// `-c tui.resume_cwd="current"` keeps that dialog from showing); those
 /// screens read as Blocked although Herdr reports done/idle;
+/// the writer-lock screen "This conversation is open in another app" reads as
+/// Blocked and is never answered;
 /// session_ref true (Herdr reports the session uuid); resume
 /// `["resume", "{session}"]`; exit by the typed `/quit` command
 /// (`exit_command`, no keys — §12 item 4); new session `/new`; compact
@@ -236,11 +269,15 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// true; resume `["-r", "{session}"]`; exit by the `/exit` command
 /// (`exit_command`, no keys). The session fields are empty: grok is not one
 /// of the kinds of §2 and its live checks were never run (M4).
-/// pi: quota `insufficient_quota`;
-/// rate limit `rate_limit_error`; auth `No API key found for`; back-off
-/// `Retrying (`; provider error `overloaded_error` and `Retry failed after`
-/// (§12 item 6); guardrails `Command auto-denied:` and
-/// `is blocked (outside working directory)`; unattended `--approve`;
+/// pi: quota `^Error: *insufficient_quota`, `^429: *insufficient_quota`,
+/// `^Error: *exceeded your current quota` and `^429: *exceeded your current
+/// quota`; rate limit `^Error: *rate_limit_error`, `^429: *rate_limit_error`,
+/// `^Error: *Rate limit reached`, `^429: *Rate limit reached`, `^Error: 429:`
+/// and `^429:`; auth `^Error: No API key found for`; back-off `^Retrying (`;
+/// provider error `^Error: *overloaded_error` and `^Error: Retry failed after`
+/// (§12 item 6); guardrails `^Command auto-denied:` and
+/// `^Access to *is blocked (outside working directory)`; unattended
+/// `--approve`;
 /// session_ref true (Herdr reports the session file); resume
 /// `["--session", "{session}"]`; exit by the `/quit` command
 /// (`exit_command`, no keys); new session `/new`; compact `/compact`;
@@ -485,15 +522,15 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             busy_markers: vec!["esc interrupt".into()],
             ratelimit_markers: vec![],
             quota_markers: vec![
-                "Session failed".into(),
-                "Token Plan".into(),
-                "(2056)".into(),
-                "Free usage limit reached".into(),
+                "^Session failed".into(),
+                "^Error: *Token Plan".into(),
+                "^Error: *(2056)".into(),
+                "^Free usage limit reached".into(),
             ],
             quota_bar: None,
             auth_markers: vec![],
             // The retry line of a provider error: `⚠ Retrying in 3s · attempt 4 · Resource exhausted`, then `⚠ Retry due · attempt 5 · …`.
-            backoff_markers: vec!["Retrying in ".into(), "Retry due ·".into()],
+            backoff_markers: vec!["^Retrying in ".into(), "^Retry due ·".into()],
             blocked_markers: vec![],
             error_markers: vec![],
             refusal_markers: vec![
@@ -594,18 +631,24 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             busy_markers: vec!["esc to interrupt".into()],
             ratelimit_markers: vec![],
             quota_markers: vec![
-                "Usage limit reached".into(),
-                "You've reached your usage limit".into(),
-                "hit your usage limit".into(),
-                "Your included usage is exhausted".into(),
-                "You've reached your workspace credit limit".into(),
-                "Your workspace is out of credits".into(),
-                "You hit your spend cap".into(),
+                "^Usage limit reached".into(),
+                "^You've reached your usage limit".into(),
+                "^You*hit your usage limit".into(),
+                "^Your included usage is exhausted".into(),
+                "^You've reached your workspace credit limit".into(),
+                "^Your workspace is out of credits".into(),
+                "^You hit your spend cap".into(),
             ],
             quota_bar: None,
             auth_markers: vec![],
-            backoff_markers: vec!["Reconnecting...".into()],
-            blocked_markers: vec![],
+            backoff_markers: vec!["^Reconnecting...".into()],
+            // The writer lock (M5, 2026-10-29): a seat that resumes a
+            // conversation another Codex process holds sees "This conversation
+            // is open in another app" (r retry / f fork). Herdr reports it
+            // idle; read it as Blocked so the captain's item quotes it. It is
+            // not a Dialog: retry or fork is the captain's call, so no key is
+            // sent.
+            blocked_markers: vec!["This conversation is open in another app".into()],
             error_markers: vec![],
             refusal_markers: vec![],
             // T-457: Codex 0.165's startup screens (the screens captured in
@@ -738,27 +781,35 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             kind: "pi".into(),
             busy_markers: vec![" Working".into()],
             ratelimit_markers: vec![
-                "rate_limit_error".into(),
-                "Rate limit reached".into(),
-                "429:".into(),
+                "^Error: *rate_limit_error".into(),
+                "^429: *rate_limit_error".into(),
+                "^Error: *Rate limit reached".into(),
+                "^429: *Rate limit reached".into(),
+                "^Error: 429:".into(),
+                "^429:".into(),
             ],
             quota_markers: vec![
-                "insufficient_quota".into(),
-                "exceeded your current quota".into(),
+                "^Error: *insufficient_quota".into(),
+                "^429: *insufficient_quota".into(),
+                "^Error: *exceeded your current quota".into(),
+                "^429: *exceeded your current quota".into(),
             ],
             quota_bar: None,
-            auth_markers: vec!["No API key found for".into()],
-            backoff_markers: vec!["Retrying (".into()],
+            auth_markers: vec!["^Error: No API key found for".into()],
+            backoff_markers: vec!["^Retrying (".into()],
             blocked_markers: vec![
-                "Command auto-denied:".into(),
-                "is blocked (outside working directory)".into(),
+                "^Command auto-denied:".into(),
+                "^Access to *is blocked (outside working directory)".into(),
             ],
             // M4 §12 item 6: the provider answered with an overload error
             // (`529 … overloaded_error`) and pi gave up after three tries
             // (`Error: Retry failed after 3 attempts: 529`). That is a
             // provider error, not a spent quota: §9.2 reads the quota source
             // to tell the two apart.
-            error_markers: vec!["overloaded_error".into(), "Retry failed after".into()],
+            error_markers: vec![
+                "^Error: *overloaded_error".into(),
+                "^Error: Retry failed after".into(),
+            ],
             refusal_markers: vec![
                 "inappropriate content".into(),
                 "content_filter".into(),
@@ -1144,7 +1195,7 @@ mod tests {
         }
         assert_eq!(
             builtin("codex").unwrap().backoff_markers,
-            vec!["Reconnecting...".to_string()]
+            vec!["^Reconnecting...".to_string()]
         );
     }
 

@@ -155,6 +155,20 @@ impl Forge for Fake {
             .push(format!("label {repo} {name} | {description}"));
         Ok(())
     }
+
+    fn create_issue(
+        &self,
+        repo: &str,
+        title: &str,
+        _body: &str,
+        _labels: &[String],
+    ) -> ForgeResult<u64> {
+        self.reachable("issue")?;
+        self.calls
+            .borrow_mut()
+            .push(format!("issue {repo} {title}"));
+        Ok(42)
+    }
 }
 
 /// A config with project `p` in GitHub mode, landing through pull requests.

@@ -382,6 +382,41 @@ impl Forge for GitHub {
         ];
         self.run(&args).map(|_| ())
     }
+
+    fn create_issue(
+        &self,
+        repo: &str,
+        title: &str,
+        body: &str,
+        labels: &[String],
+    ) -> ForgeResult<u64> {
+        let mut args: Vec<String> = vec![
+            "issue".into(),
+            "create".into(),
+            "--repo".into(),
+            repo.into(),
+            "--title".into(),
+            title.into(),
+            "--body".into(),
+            body.into(),
+        ];
+        for label in labels {
+            args.push("--label".into());
+            args.push(label.clone());
+        }
+        // `gh issue create` prints the new issue's URL: the number is its last
+        // segment, as for a claim's pull request.
+        let out = self.run(&args)?;
+        let url = out
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("http"))
+            .ok_or_else(|| Error::Unreadable(format!("the filed issue: {out:?}")))?;
+        url.rsplit('/')
+            .next()
+            .and_then(|last| last.parse::<u64>().ok())
+            .ok_or_else(|| Error::Unreadable(format!("the number in {url}")))
+    }
 }
 
 /// What `gh pr view --json isDraft` answers.

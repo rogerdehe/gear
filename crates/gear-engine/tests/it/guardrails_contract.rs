@@ -176,3 +176,48 @@ fn a_lane_that_is_refused_no_more_resolves_the_item_and_a_later_refusal_rings_ag
     assert_eq!(watch(&mut w, 2), vec!["p:heat"]);
     assert_eq!(items(&mut w, "heat").len(), 2, "a new refusal is reported");
 }
+
+/// T-654: a refusal on the screen of a working agent does not ring — the agent
+/// goes on after it.
+#[test]
+fn a_working_agent_refused_does_not_ring() {
+    let mut w = world();
+    w.herdr.set_status(LANE, AgentStatus::Working);
+    assert!(watch(&mut w, 0).is_empty());
+    assert!(items(&mut w, "heat").is_empty());
+}
+
+/// T-654: the refusal rings once it is seen on a stopped agent, and a working
+/// agent's screen neither opens nor closes the item.
+#[test]
+fn a_refusal_seen_while_working_then_stopped_rings_once() {
+    let mut w = world();
+    w.herdr.set_status(LANE, AgentStatus::Working);
+    assert!(watch(&mut w, 0).is_empty());
+    w.herdr.set_status(LANE, AgentStatus::Idle);
+    assert_eq!(watch(&mut w, 1), vec!["p:heat"]);
+    w.herdr.set_status(LANE, AgentStatus::Working);
+    w.herdr.set_screen(LANE, CLEAN);
+    assert!(watch(&mut w, 2).is_empty());
+    assert_eq!(items(&mut w, "heat")[0].state, MsgState::Open);
+    w.herdr.set_screen(LANE, REFUSED);
+    assert!(watch(&mut w, 3).is_empty());
+    w.herdr.set_status(LANE, AgentStatus::Idle);
+    assert!(watch(&mut w, 4).is_empty());
+    assert_eq!(items(&mut w, "heat").len(), 1);
+}
+
+/// T-654: a clean screen of a working agent does not resolve the item; the
+/// stopped agent's clean screen does.
+#[test]
+fn a_working_clean_screen_does_not_resolve_the_item() {
+    let mut w = world();
+    assert_eq!(watch(&mut w, 0), vec!["p:heat"]);
+    w.herdr.set_status(LANE, AgentStatus::Working);
+    w.herdr.set_screen(LANE, CLEAN);
+    assert!(watch(&mut w, 1).is_empty());
+    assert_eq!(items(&mut w, "heat")[0].state, MsgState::Open);
+    w.herdr.set_status(LANE, AgentStatus::Idle);
+    assert!(watch(&mut w, 2).is_empty());
+    assert_eq!(items(&mut w, "heat")[0].state, MsgState::Resolved);
+}

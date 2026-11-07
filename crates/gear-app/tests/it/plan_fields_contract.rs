@@ -592,7 +592,7 @@ fn idle_rebind_applies_at_once_and_invalid_targets_are_atomic() {
     .unwrap();
     assert!(
         result.warnings.contains(
-            &"rebind wire: repo root → api, owns [src/wire/] → [src/wire/]: applied".to_string()
+            &"rebind wire: repo root → api, owns [src/wire/] → [src/wire/]: applied (to undo: - rebind wire repo=. owns=[src/wire/])".to_string()
         ),
         "{:?}",
         result.warnings
@@ -627,7 +627,7 @@ fn idle_rebind_and_new_task_in_one_apply_use_the_destination_repo() {
     let result = run_at(&mut s, "# Staff\n- rebind wire repo=api owns=[src/new/]\n# Queue\n## T-2 [should] lane=wire\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n\n## NEW [must] lane=wire\ngoal: new repo work\naccept: done\nestimate: 10\ndeps: -\n", "rebind-and-new").unwrap();
     assert!(
         result.warnings.contains(
-            &"rebind wire: repo root → api, owns [src/wire/] → [src/new/]: applied".to_string()
+            &"rebind wire: repo root → api, owns [src/wire/] → [src/new/]: applied (to undo: - rebind wire repo=. owns=[src/wire/])".to_string()
         ),
         "{:?}",
         result.warnings
@@ -906,4 +906,106 @@ fn a_feature_mark_is_parsed_stored_shown_and_cleared() {
     assert_eq!(feature(&mut s, "T-1"), None, "`-` clears it");
     let shown = s.read(|tx| gear_app::plan::show(tx, "p", "T-1")).unwrap();
     assert!(!shown.contains("feature:"), "{shown}");
+}
+
+/// T-674: `repo=.` names the project root, and the undo names it the same way.
+#[test]
+fn a_rebind_to_the_root_names_it_with_a_dot() {
+    let mut s = world();
+    let result = run_at(
+        &mut s,
+        "# Staff\n- rebind heat repo=. owns=[src/heat/]\n",
+        "root",
+    )
+    .unwrap();
+    assert!(
+        result.warnings.contains(
+            &"rebind heat: repo api → root, owns [src/heat/] → [src/heat/]: applied (to undo: - rebind heat repo=api owns=[src/heat/])".to_string()
+        ),
+        "{:?}",
+        result.warnings
+    );
+    assert_eq!(
+        gear_app::config::latest(&mut s, "p")
+            .unwrap()
+            .repo_of_lane("heat")
+            .name,
+        ""
+    );
+    let stored = s.read(|tx| tx.get_project("p")).unwrap().unwrap();
+    let value: toml::Value = stored.config_toml.parse().unwrap();
+    let heat = value
+        .get("lanes")
+        .and_then(toml::Value::as_array)
+        .unwrap()
+        .iter()
+        .find(|lane| lane.get("name").and_then(toml::Value::as_str) == Some("heat"))
+        .unwrap();
+    assert!(
+        heat.get("repo").is_none(),
+        "the root lane carries no repo key: {heat:?}"
+    );
+}
+
+/// T-674: no `repo=` at all means the project root; an empty `repo=` is an
+/// error.
+#[test]
+fn a_rebind_without_repo_means_the_root() {
+    let draft =
+        parse("<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind heat owns=[src/heat/]\n")
+            .unwrap();
+    assert!(
+        matches!(
+            draft.staff.first(),
+            Some(gear_app::draft::StaffItem::Rebind { repo, .. }) if repo.is_empty()
+        ),
+        "{:?}",
+        draft.staff
+    );
+    assert!(parse(
+        "<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind heat repo= owns=[src/]\n"
+    )
+    .is_err());
+}
+
+/// T-673: one rebind that cannot apply yet does not hold the others: it waits
+/// with its reason recorded, and the next tick leaves that reason alone.
+#[test]
+fn a_blocked_rebind_does_not_hold_the_others() {
+    let mut s = world_with_two_pending_attempts();
+    s.write(|tx| {
+        tx.set_meta(
+            &gear_app::plan::rebind_pending_key("p:heat"),
+            r#"{"repo":"engine","owns":["src/"]}"#,
+        )?;
+        tx.set_meta(
+            &gear_app::plan::rebind_pending_key("p:wire"),
+            r#"{"repo":"engine","owns":["src/wire/"]}"#,
+        )?;
+        for task in ["T-1", "T-2"] {
+            let mut attempt = tx.get_attempt("p", task, 1)?.unwrap();
+            attempt.state = AttemptState::Accepted;
+            tx.update_attempt(&attempt)?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let changed = gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap();
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    let waiting = ["p:heat", "p:wire"]
+        .into_iter()
+        .find(|seat| {
+            s.read(|tx| tx.get_meta(&gear_app::plan::rebind_pending_key(seat)))
+                .unwrap()
+                .is_some_and(|v| !v.is_empty())
+        })
+        .expect("one rebind still waits");
+    let key = format!("lane-rebind-waiting:{waiting}");
+    let reason = s.read(|tx| tx.get_meta(&key)).unwrap().unwrap();
+    assert!(reason.contains("overlaps"), "{reason}");
+    assert_eq!(
+        gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap(),
+        Vec::<String>::new()
+    );
+    assert_eq!(s.read(|tx| tx.get_meta(&key)).unwrap().unwrap(), reason);
 }

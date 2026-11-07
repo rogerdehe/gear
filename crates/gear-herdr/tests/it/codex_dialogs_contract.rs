@@ -31,6 +31,10 @@ const CODEX_RESUME_SCREEN: &str = "\
   2. Use session directory (/worktrees/gear/home-heat)
 ";
 
+/// The writer lock (M5, 2026-10-29): the conversation is held by another
+/// Codex process; retry or fork is the captain's call.
+const CODEX_WRITER_LOCK: &str = "  This conversation is open in another app.\n";
+
 /// A plain composer: no dialog, nothing to answer.
 const CODEX_COMPOSER: &str = "\
   permissions: YOLO mode
@@ -152,4 +156,30 @@ fn a_slash_command_is_typed_in_one_call() {
         })
         .collect();
     assert_eq!(typed, vec!["/new".to_string()]);
+}
+
+/// T-676: the writer-lock screen reads as Blocked — the captain's guardrails
+/// item quotes it — and nothing answers it: retry or fork is the captain's
+/// call.
+#[test]
+fn the_writer_lock_screen_is_blocked_and_never_answered() {
+    let codex = builtin("codex").expect("codex is built in");
+    assert!(
+        classify_screen(&codex, CODEX_WRITER_LOCK).contains(&ScreenFlag::Blocked),
+        "{:?}",
+        classify_screen(&codex, CODEX_WRITER_LOCK)
+    );
+    assert!(codex.dialog(CODEX_WRITER_LOCK).is_none());
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent("w1:p1", "codex", AgentStatus::Idle);
+    herdr.set_screen("w1:p1", CODEX_WRITER_LOCK);
+    assert_eq!(answer_dialog(&mut herdr, "w1:p1", &codex), None);
+    assert!(
+        !herdr
+            .calls
+            .iter()
+            .any(|call| matches!(call, Call::SendKeys { .. })),
+        "no key is sent into the writer-lock screen"
+    );
+    assert!(!classify_screen(&codex, CODEX_COMPOSER).contains(&ScreenFlag::Blocked));
 }

@@ -122,6 +122,7 @@ fn cancelling_a_started_task_abandons_its_attempt_and_tells_the_lane() {
     assert_eq!(messages[0].recipient, "p:heat");
     assert_eq!(messages[0].kind, MsgKind::Instruction);
     assert_eq!(messages[0].state, MsgState::Open);
+    assert!(messages[0].urgent);
     assert_eq!(
         messages[0].body,
         "T-1 is cancelled; stop work on it, nothing to hand in"
@@ -719,6 +720,7 @@ fn moving_a_started_task_abandons_its_attempt_and_tells_the_old_lane() {
     assert_eq!(messages[0].recipient, "p:heat");
     assert_eq!(messages[0].kind, MsgKind::Instruction);
     assert_eq!(messages[0].state, MsgState::Open);
+    assert!(messages[0].urgent);
     assert_eq!(
         messages[0].body,
         "T-1 moved to lane cold; stop work on it, nothing to hand in"

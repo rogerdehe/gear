@@ -176,6 +176,9 @@ fn send_inner(
     // The hand-in gate (T-19) runs before the transaction: a candidate that
     // does not contain the current integration branch is refused and nothing —
     // no message, no attempt change — is stored.
+    // T-675: a hand-in whose diff leaves the lane's files is flagged in the
+    // result's body, never refused.
+    let mut outside: Option<String> = None;
     if args.kind == MsgKind::Result && !direction {
         if let Some(gate) = &args.base {
             let candidate = args.candidate.as_deref().ok_or_else(|| {
@@ -237,6 +240,36 @@ fn send_inner(
                             &branch,
                             candidate,
                         )?;
+                        // T-675: the files the candidate changes that the
+                        // lane does not own are named to the captain. No
+                        // config, no `owns`, or a git that cannot tell → no
+                        // line.
+                        if let Ok(config) = crate::config::latest(store, &ctx.project) {
+                            if let Some(configured) = config.lanes.iter().find(|l| l.name == lane) {
+                                if !configured.owns.is_empty() {
+                                    let base = format!(
+                                        "refs/remotes/{}/{}",
+                                        conventions.remote, gate.integration
+                                    );
+                                    if let Some(files) =
+                                        crate::base::changed_files(&gate.worktree, &base, candidate)
+                                    {
+                                        let paths: Vec<String> = files
+                                            .into_iter()
+                                            .filter(|file| {
+                                                !crate::config::owns_path(&configured.owns, file)
+                                            })
+                                            .collect();
+                                        if !paths.is_empty() {
+                                            outside = Some(format!(
+                                                "outside lane {lane}'s files: {}",
+                                                paths.join(", ")
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -563,10 +596,16 @@ fn send_inner(
             // The body of a review is the verdict, the blocking findings by
             // title and where the full review is (T-641): the captain reads
             // the item, the rework lane reads the findings in the store.
-            let body = match &review {
+            let mut body = match &review {
                 Some(review) => review_body(review, handed_path.as_deref()),
                 None => args.body.clone(),
             };
+            // T-675: the captain reads what left the lane's files.
+            if args.kind == MsgKind::Result {
+                if let Some(line) = &outside {
+                    body = format!("{body}\n{line}");
+                }
+            }
 
             // A result submits the attempt before the message is stored; an
             // error here aborts the whole send, so nothing is kept.
@@ -1772,7 +1811,10 @@ pub fn reply(
                 if !handlable(&message, args.mode) {
                     return Err(GearError::new(
                         ErrorCode::BadTransition,
-                        format!("message {id} is {}, it cannot be handled again", message.state.as_str()),
+                        format!(
+                            "message {id} is {}, it cannot be handled again",
+                            message.state.as_str()
+                        ),
                     ));
                 }
                 // A station item is settled by a plan `# Decisions` line, not
@@ -1781,10 +1823,24 @@ pub fn reply(
                 if crate::station::is_station(&message)
                     && !matches!(args.mode, ReplyMode::Note | ReplyMode::Wait)
                 {
-                    return Err(GearError::new(ErrorCode::BadFormat, format!(
-                        "station {} needs a plan # Decisions line: station {}: keep course|time-box|cut|move",
-                        message.id, message.id,
-                    )));
+                    let actions = crate::station::actions_of(tx, &ctx.project, &message)?;
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
+                        format!(
+                            "station {} needs a plan # Decisions line: station {}: {actions}",
+                            message.id, message.id,
+                        ),
+                    ));
+                }
+                // The engine's friction item closes itself when its reports
+                // are closed (T-668); a note and a wait stay allowed.
+                if args.mode == ReplyMode::Resolve {
+                    if let Some(command) = crate::friction::close_hint(tx, &ctx.project, &message)? {
+                        return Err(GearError::new(ErrorCode::BadFormat, format!(
+                            "message {} closes itself when its friction reports are closed: next: {command}",
+                            message.id
+                        )));
+                    }
                 }
                 // A review fail (or a failed merge) is settled where it can
                 // be: by a plan line — a `# Verdicts` line, or a `# Staff`
@@ -1845,7 +1901,9 @@ pub fn reply(
                 // and the wait fields it had; resolve and wait set their own
                 // (T-103).
                 let (wait_on, wait_until) = match args.mode {
-                    ReplyMode::Note | ReplyMode::Reopen => (original.wait_on.clone(), original.wait_until),
+                    ReplyMode::Note | ReplyMode::Reopen => {
+                        (original.wait_on.clone(), original.wait_until)
+                    }
                     _ => (args.wait_on.clone(), args.wait_until),
                 };
                 tx.update_message_state(
@@ -1936,14 +1994,24 @@ pub fn reply(
             RequestOutcome::Executed(value) => (value, false),
             RequestOutcome::Replayed(value) => (value, true),
         };
-        let handled: Vec<(String, String)> =
-            serde_json::from_value(value["handled"].clone()).map_err(|e| {
-                GearError::new(ErrorCode::BadFormat, format!("stored reply result is broken: {e}"))
+        let handled: Vec<(String, String)> = serde_json::from_value(value["handled"].clone())
+            .map_err(|e| {
+                GearError::new(
+                    ErrorCode::BadFormat,
+                    format!("stored reply result is broken: {e}"),
+                )
             })?;
         let replies: Vec<String> =
             serde_json::from_value(value["replies"].clone()).map_err(|e| {
-                GearError::new(ErrorCode::BadFormat, format!("stored reply result is broken: {e}"))
+                GearError::new(
+                    ErrorCode::BadFormat,
+                    format!("stored reply result is broken: {e}"),
+                )
             })?;
-        Ok(ReplyResult { handled, replies, replayed })
+        Ok(ReplyResult {
+            handled,
+            replies,
+            replayed,
+        })
     })
 }

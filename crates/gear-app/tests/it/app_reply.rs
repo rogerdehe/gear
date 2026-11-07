@@ -8,7 +8,7 @@ use gear_app::identity::Fingerprint;
 use gear_app::mail::{self, ReplyArgs, ReplyMode, SendArgs};
 use gear_app::Env;
 use gear_model::{ErrorCode, GearCtx, MsgKind, MsgState, SeatRole, SeatState};
-use gear_store::{testing, NewMessage, Store};
+use gear_store::{testing, NewFriction, NewMessage, Store};
 
 const NOW: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
@@ -996,4 +996,129 @@ fn waiting_on_info_is_rejected_without_reopening_it_or_changing_other_items() {
         .read(|tx| tx.messages_to_since("p", "p:heat", 0))
         .unwrap()
         .is_empty());
+}
+
+/// The engine's friction item and two open reports behind it (T-668).
+fn friction_item(s: &mut Store) -> String {
+    s.write(|tx| {
+        let id = tx
+            .insert_message(&NewMessage {
+                meta: None,
+                project: "p".into(),
+                thread: "friction".into(),
+                task: None,
+                attempt: None,
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: "p:captain".into(),
+                kind: MsgKind::System,
+                urgent: false,
+                body: "2 friction reports are open".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: NOW,
+            })?
+            .id;
+        for task in ["T-1", "T-2"] {
+            tx.insert_friction(&NewFriction {
+                project: "p".into(),
+                task: task.into(),
+                attempt: 1,
+                role: "dev".into(),
+                seat: "p:heat".into(),
+                body: format!("the friction of {task}"),
+                required: false,
+            })?;
+        }
+        Ok(id)
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_friction_item_is_not_closed_by_a_resolve() {
+    let mut s = world();
+    let id = friction_item(&mut s);
+    let error = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &reply_args(&[&id], ReplyMode::Resolve, "r1"),
+        NOW + 1,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat, "{error:?}");
+    assert!(
+        error
+            .detail
+            .contains("gear friction close F-1 -m \"lesson|fixed|not worth it (...)\""),
+        "{error:?}"
+    );
+    assert_eq!(state_of(&mut s, &id), MsgState::Open);
+    // A note stays allowed: it is bookkeeping, not a close.
+    mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &reply_args(&[&id], ReplyMode::Note, "r2"),
+        NOW + 2,
+    )
+    .unwrap();
+    assert_eq!(state_of(&mut s, &id), MsgState::Open);
+}
+
+#[test]
+fn a_friction_item_names_its_oldest_report() {
+    let mut s = world();
+    friction_item(&mut s);
+    let page = gear_app::home::build(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        NOW + 1,
+    )
+    .unwrap();
+    assert!(
+        page.text
+            .contains("next: gear friction close F-1 -m \"lesson|fixed|not worth it (...)\""),
+        "{}",
+        page.text
+    );
+    s.write(|tx| tx.close_friction("p", "F-1", "lesson L-1", NOW + 2))
+        .unwrap();
+    let page = gear_app::home::build(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        NOW + 3,
+    )
+    .unwrap();
+    assert!(
+        page.text
+            .contains("next: gear friction close F-2 -m \"lesson|fixed|not worth it (...)\""),
+        "{}",
+        page.text
+    );
+}
+
+#[test]
+fn a_friction_item_without_open_reports_resolves() {
+    let mut s = world();
+    let id = friction_item(&mut s);
+    s.write(|tx| {
+        tx.close_friction("p", "F-1", "lesson L-1", NOW + 1)?;
+        tx.close_friction("p", "F-2", "fixed the fixture", NOW + 1)
+    })
+    .unwrap();
+    let r = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &reply_args(&[&id], ReplyMode::Resolve, "r1"),
+        NOW + 2,
+    )
+    .unwrap();
+    assert_eq!(r.handled, vec![(id.clone(), "resolved".to_string())]);
+    assert_eq!(state_of(&mut s, &id), MsgState::Resolved);
 }

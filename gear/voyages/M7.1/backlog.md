@@ -1,0 +1,12 @@
+# Backlog
+
+M7.1 goal (agreed with the user, 2026-11-07): clear the backlog — every reasonable item done, what is not GEAR's job dropped — and ship v0.7.0.
+
+Every item of gear/voyages/M7/backlog.md was checked against the code on 2026-11-07: the fixed ones are gone, the dropped ones are recorded in plan.md's scope decisions, and the rest are M7.1's queue. New items found during M7.1 go below.
+
+## Candidates
+- **The captain's home page prints the voyage's done sentence three times** (M7.1, 2026-11-07): the voyage line, the goal line and the snapshot's voyage line each carry the full `done:` text, so a long goal fills the screen three times over. The page says it once (the goal line) and the other two name the voyage and its clock only.
+- **The parallel-change check counts files a branch merged in from dev** (M7.1, 2026-11-07, M-8738/M-8739): hull/t658 and hull/t659 had merged hull/t657 (which had merged dev with mast's T-671), so a diff from a stale merge base (git warned "multiple merge bases") listed crates/gear-app/src/plan.rs, which only mast's commits touch. The check should compare the branch's own non-merge commits (or diff against the current integration tip's merge base), so a file another task already landed on dev is not reported as shared.
+- **A lane restart request shares its key with the restart plan** (M7.1 T-665, 2026-11-07): `- restart <lane>` writes `engine.restart.<seat>` = `{"at":…}`, which is also restart.rs's plan key, so a request applied while a switch plan of that lane is pending overwrites the plan mid-switch. Give the request its own key (e.g. `engine.restart-request.<seat>`) or refuse the restart while a plan is pending.
+- **The idle-voyage item counts every task of the voyage as left** (M7.1, 2026-11-07, M-8858): it said "32 tasks left" with 29 done. It should count the tasks that are not done, as the snapshot does.
+- **A lane can leave a started task and take the next one** (M7.1, 2026-11-07): mast's T-678 and T-679 stayed Started from 01:59/02:01 with no commits while mast worked T-681 to T-683 (their packets said to stop if T-677's function was not there yet); the snapshot showed "T-678 working" and the fleet sat idle until the idle-voyage item rang. A lane that hands in another task while an attempt of its own is still Started should make that attempt's state visible to the captain (an item naming it), not hide it as "working".

@@ -32,6 +32,11 @@ pub struct InitResult {
     /// user's confirmation; the CLI prints them under "changed (captain's)".
     #[serde(default)]
     pub captain_changes: Vec<String>,
+    /// T-672: one line per model whose context window nobody knows — it has no
+    /// `context_window_k` and its CLI does not report one — so GEAR never
+    /// compacts its sessions. A warning, never a refusal.
+    #[serde(default)]
+    pub window_warnings: Vec<String>,
 }
 
 /// The seat that may register a project: the user's own shell (no ctx), or
@@ -167,7 +172,96 @@ pub fn init_with_home(
             )?;
         }
     }
+    // T-672: a model whose context window nobody knows is warned about, never
+    // refused. The home is the caller's, as `check` reads it; without one
+    // there is nothing to read the logs from.
+    let warnings_home = match home {
+        Some(home) => Some(home.to_path_buf()),
+        None => std::env::var_os("HOME").map(std::path::PathBuf::from),
+    };
+    if let Some(home) = warnings_home {
+        result.window_warnings = window_warnings(&config, &home)?;
+    }
     Ok(result)
+}
+
+/// T-672: the models of the config whose context window nobody knows — no
+/// `context_window_k`, and the CLI that runs them does not report one either —
+/// so GEAR never compacts their sessions. One line per distinct (model, CLI),
+/// in the order met.
+pub fn window_warnings(
+    config: &config::ProjectConfig,
+    home: &std::path::Path,
+) -> GearResult<Vec<String>> {
+    let table = config::profile_table(&gear_herdr::builtins(), config)?;
+    // Every model the project can run, with the seat profile it runs under.
+    let mut entries: Vec<(&config::ModelEntry, Option<&gear_herdr::Profile>)> = Vec::new();
+    for lane in &config.lanes {
+        let profile = table.get(&lane.profile);
+        for entry in config::lane_chain(config, lane) {
+            entries.push((entry, profile));
+        }
+    }
+    let temps = config
+        .temps
+        .as_ref()
+        .and_then(|temps| table.get(&temps.profile));
+    for entry in &config.models.review {
+        // Without a reviewer seat there is no profile to fall back on: only an
+        // entry that names its CLI says what runs it.
+        if config.temps.is_none() && entry.cli().is_none() {
+            continue;
+        }
+        entries.push((entry, temps));
+    }
+    let captain = table.get(&config.captain.profile);
+    for entry in &config.models.captain {
+        entries.push((entry, captain));
+    }
+    let mut warnings: Vec<String> = Vec::new();
+    let mut seen: Vec<(String, String)> = Vec::new();
+    for (entry, seat_profile) in entries {
+        if entry.context_window_k().is_some() {
+            continue;
+        }
+        let cli = match entry.cli() {
+            Some(cli) => cli,
+            None => match seat_profile {
+                Some(profile) => profile.kind.as_str(),
+                None => continue,
+            },
+        };
+        // The log of the CLI that runs the model: the seat's own profile when
+        // it is that CLI, else the first profile of the table that is.
+        let log_profile = match seat_profile {
+            Some(profile) if profile.kind == cli => Some(profile),
+            _ => table.values().find(|profile| profile.kind == cli),
+        };
+        let log = log_profile
+            .and_then(|profile| profile.usage_log.as_deref())
+            .and_then(gear_usage::UsageLog::from_name);
+        // Codex reports the window only from a session, so its log says
+        // nothing here.
+        if log == Some(gear_usage::UsageLog::CodexRollout) {
+            continue;
+        }
+        let known = log.is_some_and(|log| {
+            gear_usage::context_window_in(log, None, entry.model(), home).is_some()
+        });
+        if known {
+            continue;
+        }
+        let key = (entry.model().to_string(), cli.to_string());
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        warnings.push(format!(
+            "model {} has no context_window_k and {cli} does not report its window: GEAR will not compact its sessions; set context_window_k",
+            entry.model()
+        ));
+    }
+    Ok(warnings)
 }
 
 /// The checks `init` makes before it touches the store (T-228): the config's
@@ -728,6 +822,8 @@ fn register(
         stale_worktrees: Vec::new(),
         // A first registration has no stored config to differ from.
         captain_changes: Vec::new(),
+        // T-672: filled in by `init_with_home` once the home is known.
+        window_warnings: Vec::new(),
     })
 }
 
@@ -1110,6 +1206,8 @@ fn re_register(
         stale_worktrees: Vec::new(),
         // T-623: the captain's own fields, printed under "changed (captain's)".
         captain_changes,
+        // T-672: filled in by `init_with_home` once the home is known.
+        window_warnings: Vec::new(),
     })
 }
 

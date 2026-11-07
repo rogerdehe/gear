@@ -115,6 +115,10 @@ pub const TEMPLATES: &[(&str, &str)] = &[
 /// the frontmatter of `SKILL.md` (the CLI matches the two).
 pub const SKILL_NAME: &str = "gear";
 
+/// The file an installed skill copy carries the version that wrote it (T-681):
+/// a captain's page names every copy older than the binary.
+pub const VERSION_FILE: &str = ".gear-version";
+
 /// The agent CLIs that load skills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillAgent {
@@ -223,6 +227,47 @@ impl SkillAgent {
     }
 }
 
+/// The installed skill copies older than `version` (T-681): one line per
+/// agent whose copy carries an older version, an unparseable one, or none.
+pub fn stale_copies(home: &Path, codex_home: Option<&Path>, version: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for agent in SkillAgent::ALL {
+        let dir = agent.skills_dir_with(home, codex_home).join(SKILL_NAME);
+        if !dir.join("SKILL.md").is_file() {
+            continue;
+        }
+        let old = std::fs::read_to_string(dir.join(VERSION_FILE))
+            .ok()
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty());
+        let stale = match &old {
+            None => true,
+            Some(old) => match (version_parts(old), version_parts(version)) {
+                (Some(old), Some(version)) => old < version,
+                _ => old != version,
+            },
+        };
+        if !stale {
+            continue;
+        }
+        let old = old.unwrap_or_else(|| "an unknown version".to_string());
+        lines.push(format!(
+            "skill copy for {} is from {old}, gear is {version}: run gear admin install-skill --agent {}",
+            agent.as_str(),
+            agent.as_str()
+        ));
+    }
+    lines
+}
+
+/// A version as its dot-separated numbers, `None` when it is not one.
+fn version_parts(version: &str) -> Option<Vec<u64>> {
+    version
+        .split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
 /// Is the GEAR skill installed for `agent` under `home` (T-83)? The CLI loads
 /// `<skills root>/gear/SKILL.md`; a missing file means the agent never learns
 /// how to work as a seat. The home is explicit: the caller knows whose home it
@@ -284,6 +329,15 @@ pub fn install_into(root: &Path) -> GearResult<Vec<PathBuf>> {
         })?;
         written.push(path);
     }
+    // T-681: the version that wrote this copy, beside the skill (not part of
+    // the file list: the counts stay as they are).
+    let version_path = dir.join(VERSION_FILE);
+    std::fs::write(&version_path, format!("{}\n", env!("CARGO_PKG_VERSION"))).map_err(|e| {
+        GearError::new(
+            ErrorCode::BadFormat,
+            format!("cannot write {}: {e}", version_path.display()),
+        )
+    })?;
     Ok(written)
 }
 
@@ -382,6 +436,78 @@ mod tests {
             SkillAgent::Agy.skills_root(&home),
             home.join(".gemini").join("antigravity-cli").join("skills")
         );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn the_install_writes_the_version_beside_the_skill() {
+        let home = scratch_home("version");
+        let written = install(SkillAgent::Pi, &home).unwrap();
+        let dir = SkillAgent::Pi.skills_root(&home).join(SKILL_NAME);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(VERSION_FILE))
+                .unwrap()
+                .trim(),
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(std::fs::read_to_string(dir.join("SKILL.md"))
+            .unwrap()
+            .starts_with("---"));
+        assert_eq!(written.len(), TOPICS.len() + TEMPLATES.len());
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_copy_older_than_the_binary_is_named() {
+        let home = scratch_home("older");
+        install(SkillAgent::Pi, &home).unwrap();
+        let dir = SkillAgent::Pi.skills_root(&home).join(SKILL_NAME);
+        std::fs::write(dir.join(VERSION_FILE), "0.6.1\n").unwrap();
+        assert_eq!(
+            stale_copies(&home, None, "0.6.114"),
+            vec![
+                "skill copy for pi is from 0.6.1, gear is 0.6.114: run gear admin install-skill --agent pi"
+                    .to_string()
+            ]
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_current_or_newer_copy_is_not_named() {
+        let home = scratch_home("current");
+        install(SkillAgent::Pi, &home).unwrap();
+        let dir = SkillAgent::Pi.skills_root(&home).join(SKILL_NAME);
+        for version in ["0.6.114", "0.7.0"] {
+            std::fs::write(dir.join(VERSION_FILE), format!("{version}\n")).unwrap();
+            assert!(stale_copies(&home, None, "0.6.114").is_empty(), "{version}");
+        }
+        // Numeric, not text order: 99 is older than 114.
+        std::fs::write(dir.join(VERSION_FILE), "0.6.99\n").unwrap();
+        assert_eq!(stale_copies(&home, None, "0.6.114").len(), 1);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_copy_without_a_version_is_named_unknown() {
+        let home = scratch_home("unknown");
+        install(SkillAgent::Pi, &home).unwrap();
+        let dir = SkillAgent::Pi.skills_root(&home).join(SKILL_NAME);
+        std::fs::remove_file(dir.join(VERSION_FILE)).unwrap();
+        let lines = stale_copies(&home, None, "0.6.114");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("is from an unknown version"),
+            "{}",
+            lines[0]
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn no_copy_no_line() {
+        let home = scratch_home("empty");
+        assert!(stale_copies(&home, None, "0.6.114").is_empty());
         std::fs::remove_dir_all(&home).ok();
     }
 

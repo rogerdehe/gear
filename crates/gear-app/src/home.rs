@@ -514,17 +514,23 @@ fn next_command(
             // (T-257): `gear/voyages/<M>/plan.md` by default.
             let voyage_dir = crate::tasks::conventions_of(tx, project).voyage_dir;
             let plan = gear_model::layout::plan_file(&voyage_dir, project, milestone);
+            let actions = crate::station::actions_of(tx, project, &message)?;
             Ok(format!(
-                "next: gear plan apply {plan} (# Decisions: station {shown}: keep course|time-box|cut|move)"
+                "next: gear plan apply {plan} (# Decisions: station {shown}: {actions})"
             ))
         }
         // A review fail (or a failed merge) is settled where it can be:
         // by a `# Verdicts` line, not by a reply (T-90).
-        Some(message) => match crate::tasks::verdict_hint(tx, project, &message)? {
-            Some(hint) => Ok(format!("next: {}", verdict_command(&hint))),
-            None => Ok(format!(
-                "next: gear reply {shown} --resolve -m \"<what was done>\""
-            )),
+        Some(message) => match crate::friction::close_hint(tx, project, &message)? {
+            // The engine's friction item closes when its reports are closed
+            // (T-668).
+            Some(command) => Ok(format!("next: {command}")),
+            None => match crate::tasks::verdict_hint(tx, project, &message)? {
+                Some(hint) => Ok(format!("next: {}", verdict_command(&hint))),
+                None => Ok(format!(
+                    "next: gear reply {shown} --resolve -m \"<what was done>\""
+                )),
+            },
         },
         None => Ok(format!(
             "next: gear reply {shown} --resolve -m \"<what was done>\""

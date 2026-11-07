@@ -776,10 +776,60 @@ fn a_current_candidate_is_accepted() {
         (attempt.state, attempt.candidate.as_deref()),
         (AttemptState::Submitted, Some(current.as_str()))
     );
+    let messages = s.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].body, "Report: ops/reports/T-1.md");
+}
+
+/// T-675: a hand-in whose diff leaves the lane's files is flagged to the
+/// captain in the result's body, never refused.
+#[test]
+fn a_hand_in_outside_the_lanes_files_is_flagged() {
+    let r = repos();
+    let current = r.candidate("heat/t1", "origin/dev", "my work");
+    let mut s = world_with_config();
+    let (env, fp) = lane();
+    let gate = Some(BaseGate {
+        worktree: r.lane.clone(),
+        integration: "dev".into(),
+        window_min: 30,
+    });
+
+    mail::send(&mut s, &env, Some(&fp), &result(&current, gate), T0 + 5).unwrap();
+
+    let messages = s.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap();
+    assert_eq!(messages.len(), 1);
     assert_eq!(
-        s.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap().len(),
-        1
+        messages[0].body,
+        "Report: ops/reports/T-1.md\noutside lane heat's files: heat-t1.txt"
     );
+}
+
+/// T-675: a hand-in inside the lane's files carries no flag.
+#[test]
+fn a_hand_in_inside_the_lanes_files_is_not_flagged() {
+    let r = repos();
+    let current = r.candidate("heat/t1", "origin/dev", "my work");
+    let mut s = world_with_config();
+    s.write(|tx| {
+        let mut project = tx.get_project("p")?.unwrap();
+        project.config_toml =
+            ROOT_CONFIG.replace(r#"owns = ["src/heat/"]"#, r#"owns = ["heat-t1.txt"]"#);
+        tx.update_project(&project)
+    })
+    .unwrap();
+    let (env, fp) = lane();
+    let gate = Some(BaseGate {
+        worktree: r.lane.clone(),
+        integration: "dev".into(),
+        window_min: 30,
+    });
+
+    mail::send(&mut s, &env, Some(&fp), &result(&current, gate), T0 + 5).unwrap();
+
+    let messages = s.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].body, "Report: ops/reports/T-1.md");
 }
 
 // ---------------------------------------------------------------- R1 fixes

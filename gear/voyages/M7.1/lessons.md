@@ -1,0 +1,4 @@
+# M7.1 lessons
+
+- **"As today" in a packet reads as "the current time" (T-670, 2026-11-07):** the packet said "the `ended` time is computed as today when not sailing", meaning "unchanged"; the reviewer read "today" as now and failed the task. Write "unchanged" or name the current rule ("the last merge time, as now") instead of "as today".
+- **A packet that builds on another task of the same lane waits for its merge, not its hand-in (F-348, T-678/T-679, 2026-11-07):** T-677 added `marker_matches` and T-678/T-679 used it; same-lane deps are refused, so the order was only the queue's, and the lane reached T-678 while T-677 was handed in but not merged. It stopped twice, moved on, and left both Started. When a packet needs another packet's new function, make them one task, or move the second to the other lane with a dep on the first.

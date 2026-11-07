@@ -355,19 +355,21 @@ fn pi_last_context(path: &Path) -> Option<i64> {
 /// agy (Antigravity CLI): the conversation's transcript, one JSON object per
 /// line, under `~/.gemini/antigravity-cli/brain/<conversation>/
 /// .system_generated/logs/transcript.jsonl` (agy 1.4.12). A model record
-/// carries `input_tokens`, `cache_read_tokens` and `output_tokens` (the older
-/// records carry none, so they add nothing). The transcript carries no cost
-/// and no model id: the record's model is None and the caller's model prices
-/// it.
+/// carries `input_tokens`, `cache_read_tokens` and `output_tokens`; a record
+/// without any count is not counted, and a transcript with no count at all is
+/// unknown (None). The transcript carries no cost and no model id: the
+/// record's model is None and the caller's model prices it.
 fn agy_jsonl(session: &str, from: Ts, to: Ts, home: &Path) -> Option<Usage> {
     let path = agy_transcript_path(home, session)?;
     let lines = read_lines(&path)?;
     let mut totals = Totals::default();
+    let mut counted = false;
     for line in lines {
         let Some(value) = parse(&line) else { continue };
         let Some((time, usage)) = agy_record(&value) else {
             continue;
         };
+        counted = true;
         if time < from || time >= to {
             continue;
         }
@@ -377,6 +379,9 @@ fn agy_jsonl(session: &str, from: Ts, to: Ts, home: &Path) -> Option<Usage> {
         totals.cache_write += number(&usage, "cache_write_tokens");
         totals.reasoning += number(&usage, "thinking_tokens");
         totals.records += 1;
+    }
+    if !counted {
+        return None;
     }
     Some(totals.usage())
 }
@@ -400,13 +405,26 @@ fn agy_last_context(session: &str, home: &Path) -> Option<i64> {
     context
 }
 
-/// The time and token fields of an agy model record, if it is one.
+/// The time and token fields of an agy model record, if it is one. A record
+/// with any of the token fields counts: a missing one adds 0 through
+/// `number`, so a record without `input_tokens` still adds its output and
+/// cache tokens. A record with none of them is not a model record.
 fn agy_record<'a>(value: &'a Value) -> Option<(Ts, &'a Value)> {
     if value.get("source").and_then(Value::as_str) != Some("MODEL") {
         return None;
     }
-    let usage = value.get("input_tokens")?;
-    let _ = usage;
+    let counted = [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "thinking_tokens",
+    ]
+    .iter()
+    .any(|field| value.get(*field).is_some());
+    if !counted {
+        return None;
+    }
     let time = value.get("created_at").and_then(timestamp)?;
     Some((time, value))
 }
@@ -1129,6 +1147,7 @@ pub fn usage_records_in(
     let mut previous = CodexTokens::zero();
     let mut seen = HashSet::new();
     let mut current_model = None;
+    let mut agy_counted = false;
     for line in read_lines(&path)? {
         let Some(value) = parse(&line) else { continue };
         match log {
@@ -1172,6 +1191,7 @@ pub fn usage_records_in(
                 let Some((t, _)) = agy_record(&value) else {
                     continue;
                 };
+                agy_counted = true;
                 if t < from || t >= to {
                     continue;
                 }
@@ -1272,6 +1292,9 @@ pub fn usage_records_in(
             }
             UsageLog::OpencodeDb => unreachable!(),
         }
+    }
+    if log == UsageLog::AgyJsonl && !agy_counted {
+        return None;
     }
     Some(result)
 }
