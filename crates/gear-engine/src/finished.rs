@@ -238,7 +238,28 @@ pub fn reclaim(
             .find(|message| message.state == MsgState::Open))
     })?;
     let Some(milestone) = landed else {
-        return Ok(None);
+        // No landing to sweep now: the next voyage departed (its integration
+        // branch is that voyage's again) or the landing is past its day. An
+        // item still open names leftovers of a landing that is over, and
+        // would ring for good (Lawrence M-2179: lawrence/dev was named after
+        // M3.1 departed).
+        let Some(item) = open else {
+            return Ok(None);
+        };
+        store.write(|tx| {
+            tx.update_message_state(
+                project,
+                &item.id,
+                MsgState::Resolved,
+                Some(
+                    "the landing is over: a later voyage departed, or the landing is past its day",
+                ),
+                None,
+                None,
+                now,
+            )
+        })?;
+        return Ok(Some("closed"));
     };
     let key = format!("engine.reclaim_scan.{project}");
     let last = store
@@ -1622,6 +1643,54 @@ gate = "true"
             landed.items(RECLAIM_THREAD).is_empty(),
             "M1's landing reclaims nothing while M2 is not landed"
         );
+    }
+
+    /// Lawrence M-2179: the reclaim item of a landing closes once the next
+    /// voyage departs, since the branches it names are that voyage's again.
+    #[test]
+    fn the_landings_open_item_closes_when_the_next_voyage_departs() {
+        let mut landed = Landed::new("departed");
+        sh(
+            &landed.work,
+            "git checkout -q -b p/hull/t9 dev && echo extra > extra.txt && git add extra.txt && \
+             git commit -q -m extra && git push -q origin p/hull/t9 && git checkout -q dev",
+        );
+        landed.reclaim(NOW + 600);
+        let item = landed
+            .items(RECLAIM_THREAD)
+            .into_iter()
+            .next()
+            .expect("the landing names its leftover");
+        assert_eq!(item.state, MsgState::Open);
+
+        landed
+            .store
+            .write(|tx| {
+                tx.upsert_voyage(&VoyageRow {
+                    project: "p".into(),
+                    milestone: "M2".into(),
+                    title: "voyage M2".into(),
+                    done: Some("more".into()),
+                    bar: Some("FASTEST".into()),
+                    eta: Some("4h".into()),
+                    departure: Some(NOW + 700),
+                    departure_tasks: Some(1),
+                    departure_estimate_min: Some(30),
+                    updated: NOW + 700,
+                })?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.id = "T-2".into();
+                task.milestone = Some("M2".into());
+                task.state = TaskState::Ready;
+                tx.insert_task(&task)
+            })
+            .unwrap();
+
+        assert_eq!(landed.reclaim(NOW + 1200), Some("closed"));
+        let items = landed.items(RECLAIM_THREAD);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
+        assert_eq!(landed.reclaim(NOW + 1800), None, "closed once");
     }
 
     /// The project's release branch is never named as a leftover of a landed
