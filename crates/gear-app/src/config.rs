@@ -70,6 +70,7 @@ impl ProjectConfig {
             release: self.conventions.release.clone(),
             gate: self.conventions.gate.clone(),
             voyage_dir: self.conventions.voyage_dir.clone(),
+            setup: self.setup(),
             github: self.github.as_ref().and_then(GithubSection::resolved),
         }
     }
@@ -124,6 +125,16 @@ impl ProjectConfig {
         repo
     }
 
+    /// The project's `worktree_setup`, when it names a command.
+    fn setup(&self) -> Option<String> {
+        self.conventions
+            .worktree_setup
+            .as_deref()
+            .map(str::trim)
+            .filter(|setup| !setup.is_empty())
+            .map(str::to_string)
+    }
+
     /// Every repo of the project (T-52): the project root first, then the
     /// `[[repos]]` entries in config order. The root's name is `""`.
     pub fn repos(&self) -> Vec<Repo> {
@@ -153,6 +164,7 @@ impl ProjectConfig {
                 .clone()
                 .unwrap_or_else(|| self.conventions.gate.clone()),
             voyage_dir: self.conventions.voyage_dir.clone(),
+            setup: self.setup(),
             // A repo's own `[github]`, and only that (T-79): a child repo
             // without one is local-only. It never inherits the project's
             // section, which names another repository — a GitHub mode that
@@ -424,6 +436,11 @@ pub struct Repo {
     /// with `{project}` and `{milestone}`): a merge that changes only reports
     /// in it needs no gate (T-573).
     pub voyage_dir: String,
+    /// The project's `[conventions].worktree_setup`: the merge runs it in the
+    /// merge worktree before every gate, since that worktree holds only what
+    /// git tracks (a client's five merges failed: `tsc` without
+    /// `node_modules`). `None` = no setup.
+    pub setup: Option<String>,
     /// The GitHub mode of this repo (T-79); `None` = local-only.
     pub github: Option<Github>,
 }
@@ -564,8 +581,9 @@ pub struct Conventions {
     /// = the seat's own worktree holds them, `<worktree>/.gear/tmp`.
     pub scratch_dir: Option<String>,
     /// A shell command run once in every worktree GEAR opens for a seat,
-    /// before its agent starts (e.g. `cd web && npm ci`): a fresh worktree has
-    /// only what git tracks, never the installed dependencies. Absent = none.
+    /// before its agent starts (e.g. `cd web && npm ci`), and in the merge
+    /// worktree before every gate: a fresh worktree has only what git tracks,
+    /// never the installed dependencies. Absent = none.
     #[serde(default)]
     pub worktree_setup: Option<String>,
 }
