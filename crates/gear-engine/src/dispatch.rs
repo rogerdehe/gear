@@ -1849,6 +1849,31 @@ mod tests {
         assert!(!text.contains("Resume"), "not a resume: {text}");
     }
 
+    /// Lawrence M-2510: a rework whose task gained a dep that is still
+    /// verifying is delivered (a dep holds only the first start and the
+    /// merge); before, `start_attempt` refused it and every tick failed.
+    #[test]
+    fn a_rework_does_not_wait_on_an_unfinished_dep() {
+        let mut store = world_with_a_first_attempt(AttemptState::Rejected);
+        store
+            .write(|tx| {
+                let mut dep = ready_task("T-2");
+                dep.state = TaskState::Verifying;
+                dep.lane = Some("hull".into());
+                tx.insert_task(&dep)?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.deps = vec!["T-2".into()];
+                tx.update_task(&task)
+            })
+            .unwrap();
+        let ready = store
+            .read(|tx| ready_tasks_of(tx, &tx.get_seat("p:heat")?.unwrap()))
+            .unwrap();
+        assert_eq!(ready.len(), 1, "the rework is startable");
+        let text = assign_delivery_text(&mut store, "T-1", 2);
+        assert!(text.starts_with("Rework T-1 attempt 2"), "{text}");
+    }
+
     /// T-554 (hull F-312): a rework and a resume say how to get onto the task's
     /// branch — the lane's worktree may still be on the branch of the task it
     /// did last, and a rework was once committed there by mistake.
