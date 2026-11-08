@@ -115,7 +115,7 @@ One plan file per voyage, edited in place: `gear/voyages/<milestone>/plan.md` (o
 gear plan apply gear/voyages/M1/plan.md
 ```
 
-**The first thing after a voyage's first apply: open the board for the user** (user, 2026-10-28): its own new Herdr tab (`herdr tab create --no-focus --label "<project> board"`, never a split beside the captain's pane) running `gear board --project <project>` and left running in the project's repository, restarted if one from an earlier voyage is still open. Check it shows this project and this voyage by reading that tab's pane (`herdr pane read`); never run `gear board` in your own pane, and never rename your own tab.
+**The first thing after a voyage's first apply: open the board for the user** (user, 2026-10-28): run `gear board --open` from your pane. It opens the tab `<project> board` in your workspace, in the project's repository, replaces an earlier board tab, and returns only once the board has drawn; on an error it names what the tab shows, so fix that and run it again. Never open the board by hand, never run `gear board` in your own pane, and never rename your own tab.
 
 After a successful apply GEAR rewrites the file: `base=` becomes the applied version, each `## NEW` header gets its id (`## T-<n>`), and `# Verdicts` is removed. Re-applying it changes nothing. One wrong section, field or value rejects the whole draft (`BAD_FORMAT`, with the line) and nothing is written. When the voyage lands, the file is its record; the next voyage gets a new file.
 
