@@ -596,6 +596,7 @@ pub fn merge_passed(
         }
         tell_captain_lost(store, project, &config, now)?;
         close_landed_failures(store, project, now)?;
+        quiet_carried_failures(store, project, now)?;
         close_settled_task_items(store, project, now)?;
     }
 
@@ -6743,6 +6744,56 @@ fn close_landed_failures(store: &mut Store, project: &str, now: Ts) -> GearResul
     })
 }
 
+/// How long a carried task's merge-failed item stays quiet at most: past it,
+/// the item is due again even if its carrier has not landed.
+const CARRIED_QUIET_S: i64 = 24 * 3600;
+
+/// Quiet the merge-failed item of a task another task carries (`carried-by:
+/// T-m`) while T-m has not merged (Lawrence M-2092, M-2223): the work lands
+/// with T-m, a remerge of the task itself would only fail again, and a
+/// failure of T-m rings on T-m's own item. The item waits on T-m for at most
+/// [`CARRIED_QUIET_S`] and closes when the work lands
+/// ([`close_landed_failures`]). Only an open item is quieted, so one that came
+/// due again is not hidden a second time.
+fn quiet_carried_failures(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
+    store.write(|tx| {
+        for task in tx.tasks_of_project(project)? {
+            let Some(by) = tx.task_carried_by(project, &task.id)? else {
+                continue;
+            };
+            let (carrier_project, carrier) = gear_store::Tx::carrier_of(project, &by);
+            if gear_app::tasks::merged_at(tx, carrier_project, carrier)?.is_some() {
+                continue;
+            }
+            let carrier_live = tx
+                .get_task(carrier_project, carrier)?
+                .is_some_and(|row| row.state != TaskState::Cancelled);
+            if !carrier_live {
+                continue;
+            }
+            for item in tx.thread_messages(project, &failed_thread(&task.id))? {
+                if item.state != MsgState::Open {
+                    continue;
+                }
+                let reason = format!(
+                    "{} is carried by {by}: its work lands with {by}'s merge, and this item closes then",
+                    task.id
+                );
+                tx.update_message_state(
+                    project,
+                    &item.id,
+                    MsgState::Waiting,
+                    Some(&reason),
+                    Some(&by),
+                    Some(now + CARRIED_QUIET_S),
+                    now,
+                )?;
+            }
+        }
+        Ok(())
+    })
+}
+
 /// The thread of the item that says a batch round is red (T-572): one item per
 /// project, opened once, updated with every round, closed when a merge lands.
 fn merge_red_thread(project: &str) -> String {
@@ -9577,6 +9628,76 @@ mod tests {
         assert_eq!(state(&mut store), MsgState::Resolved, "its work landed");
     }
 
+    /// Lawrence M-2223: the merge-failed item of a task carried by another
+    /// waits, quiet, while the carrier has not merged, and closes once the
+    /// work lands.
+    #[test]
+    fn a_carried_tasks_failed_item_waits_for_its_carrier() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 5);
+        store
+            .write(|tx| {
+                let mut carrier = tx.get_task("p", "T-5")?.unwrap();
+                carrier.id = "T-9".into();
+                tx.insert_task(&carrier)?;
+                tx.set_task_carried_by("p", "T-5", "T-9")?;
+                tx.insert_message(&gear_store::NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: failed_thread("T-5"),
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: gear_model::MsgKind::System,
+                    urgent: true,
+                    body: "the merge of T-5 failed".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: 5,
+                })
+            })
+            .unwrap();
+        let item = |store: &mut Store| {
+            store
+                .read(|tx| tx.thread_messages("p", &failed_thread("T-5")))
+                .unwrap()
+                .remove(0)
+        };
+        let at = 10 + LOST_SCAN_EVERY_S;
+        merge_passed(&mut store, &mut herdr, &cfg, "p", at).unwrap();
+        let waiting = item(&mut store);
+        assert_eq!(waiting.state, MsgState::Waiting, "{waiting:?}");
+        assert_eq!(waiting.wait_on.as_deref(), Some("T-9"));
+        assert_eq!(waiting.wait_until, Some(at + CARRIED_QUIET_S));
+        assert!(
+            waiting
+                .result
+                .as_deref()
+                .is_some_and(|r| r.contains("carried by T-9")),
+            "{waiting:?}"
+        );
+
+        store
+            .write(|tx| tx.set_attempt_time("p", "T-5", 1, AttemptStep::Merged, at + 1))
+            .unwrap();
+        merge_passed(
+            &mut store,
+            &mut herdr,
+            &cfg,
+            "p",
+            at + 2 + LOST_SCAN_EVERY_S,
+        )
+        .unwrap();
+        let closed = item(&mut store);
+        assert_eq!(closed.state, MsgState::Resolved, "{closed:?}");
+        assert_eq!(closed.result.as_deref(), Some(LOST_LANDED));
+    }
+
     /// A merge-lost item closes once the work landed with another task's
     /// merge (`integrated-by`): the item asked for a remerge of work that is
     /// already on the integration branch (Lawrence M-81).
@@ -9653,8 +9774,8 @@ mod tests {
         };
         assert_eq!(
             state(&mut store),
-            MsgState::Open,
-            "the carrier has not merged"
+            MsgState::Waiting,
+            "the carrier has not merged: the item waits for it, quiet (M-2223)"
         );
         store
             .write(|tx| tx.set_attempt_time("p", "T-6", 1, AttemptStep::Merged, 30))
