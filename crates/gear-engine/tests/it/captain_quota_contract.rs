@@ -321,3 +321,46 @@ fn the_bar_reset_time_wins_over_the_fallback_window() {
     tick(&mut store, &mut herdr, &cfg, reset).unwrap();
     assert_eq!(herdr.prompts_to(CAP).len(), 1);
 }
+
+#[test]
+fn claudes_own_limit_record_pauses_without_a_quota_status_line() {
+    let (mut store, mut herdr, cfg) = world();
+    // A machine whose status line shows no `5h N%` segment, and Claude's
+    // limit stop as its session log writes it.
+    let bare = "conversation\n────────────────────────\n❯\n────────────────────────\n  Opus 5.5 · /repo (dev)\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n";
+    herdr.set_screen(CAP, bare);
+    let reset = T0 + 900;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("captain.jsonl");
+    let stop = serde_json::json!({
+        "type": "assistant",
+        "quotaLimits": {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": reset},
+        "message": {"role": "assistant", "model": "<synthetic>",
+            "content": [{"type": "text", "text": "You've hit your session limit · resets 5:50am"}]}
+    });
+    std::fs::write(&log, format!("{stop}\n")).unwrap();
+    store
+        .write(|tx| tx.set_binding_session_ref("p:captain", 1, log.to_str().unwrap()))
+        .unwrap();
+    tick(&mut store, &mut herdr, &cfg, T0 + 10).unwrap();
+    assert!(
+        herdr.prompts_to(LANE).is_empty(),
+        "the stop must pause new tasks"
+    );
+    assert_eq!(
+        store
+            .read(|tx| tx.captain_quota("p"))
+            .unwrap()
+            .unwrap()
+            .reset_at,
+        reset
+    );
+    tick(&mut store, &mut herdr, &cfg, T0 + 20).unwrap();
+    assert!(
+        herdr.prompts_to(CAP).is_empty(),
+        "nothing rings a stopped captain"
+    );
+    tick(&mut store, &mut herdr, &cfg, reset).unwrap();
+    assert_eq!(herdr.prompts_to(CAP).len(), 1);
+    assert!(herdr.prompts_to(CAP)[0].contains("quota is back"));
+}

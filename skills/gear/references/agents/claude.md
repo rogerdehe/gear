@@ -54,7 +54,7 @@ Resume from the directory the session was created in; the resumed session shows 
 
 ## Quota
 
-`5h N%` and `7d N%` are usage (100% = exhausted), `↻` is the reset. A limit stop looks like a finished turn — read the screen. GEAR reads only the status bar, never quota words quoted in the conversation.
+A limit stop looks like a finished turn. Claude Code records it in its session log (`quotaLimits` with `status` `rejected` and `resetsAt`); GEAR reads that record for the captain, so no status line is needed. A status line that shows `5h N%` / `7d N%` (usage, 100% = exhausted, `↻` the reset) is read too. GEAR never reads quota words quoted in the conversation.
 
 ## Pitfalls
 

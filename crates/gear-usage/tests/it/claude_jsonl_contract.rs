@@ -116,3 +116,50 @@ fn the_context_of_the_last_message_is_its_input_with_the_cache() {
     let context = last_context_in(UsageLog::ClaudeJsonl, SESSION, home.path()).unwrap();
     assert_eq!(context, 30 + 200 + 40);
 }
+
+/// The record Claude Code writes when its plan's limit stops a turn.
+fn limit_stop(time: i64, window: &str, resets_at: i64) -> serde_json::Value {
+    json!({
+        "type": "assistant",
+        "timestamp": iso(time),
+        "quotaLimits": {"status": "rejected", "rateLimitType": window, "resetsAt": resets_at},
+        "message": {
+            "role": "assistant",
+            "model": "<synthetic>",
+            "content": [{"type": "text", "text": "You've hit your session limit · resets 5:50am"}]
+        }
+    })
+}
+
+#[test]
+fn a_limit_stop_is_read_from_the_last_assistant_record() {
+    let home = tempfile::tempdir().unwrap();
+    let _ = session(
+        home.path(),
+        &[
+            assistant("msg_1", T12, 10, 100, 20, 5),
+            limit_stop(T13, "five_hour", T14),
+            json!({"type": "user", "message": {"role": "user", "content": "GEAR: 1 message(s) for you."}}),
+        ],
+    );
+    let stop = gear_usage::claude_limit_stop_in(SESSION, home.path()).unwrap();
+    assert_eq!(stop.window, "five_hour");
+    assert_eq!(stop.resets_at, Some(T14));
+}
+
+#[test]
+fn a_reply_after_the_stop_ends_it_and_quoted_words_are_no_stop() {
+    let home = tempfile::tempdir().unwrap();
+    let mut quoted = assistant("msg_2", T13, 1, 1, 1, 1);
+    quoted["message"]["content"] =
+        json!([{"type": "text", "text": "You've hit your session limit"}]);
+    let _ = session(
+        home.path(),
+        &[
+            limit_stop(T12, "seven_day", T14),
+            assistant("msg_1", T13, 1, 1, 1, 1),
+            quoted,
+        ],
+    );
+    assert_eq!(gear_usage::claude_limit_stop_in(SESSION, home.path()), None);
+}
