@@ -260,6 +260,23 @@ pub fn reclaim(
     let records = merge_records(store, herdr, project, &config, &milestone, now)?;
     let mut left = Vec::new();
     let mut seen = BTreeSet::new();
+    // The captain's seat branch of a voyage that has not departed (Lawrence
+    // M-2176: the M3.1 design sat on lawrence/captain/M3.1 between M3's
+    // landing and M3.1's departure) is the next voyage's, not a leftover: its
+    // branch, its worktree and that worktree's workspace stay.
+    let departed: BTreeSet<String> = store.read(|tx| {
+        Ok(tx
+            .voyages_of_project(project)?
+            .into_iter()
+            .filter(|voyage| voyage.departure.is_some())
+            .map(|voyage| voyage.milestone)
+            .collect())
+    })?;
+    let upcoming = |branch: &str| {
+        upcoming_voyage(&config.conventions.seat_branch, project, branch)
+            .is_some_and(|voyage| !departed.contains(&voyage))
+    };
+    let mut kept_labels: BTreeSet<String> = BTreeSet::new();
     for repo in config.repos() {
         if !seen.insert(repo.path.clone()) {
             continue;
@@ -268,6 +285,12 @@ pub fn reclaim(
         // branch has nothing the remote does not have; name the others with
         // the reason.
         for worktree in project_worktrees(&repo.path, project) {
+            if worktree.branch.as_deref().is_some_and(upcoming) {
+                if let Some(name) = Path::new(&worktree.path).file_name() {
+                    kept_labels.insert(name.to_string_lossy().to_string());
+                }
+                continue;
+            }
             match remove_worktree(&repo.path, &worktree) {
                 Ok(()) => {}
                 Err(reason) => left.push(format!("worktree {} ({reason})", worktree.path)),
@@ -379,7 +402,7 @@ pub fn reclaim(
                 continue;
             }
             // T-655: a cancelled task's branch was handled above.
-            if handled.contains(&branch.name) {
+            if handled.contains(&branch.name) || upcoming(&branch.name) {
                 continue;
             }
             if branch_on_integration(&repo.path, &config, &branch.tip) {
@@ -420,6 +443,9 @@ pub fn reclaim(
     // T-618: close each Herdr workspace of the project whose panes hold no
     // agent; name the others.
     for workspace in project_workspaces(project) {
+        if kept_labels.contains(&workspace.label) {
+            continue;
+        }
         if workspace.holds_agent {
             left.push(format!(
                 "workspace {} ({}) (holding an agent)",
@@ -1058,6 +1084,21 @@ fn project_workspaces(project: &str) -> Vec<ProjectWorkspace> {
         .unwrap_or_default()
 }
 
+/// The voyage a branch is the captain's seat branch of, read back through the
+/// project's seat-branch template (`{project}/{seat}/{voyage}` by default):
+/// `p/captain/M3.1` → `M3.1`. None for any other branch, and for a template
+/// without `{voyage}` (one branch for every voyage).
+fn upcoming_voyage(template: &str, project: &str, branch: &str) -> Option<String> {
+    const MARK: &str = "\u{1}";
+    if !template.contains("{voyage}") {
+        return None;
+    }
+    let pattern = gear_model::branch::expand_seat(template, project, "captain", MARK);
+    let (prefix, suffix) = pattern.split_once(MARK)?;
+    let voyage = branch.strip_prefix(prefix)?.strip_suffix(suffix)?;
+    (!voyage.is_empty() && !voyage.contains('/')).then(|| voyage.to_string())
+}
+
 /// The project's branches on the remote (`<project>/…`), named with their tip:
 /// a landed voyage keeps none, the captain's home included.
 fn project_branches(repo: &str, remote: &str, project: &str) -> Vec<ProjectBranch> {
@@ -1620,6 +1661,56 @@ gate = "true"
             .expect("the reclaim names what is left");
         assert!(item.body.contains("branch p/hull/t9"), "{}", item.body);
         assert!(!item.body.contains("branch p/main"), "{}", item.body);
+    }
+
+    /// Lawrence M-2176: the captain's seat branch of a voyage that has not
+    /// departed holds the next voyage's design; the sweep keeps it and its
+    /// worktree, and does not name them. A voyage that departed keeps no seat
+    /// branch, and the read-back matches only the seat-branch template.
+    #[test]
+    fn the_next_voyages_seat_branch_and_worktree_outlive_the_landing() {
+        let mut landed = Landed::new("upcoming");
+        let next = landed.root.path().join("p-captain-m1-1");
+        sh(
+            &landed.work,
+            &format!(
+                "git checkout -q -b p/captain/M1.1 dev && echo design > design.md && git add design.md && \
+                 git commit -q -m design && git push -q origin p/captain/M1.1 && git checkout -q dev && \
+                 git worktree add -q {} p/captain/M1.1",
+                next.display()
+            ),
+        );
+
+        landed.reclaim(NOW + 600);
+
+        assert!(
+            landed.origin_branches().contains("p/captain/M1.1"),
+            "the next voyage's seat branch stays: {}",
+            landed.origin_branches()
+        );
+        assert!(next.exists(), "its worktree stays");
+        let named: Vec<String> = landed
+            .items(RECLAIM_THREAD)
+            .into_iter()
+            .map(|item| item.body)
+            .collect();
+        assert!(
+            named
+                .iter()
+                .all(|body| !body.contains("M1.1") && !body.contains("p-captain-m1-1")),
+            "{named:?}"
+        );
+        let template = "{project}/{seat}/{voyage}";
+        assert_eq!(
+            upcoming_voyage(template, "p", "p/captain/M1.1").as_deref(),
+            Some("M1.1")
+        );
+        assert_eq!(upcoming_voyage(template, "p", "p/hull/t9"), None);
+        assert_eq!(upcoming_voyage(template, "p", "p/captain/M1/x"), None);
+        assert_eq!(
+            upcoming_voyage("{project}/{seat}/M2", "p", "p/captain/M2"),
+            None
+        );
     }
 
     /// T-585: a conflicting branch opens one item on thread `records:M1`,
