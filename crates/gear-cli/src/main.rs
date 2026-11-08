@@ -64,6 +64,13 @@ enum Cmd {
         /// and with no caller every project in the store.
         #[arg(long, value_name = "ID")]
         project: Option<String>,
+        /// Open the board for the user instead of drawing it here: a new Herdr
+        /// tab `<project> board` in the caller's workspace, in the project's
+        /// repository, running the board; an earlier board tab there is
+        /// closed first. It returns once the board has drawn its first frame,
+        /// and fails, naming what the tab shows, when it does not.
+        #[arg(long)]
+        open: bool,
     },
     /// Captain: the queue of the project (design §8.3) — what every lane
     /// does now, why an idle lane is idle, and what it has left.
@@ -581,7 +588,12 @@ fn run(cli: Cli) -> GearResult<()> {
             } => cmd_issue_file(title, body, labels, cli.json),
             IssueOp::Show { id } => cmd_issue_show(id, cli.json),
         },
-        Some(Cmd::Board { deps, project }) => cmd_board(deps, project.as_deref(), cli.json),
+        Some(Cmd::Board {
+            open: true,
+            project,
+            ..
+        }) => cmd_board_open(project.as_deref(), cli.pane.as_deref()),
+        Some(Cmd::Board { deps, project, .. }) => cmd_board(deps, project.as_deref(), cli.json),
         Some(Cmd::Queue { json }) => cmd_queue(json),
         Some(Cmd::Report { op }) => match op {
             ReportOp::Time { task, voyage } => cmd_report_time(task, voyage, cli.json),
@@ -2157,6 +2169,167 @@ fn cmd_board(deps: bool, project: Option<&str>, json: bool) -> GearResult<()> {
     };
     let mut out = std::io::stdout();
     draw_board(&mut store, &opts, herdr.as_mut(), &mut out)
+}
+
+/// `gear board --open`: open the board for the user in its own Herdr tab.
+/// Captains opened it by hand (tab create, then a typed command whose result
+/// they threw away), and a tab whose command never ran was left as an empty
+/// shell no one noticed. GEAR opens it the one way and checks it drew.
+fn cmd_board_open(project: Option<&str>, pane: Option<&str>) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let env = match open_herdr().ok() {
+        Some(mut herdr) => resolve_caller(&mut store, &mut herdr, env)?,
+        None => env,
+    };
+    let Some(project) = project
+        .map(str::to_string)
+        .or_else(|| env.ctx.as_ref().map(|ctx| ctx.project.clone()))
+    else {
+        return Err(GearError::new(
+            gear_model::ErrorCode::NoTarget,
+            "gear board --open needs a project: name it with --project, or run it from the captain's pane",
+        ));
+    };
+    let Some(row) = store.read(|tx| tx.get_project(&project))? else {
+        let registered = store.read(|tx| tx.project_ids())?;
+        return Err(GearError::new(
+            gear_model::ErrorCode::NoTarget,
+            format!(
+                "no project {project} in this store; registered: {}",
+                registered.join(", ")
+            ),
+        ));
+    };
+    let config = gear_app::config::parse_row(&row)?;
+    let repo = config.root_repo().path.clone();
+    let caller = pane.map(str::to_string).or(env.pane_id.clone());
+    let Some(workspace) = caller.as_deref().and_then(workspace_of_pane) else {
+        return Err(GearError::new(
+            gear_model::ErrorCode::NoTarget,
+            "gear board --open runs in a Herdr pane: the board's tab goes in the caller's workspace",
+        ));
+    };
+    let label = board_tab_label(&project);
+    let own_tab = std::env::var("HERDR_TAB_ID").ok();
+    let tabs = herdr_json(&["tab", "list", "--workspace", &workspace])?;
+    for tab in board_tabs_to_close(&tabs, &label, own_tab.as_deref()) {
+        herdr_json(&["tab", "close", &tab])?;
+    }
+    let created = herdr_json(&[
+        "tab",
+        "create",
+        "--workspace",
+        &workspace,
+        "--cwd",
+        &repo,
+        "--label",
+        &label,
+        "--no-focus",
+    ])?;
+    let (Some(tab), Some(board_pane)) = (
+        created["result"]["tab"]["tab_id"].as_str(),
+        created["result"]["root_pane"]["pane_id"].as_str(),
+    ) else {
+        return Err(herdr_failure("tab create", &created.to_string()));
+    };
+    let command = board_command(&project);
+    herdr_json(&["pane", "run", board_pane, &command])?;
+    let header = format!("GEAR · {project}");
+    let drawn = std::process::Command::new("herdr")
+        .args([
+            "pane",
+            "wait-output",
+            board_pane,
+            "--match",
+            &header,
+            "--timeout",
+            "20000",
+        ])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+    if !drawn {
+        let screen = std::process::Command::new("herdr")
+            .args([
+                "pane",
+                "read",
+                board_pane,
+                "--source",
+                "recent-unwrapped",
+                "--lines",
+                "15",
+            ])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_default();
+        return Err(GearError::new(
+            gear_model::ErrorCode::NoTarget,
+            format!(
+                "the board did not draw in tab {tab} (pane {board_pane}) within 20 s; `{command}` was run there, and the tab shows:\n{screen}"
+            ),
+        ));
+    }
+    println!("board open: tab {tab} \"{label}\" (pane {board_pane}) in {repo} shows {project}");
+    Ok(())
+}
+
+/// The board tab's label: the one name every captain's board tab has.
+fn board_tab_label(project: &str) -> String {
+    format!("{project} board")
+}
+
+/// What the board's pane runs.
+fn board_command(project: &str) -> String {
+    format!("gear board --project {project}")
+}
+
+/// The workspace of a Herdr pane id (`w1ZJ:pM` → `w1ZJ`).
+fn workspace_of_pane(pane: &str) -> Option<String> {
+    pane.split_once(':')
+        .map(|(workspace, _)| workspace.to_string())
+        .filter(|workspace| !workspace.is_empty())
+}
+
+/// The tabs of a `herdr tab list` answer labelled `label`, except the
+/// caller's own tab: an earlier board is replaced, never the captain's tab.
+fn board_tabs_to_close(
+    list: &serde_json::Value,
+    label: &str,
+    own_tab: Option<&str>,
+) -> Vec<String> {
+    list["result"]["tabs"]
+        .as_array()
+        .map(|tabs| {
+            tabs.iter()
+                .filter(|tab| tab["label"].as_str() == Some(label))
+                .filter_map(|tab| tab["tab_id"].as_str())
+                .filter(|id| Some(*id) != own_tab)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Run `herdr <args>` and read its JSON answer; a failure names the command
+/// and Herdr's own words.
+fn herdr_json(args: &[&str]) -> GearResult<serde_json::Value> {
+    let out = std::process::Command::new("herdr")
+        .args(args)
+        .output()
+        .map_err(|error| herdr_failure(&args.join(" "), &error.to_string()))?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(herdr_failure(&args.join(" "), &said));
+    }
+    serde_json::from_slice(&out.stdout).or(Ok(serde_json::Value::Null))
+}
+
+fn herdr_failure(what: &str, said: &str) -> GearError {
+    GearError::new(
+        gear_model::ErrorCode::NoTarget,
+        format!("herdr {what} failed: {said}"),
+    )
 }
 
 /// Draw the board. It renames no Herdr tab: the captain names the board's tab
@@ -5018,6 +5191,33 @@ fn print_skill(topic: &str) -> GearResult<()> {
     // last line is never lost.
     let _ = std::io::Write::flush(&mut std::io::stdout());
     Ok(())
+}
+
+#[cfg(test)]
+mod board_open_tests {
+    use super::*;
+
+    /// `gear board --open`: the label, the command and the workspace are one
+    /// fixed shape, and only an earlier board tab is closed, never the
+    /// caller's own tab or another tab.
+    #[test]
+    fn board_open_replaces_only_an_earlier_board_tab() {
+        assert_eq!(board_tab_label("lawrence"), "lawrence board");
+        assert_eq!(board_command("lawrence"), "gear board --project lawrence");
+        assert_eq!(workspace_of_pane("w1ZJ:pM").as_deref(), Some("w1ZJ"));
+        assert_eq!(workspace_of_pane("pM"), None);
+        let list = serde_json::json!({"result": {"tabs": [
+            {"tab_id": "w1:t1", "label": "lawrence"},
+            {"tab_id": "w1:t2", "label": "lawrence board"},
+            {"tab_id": "w1:t3", "label": "lawrence board"},
+            {"tab_id": "w1:t4", "label": "prometheus board"},
+        ]}});
+        assert_eq!(
+            board_tabs_to_close(&list, "lawrence board", Some("w1:t3")),
+            vec!["w1:t2".to_string()]
+        );
+        assert!(board_tabs_to_close(&serde_json::Value::Null, "lawrence board", None).is_empty());
+    }
 }
 
 #[cfg(test)]
