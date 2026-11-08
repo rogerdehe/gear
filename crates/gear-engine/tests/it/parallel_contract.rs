@@ -173,6 +173,7 @@ profile = "codex"
 /// and its own branches.
 struct Child {
     path: PathBuf,
+    integration: String,
 }
 impl Child {
     fn new(root: &Path, integration: &str) -> Child {
@@ -188,10 +189,16 @@ impl Child {
         }
         git(&path, &["add", "."]);
         git(&path, &["commit", "-qm", "base"]);
-        Child { path }
+        Child {
+            path,
+            integration: integration.to_string(),
+        }
     }
+    /// A task branch cut from the child's integration branch, side by side
+    /// with the others (a branch cut from another task's branch is stacked on
+    /// it, and is no pair of it).
     fn branch(&self, name: &str, file: &str) {
-        git(&self.path, &["switch", "-qc", name]);
+        git(&self.path, &["switch", "-qc", name, &self.integration]);
         fs::write(self.path.join(file), name).unwrap();
         git(&self.path, &["add", "--", file]);
         git(&self.path, &["commit", "-qm", "change"]);
