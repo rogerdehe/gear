@@ -603,8 +603,12 @@ pub struct OnboardPlan {
 /// command that opens an editor would wait for an answer no one can give
 /// (2026-10-31: review-11's `git rebase --continue` sat in vim for 59
 /// minutes).
+///
+/// It also turns Claude Code's advisor tool off for every seat GEAR starts
+/// (the user, 2026-11-08: a simple review spent many tokens on the advisor's
+/// stronger model). The other CLIs do not read the variable.
 pub const EDITOR_ENV: &str =
-    "export GIT_EDITOR=true; export GIT_SEQUENCE_EDITOR=true; export EDITOR=true";
+    "export GIT_EDITOR=true; export GIT_SEQUENCE_EDITOR=true; export EDITOR=true; export CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1";
 
 /// Plan onboarding of `seat` as generation `generation` (the next one):
 /// - Lane seats get a `WorktreeStep` (branch
@@ -1522,6 +1526,14 @@ fn step_failure<T>(step: &str, outcome: &Outcome<T>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every seat GEAR starts runs Claude Code without its advisor tool (the
+    /// user, 2026-11-08), next to the editor variables.
+    #[test]
+    fn every_seat_runs_without_the_claude_advisor() {
+        assert!(EDITOR_ENV.contains("export CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1"));
+        assert!(EDITOR_ENV.starts_with("export GIT_EDITOR=true; "));
+    }
     use gear_herdr::fake::FakeHerdr;
     use gear_store::ProjectRow;
 
