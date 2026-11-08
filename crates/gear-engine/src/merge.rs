@@ -4330,6 +4330,36 @@ fn run_gate(
         Ok(stdin) => stdin,
         Err(error) => return Err(Step::Failed(Failed::clear(format!("gate lock: {error}")))),
     };
+    // The project's worktree_setup, before every gate: the merge worktree
+    // holds only what git tracks, and the merged work may change what has to
+    // be installed (a client's five merges failed in `tsc`: no
+    // `node_modules`). A setup that fails is the environment, not the work:
+    // the merge is retried.
+    if let Some(setup) = repo.setup.as_deref() {
+        let ran = Command::new("sh")
+            .arg("-c")
+            .arg(setup)
+            .current_dir(dir)
+            .env_remove(gear_model::ctx::ENV_DB)
+            .env_remove(gear_model::ctx::ENV_CTX)
+            .stdin(std::process::Stdio::null())
+            .output();
+        let failure = match ran {
+            Ok(output) if output.status.success() => None,
+            Ok(output) => {
+                let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+                combined.push_str(&String::from_utf8_lossy(&output.stderr));
+                Some(tail(&combined, 12))
+            }
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(said) = failure {
+            probe.step("gate");
+            return Err(Step::Failed(Failed::clear(format!(
+                "worktree_setup failed in the merge worktree ({setup}), so the gate did not run:\n{said}"
+            ))));
+        }
+    }
     let tempfail = gate_tempfail_path(dir);
     let _ = std::fs::remove_file(&tempfail);
     // T-548: the failed-paths file belongs to this run, too: a line left by an
@@ -14898,6 +14928,43 @@ gate = "{project_gate}"
             log.contains("merge(T-5): origin/review/t5"),
             "the review branch was merged: {log}"
         );
+    }
+
+    /// A client's five merges failed in `tsc` because the merge worktree had
+    /// no `node_modules`: the project's worktree_setup now runs there before
+    /// every gate, and a setup that fails is retried, never the work's fault.
+    #[test]
+    fn the_merge_runs_the_worktree_setup_before_its_gate() {
+        let scratch = Scratch::new("setup");
+        let worktree = scratch.merge_worktree();
+        let mut with_setup = repo("test -f .gear-installed");
+        with_setup.setup = Some("touch .gear-installed".into());
+        let line = merge_one(&worktree, &with_setup, &op(&scratch.head_of("heat/t5")))
+            .expect("the gate finds what the setup installed");
+        assert!(line.contains("merged T-5"), "{line}");
+
+        let scratch = Scratch::new("setup-fails");
+        let worktree = scratch.merge_worktree();
+        let before = scratch.dev_log();
+        let mut broken = repo("true");
+        broken.setup = Some("echo registry unreachable >&2; exit 3".into());
+        let failed = merge_one(&worktree, &broken, &op(&scratch.head_of("heat/t5"))).unwrap_err();
+        assert!(
+            failed.reason.contains("worktree_setup failed"),
+            "{}",
+            failed.reason
+        );
+        assert!(
+            failed.reason.contains("registry unreachable"),
+            "{}",
+            failed.reason
+        );
+        assert_eq!(
+            failed.blocker,
+            Blocker::Clear,
+            "the environment, not the work"
+        );
+        assert_eq!(scratch.dev_log(), before, "dev is untouched");
     }
 
     #[test]

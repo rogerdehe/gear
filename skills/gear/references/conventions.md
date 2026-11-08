@@ -123,7 +123,7 @@ branch_max_per_lane = 3   # more than lanes × this open-voyage task branches is
 push_interval_min = 20    # a lane this long without a push is asked to tell the captain why
 push_reply_min = 10       # its time to answer; no answer is an urgent item to the captain
 scratch_dir = "~/gear-scratch"  # where a seat's temp files go; default none: <worktree>/.gear/tmp
-worktree_setup = "cd web && npm ci"  # run once in each worktree GEAR opens for a lane or reviewer, before its agent starts; default none
+worktree_setup = "cd web && npm ci"  # run once in each worktree GEAR opens for a lane or reviewer, before its agent starts, and in the merge worktree before every gate; default none
 ```
 
 Each seat GEAR starts gets its own scratch directory and `TMPDIR` points at it, so temp files — the agent's own, a build's, a test's — land there and never in the system temp directory: `scratch_dir` names the parent (`<scratch_dir>/<project>/<seat>`, `~` is the home folder), and without it the seat's worktree holds them in `.gear/tmp`, which GEAR adds once to the repository's `info/exclude`. The directory is removed when the seat is released or retired; the worktree and its build cache stay.

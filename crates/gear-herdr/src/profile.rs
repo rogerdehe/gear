@@ -687,6 +687,12 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             confirm_rounds: 2,
             unattended_args: vec![
                 "--dangerously-bypass-approvals-and-sandbox".into(),
+                // The hooks of the seat's own Codex config run without the
+                // "Hooks need review" dialog: a new or changed hook (Herdr's
+                // agent-state hook after a Herdr update) stopped every seat at
+                // start until someone answered it (the user, 2026-11-08).
+                // Codex's flag for automation (codex-cli 0.164.0 on).
+                "--dangerously-bypass-hook-trust".into(),
                 "-c".into(),
                 "check_for_update_on_startup=false".into(),
                 // T-76: the folder the agent runs in is trusted, so Codex's
@@ -1233,6 +1239,7 @@ mod tests {
             args,
             vec![
                 "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "--dangerously-bypass-hook-trust".to_string(),
                 "-c".to_string(),
                 "check_for_update_on_startup=false".to_string(),
                 "-c".to_string(),
