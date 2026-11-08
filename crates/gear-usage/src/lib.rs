@@ -631,6 +631,72 @@ fn claude_last_context(session: &str, home: &Path) -> Option<i64> {
     context
 }
 
+/// A Claude session stopped by its plan's limit. Claude Code writes the stop
+/// as a synthetic assistant record that carries `quotaLimits` with `status`
+/// `rejected`, `rateLimitType` (`five_hour`, `seven_day`) and `resetsAt` (Unix
+/// seconds). It is the agent's own record, not text in the conversation, and
+/// it needs no status line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LimitStop {
+    /// `five_hour`, `seven_day`, or empty when Claude names none.
+    pub window: String,
+    /// None when the record has no reset time.
+    pub resets_at: Option<Ts>,
+}
+
+/// The limit stop of a Claude session: Some when its last assistant record is
+/// a rejected-quota record. A later normal reply ends the stop. Only the end
+/// of the file is read, so a long captain session costs no more than a short
+/// one.
+pub fn claude_limit_stop(session_ref: &str) -> Option<LimitStop> {
+    claude_limit_stop_in(session_ref, &home())
+}
+
+/// The same, with the home folder the logs live in.
+pub fn claude_limit_stop_in(session_ref: &str, home: &Path) -> Option<LimitStop> {
+    const TAIL: u64 = 256 * 1024;
+    let path = claude_json_path(home, session_ref)?;
+    let text = read_tail(&path, TAIL)?;
+    let mut stop = None;
+    for line in text.lines() {
+        let Some(value) = parse(line) else { continue };
+        if value.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let limits = value.get("quotaLimits");
+        stop = limits
+            .filter(|q| q.get("status").and_then(Value::as_str) == Some("rejected"))
+            .map(|q| LimitStop {
+                window: q
+                    .get("rateLimitType")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                resets_at: q.get("resetsAt").and_then(Value::as_i64),
+            });
+    }
+    stop
+}
+
+/// The last `max` bytes of a file, from the first whole line in them.
+fn read_tail(path: &Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(max);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    if start > 0 {
+        let cut = bytes
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(bytes.len(), |i| i + 1);
+        bytes.drain(..cut);
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// OpenCode: the `session_message` table of its database. A row's `data`
 /// carries the tokens of the message and its cost.
 fn opencode_db(session: &str, from: Ts, to: Ts, home: &Path) -> Option<Usage> {

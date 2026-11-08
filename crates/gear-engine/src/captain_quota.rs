@@ -103,9 +103,6 @@ pub fn update(
     let Some(profile) = profiles.get(&captain.profile) else {
         return Ok(());
     };
-    let Some(bar) = &profile.quota_bar else {
-        return Ok(());
-    };
     if obs.presence != Presence::Present {
         return Ok(());
     }
@@ -113,12 +110,21 @@ pub fn update(
     let Some(binding) = binding else {
         return Ok(());
     };
-    // Reading the footer is safe even while the captain is working. It does
-    // not inspect the conversation or type anything into that agent.
-    let reading = herdr
-        .read_screen(&binding.pane_id)
-        .ok()
-        .and_then(|screen| bar.read(&screen));
+    let reading = log_reading(profile, binding.session_ref.as_deref(), now).or_else(|| {
+        // Reading the footer is safe even while the captain is working. It
+        // does not inspect the conversation or type anything into that agent.
+        let bar = profile.quota_bar.as_ref()?;
+        let reading = bar.read(&herdr.read_screen(&binding.pane_id).ok()?)?;
+        Some(Reading {
+            exhausted: reading.exhausted,
+            resets: reading
+                .resets
+                .iter()
+                .map(|hint| hint.as_deref().and_then(|hint| reset_time(hint, now)))
+                .collect(),
+            signature: reading.signature,
+        })
+    });
     let Some(reading) = reading else {
         store.write(|tx| tx.set_meta(&counter, "0"))?;
         return Ok(());
@@ -156,11 +162,7 @@ pub fn update(
     let reset_at = reading
         .resets
         .iter()
-        .map(|hint| {
-            hint.as_deref()
-                .and_then(|hint| reset_time(hint, now))
-                .unwrap_or(fallback)
-        })
+        .map(|reset| reset.unwrap_or(fallback))
         .max()
         .unwrap_or(fallback);
     store.write(|tx| {
@@ -176,6 +178,37 @@ pub fn update(
                 resumed: false,
             }),
         )
+    })
+}
+
+/// One quota reading of the captain: exhausted or not, a reset time per
+/// exhausted window (None: the policy fallback), and what identifies it.
+struct Reading {
+    exhausted: bool,
+    resets: Vec<Option<Ts>>,
+    signature: String,
+}
+
+/// The limit stop Claude Code writes in its own session log. It needs no
+/// status line, so it works on every machine; the footer bar is read only
+/// when the log has no stop. A stop whose reset has passed is over.
+fn log_reading(profile: &Profile, session: Option<&str>, now: Ts) -> Option<Reading> {
+    if profile.usage_log.as_deref() != Some("claude-jsonl") {
+        return None;
+    }
+    let session = session.filter(|s| !s.trim().is_empty())?;
+    let stop = gear_usage::claude_limit_stop(session)?;
+    if stop.resets_at.is_some_and(|reset| reset <= now) {
+        return None;
+    }
+    Some(Reading {
+        exhausted: true,
+        resets: vec![stop.resets_at],
+        signature: format!(
+            "log {} {}",
+            stop.window,
+            stop.resets_at.map_or_else(String::new, |t| t.to_string())
+        ),
     })
 }
 
