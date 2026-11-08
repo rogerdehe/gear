@@ -14,7 +14,8 @@ use gear_store::{AttemptRow, AttemptStep, NewMessage, NewOp, Tx, VerdictRow};
 /// Create attempt `n = last + 1` for `task` on `seat_id` (state Delivered,
 /// `contract_version = adopted_version =` the task's current contract version).
 /// Preconditions (else `Forbidden`, detail says which): task Ready; every dep
-/// Done; seat state Active or Standby with `generation` = the seat's current
+/// Done for its first attempt (a rework does not wait on deps); seat state
+/// Active or Standby with `generation` = the seat's current
 /// generation; the seat has no in-progress attempt. The task stays Ready.
 pub fn start_attempt(
     tx: &Tx<'_>,
@@ -37,7 +38,12 @@ pub fn start_attempt(
             task_row.state.as_str()
         )));
     }
-    for dep in &task_row.deps {
+    // A dependency holds a task's first start only, as dispatch picks it
+    // (`ready_tasks_of`): once the lane has worked on the task, a rework
+    // never waits on a merge and the deps hold only its merge
+    // (merge.rs `deps_landed`).
+    let first = tx.attempts_of_task(project, task)?.is_empty();
+    for dep in task_row.deps.iter().filter(|_| first) {
         let dep_state = match tx.get_task(project, dep)? {
             Some(row) => row.state,
             None => {
