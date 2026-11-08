@@ -146,6 +146,13 @@ struct Branch {
     task: String,
     lane: String,
     files: BTreeSet<String>,
+    /// The commits that stand for the task's work: its branch head and its
+    /// accepted candidate, when git knows it.
+    tips: Vec<String>,
+    /// The tip the files were read up to: the branch head.
+    head: String,
+    /// The branch the task merges into, at the tip the scan read.
+    base_tip: String,
 }
 
 #[derive(Debug)]
@@ -672,13 +679,61 @@ fn scan(input: &Input) -> Result<Findings, String> {
                 );
             }
         }
+        let mut task_tips = vec![head.clone()];
+        if let Some(candidate) = task.candidate.as_deref().and_then(|c| tips.revision(c)) {
+            if candidate != head {
+                task_tips.push(candidate);
+            }
+        }
         branches.push(Branch {
             project: task.project.clone(),
             task: task.task.clone(),
             lane: task.lane.clone(),
             files,
+            tips: task_tips,
+            head,
+            base_tip,
         });
     }
+    // A task started from another task's work (a stacked task: its packet
+    // told it to start from that task's accepted candidate) holds that work
+    // too. The files it inherits are the other task's, not its own change,
+    // and the two never conflict: the later one contains the earlier
+    // (Lawrence M-2306..M-2379). Its own files are what is left, and the two
+    // are no pair.
+    let mut stacked: BTreeSet<(usize, usize)> = BTreeSet::new();
+    for later in 0..branches.len() {
+        for earlier in 0..branches.len() {
+            if later == earlier || branches[earlier].project != branches[later].project {
+                continue;
+            }
+            let head = branches[later].head.clone();
+            let mut inherited = None;
+            for tip in &branches[earlier].tips {
+                if *tip != head && ancestor(&input.repo, tip, &head)? {
+                    inherited = Some(tip.clone());
+                    break;
+                }
+            }
+            let Some(tip) = inherited else {
+                continue;
+            };
+            let theirs = changed(&input.repo, &branches[later].base_tip, &tip)?;
+            branches[later].files.retain(|file| !theirs.contains(file));
+            stacked.insert((later.min(earlier), later.max(earlier)));
+        }
+    }
+    let stacked: BTreeSet<(String, String)> = stacked
+        .into_iter()
+        .map(|(a, b)| {
+            let (a, b) = (&branches[a].task, &branches[b].task);
+            if a <= b {
+                (a.clone(), b.clone())
+            } else {
+                (b.clone(), a.clone())
+            }
+        })
+        .collect();
     // Deterministic, and the scanned project's own pairs keep the order they
     // always had: by task id.
     branches.sort_by(|a, b| (&a.task, &a.project, &a.lane).cmp(&(&b.task, &b.project, &b.lane)));
@@ -693,6 +748,11 @@ fn scan(input: &Input) -> Result<Findings, String> {
             // A pair with two other projects' tasks is their captains' item,
             // not this one's: at least one side is this project's (T-281).
             if left.project != input.project && right.project != input.project {
+                continue;
+            }
+            if left.project == right.project
+                && stacked.contains(&(left.task.clone(), right.task.clone()))
+            {
                 continue;
             }
             let files: Vec<_> = left.files.intersection(&right.files).cloned().collect();
@@ -1341,6 +1401,35 @@ profile = "codex"
         scan(&inputs[0]).unwrap()
     }
 
+    /// Lawrence M-2306..M-2379: a task started from another task's work
+    /// (stacked on it) holds that task's files without changing them; the
+    /// two are no pair. Two tasks cut from `dev` that change one file still
+    /// are.
+    #[test]
+    fn a_task_stacked_on_another_is_not_its_pair() {
+        let path = feature_repo("gear-parallel-stacked");
+        member(&path, "heat/t1", "dev", "api.rs", "one");
+        member(&path, "steady/t2", "heat/t1", "view.rs", "two");
+        sh(&path, &["switch", "-q", "dev"]);
+        let mut stacked = store(&path);
+        assert!(
+            scanned(&mut stacked, T0).pairs.is_empty(),
+            "the stacked task inherits api.rs; it changes view.rs"
+        );
+
+        let path = feature_repo("gear-parallel-unstacked");
+        member(&path, "heat/t1", "dev", "api.rs", "one");
+        member(&path, "steady/t2", "dev", "api.rs", "two");
+        sh(&path, &["switch", "-q", "dev"]);
+        let mut parallel = store(&path);
+        let found = scanned(&mut parallel, T0);
+        let pair = found
+            .pairs
+            .get("tasks:T-1:T-2")
+            .expect("two parallel changes of api.rs");
+        assert_eq!(pair.files, vec!["api.rs".to_string()]);
+    }
+
     /// T-596: a feature's member is read against the feature's branch. Against
     /// the integration branch the second member carried the first's file —
     /// merged into the feature before the second was cut from it — so the two
@@ -1354,22 +1443,13 @@ profile = "codex"
         merge_into_feature(&path, "heat/t1");
         member(&path, "steady/t2", FEATURE, "notes.md", "two");
 
-        // The fixture rings the way the scan read it before this task: against
-        // `dev`, the second member's diff holds the first's report too, and its
-        // own notes.
+        // Against `dev` the second member's diff holds the first's report too.
+        // It rang before T-596; since M-2306 the second member is read as
+        // stacked on the first, so it is no pair against `dev` either.
         let mut without = store(&path);
         store_with_candidates(&path, &mut without);
         let found = scanned(&mut without, T0);
-        assert_eq!(
-            found.pairs.keys().collect::<Vec<_>>(),
-            vec![&"tasks:T-1:T-2".to_string()],
-            "the fixture rings against dev: {found:?}"
-        );
-        assert_eq!(
-            found.pairs["tasks:T-1:T-2"].files,
-            vec!["report.md".to_string()],
-            "the file the first member merged: {found:?}"
-        );
+        assert!(found.pairs.is_empty(), "stacked, no pair: {found:?}");
 
         // Read against the feature's branch: the first member's candidate is in
         // its base, so it has landed there; the second changes only its own file.
