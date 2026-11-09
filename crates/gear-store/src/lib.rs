@@ -1442,6 +1442,30 @@ impl<'s> Tx<'s> {
         Ok(row)
     }
 
+    /// The active OpenCode bindings whose recorded session is `session_ref`:
+    /// the seat a tool shell of the shared `opencode serve` works for (its
+    /// `OPENCODE_SESSION_ID`).
+    pub fn active_opencode_bindings_with_session(
+        &self,
+        session_ref: &str,
+    ) -> GearResult<Vec<BindingRow>> {
+        let mut stmt = self
+            .tx
+            .prepare_cached(
+                "SELECT seat, generation, session, pane_id, kind, session_ref, status, handover_id, created
+                 FROM bindings WHERE status='active' AND kind='opencode' AND session_ref=?1",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![session_ref], binding_from_row)
+            .map_err(map_sqlite)?;
+        let mut found = Vec::new();
+        for row in rows {
+            found.push(row.map_err(map_sqlite)?);
+        }
+        Ok(found)
+    }
+
     /// Whether `pane_id` was a void binding of `seat_id` at any generation
     /// (T-616): a respawned seat's old pane, kept by an inherited variable or
     /// old text. One query, not one per generation.
