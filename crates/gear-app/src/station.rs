@@ -196,7 +196,7 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
                     "Voyage {} is ready to land: all {done} tasks are done and merged (elapsed {} / eta {}).{open}\n\
 {issues}1. Run `gear report voyage` and write the voyage report into # Decisions.\n\
 2. Review it with the user first: the report, the ★ decisions (only those), the friction reports that led to a change. Write each correction as `- <date> user: <text>`.\n\
-3. When the user says land: `station <id>: land` (it retires every lane and releases every reviewer), then remove every worktree of the project and close its Herdr workspaces.\n\
+3. When the user says land: `station <id>: land`. It retires every lane and releases every reviewer, and GEAR then removes the project's clean worktrees, merged branches and workspaces itself; handle only what it names as left.\n\
 This item stays open until that line.",
                     report.milestone, minutes(report.elapsed_min), report.eta.as_deref().unwrap_or("-")
                 ))?,
