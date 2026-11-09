@@ -2808,7 +2808,7 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         // T-469: a resumed session gets no charter again (its rules file is
         // refreshed, but nothing is appended), and the lane's rules file is
         // its own, under `rules/lanes`.
-        let path = dir.path().join("rules/lanes/heat.md");
+        let path = dir.path().join("rules/p/lanes/heat.md");
         assert!(
             !args.windows(2).any(|w| w[0] == "--append-system-prompt"),
             "a resumed session gets no charter again: {args:?}"
