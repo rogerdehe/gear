@@ -438,25 +438,22 @@ pub fn reclaim(
         }
         // T-622: the integration branch lives for one voyage. It is deleted
         // only when its tip is on the release branch (everything it holds is
-        // released); otherwise it holds unreleased work and stays, named. An
-        // integration branch equal to the release branch is never deleted.
+        // released); otherwise it stays, and is never named: the release is
+        // the user's decision, often behind a human review, and GEAR never
+        // asks a captain to merge into it or to delete it (M-708, M-719). A
+        // deletion the remote refuses (a protected branch) is not named
+        // either. An integration branch equal to the release branch is never
+        // deleted.
         if repo.integration != repo.release {
             if let Some(tip) =
                 remote_branch_tip(&repo.path, &config.conventions.remote, &repo.integration)
             {
                 if branch_on_release(&repo.path, &config, &tip, &repo.release) {
-                    if let Err(reason) = delete_remote_branch(
+                    let _ = delete_remote_branch(
                         &repo.path,
                         &config.conventions.remote,
                         &repo.integration,
-                    ) {
-                        left.push(format!("branch {} ({reason})", repo.integration));
-                    }
-                } else {
-                    left.push(format!(
-                        "branch {} (not on {})",
-                        repo.integration, repo.release
-                    ));
+                    );
                 }
             }
         }
@@ -2041,7 +2038,8 @@ gate = "true"
     /// branch (everything it holds is released), and kept when it holds
     /// unreleased work.
     #[test]
-    fn the_reclaim_deletes_an_integration_branch_on_release_and_keeps_one_with_unreleased_work() {
+    fn the_reclaim_deletes_an_integration_branch_on_release_and_never_names_one_with_unreleased_work(
+    ) {
         // Everything on dev is on main: the branch goes.
         let mut landed = Landed::new("integration-on-release");
         sh(&landed.work, "git push -q origin dev:refs/heads/main");
@@ -2053,7 +2051,7 @@ gate = "true"
         );
 
         // A commit on dev that main does not have: the branch holds
-        // unreleased work and stays, named.
+        // unreleased work and stays, unnamed.
         let mut landed = Landed::new("integration-extra");
         sh(&landed.work, "git push -q origin dev:refs/heads/main");
         sh(
@@ -2067,15 +2065,14 @@ gate = "true"
             branches.lines().any(|branch| branch == "dev"),
             "the integration branch with unreleased work is kept: {branches}"
         );
-        let item = landed
-            .items(RECLAIM_THREAD)
-            .into_iter()
-            .next()
-            .expect("the reclaim names the integration branch");
+        // The release is the user's: the kept branch is never named, so no
+        // item asks the captain to merge it into main or delete it.
         assert!(
-            item.body.contains("branch dev (not on main)"),
-            "{}",
-            item.body
+            landed
+                .items(RECLAIM_THREAD)
+                .iter()
+                .all(|item| !item.body.contains("branch dev")),
+            "the integration branch is never named"
         );
     }
 

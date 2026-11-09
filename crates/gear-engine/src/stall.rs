@@ -165,6 +165,31 @@ pub fn alert_fact(tx: &Tx<'_>, seat_id: &str, now: Ts, fact: &str) -> GearResult
     if captain.id == seat.id {
         return Ok(false); // the captain itself: its doorbell is the signal
     }
+    // Between voyages (no departed voyage has a live task) a lane that holds
+    // no task and helps nobody keeps nobody waiting: no item rings for it,
+    // and one left open closes. A landed voyage's lanes rang for good
+    // otherwise, since nothing could clear it (pharos M-710, M-711).
+    if seat.role == gear_model::SeatRole::Lane
+        && tx.in_progress_attempts_of_seat(&seat.id)?.is_empty()
+        && gear_board::idle::helping(tx, &seat.project, &seat, now)?.is_none()
+        && !under_way(tx, &seat.project)?
+    {
+        for item in tx.thread_messages(&seat.project, &thread(&seat.id))? {
+            if matches!(item.state, MsgState::Open | MsgState::Waiting) {
+                tx.update_message_state(
+                    &seat.project,
+                    &item.id,
+                    MsgState::Resolved,
+                    Some("no voyage is under way and the lane holds no task: nothing waits on it"),
+                    None,
+                    None,
+                    now,
+                )?;
+            }
+        }
+        tx.set_meta(&format!("stall-active:{seat_id}"), "")?;
+        return Ok(false);
+    }
     let body = format!("lane {} is stuck: {fact}. About: {}. Look at its pane (agent exited? context full? a dialog? quota?), get it going (restart or resume it, or give it a fresh session), then resolve this item.", seat.name, about(tx, &seat, now)?);
     let open = tx
         .thread_messages(&seat.project, &thread(&seat.id))?
@@ -203,6 +228,20 @@ pub fn alert_fact(tx: &Tx<'_>, seat_id: &str, now: Ts, fact: &str) -> GearResult
     Ok(true)
 }
 
+/// Whether a departed voyage of the project still has a live task.
+fn under_way(tx: &Tx<'_>, project: &str) -> GearResult<bool> {
+    let departed: std::collections::BTreeSet<String> = tx
+        .voyages_of_project(project)?
+        .into_iter()
+        .filter(|voyage| voyage.departure.is_some())
+        .map(|voyage| voyage.milestone)
+        .collect();
+    Ok(tx
+        .tasks_live_of_project(project)?
+        .into_iter()
+        .any(|task| task.milestone.is_some_and(|m| departed.contains(&m))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,6 +250,91 @@ mod tests {
         testing::{seed_active_seat, seed_project},
         Store,
     };
+
+    /// The lane holds a started attempt of T-1.
+    fn working(tx: &Tx<'_>) -> GearResult<()> {
+        tx.insert_task(&gear_store::TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: "p".into(),
+            id: "T-1".into(),
+            rank: 1,
+            state: gear_model::TaskState::Running,
+            priority: "must".into(),
+            lane: Some("lane".into()),
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: None,
+            issue: None,
+            updated: 1000,
+        })?;
+        tx.insert_attempt(&gear_store::AttemptRow {
+            project: "p".into(),
+            task: "T-1".into(),
+            n: 1,
+            seat: "p:lane".into(),
+            generation: 1,
+            contract_version: 1,
+            adopted_version: 1,
+            pending_update: None,
+            state: gear_model::AttemptState::Started,
+            candidate: None,
+            report: None,
+            safe_point: None,
+            started: 1000,
+            updated: 1000,
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
+        })
+    }
+
+    #[test]
+    fn between_voyages_a_lane_with_no_task_rings_nobody_and_its_open_item_closes() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                seed_project(tx, "p", "sess", 1000)?;
+                seed_active_seat(
+                    tx,
+                    "p",
+                    "captain",
+                    SeatRole::Captain,
+                    "w1:p9",
+                    "claude",
+                    1000,
+                )?;
+                seed_active_seat(tx, "p", "lane", SeatRole::Lane, "w1:p1", "opencode", 1000)?;
+                working(tx)?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(store.write(|tx| alert(tx, "p:lane", 1001)).unwrap());
+        // The task ends: the lane holds nothing, so the item closes and no
+        // new one opens.
+        store
+            .write(|tx| {
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.expect("the attempt");
+                attempt.state = gear_model::AttemptState::Accepted;
+                tx.update_attempt(&attempt)
+            })
+            .unwrap();
+        assert!(!store.write(|tx| alert(tx, "p:lane", 1003)).unwrap());
+        let items = store
+            .read(|tx| tx.thread_messages("p", "stall:p:lane"))
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].state, MsgState::Resolved);
+    }
 
     #[test]
     fn persistent_stall_is_one_item_realerts_and_closes_on_recovery() {
@@ -228,6 +352,7 @@ mod tests {
                     1000,
                 )?;
                 seed_active_seat(tx, "p", "lane", SeatRole::Lane, "w1:p1", "opencode", 1000)?;
+                working(tx)?;
                 Ok(())
             })
             .unwrap();
@@ -288,6 +413,7 @@ mod tests {
                     1000,
                 )?;
                 seed_active_seat(tx, "p", "lane", SeatRole::Lane, "w1:p1", "opencode", 1000)?;
+                working(tx)?;
                 Ok(())
             })
             .unwrap();

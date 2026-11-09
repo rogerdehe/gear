@@ -13,6 +13,7 @@ fn world() -> Store {
     let mut s = Store::open_in_memory().unwrap();
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", T0)?;
+        testing::seed_voyage_under_way(tx, "p", T0)?;
         testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
         Ok(())

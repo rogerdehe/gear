@@ -26,7 +26,7 @@ Names are derived, never invented (`lane-a`, `agent-3`, `bot` are not allowed).
 
 | Branch | Role |
 |---|---|
-| `main` (release) | released state; reaches it only through the user's decision at a voyage's end |
+| `main` (release) | released state; reaches it only through the user's decision at a voyage's end. GEAR's work ends on the integration branch: it never merges into the release branch or asks anyone to, and what follows (a deploy, a human review, a release) is the project's |
 | `dev` (integration) | always builds and passes the gate; the engine merges passed tasks into it |
 | `<lane>/t<n>` | a task branch, cut from the latest integration branch of the lane's repo, pushed as you commit, deleted after the merge |
 | `home/<lane>` | the anchor of a lane's long-lived worktree; never committed to |
