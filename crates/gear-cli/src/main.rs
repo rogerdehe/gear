@@ -419,7 +419,31 @@ fn main() {
     // without touching the user's home (design/13: a read-only command writes
     // nothing).
     let cli = Cli::parse();
-    if let Err(e) = name_the_caller(cli.session.as_deref(), cli.pane.as_deref()) {
+    // An OpenCode seat's commands run in the shared `opencode serve`, outside
+    // its pane. A bare `gear` there names its seat by the session it works
+    // for, as if it had written `--session <s> --pane <p>` (pharos M-726,
+    // M-744: a lane that forgot the arguments was refused again and again).
+    let found = if cli.session.is_none() && cli.pane.is_none() {
+        std::env::var("OPENCODE_SESSION_ID")
+            .ok()
+            .filter(|id| !id.is_empty())
+            .and_then(|id| {
+                let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+                opencode_seat_of(&home, &id)
+            })
+    } else {
+        None
+    };
+    if found.is_some() {
+        // The shared daemon's GEAR_CTX is whichever seat started it: the seat
+        // comes from the pane found, never from that.
+        std::env::remove_var(gear_model::ctx::ENV_CTX);
+    }
+    let (session, pane) = match &found {
+        Some((session, pane)) => (Some(session.as_str()), Some(pane.as_str())),
+        None => (cli.session.as_deref(), cli.pane.as_deref()),
+    };
+    if let Err(e) = name_the_caller(session, pane) {
         eprintln!("ERROR {}: {}", e.code, e.detail);
         std::process::exit(e.code.exit_code());
     }
@@ -436,6 +460,52 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// The Herdr session and pane of the one active OpenCode seat whose recorded
+/// session is `session_id`, searched in every GEAR store on this machine (the
+/// registered ones and those under `~/.local/state/gear`). None when no seat
+/// or more than one has it.
+fn opencode_seat_of(home: &std::path::Path, session_id: &str) -> Option<(String, String)> {
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(targets_path_in(home)) {
+        for line in text.lines() {
+            if let Some((_, db)) = line.split_once('\t') {
+                paths.push(std::path::PathBuf::from(db));
+            }
+        }
+    }
+    let state = home.join(".local/state/gear");
+    paths.push(state.join("gear.db"));
+    if let Ok(dirs) = std::fs::read_dir(&state) {
+        for dir in dirs.flatten() {
+            paths.push(dir.path().join("gear.db"));
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut found: Vec<(String, String)> = Vec::new();
+    for path in paths {
+        let Ok(canonical) = path.canonicalize() else {
+            continue;
+        };
+        if !seen.insert(canonical.clone()) {
+            continue;
+        }
+        let Ok(mut store) = gear_store::Store::open_read_only(&canonical) else {
+            continue;
+        };
+        let Ok(bindings) = store.read(|tx| tx.active_opencode_bindings_with_session(session_id))
+        else {
+            continue;
+        };
+        for binding in bindings {
+            let seat = (binding.session, binding.pane_id);
+            if !found.contains(&seat) {
+                found.push(seat);
+            }
+        }
+    }
+    (found.len() == 1).then(|| found.remove(0))
 }
 
 /// `--session` and `--pane`: the caller names its Herdr session and pane. The
@@ -9895,7 +9965,6 @@ path="api"
             codex.unattended_args,
             vec![
                 "--dangerously-bypass-approvals-and-sandbox".to_string(),
-                "--dangerously-bypass-hook-trust".to_string(),
                 "-c".to_string(),
                 "check_for_update_on_startup=false".to_string(),
                 // T-76: the folder the agent runs in is trusted.
@@ -9910,7 +9979,11 @@ path="api"
         // T-457: Codex 0.165's startup screens are answered, not read as an
         // idle agent.
         let dialogs = &codex.dialogs;
-        assert_eq!(dialogs.len(), 2, "the /new and the resume dialog");
+        assert_eq!(
+            dialogs.len(),
+            3,
+            "the /new, the hook review and the resume dialog"
+        );
         assert!(
             dialogs[0]
                 .markers
@@ -9920,16 +9993,59 @@ path="api"
         assert!(
             dialogs[1]
                 .markers
+                .contains(&"Hooks need review".to_string()),
+            "the hook review's marker"
+        );
+        assert_eq!(
+            dialogs[1].keys,
+            vec!["down".to_string(), "enter".to_string()],
+            "the hook review takes Trust all and continue"
+        );
+        assert!(
+            dialogs[2]
+                .markers
                 .contains(&"Choose which working directory to use".to_string()),
             "the resume dialog's marker"
         );
-        for dialog in dialogs {
+        for dialog in [&dialogs[0], &dialogs[2]] {
             assert_eq!(
                 dialog.keys,
                 vec!["enter".to_string()],
                 "the preselected choice is taken with Enter"
             );
         }
+    }
+
+    /// A bare `gear` in OpenCode's shared daemon finds its seat by the
+    /// session it works for, across the machine's stores; an unknown or
+    /// shared session finds none.
+    #[test]
+    fn an_opencode_session_names_its_seat() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".local/state/gear/pharos");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = gear_store::Store::open(&dir.join("gear.db")).unwrap();
+        store
+            .write(|tx| {
+                gear_store::testing::seed_project(tx, "p", "default", 1000)?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "core",
+                    SeatRole::Lane,
+                    "wAS:p1",
+                    "opencode",
+                    1000,
+                )?;
+                tx.set_binding_session_ref("p:core", 1, "ses_core")
+            })
+            .unwrap();
+        drop(store);
+        assert_eq!(
+            opencode_seat_of(home.path(), "ses_core"),
+            Some(("default".to_string(), "wAS:p1".to_string()))
+        );
+        assert_eq!(opencode_seat_of(home.path(), "ses_other"), None);
     }
 
     #[test]

@@ -36,10 +36,10 @@ The pane must show the shell prompt of the agent's worktree (a freshly made pane
 herdr agent start <name> --kind codex --pane <pane> --timeout 60000 -- \
   -m <slug> -c model_reasoning_effort=<effort> -c check_for_update_on_startup=false \
   -c 'projects={"/abs/path/to/the/worktree"={trust_level="trusted"}}' \
-  --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust
+  --dangerously-bypass-approvals-and-sandbox
 ```
 
-`--dangerously-bypass-hook-trust` runs the hooks of the seat's Codex config without the "Hooks need review" dialog, which otherwise stops the seat at start whenever a hook is new or changed (Herdr's agent-state hook after a Herdr update).
+A new or changed hook (Herdr's agent-state hook after a Herdr update) shows "Hooks need review" at start: choose `Trust all and continue` (Down, Enter); Codex records the trust in its config and does not ask again until a hook changes. Never start with `--dangerously-bypass-hook-trust`: on codex-cli 0.167.0 it can ask for a new login at every start.
 
 The `projects` table is what keeps Codex's first-run "Trust this folder?" dialog from blocking a seat: name **only the canonical worktree of the registered repo** the agent runs in, never a wider directory, and use the inline-table form — the dotted `projects."<path>".trust_level` spelling is silently ignored. The bypass flag alone does not answer that dialog.
 
@@ -60,10 +60,8 @@ herdr agent send-keys <name> ctrl+c ctrl+c
 herdr agent start <name> --kind codex --pane <pane> --timeout 60000 -- \
   resume <session-uuid> -m <slug> -c model_reasoning_effort=<effort> -c check_for_update_on_startup=false \
   -c 'projects={"/abs/path/to/the/worktree"={trust_level="trusted"}}' \
-  --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust
+  --dangerously-bypass-approvals-and-sandbox
 ```
-
-`--dangerously-bypass-hook-trust` runs the hooks of the seat's Codex config without the "Hooks need review" dialog, which otherwise stops the seat at start whenever a hook is new or changed (Herdr's agent-state hook after a Herdr update).
 
 After the exit the screen shows `codex resume <uuid>` and the shell prompt. After a resume wait until the status bar shows `Context N% used` before prompting. Never resume with an empty id: it opens a picker, and the next prompt lands in its search box.
 

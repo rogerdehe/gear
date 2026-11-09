@@ -672,6 +672,18 @@ pub fn builtin(kind: &str) -> Option<Profile> {
                     ],
                     keys: vec!["enter".into()],
                 },
+                // "Hooks need review" (a new or changed hook, such as Herdr's
+                // agent-state hook after a Herdr update) stopped every seat at
+                // start. Its choices are `Review hooks`, `Trust all and
+                // continue`, `Continue without trusting`; the second trusts
+                // the hooks in the Codex config, so the dialog does not come
+                // back until a hook changes. `--dangerously-bypass-hook-trust`
+                // is not used: on a client's codex-cli 0.167.0 it asked for a
+                // new login at every start (2026-11-08).
+                Dialog {
+                    markers: vec!["Hooks need review".into(), "Trust all and continue".into()],
+                    keys: vec!["down".into(), "enter".into()],
+                },
                 Dialog {
                     markers: vec![
                         "Choose which working directory to use".into(),
@@ -687,12 +699,6 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             confirm_rounds: 2,
             unattended_args: vec![
                 "--dangerously-bypass-approvals-and-sandbox".into(),
-                // The hooks of the seat's own Codex config run without the
-                // "Hooks need review" dialog: a new or changed hook (Herdr's
-                // agent-state hook after a Herdr update) stopped every seat at
-                // start until someone answered it (the user, 2026-11-08).
-                // Codex's flag for automation (codex-cli 0.164.0 on).
-                "--dangerously-bypass-hook-trust".into(),
                 "-c".into(),
                 "check_for_update_on_startup=false".into(),
                 // T-76: the folder the agent runs in is trusted, so Codex's
@@ -1229,6 +1235,20 @@ mod tests {
             .backoff("waiting for provider: 30 s"));
     }
 
+    /// The hook review is answered with `Trust all and continue`, and the
+    /// start args never carry `--dangerously-bypass-hook-trust`.
+    #[test]
+    fn the_codex_hook_review_is_answered_with_trust_all() {
+        let codex = builtin("codex").unwrap();
+        let screen = "  Hooks need review\n  Hooks can run outside the sandbox after you trust them.\n\u{203a} 1. Review hooks\n  2. Trust all and continue\n  3. Continue without trusting (hooks won't run)\n";
+        let dialog = codex.dialog(screen).expect("the hook review is a dialog");
+        assert_eq!(dialog.keys, vec!["down".to_string(), "enter".to_string()]);
+        assert!(!codex
+            .unattended_args
+            .iter()
+            .any(|arg| arg == "--dangerously-bypass-hook-trust"));
+    }
+
     /// T-76: the codex start args carry the folder the agent runs in, so its
     /// first-run "Trust this folder?" dialog never blocks a seat.
     #[test]
@@ -1239,7 +1259,6 @@ mod tests {
             args,
             vec![
                 "--dangerously-bypass-approvals-and-sandbox".to_string(),
-                "--dangerously-bypass-hook-trust".to_string(),
                 "-c".to_string(),
                 "check_for_update_on_startup=false".to_string(),
                 "-c".to_string(),
