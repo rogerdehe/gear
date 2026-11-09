@@ -91,13 +91,28 @@ pub(crate) fn should_show(
             }
         }
     }
-    if !stale(message, period, now) {
+    // T-634: a voyage's land order waits on the user's word. Once the captain
+    // has seen it, nothing is left for the captain to do but wait, so it is
+    // never reminded (Lawrence M-2940 rang every period while the report sat
+    // with the user).
+    if is_land_order(tx, message)? || !stale(message, period, now) {
         return Ok(!shown);
     }
     let last = tx
         .get_meta(&key(&message.project, &message.id))?
         .and_then(|value| value.parse::<Ts>().ok());
     Ok(last.is_none_or(|last| now - last >= period))
+}
+
+/// Whether `message` is the land order of its voyage (`station:<milestone>`).
+fn is_land_order(tx: &Tx<'_>, message: &MessageRow) -> GearResult<bool> {
+    let Some(milestone) = message.thread.strip_prefix("station:") else {
+        return Ok(false);
+    };
+    Ok(tx
+        .get_meta(&format!("station:{}:{milestone}:land", message.project))?
+        .as_deref()
+        == Some(message.id.as_str()))
 }
 
 pub(crate) fn record(

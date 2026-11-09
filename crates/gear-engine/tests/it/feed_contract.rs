@@ -826,6 +826,51 @@ fn tail_rejects_unknown_lanes_without_changing_the_plan() {
         .unwrap());
 }
 
+/// T-634: a land order waits on the user's word. The captain has seen it and
+/// told the user; ringing it again every period only interrupts a captain
+/// that has nothing left to do (Lawrence M-2940, rung again 9 minutes after
+/// its captain put the report to the user).
+#[test]
+fn a_seen_land_order_is_never_reminded() {
+    let mut w = world(AgentStatus::Working, 2);
+    w.store
+        .write(|tx| tx.set_seat_state("p:heat", SeatState::Held, Some("land order fixture"), T0))
+        .unwrap();
+    w.store
+        .write(|tx| {
+            let id = tx
+                .insert_message(&NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: "station:M1".into(),
+                    task: None,
+                    attempt: None,
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::System,
+                    urgent: true,
+                    body: "Your goal, voyage M1: done. Land it.".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: T0,
+                })?
+                .id;
+            tx.set_meta("station:p:M1:land", &id)
+        })
+        .unwrap();
+    show_captain(&mut w, T0 + 60);
+    for now in [600, 1200, 2100, 3600, 7200, 86_400] {
+        tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + now).unwrap();
+    }
+    assert!(
+        w.herdr.prompts_to(CAP_PANE).is_empty(),
+        "a seen land order is not rung again: {:?}",
+        w.herdr.prompts_to(CAP_PANE)
+    );
+}
+
 #[test]
 fn configured_stale_period_keeps_an_unviewed_item_from_ringing_every_tick() {
     let mut w = world(AgentStatus::Working, 2);
