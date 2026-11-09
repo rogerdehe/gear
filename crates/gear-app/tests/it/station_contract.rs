@@ -383,7 +383,7 @@ fn each_third_completion_is_a_station_including_the_final_task() {
         "{land_body}"
     );
     assert!(
-        land_body.contains("it retires every lane and releases every reviewer"),
+        land_body.contains("It retires every lane and releases every reviewer"),
         "{land_body}"
     );
     assert!(land_body.contains("station <id>: land"), "{land_body}");

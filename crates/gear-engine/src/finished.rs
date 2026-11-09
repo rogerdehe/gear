@@ -213,6 +213,9 @@ pub const RECLAIM_THREAD: &str = "reclaim";
 const RECLAIM_EVERY_S: i64 = 300;
 /// How long after its landing a voyage's leftovers are named.
 const RECLAIM_WITHIN_S: i64 = 24 * 3600;
+/// How long after its landing a workspace may still hold a leaving agent
+/// before it is named to the captain.
+const AGENTS_LEAVE_S: i64 = 15 * 60;
 
 /// A landed voyage keeps no worktree (the user, 2026-11-05: Prometheus M4
 /// landed with fourteen worktrees and six Herdr workspaces left). Once the
@@ -237,7 +240,7 @@ pub fn reclaim(
             .into_iter()
             .find(|message| message.state == MsgState::Open))
     })?;
-    let Some(milestone) = landed else {
+    let Some((milestone, landed_at)) = landed else {
         // No landing to sweep now: the next voyage departed (its integration
         // branch is that voyage's again) or the landing is past its day. An
         // item still open names leftovers of a landing that is over, and
@@ -279,6 +282,11 @@ pub fn reclaim(
     // T-585: the landing merges the captain's records before it names what is
     // left, so a captain only commits and pushes its branch before landing.
     let records = merge_records(store, herdr, project, &config, &milestone, now)?;
+    // The landing retired its lanes and released its reviewers in the same
+    // apply; their agents need a few ticks to get out. Until then a workspace
+    // still holding one is not a leftover (Lawrence M-2942 named four, all
+    // closed by GEAR minutes later, and its captain closed them by hand).
+    let agents_leaving = now - landed_at < AGENTS_LEAVE_S;
     let mut left = Vec::new();
     let mut seen = BTreeSet::new();
     // The captain's seat branch of a voyage that has not departed (Lawrence
@@ -475,10 +483,14 @@ pub fn reclaim(
             continue;
         }
         if workspace.holds_agent {
-            left.push(format!(
-                "workspace {} ({}) (holding an agent)",
-                workspace.id, workspace.label
-            ));
+            // A seat the landing is taking down still has its agent: its
+            // workspace closes on a later scan, once the agent is gone.
+            if !agents_leaving {
+                left.push(format!(
+                    "workspace {} ({}) (holding an agent)",
+                    workspace.id, workspace.label
+                ));
+            }
             continue;
         }
         match herdr.worktree_remove(&workspace.id) {
@@ -556,7 +568,7 @@ pub fn reclaim(
 /// The voyage this project last landed, if it was landed within the check's
 /// window: the newest finished voyage whose landing order
 /// `station <id>: land` was answered.
-fn landed_voyage(store: &mut Store, project: &str, now: Ts) -> GearResult<Option<String>> {
+fn landed_voyage(store: &mut Store, project: &str, now: Ts) -> GearResult<Option<(String, Ts)>> {
     store.read(|tx| {
         let sweep = Sweep::read(tx, project)?;
         // Only work in progress holds a reclaim: a voyage with a task that is
@@ -606,7 +618,7 @@ fn landed_voyage(store: &mut Store, project: &str, now: Ts) -> GearResult<Option
                     action == "land" || action.starts_with("land ")
                 })
             });
-        Ok(landed.then_some(milestone))
+        Ok(landed.then(|| (milestone, message.resolved.unwrap_or(now))))
     })
 }
 
@@ -2255,6 +2267,42 @@ gate = "true"
             "its workspace is left alone: {:?}",
             landed.herdr.calls
         );
+    }
+
+    /// The landing retires its lanes and releases its reviewers; their agents
+    /// need a few ticks to get out. A workspace still holding one is named
+    /// only once that grace is over (Lawrence M-2942).
+    #[test]
+    fn a_leaving_agents_workspace_is_named_only_after_its_grace() {
+        let mut landed = Landed::new("agents-leaving");
+        let bin = landed.root.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = bin.join("herdr");
+            let json = r#"{"result":{"workspaces":[{"workspace_id":"w1KM","label":"p-heat","agent_status":"idle"}]}}"#;
+            std::fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{json}'\n")).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let old = std::env::var_os("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", bin.display(), old.to_string_lossy()),
+        );
+        let named = |landed: &mut Landed| {
+            landed
+                .items(RECLAIM_THREAD)
+                .iter()
+                .any(|item| item.body.contains("w1KM (p-heat) (holding an agent)"))
+        };
+        landed.reclaim(NOW + 60);
+        let early = named(&mut landed);
+        landed.reclaim(NOW + AGENTS_LEAVE_S + 60);
+        let late = named(&mut landed);
+        std::env::set_var("PATH", old);
+
+        assert!(!early, "an agent on its way out is not a leftover yet");
+        assert!(late, "one still there after the grace is named");
     }
 
     /// T-639: a workspace whose worktree is already gone is closed with
