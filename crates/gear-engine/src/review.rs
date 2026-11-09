@@ -3809,6 +3809,7 @@ fn start_reviewer(
             }
             tx.set_meta(&pending_review_key(&seat.id), "")?;
             tx.set_meta(&branch_key(&seat.id, &repo.path), &branch)?;
+            let packet = with_rules(tx, &config.project.id, &seat.name, &packet)?;
             tx.insert_op(&NewOp { project: config.project.id.clone(), seat: seat.id.clone(), generation: seat.generation,
                 kind: OpKind::Deliver, task: Some(task.task.clone()), attempt: Some(task.attempt), ref_msg: None,
                 plan_version: None, payload: serde_json::json!({ "text": packet }), created: now })?;
@@ -4113,6 +4114,7 @@ fn start_reviewer(
         if let Some(session) = session_ref.filter(|session| !session.is_empty()) {
             tx.set_meta(&session_key(&config.project.id, &task.task), session)?;
         }
+        let packet = with_rules(tx, &config.project.id, &seat.name, &packet)?;
         tx.insert_op(&NewOp {
             project: config.project.id.clone(),
             seat: seat.id.clone(),
@@ -4846,6 +4848,23 @@ fn review_packet_for(
     })
 }
 
+/// The packet with the reviewer's rules when its seat must be told them
+/// (`gear_app::charter::packet_section`), recorded in the same write as the
+/// delivery.
+fn with_rules(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    seat: &str,
+    packet: &str,
+) -> GearResult<String> {
+    Ok(
+        match gear_app::charter::packet_section(tx, project, gear_model::SeatRole::Temp, seat)? {
+            Some(section) => format!("{packet}\n{section}"),
+            None => packet.to_string(),
+        },
+    )
+}
+
 /// Reviewers that are up but never got their packet — the state an engine
 /// restart could leave behind before the activation and the delivery were one
 /// transaction. Each one gets its packet here, once: the absence of any
@@ -4927,6 +4946,7 @@ fn recover_missing_packets(
         let packet = job_packet(store, config, &review_task, direction.is_some(), &worktree)?;
         let generation = seat.generation;
         store.write(|tx| {
+            let packet = with_rules(tx, project, &seat.name, &packet)?;
             tx.insert_op(&NewOp {
                 project: project.to_string(),
                 seat: seat.id.clone(),
@@ -9658,7 +9678,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             .get("developer_instructions")
             .and_then(toml::Value::as_str)
             .unwrap();
-        let path = dir.path().join("rules/review.md");
+        let path = dir.path().join("rules/p/review.md");
         assert!(text.contains(path.to_str().unwrap()), "{text}");
         assert!(
             value.len() < 400,
@@ -9773,7 +9793,7 @@ review = [
                 std::path::Path::new(&cfg().db_path)
                     .parent()
                     .unwrap()
-                    .join("rules/review.md")
+                    .join("rules/p/review.md")
                     .to_string_lossy()
                     .into_owned(),
                 "--model".to_string(),
@@ -10357,7 +10377,7 @@ review = [
                         &std::path::Path::new(&cfg().db_path)
                             .parent()
                             .unwrap()
-                            .join("rules/review.md")
+                            .join("rules/p/review.md")
                             .to_string_lossy(),
                         ""
                     )[0]

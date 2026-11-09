@@ -6740,26 +6740,7 @@ fn packet_rules(tx: &Tx<'_>, project: &str, lane: Option<&str>) -> GearResult<Op
     if takes_rules_at_start {
         return Ok(None);
     }
-    let config = project_config(tx, project)?;
-    let voyage = match current_voyage(tx, project)? {
-        id if id.is_empty() => None,
-        id => tx.get_voyage(project, &id)?,
-    };
-    let done = voyage
-        .as_ref()
-        .and_then(|v| v.done.as_deref())
-        .unwrap_or("-");
-    let bar = voyage
-        .as_ref()
-        .and_then(|v| v.bar.as_deref())
-        .unwrap_or("-");
-    Ok(crate::charter::text(
-        config.as_ref(),
-        gear_model::SeatRole::Lane,
-        lane,
-        done,
-        bar,
-    ))
+    crate::charter::current_text(tx, project, gear_model::SeatRole::Lane, lane)
 }
 
 /// The attempt whose round failed, if the task has one (T-118): the highest

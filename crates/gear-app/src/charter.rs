@@ -92,7 +92,9 @@ pub fn text(
 }
 
 /// The file name of a role's rules under the seat's `rules` folder (T-469):
-/// one per lane, and one for the reviewers. `None` for the captain.
+/// one per lane, and one for the reviewers, in the project's own folder
+/// (`rules/<project>/…`: projects sharing a store have lanes of one name).
+/// `None` for the captain.
 pub fn file_name(role: SeatRole, seat: &str) -> Option<String> {
     match role {
         SeatRole::Lane => Some(format!("lanes/{seat}.md")),
@@ -127,14 +129,39 @@ pub fn arguments(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let voyage = store.read(|tx| {
-        let id = crate::plan::current_voyage(tx, project)?;
-        if id.is_empty() {
-            Ok(None)
-        } else {
-            tx.get_voyage(project, &id)
-        }
-    })?;
+    let Some(text) = store.read(|tx| current_text(tx, project, role, seat))? else {
+        return Ok(Vec::new());
+    };
+    let path = write_rules(dir, &format!("{project}/{file}"), &text)?;
+    if resumed {
+        return Ok(Vec::new());
+    }
+    let args = gear_herdr::profile::render_rules(
+        &profile.instructions_args,
+        &path.to_string_lossy(),
+        &text,
+    );
+    // What this session now holds: a later change reaches it in a packet.
+    if !args.is_empty() {
+        store.write(|tx| tx.set_meta(&given_key(project, seat), &text))?;
+    }
+    Ok(args)
+}
+
+/// The rules text a seat should hold now: its role's charter from the stored
+/// config, the working rules and the current voyage's done and bar. A project
+/// without a stored config keeps the fixed charters; a config that does not
+/// parse is the engine's finding elsewhere, not a start's failure.
+pub fn current_text(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    role: SeatRole,
+    seat: &str,
+) -> GearResult<Option<String>> {
+    let voyage = match crate::plan::current_voyage(tx, project)? {
+        id if id.is_empty() => None,
+        id => tx.get_voyage(project, &id)?,
+    };
     let done = voyage
         .as_ref()
         .and_then(|v| v.done.as_deref())
@@ -143,25 +170,58 @@ pub fn arguments(
         .as_ref()
         .and_then(|v| v.bar.as_deref())
         .unwrap_or("-");
-    // A project without a stored config (a store written before one) keeps
-    // the fixed charters; a config that does not parse is the engine's
-    // finding elsewhere, not a start's failure.
-    let config = store.read(|tx| tx.get_project(project))?;
-    let config = config
+    let config = tx
+        .get_project(project)?
         .filter(|row| !row.config_toml.trim().is_empty())
         .and_then(|row| config::parse(&row.config_toml).ok());
-    let Some(text) = text(config.as_ref(), role, seat, done, bar) else {
-        return Ok(Vec::new());
+    Ok(text(config.as_ref(), role, seat, done, bar))
+}
+
+/// The key of the rules text a seat's running agent was started with.
+fn given_key(project: &str, seat: &str) -> String {
+    format!("engine.rules_given.{project}:{seat}")
+}
+
+/// The rules section a seat's next packet carries, recorded as given.
+///
+/// A CLI that takes the rules when it starts holds them for its whole run,
+/// a new conversation included; when the charter or the voyage changed
+/// since, the packet carries the new text once (Lawrence F-164: a reviewer
+/// kept a charter its captain had replaced hours before). A reviewer on a CLI
+/// that takes no rules at start gets them in every packet, as a lane does in
+/// its task packet. `None` when there is nothing to tell.
+pub fn packet_section(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    role: SeatRole,
+    seat: &str,
+) -> GearResult<Option<String>> {
+    let seat_id = format!("{project}:{seat}");
+    let Some(row) = tx.get_seat(&seat_id)? else {
+        return Ok(None);
     };
-    let path = write_rules(dir, &file, &text)?;
-    if resumed {
-        return Ok(Vec::new());
+    let Some(binding) = tx.get_binding(&seat_id, row.generation)? else {
+        return Ok(None);
+    };
+    let Some(text) = current_text(tx, project, role, seat)? else {
+        return Ok(None);
+    };
+    let takes_rules_at_start = gear_herdr::profile::builtin(&binding.kind)
+        .is_none_or(|profile| !profile.instructions_args.is_empty());
+    if !takes_rules_at_start {
+        return Ok(match role {
+            SeatRole::Temp => Some(format!("\n## Your rules\n\n{text}")),
+            _ => None,
+        });
     }
-    Ok(gear_herdr::profile::render_rules(
-        &profile.instructions_args,
-        &path.to_string_lossy(),
-        &text,
-    ))
+    let key = given_key(project, seat);
+    if tx.get_meta(&key)?.as_deref() == Some(text.as_str()) {
+        return Ok(None);
+    }
+    tx.set_meta(&key, &text)?;
+    Ok(Some(format!(
+        "\n## Your rules changed\n\nThey replace the rules you were started with:\n\n{text}"
+    )))
 }
 
 /// Write `text` as the rules file `file` under `dir`, atomically, and only when
@@ -286,8 +346,8 @@ gate = "make test"
         let heat = arguments(&mut store, "p", SeatRole::Lane, "heat", db, &pi(), false).unwrap();
         let pricing =
             arguments(&mut store, "p", SeatRole::Lane, "pricing", db, &pi(), false).unwrap();
-        let heat_path = dir.path().join("rules/lanes/heat.md");
-        let pricing_path = dir.path().join("rules/lanes/pricing.md");
+        let heat_path = dir.path().join("rules/p/lanes/heat.md");
+        let pricing_path = dir.path().join("rules/p/lanes/pricing.md");
         assert_eq!(
             heat,
             ["--append-system-prompt", heat_path.to_str().unwrap()]
@@ -317,7 +377,7 @@ gate = "make test"
             false,
         )
         .unwrap();
-        let review_path = dir.path().join("rules/review.md");
+        let review_path = dir.path().join("rules/p/review.md");
         assert_eq!(
             review,
             ["--append-system-prompt", review_path.to_str().unwrap()]
@@ -341,6 +401,105 @@ gate = "make test"
     }
 
     #[test]
+    fn a_changed_charter_reaches_a_running_seat_once() {
+        let (mut store, dir) = world(TWO_CHARTERS);
+        let db = dir.path().join("gear.db");
+        let db = db.to_str().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p2", "pi", 1)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p3", "pi", 1)?;
+                testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "grok-review",
+                    SeatRole::Temp,
+                    "w1:p4",
+                    "grok",
+                    1,
+                )
+            })
+            .unwrap();
+        let section = |store: &mut Store, role, seat: &str| {
+            store
+                .write(|tx| packet_section(tx, "p", role, seat))
+                .unwrap()
+        };
+        // Started with the current text: nothing to tell.
+        arguments(
+            &mut store,
+            "p",
+            SeatRole::Temp,
+            "review-1",
+            db,
+            &pi(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(section(&mut store, SeatRole::Temp, "review-1"), None);
+        // A seat started by an older engine has no record: told once.
+        let told = section(&mut store, SeatRole::Lane, "heat").expect("heat is told its rules");
+        assert!(
+            told.contains("You implement your packet without designing"),
+            "{told}"
+        );
+        assert_eq!(section(&mut store, SeatRole::Lane, "heat"), None);
+        // The captain replaces the reviewers' charter while review-1 runs.
+        store
+            .write(|tx| {
+                let mut row = tx.get_project("p")?.unwrap();
+                row.config_toml = TWO_CHARTERS.replace(
+                    "You judge one candidate against its contract and the bar.",
+                    "You judge one candidate; use the web lane's database.",
+                );
+                tx.update_project(&row)
+            })
+            .unwrap();
+        let told = section(&mut store, SeatRole::Temp, "review-1").expect("the change is told");
+        assert!(told.contains("## Your rules changed"), "{told}");
+        assert!(told.contains("use the web lane's database"), "{told}");
+        assert_eq!(
+            section(&mut store, SeatRole::Temp, "review-1"),
+            None,
+            "the next packet does not repeat it"
+        );
+        // A resumed start keeps the record of what the session holds.
+        arguments(&mut store, "p", SeatRole::Temp, "review-1", db, &pi(), true).unwrap();
+        assert_eq!(section(&mut store, SeatRole::Temp, "review-1"), None);
+        // A reviewer whose CLI takes no rules at start gets them every time.
+        for _ in 0..2 {
+            let told = section(&mut store, SeatRole::Temp, "grok-review").expect("grok told");
+            assert!(told.contains("## Your rules"), "{told}");
+        }
+    }
+
+    #[test]
+    fn two_projects_with_one_lane_name_have_two_rules_files() {
+        let (mut store, dir) = world(TWO_CHARTERS);
+        store
+            .write(|tx| {
+                let mut row = testing::seed_project(tx, "q", "s", 100)?;
+                row.config_toml = TWO_CHARTERS.replace("id = \"p\"", "id = \"q\"").replace(
+                    "You implement your packet without designing; the captain decides.",
+                    "You are q's heat lane.",
+                );
+                tx.update_project(&row)
+            })
+            .unwrap();
+        let db = dir.path().join("gear.db");
+        let db = db.to_str().unwrap();
+        arguments(&mut store, "p", SeatRole::Lane, "heat", db, &pi(), false).unwrap();
+        arguments(&mut store, "q", SeatRole::Lane, "heat", db, &pi(), false).unwrap();
+        let p = std::fs::read_to_string(dir.path().join("rules/p/lanes/heat.md")).unwrap();
+        let q = std::fs::read_to_string(dir.path().join("rules/q/lanes/heat.md")).unwrap();
+        assert!(
+            p.starts_with("You implement your packet without designing"),
+            "{p}"
+        );
+        assert!(q.starts_with("You are q's heat lane."), "{q}");
+    }
+
+    #[test]
     fn a_resumed_session_gets_no_charter_again() {
         let (mut store, dir) = world(TWO_CHARTERS);
         let db = dir.path().join("gear.db");
@@ -358,7 +517,7 @@ gate = "make test"
             "a resumed session is given no charter again"
         );
         // The rules file stays for the next new session.
-        assert!(dir.path().join("rules/lanes/heat.md").is_file());
+        assert!(dir.path().join("rules/p/lanes/heat.md").is_file());
         assert!(
             arguments(&mut store, "p", SeatRole::Temp, "review-1", db, &pi(), true)
                 .unwrap()
@@ -448,7 +607,7 @@ gate = "make test"
         .unwrap()
         .is_empty());
         // The rules file is still written: the next new session reads it.
-        assert!(dir.path().join("rules/lanes/heat.md").is_file());
+        assert!(dir.path().join("rules/p/lanes/heat.md").is_file());
     }
 
     #[test]
@@ -457,7 +616,7 @@ gate = "make test"
         let db = dir.path().join("gear.db");
         let db = db.to_str().unwrap();
         arguments(&mut store, "p", SeatRole::Lane, "heat", db, &pi(), false).unwrap();
-        let path = dir.path().join("rules/lanes/heat.md");
+        let path = dir.path().join("rules/p/lanes/heat.md");
         let earlier = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
         std::fs::File::open(&path)
             .unwrap()

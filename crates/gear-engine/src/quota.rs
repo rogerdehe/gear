@@ -3515,7 +3515,7 @@ quota_reset_h = {reset_h}
                     &std::path::Path::new(&cfg().db_path)
                         .parent()
                         .unwrap()
-                        .join("rules/lanes/heat.md")
+                        .join("rules/p/lanes/heat.md")
                         .to_string_lossy(),
                     ""
                 )[0]

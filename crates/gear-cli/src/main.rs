@@ -2011,7 +2011,7 @@ fn run_show(
         Some(herdr) => observe_identity(store, env, herdr)?,
         None => None,
     };
-    let (text, project) = store.read(|tx| {
+    let (text, project, own_lane) = store.read(|tx| {
         // A qualified id `<project>:T-<n>` names the project (T-486); a bare
         // id keeps the caller's own project.
         let (_project, task, env) = match target.split_once(':') {
@@ -2038,12 +2038,29 @@ fn run_show(
             ));
         }
         // The identity of the home page: a registered seat of the project.
-        let (ctx, _seat) = gear_app::identity::require_seat(tx, &env, fp.as_ref(), None, None)?;
+        let (ctx, seat) = gear_app::identity::require_seat(tx, &env, fp.as_ref(), None, None)?;
         let text = gear_app::plan::render_task_packet(tx, &ctx.project, &task)?;
-        Ok((text, ctx.project.clone()))
+        // Only the task's own lane is told its changed rules: a look by the
+        // captain or a reviewer must not use the notice up.
+        let own_lane = seat.role == gear_model::SeatRole::Lane
+            && tx
+                .get_task(&ctx.project, &task)?
+                .and_then(|row| row.lane)
+                .as_deref()
+                == Some(seat.name.as_str());
+        Ok((text, ctx.project.clone(), own_lane.then_some(seat.name)))
     })?;
-    // The project's own standard travels with its task packets (T-85).
     let mut text = text;
+    if let Some(lane) = own_lane {
+        let section = store.write(|tx| {
+            gear_app::charter::packet_section(tx, &project, gear_model::SeatRole::Lane, &lane)
+        })?;
+        if let Some(section) = section {
+            text.push('\n');
+            text.push_str(&section);
+        }
+    }
+    // The project's own standard travels with its task packets (T-85).
     if let Some(standard) = project_standard(store, &project) {
         text.push_str("\n## Project standard (`gear/standard.md`)\n\n");
         text.push_str(&standard);

@@ -1868,7 +1868,7 @@ mod tests {
                 }
             })
             .unwrap();
-        let path = dir.path().join("rules/lanes/pi-lane.md");
+        let path = dir.path().join("rules/p/lanes/pi-lane.md");
         assert!(
             !args
                 .windows(2)
@@ -1927,7 +1927,7 @@ mod tests {
                 }
             })
             .unwrap();
-        let path = dir.path().join("rules/lanes/pi-lane.md");
+        let path = dir.path().join("rules/p/lanes/pi-lane.md");
         assert!(
             args.windows(2)
                 .any(|w| w[0] == "--append-system-prompt" && w[1] == path.to_string_lossy()),
