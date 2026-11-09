@@ -1615,8 +1615,9 @@ fn own_integration(text: String) -> GearResult<String> {
 
 /// Create the project's integration branch on the remote when it is not
 /// there yet, from the release branch: a project of its own is released on
-/// its own. A branch the captain already pushed (from a commit the user
-/// chose) is left as it is.
+/// its own. An existing branch that is behind the release branch, with no
+/// work of its own, moves forward to it; one with work of its own (or one the
+/// captain pushed from a commit the user chose) is left as it is.
 fn ensure_integration_branch(parsed: &gear_app::config::ProjectConfig) {
     let repo = parsed.root_repo();
     let remote = parsed.conventions.remote.clone();
@@ -1630,15 +1631,36 @@ fn ensure_integration_branch(parsed: &gear_app::config::ProjectConfig) {
             .unwrap_or(false)
     };
     // A repository without that remote (a local fixture) has nothing to create.
-    if !run(&["remote", "get-url", &remote])
-        || run(&[
-            "ls-remote",
-            "--exit-code",
-            "--heads",
-            &remote,
-            &repo.integration,
-        ])
-    {
+    if !run(&["remote", "get-url", &remote]) {
+        return;
+    }
+    if run(&[
+        "ls-remote",
+        "--exit-code",
+        "--heads",
+        &remote,
+        &repo.integration,
+    ]) {
+        // An integration branch that holds nothing the release branch lacks
+        // starts from the release branch's head: a voyage departs from the
+        // latest release, not from the last landing (Lawrence M3.2: lawrence/dev
+        // stayed at M3.1's landing while dev moved on). One with work of its
+        // own is left as it is; a plain push moves it only forward.
+        let integration = format!("refs/remotes/{remote}/{}", repo.integration);
+        let release = format!("refs/remotes/{remote}/{}", repo.release);
+        let fetched = run(&["fetch", "-q", &remote, &repo.release, &repo.integration]);
+        let behind = fetched
+            && run(&["merge-base", "--is-ancestor", &integration, &release])
+            && !run(&["merge-base", "--is-ancestor", &release, &integration]);
+        if behind {
+            let target = format!("{release}:refs/heads/{}", repo.integration);
+            if run(&["push", "-q", &remote, &target]) {
+                eprintln!(
+                    "integration branch: {remote}/{} moved forward to {remote}/{}",
+                    repo.integration, repo.release
+                );
+            }
+        }
         return;
     }
     let source = format!("refs/remotes/{remote}/{}", repo.release);
@@ -10032,6 +10054,68 @@ path="api"
             Some(("default".to_string(), "wAS:p1".to_string()))
         );
         assert_eq!(opencode_seat_of(home.path(), "ses_other"), None);
+    }
+
+    /// An integration branch behind the release branch, with nothing of its
+    /// own, moves forward to it; one with work of its own stays.
+    #[test]
+    fn the_integration_branch_moves_forward_to_the_release_branch_only_without_work_of_its_own() {
+        let root = tempfile::tempdir().unwrap();
+        let sh = |dir: &std::path::Path, command: &str| {
+            let out = std::process::Command::new("sh")
+                .args(["-c", command])
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{command}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(
+            root.path(),
+            &format!("git init -q --bare {}", origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git clone -q {} {}", origin.display(), work.display()),
+        );
+        sh(
+            &work,
+            "git -c user.name=t -c user.email=t@t commit -q --allow-empty -m one && \
+             git push -q origin HEAD:refs/heads/main HEAD:refs/heads/p/dev && \
+             git -c user.name=t -c user.email=t@t commit -q --allow-empty -m two && \
+             git push -q origin HEAD:refs/heads/main",
+        );
+        let text = format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"{}\"\n\n[quota]\nlanes = 1\ntemps = 0\n\n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\n[[lanes]]\nname = \"hull\"\nduty = \"everything\"\nowns = [\"src/\"]\nkind = \"pi\"\nprofile = \"pi\"\n\n[conventions]\nintegration = \"p/dev\"\ngate = \"true\"\n",
+            work.display()
+        );
+        let parsed = gear_app::config::parse(&text).unwrap();
+        let tip = |branch: &str| {
+            sh(
+                &work,
+                &format!("git ls-remote origin refs/heads/{branch} | cut -f1"),
+            )
+        };
+        ensure_integration_branch(&parsed);
+        assert_eq!(
+            tip("p/dev"),
+            tip("main"),
+            "behind with nothing of its own: moved forward"
+        );
+
+        sh(
+            &work,
+            "git -c user.name=t -c user.email=t@t commit -q --allow-empty -m own && \
+             git push -q origin HEAD:refs/heads/p/dev && \
+             git checkout -q -b rel origin/main && \
+             git -c user.name=t -c user.email=t@t commit -q --allow-empty -m three && \
+             git push -q origin HEAD:refs/heads/main",
+        );
+        let own = tip("p/dev");
+        ensure_integration_branch(&parsed);
+        assert_eq!(tip("p/dev"), own, "work of its own: left as it is");
     }
 
     #[test]

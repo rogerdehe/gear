@@ -314,7 +314,17 @@ pub fn reclaim(
             }
             match remove_worktree(&repo.path, &worktree) {
                 Ok(()) => {}
-                Err(reason) => left.push(format!("worktree {} ({reason})", worktree.path)),
+                Err(reason) => {
+                    // A worktree left for its reason (uncommitted changes,
+                    // unpushed commits) keeps its workspace too: closing that
+                    // workspace removes the worktree with Herdr, changes and
+                    // all (Lawrence M-2692: the next voyage's captain worktree
+                    // was removed with its config and plan).
+                    if let Some(name) = Path::new(&worktree.path).file_name() {
+                        kept_labels.insert(name.to_string_lossy().to_string());
+                    }
+                    left.push(format!("worktree {} ({reason})", worktree.path))
+                }
             }
         }
         // T-655: a cancelled task's branch is deleted after its tip is
@@ -2206,6 +2216,45 @@ gate = "true"
         );
         std::fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{json}'\n")).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A worktree the reclaim leaves (uncommitted changes) keeps its
+    /// workspace: closing that workspace would remove the worktree with Herdr
+    /// (Lawrence M-2692).
+    #[test]
+    fn a_dirty_worktrees_workspace_is_not_removed() {
+        let mut landed = Landed::new("dirty-workspace");
+        // The next voyage's captain worktree, as Herdr names it, holding an
+        // uncommitted config.
+        let home = landed.root.path().join("p-captain-m2");
+        sh(
+            &landed.work,
+            &format!(
+                "git worktree add -q -b home-m2 {} origin/dev",
+                home.display()
+            ),
+        );
+        std::fs::write(home.join("gear.toml"), "x").unwrap();
+        let bin = landed.root.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        stub_workspace_list(&bin, "w1KM", "p-captain-m2");
+        let old = std::env::var_os("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", bin.display(), old.to_string_lossy()),
+        );
+        landed.reclaim(NOW + 600);
+        std::env::set_var("PATH", old);
+
+        assert!(home.exists(), "the dirty worktree is kept");
+        assert!(
+            !landed.herdr.calls.iter().any(|call| matches!(
+                call,
+                Call::WorktreeRemove { .. } | Call::WorkspaceClose { .. }
+            )),
+            "its workspace is left alone: {:?}",
+            landed.herdr.calls
+        );
     }
 
     /// T-639: a workspace whose worktree is already gone is closed with
