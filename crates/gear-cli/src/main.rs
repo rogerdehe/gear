@@ -9965,6 +9965,7 @@ path="api"
             codex.unattended_args,
             vec![
                 "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "--dangerously-bypass-hook-trust".to_string(),
                 "-c".to_string(),
                 "check_for_update_on_startup=false".to_string(),
                 // T-76: the folder the agent runs in is trusted.
@@ -9979,11 +9980,7 @@ path="api"
         // T-457: Codex 0.165's startup screens are answered, not read as an
         // idle agent.
         let dialogs = &codex.dialogs;
-        assert_eq!(
-            dialogs.len(),
-            3,
-            "the /new, the hook review and the resume dialog"
-        );
+        assert_eq!(dialogs.len(), 2, "the /new and the resume dialog");
         assert!(
             dialogs[0]
                 .markers
@@ -9993,21 +9990,10 @@ path="api"
         assert!(
             dialogs[1]
                 .markers
-                .contains(&"Hooks need review".to_string()),
-            "the hook review's marker"
-        );
-        assert_eq!(
-            dialogs[1].keys,
-            vec!["down".to_string(), "enter".to_string()],
-            "the hook review takes Trust all and continue"
-        );
-        assert!(
-            dialogs[2]
-                .markers
                 .contains(&"Choose which working directory to use".to_string()),
             "the resume dialog's marker"
         );
-        for dialog in [&dialogs[0], &dialogs[2]] {
+        for dialog in dialogs {
             assert_eq!(
                 dialog.keys,
                 vec!["enter".to_string()],
