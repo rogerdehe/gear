@@ -428,7 +428,7 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
                 let Some(lane) = task.lane.clone() else {
                     continue;
                 };
-                if !open(&task.state) {
+                if !open(&task.state) || of_finished_voyage(tx, project, task)? {
                     continue;
                 }
                 let candidate = candidates
@@ -454,7 +454,7 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
             // canonicalize, as written where either does not.
             for (other, other_config) in &others {
                 for task in tx.tasks_of_project(other)? {
-                    if !open(&task.state) {
+                    if !open(&task.state) || of_finished_voyage(tx, other, &task)? {
                         continue;
                     }
                     let Some(lane) = task.lane.clone() else {
@@ -528,6 +528,21 @@ fn open(state: &TaskState) -> bool {
         state,
         TaskState::Draft | TaskState::Cancelled | TaskState::Failed
     )
+}
+
+/// Is the task a done task of a finished voyage (none of its tasks open)? Its
+/// work is merged and the voyage is over: it is no open change. After a
+/// landing the integration branch may even be gone, and every merged task of
+/// the voyage then read as unmerged and paired with every other (Lawrence
+/// M-2943..M-2948, after M3.2 landed).
+fn of_finished_voyage(tx: &Tx<'_>, project: &str, task: &TaskRow) -> GearResult<bool> {
+    if task.state != TaskState::Done {
+        return Ok(false);
+    }
+    match task.milestone.as_deref() {
+        Some(milestone) => crate::doorbell::voyage_finished(tx, project, milestone),
+        None => Ok(false),
+    }
 }
 
 /// The candidates of a task, oldest first: the last one is the latest
