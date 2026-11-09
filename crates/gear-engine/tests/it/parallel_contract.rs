@@ -1346,3 +1346,28 @@ fn another_projects_integration_overlap_is_its_own_information_line() {
         integration_line(&mut store, "q", "T-1").expect("its own project's information line");
     assert!(line.contains(SRC), "{line}");
 }
+
+/// The done tasks of a finished voyage are no open change: after a landing,
+/// the integration branch they merged into may be gone, and they must not be
+/// paired with each other (Lawrence M-2943..M-2948, after M3.2 landed).
+#[test]
+fn the_done_tasks_of_a_finished_voyage_are_never_paired() {
+    let repo = Repo::new();
+    repo.branch("heat/t1", SHARED);
+    repo.branch("steady/t2", SHARED);
+    let mut store = repo.store();
+    store
+        .write(|tx| {
+            for id in ["T-1", "T-2"] {
+                let mut task = tx.get_task("p", id)?.unwrap();
+                task.state = TaskState::Done;
+                task.milestone = Some("M1".into());
+                tx.update_task(&task)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let checked = scan(&mut store, 0);
+    assert!(checked.problems.is_empty(), "{:?}", checked.problems);
+    assert!(checked.opened.is_empty(), "{:?}", pair_items(&mut store));
+}
