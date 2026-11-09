@@ -3499,6 +3499,7 @@ quota_reset_h = {reset_h}
             starts[0].2,
             vec![
                 "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "--dangerously-bypass-hook-trust".to_string(),
                 "-c".to_string(),
                 "check_for_update_on_startup=false".to_string(),
                 // T-76: the folder the agent runs in (the lane's repo here:
