@@ -28,6 +28,7 @@ fn world() -> (Store, String) {
     let id = s
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_voyage_under_way(tx, "p", T0)?;
             testing::seed_active_seat(
                 tx,
                 "p",

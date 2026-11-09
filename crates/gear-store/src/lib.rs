@@ -4433,6 +4433,35 @@ pub mod testing {
     }
 
     /// Insert a project with quota lanes=4 temps=2, captain excluded, config_toml "", version 1.
+    /// A departed voyage `M1` with one draft task `T-900` that no lane holds:
+    /// the project is under way.
+    pub fn seed_voyage_under_way(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
+        tx.set_voyage_departure(project, "M1", now, 1, now)?;
+        tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: project.to_string(),
+            id: "T-900".into(),
+            rank: 900,
+            state: gear_model::TaskState::Draft,
+            priority: "must".into(),
+            lane: None,
+            milestone: Some("M1".into()),
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: None,
+            issue: None,
+            updated: now,
+        })
+    }
+
     pub fn seed_project(
         tx: &Tx<'_>,
         project: &str,

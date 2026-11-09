@@ -33,6 +33,7 @@ fn world_in(mut store: Store) -> World {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_voyage_under_way(tx, "p", T0)?;
             testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP, "codex", T0)?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE, "codex", T0)?;
             Ok(())
