@@ -597,6 +597,11 @@ fn close(tx: &Tx<'_>, project: &str, key: &str, reason: &str, now: Ts) -> GearRe
 }
 
 fn scan(input: &Input) -> Result<Findings, String> {
+    // Between voyages nothing is left to pair, and the integration branch may
+    // be gone: the landing deletes it and the next voyage cuts it again.
+    if input.tasks.is_empty() {
+        return Ok(Findings::default());
+    }
     git(&input.repo, &["rev-parse", "--git-dir"])?;
     // T-527: one pass reads every branch tip and resolves every candidate, so
     // the scan starts two git processes for them however many refs it asks for.
