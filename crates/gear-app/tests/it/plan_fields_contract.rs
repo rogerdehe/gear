@@ -1009,3 +1009,39 @@ fn a_blocked_rebind_does_not_hold_the_others() {
     );
     assert_eq!(s.read(|tx| tx.get_meta(&key)).unwrap().unwrap(), reason);
 }
+
+#[test]
+fn a_parked_attempt_holds_back_only_a_rebind_that_moves_the_repo() {
+    let mut s = world_with_two_pending_attempts();
+    // heat's T-1 declared a wait on T-2: its attempt is parked.
+    s.write(|tx| tx.set_task_wait("p", "T-1", "T-2", "merged"))
+        .unwrap();
+    let moved = run_at(
+        &mut s,
+        "# Staff\n- rebind heat repo=engine owns=[src/core/]\n",
+        "move",
+    )
+    .unwrap();
+    assert!(
+        moved.warnings.iter().any(|w| w.contains("waits for T-1")),
+        "{:?}",
+        moved.warnings
+    );
+    run_at(&mut s, "# Staff\n- rebind heat cancel\n", "cancel").unwrap();
+    // The same repo with other paths: nothing waits for the parked attempt.
+    run_at(
+        &mut s,
+        "# Staff\n- rebind heat repo=api owns=[src/core/]\n",
+        "owns",
+    )
+    .unwrap();
+    let after = gear_app::config::latest(&mut s, "p").unwrap();
+    assert_eq!(
+        after.lanes.iter().find(|l| l.name == "heat").unwrap().owns,
+        ["src/core/"]
+    );
+    assert!(s
+        .read(|tx| tx.get_meta(&gear_app::plan::rebind_pending_key("p:heat")))
+        .unwrap()
+        .is_none_or(|v| v.is_empty()));
+}
