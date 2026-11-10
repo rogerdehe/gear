@@ -3091,17 +3091,44 @@ fn request_rebind(
         ));
     }
     tx.set_meta(&key, &data)?;
-    let mut waiting: Vec<_> = tx
-        .open_attempts_of_seat(&seat_id)?
-        .into_iter()
-        .map(|a| a.task)
-        .collect();
+    let mut waiting = rebind_holders(tx, project, lane, &seat_id, &request)?;
     waiting.sort();
     waiting.dedup();
     if waiting.is_empty() {
         apply_rebind(tx, project, lane, &seat_id, &request)?;
     }
     Ok(waiting)
+}
+
+/// The tasks whose open attempts a rebind waits for. An attempt parked on a
+/// wait (its task has `wait_on`) does not hold a rebind that keeps the lane's
+/// repo: the attempt only goes on once the lane has done other work, and the
+/// pending rebind would stop that work from being assigned (Lawrence M4: web's
+/// T-298 waited on T-297 while an owns change waited on T-298).
+fn rebind_holders(
+    tx: &Tx<'_>,
+    project: &str,
+    lane: &str,
+    seat: &str,
+    request: &RebindRequest,
+) -> GearResult<Vec<String>> {
+    let row = tx
+        .get_project(project)?
+        .ok_or_else(|| bad(0, "project not found"))?;
+    let same_repo = crate::config::parse(&row.config_toml)?
+        .repo_of_lane(lane)
+        .name
+        == request.repo;
+    let mut holders = Vec::new();
+    for attempt in tx.open_attempts_of_seat(seat)? {
+        let parked = tx
+            .get_task(project, &attempt.task)?
+            .is_some_and(|task| task.wait_on.is_some());
+        if !(same_repo && parked) {
+            holders.push(attempt.task);
+        }
+    }
+    Ok(holders)
 }
 
 fn apply_rebind(
@@ -3168,11 +3195,11 @@ pub fn reconcile_rebinds(store: &mut Store, project: &str) -> GearResult<Vec<Str
             else {
                 return Ok(false);
             };
-            if !tx.open_attempts_of_seat(&seat.id)?.is_empty() {
-                return Ok(false);
-            }
             let request: RebindRequest = serde_json::from_str(&raw)
                 .map_err(|e| bad(0, format!("invalid pending rebind: {e}")))?;
+            if !rebind_holders(tx, project, &seat.name, &seat.id, &request)?.is_empty() {
+                return Ok(false);
+            }
             apply_rebind(tx, project, &seat.name, &seat.id, &request)?;
             Ok(true)
         });
