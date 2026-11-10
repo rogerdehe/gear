@@ -6642,6 +6642,18 @@ fn voyage_open(open: &std::collections::HashSet<String>, task: &gear_store::Task
         .is_none_or(|milestone| open.contains(milestone))
 }
 
+/// Is the candidate on the repo's integration or release branch, by their
+/// remote-tracking refs (T-636)? A missing ref answers no.
+fn on_a_stable_branch(config: &ProjectConfig, repo: &Repo, candidate: &str) -> bool {
+    let dir = Path::new(&repo.path);
+    [&repo.integration, &repo.release]
+        .into_iter()
+        .any(|branch| {
+            let reference = format!("refs/remotes/{}/{branch}", config.conventions.remote);
+            is_ancestor(dir, candidate, &reference)
+        })
+}
+
 /// Does the task's repository still hold the candidate (T-408)?
 ///
 /// `git cat-file -e <sha>^{commit}` answers: `Some(false)` — the repository no
@@ -7422,6 +7434,25 @@ fn tell_captain_lost(
         // about it is closed with that word. T-458: this comes before the old
         // filters, so an item stays closable while a merge is in flight or a
         // merge-failed item is open.
+        // T-636: work of a finished voyage that is on the integration or the
+        // release branch landed another way (a hand merge, a carrier): it is
+        // marked merged, and its merge-failed item then closes. The board and
+        // the landing read an unmerged Done task as an open voyage, while this
+        // scan skips a finished one: Lawrence M1 showed sailing for days with
+        // three such tasks, each with an open merge-failed item.
+        if !merged && !voyage && on_a_stable_branch(config, &repo, &candidate) {
+            store.write(|tx| {
+                tx.set_attempt_time(project, &task, attempt, AttemptStep::Merged, now)?;
+                tx.set_meta(
+                    &merge_lost_landed_key(project, &task, attempt),
+                    &now.to_string(),
+                )
+            })?;
+            if open_item {
+                resolve_lost_with(store, project, &task, LOST_LANDED, now)?;
+            }
+            continue;
+        }
         let checked = open_item || (!told && !settled);
         if checked {
             let skip = !voyage || matches!(candidate_held(&repo, &candidate), Some(false));
@@ -9352,6 +9383,42 @@ mod tests {
             items.is_empty(),
             "a finished voyage is not checked: {items:?}"
         );
+    }
+
+    /// T-636: work of a finished voyage that reached the release branch another
+    /// way is marked merged, so the board and the landing stop reading the
+    /// voyage as open (Lawrence M1 showed sailing with three such tasks).
+    #[test]
+    fn finished_voyage_work_on_the_release_branch_is_marked_merged() {
+        let scratch = Scratch::new("merge-lost-release");
+        let candidate = scratch.head_of("heat/t5");
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)?;
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.milestone = Some("M1".into());
+                tx.update_task(&task)
+            })
+            .unwrap();
+        lost_task(&mut store, &candidate, OpState::Failed, 10);
+        // A hand merge put the work on the release branch, not through GEAR.
+        sh(
+            &scratch.work,
+            "git switch -qc main dev && git -c user.name=a -c user.email=a@b merge -q --no-ff heat/t5 -m hand \
+             && git push -q origin main && git fetch -q origin",
+        );
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20 + LAND_WITHIN_S).unwrap();
+        let times = store.read(|tx| tx.attempt_times("p", "T-5", 1)).unwrap();
+        assert!(times.merged.is_some(), "the attempt reads as landed");
+        assert!(store
+            .read(|tx| tx.unmerged_done_tasks("p"))
+            .unwrap()
+            .is_empty());
     }
 
     /// A voyage whose last task has just settled is still open: that task holds
