@@ -531,9 +531,15 @@ pub fn verdict_hint(
             project,
             task_row.milestone.as_deref().unwrap_or("<M>"),
         ),
+        // Past the rework cap only a ruling settles a fail (T-635).
         line: format!(
-            "{task} attempt={attempt} contract={} candidate={candidate} fail rework=\"…\"",
-            attempt_row.adopted_version
+            "{task} attempt={attempt} contract={} candidate={candidate} fail {}=\"…\"",
+            attempt_row.adopted_version,
+            if rework_rounds_over_cap(tx, project, task, attempt)? {
+                "ruling"
+            } else {
+                "rework"
+            }
         ),
         // A failed merge is retried with `- remerge T-<n>` (B5): the work
         // passed, the merge did not — a rework is the other way round.
@@ -716,6 +722,24 @@ pub struct Verdict {
 /// A mismatch or missing field → `BadFormat`; the same verdict again (same
 /// task/attempt/outcome/candidate) after it settled → Ok, nothing written;
 /// a conflicting one → `BadTransition`.
+/// The header of a captain's ruling (T-635): a fail verdict written as
+/// `ruling="…"` becomes the rework note under this line.
+pub const RULING: &str = "Captain's ruling. It replaces every earlier rework note and the review's open findings: this round is judged against it alone, and anything else is logged, not failed.\n\n";
+
+/// Past the rework cap a plain fail is refused (T-635): the lane and the
+/// reviewer do not own the project, the captain does.
+fn ruling_required(tx: &Tx<'_>, v: &Verdict) -> GearResult<String> {
+    let cap = conventions_of(tx, &v.project).review_max_rounds;
+    Ok(format!(
+        "{task} has been sent back {n} times, over the cap of {cap}. The lane and the reviewer do not own the project; you do, so another plain rework is refused. \
+         Find out why the rounds keep failing (your contract, the lane or the reviewer; ask the lane if you cannot tell) and settle it yourself: \
+         pass it with why=\"…\" and put what is left in the backlog; rewrite the goal or accept, or split the task; cancel it; \
+         or send one last round as `fail ruling=\"<why the rounds failed> <the exact fix>\"`. A ruling replaces every earlier rework note and the review's open findings: that round is judged against it alone.",
+        task = v.task,
+        n = v.attempt,
+    ))
+}
+
 pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
     let mut attempt = tx
         .get_attempt(&v.project, &v.task, v.attempt)?
@@ -782,6 +806,21 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
             } else {
                 "a fail verdict needs `rework` and no `evidence`".to_string()
             },
+        ));
+    }
+    // A review round past the cap (T-635); a fail that reopens a passed
+    // attempt whose merge failed is no review round.
+    if !v.pass
+        && attempt.state == AttemptState::Submitted
+        && !v
+            .rework
+            .as_deref()
+            .is_some_and(|text| text.starts_with(RULING))
+        && rework_rounds_over_cap(tx, &v.project, &v.task, v.attempt)?
+    {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            ruling_required(tx, v)?,
         ));
     }
 

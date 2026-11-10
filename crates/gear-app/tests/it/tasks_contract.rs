@@ -351,3 +351,70 @@ fn a_hand_in_of_the_failed_candidate_by_its_full_sha_is_refused() {
     );
     assert_eq!(attempt_state(&mut s, "T-1", 2), AttemptState::Started);
 }
+
+/// T-635: past the rework cap (3 by default) a plain fail is refused; only
+/// the captain's ruling sends the task back, and it heads the rework note.
+#[test]
+fn past_the_rework_cap_only_a_ruling_sends_a_task_back() {
+    let mut s = world(&[task("T-1", TaskState::Ready, &[])]);
+    let fail = |n: i64, rework: &str| Verdict {
+        attempt: n,
+        candidate: format!("c{n}"),
+        rework: Some(rework.to_string()),
+        ..verdict(false)
+    };
+    for n in 1..=4 {
+        s.write(|tx| {
+            start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + n * 10)?;
+            on_delivery_confirmed(tx, "p", "T-1", n, T0 + n * 10 + 1)?;
+            submit_result(
+                tx,
+                "p",
+                "T-1",
+                n,
+                1,
+                &format!("c{n}"),
+                "report",
+                T0 + n * 10 + 2,
+            )
+        })
+        .unwrap();
+        if n <= 3 {
+            s.write(|tx| settle(tx, &fail(n, "edge cases"), T0 + n * 10 + 3))
+                .unwrap();
+        }
+    }
+    let refused = s
+        .write(|tx| settle(tx, &fail(4, "edge cases"), T0 + 50))
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::BadFormat);
+    assert!(
+        refused
+            .detail
+            .contains("sent back 4 times, over the cap of 3")
+            && refused.detail.contains("ruling="),
+        "{}",
+        refused.detail
+    );
+    assert_eq!(attempt_state(&mut s, "T-1", 4), AttemptState::Submitted);
+    let ruling = format!(
+        "{}the reviewer asked twice for X; do only X",
+        gear_app::tasks::RULING
+    );
+    s.write(|tx| settle(tx, &fail(4, &ruling), T0 + 51))
+        .unwrap();
+    assert_eq!(
+        (task_state(&mut s, "T-1"), attempt_state(&mut s, "T-1", 4)),
+        (TaskState::Ready, AttemptState::Rejected)
+    );
+    let note = s
+        .read(|tx| tx.get_task("p", "T-1"))
+        .unwrap()
+        .unwrap()
+        .rework_note
+        .unwrap();
+    assert!(
+        note.starts_with("Captain's ruling.") && note.ends_with("do only X"),
+        "{note}"
+    );
+}
