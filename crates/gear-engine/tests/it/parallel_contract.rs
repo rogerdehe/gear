@@ -1371,3 +1371,27 @@ fn the_done_tasks_of_a_finished_voyage_are_never_paired() {
     assert!(checked.problems.is_empty(), "{:?}", checked.problems);
     assert!(checked.opened.is_empty(), "{:?}", pair_items(&mut store));
 }
+
+#[test]
+fn a_project_between_voyages_is_not_failed_for_its_missing_integration_branch() {
+    let repo = Repo::new();
+    repo.branch("heat/t1", SHARED);
+    repo.branch("steady/t2", SHARED);
+    // The landing deleted the integration branch; the next voyage cuts it again.
+    git(&repo.path, &["branch", "-qD", "dev"]);
+    let mut store = repo.store();
+    store
+        .write(|tx| {
+            for id in ["T-1", "T-2"] {
+                let mut task = tx.get_task("p", id)?.unwrap();
+                task.state = TaskState::Done;
+                task.milestone = Some("M1".into());
+                tx.update_task(&task)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let checked = scan(&mut store, 0);
+    assert!(checked.problems.is_empty(), "{:?}", checked.problems);
+    assert!(checked.opened.is_empty(), "{:?}", pair_items(&mut store));
+}
