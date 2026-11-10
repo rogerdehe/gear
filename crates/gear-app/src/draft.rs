@@ -1232,6 +1232,20 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
                 }
                 why = Some(value.trim().to_string());
             }
+            // The captain's ruling (T-635): a fail whose text is the last word
+            // on the task. It goes on as the rework note, under its header.
+            "ruling" => {
+                if value.trim().is_empty() {
+                    return Err(bad(line, "`ruling=\"<text>\"` takes a non-empty text"));
+                }
+                if pass {
+                    return Err(bad(
+                        line,
+                        "`ruling=` belongs to a fail: a pass carries `why=`",
+                    ));
+                }
+                rework = Some(format!("{}{}", crate::tasks::RULING, value.trim()));
+            }
             other => {
                 return Err(bad(line, format!("unexpected verdict field {other:?}")));
             }
@@ -1265,7 +1279,10 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
         return Err(bad(line, "a `pass` verdict must not carry `rework=`"));
     }
     if !pass && rework.is_none() {
-        return Err(bad(line, "a `fail` verdict needs `rework=\"<text>\"`"));
+        return Err(bad(
+            line,
+            "a `fail` verdict needs `rework=\"<text>\"` or `ruling=\"<text>\"`",
+        ));
     }
     if !pass && evidence.is_some() {
         return Err(bad(line, "a `fail` verdict must not carry `evidence=`"));

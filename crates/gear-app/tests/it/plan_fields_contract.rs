@@ -1045,3 +1045,34 @@ fn a_parked_attempt_holds_back_only_a_rebind_that_moves_the_repo() {
         .unwrap()
         .is_none_or(|v| v.is_empty()));
 }
+
+/// T-635: `ruling="…"` is a fail whose text heads the rework note; a pass
+/// cannot carry one.
+#[test]
+fn a_ruling_is_a_fail_with_the_captains_last_word() {
+    let mut s = world_with_a_failed_review();
+    run_at(
+        &mut s,
+        "# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc1234 fail ruling=\"keep the old parser; fix only the empty line\"\n",
+        "ruling",
+    )
+    .unwrap();
+    let note = task(&mut s, "T-1").rework_note.unwrap();
+    assert_eq!(
+        note,
+        format!(
+            "{}keep the old parser; fix only the empty line",
+            gear_app::tasks::RULING
+        )
+    );
+    let base = 1;
+    let error = parse(&format!(
+        "<!-- gear-plan project=p base={base} -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc1234 pass evidence=x.md ruling=\"y\"\n"
+    ))
+    .unwrap_err();
+    assert!(
+        error.detail.contains("`ruling=` belongs to a fail"),
+        "{}",
+        error.detail
+    );
+}
