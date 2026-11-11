@@ -392,7 +392,10 @@ pub fn captain_sailing(
             let left = tx
                 .tasks_live_of_project(project)?
                 .into_iter()
-                .filter(|task| task.milestone.as_deref() == Some(milestone.as_str()))
+                .filter(|task| {
+                    task.milestone.as_deref() == Some(milestone.as_str())
+                        && !task.state.is_terminal()
+                })
                 .count();
             // Every task done: unfinished while its landing order waits for
             // an answer. A voyage with neither (an old one, landed before the
@@ -1632,6 +1635,15 @@ mod tests {
     #[test]
     fn a_voyage_with_tasks_left_repeats_after_captain_again() {
         let (mut s, _) = sailing_world(TaskState::Ready, false);
+        // A done task of the voyage is not a task left (Prometheus M5: 10
+        // counted, 2 left).
+        s.write(|tx| {
+            let mut done = tx.get_task("p", "T-1")?.unwrap();
+            done.id = "T-2".into();
+            done.state = TaskState::Done;
+            tx.insert_task(&done)
+        })
+        .unwrap();
         let all = vec![idle_obs(&mut s, "p:captain"), idle_obs(&mut s, "p:heat")];
         captain_sailing(&mut s, "p", &all, T).unwrap();
         captain_sailing(&mut s, "p", &all, T + 5 * 60).unwrap();
