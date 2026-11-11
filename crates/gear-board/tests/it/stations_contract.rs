@@ -530,3 +530,44 @@ fn the_board_keeps_a_voyage_with_a_superseded_land_order_sailing() {
         .expect("the voyage is listed");
     assert!(entry.sailing, "{entry:?}");
 }
+
+/// M7.2: a voyage whose land order was last answered `keep course` is landed
+/// once a later voyage of the project has departed (GEAR M4.2-M6 sailed on
+/// the board for days after M7.1 landed).
+#[test]
+fn a_later_departure_lands_a_finished_voyage_its_land_order_left_open() {
+    let mut store = landed_world();
+    let land = land_order(&mut store, None);
+    let keep = format!("station {land}: keep course");
+    store
+        .write(|tx| {
+            tx.update_message_state(
+                "p",
+                &land,
+                gear_model::MsgState::Resolved,
+                Some(&keep),
+                None,
+                None,
+                NOW + 1,
+            )
+        })
+        .unwrap();
+    assert!(!store.read(|tx| voyage_landed(tx, "p", "M5")).unwrap());
+    store
+        .write(|tx| {
+            tx.upsert_voyage(&VoyageRow {
+                project: "p".into(),
+                milestone: "M6".into(),
+                title: "the next one".into(),
+                done: None,
+                bar: None,
+                eta: None,
+                departure: Some(NOW),
+                departure_tasks: None,
+                departure_estimate_min: None,
+                updated: NOW,
+            })
+        })
+        .unwrap();
+    assert!(store.read(|tx| voyage_landed(tx, "p", "M5")).unwrap());
+}

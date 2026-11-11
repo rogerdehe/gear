@@ -184,6 +184,9 @@ pub struct Options {
     /// Draw in colour. `run` turns it off when `NO_COLOR` is set; the JSON
     /// and the text printed once (no terminal) never carry colour.
     pub color: bool,
+    /// The board's own binary: when it is replaced on disk, the board stops
+    /// and sets [`REPLACED`]. `None` never stops.
+    pub binary: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -196,6 +199,7 @@ impl Default for Options {
             view: View::Lanes,
             refresh: REFRESH,
             color: true,
+            binary: None,
         }
     }
 }
@@ -2429,6 +2433,26 @@ impl RenderKey {
 /// moved (T-471): the board generation, the tab, the selection, the header
 /// details, the size or the panel. A refresh that changes none of them reuses
 /// the text it rendered last and costs no frame build.
+/// Set when the board stopped because its binary was replaced: the caller
+/// execs the binary on disk.
+pub static REPLACED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn modified(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Whether `path` changed since `at_start` and has sat unchanged for a few
+/// seconds, so a build that writes it more than once is not run half-written.
+fn binary_replaced(path: &std::path::Path, at_start: Option<std::time::SystemTime>) -> bool {
+    let Some(now) = modified(path) else {
+        return false;
+    };
+    Some(now) != at_start
+        && std::time::SystemTime::now()
+            .duration_since(now)
+            .is_ok_and(|age| age >= Duration::from_secs(5))
+}
+
 pub fn run_with(
     store: &mut Store,
     opts: &Options,
@@ -2477,8 +2501,21 @@ pub fn run_with(
     // said is not written at all: the board redraws in place, and rewriting
     // the same text only makes the page blink.
     let mut written: Option<String> = None;
+    let binary = opts
+        .binary
+        .as_ref()
+        .map(|path| (path.clone(), modified(path)));
     loop {
         let at = std::time::Instant::now();
+        // The binary on disk was replaced (M7.2): the board stops, and its
+        // caller starts the new one in its place (a board pane opened days
+        // ago kept drawing an old build's rules).
+        if let Some((path, at_start)) = &binary {
+            if binary_replaced(path, *at_start) {
+                REPLACED.store(true, std::sync::atomic::Ordering::SeqCst);
+                return Ok(());
+            }
+        }
         let mut agents_changed = false;
         if let Some(herdr) = herdr.as_mut() {
             if agents_at.is_none_or(|asked| at.duration_since(asked) >= hook::agents_every()) {
@@ -2954,6 +2991,28 @@ fn write_error(e: std::io::Error) -> GearError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M7.2: the board stops for a binary replaced on disk, once the new file
+    /// has settled, and never for the binary it started from.
+    #[test]
+    fn a_replaced_binary_stops_the_board_once_it_settled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gear");
+        std::fs::write(&path, "old").unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(60);
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(old).unwrap();
+        let at_start = modified(&path);
+        assert!(!binary_replaced(&path, at_start), "the same binary");
+        file.set_modified(std::time::SystemTime::now()).unwrap();
+        assert!(
+            !binary_replaced(&path, at_start),
+            "just written: not settled"
+        );
+        file.set_modified(std::time::SystemTime::now() - Duration::from_secs(10))
+            .unwrap();
+        assert!(binary_replaced(&path, at_start), "replaced and settled");
+    }
 
     #[test]
     fn the_words_of_the_states_are_the_ones_of_the_plan() {

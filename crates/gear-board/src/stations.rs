@@ -223,6 +223,24 @@ pub fn voyage_landed(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<
     if unfinished {
         return Ok(false);
     }
+    // A later voyage of the project has departed: this one is history, even
+    // when its land order was last answered `keep course` or a task's merge
+    // was never recorded (GEAR M4.2-M6, Lawrence M1). What is left of it is
+    // the engine's sweep's and the reclaim's to report, not a second voyage
+    // under sail.
+    let voyages = tx.voyages_of_project(project)?;
+    let departed = voyages
+        .iter()
+        .find(|v| v.milestone == milestone)
+        .and_then(|v| v.departure);
+    if let Some(departed) = departed {
+        if voyages
+            .iter()
+            .any(|v| v.milestone != milestone && v.departure.is_some_and(|d| d > departed))
+        {
+            return Ok(true);
+        }
+    }
     if tx
         .unmerged_done_tasks(project)?
         .iter()
