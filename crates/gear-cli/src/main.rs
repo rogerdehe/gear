@@ -2274,10 +2274,24 @@ fn cmd_board(deps: bool, project: Option<&str>, json: bool) -> GearResult<()> {
         } else {
             gear_board::View::Lanes
         },
+        binary: std::env::current_exe().ok(),
         ..Default::default()
     };
     let mut out = std::io::stdout();
-    draw_board(&mut store, &opts, herdr.as_mut(), &mut out)
+    draw_board(&mut store, &opts, herdr.as_mut(), &mut out)?;
+    if gear_board::REPLACED.load(std::sync::atomic::Ordering::SeqCst) {
+        // The binary was replaced (M7.2): the same board on the new build.
+        drop(store);
+        let exe = std::env::current_exe().unwrap_or_default();
+        let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        let error =
+            std::os::unix::process::CommandExt::exec(std::process::Command::new(&exe).args(&args));
+        return Err(GearError::new(
+            gear_model::ErrorCode::NoTarget,
+            format!("the board could not start the new gear: {error}"),
+        ));
+    }
+    Ok(())
 }
 
 /// `gear board --open`: open the board for the user in its own Herdr tab.

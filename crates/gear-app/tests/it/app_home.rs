@@ -1234,3 +1234,53 @@ fn the_captains_page_still_names_gear_reply() {
         home.text
     );
 }
+
+/// M7.2: the engine's friction item shows one line on the page, the count
+/// and the command, never every report in its body (Prometheus: 251 reports
+/// printed on every call).
+#[test]
+fn a_friction_item_shows_one_line() {
+    let mut s = world();
+    let body = format!(
+        "251 friction reports:\n{}",
+        (1..=251)
+            .map(|n| format!("F-{n} T-1 dev: report {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    s.write(|tx| {
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: "p".into(),
+            thread: "friction".into(),
+            task: None,
+            attempt: None,
+            sender: "engine".into(),
+            sender_gen: 0,
+            recipient: "p:captain".into(),
+            kind: MsgKind::System,
+            urgent: false,
+            body,
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: NOW,
+        })
+        .map(|_| ())
+    })
+    .unwrap();
+    let home = home::build(
+        &mut s,
+        &seat_env("captain", CAP_PANE),
+        Some(&fp(CAP_PANE, "codex")),
+        NOW + 10,
+    )
+    .unwrap();
+    assert!(
+        home.text
+            .contains("251 friction reports: run gear friction to list them"),
+        "{}",
+        home.text
+    );
+    assert!(!home.text.contains("report 7"), "{}", home.text);
+}

@@ -1005,7 +1005,13 @@ fn folded_rows(
         Style::fg(if met == all { Color::Ok } else { Color::Bad }),
     );
     if let Some((_, first)) = project.goal_check.iter().find(|(met, _)| !*met) {
-        canvas.put_styled(30, row, &format!("next: {first}"), Style::fg(Color::Bad));
+        // Cut before the milestone column: a long clause ran over it.
+        canvas.put_styled(
+            30,
+            row,
+            &cut(&format!("next: {first}"), mx.saturating_sub(32)),
+            Style::fg(Color::Bad),
+        );
     }
     canvas.put_styled(mx, row, "Milestone", Style::bold());
     if project.stations.is_empty() {
@@ -2047,7 +2053,8 @@ fn view_now(
     }
     // One line on whether the work is balanced: the first and the last lane
     // to end, the first in lane order on a tie.
-    if sailing && !ends.is_empty() {
+    // One row has nothing to balance against (a captain alone, M7.2).
+    if sailing && ends.len() > 1 {
         let mut first = ends[0];
         let mut last = ends[0];
         for end in &ends {
@@ -2288,6 +2295,13 @@ fn idle_reason_text(project: &ProjectBoard, lane: &LaneBoard, landed: bool) -> (
         .find(|task| task.deps_open.is_empty())
         .copied()
     {
+        // The captain's own task is never delivered: the captain takes it.
+        if lane.lane == crate::UNASSIGNED {
+            return (
+                format!("next {}: the captain's own", next.id),
+                Style::fg(Color::Acc),
+            );
+        }
         return (
             format!("next {} is ready but not delivered", next.id),
             Style::fg(Color::Bad),
@@ -2346,7 +2360,9 @@ fn needs_a_look(project: &ProjectBoard) -> Vec<String> {
     });
     let mut looks = Vec::new();
     for (lane, task) in tasks {
-        if !task.stage.is_open() {
+        // A cancelled task is not work, whatever stage its last attempt left
+        // (Lawrence M4: T-308 and T-314, cut at landing, read "round 3").
+        if !task.stage.is_open() || task.state == gear_model::TaskState::Cancelled {
             continue;
         }
         let actual = task.actual_min.unwrap_or(0);
@@ -2426,10 +2442,10 @@ pub fn lane_panel(lane: &LaneBoard, tasks: &[graph::GraphTask]) -> Vec<String> {
 }
 
 /// Whether the graph task is in the lane's queue: a task a plan left without a
-/// lane shows in the `unassigned` lane.
+/// lane is the captain's own and shows in the `capt` row.
 fn in_lane(task: &graph::GraphTask, lane: &str) -> bool {
     if task.lane.is_empty() {
-        lane == "unassigned"
+        lane == crate::UNASSIGNED
     } else {
         task.lane == lane
     }

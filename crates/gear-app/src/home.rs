@@ -203,7 +203,7 @@ pub fn build_with_agents(
                     let urgent = if thread.urgent { " [urgent]" } else { "" };
                     lines.push(format!("  {}{urgent} {}", thread.thread, ids.join(" ")));
                     for message in &thread.open {
-                        lines.push(format!("    {}", message.body));
+                        lines.push(format!("    {}", shown_body(message)));
                         shown_msgs.push(message.id.clone());
                     }
                     if thread.more > 0 {
@@ -235,7 +235,9 @@ pub fn build_with_agents(
             for message in &unshown {
                 lines.push(format!(
                     "  {} {}  {}",
-                    message.id, message.thread, message.body
+                    message.id,
+                    message.thread,
+                    shown_body(message)
                 ));
                 shown_msgs.push(message.id.clone());
             }
@@ -349,7 +351,7 @@ fn multi_page(
                 .collect();
             urgent_lines.push(format!("  {} [urgent] {}", thread.thread, ids.join(" ")));
             for message in &thread.open {
-                urgent_lines.push(format!("    {}", message.body));
+                urgent_lines.push(format!("    {}", shown_body(message)));
             }
             if thread.more > 0 {
                 urgent_lines.push(format!("    +{} more", thread.more));
@@ -405,7 +407,7 @@ fn multi_page(
                     .collect();
                 lines.push(format!("  {} {}", thread.thread, ids.join(" ")));
                 for message in &thread.open {
-                    lines.push(format!("    {}", message.body));
+                    lines.push(format!("    {}", shown_body(message)));
                     shown_msgs.push(message.id.clone());
                 }
                 if thread.more > 0 {
@@ -435,7 +437,9 @@ fn multi_page(
             for message in &unshown {
                 lines.push(format!(
                     "  {project}:{} {}  {}",
-                    message.id, message.thread, message.body
+                    message.id,
+                    message.thread,
+                    shown_body(message)
                 ));
                 shown_msgs.push(message.id.clone());
                 if first.is_none() {
@@ -536,6 +540,25 @@ fn next_command(
             "next: gear reply {shown} --resolve -m \"<what was done>\""
         )),
     }
+}
+
+/// The text an item shows on the page. The engine's friction item lists
+/// every open report in its body (Prometheus: 251 reports on every call): the
+/// page shows its first line, the count, and the command that lists them.
+fn shown_body(message: &gear_store::MessageRow) -> String {
+    if message.sender == "engine"
+        && message.kind == gear_model::MsgKind::System
+        && message.thread == "friction"
+    {
+        let head = message
+            .body
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(':');
+        return format!("{head}: run gear friction to list them");
+    }
+    message.body.clone()
 }
 
 /// Persist the view. The CLI calls this **after** printing succeeded; if

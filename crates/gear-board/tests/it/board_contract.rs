@@ -3545,6 +3545,43 @@ fn an_open_reworked_task_is_an_item_to_handle() {
     assert!(frame.contains("the captain scopes what is left"), "{frame}");
 }
 
+/// M7.2: a cancelled task is not an item to handle, even when its last
+/// attempt took several rounds and was accepted (Lawrence M4: T-308 and
+/// T-314, cut at landing, read "round 3: the captain scopes what is left").
+#[test]
+fn a_cancelled_reworked_task_is_not_an_item_to_handle() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-2".into(),
+                n: 2,
+                seat: "p:runtime".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Accepted,
+                candidate: Some("abc".into()),
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            let mut row = tx.get_task("p", "T-2")?.unwrap();
+            row.state = TaskState::Cancelled;
+            tx.update_task(&row)
+        })
+        .unwrap();
+    let frame = now_frame(&mut store, T0 + 30 * 60);
+    assert!(!frame.contains("T-2 runtime round"), "{frame}");
+}
+
 /// The items follow the plan's order, not the lanes' grouping: a keel task
 /// ranked before a hull task is listed first.
 #[test]

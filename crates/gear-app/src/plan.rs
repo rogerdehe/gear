@@ -138,6 +138,7 @@ pub fn apply(
     // The verdicts that name the merge that landed their work are checked
     // before anything is written (git runs outside the store transaction).
     require_integrated_by(store, draft)?;
+    require_own_commits(store, draft)?;
 
     store.write(|tx| {
         // 1. identity: only the captain applies a plan.
@@ -532,7 +533,11 @@ fn apply_queue(
                 }
             }
             None => {
-                if item.lane.is_none() {
+                // A project with no lanes is its captain's alone: a task with
+                // no lane is the captain's own work.
+                if item.lane.is_none()
+                    && !project_config(tx, project)?.is_some_and(|c| c.captain_alone())
+                {
                     return Err(bad(item.line, "a NEW block needs `lane=`"));
                 }
                 if item.goal.is_none() {
@@ -1829,6 +1834,20 @@ fn apply_queue(
     // an error aborts the whole apply, so nothing of it is kept.
     let mut settled: Vec<String> = Vec::new();
     for line in &draft.verdicts {
+        if line.own {
+            crate::tasks::record_own(
+                tx,
+                project,
+                &line.task,
+                &line.candidate,
+                line.evidence.as_deref().unwrap_or_default(),
+                by_seat,
+                now,
+            )
+            .map_err(|e| bad(line.line, e.detail))?;
+            settled.push(line.task.clone());
+            continue;
+        }
         // A pass over a failed review says why (design §7.4): the captain
         // overrules the reviewer, and the reason is recorded.
         let failed_review = tx
@@ -2475,6 +2494,48 @@ fn require_integrated_by(store: &mut Store, draft: &Draft) -> GearResult<()> {
                 format!(
                     "{task}: the candidate {candidate} is not in {}: a pass may name the task whose merge landed the work only when that work is in the integration branch",
                     repo.integration
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A done line's commit must be on the integration or the release branch
+/// (M7.2): done means landed, so the captain records its own work only after
+/// it pushed it there. Checked before the transaction, like a pass naming
+/// the merge that landed the work.
+fn require_own_commits(store: &mut Store, draft: &Draft) -> GearResult<()> {
+    let own: Vec<&crate::draft::VerdictLine> =
+        draft.verdicts.iter().filter(|line| line.own).collect();
+    if own.is_empty() {
+        return Ok(());
+    }
+    let project = draft.project.clone();
+    let config = crate::config::latest(store, &project)?;
+    let repo = config.root_repo();
+    let remote = &config.conventions.remote;
+    for line in own {
+        let commit = &line.candidate;
+        let mut landed = false;
+        if object_held(&repo.path, remote, commit) {
+            for branch in [&repo.integration, &repo.release] {
+                let Ok(reference) = crate::base::fetch_integration(&repo.path, remote, branch)
+                else {
+                    continue;
+                };
+                if crate::base::contains(std::path::Path::new(&repo.path), commit, &reference)? {
+                    landed = true;
+                    break;
+                }
+            }
+        }
+        if !landed {
+            return Err(bad(
+                line.line,
+                format!(
+                    "{}: commit {commit} is not on {remote}/{} or {remote}/{}: run the gate, push the work to {}, then record it done",
+                    line.task, repo.integration, repo.release, repo.integration
                 ),
             ));
         }

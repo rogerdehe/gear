@@ -45,6 +45,8 @@ const NO_TASK_LEFT: &str = "no task is left in the voyage";
 const IN_PROGRESS: &str = "a task is in progress";
 /// The word a stalled item closes with while a merge is queued or running.
 const MERGE_IN_FLIGHT: &str = "a merge is queued or running";
+/// The item closes when the project runs with its captain alone (M7.2).
+const CAPTAIN_ALONE: &str = "the project runs with its captain alone: its tasks are the captain's";
 
 /// How many of the tasks left the stalled item names (T-560).
 const STALLED_SHOWN: usize = 5;
@@ -67,6 +69,18 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
     let Some(captain) = tx.captain_of(project)? else {
         return Ok(Vec::new()); // no captain: nobody to warn
     };
+    // A project run by its captain alone (M7.2) has no lane to feed: its
+    // tasks are the captain's own work, never a stopped voyage. The idle
+    // reminder wakes the captain when it stops with work left.
+    let alone = tx
+        .get_project(project)?
+        .and_then(|row| gear_app::config::parse_row(&row).ok())
+        .is_some_and(|config| config.captain_alone());
+    if alone {
+        return Ok(close_stalled(tx, project, &captain.id, now, CAPTAIN_ALONE)?
+            .into_iter()
+            .collect());
+    }
     // Nothing startable anywhere in the project: no lane can run dry, and one
     // item per lane would ring for every lane at once (M4.1). Every lane item
     // closes and the project stays quiet (T-232).

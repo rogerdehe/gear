@@ -162,6 +162,10 @@ pub struct VerdictLine {
     /// The task whose merge landed this work (design §10.7, row B03-01):
     /// `integrated-by=T-m`.
     pub integrated_by: Option<String>,
+    /// The captain's own work (M7.2): `- T-n done commit=<sha> evidence=<text>`
+    /// records a task with no lane as done by the commit that holds it. It
+    /// carries no attempt or contract (both 0); `candidate` is the commit.
+    pub own: bool,
 }
 
 /// `V-9 keep plan=12: <text>; next=<RFC3339>`
@@ -1144,6 +1148,9 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
             format!("a verdict line needs a task id, got {task:?}"),
         ));
     }
+    if rest.split_whitespace().nth(1) == Some("done") {
+        return parse_own(rest, task, line);
+    }
     let attempt = number_field(tokens.next(), "attempt", line)?;
     let contract = number_field(tokens.next(), "contract", line)?;
     let candidate = tokens
@@ -1303,6 +1310,54 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
         estimate,
         why,
         integrated_by,
+        own: false,
+    })
+}
+
+/// `T-n done commit=<sha> evidence=<text to the end of the line>`: the
+/// captain's own task, done by a commit on the integration branch (M7.2).
+fn parse_own(rest: &str, task: &str, line: usize) -> GearResult<VerdictLine> {
+    let tail = rest
+        .splitn(3, char::is_whitespace)
+        .nth(2)
+        .unwrap_or("")
+        .trim();
+    let (commit, evidence) = match tail.split_once(char::is_whitespace) {
+        Some((commit, evidence)) => (commit, evidence.trim()),
+        None => (tail, ""),
+    };
+    let commit = commit
+        .strip_prefix("commit=")
+        .filter(|sha| !sha.is_empty())
+        .ok_or_else(|| {
+            bad(
+                line,
+                "a done line reads `- T-n done commit=<sha> evidence=<text>`",
+            )
+        })?;
+    let evidence = evidence
+        .strip_prefix("evidence=")
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| {
+            bad(
+                line,
+                "a done line needs `evidence=<text>` after the commit: what shows the task is done",
+            )
+        })?;
+    Ok(VerdictLine {
+        line,
+        task: task.to_string(),
+        attempt: 0,
+        contract: 0,
+        candidate: commit.to_string(),
+        pass: true,
+        evidence: Some(evidence.to_string()),
+        rework: None,
+        estimate: None,
+        why: None,
+        integrated_by: None,
+        own: true,
     })
 }
 
