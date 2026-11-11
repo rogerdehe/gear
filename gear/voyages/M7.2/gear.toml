@@ -1,0 +1,21 @@
+# GEAR's own project config for voyage M7.2: the captain alone, no lanes and no reviewers (light mode, built by running it).
+# Registered with: GEAR_ADMIN=1 gear admin init gear/voyages/M7.2/gear.toml
+
+[project]
+id = "gear"
+herdr_session = "orch"
+repo = "/Volumes/Data/myai/gear"
+
+[quota]
+lanes = 0
+temps = 0
+
+[captain]
+pane = "w2:p2"
+kind = "claude"
+profile = "claude"
+
+[conventions]
+integration = "dev"
+release = "main"
+gate = "make gate"
