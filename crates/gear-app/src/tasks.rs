@@ -1609,3 +1609,35 @@ pub fn resolve_review_items(
     })?;
     Ok(())
 }
+
+/// Where a task's `state: hold until=<date>` is kept.
+fn hold_until_key(project: &str, task: &str) -> String {
+    format!("hold_until:{project}:{task}")
+}
+
+/// Keep or clear a task's hold date as its queue block says: `hold until=`
+/// sets it, any other `state:` clears it, no `state:` keeps it.
+pub fn set_hold_until(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    item: &crate::draft::QueueItem,
+) -> GearResult<()> {
+    match (&item.state, &item.hold_until) {
+        (_, Some(date)) => tx.set_meta(&hold_until_key(project, task), date),
+        (Some(_), None) => tx.delete_meta(&hold_until_key(project, task)),
+        (None, None) => Ok(()),
+    }
+}
+
+/// The date a held task waits for, while that date (read in UTC) is still to
+/// come. A task on hold with no date, or past its date, gives `None`.
+pub fn held_until(tx: &Tx<'_>, task: &gear_store::TaskRow, now: Ts) -> GearResult<Option<String>> {
+    if task.state != TaskState::Draft {
+        return Ok(None);
+    }
+    let today = crate::plan::utc_date(now);
+    Ok(tx
+        .get_meta(&hold_until_key(&task.project, &task.id))?
+        .filter(|date| date.as_str() > today.as_str()))
+}

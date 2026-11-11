@@ -262,3 +262,59 @@ fn a_done_line_is_refused_for_a_lanes_task() {
         err.detail
     );
 }
+
+fn departed(s: &mut Store) {
+    s.write(|tx| {
+        tx.upsert_voyage(&gear_store::VoyageRow {
+            project: "p".into(),
+            milestone: "M1".into(),
+            title: "v".into(),
+            done: Some("done".into()),
+            bar: Some("FASTEST".into()),
+            eta: Some("4h".into()),
+            departure: Some(NOW),
+            departure_tasks: Some(2),
+            departure_estimate_min: Some(60),
+            updated: NOW,
+        })
+    })
+    .unwrap();
+    run(
+        s,
+        "# Queue\n## NEW [must] milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [must] milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n",
+    )
+    .unwrap();
+}
+
+/// A captain alone that sets its own task aside stops no fleet: the hold
+/// needs no confirmation from the user.
+#[test]
+fn a_captain_alone_holds_its_own_task_without_a_confirmation() {
+    let mut s = world(ALONE);
+    departed(&mut s);
+    run(&mut s, "# Queue\n## T-1 [must] milestone=M1\nstate: hold\n## T-2 [must] milestone=M1\nstate: hold until=2099-01-01\n").unwrap();
+    let task = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+    assert_eq!(task.state, gear_model::TaskState::Draft);
+    let (t2, until) = s
+        .read(|tx| {
+            let t2 = tx.get_task("p", "T-2")?.unwrap();
+            let until = gear_app::tasks::held_until(tx, &t2, NOW)?;
+            Ok((t2, until))
+        })
+        .unwrap();
+    assert_eq!(t2.state, gear_model::TaskState::Draft);
+    assert_eq!(until.as_deref(), Some("2099-01-01"));
+    // `state: ready` clears the date.
+    run(
+        &mut s,
+        "# Queue\n## T-2 [must] milestone=M1\nstate: ready\n",
+    )
+    .unwrap();
+    let until = s
+        .read(|tx| {
+            let t2 = tx.get_task("p", "T-2")?.unwrap();
+            gear_app::tasks::held_until(tx, &t2, NOW)
+        })
+        .unwrap();
+    assert_eq!(until, None);
+}

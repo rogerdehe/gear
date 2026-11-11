@@ -389,14 +389,26 @@ pub fn captain_sailing(
             if milestone.is_empty() || voyage_landed(tx, project, &milestone)? {
                 return Ok(());
             }
-            let left = tx
+            let open: Vec<_> = tx
                 .tasks_live_of_project(project)?
                 .into_iter()
                 .filter(|task| {
                     task.milestone.as_deref() == Some(milestone.as_str())
                         && !task.state.is_terminal()
                 })
-                .count();
+                .collect();
+            let left = open.len();
+            // Every task left is on hold until a date to come: the voyage
+            // waits for time, and nothing is there to do before it.
+            let mut dated = 0;
+            for task in &open {
+                if gear_app::tasks::held_until(tx, task, now)?.is_some() {
+                    dated += 1;
+                }
+            }
+            if left > 0 && dated == left {
+                return Ok(());
+            }
             // Every task done: unfinished while its landing order waits for
             // an answer. A voyage with neither (an old one, landed before the
             // landing order existed) is finished and rings nobody (T-571).
@@ -1630,6 +1642,23 @@ mod tests {
         assert!(items[1].body.contains(&next), "{}", items[1].body);
         captain_sailing(&mut s, "p", &all, T + 66 * 60).unwrap();
         assert_eq!(sailing_items(&mut s).len(), 2, "once for the new order");
+    }
+
+    /// Every task left is on hold until a date to come: the bell waits for
+    /// that date, then rings (Prometheus M5: a bill tomorrow, a reading a
+    /// week out).
+    #[test]
+    fn a_dated_hold_quiets_the_bell_until_its_date() {
+        let (mut s, _) = sailing_world(TaskState::Draft, false);
+        let day = gear_app::plan::utc_date(T + 86_400);
+        s.write(|tx| tx.set_meta("hold_until:p:T-1", &day)).unwrap();
+        let all = vec![idle_obs(&mut s, "p:captain"), idle_obs(&mut s, "p:heat")];
+        captain_sailing(&mut s, "p", &all, T).unwrap();
+        captain_sailing(&mut s, "p", &all, T + 60 * 60).unwrap();
+        assert!(sailing_items(&mut s).is_empty(), "quiet before the date");
+        captain_sailing(&mut s, "p", &all, T + 86_400).unwrap();
+        let items = sailing_items(&mut s);
+        assert_eq!(items.len(), 1, "rings on the date: {items:?}");
     }
 
     #[test]

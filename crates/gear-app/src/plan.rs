@@ -1072,6 +1072,7 @@ fn apply_queue(
                 if let Some(audit) = item.audit {
                     tx.set_task_audit(project, &id, audit)?;
                 }
+                crate::tasks::set_hold_until(tx, project, &id, item)?;
                 let contract = ContractRow {
                     project: project.to_string(),
                     task: id.clone(),
@@ -1273,6 +1274,7 @@ fn apply_queue(
                     }
                     _ => {}
                 }
+                crate::tasks::set_hold_until(tx, project, id, item)?;
                 // A task moved to another lane takes its work with it (T-311):
                 // the old lane's attempts close, so its seat is free and it
                 // stops working on a task that is not its own any more. The
@@ -5517,12 +5519,19 @@ fn fleet_withheld(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Stri
                 && matches!(seat.state, SeatState::Held | SeatState::Parked)
         })
     };
+    // A captain alone has no fleet to stand still: a task it sets aside is
+    // its own call, and the idle bell still counts it as left.
+    if project_config(tx, project)?.is_some_and(|c| c.captain_alone()) {
+        return Ok(None);
+    }
     let (mut held, mut ready_for_down) = (0, 0);
     for task in tx.tasks_of_project(project)? {
         if task.milestone.as_deref() != Some(voyage.as_str()) {
             continue;
         }
         match task.state {
+            // A hold until a date waits for time, not for a decision.
+            TaskState::Draft if crate::tasks::held_until(tx, &task, now)?.is_some() => {}
             TaskState::Draft => held += 1,
             TaskState::Ready if task.lane.as_deref().is_some_and(lane_down) => ready_for_down += 1,
             _ => {}
