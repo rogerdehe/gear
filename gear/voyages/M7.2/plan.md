@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1286 -->
+<!-- gear-plan project=gear base=1287 -->
 # Goal
 A project can run with its captain alone: one agent plans, works and lands a small voyage on GEAR with no lanes and no reviewers, and the board and the captain's page tell the truth about it. Built by running GEAR's own M7.2 that way, and shipped as a v0.7.x patch live for every project on this machine.
 
@@ -9,6 +9,13 @@ eta: 4h
 depart: now
 
 # Decisions
+- station M-8891: land | why: all 6 M7.2 tasks are done and merged on dev; the five done clauses are met below; released as v0.7.23, live on both engines
+- done (1): met | evidence: T-684 (a task with no lane= is the captain's; captain_alone_contract) and the feed fix in T-685's commit (no stopped-voyage item for a captain alone; feed_contract); M7.2 itself was planned without lanes
+- done (2): met | evidence: T-685: `- T-n done commit=<sha> evidence=` records the task done and merged, refuses an unpushed commit and a lane's task (captain_alone_contract); every M7.2 task was recorded this way
+- done (3): met | evidence: T-686, T-687, T-688: capt row, no balance line for one row, cancelled tasks out of TO HANDLE, the friction item in one line, a voyage a later departure follows reads landed, the board restarts on a new binary; GEAR's board shows only M7.2 sailing, Lawrence's TO HANDLE is empty
+- done (4): met | evidence: T-689: captain.md "Working alone"; skill copies reinstalled for claude, codex, pi, opencode, grok, agy and codex-home
+- done (5): met | evidence: v0.7.23 tagged and merged to main, installed, both engines started 0.7.23 at 15:57Z, the Prometheus captain told
+- 2026-11-11 09:58 note: voyage report: 6 of 6 tasks done in about 50m against the 4h eta, no goal change, nothing cut, no rework; the captain alone, no lanes or reviewers. Pain points met on the way and fixed in it: the lane= refusal, no way to record own work, the stopped-voyage item, the unassigned row, the goal-check overlap; plus the user's call that one person works in one worktree of its own with no branch per task | why: the landing record
 - 2026-11-11 09:10 confirmed: M7.2 departure, not departed -> departs now with the scope above, eta 4h | why: the user asked for a light mode for one agent working alone, built by running this voyage alone and fixing what hurts
 - 2026-11-11 09:10 note: the pain points come from the Prometheus captain's report (alone on its M5) and from running this voyage the same way; each new one becomes a task here
 
