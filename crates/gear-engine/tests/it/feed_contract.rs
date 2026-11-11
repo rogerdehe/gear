@@ -1997,3 +1997,27 @@ fn a_running_merge_is_not_a_stopped_voyage() {
         Some("a merge is queued or running")
     );
 }
+
+/// M7.2: a project run by its captain alone has no lane to feed. Its tasks
+/// are the captain's own work, so its voyage is never reported stopped, and
+/// an item that rang before closes.
+#[test]
+fn a_captain_alone_voyage_is_never_reported_stopped() {
+    let mut w = stalled_world();
+    w.store
+        .write(|tx| {
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/repo\"\n\n[quota]\nlanes = 0\ntemps = 0\n\n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n".into();
+            tx.update_project(&project)
+        })
+        .unwrap();
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 10).unwrap();
+    let open: Vec<_> = w
+        .store
+        .read(|tx| tx.thread_messages("p", "stalled"))
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.state == MsgState::Open)
+        .collect();
+    assert!(open.is_empty(), "{open:?}");
+}

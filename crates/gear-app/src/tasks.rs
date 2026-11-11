@@ -692,6 +692,99 @@ pub fn mark_integrated_by(
     Ok(())
 }
 
+/// The captain records its own task as done (M7.2): a task with no lane,
+/// done by `commit`, which the caller has checked is on the integration or
+/// release branch. One captain attempt is written, accepted and merged now,
+/// with its verdict; the task is Done. The same line again changes nothing.
+pub fn record_own(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    commit: &str,
+    evidence: &str,
+    by_seat: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let mut row = tx.get_task(project, task)?.ok_or_else(|| {
+        GearError::new(ErrorCode::NoTarget, format!("task {task} does not exist"))
+    })?;
+    if let Some(lane) = row.lane.as_deref() {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!("{task} is lane {lane}'s: a done line records only the captain's own task (one with no lane); settle a lane's task by its verdict"),
+        ));
+    }
+    let attempts = tx.attempts_of_task(project, task)?;
+    if row.state == TaskState::Done {
+        if attempts
+            .iter()
+            .any(|a| a.candidate.as_deref() == Some(commit) && a.state == AttemptState::Accepted)
+        {
+            return Ok(());
+        }
+        return Err(GearError::new(
+            ErrorCode::BadTransition,
+            format!("{task} is already done"),
+        ));
+    }
+    if row.state.is_terminal() {
+        return Err(GearError::new(
+            ErrorCode::BadTransition,
+            format!(
+                "{task} is {}: only an open task is recorded done",
+                row.state.as_str()
+            ),
+        ));
+    }
+    let n = attempts.iter().map(|a| a.n).max().unwrap_or(0) + 1;
+    let seat = tx
+        .captain_of(project)?
+        .map(|seat| seat.id)
+        .unwrap_or_else(|| by_seat.to_string());
+    tx.insert_attempt(&AttemptRow {
+        project: project.to_string(),
+        task: task.to_string(),
+        n,
+        seat: seat.clone(),
+        generation: 0,
+        contract_version: row.contract_version,
+        adopted_version: row.contract_version,
+        pending_update: None,
+        state: AttemptState::Accepted,
+        candidate: Some(commit.to_string()),
+        report: Some(evidence.to_string()),
+        safe_point: None,
+        started: now,
+        updated: now,
+        session_ref: None,
+        session_cli: None,
+        session_action: None,
+        sent_at: None,
+    })?;
+    for step in [
+        AttemptStep::HandedIn,
+        AttemptStep::Settled,
+        AttemptStep::Merged,
+    ] {
+        tx.set_attempt_time(project, task, n, step, now)?;
+    }
+    tx.insert_verdict(&VerdictRow {
+        project: project.to_string(),
+        task: task.to_string(),
+        attempt: n,
+        contract_version: row.contract_version,
+        candidate: commit.to_string(),
+        passed: true,
+        evidence: Some(evidence.to_string()),
+        by_seat: by_seat.to_string(),
+        created: now,
+    })?;
+    row.state = TaskState::Done;
+    row.rework_note = None;
+    row.updated = now;
+    tx.update_task(&row)
+}
+
 /// An acceptance verdict (design/05 `# Verdicts`, design/06 `settle`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
