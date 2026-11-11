@@ -127,7 +127,9 @@ pub mod hook {
 }
 
 /// The lane name of a task that belongs to no lane.
-const UNASSIGNED: &str = "unassigned";
+/// A task with no lane is the captain's own work (M7.2): it shows in the
+/// `capt` row (five cells at most: the lane column's width).
+pub(crate) const UNASSIGNED: &str = "capt";
 
 /// What a lane of a landed voyage reads (T-350): the voyage keeps its data,
 /// and its lanes are retired at the landing.
@@ -1101,6 +1103,9 @@ pub fn project_for(
     });
     let mut waiting_on = Vec::new();
     for (lane, task) in ordered {
+        if task.state == TaskState::Cancelled {
+            continue;
+        }
         match task.stage {
             graph::Stage::Review => {
                 let holder = temps_seats.iter().find(|seat| {
