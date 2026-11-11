@@ -56,6 +56,7 @@ mod backoff_home_contract;
 mod bar_contract;
 mod base_gate;
 mod cancel_contract;
+mod captain_alone_contract;
 mod captain_handover_contract;
 mod captain_take_contract;
 mod config_change_contract;

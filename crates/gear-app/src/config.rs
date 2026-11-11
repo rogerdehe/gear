@@ -81,6 +81,12 @@ impl ProjectConfig {
     ///
     /// A lane without a `repo`, a lane that is not in the config and a lane
     /// naming a repo that is not there all work in the project root.
+    /// Whether the project runs with its captain alone: no lane is
+    /// configured, so every task is the captain's own work.
+    pub fn captain_alone(&self) -> bool {
+        self.lanes.is_empty()
+    }
+
     pub fn repo_of_lane(&self, lane: &str) -> Repo {
         let bound = self
             .lanes

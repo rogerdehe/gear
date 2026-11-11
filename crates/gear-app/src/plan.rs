@@ -532,7 +532,11 @@ fn apply_queue(
                 }
             }
             None => {
-                if item.lane.is_none() {
+                // A project with no lanes is its captain's alone: a task with
+                // no lane is the captain's own work.
+                if item.lane.is_none()
+                    && !project_config(tx, project)?.is_some_and(|c| c.captain_alone())
+                {
                     return Err(bad(item.line, "a NEW block needs `lane=`"));
                 }
                 if item.goal.is_none() {
