@@ -38,8 +38,11 @@ pub struct QueueItem {
     pub estimate: Option<u32>,
     /// `deps: -` → empty
     pub deps: Vec<String>,
-    /// only `ready` or `cancelled`
+    /// `ready`, `hold` or `cancelled`
     pub state: Option<String>,
+    /// `state: hold until=YYYY-MM-DD`: the task waits for a date, not for a
+    /// decision (Prometheus M5: a task that settles on tomorrow's bill).
+    pub hold_until: Option<String>,
     pub followup_of: Option<String>,
     pub reopen: Option<String>,
     /// The GitHub issue a task came from (T-79): `issue: #12`.
@@ -656,6 +659,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
         estimate: None,
         deps: Vec::new(),
         state: None,
+        hold_until: None,
         followup_of: None,
         reopen: None,
         issue: None,
@@ -737,10 +741,22 @@ fn parse_queue_field(
             }
         }
         "state" => {
+            if let Some(date) = value.strip_prefix("hold until=") {
+                let date = date.trim();
+                if !is_date(date) {
+                    return Err(bad(
+                        line,
+                        format!("`state: hold until=` takes a date YYYY-MM-DD, got {date:?}"),
+                    ));
+                }
+                item.state = Some("hold".to_string());
+                item.hold_until = Some(date.to_string());
+                return Ok(());
+            }
             if value != "ready" && value != "hold" && value != "cancelled" {
                 return Err(bad(
                     line,
-                    format!("`state` is `ready`, `hold` or `cancelled`, got {value:?}"),
+                    format!("`state` is `ready`, `hold`, `hold until=YYYY-MM-DD` or `cancelled`, got {value:?}"),
                 ));
             }
             item.state = Some(value.to_string());
@@ -1665,6 +1681,21 @@ mod tests {
 
     const HEADER: &str = "<!-- gear-plan project=p base=0 -->\n";
 
+    #[test]
+    fn a_hold_takes_a_date() {
+        let plan = parse(&format!(
+            "{HEADER}# Queue\n## T-1 [must]\nstate: hold until=2026-11-18\n"
+        ))
+        .unwrap();
+        assert_eq!(plan.queue[0].state.as_deref(), Some("hold"));
+        assert_eq!(plan.queue[0].hold_until.as_deref(), Some("2026-11-18"));
+        let err = parse(&format!(
+            "{HEADER}# Queue\n## T-1 [must]\nstate: hold until=next week\n"
+        ))
+        .unwrap_err();
+        assert!(err.detail.contains("YYYY-MM-DD"), "{}", err.detail);
+    }
+
     fn detail_of(text: &str) -> String {
         let err = parse(text).unwrap_err();
         assert_eq!(err.code, ErrorCode::BadFormat);
@@ -1855,4 +1886,17 @@ mod tests {
         let detail = detail_of(&text);
         assert!(detail.contains("milestone M2 appears twice"), "{detail}");
     }
+}
+
+/// `YYYY-MM-DD` with a month 01-12 and a day 01-31.
+fn is_date(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+        && matches!(text[5..7].parse::<u8>(), Ok(1..=12))
+        && matches!(text[8..10].parse::<u8>(), Ok(1..=31))
 }
