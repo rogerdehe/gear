@@ -61,6 +61,12 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
         return Ok(Vec::new());
     };
     let tasks = tx.tasks_of_project(project)?;
+    // A captain alone has no lane to check on: the hourly course station is
+    // busywork there; its eta stations and land order still ring.
+    let alone = tx
+        .get_project(project)?
+        .and_then(|row| crate::config::parse_row(&row).ok())
+        .is_some_and(|config| config.captain_alone());
     let mut opened = Vec::new();
     for report in gear_board::voyage::reports_including_finished(tx, project, now)? {
         let scope: Vec<_> = tasks
@@ -91,7 +97,7 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
             let voyage = tx
                 .get_voyage(project, &report.milestone)?
                 .expect("report has a voyage");
-            if let Some(departure) = voyage.departure {
+            if let Some(departure) = voyage.departure.filter(|_| !alone) {
                 let hours = (now - departure).max(0) / 3600;
                 let course_key = format!("{key}:course");
                 let last = tx

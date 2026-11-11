@@ -1071,3 +1071,25 @@ fn the_landing_order_offers_land() {
         "{error:?}"
     );
 }
+
+/// A captain alone has no lane to check on: no hourly course station, but its
+/// eta stations still ring.
+#[test]
+fn a_captain_alone_gets_no_course_station() {
+    let mut store = world("8h", 5);
+    store
+        .write(|tx| {
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/repo\"\n\n[quota]\nlanes = 0\ntemps = 0\n\n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n".into();
+            tx.update_project(&project)?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(check(&mut store, 3599).is_empty());
+    assert!(check(&mut store, 3600).is_empty(), "no course station");
+    let ids = check(&mut store, 2 * 3600);
+    assert_eq!(ids.len(), 1, "the 25% eta station");
+    let body = item(&mut store, &ids[0]).body;
+    assert!(body.contains("% eta"), "{body}");
+    assert!(!body.contains("120 min"), "{body}");
+}
