@@ -461,8 +461,15 @@ pub fn reclaim(
         // asks a captain to merge into it or to delete it (M-708, M-719). A
         // deletion the remote refuses (a protected branch) is not named
         // either. An integration branch equal to the release branch is never
-        // deleted.
-        if repo.integration != repo.release {
+        // deleted. Only a branch in the project's own namespace
+        // (`<project>/dev`) is the voyage's: a shared name such as `dev` is
+        // the integration branch of other projects and of the release flow
+        // too, and is never deleted (SelyraAI 2026-11-12: prometheus M5's
+        // landing deleted the shared `dev`).
+        if repo.integration != repo.release
+            && repo.integration != config.conventions.staging
+            && repo.integration.starts_with(&format!("{project}/"))
+        {
             if let Some(tip) =
                 remote_branch_tip(&repo.path, &config.conventions.remote, &repo.integration)
             {
@@ -2062,14 +2069,38 @@ gate = "true"
     #[test]
     fn the_reclaim_deletes_an_integration_branch_on_release_and_never_names_one_with_unreleased_work(
     ) {
-        // Everything on dev is on main: the branch goes.
-        let mut landed = Landed::new("integration-on-release");
+        // A shared integration branch (`dev`, other projects' too) is never
+        // deleted, even when everything on it is on main.
+        let mut landed = Landed::new("shared-integration");
         sh(&landed.work, "git push -q origin dev:refs/heads/main");
         landed.reclaim(NOW + 600);
         let branches = landed.origin_branches();
         assert!(
-            !branches.lines().any(|branch| branch == "dev"),
-            "the integration branch on release is deleted: {branches}"
+            branches.lines().any(|branch| branch == "dev"),
+            "a shared integration branch is kept: {branches}"
+        );
+
+        // The project's own `p/dev`, everything on main: the branch goes.
+        let mut landed = Landed::new("integration-on-release");
+        sh(
+            &landed.work,
+            "git push -q origin dev:refs/heads/main dev:refs/heads/p/dev",
+        );
+        landed
+            .store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = project
+                    .config_toml
+                    .replace("integration = \"dev\"", "integration = \"p/dev\"");
+                tx.update_project(&project)
+            })
+            .unwrap();
+        landed.reclaim(NOW + 600);
+        let branches = landed.origin_branches();
+        assert!(
+            !branches.lines().any(|branch| branch == "p/dev"),
+            "the project's own integration branch on release is deleted: {branches}"
         );
 
         // A commit on dev that main does not have: the branch holds
