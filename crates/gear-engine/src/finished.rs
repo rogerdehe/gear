@@ -857,6 +857,9 @@ fn records_step(
 /// branch. A ref git refuses (the captain's own worktree still holds it) stays
 /// and the reclaim item names it.
 fn delete_records_branch(dir: &Path, remote: &str, branch: &str) {
+    if !gear_app::base::may_delete_branch(branch) {
+        return;
+    }
     let _ = merge::git(dir, &["push", remote, "--delete", branch]);
     let _ = merge::git(dir, &["branch", "-D", branch]);
     let _ = merge::git(
@@ -1088,6 +1091,11 @@ fn branch_on_release(repo: &str, config: &ProjectConfig, tip: &str, release: &st
 
 /// Delete a branch on the remote.
 fn delete_remote_branch(repo: &str, remote: &str, branch: &str) -> Result<(), String> {
+    if !gear_app::base::may_delete_branch(branch) {
+        return Err(format!(
+            "{branch} is a shared branch: GEAR never deletes it"
+        ));
+    }
     merge::git(Path::new(repo), &["push", remote, "--delete", branch])?;
     Ok(())
 }

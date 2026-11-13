@@ -942,7 +942,10 @@ fn move_seat_branches(
                 seat.name
             ),
         };
-        if renamed.is_ok() && remote_has_branch(&path, remote, &old_branch) {
+        if renamed.is_ok()
+            && crate::base::may_delete_branch(&old_branch)
+            && remote_has_branch(&path, remote, &old_branch)
+        {
             let pushed = git_in(
                 &path,
                 &[
