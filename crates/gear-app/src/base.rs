@@ -43,6 +43,16 @@ pub struct BaseGate {
 /// that repo's own integration branch (`[conventions].integration` for the
 /// root). No `GEAR_CTX`, or a config that cannot be read → `BadFormat`: a
 /// hand-in is never accepted unchecked.
+/// Whether GEAR may delete this branch on a remote by itself: only a branch
+/// under a prefix (`<project>/...`, as every branch GEAR names is). A
+/// top-level name such as `dev`, `main` or `staging` is shared by people,
+/// projects and the release flow and is never deleted (SelyraAI 2026-11-12:
+/// the landing's reclaim deleted the shared `dev` twice).
+pub fn may_delete_branch(branch: &str) -> bool {
+    let name = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+    name.contains('/') && !name.starts_with('/') && !name.ends_with('/')
+}
+
 pub fn gate_for(store: &mut Store, env: &Env) -> GearResult<BaseGate> {
     let ctx = env.ctx.as_ref().ok_or_else(|| {
         GearError::new(
@@ -620,5 +630,20 @@ mod tests {
             .read(|tx| task_branch_of(tx, &conventions, "p", "align", "T-9"))
             .unwrap();
         assert_eq!(branch, "web/t9");
+    }
+}
+
+#[cfg(test)]
+mod may_delete_tests {
+    use super::may_delete_branch;
+
+    #[test]
+    fn a_shared_top_level_branch_is_never_deletable() {
+        for shared in ["dev", "main", "staging", "refs/heads/dev", "/x", "x/"] {
+            assert!(!may_delete_branch(shared), "{shared}");
+        }
+        for owned in ["p/dev", "p/hull/t9", "refs/heads/p/captain/M1", "hull/t10"] {
+            assert!(may_delete_branch(owned), "{owned}");
+        }
     }
 }

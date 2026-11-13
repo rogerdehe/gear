@@ -147,7 +147,7 @@ pub fn rename(dir: &str, old: &str, new: &str) -> Result<(), String> {
 /// what happened, never a reason to fail.
 pub fn move_remote(dir: &str, remote: &str, old: &str, new: &str) -> String {
     let remote = remote.trim();
-    if remote.is_empty() || !has_branch(dir, remote, old) {
+    if remote.is_empty() || !crate::base::may_delete_branch(old) || !has_branch(dir, remote, old) {
         return String::new();
     }
     let push = |dir: &str, name: &str| {

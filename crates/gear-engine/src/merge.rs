@@ -1899,6 +1899,9 @@ impl Remote for GitRemote {
     }
 
     fn delete(&self, dir: &Path, remote: &str, branch: &str) -> bool {
+        if !gear_app::base::may_delete_branch(branch) {
+            return false;
+        }
         git(dir, &["push", remote, "--delete", branch]).is_ok()
     }
 }
