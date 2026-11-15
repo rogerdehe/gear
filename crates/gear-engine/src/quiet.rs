@@ -1657,8 +1657,10 @@ mod tests {
         captain_sailing(&mut s, "p", &all, T + 60 * 60).unwrap();
         assert!(sailing_items(&mut s).is_empty(), "quiet before the date");
         captain_sailing(&mut s, "p", &all, T + 86_400).unwrap();
+        assert!(sailing_items(&mut s).is_empty(), "quiet through the date");
+        captain_sailing(&mut s, "p", &all, T + 2 * 86_400).unwrap();
         let items = sailing_items(&mut s);
-        assert_eq!(items.len(), 1, "rings on the date: {items:?}");
+        assert_eq!(items.len(), 1, "rings the day after: {items:?}");
     }
 
     #[test]

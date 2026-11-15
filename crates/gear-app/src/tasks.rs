@@ -1630,8 +1630,10 @@ pub fn set_hold_until(
     }
 }
 
-/// The date a held task waits for, while that date (read in UTC) is still to
-/// come. A task on hold with no date, or past its date, gives `None`.
+/// The date a held task is held through, while that date (read in UTC) has not
+/// ended: `until=D` holds the task all of day D, and it counts again from the
+/// next day (two captains read `until=` that way; Lawrence T-354, Prometheus
+/// T-805). A task on hold with no date, or past its date, gives `None`.
 pub fn held_until(tx: &Tx<'_>, task: &gear_store::TaskRow, now: Ts) -> GearResult<Option<String>> {
     if task.state != TaskState::Draft {
         return Ok(None);
@@ -1639,5 +1641,5 @@ pub fn held_until(tx: &Tx<'_>, task: &gear_store::TaskRow, now: Ts) -> GearResul
     let today = crate::plan::utc_date(now);
     Ok(tx
         .get_meta(&hold_until_key(&task.project, &task.id))?
-        .filter(|date| date.as_str() > today.as_str()))
+        .filter(|date| date.as_str() >= today.as_str()))
 }
