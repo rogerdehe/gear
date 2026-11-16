@@ -629,8 +629,24 @@ fn finish_rebind(
                 // Ask the agent still running in the previous captain's pane.
                 // A pane that lost its agent (or its name) is not a failure:
                 // the session is named for the new captain to read.
+                // Only the previous captain's own agent is asked: a pane id
+                // outlives its agent, and a pane the user reused for another
+                // project's agent must never get this project's handover
+                // (pharos, 2026-11-16: the ask reached an agent working on an
+                // unrelated project). The proof is the agent session GEAR
+                // recorded on the binding; without one nobody is asked and the
+                // new captain reads the previous session instead.
                 let mut asked = false;
-                if herdr.agent_get(&previous.pane_id).ok().flatten().is_some() {
+                let same_agent = herdr
+                    .agent_get(&previous.pane_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|info| info.agent_session.map(|session| session.value))
+                    .zip(previous.session_ref.as_deref())
+                    .is_some_and(|(now_there, recorded)| {
+                        !recorded.trim().is_empty() && now_there == recorded
+                    });
+                if same_agent {
                     let target = herdr
                         .agent_names()
                         .ok()
@@ -943,7 +959,7 @@ fn handover_pointer(request: &HandoverRequest, directory: &str) -> String {
         )
     } else {
         format!(
-            "\n\nThe previous captain's pane {} hosts no agent to ask: no handover document is under {directory}. Read its {session} and write part 2 yourself.",
+            "\n\nThe previous captain's pane {} hosts no agent GEAR can prove is the previous captain (none there, or another agent session), so nobody was asked: no handover document is under {directory}. Read its {session} and write part 2 yourself.",
             request.pane
         )
     }

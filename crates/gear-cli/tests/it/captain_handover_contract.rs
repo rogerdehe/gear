@@ -186,6 +186,8 @@ fn herdr() -> FakeHerdr {
     herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
     herdr.add_agent(NEW_PANE, "claude", AgentStatus::Idle);
     herdr.set_agent_name(CAP_PANE, Some("p-captain"));
+    // The previous captain's own agent: the session its binding recorded.
+    herdr.set_agent_session(CAP_PANE, "sess-abc");
     herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
     herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
     herdr.set_pane_processes(NEW_PANE, Some(NEW_CALLER[1]), &[]);
@@ -386,7 +388,9 @@ fn take_points_at_the_session_when_the_previous_pane_is_gone() {
         .read(|tx| tx.thread_messages("p", "captain:take"))
         .unwrap();
     assert!(
-        items[0].body.contains("hosts no agent to ask"),
+        items[0]
+            .body
+            .contains("hosts no agent GEAR can prove is the previous captain"),
         "{}",
         items[0].body
     );
@@ -688,4 +692,25 @@ fn a_landing_order_needs_land_by_its_id() {
         facts.text
     );
     assert!(!facts.text.contains("station M6:"), "{}", facts.text);
+}
+
+/// A pane the user reused for another agent (another project's work) is never
+/// asked for this project's handover: only the agent session the binding
+/// recorded is the previous captain (pharos, 2026-11-16).
+#[test]
+fn take_never_asks_another_agent_in_the_previous_pane() {
+    let root = crate::scratch::temp("captain-handover-other-agent");
+    let mut s = world(&root);
+    let mut herdr = herdr();
+    herdr.set_agent_session(CAP_PANE, "another-project-session");
+
+    let taken = take(&mut s, &bare(), &mut herdr, &NEW_CALLER, &root, None, NOW).unwrap();
+
+    let request = taken.request.as_ref().expect("a handover pointer");
+    assert!(!request.asked, "another agent is never asked");
+    assert!(
+        herdr.prompts_to(CAP_PANE).is_empty(),
+        "{:?}",
+        herdr.prompts_to(CAP_PANE)
+    );
 }
