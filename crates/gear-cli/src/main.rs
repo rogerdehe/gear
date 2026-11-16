@@ -3051,7 +3051,7 @@ fn cmd_captain_handover(pane: &str, project: Option<&str>, json: bool) -> GearRe
             if request.asked {
                 "was asked to write it"
             } else {
-                "hosts no agent to ask"
+                "hosts no agent proven to be the previous captain, so nobody was asked"
             }
         ),
         (None, None) => println!(
@@ -3138,7 +3138,7 @@ fn cmd_captain_take(projects: &[String], json: bool) -> GearResult<()> {
                 if request.asked {
                     "was asked for its handover"
                 } else {
-                    "hosts no agent to ask"
+                    "hosts no agent proven to be the previous captain, so nobody was asked"
                 },
                 request.session_ref.as_deref().unwrap_or("not recorded"),
                 gear_app::captain::HANDOVER_ASK_MIN
