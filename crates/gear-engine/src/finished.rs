@@ -734,8 +734,31 @@ fn merge_records(
             resolve_records(store, project, milestone, &reason, now)
         }
         Recorded::Missing => {
-            let reason = format!("there is no branch {branch} on the remote");
-            resolve_records(store, project, milestone, &reason, now)
+            // T-710: a seat branch the remote does not have is often a pinned
+            // voyage (Lawrence M2: the captain pushed `lawrence/captain/M1`
+            // while the landing asked for `lawrence/captain/M2`). Name the
+            // captain branches the remote does have, so the captain can push
+            // the records where the landing looks.
+            let branches = remote_captain_branches(&dir, &config.conventions.remote, project);
+            if branches.is_empty() {
+                let reason = format!("there is no branch {branch} on the remote");
+                resolve_records(store, project, milestone, &reason, now)
+            } else {
+                let error = format!(
+                    "no branch {branch} on {}; the remote has {}: push this voyage's records to {branch}",
+                    config.conventions.remote,
+                    branches.join(", ")
+                );
+                tell_records_failed(
+                    store,
+                    project,
+                    milestone,
+                    &branch,
+                    &repo.integration,
+                    &error,
+                    now,
+                )
+            }
         }
         Recorded::Busy => Ok(None),
         Recorded::Failed(error) => tell_records_failed(
@@ -748,6 +771,27 @@ fn merge_records(
             now,
         ),
     }
+}
+
+/// The remote's `<project>/captain/*` branches, the `<remote>/` prefix cut
+/// (T-710).
+fn remote_captain_branches(dir: &Path, remote: &str, project: &str) -> Vec<String> {
+    let Ok(out) = merge::git(
+        dir,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            &format!("refs/remotes/{remote}/{project}/captain/"),
+        ],
+    ) else {
+        return Vec::new();
+    };
+    let prefix = format!("{remote}/");
+    out.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.strip_prefix(&prefix).unwrap_or(line).to_string())
+        .collect()
 }
 
 /// The git half of [`merge_records`]: fetch (done by the caller), compare,
@@ -2065,6 +2109,59 @@ merge_method = "merge"
             "nothing landed"
         );
         assert_eq!(landed.meta(&records_key("p", "M1")), None);
+    }
+
+    /// T-710: a landing whose seat branch is missing names the captain
+    /// branches the remote does have, and merges nothing.
+    #[test]
+    fn a_missing_seat_branch_names_the_captain_branches_the_remote_has() {
+        let mut landed = Landed::new("missing-seat");
+        sh(
+            &landed.root.path(),
+            &format!("git -C {} branch -D {CAP}", landed.origin.display()),
+        );
+        sh(
+            &landed.root.path(),
+            &format!("git -C {} branch p/captain/M0 dev", landed.origin.display()),
+        );
+
+        landed.reclaim(NOW + 600);
+
+        let items = landed.items(&records_thread("M1"));
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].state, MsgState::Open, "{items:?}");
+        assert!(items[0].urgent, "{items:?}");
+        let body = &items[0].body;
+        assert!(body.contains("no branch p/captain/M1 on origin"), "{body}");
+        assert!(body.contains("p/captain/M0"), "the branch is named: {body}");
+        assert!(
+            body.contains("push this voyage's records to p/captain/M1"),
+            "{body}"
+        );
+        assert!(
+            !landed.dev_log().contains("records: p M1"),
+            "nothing is merged: {}",
+            landed.dev_log()
+        );
+    }
+
+    /// T-710: with no captain branch at all the landing resolves as before.
+    #[test]
+    fn a_landing_with_no_captain_branch_at_all_resolves_as_before() {
+        let mut landed = Landed::new("no-captain");
+        sh(
+            &landed.root.path(),
+            &format!("git -C {} branch -D {CAP}", landed.origin.display()),
+        );
+
+        landed.reclaim(NOW + 600);
+
+        assert!(
+            landed.items(&records_thread("M1")).is_empty(),
+            "{:?}",
+            landed.items(&records_thread("M1"))
+        );
+        assert!(!landed.dev_log().contains("records: p M1"));
     }
 
     /// T-585: a branch the integration branch already holds is only deleted.
