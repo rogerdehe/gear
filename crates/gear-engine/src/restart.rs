@@ -1550,9 +1550,7 @@ fn move_name(
         }
     }
     match gear_herdr::ensure_agent_name(herdr, new_pane, &name) {
-        gear_herdr::Ensured::Named | gear_herdr::Ensured::Renamed | gear_herdr::Ensured::Kept => {
-            Ok(true)
-        }
+        gear_herdr::Ensured::Named | gear_herdr::Ensured::Renamed => Ok(true),
         // The name is still held (the old pane's clear was not seen yet) or
         // the rename could not be read: the next tick tries again.
         gear_herdr::Ensured::Taken { .. } | gear_herdr::Ensured::Failed(_) => Ok(false),

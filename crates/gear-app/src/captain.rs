@@ -470,18 +470,10 @@ fn take_one(
     let previous = store.read(|tx| tx.get_binding(&captain, seat.generation))?;
     if let Some(binding) = &previous {
         if binding.status == BindingStatus::Active && binding.pane_id == pane {
-            // T-552: a pane may hold another project's captain seat too, and
-            // the agent then carries that captain's name; naming it after this
-            // project would take that name away from every prompt to it.
-            let named = if other_captain_in_pane(store, pane, &captain)?.is_some() {
-                gear_herdr::Ensured::Kept
-            } else {
-                gear_herdr::ensure_agent_name(
-                    herdr,
-                    pane,
-                    &crate::config::agent_name(project, "captain"),
-                )
-            };
+            // The take names the fleet the captain works for now: the agent
+            // carries this project's captain name, even when the pane holds
+            // another project's captain seat too (user, 2026-11-17).
+            let named = name_after_take(store, herdr, pane, project, &captain)?;
             return Ok(Taken {
                 project: project.to_string(),
                 captain,
@@ -544,30 +536,32 @@ enum Rebound {
     HandedOver,
 }
 
-/// The other project's captain seat this pane already holds (T-552), if any.
-///
-/// A captain pane may hold the captain seats of more than one project (T-485),
-/// and the agent in it carries one name: naming it after the second project
-/// takes the first captain's name away, so every prompt to that name fails with
-/// `agent_not_found`. The name is therefore kept as it is.
-fn other_captain_in_pane(store: &mut Store, pane: &str, seat: &str) -> GearResult<Option<String>> {
-    store.read(|tx| {
-        for project in tx.project_ids()? {
-            let Some(other) = tx.captain_of(&project)? else {
-                continue;
-            };
-            if other.id == seat {
-                continue;
-            }
-            let Some(binding) = tx.get_binding(&other.id, other.generation)? else {
-                continue;
-            };
-            if binding.status == BindingStatus::Active && binding.pane_id == pane {
-                return Ok(Some(other.id));
-            }
-        }
-        Ok(None)
-    })
+/// The meta key naming the captain seat `pane` took last (user, 2026-11-17):
+/// the engine's name pass names the pane's agent after that seat.
+pub fn pane_named_key(pane: &str) -> String {
+    format!("pane.named:{pane}")
+}
+
+/// Name the agent in `pane` after the captain seat it has just taken and
+/// record that seat as the pane's name, so the engine's name pass keeps it.
+/// A pane may hold the captain seats of several projects (T-485) and its agent
+/// carries one name: the project it took last. T-552 kept the name the agent
+/// already had, so a captain that took over another fleet went on showing the
+/// fleet it came from. Deliveries go to the pane's live name, so the other
+/// seats' prompts still reach it.
+fn name_after_take(
+    store: &mut Store,
+    herdr: &mut dyn gear_herdr::HerdrAct,
+    pane: &str,
+    project: &str,
+    captain: &str,
+) -> GearResult<gear_herdr::Ensured> {
+    store.write(|tx| tx.set_meta(&pane_named_key(pane), captain))?;
+    Ok(gear_herdr::ensure_agent_name(
+        herdr,
+        pane,
+        &crate::config::agent_name(project, "captain"),
+    ))
 }
 
 /// What the steps after a rebind did.
@@ -722,8 +716,8 @@ fn finish_rebind(
     // 7. The new captain's agent carries the captain's name (T-134): Herdr
     //    clears a name when it re-detects the occupant, and a prompt to an
     //    unnamed agent is refused, so the seat must not start out nameless.
-    //    Unless the pane already holds another project's captain seat (T-552):
-    //    that captain's name stays, or every prompt to it would fail.
+    //    A pane that holds another project's captain seat too carries the
+    //    name of the project it took last: this one.
     let name = crate::config::agent_name(project, "captain");
     if let Some(from) = from.as_deref().filter(|from| *from != pane) {
         let held_by_old = herdr
@@ -735,11 +729,7 @@ fn finish_rebind(
             let _ = herdr.agent_clear_name(from);
         }
     }
-    let named = if other_captain_in_pane(store, pane, &captain)?.is_some() {
-        gear_herdr::Ensured::Kept
-    } else {
-        gear_herdr::ensure_agent_name(herdr, pane, &name)
-    };
+    let named = name_after_take(store, herdr, pane, project, &captain)?;
 
     Ok(Finished {
         named,
