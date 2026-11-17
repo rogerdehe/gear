@@ -470,15 +470,70 @@ pub fn reclaim(
             && repo.integration != config.conventions.staging
             && repo.integration.starts_with(&format!("{project}/"))
         {
-            if let Some(tip) =
-                remote_branch_tip(&repo.path, &config.conventions.remote, &repo.integration)
+            if remote_branch_tip(&repo.path, &config.conventions.remote, &repo.integration)
+                .is_some()
             {
-                if branch_on_release(&repo.path, &config, &tip, &repo.release) {
+                if branch_on_release(&repo.path, &config, &repo.release) {
                     let _ = delete_remote_branch(
                         &repo.path,
                         &config.conventions.remote,
                         &repo.integration,
                     );
+                } else {
+                    // M7.3: the integration branch is named as not on the
+                    // release branch — unless only the voyage's records are
+                    // missing: those are the captain's own files, and the line
+                    // says so once, not urgently.
+                    let remote = &config.conventions.remote;
+                    let added = gear_app::base::added_paths(
+                        Path::new(&repo.path),
+                        &format!("{remote}/{}", repo.release),
+                        &format!("{remote}/{}", repo.integration),
+                    )
+                    .unwrap_or_default();
+                    let voyage =
+                        gear_model::layout::voyage_dir(&repo.voyage_dir, project, &milestone);
+                    let only_records = !added.is_empty()
+                        && added
+                            .iter()
+                            .all(|path| path.starts_with(&format!("{voyage}/")));
+                    if only_records {
+                        let key = format!("records_unreleased:{project}:{milestone}");
+                        if store.read(|tx| tx.get_meta(&key))?.is_none() {
+                            let body = format!(
+                                "only the voyage records on {} are not on {}",
+                                repo.integration, repo.release
+                            );
+                            store.write(|tx| {
+                                let Some(captain) = tx.captain_of(project)? else {
+                                    return Ok(());
+                                };
+                                tx.insert_message(&gear_store::NewMessage {
+                                    meta: None,
+                                    project: project.to_string(),
+                                    thread: records_thread(&milestone),
+                                    task: None,
+                                    attempt: None,
+                                    sender: "engine".into(),
+                                    sender_gen: 0,
+                                    recipient: captain.id,
+                                    kind: gear_model::MsgKind::System,
+                                    urgent: false,
+                                    body,
+                                    reply_to: None,
+                                    needs_ack: false,
+                                    state: MsgState::Open,
+                                    created: now,
+                                })?;
+                                tx.set_meta(&key, "1")
+                            })?;
+                        }
+                    } else {
+                        left.push(format!(
+                            "branch {} (not on {})",
+                            repo.integration, repo.release
+                        ));
+                    }
                 }
             }
         }
@@ -1103,15 +1158,12 @@ fn remove_worktree(repo: &str, worktree: &ProjectWorktree) -> Result<(), String>
     Ok(())
 }
 
-/// Whether the branch's tip is on the integration branch.
+/// Whether the branch's tip is on the integration branch (M7.3): by ancestry,
+/// or through the `Gear-Candidate`/`Gear-Source` trailer of a squash commit.
 fn branch_on_integration(repo: &str, config: &ProjectConfig, tip: &str) -> bool {
     let remote = &config.conventions.remote;
     let integration = format!("{remote}/{}", config.conventions.integration);
-    merge::git(
-        Path::new(repo),
-        &["merge-base", "--is-ancestor", tip, &integration],
-    )
-    .is_ok()
+    gear_app::base::landed_in(Path::new(repo), &integration, tip).unwrap_or(false)
 }
 
 /// The tip of a branch on the remote, if it is there (T-622).
@@ -1136,19 +1188,17 @@ fn remote_branch_tip(repo: &str, remote: &str, branch: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Whether the branch's tip is on the release branch (T-622).
-fn branch_on_release(repo: &str, config: &ProjectConfig, tip: &str, release: &str) -> bool {
+/// Whether the integration branch adds nothing to the release branch (T-622,
+/// M7.3): it is an ancestor of it, or its content is already there — a squash
+/// landed the same tree.
+fn branch_on_release(repo: &str, config: &ProjectConfig, release: &str) -> bool {
     let remote = &config.conventions.remote;
-    merge::git(
+    gear_app::base::adds_nothing(
         Path::new(repo),
-        &[
-            "merge-base",
-            "--is-ancestor",
-            tip,
-            &format!("{remote}/{release}"),
-        ],
+        &format!("{remote}/{release}"),
+        &format!("{remote}/{}", config.conventions.integration),
     )
-    .is_ok()
+    .unwrap_or(false)
 }
 
 /// Delete a branch on the remote.
@@ -1496,6 +1546,22 @@ merge_method = "merge"
                      git add -A && git commit -q -m 'later on dev' && git push -q origin dev"
                 ),
             );
+        }
+
+        /// The project's config with `integration` set to `branch`.
+        fn set_integration(&mut self, branch: &str) {
+            let text = config_text(&self.work).replace(
+                "integration = \"dev\"",
+                &format!("integration = \"{branch}\""),
+            );
+            self.store
+                .write(|tx| {
+                    let mut project = tx.get_project("p")?.unwrap();
+                    project.config_toml = text;
+                    tx.update_project(&project)?;
+                    Ok(())
+                })
+                .unwrap();
         }
 
         /// The project's config with `merge_method` set to `method`.
@@ -2327,6 +2393,135 @@ merge_method = "merge"
                 .iter()
                 .all(|item| !item.body.contains("branch dev")),
             "the integration branch is never named"
+        );
+    }
+
+    /// M7.3: a leftover task branch whose work was squashed onto the
+    /// integration branch counts as on it — the squash commit names it by
+    /// `Gear-Candidate` — and is deleted.
+    #[test]
+    fn a_task_branch_squashed_onto_the_integration_branch_is_deleted() {
+        let mut landed = Landed::new("squashed-branch");
+        sh(
+            &landed.work,
+            "git checkout -q -b p/hull/t9 dev && echo work > work.txt && git add work.txt && \
+             git commit -q -m 'the work' && git push -q origin p/hull/t9 && git checkout -q dev",
+        );
+        let sha = sh(
+            &landed.root.path(),
+            &format!("git -C {} rev-parse p/hull/t9", landed.origin.display()),
+        );
+        sh(
+            &landed.work,
+            &format!(
+                "git commit -q --allow-empty -m 'T-9: the goal\n\nGear-Candidate: {sha}' && \
+                 git push -q origin dev"
+            ),
+        );
+
+        landed.reclaim(NOW + 600);
+
+        let branches = landed.origin_branches();
+        assert!(
+            !branches.lines().any(|branch| branch == "p/hull/t9"),
+            "the squashed branch is deleted: {branches}"
+        );
+    }
+
+    /// M7.3: an integration branch squashed onto the release branch by a pull
+    /// request adds nothing to it, so the reclaim deletes it like one merged.
+    #[test]
+    fn an_integration_branch_squashed_onto_release_is_deleted() {
+        let mut landed = Landed::new("squashed-integration");
+        sh(
+            &landed.work,
+            "git checkout -q -b p/dev dev && echo work > work.txt && git add work.txt && \
+             git commit -q -m 'the work' && git push -q origin p/dev",
+        );
+        // The same content reaches main by a squash (a pull request).
+        sh(
+            &landed.work,
+            "git checkout -q main && git merge -q --squash p/dev && git commit -q -m 'the work' && \
+             git push -q origin main",
+        );
+        landed.set_integration("p/dev");
+
+        landed.reclaim(NOW + 600);
+
+        let branches = landed.origin_branches();
+        assert!(
+            !branches.lines().any(|branch| branch == "p/dev"),
+            "the integration branch whose content is on main is deleted: {branches}"
+        );
+    }
+
+    /// M7.3: an integration branch with a code change of its own is named as
+    /// not on the release branch, urgently.
+    #[test]
+    fn an_integration_branch_with_a_code_change_is_named() {
+        let mut landed = Landed::new("integration-code");
+        sh(
+            &landed.work,
+            "git checkout -q -b p/dev dev && echo work > work.txt && git add work.txt && \
+             git commit -q -m 'the work' && git push -q origin p/dev",
+        );
+        landed.set_integration("p/dev");
+
+        landed.reclaim(NOW + 600);
+
+        let items = landed.items(RECLAIM_THREAD);
+        assert!(
+            items
+                .iter()
+                .any(|item| item.body.contains("branch p/dev (not on main)")),
+            "the branch is named: {items:?}"
+        );
+        assert!(items.iter().any(|item| item.urgent), "{items:?}");
+        assert!(
+            landed
+                .origin_branches()
+                .lines()
+                .any(|branch| branch == "p/dev"),
+            "the branch is kept"
+        );
+    }
+
+    /// M7.3: an integration branch whose only unreleased change is the voyage's
+    /// records says so once, not urgently; a second scan writes nothing.
+    #[test]
+    fn an_integration_branch_with_only_records_unreleased_says_so_once() {
+        let mut landed = Landed::new("integration-records");
+        sh(
+            &landed.work,
+            "git checkout -q -b p/dev dev && mkdir -p voyages/M1 && \
+             echo report > voyages/M1/report.md && git add voyages/M1/report.md && \
+             git commit -q -m 'records' && git push -q origin p/dev",
+        );
+        landed.set_integration("p/dev");
+
+        landed.reclaim(NOW + 600);
+
+        let items = landed.items(&records_thread("M1"));
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(!items[0].urgent, "not urgent: {items:?}");
+        assert!(
+            items[0]
+                .body
+                .contains("only the voyage records on p/dev are not on main"),
+            "{}",
+            items[0].body
+        );
+        assert_eq!(
+            landed.meta(&format!("records_unreleased:p:M1")).as_deref(),
+            Some("1")
+        );
+
+        // A second scan writes nothing.
+        landed.reclaim(NOW + 900);
+        assert_eq!(
+            landed.items(&records_thread("M1")).len(),
+            1,
+            "one line, not two"
         );
     }
 
