@@ -117,7 +117,11 @@ const SESSION_SWITCH_GRACE_S: i64 = 120;
 /// and held every temp slot for over ten minutes): the seat is released as
 /// T-399 did. A step without a readable `step_at` has no age to trust: it says
 /// nothing about this generation either.
-fn a_session_switch_is_in_flight(store: &mut Store, seat: &SeatRow, now: Ts) -> GearResult<bool> {
+pub(crate) fn a_session_switch_is_in_flight(
+    store: &mut Store,
+    seat: &SeatRow,
+    now: Ts,
+) -> GearResult<bool> {
     let Some(raw) = store.read(|tx| tx.get_meta(&format!("engine.session_step.{}", seat.id)))?
     else {
         return Ok(false);

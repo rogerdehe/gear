@@ -221,7 +221,7 @@ fn working_of(
     now: Ts,
 ) -> GearResult<Option<Working>> {
     let open = tx.open_attempts_of_seat(seat_id)?;
-    let attempt = open.into_iter().find(|attempt| {
+    let in_flight = |attempt: &&gear_store::AttemptRow| {
         matches!(
             attempt.state,
             AttemptState::Delivered
@@ -229,7 +229,21 @@ fn working_of(
                 | AttemptState::Stopped
                 | AttemptState::Unknown
         )
-    });
+    };
+    // The task worked now: one without a declared wait first (a lane works
+    // its next task while another waits), else any in flight.
+    let unwaited = |attempt: &&gear_store::AttemptRow| {
+        tx.get_task(project, &attempt.task)
+            .ok()
+            .flatten()
+            .is_some_and(|task| task.wait_on.is_none())
+    };
+    let attempt = open
+        .iter()
+        .filter(in_flight)
+        .find(unwaited)
+        .or_else(|| open.iter().find(in_flight))
+        .cloned();
     let Some(attempt) = attempt else {
         return Ok(None);
     };
