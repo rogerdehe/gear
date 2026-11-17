@@ -817,6 +817,34 @@ fn records_step(
         delete_records_branch(&dir, &remote, branch);
         return Ok(Recorded::Empty);
     }
+    // T-699: the records branch carries the voyage's records and nothing else.
+    // A file outside the voyage folder is the captain's work, which belongs to
+    // a task: refuse before anything is merged or deleted.
+    let voyage = gear_model::layout::voyage_dir(&repo.voyage_dir, project, milestone);
+    let changed = match merge::git(
+        &dir,
+        &[
+            "diff",
+            "--name-only",
+            &format!("{remote}/{}...{theirs}", repo.integration),
+        ],
+    ) {
+        Ok(paths) => paths,
+        Err(error) => return Ok(Recorded::Failed(error)),
+    };
+    let outside: Vec<&str> = changed
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .filter(|path| !path.starts_with(&format!("{voyage}/")))
+        .collect();
+    if !outside.is_empty() {
+        let named: Vec<&str> = outside.iter().take(10).copied().collect();
+        return Ok(Recorded::Failed(format!(
+            "the captain's branch changes files outside {voyage}: {}; move them to a task",
+            named.join(", ")
+        )));
+    }
     let worktree = match merge::open_integration_worktree(store, herdr, repo, project, config, now)
     {
         Ok(worktree) => worktree,
@@ -859,6 +887,19 @@ fn records_step(
         let _ = git(&["merge", "--abort"]);
         let _ = git(&["reset", "--hard", &base]);
         return Ok(Recorded::Failed(error));
+    }
+    // T-699: in squash mode the records land as one commit on the integration
+    // tip, never a merge commit: the merge above staged the branch's content,
+    // the soft reset moves the tip back under it, and the commit lands it.
+    if repo.merge_method == gear_app::config::MergeMethod::Squash {
+        if let Err(error) = git(&["reset", "--soft", &base]) {
+            let _ = git(&["reset", "--hard", &base]);
+            return Ok(Recorded::Failed(error));
+        }
+        if let Err(error) = git(&["commit", "-m", &message]) {
+            let _ = git(&["reset", "--hard", &base]);
+            return Ok(Recorded::Failed(error));
+        }
     }
     if let Err(error) = git(&[
         "push",
@@ -1285,6 +1326,10 @@ profile = "pi"
 [conventions]
 integration = "dev"
 gate = "true"
+# The fixture names its own voyage folder and keeps today's merge commits;
+# the squash is tested on its own.
+voyage_dir = "voyages/{{milestone}}"
+merge_method = "merge"
 "#,
             repo.display()
         )
@@ -1444,11 +1489,29 @@ gate = "true"
             sh(
                 &self.work,
                 &format!(
-                    "git checkout -q {CAP} && echo records > README.md && git commit -q -am 'records of M1' && \
+                    "git checkout -q {CAP} && mkdir -p voyages/M1 && echo records > voyages/M1/report.md && \
+                     git add -A && git commit -q -m 'records of M1' && \
                      git push -q origin {CAP} && git checkout -q dev && \
-                     echo later > README.md && git commit -q -am 'later on dev' && git push -q origin dev"
+                     mkdir -p voyages/M1 && echo later > voyages/M1/report.md && \
+                     git add -A && git commit -q -m 'later on dev' && git push -q origin dev"
                 ),
             );
+        }
+
+        /// The project's config with `merge_method` set to `method`.
+        fn use_merge_method(&mut self, method: &str) {
+            let text = config_text(&self.work).replace(
+                "merge_method = \"merge\"",
+                &format!("merge_method = \"{method}\""),
+            );
+            self.store
+                .write(|tx| {
+                    let mut project = tx.get_project("p")?.unwrap();
+                    project.config_toml = text;
+                    tx.update_project(&project)?;
+                    Ok(())
+                })
+                .unwrap();
         }
 
         /// An accepted attempt of the voyage's only task: handed in and judged,
@@ -1609,6 +1672,84 @@ gate = "true"
         assert!(
             landed.items(&records_thread("M1")).is_empty(),
             "nothing to tell the captain"
+        );
+    }
+
+    /// T-699: the records branch carries the voyage's records only. A code
+    /// file is refused before anything is merged or deleted, and the item
+    /// names it.
+    #[test]
+    fn a_records_branch_changing_a_code_file_is_refused() {
+        let mut landed = Landed::new("outside");
+        landed.records("src/main.rs", "fn main() {}");
+
+        landed.reclaim(NOW + 600);
+
+        let items = landed.items(&records_thread("M1"));
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].state, MsgState::Open, "{items:?}");
+        let body = &items[0].body;
+        assert!(body.contains("src/main.rs"), "the file is named: {body}");
+        assert!(
+            body.contains("outside voyages/M1"),
+            "the voyage folder is named: {body}"
+        );
+        assert!(
+            body.contains("move them to a task"),
+            "the captain is told what to do: {body}"
+        );
+        assert!(
+            landed.origin_branches().contains(CAP),
+            "nothing is deleted: {}",
+            landed.origin_branches()
+        );
+        assert!(landed.local_branch(CAP), "not even locally");
+        assert!(
+            !landed.dev_log().contains("records: p M1"),
+            "nothing landed: {}",
+            landed.dev_log()
+        );
+        assert_eq!(landed.meta(&records_key("p", "M1")), None);
+    }
+
+    /// T-699: in squash mode the records land as one commit on the integration
+    /// tip, never a merge commit.
+    #[test]
+    fn a_squashed_records_landing_is_one_commit() {
+        let mut landed = Landed::new("squash");
+        landed.records("voyages/M1/report.md", "the voyage report");
+        landed.use_merge_method("squash");
+
+        landed.reclaim(NOW + 600);
+
+        let log = landed.dev_log();
+        assert_eq!(log.lines().next(), Some("records: p M1"), "{log}");
+        let parents = sh(
+            &landed.root.path(),
+            &format!(
+                "git -C {} rev-list --parents -n 1 dev",
+                landed.origin.display()
+            ),
+        );
+        assert_eq!(
+            parents.split_whitespace().count(),
+            2,
+            "one parent: no merge commit ({parents})"
+        );
+        assert_eq!(
+            sh(
+                &landed.root.path(),
+                &format!(
+                    "git -C {} show dev:voyages/M1/report.md",
+                    landed.origin.display()
+                )
+            ),
+            "the voyage report"
+        );
+        assert!(
+            !landed.origin_branches().contains(CAP),
+            "the branch is gone: {}",
+            landed.origin_branches()
         );
     }
 
@@ -2004,8 +2145,9 @@ gate = "true"
         sh(
             &landed.work,
             &format!(
-                "git checkout -q -b {CAP} dev && echo more > more.txt && git add more.txt && \
-                 git commit -q -m 'more records' && git push -q origin {CAP} && git checkout -q dev"
+                "git checkout -q -b {CAP} origin/dev && echo more > voyages/M1/plan.md && \
+                 git add voyages/M1/plan.md && git commit -q -m 'more records' && \
+                 git push -q origin {CAP} && git checkout -q dev"
             ),
         );
         let second_tip = sh(
