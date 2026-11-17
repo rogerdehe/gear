@@ -574,7 +574,7 @@ pub fn tick(
             // A hand restart of an agent is a new session in the same generation
             // (T-97): the binding follows what the pane reports, so a delivery that
             // was never confirmed can be sent again without a store edit.
-            observe::record_sessions(store, &observed)?;
+            observe::record_sessions(store, herdr, &observed)?;
             let present: Vec<gear_store::SeatRow> = observed
                 .iter()
                 .filter(|obs| obs.presence == observe::Presence::Present)

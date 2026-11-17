@@ -756,6 +756,18 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
     if binding.status != BindingStatus::Active {
         return void("the seat's binding is not active".to_string());
     }
+    // Another agent holds the seat's pane (pharos, 2026-11-16): nothing is
+    // typed into it. A delivery waits for the seat's agent or a new binding;
+    // a doorbell is dropped, its items stay open for the next ring.
+    if crate::observe::is_foreign(tx, &op.seat, op.generation)? {
+        if op.kind == OpKind::Deliver {
+            return Ok(Prepared::Wait { id: op.id.clone() });
+        }
+        return void(format!(
+            "another agent holds the pane {}: it is not the seat's agent",
+            binding.pane_id
+        ));
+    }
     if op.kind == OpKind::Deliver {
         // The attempt this delivery was written for must still be the seat's
         // open attempt. Deliveries are only intended for attempts
@@ -3074,6 +3086,36 @@ mod tests {
                 .any(|c| matches!(c, Call::SendKeys { .. })),
             "the captain's turn is not cut"
         );
+    }
+
+    /// pharos, 2026-11-16: a pane another agent holds gets no doorbell. The
+    /// op is voided before anything is typed; the item stays open.
+    #[test]
+    fn a_doorbell_never_reaches_another_agent_in_the_seat_pane() {
+        let mut store = interrupt_world();
+        store
+            .write(|tx| {
+                let id = message_for(tx, "p:captain", true)?;
+                doorbell_for(tx, "p:captain", &id)?;
+                tx.set_meta(&crate::observe::foreign_key("p:captain", 1), "s9")?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(CAP_PANE, "codex", AgentStatus::Idle, "p-captain");
+
+        execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
+
+        assert!(
+            !herdr
+                .calls
+                .iter()
+                .any(|c| matches!(c, Call::Prompt { .. } | Call::SendKeys { .. })),
+            "nothing is typed into a pane another agent holds: {:?}",
+            herdr.calls
+        );
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_ne!(op.state, OpState::Submitted, "{op:?}");
     }
 
     #[test]

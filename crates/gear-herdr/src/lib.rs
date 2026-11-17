@@ -224,6 +224,14 @@ pub trait HerdrRead {
     /// client does not carry the name, so this reads `agent.list` itself.
     /// `None` = Herdr shows the agent with no name.
     fn agent_names(&mut self) -> Result<BTreeMap<String, Option<String>>, ObserveError>;
+    /// The working directory Herdr reports for every pane, by pane id. Read
+    /// only when an agent's session in a bound pane changed: a new session in
+    /// another repository is another agent, not the seat's agent restarted.
+    /// The default knows none, and a pane with no reported directory is never
+    /// judged by it.
+    fn pane_cwds(&mut self) -> Result<BTreeMap<String, String>, ObserveError> {
+        Ok(BTreeMap::new())
+    }
     /// The Herdr socket this door asked, for an error a reader can trace
     /// (T-314). `None` = a fake or a door that does not know its socket.
     fn socket(&self) -> Option<String> {
@@ -374,6 +382,20 @@ impl HerdrRead for SocketHerdr {
             .pane_list(None)
             .map_err(|e| ObserveError(format!("pane.list failed: {e}")))?;
         Ok(panes.into_iter().map(|pane| pane.pane_id).collect())
+    }
+
+    fn pane_cwds(&mut self) -> Result<BTreeMap<String, String>, ObserveError> {
+        let panes = self
+            .client
+            .pane_list(None)
+            .map_err(|e| ObserveError(format!("pane.list failed: {e}")))?;
+        Ok(panes
+            .into_iter()
+            .filter_map(|pane| {
+                let cwd = pane.cwd.filter(|cwd| !cwd.trim().is_empty())?;
+                Some((pane.pane_id, cwd))
+            })
+            .collect())
     }
 
     fn agent_names(&mut self) -> Result<BTreeMap<String, Option<String>>, ObserveError> {

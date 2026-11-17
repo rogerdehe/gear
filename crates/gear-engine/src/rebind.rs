@@ -103,6 +103,11 @@ pub fn tick(
                 continue;
             }
             let Some(binding) = binding else { continue };
+            // Another agent holds the old pane: no exit is sent to it and the
+            // pane is not closed (pharos, 2026-11-16).
+            if store.read(|tx| crate::observe::is_foreign(tx, &seat.id, seat.generation))? {
+                continue;
+            }
             let occupant = match herdr.agent_get(&binding.pane_id) {
                 Ok(value) => value,
                 Err(_) => continue,

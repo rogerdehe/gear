@@ -17,6 +17,8 @@ use gear_store::Store;
 
 /// The code of a close refused because another seat uses the pane.
 pub const PANE_IN_USE: &str = "pane_in_use";
+/// The refusal code of a pane another agent holds.
+pub const PANE_FOREIGN: &str = "pane_foreign";
 
 /// The seats other than `own` whose active binding is on `pane`.
 pub fn others_on_pane(store: &mut Store, pane: &str, own: &str) -> GearResult<Vec<String>> {
@@ -34,6 +36,23 @@ pub fn close_seat_pane(
     pane: &str,
     own: &str,
 ) -> GearResult<Outcome<()>> {
+    // Another agent holds the pane (pharos, 2026-11-16): closing it would end
+    // somebody else's work.
+    let foreign = store.read(|tx| {
+        let Some(seat) = tx.get_seat(own)? else {
+            return Ok(false);
+        };
+        let bound_here = tx
+            .get_binding(own, seat.generation)?
+            .is_some_and(|binding| binding.pane_id == pane);
+        Ok(bound_here && crate::observe::is_foreign(tx, own, seat.generation)?)
+    })?;
+    if foreign {
+        return Ok(Outcome::Refused {
+            code: PANE_FOREIGN.to_string(),
+            message: format!("pane {pane} is not closed for {own}: another agent holds it"),
+        });
+    }
     let others = others_on_pane(store, pane, own)?;
     if !others.is_empty() {
         return Ok(Outcome::Refused {

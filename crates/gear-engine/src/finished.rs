@@ -780,6 +780,27 @@ fn records_step(
     {
         return Ok(Recorded::Missing);
     }
+    // The integration branch the config names must be on the remote: a local
+    // branch of that name may be stale, and the records never go into it
+    // (Lawrence M4.1, 2026-11-16: `lawrence/dev` was not on the remote).
+    if merge::git(
+        &dir,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/{remote}/{}", repo.integration),
+        ],
+    )
+    .is_err()
+    {
+        return Ok(Recorded::Failed(format!(
+            "the integration branch {} that [conventions].integration names is not on {remote}: \
+             the records are not merged into a local copy of it. Push that branch, or apply a \
+             config whose integration branch is the one the voyage worked on",
+            repo.integration
+        )));
+    }
     let ahead = match merge::git(
         &dir,
         &[
@@ -1912,6 +1933,36 @@ gate = "true"
         assert!(
             !landed.dev_log().contains("records: p M1"),
             "nothing landed"
+        );
+        assert_eq!(landed.meta(&records_key("p", "M1")), None);
+    }
+
+    /// Lawrence M4.1, 2026-11-16: the integration branch the config names is
+    /// not on the remote. The records go into no local copy of it: one item
+    /// names the branch and the config key, and nothing is deleted.
+    #[test]
+    fn records_are_not_merged_into_an_integration_branch_missing_on_the_remote() {
+        let mut landed = Landed::new("noint");
+        landed.records("voyages/M1/report.md", "the voyage report");
+        sh(
+            &landed.root.path(),
+            &format!(
+                "git -C {} update-ref -d refs/heads/dev",
+                landed.origin.display()
+            ),
+        );
+
+        landed.merge_records(NOW + 600);
+
+        let items = landed.items(&records_thread("M1"));
+        assert_eq!(items.len(), 1, "{items:?}");
+        let body = &items[0].body;
+        assert!(body.contains("[conventions].integration"), "{body}");
+        assert!(body.contains("not on origin"), "{body}");
+        assert!(
+            landed.origin_branches().contains(CAP),
+            "nothing is deleted: {}",
+            landed.origin_branches()
         );
         assert_eq!(landed.meta(&records_key("p", "M1")), None);
     }

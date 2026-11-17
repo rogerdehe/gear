@@ -109,6 +109,8 @@ struct FakePane {
     name: Option<String>,
     screen: String,
     revision: u64,
+    /// The working directory Herdr reports for the pane.
+    cwd: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -176,6 +178,7 @@ impl FakeHerdr {
                 name: None,
                 screen: String::new(),
                 revision: 0,
+                cwd: None,
             },
         );
     }
@@ -189,6 +192,7 @@ impl FakeHerdr {
                 name: None,
                 screen: String::new(),
                 revision: 1,
+                cwd: None,
             },
         );
     }
@@ -286,6 +290,11 @@ impl FakeHerdr {
         let a = p.agent.as_mut().expect("pane has no agent");
         a.2 = Some(session.to_string());
         p.revision += 1;
+    }
+
+    /// The working directory Herdr reports for `pane`.
+    pub fn set_pane_cwd(&mut self, pane: &str, cwd: &str) {
+        self.panes.get_mut(pane).expect("unknown pane").cwd = Some(cwd.to_string());
     }
 
     pub fn set_screen(&mut self, pane: &str, screen: &str) {
@@ -451,6 +460,17 @@ impl HerdrRead for FakeHerdr {
 
     fn panes(&mut self) -> Result<Vec<String>, ObserveError> {
         Ok(self.panes.keys().cloned().collect())
+    }
+
+    fn pane_cwds(&mut self) -> Result<BTreeMap<String, String>, ObserveError> {
+        if self.observe_fails {
+            return Err(ObserveError("injected".into()));
+        }
+        Ok(self
+            .panes
+            .iter()
+            .filter_map(|(id, p)| Some((id.clone(), p.cwd.clone()?)))
+            .collect())
     }
 
     fn agent_names(&mut self) -> Result<BTreeMap<String, Option<String>>, ObserveError> {
