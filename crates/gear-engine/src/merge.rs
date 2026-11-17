@@ -7519,7 +7519,9 @@ fn tell_captain_lost(
                     "refs/remotes/{}/{}",
                     config.conventions.remote, repo.integration
                 );
-                if is_ancestor(Path::new(&repo.path), &candidate, &reference) {
+                if gear_app::base::landed_in(Path::new(&repo.path), &reference, &candidate)
+                    .unwrap_or(false)
+                {
                     store.write(|tx| {
                         tx.set_attempt_time(project, &task, attempt, AttemptStep::Merged, now)?;
                         tx.set_meta(
@@ -7558,7 +7560,8 @@ fn tell_captain_lost(
             "refs/remotes/{}/{}",
             config.conventions.remote, repo.integration
         );
-        if is_ancestor(Path::new(&repo.path), &candidate, &reference) {
+        if gear_app::base::landed_in(Path::new(&repo.path), &reference, &candidate).unwrap_or(false)
+        {
             store.write(|tx| {
                 tx.set_attempt_time(project, &task, attempt, AttemptStep::Merged, now)?;
                 tx.set_meta(
@@ -9356,15 +9359,6 @@ mod tests {
     fn a_told_lost_task_whose_candidate_landed_closes_its_items() {
         let scratch = Scratch::new("merge-lost-landed-later");
         let candidate = scratch.head_of("heat/t5");
-        assert_eq!(
-            gear_app::base::landed_in(&scratch.work, "refs/remotes/origin/dev", &candidate),
-            Ok(true),
-            "the squash names the candidate: {}",
-            sh(
-                &scratch.work,
-                "git log --format=%B -1 refs/remotes/origin/dev"
-            )
-        );
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -17691,6 +17685,15 @@ gate = "{project_gate}"
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
         let cfg = test_cfg();
 
+        assert_eq!(
+            gear_app::base::landed_in(&scratch.work, "refs/remotes/origin/dev", &candidate),
+            Ok(true),
+            "the squash names the candidate: {}",
+            sh(
+                &scratch.work,
+                "git log --format=%B -1 refs/remotes/origin/dev"
+            )
+        );
         merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
         let items = store
             .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
