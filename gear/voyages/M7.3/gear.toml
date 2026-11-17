@@ -1,0 +1,66 @@
+# GEAR's own project config for voyage M7.3: two lanes on the self-hosted DeepSeek V4.1 Flash (hk-dgx-1), reviewers on DeepSeek V4 Pro through opencode-go in pi (user, 2026-11-17).
+# Registered with: GEAR_ADMIN=1 gear admin init gear/voyages/M7.3/gear.toml
+
+[project]
+id = "gear"
+herdr_session = "orch"
+repo = "/Volumes/Data/myai/gear"
+
+[quota]
+lanes = 2
+temps = 2
+
+[captain]
+pane = "w2:p2"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "hull"
+duty = "M7.3 engine merge path: the squash, the feature replay, bisect, the merged checks, the parallel-change check (merge.rs, parallel.rs, review.rs)"
+owns = ["crates/gear-engine/src/merge.rs", "crates/gear-engine/src/parallel.rs", "crates/gear-engine/src/review.rs"]
+charter = """You run on a flash model. Implement the packet exactly as written, in the files it names; never design, widen or reinterpret it. When the packet is unclear, contradicts the code, or cannot be done as written, ask the captain with `gear send --kind question` and give a default, instead of guessing."""
+kind = "pi"
+profile = "pi"
+models = [
+  { model = "hk-dgx-1/DeepSeek-V4.1-Flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 500 },
+]
+
+[[lanes]]
+name = "mast"
+duty = "M7.3 config, shared git helpers, plan checks, CLI, the reclaim and records (finished.rs), skill and docs"
+owns = ["crates/gear-engine/src/finished.rs", "crates/gear-app/", "crates/gear-model/", "crates/gear-cli/", "crates/gear-herdr/", "crates/gear-store/", "crates/gear-board/", "crates/gear-forge/", "crates/gear-usage/", "skills/", "docs/", "README.md"]
+charter = """You run on a flash model. Implement the packet exactly as written, in the files it names; never design, widen or reinterpret it. When the packet is unclear, contradicts the code, or cannot be done as written, ask the captain with `gear send --kind question` and give a default, instead of guessing."""
+kind = "pi"
+profile = "pi"
+models = [
+  { model = "hk-dgx-1/DeepSeek-V4.1-Flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 500 },
+]
+
+# GEAR lanes run pi without pi-lens (uninstalled 2026-10-28).
+[profiles.pi]
+unattended_args = ["--approve"]
+
+[temps]                  # reviewers: pi on DeepSeek V4 Pro through opencode-go (user, 2026-11-17)
+charter = """You run on a strong model. Judge one candidate against its contract and the voyage's bar (DELIVERABLE): an error in normal use blocks it, an edge case outside normal use is logged, a style preference is neither. Check what the contract asks, in the files it names, and run only the acceptance it names."""
+kind = "pi"
+profile = "pi"
+
+[models]
+lanes = [
+  { model = "hk-dgx-1/DeepSeek-V4.1-Flash-1017", cli = "pi", args = ["--thinking", "high"], context_window_k = 500 },
+]
+# The reviewer never runs the model it reviews.
+review = [
+  { model = "opencode-go/deepseek-v4-pro", cli = "pi", args = ["--thinking", "high"], context_window_k = 1000 },
+]
+on_quota = { lanes = "wait", review = "wait" }
+quota_reset_h = 5
+
+[conventions]
+integration = "dev"
+release = "main"
+gate = "make gate"
+
+[timing]
+handin_base_window_min = 120

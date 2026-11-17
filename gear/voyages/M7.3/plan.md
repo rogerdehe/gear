@@ -1,0 +1,82 @@
+<!-- gear-plan project=gear base=1289 -->
+# Goal
+A merge leaves one commit per gated change and no merge commits: each task lands as one squashed commit on the integration tip, a feature lands by replaying its tasks' commits, and everything in GEAR that asked git "is this merged" still answers right. Shipped as a v0.7.x patch live for every project on this machine.
+
+# Milestone M7.3: squash and rebase, released
+done: (1) with `[conventions].merge_method = "squash"` (the default) a task merge in push mode lands one commit on the integration tip: subject `T-n: <goal>`, the lane's commit subjects in the body, trailers `Gear-Task`, `Gear-Attempt`, `Gear-Candidate` and one `Gear-Source` per merged commit; `merge_method = "merge"` keeps today's merge commits; (2) a feature's integration task lands by replaying the feature's own commits onto the integration tip with no merge commit, and falls back to one squashed commit when the replay conflicts; bisect finds a feature's members by their `Gear-Task` trailer; (3) every check that asked "is this commit merged" by ancestry also accepts a commit on the branch whose trailer names it: the merge restart, the lost-merge scan, carried tasks, the coverage report, the plan's merged check, the leftover-branch sweep and the parallel-change check; the release check accepts an integration branch whose content is on the release branch after a squash; (4) the M7.1 leftovers in the same code: the parallel-change check reads the branch's own commits, an `integrated-by` pass whose candidate differs from the integration branch only in voyage files is accepted, a landing whose only unreleased change is its records says so once and not as urgent, and the records merge refuses a seat branch that changes files outside the voyage folder; (5) released as a v0.7.x patch, installed, skills reinstalled, the three engines on it, the captains told
+bar: DELIVERABLE: an error in normal use blocks the task; edge cases outside normal use are logged
+eta: 5h
+depart: now
+
+# Decisions
+- 2026-11-17 01:40 confirmed: M7.3 departure, not departed -> departs now with the scope above, eta 5h | why: the user ordered the voyage's work and staffing in their own words
+- 2026-11-17 note: scope agreed with the user: local squash plus rebase (one commit per gated change, never one per voyage), and the four M7.1 leftovers that sit in the same merge and landing code (parallel check, integrated-by, records-only landing, records merge files) | why: the user's call after the M8 backlog review; M7.3 is a small voyage, patches stay v0.7.x
+- 2026-11-17 note: staffing: hull and mast on the self-hosted DeepSeek V4.1 Flash, two reviewers on DeepSeek V4 Pro through opencode-go | why: the user's staffing for M7.3
+- 2026-11-17 note: a squash is built from the merge GEAR already does: merge as today on the base, then `git reset --soft <base>` and one commit, so conflicts, the gate and the train behave as before | why: the smallest change that keeps every merge path (single, train, batch, feature member) on one code path
+
+# Queue
+## T-690 [must] lane=hull milestone=M7.3 required
+goal: The parallel-change check reads the branch's own commits. In crates/gear-engine/src/parallel.rs: `changed(repo, from, to)` for a task branch lists the files of the branch's own non-merge commits, `git log --no-merges --name-only --format= -z <from>..<to>`, instead of `git diff <from>...<to>` (a stale or multiple merge base listed files another task already landed, M7.1 M-8738). Keep the cache keyed as today.
+accept: tests: a branch that merged dev after dev took another task's change to `plan.rs` is not reported as sharing `plan.rs`; the existing parallel tests pass.
+estimate: 45
+deps: -
+
+## T-691 [must] lane=mast milestone=M7.3 required
+goal: Config and commit message for the squash. (a) In crates/gear-app/src/config.rs add `merge_method: MergeMethod` to `Conventions` (reuse the existing `MergeMethod` enum, default `Squash`), parsed from `[conventions].merge_method` ("squash" | "merge"), and resolve it onto `Repo` as `pub merge_method: MergeMethod` the way `Repo.integration` is resolved (a `[[repos]]` entry may not override it). (b) In crates/gear-model/src/commit.rs add `pub const TRAILER_TASK: &str = "Gear-Task"`, `TRAILER_ATTEMPT = "Gear-Attempt"`, `TRAILER_CANDIDATE = "Gear-Candidate"`, `TRAILER_SOURCE = "Gear-Source"` and `pub fn squash_message(task: &str, attempt: &str, goal: &str, candidate: &str, sources: &[String], lines: &[String]) -> String`: subject `{task}: {first line of goal, cut to 72 chars at a word}`, a blank line, each of `lines` as `- {line}` (none: no body block), a blank line, then `Gear-Task: {task}`, `Gear-Attempt: {attempt}`, `Gear-Candidate: {candidate}` and one `Gear-Source: {sha}` per source. (c) In crates/gear-app/src/tasks.rs, where the merge op is inserted (`kind: OpKind::Merge`, payload with "branch"/"candidate"/"review"/"keep_branch"), add `"goal": <the task's goal>` to the payload.
+accept: unit tests: `merge_method` parses both values and defaults to squash, and reaches `Repo`; `squash_message` builds the exact text for a goal longer than 72 chars, with and without lines, with two sources; the merge op payload carries the goal. `make check` for gear-app and gear-model.
+estimate: 45
+deps: -
+
+## T-692 [must] lane=mast milestone=M7.3 required
+goal: Shared git helpers in crates/gear-app/src/base.rs. (a) `pub fn landed_in(dir: &Path, reference: &str, commit: &str) -> Result<bool, String>`: true when `git merge-base --is-ancestor <commit> <reference>` says yes, or when `git log -1 --format=%H -F --grep="Gear-Candidate: <commit>" --grep="Gear-Source: <commit>" <reference>` prints a sha (full sha of `commit` resolved first with `git rev-parse --verify <commit>^{commit}`; a commit git cannot resolve is `Ok(false)`; any other git failure is `Err`). (b) `pub fn adds_nothing(dir: &Path, release: &str, integration: &str) -> Result<bool, String>`: true when `integration` is an ancestor of `release`, or when `git merge-tree --write-tree <release> <integration>` exits 0 and prints the same tree as `git rev-parse <release>^{tree}` (the integration branch's content is already on release, e.g. after a squash). (c) `pub fn added_paths(dir: &Path, release: &str, integration: &str) -> Result<Vec<String>, String>`: the paths `git merge-tree --write-tree --name-only`'s result tree changes against `<release>^{tree}` (`git diff --name-only <release>^{tree} <tree>`).
+accept: unit tests on a temp repo: an ancestor is landed; a squashed commit whose message carries `Gear-Candidate: <sha>` or `Gear-Source: <sha>` makes that sha landed; an unrelated commit is not; `adds_nothing` is true for an ancestor and for a branch squashed onto release, false for a branch with a change of its own; `added_paths` lists only that change's files. `make check PKG=gear-app` (or the gear-app crate check).
+estimate: 45
+deps: -
+
+## T-693 [must] lane=hull milestone=M7.3 required
+goal: A task merge lands one squashed commit. In crates/gear-engine/src/merge.rs `prepare_merge`, after the merge loop and the conflict-marker check, when `repo.merge_method == MergeMethod::Squash`: collect `lines` = `git log --no-merges --reverse --format=%s <base_ref>..HEAD` minus subjects that start with the review prefix, run `git reset --soft <base_ref>`, then `git commit -m <gear_model::commit::squash_message(task, attempt, goal, sha, sources, lines)>` where `goal` is `op.payload["goal"]` (empty: the merge commit text `commit` as the goal), `sha` the candidate and `sources` the shas of the `merges` targets. Add `"goal"` to the payload of the merge op inserted in `collect_finished`/the queue step (around the `kind: OpKind::Merge` insert near line 555), read from the task row. `MergeMethod::Merge` changes nothing. The train and the batch call `prepare_merge`, so each of their tasks becomes one commit too.
+accept: tests in merge.rs on a temp remote: with squash, a task branch of three commits plus a review commit lands as exactly one non-merge commit on dev whose message has the subject, the three lane subjects and the four trailer kinds, and dev's tree equals today's merge result; with `merge_method = "merge"` the merge commit is as before; a train of two tasks lands two commits in order. Existing merge tests pass (fix fixtures that read a merge commit's parents only where squash is now the default, by setting `merge_method = "merge"` in those fixtures).
+estimate: 60
+deps: T-691
+
+## T-694 [must] lane=hull milestone=M7.3 required
+goal: A feature lands by replaying its commits. In crates/gear-engine/src/merge.rs `prepare_merge`, for a feature's integration task (`op.payload["keep_branch"] == true`) in squash mode: instead of the merge loop, from `base_ref` cherry-pick each commit of `git rev-list --reverse --first-parent --no-merges <base_ref>..<task_tip>` in order (`git cherry-pick --allow-empty --keep-redundant-commits`); then amend the last commit's message to append `Gear-Source: <task_tip>` and `Gear-Candidate: <sha>`. When a cherry-pick fails: `git cherry-pick --abort`, `git reset --hard <base_ref>`, and land the feature as one squashed commit through the task squash path (body line `- replay conflicted; squashed`). The feature's own commits keep their messages and trailers.
+accept: tests: a feature branch holding two squashed member commits and one merge of dev into it lands as those two commits on dev, in order, no merge commit, the last one with the two extra trailers; a feature whose replay conflicts lands as one squashed commit; the gate still runs once on the result.
+estimate: 60
+deps: T-693
+
+## T-695 [must] lane=hull milestone=M7.3 required
+goal: Members are found by trailer. In crates/gear-engine/src/merge.rs: `bisect_members` also takes a non-merge commit as a member when its message carries `Gear-Task: <task>` (read the log with `--format=%H%x09%P%x09%s%x09%(trailers:key=Gear-Task,valueonly,separator=%x2C)`; the member's name is the trailer's task); `run_bisect`'s probe stays a merge of the k-th member onto the base (on a linear feature branch that brings members 1..k). In `prepare_merge`'s `members_in` (the feature integration task's members), a first-parent commit with a `Gear-Task` trailer is a member too, its own commit (not `^2`) left out of the foreign-commit check.
+accept: tests: a feature branch of three squashed members bisects to the member that breaks the gate; a feature integration task whose branch holds squashed members and no lane commit after the candidate is not refused as foreign; merge-commit members still work as before.
+estimate: 45
+deps: T-691
+
+## T-696 [must] lane=hull milestone=M7.3 required
+goal: The engine's merged checks accept a squash. Replace the ancestry test with `gear_app::base::landed_in(dir, reference, commit)` in crates/gear-engine: merge.rs `prepare_merge`'s `already` (the candidate is on `base_ref`), `on_a_stable_branch`, the carried-task check in `land_carried`; review.rs `on_integration`; parallel.rs, the "candidate already in its base" test (`ancestor(&input.repo, &candidate, &base_tip)`). An error from `landed_in` keeps each site's current behavior for a git error (a check that cannot answer does not pass).
+accept: tests: after a squash merge, a restart of the same merge op says it was already merged and pushes nothing; the lost-merge scan does not name a squashed task; review.rs's check passes a squashed candidate; a task squashed onto dev is not an open change in the parallel-change check.
+estimate: 45
+deps: T-692
+
+## T-697 [must] lane=mast milestone=M7.3 required
+goal: The plan and the coverage report accept a squash, and an integrated-by pass with only voyage files missing. (a) crates/gear-app/src/plan.rs: in the function around line 2780-2830 that runs `git merge-base --is-ancestor <candidate> <reference>` to tell whether a candidate is merged, use `crate::base::landed_in`; when it is not landed and the check serves an `integrated-by` pass, accept it when `git diff --name-only <reference> <candidate>` lists only paths under the project's voyage folder (`Repo.voyage_dir` expanded for the project). (b) crates/gear-cli/src/main.rs: the coverage report's commit check (`merge-base --is-ancestor` near line 2614-2690) uses `gear_app::base::landed_in`.
+accept: tests: a squashed candidate counts as merged in the plan check and is not listed by `gear report coverage`; an `integrated-by=T-m` pass whose candidate differs from dev only in `gear/voyages/M1/reports/T-1.md` is applied; one that differs in a code file is still refused with today's text.
+estimate: 45
+deps: T-692
+
+## T-698 [must] lane=mast milestone=M7.3 required
+goal: The reclaim knows a squashed release and a records-only remainder. In crates/gear-engine/src/finished.rs: `branch_on_integration` uses `gear_app::base::landed_in`; `branch_on_release` and the integration-branch deletion guard use `gear_app::base::adds_nothing(dir, <remote>/<release>, <remote>/<integration>)` instead of ancestry (the namespace and `may_delete_branch` rules stay as they are). Where the reclaim names the integration branch as not on the release branch, compute `gear_app::base::added_paths`; when every path is under the voyage folder, the item says "only the voyage records on <integration> are not on <release>", is not urgent, and is written once per landing (a meta key `records_unreleased:<project>:<milestone>`).
+accept: tests: a leftover task branch whose work is squashed on dev counts as on the integration branch; an integration branch squashed onto main by a pull request is deleted by the reclaim like one merged; one with a code change of its own is named as today; one whose only difference is a file under the voyage folder gets the one non-urgent line once, and a second scan writes nothing.
+estimate: 45
+deps: T-692
+
+## T-699 [must] lane=mast milestone=M7.3 required
+goal: The records merge follows the merge method and takes only voyage files. In crates/gear-engine/src/finished.rs `records_step`: before merging, list `git diff --name-only <remote>/<integration>...<remote>/<seat branch>`; any path outside the project's voyage folder refuses the step with `Recorded::Failed` naming up to 10 such paths ("the captain's branch changes files outside <voyage folder>: ...; move them to a task"). In squash mode the records land as one commit `records: <project> <milestone>` (merge, then `git reset --soft` to the integration tip, then commit), in merge mode as today.
+accept: tests: a seat branch changing a code file is refused, its item names the file, nothing is merged or deleted; in squash mode the records land as one non-merge commit; existing records tests pass.
+estimate: 45
+deps: T-691
+
+## T-700 [must] lane=mast milestone=M7.3 required
+goal: The departure move and the docs. (a) crates/gear-cli/src/main.rs, the integration branch moved forward to the release head at departure (near line 1640-1660, `behind` from two `merge-base --is-ancestor` calls): `behind` is also true when `gear_app::base::adds_nothing(release, integration)` and integration is not equal to release, so an integration branch squashed onto release starts from release. (b) skills/gear/references/conventions.md documents `merge_method` ("squash" default: one commit per task, a feature replays its tasks' commits; "merge": merge commits), and the trailers; skills/gear/references/github.md says `merge_method` under `[github]` is the pull-request method and the push mode reads `[conventions].merge_method`.
+accept: a test: an integration branch squashed onto main is moved to main's head at departure; one with its own work is left as it is. The two reference files carry the text.
+estimate: 30
+deps: T-692
