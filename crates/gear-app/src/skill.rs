@@ -230,8 +230,19 @@ impl SkillAgent {
 /// The installed skill copies older than `version` (T-681): one line per
 /// agent whose copy carries an older version, an unparseable one, or none.
 pub fn stale_copies(home: &Path, codex_home: Option<&Path>, version: &str) -> Vec<String> {
+    stale_copies_of(home, codex_home, version, SkillAgent::ALL)
+}
+
+/// [`stale_copies`] for the agents given only: a captain's page names the
+/// copies of the CLIs its project starts, never another project's.
+pub fn stale_copies_of(
+    home: &Path,
+    codex_home: Option<&Path>,
+    version: &str,
+    agents: &[SkillAgent],
+) -> Vec<String> {
     let mut lines = Vec::new();
-    for agent in SkillAgent::ALL {
+    for &agent in agents {
         let dir = agent.skills_dir_with(home, codex_home).join(SKILL_NAME);
         if !dir.join("SKILL.md").is_file() {
             continue;
@@ -485,6 +496,23 @@ mod tests {
         // Numeric, not text order: 99 is older than 114.
         std::fs::write(dir.join(VERSION_FILE), "0.6.99\n").unwrap();
         assert_eq!(stale_copies(&home, None, "0.6.114").len(), 1);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// selina 2026-11-17: an `omp` copy no seat of the project uses is not
+    /// named on that project's page.
+    #[test]
+    fn only_the_agents_given_are_named() {
+        let home = scratch_home("only-given");
+        install(SkillAgent::Pi, &home).unwrap();
+        install(SkillAgent::Omp, &home).unwrap();
+        for agent in [SkillAgent::Pi, SkillAgent::Omp] {
+            let dir = agent.skills_root(&home).join(SKILL_NAME);
+            std::fs::remove_file(dir.join(VERSION_FILE)).unwrap();
+        }
+        let lines = stale_copies_of(&home, None, "0.6.114", &[SkillAgent::Pi]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("--agent pi"), "{}", lines[0]);
         std::fs::remove_dir_all(&home).ok();
     }
 

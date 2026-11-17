@@ -6082,7 +6082,8 @@ fn require_confirmed_changes(
         return Err(GearError::new(
             ErrorCode::BadFormat,
             format!(
-                "{what}: a raise, a departure and a move between milestones are the user's; confirm it with them, then apply again with --confirmed and a `confirmed:` line in # Decisions"
+                "{what}: a raise, a departure and a move between milestones are the user's. Once the user has agreed (now, or in an authorization they gave earlier: name where in the why), apply again with --confirmed and this line in # Decisions: {}",
+                confirmed_example(departing, moved, &raises)
             ),
         ));
     }
@@ -6091,8 +6092,9 @@ fn require_confirmed_changes(
         return Err(GearError::new(
             ErrorCode::BadFormat,
             format!(
-                "this apply changes {} but # Decisions carries no `confirmed:` line: add `- <time> confirmed: <what changes, before -> after> | why: <the user's reason>` in this same apply",
-                guarded_summary(departing, moved, &raises)
+                "this apply changes {} but # Decisions carries no `confirmed:` line: add this line in this same apply: {}",
+                guarded_summary(departing, moved, &raises),
+                confirmed_example(departing, moved, &raises)
             ),
         ));
     }
@@ -6125,6 +6127,25 @@ fn confirmed_decisions(draft: &Draft) -> Vec<crate::decision::Decision> {
         .map(|line| crate::decision::parse(line))
         .filter(|decision| decision.kind == "confirmed" && !decision.note)
         .collect()
+}
+
+/// The `confirmed:` line a guarded apply needs, ready to copy: the first
+/// guarded change filled in, the time and the user's reason left to write.
+fn confirmed_example(
+    departing: &BTreeSet<String>,
+    moved: &[(String, String, String)],
+    raises: &[(String, u32, String)],
+) -> String {
+    let what = if let Some(milestone) = departing.iter().next() {
+        format!("milestone {milestone} departs")
+    } else if let Some((role, to, until)) = raises.first() {
+        format!("{role} <from> -> {to} until {until}")
+    } else if let Some((id, old, new)) = moved.first() {
+        format!("{id} moves from {old} -> {new}")
+    } else {
+        "<what changes, before -> after>".to_string()
+    };
+    format!("`- <YYYY-MM-DD HH:MM> confirmed: {what} | why: <the user's words, or where they authorized it>`")
 }
 
 /// What a guarded apply changes, for the refusal that names it (T-461).
@@ -6933,9 +6954,23 @@ fn retired_lane_warnings(
 
 /// T-473: one warning per file two Ready tasks on different lanes name. The
 /// names come from each task's goal text (a path such as `crates/x/src/y.rs`)
-/// and its evidence files. A warning, never a refusal: a lane works its queue
-/// in order, but the file may need both.
+/// and its evidence files. A path a goal names counts only when it lies in the
+/// task's lane's own paths (`owns`): a lane edits only what it owns, and a
+/// goal that names another lane's file as a shape to match does not edit it
+/// (selina T-23, 2026-11-17). A warning, never a refusal: a lane works its
+/// queue in order, but the file may need both.
 fn shared_file_warnings(tx: &Tx<'_>, project: &str) -> GearResult<Vec<String>> {
+    let owns: std::collections::BTreeMap<String, Vec<String>> = tx
+        .get_project(project)?
+        .and_then(|row| crate::config::parse(&row.config_toml).ok())
+        .map(|config| {
+            config
+                .lanes
+                .into_iter()
+                .map(|lane| (lane.name, lane.owns))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut by_file: std::collections::BTreeMap<String, Vec<(String, String)>> =
         std::collections::BTreeMap::new();
     for task in tx
@@ -6947,8 +6982,13 @@ fn shared_file_warnings(tx: &Tx<'_>, project: &str) -> GearResult<Vec<String>> {
             continue;
         };
         let lane = task.lane.clone().unwrap_or_default();
-        let mut files: std::collections::BTreeSet<String> =
-            files_of(&contract.goal).into_iter().collect();
+        let mut files: std::collections::BTreeSet<String> = files_of(&contract.goal)
+            .into_iter()
+            .filter(|file| {
+                owns.get(&lane)
+                    .is_none_or(|owned| crate::config::owns_path(owned, file))
+            })
+            .collect();
         files.extend(contract.evidence_files.iter().cloned());
         for file in files {
             by_file
@@ -7461,5 +7501,126 @@ gate = "make test"
         .unwrap();
         assert_eq!(on_integration(&config, Some("heat"), &candidate), Ok(true));
         assert_eq!(on_integration(&config, Some("heat"), "deadbeef"), Ok(false));
+    }
+}
+
+#[cfg(test)]
+mod shared_file_tests {
+    use super::shared_file_warnings;
+    use gear_model::TaskState;
+    use gear_store::{testing, ContractRow, Store, TaskRow};
+
+    const CONFIG: &str = r#"[project]
+id = "s"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 2
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "api"
+duty = "server"
+owns = ["server/"]
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "web"
+duty = "web"
+owns = ["web/src/"]
+kind = "codex"
+profile = "codex"
+
+[conventions]
+gate = "true"
+"#;
+
+    fn task(tx: &gear_store::Tx<'_>, id: &str, lane: &str, goal: &str, evidence: &[&str]) {
+        tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: "s".into(),
+            id: id.into(),
+            rank: 1,
+            state: TaskState::Ready,
+            priority: "must".into(),
+            lane: Some(lane.into()),
+            milestone: Some("M1".into()),
+            required: false,
+            contract_version: 1,
+            deps: Vec::new(),
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: Some(30),
+            issue: None,
+            updated: 1,
+        })
+        .unwrap();
+        tx.insert_contract(&ContractRow {
+            project: "s".into(),
+            task: id.into(),
+            version: 1,
+            goal: goal.into(),
+            accept: "it works".into(),
+            evidence_files: evidence.iter().map(|file| file.to_string()).collect(),
+            evidence_due_min: None,
+            body: String::new(),
+            created: 1,
+            mechanical: None,
+        })
+        .unwrap();
+    }
+
+    /// selina T-23, 2026-11-17: a goal naming another lane's file as a shape
+    /// to match does not edit it; only a path in the lane's own paths counts.
+    #[test]
+    fn a_file_another_lane_owns_named_as_a_shape_is_not_shared() {
+        let mut store = Store::open_in_memory().unwrap();
+        let warnings = store
+            .write(|tx| {
+                let mut row = testing::seed_project(tx, "s", "sess", 1)?;
+                row.config_toml = CONFIG.into();
+                tx.update_project(&row)?;
+                task(
+                    tx,
+                    "T-23",
+                    "api",
+                    "a reply shaped as web/src/api.ts Message in server/chat.go",
+                    &[],
+                );
+                task(tx, "T-33", "web", "add retries to web/src/api.ts", &[]);
+                shared_file_warnings(tx, "s")
+            })
+            .unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// A file both tasks list as evidence is still named.
+    #[test]
+    fn an_evidence_file_two_lanes_name_is_shared() {
+        let mut store = Store::open_in_memory().unwrap();
+        let warnings = store
+            .write(|tx| {
+                let mut row = testing::seed_project(tx, "s", "sess", 1)?;
+                row.config_toml = CONFIG.into();
+                tx.update_project(&row)?;
+                task(tx, "T-1", "api", "server side", &["docs/api.md"]);
+                task(tx, "T-2", "web", "web side", &["docs/api.md"]);
+                shared_file_warnings(tx, "s")
+            })
+            .unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("docs/api.md"), "{}", warnings[0]);
     }
 }

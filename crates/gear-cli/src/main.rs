@@ -1937,10 +1937,21 @@ fn cmd_home(show: Option<&str>, json: bool) -> GearResult<()> {
                     let codex_home = std::env::var_os("CODEX_HOME")
                         .filter(|value| !value.is_empty())
                         .map(std::path::PathBuf::from);
-                    for line in gear_app::skill::stale_copies(
+                    // Only the CLIs this project starts (selina, 2026-11-17);
+                    // every copy when its config cannot be read.
+                    let agents: Vec<gear_app::skill::SkillAgent> =
+                        match gear_app::config::latest(&mut store, &ctx.project) {
+                            Ok(config) => gear_app::admin::project_kinds(&config)
+                                .iter()
+                                .filter_map(|kind| gear_app::skill::SkillAgent::parse(kind).ok())
+                                .collect(),
+                            Err(_) => gear_app::skill::SkillAgent::ALL.to_vec(),
+                        };
+                    for line in gear_app::skill::stale_copies_of(
                         &home,
                         codex_home.as_deref(),
                         env!("CARGO_PKG_VERSION"),
+                        &agents,
                     ) {
                         println!("{line}");
                     }
@@ -2337,6 +2348,20 @@ fn cmd_board_open(project: Option<&str>, pane: Option<&str>) -> GearResult<()> {
             "gear board --open needs a project: name it with --project, or run it from the captain's pane",
         ));
     };
+    let line = open_board(&mut store, &env, &project, pane)?;
+    println!("{line}");
+    Ok(())
+}
+
+/// Open `project`'s board in its own tab of the caller's workspace, replacing
+/// an earlier board tab, and return the line that says where once it drew.
+fn open_board(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    project: &str,
+    pane: Option<&str>,
+) -> GearResult<String> {
+    let project = project.to_string();
     let Some(row) = store.read(|tx| tx.get_project(&project))? else {
         let registered = store.read(|tx| tx.project_ids())?;
         return Err(GearError::new(
@@ -2416,8 +2441,9 @@ fn cmd_board_open(project: Option<&str>, pane: Option<&str>) -> GearResult<()> {
             ),
         ));
     }
-    println!("board open: tab {tab} \"{label}\" (pane {board_pane}) in {repo} shows {project}");
-    Ok(())
+    Ok(format!(
+        "board open: tab {tab} \"{label}\" (pane {board_pane}) in {repo} shows {project}"
+    ))
 }
 
 /// The board tab's label: the one name every captain's board tab has.
@@ -3311,6 +3337,7 @@ fn cmd_plan(
     let mut herdr = open_herdr()?;
     let env = resolve_caller(&mut store, &mut herdr, env)?;
     let request_id = announce_request_id(request_id);
+    let before = departed_voyages(&mut store)?;
     let out = run_plan(
         &mut store,
         &env,
@@ -3324,7 +3351,37 @@ fn cmd_plan(
         confirmed,
     )?;
     println!("{out}");
+    // The apply that makes a voyage depart opens its board for the user, in
+    // the captain's workspace (selina M2, 2026-11-17: the captain departed and
+    // never ran `gear board --open`; a step left to memory is skipped). A
+    // board that does not open never undoes the apply: the line says why.
+    for (project, milestone) in departed_voyages(&mut store)?.difference(&before) {
+        match open_board(&mut store, &env, project, None) {
+            Ok(line) => eprintln!("{milestone} departed: {line}"),
+            Err(error) => eprintln!(
+                "{milestone} departed, but its board did not open: {} — run `gear board --open`",
+                error.detail
+            ),
+        }
+    }
     Ok(())
+}
+
+/// Every departed voyage of the store, as (project, milestone).
+fn departed_voyages(
+    store: &mut gear_store::Store,
+) -> GearResult<std::collections::BTreeSet<(String, String)>> {
+    store.read(|tx| {
+        let mut departed = std::collections::BTreeSet::new();
+        for project in tx.project_ids()? {
+            for voyage in tx.voyages_of_project(&project)? {
+                if voyage.departure.is_some() {
+                    departed.insert((project.clone(), voyage.milestone));
+                }
+            }
+        }
+        Ok(departed)
+    })
 }
 
 /// `gear plan check`: end the parks whose time has come (T-190).
