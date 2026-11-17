@@ -641,7 +641,7 @@ impl Default for Conventions {
 }
 
 /// The finding for a project that does not name its gate (T-255).
-const GATE_MISSING: &str = "name the command the merge gate runs in the integration worktree; it must exit non-zero on any failure (e.g. `make gate`, `go test ./...`)";
+const GATE_MISSING: &str = "name the command the merge gate runs in the integration worktree; it must exit non-zero on any failure (e.g. `npm test`, `go test ./...`)";
 
 /// What to do when an agent stops on a provider limit (17 §0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]

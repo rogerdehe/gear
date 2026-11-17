@@ -743,7 +743,7 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
         "release = \"main\"              # the release branch".to_string(),
         // T-255: the gate has no default, so the skeleton names it as empty
         // and asks the captain for the command this project actually runs.
-        "gate = \"\"                     # fill in: the command the merge runs in the integration worktree; it must exit non-zero on any failure (e.g. \"make gate\", \"go test ./...\")".to_string(),
+        "gate = \"\"                     # fill in: the command the merge runs in the integration worktree; it must exit non-zero on any failure (e.g. \"npm test\", \"go test ./...\")".to_string(),
     ]);
     // A kind Herdr can start but GEAR has no built-in profile for (T-31): the
     // user fills the block in — the comment says which fields matter.
