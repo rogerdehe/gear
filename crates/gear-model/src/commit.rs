@@ -32,7 +32,8 @@ const SQUASH_GOAL_MAX: usize = 72;
 /// The message of a squashed task merge (M7.3): the subject `{task}: {goal}`
 /// with the goal's first line cut to a word at 72 characters, the lane's
 /// commit subjects as body lines, and the trailers that name the task, the
-/// attempt, the candidate and every commit the squash carries.
+/// attempt, the candidate and every commit the squash carries. Without a goal
+/// the subject is the task id alone (`T-n`), never a placeholder.
 pub fn squash_message(
     task: &str,
     attempt: &str,
@@ -44,8 +45,10 @@ pub fn squash_message(
     let first = goal.lines().next().unwrap_or_default().trim();
     let mut out = String::new();
     out.push_str(task);
-    out.push_str(": ");
-    out.push_str(&cut_at_word(first, SQUASH_GOAL_MAX));
+    if !first.is_empty() {
+        out.push_str(": ");
+        out.push_str(&cut_at_word(first, SQUASH_GOAL_MAX));
+    }
     out.push_str("\n\n");
     if !lines.is_empty() {
         for line in lines {

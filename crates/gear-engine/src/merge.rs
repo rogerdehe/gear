@@ -534,6 +534,17 @@ pub fn merge_passed(
             "attempt_candidate": attempt_candidate,
             "review": review_branch(&config.conventions.review_branch, project, &lane, &task),
         });
+        // M7.3: the task's goal is the subject of its squashed merge commit.
+        let goal = store.read(|tx| {
+            let Some(row) = tx.get_task(project, &task)? else {
+                return Ok(String::new());
+            };
+            Ok(tx
+                .get_contract(project, &task, row.contract_version)?
+                .map(|contract| contract.goal)
+                .unwrap_or_default())
+        })?;
+        payload["goal"] = serde_json::json!(goal);
         // T-582: the feature branch is not a task branch to close.
         if feature_branch.is_some() {
             payload["keep_branch"] = serde_json::json!(true);
@@ -4321,6 +4332,76 @@ fn prepare_merge(
         return Err(Step::Failed(Failed::stuck(
             "conflict markers in the merged tree",
         )));
+    }
+    // 7b. squash (M7.3): one commit on the integration branch, the lane's own
+    //     subjects in the body and the trailers that name the task, the
+    //     attempt, the candidate and every commit the squash carries. The tree
+    //     is the merge's own: the reset only moves the commit boundary.
+    if repo.merge_method == gear_app::config::MergeMethod::Squash {
+        let lines: Vec<String> = match git(
+            dir,
+            &[
+                "log",
+                "--no-merges",
+                "--reverse",
+                "--format=%s",
+                &format!("{base_ref}..HEAD"),
+            ],
+        ) {
+            Ok(log) => log
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with(review_prefix))
+                .map(str::to_string)
+                .collect(),
+            Err(reason) => {
+                probe.step("merge");
+                return Err(Step::Failed(Failed::clear(format!(
+                    "{task}: the commits of the merge could not be read: {reason}"
+                ))));
+            }
+        };
+        let goal = op
+            .payload
+            .get("goal")
+            .and_then(|goal| goal.as_str())
+            .unwrap_or_default();
+        // No goal: the subject is the task id alone (M7.3 rework F1), never
+        // the unfilled merge template.
+        let goal = if goal.trim().is_empty() { "" } else { goal };
+        // The trailer names the commit, not the ref the merge read (F2): a
+        // legacy review branch is a ref name, and its sha is what landed.
+        let sources: Vec<String> = merges
+            .iter()
+            .map(|(target, _)| {
+                git(
+                    dir,
+                    &["rev-parse", "--verify", &format!("{target}^{{commit}}")],
+                )
+                .map(|sha| sha.trim().to_string())
+                .unwrap_or_else(|_| target.clone())
+            })
+            .collect();
+        let message = gear_model::commit::squash_message(
+            &task,
+            &op_attempt(op),
+            goal,
+            &sha,
+            &sources,
+            &lines,
+        );
+        if let Err(reason) = git(dir, &["reset", "--soft", &base_ref]) {
+            probe.step("merge");
+            return Err(Step::Failed(Failed::clear(format!(
+                "{task}: the merge could not be squashed: {reason}"
+            ))));
+        }
+        if let Err(reason) = git(dir, &["commit", "-m", &message]) {
+            probe.step("merge");
+            return Err(Step::Failed(Failed::clear(format!(
+                "{task}: the squashed commit could not be written: {reason}"
+            ))));
+        }
     }
     probe.step("merge");
 
@@ -10230,10 +10311,16 @@ mod tests {
 
     /// The project's merges gate two at a time, with `gate` as its gate.
     fn train_of_two(store: &mut Store, gate: &str) {
+        train_of_two_method(store, gate, "merge");
+    }
+
+    /// The project's merges gate two at a time, with `gate` as its gate and
+    /// the given merge method (M7.3).
+    fn train_of_two_method(store: &mut Store, gate: &str, method: &str) {
         store
             .write(|tx| {
                 let mut project = tx.get_project("p")?.unwrap();
-                project.config_toml = config_text(gate)
+                project.config_toml = config_text_method(gate, method)
                     .replace("[conventions]\n", "[conventions]\nmerge_parallel = 2\n");
                 tx.update_project(&project)
             })
@@ -11644,8 +11731,19 @@ kind = "opencode"
 profile = "opencode"
 
 [conventions]
+merge_method = "merge"
 gate = "{gate}"
 "#
+        )
+    }
+
+    /// The test project's config with another merge method (M7.3): the shared
+    /// fixture keeps `merge`, so the tests of the merge commits read them as
+    /// before; the squash tests ask for `squash` here.
+    fn config_text_method(gate: &str, method: &str) -> String {
+        config_text(gate).replace(
+            "merge_method = \"merge\"",
+            &format!("merge_method = \"{method}\""),
         )
     }
 
@@ -11662,6 +11760,13 @@ gate = "{gate}"
     /// the given gate.
     fn repo(gate: &str) -> Repo {
         gear_app::config::parse(&config_text(gate))
+            .unwrap()
+            .repo_of_lane("heat")
+    }
+
+    /// The repo the merge runs in, with the given merge method (M7.3).
+    fn repo_method(gate: &str, method: &str) -> Repo {
+        gear_app::config::parse(&config_text_method(gate, method))
             .unwrap()
             .repo_of_lane("heat")
     }
@@ -17616,6 +17721,171 @@ gate = "{project_gate}"
         assert_eq!(merged.len(), 1);
         assert_eq!(op_state(&mut store, "O-1"), Some(OpState::Confirmed));
         assert!(cfg.merges.idle(), "nothing runs any more");
+    }
+
+    /// A task branch of three lane commits and the review commit on top, as
+    /// the squash tests read it (M7.3). Returns the candidate (the head after
+    /// the three commits) and the task branch tip.
+    fn task_branch_with_three_commits(scratch: &Scratch) -> (String, String) {
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo w1 > w1.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'work one' \
+             && echo w2 > w2.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'work two' \
+             && echo w3 > w3.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'work three'",
+        );
+        publish(&scratch.work, "heat/t5");
+        let candidate = scratch.head_of("heat/t5");
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass'",
+        );
+        publish(&scratch.work, "heat/t5");
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+        let tip = scratch.head_of("heat/t5");
+        (candidate, tip)
+    }
+
+    /// M7.3: with `merge_method = "squash"` a task branch of three commits and
+    /// a review commit lands as exactly one non-merge commit on the integration
+    /// branch: the subject names the task and its goal, the body holds the
+    /// lane's subjects, and the trailers name the task, the attempt, the
+    /// candidate and the merged commit. Its tree is the merge's own.
+    #[test]
+    fn a_squash_merge_lands_one_commit_with_the_lane_subjects_and_trailers() {
+        let scratch = Scratch::new("squash-one-commit");
+        let worktree = scratch.merge_worktree();
+        let (candidate, tip) = task_branch_with_three_commits(&scratch);
+        let before: i64 = sh(&scratch.root, "git -C origin.git rev-list --count dev")
+            .parse()
+            .unwrap();
+        let mut carrier = op(&candidate);
+        carrier.payload["goal"] = serde_json::json!("the goal");
+
+        let merged = merge_one(&worktree, &repo_method("true", "squash"), &carrier);
+
+        assert!(merged.is_ok(), "{merged:?}");
+        let after: i64 = sh(&scratch.root, "git -C origin.git rev-list --count dev")
+            .parse()
+            .unwrap();
+        assert_eq!(after, before + 1, "exactly one commit landed");
+        let head = sh(
+            &scratch.root,
+            "git -C origin.git log -1 --format=%H%x09%P%x09%s dev",
+        );
+        let mut fields = head.split('\t');
+        let sha = fields.next().unwrap_or_default();
+        let parents = fields.next().unwrap_or_default().split_whitespace().count();
+        let subject = fields.next().unwrap_or_default();
+        assert_eq!(parents, 1, "a non-merge commit: {head}");
+        assert_eq!(subject, "T-5: the goal", "{head}");
+        let message = sh(&scratch.root, "git -C origin.git log -1 --format=%B dev");
+        for line in ["- work one", "- work two", "- work three"] {
+            assert!(message.contains(line), "{line:?} in {message:?}");
+        }
+        for trailer in [
+            "Gear-Task: T-5".to_string(),
+            "Gear-Attempt: 1".to_string(),
+            format!("Gear-Candidate: {candidate}"),
+            format!("Gear-Source: {tip}"),
+        ] {
+            assert!(message.contains(&trailer), "{trailer:?} in {message:?}");
+        }
+        assert!(
+            !message.contains("review(T-5)"),
+            "the review subject is no body line: {message:?}"
+        );
+        assert!(!sha.is_empty());
+
+        // The same branch merged with `merge_method = "merge"`: the squash's
+        // tree is that merge's, and the merge commit is a merge as before.
+        let twin = Scratch::new("squash-one-commit-twin");
+        let twin_worktree = twin.merge_worktree();
+        let (twin_candidate, _) = task_branch_with_three_commits(&twin);
+        let mut twin_carrier = op(&twin_candidate);
+        twin_carrier.payload["goal"] = serde_json::json!("the goal");
+        let twin_merged = merge_one(&twin_worktree, &repo_method("true", "merge"), &twin_carrier);
+        assert!(twin_merged.is_ok(), "{twin_merged:?}");
+        let squash_tree = sh(&scratch.root, "git -C origin.git rev-parse dev^{tree}");
+        let merge_tree = sh(&twin.root, "git -C origin.git rev-parse dev^{tree}");
+        assert_eq!(squash_tree, merge_tree, "the squash lands the merge's tree");
+        let twin_parents = sh(&twin.root, "git -C origin.git log -1 --format=%P dev");
+        assert_eq!(
+            twin_parents.split_whitespace().count(),
+            2,
+            "the merge method keeps the merge commit: {twin_parents}"
+        );
+    }
+
+    /// M7.3: a train of two tasks with `merge_method = "squash"` lands two
+    /// commits in order, each one task's own and each a non-merge commit.
+    #[test]
+    fn a_squash_train_lands_one_commit_per_task_in_order() {
+        let pair = Pair::new("squash-train", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge/between-voyages", &worktree.path, &worktree.pane_id);
+        second_stage(&pair, &mut herdr);
+        let mut store = pair_world(&pair.a, &pair.b);
+        train_of_two_method(&mut store, "true", "squash");
+        pass(&mut store, "T-1", &pair.a, 10);
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Confirmed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let log = sh(
+            &pair.root,
+            "git -C origin.git log --format=%H%x09%P%x09%s dev",
+        );
+        let lines: Vec<&str> = log.lines().take(2).collect();
+        assert_eq!(lines.len(), 2, "two commits landed: {log}");
+        let mut first = lines[1].split('\t');
+        let first_sha = first.next().unwrap_or_default();
+        let first_parents = first.next().unwrap_or_default().split_whitespace().count();
+        let first_subject = first.next().unwrap_or_default();
+        let mut second = lines[0].split('\t');
+        let _second_sha = second.next().unwrap_or_default();
+        let second_parents = second.next().unwrap_or_default();
+        let second_parents = second_parents.split_whitespace().collect::<Vec<_>>();
+        let second_subject = second.next().unwrap_or_default();
+        assert_eq!(first_parents, 1, "T-1's commit is no merge: {log}");
+        assert_eq!(second_parents.len(), 1, "T-2's commit is no merge: {log}");
+        assert_eq!(second_parents[0], first_sha, "T-2 lands on T-1: {log}");
+        assert!(first_subject.starts_with("T-1"), "{first_subject}");
+        assert!(second_subject.starts_with("T-2"), "{second_subject}");
+        assert!(!first_subject.contains('{'), "{first_subject}");
+        assert!(!second_subject.contains('{'), "{second_subject}");
+    }
+
+    /// M7.3 rework F1: a merge op without a goal lands a subject built from
+    /// the task id alone, never the unfilled merge template.
+    #[test]
+    fn a_squash_without_a_goal_lands_the_task_id_alone() {
+        let scratch = Scratch::new("squash-no-goal");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        let carrier = op(&candidate);
+
+        let merged = merge_one(&worktree, &repo_method("true", "squash"), &carrier);
+
+        assert!(merged.is_ok(), "{merged:?}");
+        let subject = sh(&scratch.root, "git -C origin.git log -1 --format=%s dev");
+        assert_eq!(subject, "T-5", "the task id alone: {subject}");
+        assert!(!subject.contains('{'), "no placeholder: {subject}");
     }
 
     // ---- T-696: the merged checks accept a squash ------------------------
